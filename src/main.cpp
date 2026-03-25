@@ -358,6 +358,12 @@ static void drawSettings() {
 
 // ── Draw: input bar ───────────────────────────────────────────
 static void drawInput() {
+    if (activeView == CHAN_ANN) {
+        // Read-only channel — blank the input area
+        lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, TFT_BLACK);
+        dirtyInput = false;
+        return;
+    }
     lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_BG);
     lcd.setTextSize(1);
     lcd.setTextColor(TFT_GREEN, COL_INPUT_BG);
@@ -491,7 +497,7 @@ static void handleKey(char k) {
     if (k == KEY_NONE) return;
 
     if (k == KEY_ENTER) {
-        if (inputLen > 0) {
+        if (inputLen > 0 && activeView != CHAN_ANN) {
             inputBuf[inputLen] = '\0';
             if (!Channels.sendText(myNodeId, inputBuf)) {
                 // TX failed — show error
@@ -504,7 +510,7 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_BACKSPACE) {
-        if (inputLen > 0) { inputBuf[--inputLen] = '\0'; dirtyInput = true; }
+        if (inputLen > 0 && activeView != CHAN_ANN) { inputBuf[--inputLen] = '\0'; dirtyInput = true; }
 
     } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
         if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
@@ -594,7 +600,7 @@ static void handleKey(char k) {
         }
 
     } else if (k >= 0x20 && k < 0x7F) {
-        if (inputLen < MAX_INPUT_LEN) {
+        if (inputLen < MAX_INPUT_LEN && activeView != CHAN_ANN) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
             dirtyInput = true;
