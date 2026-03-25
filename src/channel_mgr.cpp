@@ -221,14 +221,15 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId) {
     return ok;
 }
 
-bool ChannelMgr::sendNodeInfo(uint32_t myNodeId) {
+bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
+                              const char *longName, const char *shortName) {
     if (!Radio.isReady()) return false;
 
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
     uint8_t proto[256], cipher[256];
-    size_t protoLen = encodeNodeInfo(myNodeId, MY_LONG_NAME, MY_SHORT_NAME,
+    size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
                                      mac, proto, sizeof(proto));
     if (protoLen == 0) return false;
 

@@ -209,7 +209,7 @@ static void drawStatus() {
     char buf[56];
     uint32_t upSec = millis() / 1000;
     snprintf(buf, sizeof(buf), "%-8s 906.9MHz %-9s #%lu  %02lu:%02lu",
-             MY_SHORT_NAME, Channels.get(Channels.activeIdx()).name,
+             gCfg.nodeShort, Channels.get(Channels.activeIdx()).name,
              pktCount, (upSec / 3600) % 24, (upSec / 60) % 60);
     lcd.setCursor(1, 1);
     lcd.print(buf);
@@ -514,7 +514,6 @@ static void handleKey(char k) {
 
     } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
         if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
-            // handled below in the '\r' branch — fall through to action
             bool ok = false;
             if (settingsSel == 0) {
                 ok = cfgExport(gCfg);
@@ -523,11 +522,16 @@ static void handleKey(char k) {
             } else if (settingsSel == 1) {
                 ok = cfgImport(gCfg);
                 if (ok) {
+                    { Preferences p; p.begin("camillia", false);
+                      p.putString("nodeLong", gCfg.nodeLong);
+                      p.putString("nodeShort", gCfg.nodeShort); p.end(); }
                     NodeEntry *me = Nodes.upsert(myNodeId);
                     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
                     strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
                     Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
                                       gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+                    dirtyStatus = dirtyNodes = true;
                     snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK");
                 } else {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
@@ -586,11 +590,16 @@ static void handleKey(char k) {
             } else if (settingsSel == 1) {
                 ok = cfgImport(gCfg);
                 if (ok) {
+                    { Preferences p; p.begin("camillia", false);
+                      p.putString("nodeLong", gCfg.nodeLong);
+                      p.putString("nodeShort", gCfg.nodeShort); p.end(); }
                     NodeEntry *me = Nodes.upsert(myNodeId);
                     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
                     strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
                     Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
                                       gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+                    dirtyStatus = dirtyNodes = true;
                     snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK");
                 } else {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
@@ -613,7 +622,7 @@ void setup() {
     Serial.begin(115200);
     delay(200);
 
-    // Load or generate stable node ID from NVS
+    // Load or generate stable node ID + names from NVS
     {
         Preferences prefs;
         prefs.begin("camillia", false);
@@ -630,10 +639,19 @@ void setup() {
         }
         prefs.end();
     }
-    Serial.printf("[camillia-mt] Name: %s (%s)\n", MY_LONG_NAME, MY_SHORT_NAME);
 
-    // Load runtime config defaults (SD overrides applied below)
+    // Load runtime config defaults, then overlay NVS-saved names
     cfgInitDefaults(gCfg);
+    {
+        Preferences prefs;
+        prefs.begin("camillia", true);
+        String ln = prefs.getString("nodeLong",  "");
+        String sn = prefs.getString("nodeShort", "");
+        if (ln.length()) strncpy(gCfg.nodeLong,  ln.c_str(), sizeof(gCfg.nodeLong)  - 1);
+        if (sn.length()) strncpy(gCfg.nodeShort, sn.c_str(), sizeof(gCfg.nodeShort) - 1);
+        prefs.end();
+    }
+    Serial.printf("[camillia-mt] Name: %s (%s)\n", gCfg.nodeLong, gCfg.nodeShort);
 
     // Board power
     pinMode(BOARD_POWERON, OUTPUT); digitalWrite(BOARD_POWERON, HIGH);
@@ -661,8 +679,8 @@ void setup() {
     // Register ourselves in the node DB immediately
     {
         NodeEntry *me = Nodes.upsert(myNodeId);
-        strncpy(me->longName,  MY_LONG_NAME,  sizeof(me->longName)  - 1);
-        strncpy(me->shortName, MY_SHORT_NAME, sizeof(me->shortName) - 1);
+        strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
+        strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
         me->latI        = MY_LAT_I;
         me->lonI        = MY_LON_I;
         me->alt         = MY_ALT;
@@ -681,7 +699,7 @@ void setup() {
 
     // Let radio settle before first TX
     delay(200);
-    bool niOk = Channels.sendNodeInfo(myNodeId);
+    bool niOk = Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
     Serial.printf("[camillia-mt] NODEINFO broadcast %s\n", niOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", niOk ? "* Announced (NODEINFO)" : "! NODEINFO failed",
                         niOk ? TFT_DARKGREY : TFT_RED);
@@ -723,7 +741,7 @@ void loop() {
     // 5. Periodic NODEINFO re-announcement
     if (now - lastNodeInfo > NODEINFO_INTERVAL_MS) {
         lastNodeInfo = now;
-        Channels.sendNodeInfo(myNodeId);
+        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
     }
 
     // 6. Periodic position broadcast

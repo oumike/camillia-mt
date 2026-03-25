@@ -54,7 +54,7 @@ public:
     bool sendText(uint32_t myNodeId, const char *text);
 
     // Broadcast a NODEINFO_APP packet on LongFast so other nodes see us.
-    bool sendNodeInfo(uint32_t myNodeId);
+    bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName);
 
     // Broadcast a POSITION_APP packet on LongFast.
     bool sendPosition(uint32_t myNodeId);
