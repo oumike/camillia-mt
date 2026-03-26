@@ -49,7 +49,13 @@
 #define MY_LONG_NAME    "Rhino Dev MT"
 #define MY_SHORT_NAME   "RDMT"
 
+// ── GPS hardware ──────────────────────────────────────────────
+// Set to 1 if a GPS module is connected and position comes from hardware.
+// Set to 0 if position is entered manually (web config or compile-time defaults).
+#define HAS_GPS         0
+
 // ── Fixed position (from ribl_config) ────────────────────────
+// Used as the startup default when HAS_GPS == 0.
 #define MY_LAT_I        424935424   // lat * 1e7  (42.4935424°N)
 #define MY_LON_I       -833880064   // lon * 1e7  (-83.3880064°W)
 #define MY_ALT          228         // meters
@@ -69,11 +75,12 @@
 #define INPUT_H          12   // input bar height
 #define INPUT_Y         228   // top of input bar     (LCD_H - INPUT_H)
 
-// Font0: 6×8 px monospace
+// Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
 #define CHAR_W            6
-#define CHAR_H            8
+#define CHAR_H            8   // actual font cell height (used for cursor / input bar)
+#define LINE_H            7   // row stride in chat/node/settings panels (tighter spacing)
 #define MSG_CHARS       (MSG_W / CHAR_W)    // 38 chars per message line
-#define VISIBLE_LINES   (CHAT_H / CHAR_H)   // 26 visible message rows
+#define VISIBLE_LINES   (CHAT_H / LINE_H)   // 29 visible message rows
 #define NODE_CHARS      (NODE_W / CHAR_W)   // 14 chars in node pane
 
 // ── Message storage ───────────────────────────────────────────

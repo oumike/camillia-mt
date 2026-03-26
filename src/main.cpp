@@ -7,6 +7,7 @@
 #include "node_db.h"
 #include "channel_mgr.h"
 #include "config_io.h"
+#include "web_config.h"
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -57,19 +58,31 @@ static bool isDuplicate(uint32_t id) {
 }
 
 
-// ── Settings actions ──────────────────────────────────────────
-#define NUM_SETTINGS 2
-static char settingsStatus[LCD_W / CHAR_W + 1] = "";  // last action result
+// ── Settings ──────────────────────────────────────────────────
+#define SETTING_WEBCFG  0
+#define SETTING_EXPORT  1
+#define SETTING_IMPORT  2
+#define NUM_SETTINGS    3
+
+static char settingsStatus[LCD_W / CHAR_W + 1] = "";
+
+// ── Node list focus / detail ───────────────────────────────────
+static bool     nodeListFocused = false;
+static int      nodeListSel     = 0;
+static bool     nodeDetailOpen  = false;
+static uint32_t nodeDetailId    = 0;
 
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
     bool wasSettings = (activeView == VIEW_SETTINGS);
     activeView = v;
+    nodeListFocused = false;
+    nodeDetailOpen  = false;
     if (v < MAX_CHANNELS) {
         Channels.setActive(v);
         if (wasSettings) dirtyDivider = true;   // restore divider after leaving settings
     }
-    dirtyTabs = dirtyChat = dirtyNodes = dirtyStatus = true;
+    dirtyTabs = dirtyChat = dirtyNodes = dirtyStatus = dirtyInput = true;
 }
 
 // ── Splash screen ─────────────────────────────────────────────
@@ -113,13 +126,19 @@ static void drawSplash() {
     lcd.setCursor((LCD_W - tw) / 2, 132);
     lcd.print(sub2);
 
-    // Node ID line
-    char idBuf[32];
-    snprintf(idBuf, sizeof(idBuf), "!%08x  %s", myNodeId, MY_SHORT_NAME);
+    // Long name
     lcd.setTextSize(1);
+    lcd.setTextColor(SUB, BG);
+    tw = strlen(gCfg.nodeLong) * 6;
+    lcd.setCursor((LCD_W - tw) / 2, 160);
+    lcd.print(gCfg.nodeLong);
+
+    // Node ID + short name
+    char idBuf[32];
+    snprintf(idBuf, sizeof(idBuf), "!%08x  %s", myNodeId, gCfg.nodeShort);
     lcd.setTextColor(DIM, BG);
     tw = strlen(idBuf) * 6;
-    lcd.setCursor((LCD_W - tw) / 2, 170);
+    lcd.setCursor((LCD_W - tw) / 2, 171);
     lcd.print(idBuf);
 
     // Decorative dots row
@@ -267,7 +286,7 @@ static void drawChat() {
         const DisplayLine *dl = Channels.getLine(active, row);
         if (!dl) continue;
 
-        int y = CHAT_Y + row * CHAR_H;
+        int y = CHAT_Y + row * LINE_H;
         uint16_t col = dl->color;
 
         // ACK indicator prefix (overrides first char of text with symbol)
@@ -297,19 +316,23 @@ static void drawNodes() {
     lcd.fillRect(NODE_X, CHAT_Y, NODE_W, CHAT_H, TFT_BLACK);
     lcd.setTextSize(1);
 
-    const int MAX_VISIBLE = CHAT_H / CHAR_H;  // 26
+    const int MAX_VISIBLE = CHAT_H / LINE_H;  // 29
     uint32_t now = millis();
 
     for (int i = 0; i < MAX_VISIBLE; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         if (!n) break;
 
-        int y = CHAT_Y + i * CHAR_H;
+        int      y   = CHAT_Y + i * LINE_H;
+        bool     sel = nodeListFocused && (i == nodeListSel);
+        uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint32_t age = now - n->lastHeardMs;
-        uint16_t col = (age < 60000UL)    ? TFT_CYAN    :
-                       (age < 3600000UL)  ? TFT_WHITE   : COL_TAB_IDLE;
+        uint16_t col = sel               ? TFT_WHITE    :
+                       (age < 60000UL)   ? TFT_CYAN     :
+                       (age < 3600000UL) ? TFT_WHITE    : COL_TAB_IDLE;
 
-        // Single row: short name + hops + snr (+ battery if available)
+        lcd.fillRect(NODE_X, y, NODE_W, LINE_H, bg);
+
         char r[NODE_CHARS + 1];
         if (n->hasTelemetry && n->battPct > 0)
             snprintf(r, sizeof(r), "%-4s %d %+.0f %d%%",
@@ -318,7 +341,7 @@ static void drawNodes() {
             snprintf(r, sizeof(r), "%-4s %d %+.0f",
                      n->shortName, n->hops, n->snr);
 
-        lcd.setTextColor(col, TFT_BLACK);
+        lcd.setTextColor(col, bg);
         lcd.setCursor(NODE_X, y);
         lcd.print(r);
     }
@@ -330,29 +353,147 @@ static void drawSettings() {
     lcd.fillRect(0, CHAT_Y, LCD_W, CHAT_H, TFT_BLACK);
     lcd.setTextSize(1);
 
-    // Action rows
-    const char *labels[NUM_SETTINGS] = { "Export Config", "Import Config" };
-    for (int i = 0; i < NUM_SETTINGS; i++) {
-        int      y   = CHAT_Y + i * CHAR_H;
+    char buf[LCD_W / CHAR_W + 2];
+    int  r = 0;   // current row index
+
+    // ── Action buttons ────────────────────────────────────────
+    for (int i = 0; i < NUM_SETTINGS; i++, r++) {
+        int      y  = CHAT_Y + r * LINE_H;
         bool     sel = (i == settingsSel);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint16_t fg  = sel ? TFT_WHITE : COL_TAB_IDLE;
-        lcd.fillRect(0, y, LCD_W, CHAR_H, bg);
-        char row[LCD_W / CHAR_W + 2];
-        snprintf(row, sizeof(row), "  [ %s ]", labels[i]);
+        lcd.fillRect(0, y, LCD_W, LINE_H, bg);
         lcd.setTextColor(fg, bg);
         lcd.setCursor(0, y);
-        lcd.print(row);
+        if (i == SETTING_EXPORT)
+            snprintf(buf, sizeof(buf), "  [ Export Config ]");
+        else if (i == SETTING_IMPORT)
+            snprintf(buf, sizeof(buf), "  [ Import Config ]");
+        else if (webCfgRunning())
+            snprintf(buf, sizeof(buf), "  [ Web Config : %s ]", webCfgIP());
+        else
+            snprintf(buf, sizeof(buf), "  [ Web Config : OFF ]");
+        lcd.print(buf);
     }
 
-    // Status line (2 rows down from last action row)
+    // ── Status line (transient feedback) ─────────────────────
     if (settingsStatus[0]) {
-        int y = CHAT_Y + (NUM_SETTINGS + 1) * CHAR_H;
         lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-        lcd.setCursor(2, y);
+        lcd.setCursor(2, CHAT_Y + r * LINE_H);
         lcd.print(settingsStatus);
     }
+    r++;  // always advance past status slot
 
+    // ── Separator ─────────────────────────────────────────────
+    lcd.drawFastHLine(2, CHAT_Y + r * LINE_H + LINE_H / 2, LCD_W - 4, COL_DIVIDER);
+    r++;
+
+    // ── Read-only config info ─────────────────────────────────
+    const uint16_t DIM = 0x7BEF;   // mid-grey
+    auto pr = [&](const char *s) {
+        lcd.setTextColor(DIM, TFT_BLACK);
+        lcd.setCursor(2, CHAT_Y + r++ * LINE_H);
+        lcd.print(s);
+    };
+
+    snprintf(buf, sizeof(buf), "Long:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
+    pr(buf);
+
+    snprintf(buf, sizeof(buf), "Short: %s", gCfg.nodeShort);
+    pr(buf);
+
+    snprintf(buf, sizeof(buf), "Freq:  %.3f MHz", gCfg.loraFreq);
+    pr(buf);
+
+    snprintf(buf, sizeof(buf), "BW:%.0f  SF:%d  CR:4/%d",
+             gCfg.loraBw, gCfg.loraSf, gCfg.loraCr);
+    pr(buf);
+
+    snprintf(buf, sizeof(buf), "Pwr:%d dBm  Hops:%d",
+             gCfg.loraPower, gCfg.loraHopLimit);
+    pr(buf);
+
+    dirtyChat = false;
+}
+
+// ── Draw: node detail overlay ────────────────────────────────
+static void drawNodeDetail(const NodeEntry *n) {
+    lcd.fillRect(0, CHAT_Y, LCD_W, LCD_H - CHAT_Y, TFT_BLACK);
+    lcd.setTextSize(1);
+
+    const int X = 2;
+    int row = 0;
+
+    // Helper: print one row and advance
+    char buf[LCD_W / CHAR_W + 2];
+    auto pr = [&](uint16_t col, const char *s) {
+        lcd.setTextColor(col, TFT_BLACK);
+        lcd.setCursor(X, CHAT_Y + row++ * LINE_H);
+        lcd.print(s);
+    };
+
+    if (!n) {
+        pr(TFT_RED, "Node not found");
+        pr(COL_TAB_IDLE, "[ESC/Enter] close");
+        dirtyChat = false;
+        return;
+    }
+
+    snprintf(buf, sizeof(buf), "[ !%08x ]", n->nodeId);
+    pr(TFT_CYAN, buf);
+    pr(COL_DIVIDER, "--------------------------------");
+
+    // Identity
+    snprintf(buf, sizeof(buf), "Long  : %s", n->longName[0] ? n->longName : "(unknown)");
+    pr(TFT_WHITE, buf);
+    snprintf(buf, sizeof(buf), "Short : %s", n->shortName[0] ? n->shortName : "----");
+    pr(TFT_WHITE, buf);
+    row++;
+
+    // Connectivity
+    uint32_t ageSec = (millis() - n->lastHeardMs) / 1000;
+    if      (ageSec < 60)
+        snprintf(buf, sizeof(buf), "Heard : %us ago",           (unsigned)ageSec);
+    else if (ageSec < 3600)
+        snprintf(buf, sizeof(buf), "Heard : %um %us ago",       (unsigned)(ageSec/60), (unsigned)(ageSec%60));
+    else
+        snprintf(buf, sizeof(buf), "Heard : %uh %um ago",       (unsigned)(ageSec/3600), (unsigned)((ageSec%3600)/60));
+    pr(TFT_WHITE, buf);
+
+    snprintf(buf, sizeof(buf), "Hops  : %d   SNR: %+.1f dB", n->hops, n->snr);
+    pr(TFT_WHITE, buf);
+
+    const char *chanName = (n->chanIdx >= 0 && n->chanIdx < MAX_CHANNELS)
+                           ? CHANNEL_KEYS[n->chanIdx].name : "?";
+    snprintf(buf, sizeof(buf), "Chan  : %s", chanName);
+    pr(TFT_WHITE, buf);
+    row++;
+
+    // Position
+    if (n->hasPosition) {
+        pr(TFT_CYAN, "Position");
+        float lat = n->latI * 1e-7f;
+        float lon = n->lonI * 1e-7f;
+        snprintf(buf, sizeof(buf), "Lat   : %.5f %c",
+                 lat >= 0 ? lat : -lat, lat >= 0 ? 'N' : 'S');
+        pr(TFT_WHITE, buf);
+        snprintf(buf, sizeof(buf), "Lon   : %.5f %c",
+                 lon >= 0 ? lon : -lon, lon >= 0 ? 'E' : 'W');
+        pr(TFT_WHITE, buf);
+        snprintf(buf, sizeof(buf), "Alt   : %d m", (int)n->alt);
+        pr(TFT_WHITE, buf);
+        row++;
+    }
+
+    // Telemetry
+    if (n->hasTelemetry) {
+        pr(TFT_CYAN, "Telemetry");
+        snprintf(buf, sizeof(buf), "Batt  : %.0f%%  %.2f V", n->battPct, n->voltage);
+        pr(TFT_WHITE, buf);
+        row++;
+    }
+
+    pr(COL_TAB_IDLE, "[ESC / Enter] close");
     dirtyChat = false;
 }
 
@@ -492,35 +633,46 @@ static void handleRx(const MeshPacket &pkt) {
     Serial.printf("└─────────────────────────────────────────\n");
 }
 
+static void onWebCfgSaved();  // forward declaration
+
 // ── Handle keyboard input ─────────────────────────────────────
 static void handleKey(char k) {
     if (k == KEY_NONE) return;
 
-    if (k == KEY_ENTER) {
-        if (inputLen > 0 && activeView != CHAN_ANN) {
-            inputBuf[inputLen] = '\0';
-            if (!Channels.sendText(myNodeId, inputBuf)) {
-                // TX failed — show error
-                Channels.addMessage(Channels.activeIdx(), "",
-                    "! TX failed", TFT_RED, 0);
-                dirtyChat = true;
-            }
-            inputLen = 0; inputBuf[0] = '\0';
-            dirtyInput = dirtyChat = true;
+    // ALT+E — toggle node list focus / close detail
+    if (k == KEY_NODE_FOCUS || k == KEY_ESC) {
+        if (nodeDetailOpen) {
+            nodeDetailOpen = false;
+            dirtyChat = dirtyNodes = dirtyInput = true;
+        } else if (nodeListFocused) {
+            nodeListFocused = false;
+            dirtyNodes = true;
+        } else if (activeView < MAX_CHANNELS) {
+            nodeListFocused = true;
+            nodeListSel = 0;
+            dirtyNodes = true;
         }
+        return;
+    }
 
-    } else if (k == KEY_BACKSPACE) {
-        if (inputLen > 0 && activeView != CHAN_ANN) { inputBuf[--inputLen] = '\0'; dirtyInput = true; }
-
-    } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
-        if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
-            bool ok = false;
-            if (settingsSel == 0) {
-                ok = cfgExport(gCfg);
+    if (k == KEY_ENTER) {
+        if (nodeDetailOpen) {
+            nodeDetailOpen = false;
+            dirtyChat = dirtyNodes = dirtyInput = true;
+            return;
+        }
+        if (nodeListFocused) {
+            NodeEntry *n = Nodes.getByRank(nodeListSel);
+            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+            return;
+        }
+        if (activeView == VIEW_SETTINGS) {
+            if (settingsSel == SETTING_EXPORT) {
+                bool ok = cfgExport(gCfg);
                 snprintf(settingsStatus, sizeof(settingsStatus),
-                         ok ? "Exported to /camillia-mt/config.ini" : "Export FAILED (no SD?)");
-            } else if (settingsSel == 1) {
-                ok = cfgImport(gCfg);
+                         ok ? "Exported to /camillia/config.yaml" : "Export FAILED (no SD?)");
+            } else if (settingsSel == SETTING_IMPORT) {
+                bool ok = cfgImport(gCfg);
                 if (ok) {
                     { Preferences p; p.begin("camillia", false);
                       p.putString("nodeLong", gCfg.nodeLong);
@@ -536,6 +688,75 @@ static void handleKey(char k) {
                 } else {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
+            } else if (settingsSel == SETTING_WEBCFG) {
+                if (webCfgRunning()) {
+                    webCfgEnd();
+                    snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
+                } else {
+                    bool ok = webCfgBegin(&gCfg, onWebCfgSaved);
+                    if (ok)
+                        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+                    else
+                        snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
+                }
+            }
+            dirtyChat = true;
+        } else if (inputLen > 0 && activeView != CHAN_ANN) {
+            inputBuf[inputLen] = '\0';
+            if (!Channels.sendText(myNodeId, inputBuf)) {
+                Channels.addMessage(Channels.activeIdx(), "",
+                    "! TX failed", TFT_RED, 0);
+                dirtyChat = true;
+            }
+            inputLen = 0; inputBuf[0] = '\0';
+            dirtyInput = dirtyChat = true;
+        }
+
+    } else if (k == KEY_BACKSPACE) {
+        if (inputLen > 0 && activeView != CHAN_ANN) {
+            inputBuf[--inputLen] = '\0'; dirtyInput = true;
+        }
+
+    } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
+        if (nodeDetailOpen && k == KEY_ROLLER) {
+            nodeDetailOpen = false;
+            dirtyChat = dirtyNodes = dirtyInput = true;
+        } else if (nodeListFocused && k == KEY_ROLLER) {
+            NodeEntry *n = Nodes.getByRank(nodeListSel);
+            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+        } else if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
+            if (settingsSel == SETTING_EXPORT) {
+                bool ok = cfgExport(gCfg);
+                snprintf(settingsStatus, sizeof(settingsStatus),
+                         ok ? "Exported to /camillia/config.yaml" : "Export FAILED (no SD?)");
+            } else if (settingsSel == SETTING_IMPORT) {
+                bool ok = cfgImport(gCfg);
+                if (ok) {
+                    { Preferences p; p.begin("camillia", false);
+                      p.putString("nodeLong", gCfg.nodeLong);
+                      p.putString("nodeShort", gCfg.nodeShort); p.end(); }
+                    NodeEntry *me = Nodes.upsert(myNodeId);
+                    strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
+                    strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
+                    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
+                                      gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+                    dirtyStatus = dirtyNodes = true;
+                    snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK");
+                } else {
+                    snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
+                }
+            } else if (settingsSel == SETTING_WEBCFG) {
+                if (webCfgRunning()) {
+                    webCfgEnd();
+                    snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
+                } else {
+                    bool ok = webCfgBegin(&gCfg, onWebCfgSaved);
+                    if (ok)
+                        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+                    else
+                        snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
+                }
             }
             dirtyChat = true;
         } else if (activeView != VIEW_SETTINGS || settingsSel == 0) {
@@ -547,23 +768,36 @@ static void handleKey(char k) {
             goToView((activeView + MAX_CHANNELS) % (MAX_CHANNELS + 1));
 
     } else if (k == KEY_SCROLL_UP) {
-        if (activeView == VIEW_SETTINGS) {
+        if (nodeDetailOpen) {
+            /* no scroll in detail view */
+        } else if (nodeListFocused) {
+            nodeListSel = max(0, nodeListSel - 1);
+            dirtyNodes = true;
+        } else if (activeView == VIEW_SETTINGS) {
             settingsSel = max(0, settingsSel - 1);
+            dirtyChat = true;
         } else {
             Channel &ch = Channels.get(activeView);
             int maxOff = max(0, ch.count - VISIBLE_LINES);
             ch.scrollOff = min(ch.scrollOff + 3, maxOff);
+            dirtyChat = true;
         }
-        dirtyChat = true;
 
     } else if (k == KEY_SCROLL_DN) {
-        if (activeView == VIEW_SETTINGS) {
+        if (nodeDetailOpen) {
+            /* no scroll in detail view */
+        } else if (nodeListFocused) {
+            int cap = max(0, Nodes.count() - 1);
+            nodeListSel = min(cap, nodeListSel + 1);
+            dirtyNodes = true;
+        } else if (activeView == VIEW_SETTINGS) {
             settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
+            dirtyChat = true;
         } else {
             Channel &ch = Channels.get(activeView);
             ch.scrollOff = max(0, ch.scrollOff - 3);
+            dirtyChat = true;
         }
-        dirtyChat = true;
 
     } else if (k == KEY_PAGE_UP) {
         if (activeView < MAX_CHANNELS) {
@@ -580,41 +814,40 @@ static void handleKey(char k) {
             dirtyChat = true;
         }
 
-    } else if (k == '\r') {
-        if (activeView == VIEW_SETTINGS) {
-            bool ok = false;
-            if (settingsSel == 0) {
-                ok = cfgExport(gCfg);
-                snprintf(settingsStatus, sizeof(settingsStatus),
-                         ok ? "Exported to /camillia-mt/config.ini" : "Export FAILED (no SD?)");
-            } else if (settingsSel == 1) {
-                ok = cfgImport(gCfg);
-                if (ok) {
-                    { Preferences p; p.begin("camillia", false);
-                      p.putString("nodeLong", gCfg.nodeLong);
-                      p.putString("nodeShort", gCfg.nodeShort); p.end(); }
-                    NodeEntry *me = Nodes.upsert(myNodeId);
-                    strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
-                    strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
-                    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
-                                      gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
-                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-                    dirtyStatus = dirtyNodes = true;
-                    snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK");
-                } else {
-                    snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
-                }
-            }
-            dirtyChat = true;
-        }
-
     } else if (k >= 0x20 && k < 0x7F) {
-        if (inputLen < MAX_INPUT_LEN && activeView != CHAN_ANN) {
+        if (inputLen < MAX_INPUT_LEN && activeView != CHAN_ANN
+                && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
             dirtyInput = true;
         }
     }
+}
+
+// ── Web config save callback ──────────────────────────────────
+static void onWebCfgSaved() {
+    // Persist all config fields to NVS
+    Preferences p; p.begin("camillia", false);
+    p.putString("nodeLong",  gCfg.nodeLong);
+    p.putString("nodeShort", gCfg.nodeShort);
+    p.putFloat("loraFreq",   gCfg.loraFreq);
+    p.putFloat("loraBw",     gCfg.loraBw);
+    p.putUChar("loraSf",     gCfg.loraSf);
+    p.putUChar("loraCr",     gCfg.loraCr);
+    p.putUChar("loraPower",  gCfg.loraPower);
+    p.putUChar("loraHopLim", gCfg.loraHopLimit);
+    p.putInt("latI",         gCfg.latI);
+    p.putInt("lonI",         gCfg.lonI);
+    p.putInt("alt",          gCfg.alt);
+    p.end();
+    // Apply LoRa changes immediately
+    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+    // Broadcast updated node identity
+    NodeEntry *me = Nodes.upsert(myNodeId);
+    strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
+    strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
+    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+    dirtyStatus = dirtyNodes = true;
 }
 
 // ── Setup ─────────────────────────────────────────────────────
@@ -640,7 +873,7 @@ void setup() {
         prefs.end();
     }
 
-    // Load runtime config defaults, then overlay NVS-saved names
+    // Load runtime config defaults, then overlay anything saved to NVS
     cfgInitDefaults(gCfg);
     {
         Preferences prefs;
@@ -649,6 +882,18 @@ void setup() {
         String sn = prefs.getString("nodeShort", "");
         if (ln.length()) strncpy(gCfg.nodeLong,  ln.c_str(), sizeof(gCfg.nodeLong)  - 1);
         if (sn.length()) strncpy(gCfg.nodeShort, sn.c_str(), sizeof(gCfg.nodeShort) - 1);
+        float f;
+        f = prefs.getFloat("loraFreq", 0.0f); if (f > 0.0f) gCfg.loraFreq     = f;
+        f = prefs.getFloat("loraBw",   0.0f); if (f > 0.0f) gCfg.loraBw       = f;
+        uint8_t u;
+        u = prefs.getUChar("loraSf",     0); if (u) gCfg.loraSf       = u;
+        u = prefs.getUChar("loraCr",     0); if (u) gCfg.loraCr       = u;
+        u = prefs.getUChar("loraPower",  0); if (u) gCfg.loraPower    = u;
+        u = prefs.getUChar("loraHopLim", 0); if (u) gCfg.loraHopLimit = u;
+        int32_t i;
+        i = prefs.getInt("latI", 0); if (i) gCfg.latI = i;
+        i = prefs.getInt("lonI", 0); if (i) gCfg.lonI = i;
+        i = prefs.getInt("alt",  -1); if (i >= 0) gCfg.alt = (int32_t)i;
         prefs.end();
     }
     Serial.printf("[camillia-mt] Name: %s (%s)\n", gCfg.nodeLong, gCfg.nodeShort);
@@ -723,6 +968,9 @@ void loop() {
     MeshPacket pkt;
     if (Radio.pollRx(pkt)) handleRx(pkt);
 
+    // 1b. Service web config server if running
+    webCfgLoop();
+
     // 2. Poll keyboard
     char k = kb.read();
     if (k != KEY_NONE) handleKey(k);
@@ -761,13 +1009,24 @@ void loop() {
     // 7. Redraw dirty zones
     if (dirtyStatus)  drawStatus();
     if (dirtyTabs)    drawTabs();
-    if (dirtyDivider) { drawDivider(); dirtyDivider = false; }
-    if (dirtyChat) {
-        if (activeView == VIEW_SETTINGS) drawSettings();
-        else                             drawChat();
+
+    if (nodeDetailOpen) {
+        // Detail overlay refreshes when chat or nodes go dirty
+        if (dirtyChat || dirtyNodes) {
+            NodeEntry *n = Nodes.find(nodeDetailId);
+            drawNodeDetail(n);
+            dirtyNodes = false;
+        }
+        dirtyInput = false;   // detail covers input area
+    } else {
+        if (dirtyDivider) { drawDivider(); dirtyDivider = false; }
+        if (dirtyChat) {
+            if (activeView == VIEW_SETTINGS) drawSettings();
+            else                             drawChat();
+        }
+        if (activeView < MAX_CHANNELS) {
+            if (dirtyNodes) drawNodes();
+        }
+        if (dirtyInput) drawInput();
     }
-    if (activeView < MAX_CHANNELS) {
-        if (dirtyNodes) drawNodes();
-    }
-    if (dirtyInput)   drawInput();
 }

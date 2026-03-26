@@ -60,6 +60,8 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0x0A: return KEY_ENTER;
         case 0x7F: return KEY_BACKSPACE;
         case 0x08: return KEY_BACKSPACE;
+        case 0x1B: return KEY_ESC;
+        case 0x05: return KEY_NODE_FOCUS;  // ALT+E
         default:
             if (raw < 0x20 || raw > 0x7E)
                 Serial.printf("[kb] raw=0x%02X\n", raw);

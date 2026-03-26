@@ -15,12 +15,19 @@ struct RhinoConfig {
 // Initialise from compile-time defaults. Call once before sdBegin().
 void cfgInitDefaults(RhinoConfig &cfg);
 
+// Serialise cfg (and CHANNEL_KEYS[]) to YAML, appending into out.
+void cfgToYaml(const RhinoConfig &cfg, String &out);
+
+// Parse YAML from an in-memory buffer. Updates CHANNEL_KEYS[] and fills cfg.
+// Returns true on success.
+bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg);
+
 // Mount SD card (call after SPI.begin). Returns true if card present.
 bool sdBegin();
 
-// Write /camillia/config.ini. Returns true on success.
+// Write /camillia/config.yaml. Returns true on success.
 bool cfgExport(const RhinoConfig &cfg);
 
-// Read /camillia/config.ini.
+// Read /camillia/config.yaml.
 // Updates CHANNEL_KEYS[] and fills cfg. Returns true on success.
 bool cfgImport(RhinoConfig &cfg);
