@@ -57,6 +57,15 @@ static const char kHead[] =
     ".gps-note{margin:.4em 0;font-size:.9em}"
     ".gps-note button{padding:.2em .8em;font-size:.9em;margin-left:.4em}"
     ".gps-hint{font-size:.8em;color:#888;margin:.2em 0 .6em}"
+    "details{border:1px solid #ddd;border-radius:4px;margin:.8em 0;padding:0 .8em}"
+    "details[open]{padding-bottom:.8em}"
+    "summary{font-size:1em;font-weight:600;color:#2a9d8f;cursor:pointer;"
+             "padding:.5em 0;list-style:none}"
+    "summary::-webkit-details-marker{display:none}"
+    "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
+    "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
+    ".ch-row{display:grid;grid-template-columns:1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
+    ".ch-row label{margin:0;font-size:.85em}"
     "</style></head><body>";
 
 // ── Login page ────────────────────────────────────────────────
@@ -78,92 +87,160 @@ static void sendLoginPage(const char *err = "") {
     server.send(200, "text/html", html);
 }
 
+static const char kB64Chars[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void b64Encode(const uint8_t *in, size_t len, char *out) {
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t b = (uint32_t)in[i] << 16;
+        if (i + 1 < len) b |= (uint32_t)in[i+1] << 8;
+        if (i + 2 < len) b |= (uint32_t)in[i+2];
+        out[o++] = kB64Chars[(b >> 18) & 0x3F];
+        out[o++] = kB64Chars[(b >> 12) & 0x3F];
+        out[o++] = (i + 1 < len) ? kB64Chars[(b >>  6) & 0x3F] : '=';
+        out[o++] = (i + 2 < len) ? kB64Chars[ b        & 0x3F] : '=';
+    }
+    out[o] = '\0';
+}
+
+static int b64Decode(const char *in, uint8_t *out, int maxLen) {
+    uint32_t acc = 0; int bits = 0, o = 0;
+    for (const char *p = in; *p && *p != '='; p++) {
+        int v;
+        char c = *p;
+        if      (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+') v = 62;
+        else if (c == '/') v = 63;
+        else continue;
+        acc = (acc << 6) | (uint32_t)v; bits += 6;
+        if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
+    }
+    return o;
+}
+
 // ── Config page ───────────────────────────────────────────────
 
 static void sendConfigPage(const char *msg = "") {
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
 
-    char tmp[32];
+    char tmp[96];
     String html = kHead;
-
     html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
 
-    if (msg[0]) {
-        html += "<p class='msg'>";
-        html += msg;
-        html += "</p>";
-    }
+    if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
 
     html += "<form method='POST' action='/save'>";
 
     // ── Node Identity ─────────────────────────────────────────
-    html += "<h3>Node Identity</h3>";
+    html += "<details open><summary>Node Identity</summary>";
     html += "<label>Long Name (max 39 chars)"
             "<input name='long' type='text' maxlength='39' value='";
-    html += gCfg->nodeLong;
-    html += "'></label>";
+    html += gCfg->nodeLong; html += "'></label>";
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
-    html += gCfg->nodeShort;
-    html += "'></label>";
+    html += gCfg->nodeShort; html += "'></label>";
+    html += "</details>";
+
+    // ── Device ────────────────────────────────────────────────
+    html += "<details open><summary>Device</summary>";
+    html += "<div class='row2'>";
+    html += "<label>Role<select name='role'>";
+    static const struct { uint8_t v; const char *l; } kRoles[] = {
+        {0,"CLIENT"},{1,"CLIENT_MUTE"},{2,"ROUTER"},{3,"ROUTER_CLIENT"},
+        {4,"REPEATER"},{5,"TRACKER"},{6,"SENSOR"},{7,"TAK"},
+        {8,"CLIENT_HIDDEN"},{9,"LOST_AND_FOUND"},{10,"TAK_TRACKER"}
+    };
+    for (int i = 0; i < 11; i++) {
+        snprintf(tmp, sizeof(tmp), "%d", kRoles[i].v);
+        html += "<option value='"; html += tmp; html += "'";
+        if (gCfg->deviceRole == kRoles[i].v) html += " selected";
+        html += ">"; html += kRoles[i].l; html += "</option>";
+    }
+    html += "</select></label>";
+    html += "<label>Rebroadcast<select name='rebroadcast'>";
+    static const struct { uint8_t v; const char *l; } kRebroad[] = {
+        {0,"ALL"},{1,"ALL_SKIP_DECODING"},{2,"LOCAL_ONLY"},{3,"KNOWN_ONLY"},{4,"CORE_PORTNUMS_ONLY"}
+    };
+    for (int i = 0; i < 5; i++) {
+        snprintf(tmp, sizeof(tmp), "%d", kRebroad[i].v);
+        html += "<option value='"; html += tmp; html += "'";
+        if (gCfg->rebroadcastMode == kRebroad[i].v) html += " selected";
+        html += ">"; html += kRebroad[i].l; html += "</option>";
+    }
+    html += "</select></label></div>";
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->nodeInfoIntervalS);
+    html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
+    html += "<label>Position Interval (s)<input name='pos_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label></div>";
+    html += "<label>Timezone (POSIX tzdef, e.g. EST5EDT,M3.2.0,M11.1.0)"
+            "<input name='tzdef' type='text' value='";
+    html += gCfg->tzDef; html += "'></label>";
+    html += "</details>";
 
     // ── Position ──────────────────────────────────────────────
-    html += "<h3>Position</h3>";
-
-#if HAS_GPS
-    html += "<p class='gps-note'>&#128satellites; Coordinates sourced from GPS hardware.</p>";
-#else
-    html +=
-        "<p class='gps-note'>No GPS hardware &mdash; "
-        "<button type='button' onclick='fillLocation()'>Use my location</button>"
-        " <span id='geo-msg'></span></p>"
-        "<p class='gps-hint'>If the button is blocked (browsers require HTTPS for geolocation), "
-        "find your coordinates at "
-        "<a href='https://www.latlong.net' target='_blank'>latlong.net</a> "
-        "and paste them below.</p>"
-        "<script>"
-        "function fillLocation(){"
-          "var msg=document.getElementById('geo-msg');"
-          "if(!navigator.geolocation){msg.textContent='Geolocation not available.';return;}"
-          "msg.textContent='Locating\u2026';"
-          "navigator.geolocation.getCurrentPosition("
-            "function(p){"
-              "document.querySelector('[name=lat]').value=p.coords.latitude.toFixed(7);"
-              "document.querySelector('[name=lon]').value=p.coords.longitude.toFixed(7);"
-              "if(p.coords.altitude!==null)"
-                "document.querySelector('[name=alt]').value=Math.round(p.coords.altitude);"
-              "msg.textContent='\u2713 Done';"
-            "},"
-            "function(e){msg.textContent='Error: '+e.message;}"
-          ");"
-        "}"
-        "</script>";
-#endif
-
+    html += "<details open><summary>Position</summary>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='gpsEnabled' value='1'";
+    if (gCfg->gpsEnabled) html += " checked";
+    html += "> GPS Enabled (L76K hardware GPS)</label>";
+    html += "<p class='gps-hint'>When GPS is enabled, position is sourced from the GPS module. "
+            "The manual coordinates below are used as fallback until a fix is acquired.</p>";
     html += "<div class='row2'>";
-
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->latI * 1e-7);
-    html += "<label>Latitude&deg;<input name='lat' type='number' step='0.0000001' value='";
-    html += tmp;
-    html += "'></label>";
-
+    html += "<label>Latitude&deg; (fallback)<input name='lat' type='number' step='0.0000001' value='";
+    html += tmp; html += "'></label>";
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->lonI * 1e-7);
-    html += "<label>Longitude&deg;<input name='lon' type='number' step='0.0000001' value='";
-    html += tmp;
-    html += "'></label>";
-
-    html += "</div>";
-
+    html += "<label>Longitude&deg; (fallback)<input name='lon' type='number' step='0.0000001' value='";
+    html += tmp; html += "'></label></div>";
     snprintf(tmp, sizeof(tmp), "%d", (int)gCfg->alt);
-    html += "<label>Altitude (m)"
-            "<input name='alt' type='number' value='";
-    html += tmp;
-    html += "' style='max-width:120px'></label>";
+    html += "<label>Altitude m (fallback)<input name='alt' type='number' value='";
+    html += tmp; html += "' style='max-width:120px'></label>";
+    html += "</details>";
 
-    // ── Meshtastic Preset ─────────────────────────────────────
-    html += "<h3>Meshtastic Preset</h3>"
-            "<div class='row2'>"
-            "<label>Region<select id='sel-rgn'>"
+    // ── Channels ──────────────────────────────────────────────
+    html += "<details><summary>Channels</summary>";
+    html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
+            "Hash is recomputed automatically on save.</p>";
+    char b64buf[48];
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const ChannelKey &ch = CHANNEL_KEYS[i];
+        b64Encode(ch.key, ch.keyLen, b64buf);
+        html += "<div class='ch-row'>";
+        // Name
+        snprintf(tmp, sizeof(tmp), "ch%d_name", i);
+        html += "<label>"; snprintf(tmp+20, 20, "%d", i); html += "Ch "; html += (tmp+20);
+        snprintf(tmp, sizeof(tmp), "ch%d_name", i);
+        html += "<input name='"; html += tmp; html += "' type='text' maxlength='11' value='";
+        html += ch.name; html += "'></label>";
+        // Key
+        snprintf(tmp, sizeof(tmp), "ch%d_key", i);
+        html += "<label>Key<input name='"; html += tmp;
+        html += "' type='text' value='"; html += b64buf; html += "'></label>";
+        // Role
+        snprintf(tmp, sizeof(tmp), "ch%d_role", i);
+        html += "<label>Role<select name='"; html += tmp; html += "'>";
+        const char *roles[] = {"PRIMARY","SECONDARY","DISABLED"};
+        for (int r = 0; r < 3; r++) {
+            snprintf(tmp, sizeof(tmp), "%d", r);
+            html += "<option value='"; html += tmp; html += "'";
+            if (ch.role == r) html += " selected";
+            html += ">"; html += roles[r]; html += "</option>";
+        }
+        html += "</select></label>";
+        html += "</div>";
+    }
+    html += "</details>";
+
+    // ── LoRa Radio ────────────────────────────────────────────
+    html += "<details open><summary>LoRa Radio</summary>";
+    html += "<div class='row2'>"
+            "<label>Region<select name='region' id='sel-rgn'>"
             "<option value='US'>US (902&ndash;928 MHz)</option>"
             "<option value='EU_433'>EU 433 (433&ndash;434 MHz)</option>"
             "<option value='EU_868'>EU 868 (869.4&ndash;869.65 MHz)</option>"
@@ -201,54 +278,24 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='Short Fast'>Short Fast</option>"
             "<option value='Short Slow'>Short Slow</option>"
             "<option value='Short Turbo'>Short Turbo</option>"
-            "</select></label>"
-            "</div>"
-            "<button type='button' onclick='applyPreset()'"
-            " style='margin-top:.5em;background:#555'>Apply Preset</button>"
-            "<p class='gps-hint'>Fills frequency, bandwidth, SF, CR and TX power. "
-            "Frequency shown is the band midpoint &mdash; Meshtastic picks the exact slot "
-            "by hashing the channel name, but this gets you in the right region. "
-            "Fine-tune manually if needed.</p>"
+            "</select></label></div>";
+    html += "<script>document.getElementById('sel-rgn').value='";
+    html += gCfg->region; html += "';</script>";
+    html += "<button type='button' onclick='applyPreset()'"
+            " style='margin-top:.5em;background:#555'>Apply Preset to fields below</button>"
+            "<p class='gps-hint'>Fills frequency, BW, SF, CR and TX power from preset.</p>"
             "<script>"
-            "var R={"
-              "'US':{f:906.875,p:22},"
-              "'EU_433':{f:433.5,p:10},"
-              "'EU_868':{f:869.525,p:22},"
-              "'CN':{f:490.0,p:19},"
-              "'JP':{f:922.0,p:13},"
-              "'ANZ':{f:921.5,p:22},"
-              "'ANZ_433':{f:433.92,p:14},"
-              "'RU':{f:868.95,p:20},"
-              "'KR':{f:921.5,p:22},"
-              "'TW':{f:922.5,p:22},"
-              "'IN':{f:866.0,p:22},"
-              "'NZ_865':{f:866.0,p:22},"
-              "'TH':{f:922.5,p:16},"
-              "'UA_433':{f:433.85,p:10},"
-              "'UA_868':{f:868.3,p:14},"
-              "'MY_433':{f:434.0,p:20},"
-              "'MY_919':{f:921.5,p:22},"
-              "'SG_923':{f:921.0,p:20},"
-              "'PH_433':{f:433.85,p:10},"
-              "'PH_868':{f:868.7,p:14},"
-              "'PH_915':{f:916.5,p:22},"
-              "'KZ_433':{f:433.925,p:10},"
-              "'KZ_863':{f:865.5,p:22},"
-              "'NP_865':{f:866.5,p:22},"
-              "'BR_902':{f:904.75,p:22},"
-              "'LORA_24':{f:2441.75,p:10}"
-            "};"
-            "var P={"
-              "'Long Fast':{bw:250,sf:11,cr:5},"
-              "'Long Moderate':{bw:125,sf:11,cr:8},"
-              "'Long Slow':{bw:125,sf:12,cr:8},"
-              "'Long Turbo':{bw:500,sf:11,cr:8},"
-              "'Medium Fast':{bw:250,sf:9,cr:5},"
-              "'Medium Slow':{bw:250,sf:10,cr:5},"
-              "'Short Fast':{bw:250,sf:7,cr:5},"
-              "'Short Slow':{bw:250,sf:8,cr:5},"
-              "'Short Turbo':{bw:500,sf:7,cr:5}"
-            "};"
+            "var R={'US':{f:906.875,p:22},'EU_433':{f:433.5,p:10},'EU_868':{f:869.525,p:22},"
+            "'CN':{f:490.0,p:19},'JP':{f:922.0,p:13},'ANZ':{f:921.5,p:22},'ANZ_433':{f:433.92,p:14},"
+            "'RU':{f:868.95,p:20},'KR':{f:921.5,p:22},'TW':{f:922.5,p:22},'IN':{f:866.0,p:22},"
+            "'NZ_865':{f:866.0,p:22},'TH':{f:922.5,p:16},'UA_433':{f:433.85,p:10},'UA_868':{f:868.3,p:14},"
+            "'MY_433':{f:434.0,p:20},'MY_919':{f:921.5,p:22},'SG_923':{f:921.0,p:20},'PH_433':{f:433.85,p:10},"
+            "'PH_868':{f:868.7,p:14},'PH_915':{f:916.5,p:22},'KZ_433':{f:433.925,p:10},'KZ_863':{f:865.5,p:22},"
+            "'NP_865':{f:866.5,p:22},'BR_902':{f:904.75,p:22},'LORA_24':{f:2441.75,p:10}};"
+            "var P={'Long Fast':{bw:250,sf:11,cr:5},'Long Moderate':{bw:125,sf:11,cr:8},"
+            "'Long Slow':{bw:125,sf:12,cr:8},'Long Turbo':{bw:500,sf:11,cr:8},"
+            "'Medium Fast':{bw:250,sf:9,cr:5},'Medium Slow':{bw:250,sf:10,cr:5},"
+            "'Short Fast':{bw:250,sf:7,cr:5},'Short Slow':{bw:250,sf:8,cr:5},'Short Turbo':{bw:500,sf:7,cr:5}};"
             "function applyPreset(){"
               "var r=R[document.getElementById('sel-rgn').value];"
               "var p=P[document.getElementById('sel-pst').value];"
@@ -260,82 +307,168 @@ static void sendConfigPage(const char *msg = "") {
               "document.querySelector('[name=pwr]').value=r.p;"
             "}"
             "</script>";
-
-    // ── LoRa Radio ────────────────────────────────────────────
-    html += "<h3>LoRa Radio</h3>";
     html += "<div class='row2'>";
-
     snprintf(tmp, sizeof(tmp), "%.3f", gCfg->loraFreq);
-    html += "<label>Frequency (MHz)"
-            "<input name='freq' type='number' step='0.001' min='150' max='2500' value='";
-    html += tmp;
-    html += "'></label>";
-
-    // Bandwidth — dropdown (LoRa only supports specific values)
+    html += "<label>Frequency (MHz)<input name='freq' type='number' step='0.001' min='150' max='2500' value='";
+    html += tmp; html += "'></label>";
     html += "<label>Bandwidth (kHz)<select name='bw'>";
-    const float bwOpts[]      = { 125.0f, 250.0f, 500.0f };
-    const char *bwLabels[]    = { "125 kHz", "250 kHz", "500 kHz" };
+    const float bwOpts[] = {125.0f,250.0f,500.0f};
+    const char *bwLabels[] = {"125 kHz","250 kHz","500 kHz"};
     for (int i = 0; i < 3; i++) {
         snprintf(tmp, sizeof(tmp), "%.0f", bwOpts[i]);
-        html += "<option value='";
-        html += tmp;
-        html += "'";
+        html += "<option value='"; html += tmp; html += "'";
         if (fabsf(gCfg->loraBw - bwOpts[i]) < 0.1f) html += " selected";
-        html += ">";
-        html += bwLabels[i];
-        html += "</option>";
+        html += ">"; html += bwLabels[i]; html += "</option>";
     }
-    html += "</select></label></div>";
-
-    html += "<div class='row2'>";
-
-    // Spreading Factor — dropdown SF7–SF12
+    html += "</select></label></div><div class='row2'>";
     html += "<label>Spreading Factor<select name='sf'>";
     for (int sf = 7; sf <= 12; sf++) {
         snprintf(tmp, sizeof(tmp), "%d", sf);
-        html += "<option value='";
-        html += tmp;
-        html += "'";
+        html += "<option value='"; html += tmp; html += "'";
         if (gCfg->loraSf == sf) html += " selected";
-        html += ">SF";
-        html += tmp;
-        html += "</option>";
+        html += ">SF"; html += tmp; html += "</option>";
     }
     html += "</select></label>";
-
-    // Coding Rate — 4/5 … 4/8
     html += "<label>Coding Rate<select name='cr'>";
     for (int cr = 5; cr <= 8; cr++) {
         snprintf(tmp, sizeof(tmp), "%d", cr);
-        html += "<option value='";
-        html += tmp;
-        html += "'";
+        html += "<option value='"; html += tmp; html += "'";
         if (gCfg->loraCr == cr) html += " selected";
-        html += ">4/";
-        html += tmp;
-        html += "</option>";
+        html += ">4/"; html += tmp; html += "</option>";
+    }
+    html += "</select></label></div><div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
+    html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
+    html += tmp; html += "'></label>";
+    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
+    html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
+    html += tmp; html += "'></label></div>";
+    html += "</details>";
+
+    // ── Bluetooth ─────────────────────────────────────────────
+    html += "<details><summary>Bluetooth</summary>";
+    html += "<div class='row2'>";
+    html += "<label>Enabled<select name='bt_enabled'>"
+            "<option value='1'"; if ( gCfg->btEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->btEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
+    html += "<label>Mode<select name='bt_mode'>";
+    static const char *btModes[] = {"RANDOM_PIN","FIXED_PIN","NO_PIN"};
+    for (int i = 0; i < 3; i++) {
+        snprintf(tmp, sizeof(tmp), "%d", i);
+        html += "<option value='"; html += tmp; html += "'";
+        if (gCfg->btMode == i) html += " selected";
+        html += ">"; html += btModes[i]; html += "</option>";
     }
     html += "</select></label></div>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->btFixedPin);
+    html += "<label>Fixed PIN (when mode = FIXED_PIN)"
+            "<input name='bt_pin' type='number' min='0' max='999999' value='";
+    html += tmp; html += "' style='max-width:150px'></label>";
+    html += "</details>";
 
+    // ── Network ───────────────────────────────────────────────
+    html += "<details><summary>Network</summary>";
+    html += "<label>NTP Server<input name='ntp_server' type='text' value='";
+    html += gCfg->ntpServer; html += "'></label>";
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>MQTT</h3>";
     html += "<div class='row2'>";
+    html += "<label>MQTT Enabled<select name='mqtt_enabled'>"
+            "<option value='1'"; if ( gCfg->mqttEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->mqttEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
+    html += "<label>Encryption<select name='mqtt_encrypt'>"
+            "<option value='1'"; if ( gCfg->mqttEncryption) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->mqttEncryption) html += " selected"; html += ">No</option>"
+            "</select></label></div>";
+    html += "<label>Broker Address<input name='mqtt_server' type='text' value='";
+    html += gCfg->mqttServer; html += "'></label>";
+    html += "<div class='row2'>";
+    html += "<label>Username<input name='mqtt_user' type='text' value='";
+    html += gCfg->mqttUser; html += "'></label>";
+    html += "<label>Password<input name='mqtt_pass' type='text' value='";
+    html += gCfg->mqttPass; html += "'></label></div>";
+    html += "<div class='row2'>";
+    html += "<label>Root Topic<input name='mqtt_root' type='text' value='";
+    html += gCfg->mqttRoot; html += "'></label>";
+    html += "<label>Map Reporting<select name='mqtt_map_rpt'>"
+            "<option value='1'"; if ( gCfg->mqttMapReport) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->mqttMapReport) html += " selected"; html += ">No</option>"
+            "</select></label></div>";
+    html += "</details>";
 
-    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
-    html += "<label>TX Power (dBm, 1&ndash;22)"
-            "<input name='pwr' type='number' min='1' max='22' value='";
-    html += tmp;
-    html += "'></label>";
+    // ── Display ───────────────────────────────────────────────
+    html += "<details><summary>Display</summary>";
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
+    html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
+    html += tmp; html += "'></label>";
+    html += "<label>Units<select name='disp_units'>"
+            "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric</option>"
+            "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial</option>"
+            "</select></label></div>";
+    html += "<div class='row2'>";
+    html += "<label>Compass North Top<select name='compass_north'>"
+            "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->compassNorthTop) html += " selected"; html += ">No</option>"
+            "</select></label>";
+    html += "<label>Flip Screen<select name='flip_screen'>"
+            "<option value='1'"; if ( gCfg->flipScreen) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->flipScreen) html += " selected"; html += ">No</option>"
+            "</select></label></div>";
+    html += "</details>";
 
-    snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
-    html += "<label>Hop Limit (1&ndash;7)"
-            "<input name='hop' type='number' min='1' max='7' value='";
-    html += tmp;
-    html += "'></label></div>";
+    // ── Power ─────────────────────────────────────────────────
+    html += "<details><summary>Power</summary>";
+    html += "<label>Power Saving<select name='pwr_saving'>"
+            "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->lsSecs);
+    html += "<label>Light Sleep After (s)<input name='ls_secs' type='number' min='0' value='";
+    html += tmp; html += "'></label>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->minWakeSecs);
+    html += "<label>Min Wake (s)<input name='min_wake' type='number' min='0' value='";
+    html += tmp; html += "'></label></div>";
+    html += "</details>";
 
-    html += "<button type='submit'>Save</button></form>";
+    // ── Modules ───────────────────────────────────────────────
+    html += "<details><summary>Modules</summary>";
+    // Telemetry
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Telemetry</h3>";
+    html += "<div class='row2'>";
+    html += "<label>Device Telemetry<select name='tel_dev_en'>"
+            "<option value='1'"; if ( gCfg->telDeviceEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->telDeviceEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->telDeviceIntervalS);
+    html += "<label>Device Interval (s)<input name='tel_dev_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label></div>";
+    html += "<div class='row2'>";
+    html += "<label>Environment Telemetry<select name='tel_env_en'>"
+            "<option value='1'"; if ( gCfg->telEnvEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->telEnvEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->telEnvIntervalS);
+    html += "<label>Env Interval (s)<input name='tel_env_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label></div>";
+    // Canned Messages
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Canned Messages</h3>";
+    html += "<label>Enabled<select name='canned_en'>"
+            "<option value='1'"; if ( gCfg->cannedEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->cannedEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
+    html += "<label>Messages (pipe-separated, e.g. Hi|Bye|Yes|No)"
+            "<input name='canned_msgs' type='text' maxlength='199' value='";
+    html += gCfg->cannedMessages; html += "'></label>";
+    html += "</details>";
+
+    html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
 
     // ── Backup & Restore ──────────────────────────────────────
     html +=
-        "<h3>Backup &amp; Restore</h3>"
+        "<h3 style='margin-top:1.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export' download='config.yaml'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
@@ -349,7 +482,6 @@ static void sendConfigPage(const char *msg = "") {
         "</form>";
 
     html += "</body></html>";
-
     server.send(200, "text/html", html);
 }
 
@@ -391,10 +523,48 @@ static void handlePostSave() {
     gCfg->nodeLong[sizeof(gCfg->nodeLong)   - 1] = '\0';
     gCfg->nodeShort[sizeof(gCfg->nodeShort) - 1] = '\0';
 
+    // Device
+    gCfg->deviceRole        = (uint8_t)constrain(server.arg("role").toInt(),        0, 10);
+    gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
+    gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
+    gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());
+    strncpy(gCfg->tzDef, server.arg("tzdef").c_str(), sizeof(gCfg->tzDef) - 1);
+
     // Position
+    gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
     gCfg->latI = (int32_t)(server.arg("lat").toFloat() * 1e7f);
     gCfg->lonI = (int32_t)(server.arg("lon").toFloat() * 1e7f);
     gCfg->alt  = (int32_t)server.arg("alt").toInt();
+
+    // Channels
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        char field[16];
+        snprintf(field, sizeof(field), "ch%d_name", i);
+        String nm = server.arg(field);
+        if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
+            strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+            CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+            CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+        }
+        snprintf(field, sizeof(field), "ch%d_key", i);
+        String kh = server.arg(field);
+        kh.trim();
+        if (kh.length() >= 2) {
+            uint8_t kbuf[32];
+            int klen = b64Decode(kh.c_str(), kbuf, 32);
+            if (klen > 0) { memcpy(CHANNEL_KEYS[i].key, kbuf, klen); CHANNEL_KEYS[i].keyLen = (uint8_t)klen; }
+        }
+        snprintf(field, sizeof(field), "ch%d_role", i);
+        CHANNEL_KEYS[i].role = (uint8_t)constrain(server.arg(field).toInt(), 0, 2);
+        // Recompute on-air hash from current name + key
+        const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+        CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+    }
+
+    // Region
+    String rgn = server.arg("region");
+    if (rgn.length() > 0 && rgn.length() < sizeof(gCfg->region))
+        strncpy(gCfg->region, rgn.c_str(), sizeof(gCfg->region) - 1);
 
     // LoRa
     gCfg->loraFreq     = server.arg("freq").toFloat();
@@ -403,6 +573,40 @@ static void handlePostSave() {
     gCfg->loraCr       = (uint8_t)constrain(server.arg("cr").toInt(),  5,  8);
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
+
+    // Bluetooth
+    gCfg->btEnabled  = server.arg("bt_enabled").toInt() != 0;
+    gCfg->btMode     = (uint8_t)constrain(server.arg("bt_mode").toInt(), 0, 2);
+    gCfg->btFixedPin = (uint32_t)server.arg("bt_pin").toInt();
+
+    // Network
+    strncpy(gCfg->ntpServer,  server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer)  - 1);
+    gCfg->mqttEnabled   = server.arg("mqtt_enabled").toInt() != 0;
+    gCfg->mqttEncryption= server.arg("mqtt_encrypt").toInt() != 0;
+    gCfg->mqttMapReport = server.arg("mqtt_map_rpt").toInt() != 0;
+    strncpy(gCfg->mqttServer, server.arg("mqtt_server").c_str(), sizeof(gCfg->mqttServer) - 1);
+    strncpy(gCfg->mqttUser,   server.arg("mqtt_user").c_str(),   sizeof(gCfg->mqttUser)   - 1);
+    strncpy(gCfg->mqttPass,   server.arg("mqtt_pass").c_str(),   sizeof(gCfg->mqttPass)   - 1);
+    strncpy(gCfg->mqttRoot,   server.arg("mqtt_root").c_str(),   sizeof(gCfg->mqttRoot)   - 1);
+
+    // Display
+    gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
+    gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
+    gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
+    gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
+
+    // Power
+    gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
+    gCfg->lsSecs        = (uint32_t)server.arg("ls_secs").toInt();
+    gCfg->minWakeSecs   = (uint32_t)server.arg("min_wake").toInt();
+
+    // Modules
+    gCfg->telDeviceEnabled   = server.arg("tel_dev_en").toInt() != 0;
+    gCfg->telDeviceIntervalS = (uint32_t)max((long)60, server.arg("tel_dev_intv").toInt());
+    gCfg->telEnvEnabled      = server.arg("tel_env_en").toInt() != 0;
+    gCfg->telEnvIntervalS    = (uint32_t)max((long)60, server.arg("tel_env_intv").toInt());
+    gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
+    strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
 
     if (gOnSave) gOnSave();
     sendConfigPage("Saved.");

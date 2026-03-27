@@ -56,8 +56,8 @@ public:
     // Broadcast a NODEINFO_APP packet on LongFast so other nodes see us.
     bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName);
 
-    // Broadcast a POSITION_APP packet on LongFast.
-    bool sendPosition(uint32_t myNodeId);
+    // Broadcast a POSITION_APP packet on LongFast with the given coordinates.
+    bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt);
 
 private:
     Channel    _chans[MAX_CHANNELS];

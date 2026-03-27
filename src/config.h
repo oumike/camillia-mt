@@ -50,15 +50,59 @@
 #define MY_SHORT_NAME   "RDMT"
 
 // ── GPS hardware ──────────────────────────────────────────────
-// Set to 1 if a GPS module is connected and position comes from hardware.
-// Set to 0 if position is entered manually (web config or compile-time defaults).
-#define HAS_GPS         0
+// L76K GPS module connected to UART1 on T-Deck.
+#define HAS_GPS         1
+#define GPS_RX          44    // ESP32 RX ← GPS TX
+#define GPS_TX          43    // ESP32 TX → GPS RX
+#define GPS_BAUD        9600
+
+#define MY_GPS_ENABLED  1     // runtime default (can be toggled via web config)
 
 // ── Fixed position (from ribl_config) ────────────────────────
 // Used as the startup default when HAS_GPS == 0.
 #define MY_LAT_I        424935424   // lat * 1e7  (42.4935424°N)
 #define MY_LON_I       -833880064   // lon * 1e7  (-83.3880064°W)
 #define MY_ALT          228         // meters
+
+#define MY_DEVICE_ROLE      0      // CLIENT
+#define MY_REBROADCAST      0      // ALL
+#define MY_NODEINFO_INTV  900      // 15 min (seconds)
+#define MY_POS_INTV      1800      // 30 min (seconds)
+#define MY_REGION        "US"
+
+// ── Display defaults ──────────────────────────────────────────
+#define MY_SCREEN_ON_SECS   300    // 5 min
+#define MY_DISPLAY_UNITS    0      // METRIC
+#define MY_COMPASS_NORTH    0
+#define MY_FLIP_SCREEN      0
+
+// ── Bluetooth defaults ─────────────────────────────────────────
+#define MY_BT_ENABLED       1
+#define MY_BT_MODE          0      // RANDOM_PIN
+#define MY_BT_PIN           123456
+
+// ── Network defaults ───────────────────────────────────────────
+#define MY_NTP_SERVER       "meshtastic.pool.ntp.org"
+#define MY_MQTT_ENABLED     0
+#define MY_MQTT_SERVER      "mqtt.meshtastic.org"
+#define MY_MQTT_USER        "meshdev"
+#define MY_MQTT_PASS        "large4cats"
+#define MY_MQTT_ROOT        "msh/US"
+#define MY_MQTT_ENCRYPT     1
+#define MY_MQTT_MAP_RPT     0
+
+// ── Power defaults ─────────────────────────────────────────────
+#define MY_POWER_SAVING     0
+#define MY_LS_SECS          300
+#define MY_MIN_WAKE_SECS    10
+
+// ── Module defaults ────────────────────────────────────────────
+#define MY_TEL_DEV_EN       1
+#define MY_TEL_DEV_INTV     7200
+#define MY_TEL_ENV_EN       0
+#define MY_TEL_ENV_INTV     7200
+#define MY_CANNED_EN        1
+#define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 
 // ── Display UI zones (landscape 320×240, font0 = 6×8 px) ─────
 #define LCD_W           320

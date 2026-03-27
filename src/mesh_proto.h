@@ -13,6 +13,7 @@ struct ChannelKey {
     uint8_t     keyLen;       // 16 = AES-128, 32 = AES-256
     uint8_t     hash;         // XOR(name_bytes) ^ XOR(expanded_key_bytes)
     char        name_buf[16]; // mutable storage for imported names (zero at static init)
+    uint8_t role;             // 0=PRIMARY, 1=SECONDARY, 2=DISABLED
 };
 
 // Inline definitions so the table lives in mesh_proto.cpp (extern declared below)
@@ -89,6 +90,13 @@ bool decodeData(const uint8_t *buf, size_t len,
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
 bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out);
+
+// ── PSK expansion ─────────────────────────────────────────────
+// Expand a 1-byte PSK to the 16-byte Meshtastic DEFAULT_KEY variant.
+void    expandPsk(uint8_t psk, uint8_t out[16]);
+
+// Compute the on-air channel hash (XOR of name bytes ^ XOR of expanded key bytes).
+uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen);
 
 // ── Encryption / decryption ───────────────────────────────────
 // Try all known channel keys; returns channel index or -1.

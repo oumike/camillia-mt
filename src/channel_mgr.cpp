@@ -193,11 +193,11 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text) {
     return true;
 }
 
-bool ChannelMgr::sendPosition(uint32_t myNodeId) {
+bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt) {
     if (!Radio.isReady()) return false;
 
     uint8_t proto[64], cipher[64];
-    size_t protoLen = encodePosition(MY_LAT_I, MY_LON_I, MY_ALT, proto, sizeof(proto));
+    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto));
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // always LongFast

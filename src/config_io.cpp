@@ -8,20 +8,57 @@
 static const char *kPath = "/camillia/config.yaml";
 static bool sdReady = false;
 
-// ── Hex helpers ──────────────────────────────────────────────
-static void bytesToHex(const uint8_t *b, int len, char *out) {
-    for (int i = 0; i < len; i++) snprintf(out + 2*i, 3, "%02x", b[i]);
-    out[2*len] = '\0';
+// ── Base64 helpers ────────────────────────────────────────────
+static const char kB64Chars[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static void b64Encode(const uint8_t *in, size_t len, char *out) {
+    size_t o = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        uint32_t b = (uint32_t)in[i] << 16;
+        if (i + 1 < len) b |= (uint32_t)in[i+1] << 8;
+        if (i + 2 < len) b |= (uint32_t)in[i+2];
+        out[o++] = kB64Chars[(b >> 18) & 0x3F];
+        out[o++] = kB64Chars[(b >> 12) & 0x3F];
+        out[o++] = (i + 1 < len) ? kB64Chars[(b >>  6) & 0x3F] : '=';
+        out[o++] = (i + 2 < len) ? kB64Chars[ b        & 0x3F] : '=';
+    }
+    out[o] = '\0';
 }
 
-static int hexToBytes(const char *hex, uint8_t *out, int maxLen) {
-    int n = strlen(hex) / 2;
-    if (n > maxLen) n = maxLen;
-    for (int i = 0; i < n; i++) {
-        char tmp[3] = { hex[2*i], hex[2*i+1], '\0' };
-        out[i] = (uint8_t)strtol(tmp, nullptr, 16);
+static int b64Decode(const char *in, uint8_t *out, int maxLen) {
+    uint32_t acc = 0; int bits = 0, o = 0;
+    for (const char *p = in; *p && *p != '='; p++) {
+        int v;
+        char c = *p;
+        if      (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '+') v = 62;
+        else if (c == '/') v = 63;
+        else continue;
+        acc = (acc << 6) | (uint32_t)v; bits += 6;
+        if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
     }
-    return n;
+    return o;
+}
+
+// ── Role / rebroadcast name tables ───────────────────────────
+static const char *kRoleNames[] = {
+    "CLIENT", "CLIENT_MUTE", "ROUTER", "ROUTER_CLIENT", "REPEATER",
+    "TRACKER", "SENSOR", "TAK", "CLIENT_HIDDEN", "LOST_AND_FOUND", "TAK_TRACKER"
+};
+static const int kNumRoles = 11;
+
+static const char *kRebroadNames[] = {
+    "ALL", "ALL_SKIP_DECODING", "LOCAL_ONLY", "KNOWN_ONLY", "CORE_PORTNUMS_ONLY"
+};
+static const int kNumRebroadModes = 5;
+
+static uint8_t findName(const char *val, const char **table, int n) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp(val, table[i])) return (uint8_t)i;
+    return 0;
 }
 
 // ── Defaults ─────────────────────────────────────────────────
@@ -30,6 +67,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.nodeShort, MY_SHORT_NAME, sizeof(cfg.nodeShort) - 1);
     cfg.nodeLong[sizeof(cfg.nodeLong)   - 1] = '\0';
     cfg.nodeShort[sizeof(cfg.nodeShort) - 1] = '\0';
+    cfg.gpsEnabled   = (bool)MY_GPS_ENABLED;
     cfg.latI         = MY_LAT_I;
     cfg.lonI         = MY_LON_I;
     cfg.alt          = MY_ALT;
@@ -39,6 +77,43 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.loraCr       = MESH_CR;
     cfg.loraPower    = MESH_POWER;
     cfg.loraHopLimit = MESH_HOP_LIMIT;
+    cfg.deviceRole        = MY_DEVICE_ROLE;
+    cfg.rebroadcastMode   = MY_REBROADCAST;
+    cfg.nodeInfoIntervalS = MY_NODEINFO_INTV;
+    cfg.posIntervalS      = MY_POS_INTV;
+    strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
+    cfg.region[sizeof(cfg.region) - 1] = '\0';
+    cfg.tzDef[0]           = '\0';
+    cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
+    cfg.displayUnits       = MY_DISPLAY_UNITS;
+    cfg.compassNorthTop    = MY_COMPASS_NORTH;
+    cfg.flipScreen         = MY_FLIP_SCREEN;
+    cfg.btEnabled          = MY_BT_ENABLED;
+    cfg.btMode             = MY_BT_MODE;
+    cfg.btFixedPin         = MY_BT_PIN;
+    strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
+    cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
+    cfg.mqttEnabled        = MY_MQTT_ENABLED;
+    strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
+    cfg.mqttServer[sizeof(cfg.mqttServer) - 1] = '\0';
+    strncpy(cfg.mqttUser,    MY_MQTT_USER,   sizeof(cfg.mqttUser)   - 1);
+    cfg.mqttUser[sizeof(cfg.mqttUser) - 1] = '\0';
+    strncpy(cfg.mqttPass,    MY_MQTT_PASS,   sizeof(cfg.mqttPass)   - 1);
+    cfg.mqttPass[sizeof(cfg.mqttPass) - 1] = '\0';
+    strncpy(cfg.mqttRoot,    MY_MQTT_ROOT,   sizeof(cfg.mqttRoot)   - 1);
+    cfg.mqttRoot[sizeof(cfg.mqttRoot) - 1] = '\0';
+    cfg.mqttEncryption     = MY_MQTT_ENCRYPT;
+    cfg.mqttMapReport      = MY_MQTT_MAP_RPT;
+    cfg.isPowerSaving      = MY_POWER_SAVING;
+    cfg.lsSecs             = MY_LS_SECS;
+    cfg.minWakeSecs        = MY_MIN_WAKE_SECS;
+    cfg.telDeviceEnabled   = MY_TEL_DEV_EN;
+    cfg.telDeviceIntervalS = MY_TEL_DEV_INTV;
+    cfg.telEnvEnabled      = MY_TEL_ENV_EN;
+    cfg.telEnvIntervalS    = MY_TEL_ENV_INTV;
+    cfg.cannedEnabled      = MY_CANNED_EN;
+    strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
+    cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
 }
 
 // ── SD init ──────────────────────────────────────────────────
@@ -50,22 +125,94 @@ bool sdBegin() {
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
-    char tmp[64];
+    char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
+    // canned_messages top-level
+    out += "canned_messages: "; out += cfg.cannedMessages; out += "\n";
     out += "config:\n";
+    // bluetooth
+    out += "  bluetooth:\n";
+    snprintf(tmp, sizeof(tmp), "    enabled: %s\n",    cfg.btEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    fixedPin: %lu\n",  (unsigned long)cfg.btFixedPin);    out += tmp;
+    out += "    mode: ";
+    out += (cfg.btMode == 1 ? "FIXED_PIN" : cfg.btMode == 2 ? "NO_PIN" : "RANDOM_PIN");
+    out += "\n";
+    // device
+    out += "  device:\n";
+    snprintf(tmp, sizeof(tmp), "    nodeInfoBroadcastSecs: %lu\n", (unsigned long)cfg.nodeInfoIntervalS); out += tmp;
+    out += "    rebroadcastMode: ";
+    out += (cfg.rebroadcastMode < kNumRebroadModes) ? kRebroadNames[cfg.rebroadcastMode] : "ALL";
+    out += "\n";
+    out += "    role: ";
+    out += (cfg.deviceRole < kNumRoles) ? kRoleNames[cfg.deviceRole] : "CLIENT";
+    out += "\n";
+    if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
+    // display
+    out += "  display:\n";
+    snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
+    out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
+    snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
+    // lora
     out += "  lora:\n";
     snprintf(tmp, sizeof(tmp), "    bandwidth: %.0f\n",    cfg.loraBw);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    codingRate: %d\n",     cfg.loraCr);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    freq_mhz: %.3f\n",     cfg.loraFreq);     out += tmp;
     snprintf(tmp, sizeof(tmp), "    hopLimit: %d\n",       cfg.loraHopLimit); out += tmp;
+    out += "    region: "; out += cfg.region; out += "\n";
     snprintf(tmp, sizeof(tmp), "    spreadFactor: %d\n",   cfg.loraSf);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
+    // network
+    out += "  network:\n";
+    out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
+    // position
+    out += "  position:\n";
+    snprintf(tmp, sizeof(tmp), "    fixedPosition: %s\n", cfg.gpsEnabled ? "false" : "true"); out += tmp;
+    out += "    gpsMode: "; out += (cfg.gpsEnabled ? "ENABLED" : "DISABLED"); out += "\n";
+    snprintf(tmp, sizeof(tmp), "    positionBroadcastSecs: %lu\n", (unsigned long)cfg.posIntervalS); out += tmp;
+    // power
+    out += "  power:\n";
+    snprintf(tmp, sizeof(tmp), "    isPowerSaving: %s\n", cfg.isPowerSaving ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    lsSecs: %lu\n",       (unsigned long)cfg.lsSecs);            out += tmp;
+    snprintf(tmp, sizeof(tmp), "    minWakeSecs: %lu\n",  (unsigned long)cfg.minWakeSecs);        out += tmp;
+    // location
     out += "location:\n";
-    snprintf(tmp, sizeof(tmp), "  alt: %d\n",              (int)cfg.alt);     out += tmp;
-    snprintf(tmp, sizeof(tmp), "  lat: %.7f\n",            cfg.latI * 1e-7f); out += tmp;
-    snprintf(tmp, sizeof(tmp), "  lon: %.7f\n",            cfg.lonI * 1e-7f); out += tmp;
+    snprintf(tmp, sizeof(tmp), "  alt: %d\n",    (int)cfg.alt);        out += tmp;
+    snprintf(tmp, sizeof(tmp), "  lat: %.7f\n",  cfg.latI * 1e-7f);    out += tmp;
+    snprintf(tmp, sizeof(tmp), "  lon: %.7f\n",  cfg.lonI * 1e-7f);    out += tmp;
+    // module_config
+    out += "module_config:\n";
+    out += "  cannedMessage:\n";
+    snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.cannedEnabled ? "true" : "false"); out += tmp;
+    out += "  mqtt:\n";
+    out += "    address: "; out += cfg.mqttServer; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    enabled: %s\n",           cfg.mqttEnabled   ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    encryptionEnabled: %s\n", cfg.mqttEncryption? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n",cfg.mqttMapReport? "true" : "false"); out += tmp;
+    out += "    password: "; out += cfg.mqttPass; out += "\n";
+    out += "    root: ";     out += cfg.mqttRoot; out += "\n";
+    out += "    username: "; out += cfg.mqttUser; out += "\n";
+    out += "  telemetry:\n";
+    snprintf(tmp, sizeof(tmp), "    deviceTelemetryEnabled: %s\n", cfg.telDeviceEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    deviceUpdateInterval: %lu\n",  (unsigned long)cfg.telDeviceIntervalS);    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    environmentMeasurementEnabled: %s\n", cfg.telEnvEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    environmentUpdateInterval: %lu\n",    (unsigned long)cfg.telEnvIntervalS);    out += tmp;
+    // owner
     out += "owner: ";       out += cfg.nodeLong;  out += "\n";
     out += "owner_short: "; out += cfg.nodeShort; out += "\n";
+    // channels (our format — key stored as base64, e.g. "MA==" for 1-byte PSK 0x30)
+    out += "channels:\n";
+    char b64buf[48];
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const ChannelKey &ch = CHANNEL_KEYS[i];
+        const char *nm = ch.name_buf[0] ? ch.name_buf : ch.name;
+        b64Encode(ch.key, ch.keyLen, b64buf);
+        const char *roleStr = (ch.role == 1) ? "SECONDARY" : (ch.role == 2) ? "DISABLED" : "PRIMARY";
+        snprintf(tmp, sizeof(tmp),
+                 "  - name: %s\n    role: %s\n    key: %s\n    hash: %02x\n",
+                 nm, roleStr, b64buf, ch.hash);
+        out += tmp;
+    }
 }
 
 // ── YAML parse (from memory buffer) ──────────────────────────
@@ -133,6 +280,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     strncpy(cfg.nodeLong,  val, sizeof(cfg.nodeLong)  - 1);
                 else if (!strcmp(key, "owner_short"))
                     strncpy(cfg.nodeShort, val, sizeof(cfg.nodeShort) - 1);
+                else if (!strcmp(key, "canned_messages"))
+                    strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
             }
         } else if (indent == 2) {
             if (!hasVal) {
@@ -180,12 +329,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                             sizeof(CHANNEL_KEYS[0].name_buf) - 1);
                     CHANNEL_KEYS[chanIdx].name = CHANNEL_KEYS[chanIdx].name_buf;
                 } else if (!strcmp(key, "key")) {
-                    CHANNEL_KEYS[chanIdx].keyLen =
-                        (uint8_t)hexToBytes(val, CHANNEL_KEYS[chanIdx].key, 32);
-                } else if (!strcmp(key, "keylen")) {
-                    CHANNEL_KEYS[chanIdx].keyLen = (uint8_t)atoi(val);
+                    int kl = b64Decode(val, CHANNEL_KEYS[chanIdx].key, 32);
+                    if (kl > 0) CHANNEL_KEYS[chanIdx].keyLen = (uint8_t)kl;
                 } else if (!strcmp(key, "hash")) {
                     CHANNEL_KEYS[chanIdx].hash = (uint8_t)strtol(val, nullptr, 16);
+                } else if (!strcmp(key, "role")) {
+                    CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
                 // Meshtastic CLI format
@@ -195,6 +344,53 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "spreadFactor")) cfg.loraSf       = (uint8_t)atoi(val);
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);
+                else if (!strcmp(key, "region"))       strncpy(cfg.region, val, sizeof(cfg.region) - 1);
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "device")) {
+                if      (!strcmp(key, "role"))
+                    cfg.deviceRole = findName(val, kRoleNames, kNumRoles);
+                else if (!strcmp(key, "rebroadcastMode"))
+                    cfg.rebroadcastMode = findName(val, kRebroadNames, kNumRebroadModes);
+                else if (!strcmp(key, "nodeInfoBroadcastSecs"))
+                    cfg.nodeInfoIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
+                if (!strcmp(key, "positionBroadcastSecs"))
+                    cfg.posIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "gpsMode"))
+                    cfg.gpsEnabled = (!strcmp(val,"ENABLED"));
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {
+                if      (!strcmp(key, "enabled"))  cfg.btEnabled  = (!strcmp(val,"true"));
+                else if (!strcmp(key, "fixedPin")) cfg.btFixedPin = (uint32_t)atol(val);
+                else if (!strcmp(key, "mode"))     cfg.btMode = !strcmp(val,"FIXED_PIN") ? 1 : !strcmp(val,"NO_PIN") ? 2 : 0;
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
+                if      (!strcmp(key, "screenOnSecs"))    cfg.screenOnSecs    = (uint32_t)atol(val);
+                else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
+                else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
+                else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
+                if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {
+                if      (!strcmp(key, "isPowerSaving")) cfg.isPowerSaving = (!strcmp(val,"true"));
+                else if (!strcmp(key, "lsSecs"))        cfg.lsSecs        = (uint32_t)atol(val);
+                else if (!strcmp(key, "minWakeSecs"))   cfg.minWakeSecs   = (uint32_t)atol(val);
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mqtt")) {
+                if      (!strcmp(key, "address"))            strncpy(cfg.mqttServer,  val, sizeof(cfg.mqttServer)  - 1);
+                else if (!strcmp(key, "enabled"))            cfg.mqttEnabled    = (!strcmp(val,"true"));
+                else if (!strcmp(key, "encryptionEnabled"))  cfg.mqttEncryption = (!strcmp(val,"true"));
+                else if (!strcmp(key, "mapReportingEnabled"))cfg.mqttMapReport  = (!strcmp(val,"true"));
+                else if (!strcmp(key, "password"))           strncpy(cfg.mqttPass,    val, sizeof(cfg.mqttPass)    - 1);
+                else if (!strcmp(key, "root"))               strncpy(cfg.mqttRoot,    val, sizeof(cfg.mqttRoot)    - 1);
+                else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
+                if      (!strcmp(key, "deviceTelemetryEnabled"))        cfg.telDeviceEnabled   = (!strcmp(val,"true"));
+                else if (!strcmp(key, "deviceUpdateInterval"))          cfg.telDeviceIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "environmentMeasurementEnabled")) cfg.telEnvEnabled      = (!strcmp(val,"true"));
+                else if (!strcmp(key, "environmentUpdateInterval"))     cfg.telEnvIntervalS    = (uint32_t)atol(val);
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
+                if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
+            } else if (!strcmp(section, "channels") && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
+                if (!strcmp(key, "role"))
+                    CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;
             }
         }
     }

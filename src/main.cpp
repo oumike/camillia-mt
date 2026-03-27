@@ -8,6 +8,7 @@
 #include "channel_mgr.h"
 #include "config_io.h"
 #include "web_config.h"
+#include "gps.h"
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -38,8 +39,7 @@ static bool   cursorOn  = true;
 static uint32_t lastBlink      = 0;
 static uint32_t lastNodeInfo   = 0;
 static uint32_t lastPosition   = 0;
-#define NODEINFO_INTERVAL_MS  (15UL * 60UL * 1000UL)  // 15 minutes
-#define POSITION_INTERVAL_MS  (30UL * 60UL * 1000UL)  // 30 minutes
+// Broadcast intervals are runtime-configurable via gCfg.nodeInfoIntervalS / posIntervalS
 
 // ── Packet counter ────────────────────────────────────────────
 static uint32_t pktCount = 0;
@@ -411,6 +411,17 @@ static void drawSettings() {
 
     snprintf(buf, sizeof(buf), "Pwr:%d dBm  Hops:%d",
              gCfg.loraPower, gCfg.loraHopLimit);
+    pr(buf);
+
+    // GPS status
+    if (gCfg.gpsEnabled) {
+        if (gpsHasFix())
+            snprintf(buf, sizeof(buf), "GPS:  FIX  sats:%d", gpsSats());
+        else
+            snprintf(buf, sizeof(buf), "GPS:  searching...");
+    } else {
+        snprintf(buf, sizeof(buf), "GPS:  disabled");
+    }
     pr(buf);
 
     dirtyChat = false;
@@ -836,10 +847,53 @@ static void onWebCfgSaved() {
     p.putUChar("loraCr",     gCfg.loraCr);
     p.putUChar("loraPower",  gCfg.loraPower);
     p.putUChar("loraHopLim", gCfg.loraHopLimit);
+    p.putBool("gpsEnabled",  gCfg.gpsEnabled);
     p.putInt("latI",         gCfg.latI);
     p.putInt("lonI",         gCfg.lonI);
     p.putInt("alt",          gCfg.alt);
+    p.putUChar("devRole",     gCfg.deviceRole);
+    p.putUChar("rebroadcast", gCfg.rebroadcastMode);
+    p.putULong("nodeInfoIntv",gCfg.nodeInfoIntervalS);
+    p.putULong("posIntv",     gCfg.posIntervalS);
+    p.putString("region",     gCfg.region);
+    p.putString("tzDef",       gCfg.tzDef);
+    p.putULong("screenOnSecs", gCfg.screenOnSecs);
+    p.putUChar("dispUnits",    gCfg.displayUnits);
+    p.putBool("compassNorth",  gCfg.compassNorthTop);
+    p.putBool("flipScreen",    gCfg.flipScreen);
+    p.putBool("btEnabled",     gCfg.btEnabled);
+    p.putUChar("btMode",       gCfg.btMode);
+    p.putULong("btFixedPin",   gCfg.btFixedPin);
+    p.putString("ntpServer",   gCfg.ntpServer);
+    p.putBool("mqttEnabled",   gCfg.mqttEnabled);
+    p.putString("mqttServer",  gCfg.mqttServer);
+    p.putString("mqttUser",    gCfg.mqttUser);
+    p.putString("mqttPass",    gCfg.mqttPass);
+    p.putString("mqttRoot",    gCfg.mqttRoot);
+    p.putBool("mqttEncrypt",   gCfg.mqttEncryption);
+    p.putBool("mqttMapRpt",    gCfg.mqttMapReport);
+    p.putBool("isPwrSaving",   gCfg.isPowerSaving);
+    p.putULong("lsSecs",       gCfg.lsSecs);
+    p.putULong("minWakeSecs",  gCfg.minWakeSecs);
+    p.putBool("telDevEn",      gCfg.telDeviceEnabled);
+    p.putULong("telDevIntv",   gCfg.telDeviceIntervalS);
+    p.putBool("telEnvEn",      gCfg.telEnvEnabled);
+    p.putULong("telEnvIntv",   gCfg.telEnvIntervalS);
+    p.putBool("cannedEn",      gCfg.cannedEnabled);
+    p.putString("cannedMsgs",  gCfg.cannedMessages);
     p.end();
+    // Save channel config
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        char ns[12]; snprintf(ns, sizeof(ns), "mesh_ch%d", i);
+        Preferences cp; cp.begin(ns, false);
+        const char *nm = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+        cp.putString("name", nm);
+        cp.putBytes("key",   CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+        cp.putUChar("role",  CHANNEL_KEYS[i].role);
+        cp.end();
+    }
+    // Apply GPS enable/disable immediately
+    gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
     Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
     // Broadcast updated node identity
@@ -890,11 +944,60 @@ void setup() {
         u = prefs.getUChar("loraCr",     0); if (u) gCfg.loraCr       = u;
         u = prefs.getUChar("loraPower",  0); if (u) gCfg.loraPower    = u;
         u = prefs.getUChar("loraHopLim", 0); if (u) gCfg.loraHopLimit = u;
+        if (prefs.isKey("gpsEnabled")) gCfg.gpsEnabled = prefs.getBool("gpsEnabled");
         int32_t i;
         i = prefs.getInt("latI", 0); if (i) gCfg.latI = i;
         i = prefs.getInt("lonI", 0); if (i) gCfg.lonI = i;
         i = prefs.getInt("alt",  -1); if (i >= 0) gCfg.alt = (int32_t)i;
+        uint8_t ro = prefs.getUChar("devRole",     0xFF); if (ro != 0xFF) gCfg.deviceRole     = ro;
+        ro          = prefs.getUChar("rebroadcast", 0xFF); if (ro != 0xFF) gCfg.rebroadcastMode = ro;
+        uint32_t ul;
+        ul = prefs.getULong("nodeInfoIntv", 0); if (ul) gCfg.nodeInfoIntervalS = ul;
+        ul = prefs.getULong("posIntv",      0); if (ul) gCfg.posIntervalS      = ul;
+        String rgn = prefs.getString("region", ""); if (rgn.length()) strncpy(gCfg.region, rgn.c_str(), sizeof(gCfg.region)-1);
+        String tz = prefs.getString("tzDef", ""); if (tz.length()) strncpy(gCfg.tzDef, tz.c_str(), sizeof(gCfg.tzDef)-1);
+        ul = prefs.getULong("screenOnSecs", 0); if (ul) gCfg.screenOnSecs = ul;
+        ro = prefs.getUChar("dispUnits", 0xFF); if (ro != 0xFF) gCfg.displayUnits = ro;
+        if (prefs.isKey("compassNorth")) gCfg.compassNorthTop = prefs.getBool("compassNorth");
+        if (prefs.isKey("flipScreen"))   gCfg.flipScreen      = prefs.getBool("flipScreen");
+        if (prefs.isKey("btEnabled"))    gCfg.btEnabled       = prefs.getBool("btEnabled");
+        ro = prefs.getUChar("btMode", 0xFF); if (ro != 0xFF) gCfg.btMode = ro;
+        ul = prefs.getULong("btFixedPin", 0); if (ul) gCfg.btFixedPin = ul;
+        String ns2 = prefs.getString("ntpServer",  ""); if (ns2.length()) strncpy(gCfg.ntpServer,  ns2.c_str(), sizeof(gCfg.ntpServer)-1);
+        if (prefs.isKey("mqttEnabled")) gCfg.mqttEnabled   = prefs.getBool("mqttEnabled");
+        String ms = prefs.getString("mqttServer", ""); if (ms.length()) strncpy(gCfg.mqttServer, ms.c_str(), sizeof(gCfg.mqttServer)-1);
+        String mu = prefs.getString("mqttUser",   ""); if (mu.length()) strncpy(gCfg.mqttUser,   mu.c_str(), sizeof(gCfg.mqttUser)-1);
+        String mp = prefs.getString("mqttPass",   ""); if (mp.length()) strncpy(gCfg.mqttPass,   mp.c_str(), sizeof(gCfg.mqttPass)-1);
+        String mr = prefs.getString("mqttRoot",   ""); if (mr.length()) strncpy(gCfg.mqttRoot,   mr.c_str(), sizeof(gCfg.mqttRoot)-1);
+        if (prefs.isKey("mqttEncrypt")) gCfg.mqttEncryption = prefs.getBool("mqttEncrypt");
+        if (prefs.isKey("mqttMapRpt"))  gCfg.mqttMapReport  = prefs.getBool("mqttMapRpt");
+        if (prefs.isKey("isPwrSaving")) gCfg.isPowerSaving  = prefs.getBool("isPwrSaving");
+        ul = prefs.getULong("lsSecs",       0); if (ul) gCfg.lsSecs       = ul;
+        ul = prefs.getULong("minWakeSecs",  0); if (ul) gCfg.minWakeSecs  = ul;
+        if (prefs.isKey("telDevEn"))  gCfg.telDeviceEnabled = prefs.getBool("telDevEn");
+        ul = prefs.getULong("telDevIntv",   0); if (ul) gCfg.telDeviceIntervalS = ul;
+        if (prefs.isKey("telEnvEn"))  gCfg.telEnvEnabled    = prefs.getBool("telEnvEn");
+        ul = prefs.getULong("telEnvIntv",   0); if (ul) gCfg.telEnvIntervalS    = ul;
+        if (prefs.isKey("cannedEn"))  gCfg.cannedEnabled    = prefs.getBool("cannedEn");
+        String cm = prefs.getString("cannedMsgs", ""); if (cm.length()) strncpy(gCfg.cannedMessages, cm.c_str(), sizeof(gCfg.cannedMessages)-1);
         prefs.end();
+    }
+    // Load channel config from NVS
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        char ns[12]; snprintf(ns, sizeof(ns), "mesh_ch%d", i);
+        Preferences cp; cp.begin(ns, true);
+        String nm = cp.getString("name", "");
+        if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
+            strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+            CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+            CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+        }
+        uint8_t kbuf[32];
+        size_t klen = cp.getBytes("key", kbuf, 32);
+        if (klen > 0) { memcpy(CHANNEL_KEYS[i].key, kbuf, klen); CHANNEL_KEYS[i].keyLen = (uint8_t)klen; }
+        uint8_t role = cp.getUChar("role", 0xFF);
+        if (role != 0xFF) CHANNEL_KEYS[i].role = role;
+        cp.end();
     }
     Serial.printf("[camillia-mt] Name: %s (%s)\n", gCfg.nodeLong, gCfg.nodeShort);
 
@@ -949,13 +1052,25 @@ void setup() {
     Channels.addMessage(CHAN_ANN, "", niOk ? "* Announced (NODEINFO)" : "! NODEINFO failed",
                         niOk ? TFT_DARKGREY : TFT_RED);
 
-    bool posOk = Channels.sendPosition(myNodeId);
+    bool posOk = Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
     Serial.printf("[camillia-mt] POSITION broadcast %s\n", posOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", posOk ? "* Position broadcast" : "! POSITION failed",
                         posOk ? TFT_DARKGREY : TFT_RED);
 
     // Sync activeView with the channel manager's initial active index
     activeView = Channels.activeIdx();
+
+    // Start GPS if enabled
+    if (gCfg.gpsEnabled) {
+        gpsBegin();
+        Channels.addMessage(CHAN_ANN, "", "* GPS started", TFT_DARKGREY);
+    }
+
+    // Auto-start web config (TODO: gate on a setting or button before production)
+    if (webCfgBegin(&gCfg, onWebCfgSaved)) {
+        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+        Channels.addMessage(CHAN_ANN, "", settingsStatus, TFT_DARKGREY);
+    }
 
     // Initial full draw
     drawDivider();
@@ -970,6 +1085,9 @@ void loop() {
 
     // 1b. Service web config server if running
     webCfgLoop();
+
+    // 1c. Poll GPS
+    gpsLoop();
 
     // 2. Poll keyboard
     char k = kb.read();
@@ -987,15 +1105,18 @@ void loop() {
     }
 
     // 5. Periodic NODEINFO re-announcement
-    if (now - lastNodeInfo > NODEINFO_INTERVAL_MS) {
+    if (now - lastNodeInfo > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL) {
         lastNodeInfo = now;
         Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
     }
 
     // 6. Periodic position broadcast
-    if (now - lastPosition > POSITION_INTERVAL_MS) {
+    if (now - lastPosition > (uint32_t)gCfg.posIntervalS * 1000UL) {
         lastPosition = now;
-        Channels.sendPosition(myNodeId);
+        // Prefer live GPS fix; fall back to manual/last-known config position
+        int32_t posLat = gCfg.latI, posLon = gCfg.lonI, posAlt = gCfg.alt;
+        if (gpsHasFix()) { posLat = gpsLatI(); posLon = gpsLonI(); posAlt = gpsAltM(); }
+        Channels.sendPosition(myNodeId, posLat, posLon, posAlt);
     }
 
     // 6b. Battery refresh every 5 s

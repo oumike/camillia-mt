@@ -1,25 +1,48 @@
 #include "mesh_proto.h"
 #include "mbedtls/aes.h"
 
-// ── Channel key table ─────────────────────────────────────────
-// Key expansion: 1-byte PSK N → DEFAULT_KEY with last byte = N.
-// DEFAULT_KEY has last byte 0x01; PSK 0x01 = DEFAULT_KEY unchanged.
-#define DK 0xd4,0xf1,0xbb,0x3a,0x20,0x29,0x07,0x59,0xf0,0xbc,0xff,0xab,0xcf,0x4e,0x69
+// ── PSK expansion ─────────────────────────────────────────────
+// Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
+// PSK 0x01 → DEFAULT_KEY unchanged (base64 "AQ==").
+static const uint8_t kDkBase[15] = {
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69
+};
 
+void expandPsk(uint8_t psk, uint8_t out[16]) {
+    memcpy(out, kDkBase, 15);
+    out[15] = psk;
+}
+
+uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen) {
+    uint8_t exp[16];
+    const uint8_t *k = key;
+    uint8_t kl = keyLen;
+    if (keyLen == 1) { expandPsk(key[0], exp); k = exp; kl = 16; }
+    uint8_t h = 0;
+    for (const char *p = name; *p; p++) h ^= (uint8_t)*p;
+    for (int i = 0; i < kl; i++) h ^= k[i];
+    return h;
+}
+
+// ── Channel key table ─────────────────────────────────────────
+// 1-byte PSK keys are stored as a single byte and expanded at runtime via expandPsk().
+// role: 0=PRIMARY, 1=SECONDARY, 2=DISABLED
 ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
-    { "LongFast",  { DK, 0x01 }, 16, 0x08 },
-    { "Michigan",  { DK, 0x30 }, 16, 0x1D },
-    { "DevTest", { DK, 0x01 }, 16, 0x63 },  // DEFAULT_KEY; real hash from wire (byte 13 of RX hdr)
+    //           name          PSK       len  hash  name_buf  role
+    { "LongFast",  { 0x01 },   1, 0x08, {}, 0 },  // PRIMARY  (AQ==)
+    { "Michigan",  { 0x30 },   1, 0x1D, {}, 1 },  // SECONDARY (MA==)
+    { "DevTest",   { 0x01 },   1, 0x63, {}, 1 },  // SECONDARY (AQ==)
     { "Sumat",     {
         0x54,0xc2,0x22,0xfa,0x29,0x9a,0xe1,0x46,
         0x3b,0x76,0x6c,0x28,0xa9,0xe3,0x32,0xb5,
         0x2f,0xaf,0x1c,0x59,0xf9,0x53,0x75,0xad,
-        0x51,0xd0,0x38,0x4c,0x7b,0xea,0x16,0xdc }, 32, 0xD9 },
-    { "WMI",       { DK, 0x30 }, 16, 0x60 },
-    { "YOOPER",    { DK, 0x30 }, 16, 0x2D },
-    { "Washtenaw", { DK, 0x30 }, 16, 0x77 },
-    { "Muskegon",  { DK, 0x30 }, 16, 0x10 },
-    { "ANN",       {0},           0, 0xFF },  // virtual announcements channel
+        0x51,0xd0,0x38,0x4c,0x7b,0xea,0x16,0xdc }, 32, 0xD9, {}, 1 },  // SECONDARY (AES-256)
+    { "WMI",       { 0x30 },   1, 0x60, {}, 1 },  // SECONDARY (MA==)
+    { "YOOPER",    { 0x30 },   1, 0x2D, {}, 1 },  // SECONDARY (MA==)
+    { "Washtenaw", { 0x30 },   1, 0x77, {}, 1 },  // SECONDARY (MA==)
+    { "Muskegon",  { 0x30 },   1, 0x10, {}, 1 },  // SECONDARY (MA==)
+    { "ANN",       { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, local-only)
 };
 
 // ── Protobuf helpers ──────────────────────────────────────────
@@ -177,11 +200,14 @@ static bool looksLikeData(const uint8_t *plain, size_t len) {
 int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
                   uint8_t *plain, size_t len) {
     auto tryDecrypt = [&](int i) -> bool {
-        if (CHANNEL_KEYS[i].keyLen == 0) {
+        uint8_t exp[16];
+        const uint8_t *keyPtr = CHANNEL_KEYS[i].key;
+        uint8_t keyLen = CHANNEL_KEYS[i].keyLen;
+        if (keyLen == 1) { expandPsk(CHANNEL_KEYS[i].key[0], exp); keyPtr = exp; keyLen = 16; }
+        if (keyLen == 0) {
             memcpy(plain, cipher, len);
         } else {
-            if (!aesCtr(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen,
-                        hdr.id, hdr.from, cipher, plain, len)) return false;
+            if (!aesCtr(keyPtr, keyLen, hdr.id, hdr.from, cipher, plain, len)) return false;
         }
         return looksLikeData(plain, len);
     };
@@ -203,6 +229,8 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
                     const uint8_t *key, uint8_t keyLen,
                     const uint8_t *plain, uint8_t *cipher, size_t len) {
     if (keyLen == 0) { memcpy(cipher, plain, len); return true; }
+    uint8_t exp[16];
+    if (keyLen == 1) { expandPsk(key[0], exp); key = exp; keyLen = 16; }
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 
