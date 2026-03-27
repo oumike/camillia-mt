@@ -9,6 +9,7 @@
 #include "config_io.h"
 #include "web_config.h"
 #include "gps.h"
+#include <math.h>
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -20,8 +21,10 @@ static uint32_t myNodeId = 0;
 static RhinoConfig gCfg;
 
 // ── View state ────────────────────────────────────────────────
-#define VIEW_SETTINGS  MAX_CHANNELS   // index 8 = settings page
-static int  activeView   = 0;         // 0..7 channel, 8 settings
+#define VIEW_GPS      MAX_CHANNELS          // index 9 = GPS/compass page
+#define VIEW_SETTINGS (MAX_CHANNELS + 1)    // index 10 = settings page
+#define TOTAL_VIEWS   (MAX_CHANNELS + 2)    // 11 total
+static int  activeView   = 0;              // 0..8 channel, 9 GPS, 10 settings
 static int  settingsSel  = 0;         // highlighted settings row
 
 // ── Dirty flags ───────────────────────────────────────────────
@@ -74,13 +77,13 @@ static uint32_t nodeDetailId    = 0;
 
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
-    bool wasSettings = (activeView == VIEW_SETTINGS);
+    bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS);
     activeView = v;
     nodeListFocused = false;
     nodeDetailOpen  = false;
     if (v < MAX_CHANNELS) {
         Channels.setActive(v);
-        if (wasSettings) dirtyDivider = true;   // restore divider after leaving settings
+        if (wasFullWidth) dirtyDivider = true;   // restore divider after leaving GPS/settings
     }
     dirtyTabs = dirtyChat = dirtyNodes = dirtyStatus = dirtyInput = true;
 }
@@ -240,31 +243,37 @@ static void drawStatus() {
 static void drawTabs() {
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, TFT_BLACK);
     lcd.setTextSize(1);
-    // MAX_CHANNELS channel tabs (8 mesh + 1 ANN) + 1 CFG = 10 total
-    const int TOTAL_TABS = MAX_CHANNELS + 1;
-    const int TAB_W      = LCD_W / TOTAL_TABS;  // 32px each
-    for (int i = 0; i <= MAX_CHANNELS; i++) {
+    // 9 channel tabs + GPS tab + CFG tab = 11 total → 29px each
+    const int TAB_W = LCD_W / TOTAL_VIEWS;
+    for (int i = 0; i < TOTAL_VIEWS; i++) {
         int x = i * TAB_W;
         bool isActive   = (i == activeView);
         bool isSettings = (i == VIEW_SETTINGS);
+        bool isGps      = (i == VIEW_GPS);
         bool isAnn      = (i == CHAN_ANN);
         uint16_t col;
         if (isSettings) {
             col = isActive ? TFT_WHITE : COL_TAB_IDLE;
+        } else if (isGps) {
+            if      (isActive)       col = TFT_WHITE;
+            else if (gpsHasFix())    col = TFT_GREEN;
+            else if (gpsIsEnabled()) col = TFT_YELLOW;
+            else                     col = COL_TAB_IDLE;
         } else if (isAnn) {
             Channel &ch = Channels.get(i);
             col = ch.unread ? TFT_CYAN : isActive ? TFT_CYAN : COL_TAB_IDLE;
         } else {
             Channel &ch = Channels.get(i);
-            col = ch.unread      ? COL_TAB_UNREAD :
-                  isActive       ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
+            col = ch.unread  ? COL_TAB_UNREAD :
+                  isActive   ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
         }
         if (isActive) lcd.fillRect(x, STATUS_H, TAB_W - 1, TAB_H, 0x0013);
         lcd.setTextColor(col, isActive ? 0x0013 : TFT_BLACK);
         char label[8];
-        if (isSettings)     strncpy(label, "CFG", sizeof(label));
-        else if (isAnn)     strncpy(label, "ANN", sizeof(label));
-        else                snprintf(label, sizeof(label), "%.4s", Channels.get(i).name);
+        if      (isSettings) strncpy(label, "CFG", sizeof(label));
+        else if (isGps)      strncpy(label, "GPS", sizeof(label));
+        else if (isAnn)      strncpy(label, "ANN", sizeof(label));
+        else                 snprintf(label, sizeof(label), "%.4s", Channels.get(i).name);
         lcd.setCursor(x + 1, STATUS_H + 1);
         lcd.print(label);
     }
@@ -346,6 +355,132 @@ static void drawNodes() {
         lcd.print(r);
     }
     dirtyNodes = false;
+}
+
+// ── Draw: GPS / compass page ──────────────────────────────────
+static void drawCompassRose(int cx, int cy, int cr, float heading) {
+    // Outer ring
+    lcd.drawCircle(cx, cy, cr,     COL_DIVIDER);
+    lcd.drawCircle(cx, cy, cr - 1, COL_DIVIDER);
+
+    // Tick marks: 8 × 45° — cardinal (N/S/E/W) are longer
+    for (int a = 0; a < 360; a += 45) {
+        float rad    = a * (float)M_PI / 180.0f;
+        int   tlen   = (a % 90 == 0) ? 8 : 4;
+        int   x1     = cx + (int)((cr - 1)     * sinf(rad));
+        int   y1     = cy - (int)((cr - 1)     * cosf(rad));
+        int   x2     = cx + (int)((cr - tlen)  * sinf(rad));
+        int   y2     = cy - (int)((cr - tlen)  * cosf(rad));
+        lcd.drawLine(x1, y1, x2, y2, COL_TAB_IDLE);
+    }
+
+    // Cardinal labels
+    lcd.setTextSize(1);
+    lcd.setTextColor(TFT_RED, TFT_BLACK);
+    lcd.setCursor(cx - 3, cy - cr + 1);  lcd.print("N");
+    lcd.setTextColor(COL_TAB_IDLE, TFT_BLACK);
+    lcd.setCursor(cx - 3, cy + cr - 8);  lcd.print("S");
+    lcd.setCursor(cx + cr - 7, cy - 4);  lcd.print("E");
+    lcd.setCursor(cx - cr + 1, cy - 4);  lcd.print("W");
+
+    // Needle: north arm (red) + south tail (grey)
+    float headRad = heading * (float)M_PI / 180.0f;
+    int   nLen    = cr - 12;
+    int   sLen    = cr - 22;
+    int   nx = cx + (int)(nLen * sinf(headRad));
+    int   ny = cy - (int)(nLen * cosf(headRad));
+    int   sx = cx - (int)(sLen * sinf(headRad));
+    int   sy = cy + (int)(sLen * cosf(headRad));
+    // Draw each arm twice (one pixel thick is fine on small display)
+    lcd.drawLine(cx, cy, nx, ny, TFT_RED);
+    lcd.drawLine(cx, cy, sx, sy, COL_TAB_IDLE);
+
+    // Centre dot
+    lcd.fillCircle(cx, cy, 3, TFT_WHITE);
+}
+
+static void drawGps() {
+    lcd.fillRect(0, CHAT_Y, LCD_W, CHAT_H, TFT_BLACK);
+    lcd.setTextSize(1);
+
+    const bool    fix     = gpsHasFix();
+    const uint8_t sats    = gpsSats();
+    const float   course  = gpsCourse();
+    const float   speed   = gpsSpeedKmh();
+    const int32_t latI    = fix ? gpsLatI()  : gCfg.latI;
+    const int32_t lonI    = fix ? gpsLonI()  : gCfg.lonI;
+    const int32_t altM    = fix ? gpsAltM()  : gCfg.alt;
+
+    char buf[40];
+    const int TX  = 3;            // left margin
+    const int DIM = 0x7BEF;      // mid-grey
+
+    // ── Left panel: text rows ─────────────────────────────────
+    int row = 0;
+    auto pr = [&](uint16_t col, const char *s) {
+        lcd.setTextColor(col, TFT_BLACK);
+        lcd.setCursor(TX, CHAT_Y + row++ * LINE_H);
+        lcd.print(s);
+    };
+
+    // Status
+    if (!gCfg.gpsEnabled) {
+        pr(COL_TAB_IDLE, "GPS: DISABLED");
+    } else if (fix) {
+        snprintf(buf, sizeof(buf), "GPS: FIX  sats:%d", sats);
+        pr(TFT_GREEN, buf);
+    } else {
+        snprintf(buf, sizeof(buf), "GPS: searching  sats:%d", sats);
+        pr(TFT_YELLOW, buf);
+    }
+    row++;  // blank line
+
+    // Latitude
+    float lat = latI * 1e-7f;
+    snprintf(buf, sizeof(buf), "Lat  %10.6f %c",
+             lat >= 0 ? lat : -lat, lat >= 0 ? 'N' : 'S');
+    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+
+    // Longitude
+    float lon = lonI * 1e-7f;
+    snprintf(buf, sizeof(buf), "Lon  %10.6f %c",
+             lon >= 0 ? lon : -lon, lon >= 0 ? 'E' : 'W');
+    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+
+    // Altitude
+    snprintf(buf, sizeof(buf), "Alt  %d m", (int)altM);
+    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+
+    row++;  // blank line
+
+    // Course / speed
+    snprintf(buf, sizeof(buf), "Hdg  %.1f\xb0", course);
+    pr(fix ? TFT_CYAN : (uint16_t)DIM, buf);
+
+    snprintf(buf, sizeof(buf), "Spd  %.1f km/h", speed);
+    pr(fix ? TFT_CYAN : (uint16_t)DIM, buf);
+
+    row++;  // blank line
+
+    // Fallback notice when no fix
+    if (!fix && gCfg.gpsEnabled) {
+        pr(COL_TAB_IDLE, "(showing stored pos)");
+    }
+
+    // ── Right panel: compass ──────────────────────────────────
+    const int CX = 240;
+    const int CY = CHAT_Y + CHAT_H / 2 - 4;   // vertically centred
+    const int CR = 68;
+    drawCompassRose(CX, CY, CR, fix ? course : 0.0f);
+
+    // Heading value below compass
+    snprintf(buf, sizeof(buf), "%3.0f\xb0", fix ? course : 0.0f);
+    int tw = strlen(buf) * CHAR_W;
+    lcd.setTextColor(fix ? TFT_WHITE : (uint16_t)COL_TAB_IDLE, TFT_BLACK);
+    lcd.setCursor(CX - tw / 2, CY + CR + 4);
+    lcd.print(buf);
+
+    dirtyChat = false;
 }
 
 // ── Draw: settings page ───────────────────────────────────────
@@ -510,8 +645,9 @@ static void drawNodeDetail(const NodeEntry *n) {
 
 // ── Draw: input bar ───────────────────────────────────────────
 static void drawInput() {
-    if (activeView == CHAN_ANN) {
-        // Read-only channel — blank the input area
+    if (activeView == CHAN_ANN || activeView == CHAN_DM
+            || activeView == VIEW_GPS || activeView == VIEW_SETTINGS) {
+        // Non-text view — blank the input area
         lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, TFT_BLACK);
         dirtyInput = false;
         return;
@@ -712,7 +848,7 @@ static void handleKey(char k) {
                 }
             }
             dirtyChat = true;
-        } else if (inputLen > 0 && activeView != CHAN_ANN) {
+        } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM && activeView != VIEW_GPS) {
             inputBuf[inputLen] = '\0';
             if (!Channels.sendText(myNodeId, inputBuf)) {
                 Channels.addMessage(Channels.activeIdx(), "",
@@ -724,7 +860,7 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_BACKSPACE) {
-        if (inputLen > 0 && activeView != CHAN_ANN) {
+        if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM) {
             inputBuf[--inputLen] = '\0'; dirtyInput = true;
         }
 
@@ -771,12 +907,12 @@ static void handleKey(char k) {
             }
             dirtyChat = true;
         } else if (activeView != VIEW_SETTINGS || settingsSel == 0) {
-            goToView((activeView + 1) % (MAX_CHANNELS + 1));
+            goToView((activeView + 1) % TOTAL_VIEWS);
         }
 
     } else if (k == KEY_PREV_CHAN) {
         if (activeView != VIEW_SETTINGS || settingsSel == 0)
-            goToView((activeView + MAX_CHANNELS) % (MAX_CHANNELS + 1));
+            goToView((activeView + TOTAL_VIEWS - 1) % TOTAL_VIEWS);
 
     } else if (k == KEY_SCROLL_UP) {
         if (nodeDetailOpen) {
@@ -827,7 +963,8 @@ static void handleKey(char k) {
 
     } else if (k >= 0x20 && k < 0x7F) {
         if (inputLen < MAX_INPUT_LEN && activeView != CHAN_ANN
-                && activeView != VIEW_SETTINGS) {
+                && activeView != CHAN_DM
+                && activeView != VIEW_SETTINGS && activeView != VIEW_GPS) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
             dirtyInput = true;
@@ -1023,6 +1160,13 @@ void setup() {
     // Data modules
     Nodes.init();
     Channels.init();
+    Channels.setActive(0);  // start on LongFast (channel 0)
+
+    // Fake DM messages so the panel renders — remove when DM is wired up
+    Channels.addMessage(CHAN_DM, "09:12 [MICH] ", "Hey are you out there?", TFT_GREEN);
+    Channels.addMessage(CHAN_DM, "09:14 [RDMT] ", "Yeah, loud and clear", TFT_WHITE);
+    Channels.addMessage(CHAN_DM, "09:15 [MICH] ", "What's your battery at?", TFT_GREEN);
+    Channels.addMessage(CHAN_DM, "09:16 [RDMT] ", "72%. Good signal here too", TFT_WHITE);
 
     // Register ourselves in the node DB immediately
     {
@@ -1119,7 +1263,16 @@ void loop() {
         Channels.sendPosition(myNodeId, posLat, posLon, posAlt);
     }
 
-    // 6b. Battery refresh every 5 s
+    // 6b. Auto-refresh GPS view every second
+    if (activeView == VIEW_GPS) {
+        static uint32_t lastGpsRefreshMs = 0;
+        if (now - lastGpsRefreshMs >= 1000) {
+            lastGpsRefreshMs = now;
+            dirtyChat = dirtyTabs = true;   // update tab colour (fix state) too
+        }
+    }
+
+    // 6c. Battery refresh every 5 s
     static uint32_t lastBattMs = 0;
     if (now - lastBattMs >= 5000) {
         lastBattMs   = now;
@@ -1142,8 +1295,9 @@ void loop() {
     } else {
         if (dirtyDivider) { drawDivider(); dirtyDivider = false; }
         if (dirtyChat) {
-            if (activeView == VIEW_SETTINGS) drawSettings();
-            else                             drawChat();
+            if      (activeView == VIEW_SETTINGS) drawSettings();
+            else if (activeView == VIEW_GPS)      drawGps();
+            else                                  drawChat();
         }
         if (activeView < MAX_CHANNELS) {
             if (dirtyNodes) drawNodes();

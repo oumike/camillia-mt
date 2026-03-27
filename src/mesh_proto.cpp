@@ -42,7 +42,8 @@ ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
     { "YOOPER",    { 0x30 },   1, 0x2D, {}, 1 },  // SECONDARY (MA==)
     { "Washtenaw", { 0x30 },   1, 0x77, {}, 1 },  // SECONDARY (MA==)
     { "Muskegon",  { 0x30 },   1, 0x10, {}, 1 },  // SECONDARY (MA==)
-    { "ANN",       { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, local-only)
+    { "DM",        { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, direct messages)
+    { "ANN",       { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, announcements)
 };
 
 // ── Protobuf helpers ──────────────────────────────────────────

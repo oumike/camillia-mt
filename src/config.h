@@ -128,9 +128,10 @@
 #define NODE_CHARS      (NODE_W / CHAR_W)   // 14 chars in node pane
 
 // ── Message storage ───────────────────────────────────────────
-#define MESH_CHANNELS     8   // number of actual LoRa channels
-#define CHAN_ANN          8   // Announcements tab (virtual, local-only)
-#define MAX_CHANNELS      9   // MESH_CHANNELS + 1 (ANN)
+#define MESH_CHANNELS     8   // number of actual LoRa channels (0-7)
+#define CHAN_DM           8   // Direct Messages tab (virtual, local-only)
+#define CHAN_ANN          9   // Announcements tab   (virtual, local-only)
+#define MAX_CHANNELS     10   // MESH_CHANNELS + DM + ANN
 #define MAX_MSG_LINES   400   // display lines per channel (in PSRAM)
 #define MAX_INPUT_LEN   200
 #define MAX_NODES        64
