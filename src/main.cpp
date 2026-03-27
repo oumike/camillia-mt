@@ -29,8 +29,10 @@ static int  activeView   = 0;              // 0..8 channel, 9 GPS, 10 settings
 static int  settingsSel  = 0;         // highlighted settings row
 
 // ── DM sub-state ──────────────────────────────────────────────
-static bool     dmConvOpen   = false;  // false = contact list, true = conv view
-static int      dmListSel    = 0;      // selected contact in list
+static bool     dmConvOpen   = false;  // true = showing conversation
+static bool     dmPickerOpen = false;  // true = showing node picker ("New DM")
+static int      dmListSel    = 0;      // 0 = "New DM" button, 1+ = conversation index
+static int      dmPickerSel  = 0;      // selected row in node picker
 static uint32_t dmConvNodeId = 0;      // node ID of open conversation
 
 // ── Dirty flags ───────────────────────────────────────────────
@@ -89,7 +91,9 @@ static void goToView(int v) {
     nodeListFocused = false;
     nodeDetailOpen  = false;
     dmConvOpen      = false;   // reset DM sub-state on any navigation
+    dmPickerOpen    = false;
     dmListSel       = 0;
+    dmPickerSel     = 0;
     if (v < MAX_CHANNELS) {
         Channels.setActive(v);
         if (wasFullWidth) dirtyDivider = true;   // restore divider after leaving full-width views
@@ -270,8 +274,10 @@ static void drawTabs() {
             else if (gpsIsEnabled()) col = TFT_YELLOW;
             else                     col = COL_TAB_IDLE;
         } else if (isDm) {
-            col = isActive ? TFT_WHITE
-                           : (DMs.count() > 0 ? (uint16_t)0xF81F /*magenta*/ : COL_TAB_IDLE);
+            if      (isActive)         col = TFT_WHITE;
+            else if (DMs.hasUnread())  col = TFT_YELLOW;          // unread DM
+            else if (DMs.count() > 0)  col = (uint16_t)0xF81F;   // has convs (magenta)
+            else                       col = COL_TAB_IDLE;
         } else if (isAnn) {
             Channel &ch = Channels.get(i);
             col = ch.unread ? TFT_CYAN : isActive ? TFT_CYAN : COL_TAB_IDLE;
@@ -497,39 +503,131 @@ static void drawGps() {
     dirtyChat = false;
 }
 
+// ── DM helper: open a conversation with a node ────────────────
+static void openDmWith(NodeEntry *n) {
+    if (!n) return;
+    const char *sn = n->shortName[0] ? n->shortName : "????";
+    DMs.findOrCreate(n->nodeId, sn);
+    DMs.markRead(n->nodeId);
+    dmConvNodeId = n->nodeId;
+    dmConvOpen   = true;
+    dmPickerOpen = false;
+    dirtyChat = dirtyInput = true;
+}
+
 // ── Draw: DM contact list ─────────────────────────────────────
 static void drawDmList() {
     lcd.fillRect(0, CHAT_Y, LCD_W, CHAT_H, TFT_BLACK);
     lcd.setTextSize(1);
-    dirtyNodes = false;  // suppress node pane when DM is active
+    dirtyNodes = false;
 
-    if (DMs.count() == 0) {
-        lcd.setTextColor(COL_TAB_IDLE, TFT_BLACK);
-        lcd.setCursor(4, CHAT_Y + 4 * LINE_H);
-        lcd.print("No direct messages");
-        dirtyChat = false;
-        return;
+    // Row 0: "New DM" button (always present)
+    {
+        bool     sel = (dmListSel == 0);
+        uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
+        uint16_t col = sel ? TFT_WHITE : TFT_CYAN;
+        lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, bg);
+        lcd.setTextColor(col, bg);
+        lcd.setCursor(0, CHAT_Y);
+        lcd.print("  [ + New DM ]");
     }
 
-    const int rows = min(DMs.count(), VISIBLE_LINES);
+    // Rows 1..: conversations (dmListSel 1..count)
+    const int rows = min(DMs.count(), VISIBLE_LINES - 1);
     for (int i = 0; i < rows; i++) {
         DmConv *c = DMs.getByRank(i);
         if (!c) break;
 
-        int      y   = CHAT_Y + i * LINE_H;
-        bool     sel = (i == dmListSel);
+        int      y   = CHAT_Y + (i + 1) * LINE_H;
+        bool     sel = (dmListSel == i + 1);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
-        uint16_t col = sel ? TFT_WHITE : (uint16_t)0xF81F;   // magenta for contacts
+        uint16_t col = sel ? TFT_WHITE
+                           : c->unread ? TFT_YELLOW : (uint16_t)0xF81F;
 
         lcd.fillRect(0, y, LCD_W, LINE_H, bg);
 
-        // "[MICH]  last message text..."
         char row[DM_LINE_LEN + 1];
-        snprintf(row, sizeof(row), "[%-4s] %.44s", c->shortName, c->lastText);
+        snprintf(row, sizeof(row), " [%-4s] %.43s", c->shortName, c->lastText);
 
         lcd.setTextColor(col, bg);
         lcd.setCursor(0, y);
         lcd.print(row);
+    }
+    dirtyChat = false;
+}
+
+// ── Picker helpers: node list excluding self ──────────────────
+// Returns the nth node (0-based) excluding myNodeId.
+static NodeEntry *pickerNode(int sel) {
+    int vis = 0;
+    for (int i = 0; i < Nodes.count(); i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (!n || n->nodeId == myNodeId) continue;
+        if (vis == sel) return n;
+        vis++;
+    }
+    return nullptr;
+}
+
+// Returns the number of nodes excluding myNodeId.
+static int pickerNodeCount() {
+    int count = 0;
+    for (int i = 0; i < Nodes.count(); i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (n && n->nodeId != myNodeId) count++;
+    }
+    return count;
+}
+
+// ── Draw: DM node picker ──────────────────────────────────────
+static void drawDmPicker() {
+    lcd.fillRect(0, CHAT_Y, LCD_W, CHAT_H, TFT_BLACK);
+    lcd.setTextSize(1);
+    dirtyNodes = false;
+
+    // Header bar
+    lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, 0x001F);
+    lcd.setTextColor(TFT_WHITE, 0x001F);
+    lcd.setCursor(0, CHAT_Y);
+    lcd.print("  Select a node  (ESC to cancel)");
+
+    int filteredCount = pickerNodeCount();
+    if (filteredCount == 0) {
+        lcd.setTextColor(COL_TAB_IDLE, TFT_BLACK);
+        lcd.setCursor(4, CHAT_Y + 3 * LINE_H);
+        lcd.print("No other nodes known yet");
+        dirtyChat = false;
+        return;
+    }
+
+    const int MSG_ROWS   = VISIBLE_LINES - 1;
+    int firstVisible = max(0, dmPickerSel - (MSG_ROWS - 1));
+
+    for (int row = 0; row < MSG_ROWS; row++) {
+        int vi = firstVisible + row;
+        int      y  = CHAT_Y + (row + 1) * LINE_H;
+        if (vi >= filteredCount) {
+            lcd.fillRect(0, y, LCD_W, LINE_H, TFT_BLACK);
+            continue;
+        }
+        NodeEntry *n = pickerNode(vi);
+        if (!n) break;
+
+        bool     sel = (vi == dmPickerSel);
+        uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
+        uint16_t col = sel ? TFT_WHITE : TFT_GREEN;
+
+        lcd.fillRect(0, y, LCD_W, LINE_H, bg);
+
+        char entry[DM_LINE_LEN + 1];
+        snprintf(entry, sizeof(entry), " [%-4s] %-28s !%08x",
+                 n->shortName[0] ? n->shortName : "????",
+                 n->longName[0]  ? n->longName  : "(unknown)",
+                 (unsigned)n->nodeId);
+
+        lcd.setTextColor(col, bg);
+        lcd.setCursor(0, y);
+        lcd.print(entry);
     }
     dirtyChat = false;
 }
@@ -732,8 +830,12 @@ static void drawNodeDetail(const NodeEntry *n) {
 
 // ── Draw: input bar ───────────────────────────────────────────
 static void drawInput() {
-    if (activeView == CHAN_ANN || activeView == CHAN_DM
-            || activeView == VIEW_GPS || activeView == VIEW_SETTINGS) {
+    // Show input bar only in channel views and DM conv view (not picker, not list)
+    bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
+    if ((activeView == CHAN_ANN)
+            || (activeView == CHAN_DM && !dmNeedsInput)
+            || (activeView == VIEW_GPS)
+            || (activeView == VIEW_SETTINGS)) {
         // Non-text view — blank the input area
         lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, TFT_BLACK);
         dirtyInput = false;
@@ -805,8 +907,20 @@ static void handleRx(const MeshPacket &pkt) {
 
         snprintf(prefix, sizeof(prefix), "%02lu:%02lu [%s] ",
                  (upSec / 3600) % 24, (upSec / 60) % 60, sender);
-        Channels.addMessage(pkt.chanIdx, prefix, tm.text, TFT_GREEN);
-        dirtyChat = dirtyTabs = true;
+
+        if (pkt.hdr.to == myNodeId) {
+            // Unicast DM addressed to us
+            bool viewing = (activeView == CHAN_DM && dmConvOpen
+                            && dmConvNodeId == pkt.hdr.from);
+            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, TFT_GREEN,
+                           /*markUnread=*/!viewing);
+            if (viewing) dirtyChat = true;
+            dirtyTabs = true;
+        } else {
+            // Broadcast / relay message — goes to channel
+            Channels.addMessage(pkt.chanIdx, prefix, tm.text, TFT_GREEN);
+            dirtyChat = dirtyTabs = true;
+        }
         break;
     }
 
@@ -876,11 +990,9 @@ static void handleKey(char k) {
     // ALT+E — toggle node list focus / close detail  (ESC in DM: close conv)
     if (k == KEY_NODE_FOCUS || k == KEY_ESC) {
         if (activeView == CHAN_DM) {
-            if (dmConvOpen) {
-                dmConvOpen = false;
-                dirtyChat = true;
-            }
-            // ESC from list view does nothing; left/right exits the tab
+            if (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; }
+            else if (dmConvOpen) { dmConvOpen = false; dirtyChat = dirtyInput = true; }
+            // ESC from list does nothing; left/right exits the tab
             return;
         }
         if (nodeDetailOpen) {
@@ -899,11 +1011,35 @@ static void handleKey(char k) {
 
     if (k == KEY_ENTER) {
         if (activeView == CHAN_DM) {
-            if (!dmConvOpen) {
-                DmConv *c = DMs.getByRank(dmListSel);
-                if (c) { dmConvNodeId = c->nodeId; dmConvOpen = true; dirtyChat = true; }
+            if (dmPickerOpen) {
+                openDmWith(pickerNode(dmPickerSel));
+            } else if (!dmConvOpen) {
+                if (dmListSel == 0) {
+                    // "New DM" button
+                    dmPickerSel  = 0;
+                    dmPickerOpen = true;
+                    dirtyChat = true;
+                } else {
+                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    if (c) {
+                        DMs.markRead(c->nodeId);
+                        dmConvNodeId = c->nodeId;
+                        dmConvOpen   = true;
+                        dirtyChat = dirtyInput = dirtyTabs = true;
+                    }
+                }
+            } else {
+                // Conv view: ENTER sends the message
+                if (inputLen > 0) {
+                    inputBuf[inputLen] = '\0';
+                    if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
+                        // TX failed — add a local error line so the user knows
+                        DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
+                    }
+                    inputLen = 0; inputBuf[0] = '\0';
+                    dirtyInput = dirtyChat = true;
+                }
             }
-            // In conv view, enter does nothing (no reply yet)
             return;
         }
         if (nodeDetailOpen) {
@@ -951,7 +1087,8 @@ static void handleKey(char k) {
                 }
             }
             dirtyChat = true;
-        } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM && activeView != VIEW_GPS) {
+        } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
+                   && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
             if (!Channels.sendText(myNodeId, inputBuf)) {
                 Channels.addMessage(Channels.activeIdx(), "",
@@ -963,22 +1100,44 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_BACKSPACE) {
-        if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM) {
+        bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
+                            && activeView != VIEW_GPS
+                            && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
+        if (inputLen > 0 && textAllowed) {
             inputBuf[--inputLen] = '\0'; dirtyInput = true;
         }
 
     } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
         if (activeView == CHAN_DM) {
-            if (dmConvOpen) {
+            if (dmPickerOpen) {
+                if (k == KEY_ROLLER) {
+                    openDmWith(pickerNode(dmPickerSel));
+                } else {
+                    // Tab/right closes picker, back to list
+                    dmPickerOpen = false;
+                    dirtyChat = true;
+                }
+            } else if (dmConvOpen) {
                 // Roller/right/tab from conv → back to contact list
                 dmConvOpen = false;
-                dirtyChat = true;
+                dirtyChat = dirtyInput = true;
             } else if (k == KEY_ROLLER) {
-                // Roller on list item → open conversation
-                DmConv *c = DMs.getByRank(dmListSel);
-                if (c) { dmConvNodeId = c->nodeId; dmConvOpen = true; dirtyChat = true; }
+                // Roller on list item: "New DM" or open conv
+                if (dmListSel == 0) {
+                    dmPickerSel  = 0;
+                    dmPickerOpen = true;
+                    dirtyChat = true;
+                } else {
+                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    if (c) {
+                        DMs.markRead(c->nodeId);
+                        dmConvNodeId = c->nodeId;
+                        dmConvOpen   = true;
+                        dirtyChat = dirtyInput = dirtyTabs = true;
+                    }
+                }
             } else {
-                // Tab/right from list → leave DM tab (cycle forward)
+                // Tab/right from list → cycle forward
                 goToView((activeView + 1) % TOTAL_VIEWS);
             }
             return;
@@ -1029,18 +1188,20 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_PREV_CHAN) {
-        if (activeView == CHAN_DM && dmConvOpen) {
-            // Left from conv → back to contact list
-            dmConvOpen = false;
-            dirtyChat = true;
-            return;
+        if (activeView == CHAN_DM) {
+            if      (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; return; }
+            else if (dmConvOpen)   { dmConvOpen = false; dirtyChat = dirtyInput = true; return; }
+            // else: fall through to tab cycle
         }
         if (activeView != VIEW_SETTINGS || settingsSel == 0)
             goToView((activeView + TOTAL_VIEWS - 1) % TOTAL_VIEWS);
 
     } else if (k == KEY_SCROLL_UP) {
         if (activeView == CHAN_DM) {
-            if (dmConvOpen) {
+            if (dmPickerOpen) {
+                dmPickerSel = max(0, dmPickerSel - 1);
+                dirtyChat = true;
+            } else if (dmConvOpen) {
                 DmConv *c = DMs.find(dmConvNodeId);
                 if (c) {
                     int total = (c->count < MAX_DM_LINES) ? c->count : MAX_DM_LINES;
@@ -1049,6 +1210,7 @@ static void handleKey(char k) {
                     dirtyChat = true;
                 }
             } else {
+                // List: 0 = "New DM" button, 1..count = convs
                 dmListSel = max(0, dmListSel - 1);
                 dirtyChat = true;
             }
@@ -1071,11 +1233,16 @@ static void handleKey(char k) {
 
     } else if (k == KEY_SCROLL_DN) {
         if (activeView == CHAN_DM) {
-            if (dmConvOpen) {
+            if (dmPickerOpen) {
+                int cap = max(0, pickerNodeCount() - 1);
+                dmPickerSel = min(cap, dmPickerSel + 1);
+                dirtyChat = true;
+            } else if (dmConvOpen) {
                 DmConv *c = DMs.find(dmConvNodeId);
                 if (c) { c->scrollOff = max(0, c->scrollOff - 3); dirtyChat = true; }
             } else {
-                int cap = max(0, DMs.count() - 1);
+                // List: max is DMs.count() (last conv), 0 is the button
+                int cap = DMs.count();
                 dmListSel = min(cap, dmListSel + 1);
                 dirtyChat = true;
             }
@@ -1112,9 +1279,10 @@ static void handleKey(char k) {
         }
 
     } else if (k >= 0x20 && k < 0x7F) {
-        if (inputLen < MAX_INPUT_LEN && activeView != CHAN_ANN
-                && activeView != CHAN_DM
-                && activeView != VIEW_SETTINGS && activeView != VIEW_GPS) {
+        bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
+                            && activeView != VIEW_GPS
+                            && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
+        if (inputLen < MAX_INPUT_LEN && textAllowed) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
             dirtyInput = true;
@@ -1313,13 +1481,6 @@ void setup() {
     Channels.setActive(0);  // start on LongFast (channel 0)
     DMs.init();
 
-    // Seed fake DM conversations for preview
-    DMs.addMessage(0xDEAD0001, "MICH", "09:12 [MICH] ", "Hey are you out there?", TFT_GREEN);
-    DMs.addMessage(0xDEAD0001, "MICH", "09:14 [RDMT] ", "Yeah, loud and clear", TFT_WHITE);
-    DMs.addMessage(0xDEAD0001, "MICH", "09:15 [MICH] ", "What's your battery at?", TFT_GREEN);
-    DMs.addMessage(0xDEAD0001, "MICH", "09:16 [RDMT] ", "72%. Good signal here too", TFT_WHITE);
-    DMs.addMessage(0xDEAD0002, "DAVE", "09:30 [DAVE] ", "Good to hear from you!", TFT_GREEN);
-
     // Register ourselves in the node DB immediately
     {
         NodeEntry *me = Nodes.upsert(myNodeId);
@@ -1447,11 +1608,12 @@ void loop() {
     } else {
         if (dirtyDivider) { drawDivider(); dirtyDivider = false; }
         if (dirtyChat) {
-            if      (activeView == VIEW_SETTINGS)              drawSettings();
-            else if (activeView == VIEW_GPS)                   drawGps();
-            else if (activeView == CHAN_DM && dmConvOpen)      drawDmConv();
-            else if (activeView == CHAN_DM)                    drawDmList();
-            else                                               drawChat();
+            if      (activeView == VIEW_SETTINGS)                      drawSettings();
+            else if (activeView == VIEW_GPS)                           drawGps();
+            else if (activeView == CHAN_DM && dmPickerOpen)            drawDmPicker();
+            else if (activeView == CHAN_DM && dmConvOpen)              drawDmConv();
+            else if (activeView == CHAN_DM)                            drawDmList();
+            else                                                       drawChat();
         }
         if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             if (dirtyNodes) drawNodes();
