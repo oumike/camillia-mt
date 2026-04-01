@@ -16,28 +16,13 @@ if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
     exit 1
 fi
 
-# Build
-echo "Building $TAG..."
-pio run -e tdeck
-
-BINARY=".pio/build/tdeck/firmware.bin"
-if [[ ! -f "$BINARY" ]]; then
-    echo "Build output not found: $BINARY"
-    exit 1
+# Remove stale local tag if present (not on remote, so safe to recreate)
+if git tag | grep -q "^$TAG$"; then
+    git tag -d "$TAG"
 fi
 
-# Stage binary with versioned name
-RELEASE_BIN="camillia-mt-${TAG}.bin"
-cp "$BINARY" "$RELEASE_BIN"
+git tag "$TAG"
+git push origin "$TAG"
 
-# Create GitHub release and attach firmware + flash script
-gh release create "$TAG" \
-    --title "$TAG" \
-    --draft \
-    "$RELEASE_BIN" \
-    "flash.sh"
-
-rm "$RELEASE_BIN"
-
-echo "Draft release $TAG created. Review and publish at:"
-gh release view "$TAG" --web 2>/dev/null || echo "https://github.com/oumike/camillia-mt/releases/tag/$TAG"
+echo "Tag $TAG pushed. GitHub Actions will build and create the draft release."
+echo "https://github.com/oumike/camillia-mt/actions"

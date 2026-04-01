@@ -49,3 +49,4 @@ jobs:
             dist/*.bin
             dist/*.elf
             dist/*.map
+            flash.sh
