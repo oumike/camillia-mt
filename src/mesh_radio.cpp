@@ -81,7 +81,7 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 
         if (pkt.decrypted) {
             const uint8_t *payPtr; size_t payLen;
-            decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen, pkt.requestId);
+            decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen, pkt.requestId, pkt.wantResponse);
             if (payPtr && payLen <= sizeof(pkt.payload)) {
                 memcpy(pkt.payload, payPtr, payLen);
                 pkt.payloadLen = payLen;

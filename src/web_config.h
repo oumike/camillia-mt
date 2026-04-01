@@ -21,3 +21,6 @@ bool webCfgRunning();
 
 // DHCP-assigned IP address string — valid only while running, empty otherwise.
 const char *webCfgIP();
+
+// Returns true (and clears the flag) if the web UI requested a NODEINFO broadcast.
+bool webCfgAnnounceRequested();

@@ -5,8 +5,9 @@
 
 // Runtime config (loaded from SD or defaulted from compile-time #defines)
 struct RhinoConfig {
-    char    nodeLong[40];
-    char    nodeShort[5];
+    char     nodeLong[40];
+    char     nodeShort[5];
+    uint32_t nodeIdOverride;  // 0 = derive from MAC; non-zero = use this as myNodeId
     bool    gpsEnabled;           // use hardware GPS when available
     int32_t latI, lonI, alt;      // manual / last-known position (fallback)
     float   loraFreq, loraBw;

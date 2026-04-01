@@ -222,15 +222,29 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
 }
 
 bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
-                              const char *longName, const char *shortName) {
+                              const char *longName, const char *shortName,
+                              uint32_t toNodeId) {
     if (!Radio.isReady()) return false;
 
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // Build a MAC address consistent with myNodeId.
+    // Meshtastic derives nodeId from mac[2..5], so those bytes must match.
+    // Keep the real OUI in bytes [0..1] and pack the node ID into [2..5].
+    uint8_t realMac[6];
+    esp_read_mac(realMac, ESP_MAC_WIFI_STA);
+    uint8_t mac[6] = {
+        realMac[0], realMac[1],
+        (uint8_t)(myNodeId >> 24),
+        (uint8_t)(myNodeId >> 16),
+        (uint8_t)(myNodeId >>  8),
+        (uint8_t)(myNodeId      )
+    };
 
+    // For broadcasts, set want_response so other nodes reply with their identity.
+    // For unicast responses, omit it to avoid infinite ping-pong.
+    bool isUnicast = (toNodeId != 0xFFFFFFFF);
     uint8_t proto[256], cipher[256];
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto));
+                                     mac, proto, sizeof(proto), !isUnicast);
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
@@ -241,7 +255,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
 
     uint8_t frame[sizeof(MeshHdr) + 256];
     MeshHdr hdr = {};
-    hdr.to      = 0xFFFFFFFF;
+    hdr.to      = toNodeId;
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
@@ -250,11 +264,8 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
-    Serial.printf("[nodeinfo] proto %u bytes, frame %u bytes\n",
-                  protoLen, sizeof(hdr) + protoLen);
-    Serial.printf("[nodeinfo] proto hex: ");
-    for (size_t i = 0; i < protoLen; i++) Serial.printf("%02x ", proto[i]);
-    Serial.println();
+    Serial.printf("[nodeinfo] %s to !%08X  proto=%u bytes\n",
+                  isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     Serial.printf("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");

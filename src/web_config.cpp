@@ -16,6 +16,7 @@ static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
 static WebCfgSaveCb   gOnSave          = nullptr;
+static volatile bool  gAnnounceReq     = false;
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -142,6 +143,14 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     html += gCfg->nodeShort; html += "'></label>";
+    // Node ID override
+    snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
+    html += "<label>Node ID Override "
+            "<span style='font-size:.8em;color:#888'>"
+            "(hex, e.g. a0a5e7b8 — leave blank or 00000000 to use MAC-derived ID)</span>"
+            "<input name='node_id_ovr' type='text' maxlength='8' "
+            "pattern='[0-9a-fA-F]{0,8}' value='";
+    html += (gCfg->nodeIdOverride ? tmp : ""); html += "'></label>";
     html += "</details>";
 
     // ── Device ────────────────────────────────────────────────
@@ -468,16 +477,23 @@ static void sendConfigPage(const char *msg = "") {
 
     // ── Backup & Restore ──────────────────────────────────────
     html +=
-        "<h3 style='margin-top:1.5em'>Backup &amp; Restore</h3>"
+        "<h3 style='margin-top:1.5em'>Diagnostics</h3>"
+        "<form method='POST' action='/announce'>"
+        "<button type='submit' style='background:#e07b00'>"
+        "&#128225; Send NODEINFO Broadcast</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>"
+        "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export' download='config.yaml'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
         "&#11015; Export config.yaml</a></p>"
         "<form method='POST' action='/import' enctype='multipart/form-data'"
         " style='margin-top:.6em'>"
-        "<label>Import config.yaml"
+        "<label>Import a YAML config file.</label>  "
         "<input type='file' name='f' accept='.yaml,.yml'"
-        " style='margin-top:.3em'></label>"
+        " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>";
 
@@ -522,6 +538,8 @@ static void handlePostSave() {
     strncpy(gCfg->nodeShort, shrt.c_str(), sizeof(gCfg->nodeShort) - 1);
     gCfg->nodeLong[sizeof(gCfg->nodeLong)   - 1] = '\0';
     gCfg->nodeShort[sizeof(gCfg->nodeShort) - 1] = '\0';
+    String ovr = server.arg("node_id_ovr");
+    gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
 
     // Device
     gCfg->deviceRole        = (uint8_t)constrain(server.arg("role").toInt(),        0, 10);
@@ -612,6 +630,14 @@ static void handlePostSave() {
     sendConfigPage("Saved.");
 }
 
+// ── Announce ─────────────────────────────────────────────────
+
+static void handlePostAnnounce() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    gAnnounceReq = true;
+    sendConfigPage("NODEINFO broadcast queued.");
+}
+
 // ── Export / Import ───────────────────────────────────────────
 
 static void handleGetExport() {
@@ -692,13 +718,14 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
 
-    server.on("/",       HTTP_GET,  handleGetRoot);
-    server.on("/login",  HTTP_GET,  handleGetLogin);
-    server.on("/login",  HTTP_POST, handlePostLogin);
-    server.on("/save",   HTTP_POST, handlePostSave);
-    server.on("/logout", HTTP_GET,  handleGetLogout);
-    server.on("/export", HTTP_GET,  handleGetExport);
-    server.on("/import", HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/",        HTTP_GET,  handleGetRoot);
+    server.on("/login",   HTTP_GET,  handleGetLogin);
+    server.on("/login",   HTTP_POST, handlePostLogin);
+    server.on("/save",    HTTP_POST, handlePostSave);
+    server.on("/logout",  HTTP_GET,  handleGetLogout);
+    server.on("/export",  HTTP_GET,  handleGetExport);
+    server.on("/announce",HTTP_POST, handlePostAnnounce);
+    server.on("/import",  HTTP_POST, handleImportDone, handleImportUpload);
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
@@ -724,3 +751,9 @@ void webCfgLoop() {
 
 bool webCfgRunning() { return running; }
 const char *webCfgIP() { return ipBuf; }
+
+bool webCfgAnnounceRequested() {
+    if (!gAnnounceReq) return false;
+    gAnnounceReq = false;
+    return true;
+}

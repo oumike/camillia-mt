@@ -72,20 +72,27 @@ static size_t pbSkip(const uint8_t *buf, size_t len, size_t i, int wtype) {
 
 bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
-                uint32_t &requestId) {
-    portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0;
+                uint32_t &requestId, bool &wantResponse) {
+    portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0; wantResponse = false;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
         uint32_t field = tag >> 3, wtype = tag & 7;
         if (wtype == 0) {
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
-            if (field == 1) portnum    = (uint32_t)v;
-            if (field == 6) requestId  = (uint32_t)v;
+            if (field == 1) portnum = (uint32_t)v;
+            else if (field == 3) wantResponse = (v != 0);
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
             i += sz;
+        } else if (wtype == 5) {
+            // fixed32 — fields 4=dest, 5=source, 6=request_id, 7=reply_id, 8=emoji
+            if (i + 4 <= len) {
+                uint32_t v; memcpy(&v, buf + i, 4);
+                if (field == 6) requestId = v;
+            }
+            i += 4;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
     }
     return true;
@@ -192,8 +199,8 @@ static bool looksLikeData(const uint8_t *plain, size_t len) {
     if (wtype > 5) return false;
     // Try to decode portnum (field 1, varint) to verify it's a known port
     uint32_t portnum = 0; const uint8_t *payPtr = nullptr; size_t payLen = 0;
-    uint32_t reqId = 0;
-    decodeData(plain, len, portnum, payPtr, payLen, reqId);
+    uint32_t reqId = 0; bool wantResp = false;
+    decodeData(plain, len, portnum, payPtr, payLen, reqId, wantResp);
     // Accept known ports or any non-zero port up to 1024
     return portnum > 0 && portnum <= 1024;
 }
@@ -262,7 +269,7 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen) {
 
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
-                      uint8_t *buf, size_t bufLen) {
+                      uint8_t *buf, size_t bufLen, bool wantResponse) {
     // Build inner User message
     uint8_t user[128]; size_t u = 0;
 
@@ -286,8 +293,15 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     u += pbWriteVarint(user + u, 6);
     memcpy(user + u, mac6, 6); u += 6;
 
+    u += pbWriteVarint(user + u, (5 << 3) | 0);
+    u += pbWriteVarint(user + u, 50); // HardwareModel::T_DECK = 50
+
+    // field 6 = is_licensed (bool, varint).  Setting true so other nodes accept DMs from us:
+    // Meshtastic's RoutingModule filters packets from nodes with is_licensed=false when the
+    // receiving node is a licensed operator, and unlicensed receivers reject legacy DMs unless
+    // the sender is known-licensed.
     u += pbWriteVarint(user + u, (6 << 3) | 0);
-    u += pbWriteVarint(user + u, 84); // HardwareModel::T_DECK
+    u += pbWriteVarint(user + u, 1); // true
 
     // Wrap in Data message
     size_t n = 0;
@@ -297,6 +311,11 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     n += pbWriteVarint(buf + n, u);
     if (n + u > bufLen) return 0;
     memcpy(buf + n, user, u); n += u;
+    if (wantResponse) {
+        // want_response = true: causes receiving nodes to reply with their own NODEINFO
+        n += pbWriteVarint(buf + n, (3 << 3) | 0);  // field 3, varint
+        n += pbWriteVarint(buf + n, 1);              // true
+    }
     return n;
 }
 
@@ -321,6 +340,37 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     n += pbWriteVarint(buf + n, p);
     if (n + p > bufLen) return 0;
     memcpy(buf + n, pos, p); n += p;
+    return n;
+}
+
+size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
+                     uint8_t *buf, size_t bufLen) {
+    // Inner Routing proto: field 3 (error_reason), varint = 0 (NONE = success)
+    uint8_t inner[4]; size_t innerLen = 0;
+    inner[innerLen++] = (3 << 3) | 0;  // field 3, varint
+    inner[innerLen++] = 0;              // NONE
+
+    size_t n = 0;
+    // Data field 1 (portnum = ROUTING_APP), varint
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, ROUTING_APP);
+    // Data field 2 (payload = inner Routing proto), length-delimited
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, innerLen);
+    if (n + innerLen + 10 > bufLen) return 0;
+    memcpy(buf + n, inner, innerLen); n += innerLen;
+    // Data field 5 (source), fixed32 — identifies who is sending this ACK
+    buf[n++] = (5 << 3) | 5;
+    buf[n++] = fromNodeId & 0xFF;
+    buf[n++] = (fromNodeId >>  8) & 0xFF;
+    buf[n++] = (fromNodeId >> 16) & 0xFF;
+    buf[n++] = (fromNodeId >> 24) & 0xFF;
+    // Data field 6 (request_id), fixed32 — ID of the packet being ACK'd
+    buf[n++] = (6 << 3) | 5;
+    buf[n++] = requestId & 0xFF;
+    buf[n++] = (requestId >>  8) & 0xFF;
+    buf[n++] = (requestId >> 16) & 0xFF;
+    buf[n++] = (requestId >> 24) & 0xFF;
     return n;
 }
 

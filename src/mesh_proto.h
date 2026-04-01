@@ -50,6 +50,7 @@ struct MeshPacket {
     uint8_t  payload[220];    // decrypted inner payload (after Data wrapper)
     size_t   payloadLen;
     uint32_t requestId;       // non-zero for ROUTING_APP ACK/NAK
+    bool     wantResponse;    // Data.want_response: requester wants us to send our NODEINFO back
     bool     decrypted;
     int      chanIdx;         // which channel key was used (-1 = none)
 };
@@ -61,8 +62,10 @@ struct TextMsg {
 };
 
 struct UserInfo {
-    char longName[40];
-    char shortName[5];
+    char    longName[40];
+    char    shortName[5];
+    uint8_t pubKey[32];   // Curve25519 public key (field 8), zero if absent
+    bool    hasPubKey;
 };
 
 struct PositionInfo {
@@ -82,10 +85,10 @@ struct TelemetryInfo {
 // ── Protobuf helpers ──────────────────────────────────────────
 size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val);
 
-// Decode Data message: fills portnum, payload slice, requestId
+// Decode Data message: fills portnum, payload slice, requestId, wantResponse
 bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
-                uint32_t &requestId);
+                uint32_t &requestId, bool &wantResponse);
 
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
@@ -113,14 +116,20 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen);
 
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
+// wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
-                      uint8_t *buf, size_t bufLen);
+                      uint8_t *buf, size_t bufLen, bool wantResponse = true);
 
 // Encode a POSITION_APP Data message. lat/lon are sint32 (degrees * 1e7),
 // alt is int32 (meters). Returns encoded length.
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen);
+
+// Encode a ROUTING_APP success ACK Data message.
+// requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).
+size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
+                     uint8_t *buf, size_t bufLen);
 
 // ── Port name helper ──────────────────────────────────────────
 const char *portnumName(uint32_t p);

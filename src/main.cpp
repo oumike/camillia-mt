@@ -94,6 +94,21 @@ static void goToView(int v) {
     dmPickerOpen    = false;
     dmListSel       = 0;
     dmPickerSel     = 0;
+    // If navigating to DM tab and there's an unread conversation, open it immediately
+    if (v == CHAN_DM) {
+        for (int i = 0; i < DMs.count(); i++) {
+            DmConv *c = DMs.getByRank(i);
+            if (c && c->unread) {
+                DMs.markRead(c->nodeId);
+                dmConvNodeId = c->nodeId;
+                dmConvOpen   = true;
+                break;
+            }
+        }
+        // Even if no unread, pre-select the most recent conversation (not "New DM")
+        if (!dmConvOpen && DMs.count() > 0)
+            dmListSel = 1;
+    }
     if (v < MAX_CHANNELS) {
         Channels.setActive(v);
         if (wasFullWidth) dirtyDivider = true;   // restore divider after leaving full-width views
@@ -589,7 +604,7 @@ static void drawDmPicker() {
     lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, 0x001F);
     lcd.setTextColor(TFT_WHITE, 0x001F);
     lcd.setCursor(0, CHAT_Y);
-    lcd.print("  Select a node  (ESC to cancel)");
+    lcd.print("  Select a node  (roll left to cancel)");
 
     int filteredCount = pickerNodeCount();
     if (filteredCount == 0) {
@@ -860,25 +875,66 @@ static void drawInput() {
     dirtyInput = false;
 }
 
+// ── Send routing ACK back to sender ──────────────────────────
+static void sendRoutingAck(const MeshPacket &pkt) {
+    if (pkt.chanIdx < 0 || pkt.chanIdx >= MAX_CHANNELS) return;
+
+    uint8_t proto[32], cipher[32];
+    size_t protoLen = encodeRouting(pkt.hdr.id, myNodeId, proto, sizeof(proto));
+    if (protoLen == 0) return;
+
+    const ChannelKey &ck = CHANNEL_KEYS[pkt.chanIdx];
+    uint32_t ackId = esp_random() ^ millis();
+    if (!encryptPayload(ackId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
+
+    uint8_t frame[sizeof(MeshHdr) + 32];
+    MeshHdr hdr = {};
+    hdr.to      = pkt.hdr.from;
+    hdr.from    = myNodeId;
+    hdr.id      = ackId;
+    hdr.channel = ck.hash;
+    // hop_limit=0: direct-neighbor ACK — Meshtastic shows "Delivered" (not "Acknowledged by another node")
+    hdr.flags   = 0;
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    Radio.transmit(frame, sizeof(hdr) + protoLen);
+    Serial.printf("[ack] routing ACK → !%08X for pkt 0x%08X\n", pkt.hdr.from, pkt.hdr.id);
+}
+
 // ── Handle received packet ────────────────────────────────────
 static void handleRx(const MeshPacket &pkt) {
     if (isDuplicate(pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
+
+    bool isBcast = (pkt.hdr.to == 0xFFFFFFFF);
+
+    // Send routing ACK FIRST — before any logging or processing — to get it on the air
+    // as fast as possible and beat relay re-broadcasts (which cause "Acknowledged by
+    // another node" on the sender's app instead of "Delivered").
+    bool isAckOrNakEarly = (pkt.portnum == ROUTING_APP && pkt.requestId != 0);
+    if (!isBcast && pkt.hdr.to == myNodeId && (pkt.hdr.flags & 0x08) && pkt.decrypted && !isAckOrNakEarly) {
+        sendRoutingAck(pkt);
+    }
+
     pktCount++;
     dirtyStatus = true;
 
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     uint8_t hopStart = (pkt.hdr.flags >> 5) & 0x07;
-    bool    isBcast  = (pkt.hdr.to == 0xFFFFFFFF);
 
     // Serial log (always)
     Serial.printf("\n┌─ PKT #%lu ───────────────────────────────\n", pktCount);
     Serial.printf("│ RSSI:%.1f SNR:%.2f Len:%u Chan:%d\n",
                   pkt.rssi, pkt.snr, sizeof(MeshHdr) + pkt.payloadLen, pkt.chanIdx);
-    Serial.printf("│ From:!%08x  To:%s  Hops:%u/%u\n",
-                  pkt.hdr.from, isBcast ? "BCAST" : "unicast", hopLimit, hopStart);
+    if (isBcast)
+        Serial.printf("│ From:!%08x  To:BCAST  Hops:%u/%u  flags:0x%02x\n",
+                      pkt.hdr.from, hopLimit, hopStart, pkt.hdr.flags);
+    else
+        Serial.printf("│ From:!%08x  To:!%08x  Hops:%u/%u  flags:0x%02x\n",
+                      pkt.hdr.from, pkt.hdr.to, hopLimit, hopStart, pkt.hdr.flags);
 
-    // Update node DB from every received packet
+    // Update node DB from every received packet (before portnum switch so hasName is current)
     Nodes.updateFromPacket(pkt);
     dirtyNodes = true;
 
@@ -913,7 +969,14 @@ static void handleRx(const MeshPacket &pkt) {
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
             DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, TFT_GREEN,
-                           /*markUnread=*/!viewing);
+                           /*markUnread=*/!viewing, pkt.chanIdx);
+            // If we're on the DM list (not inside a conv), jump straight into this one
+            if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
+                DMs.markRead(pkt.hdr.from);
+                dmConvNodeId = pkt.hdr.from;
+                dmConvOpen   = true;
+                viewing      = true;
+            }
             if (viewing) dirtyChat = true;
             dirtyTabs = true;
         } else {
@@ -928,7 +991,9 @@ static void handleRx(const MeshPacket &pkt) {
         UserInfo u;
         decodeUser(pkt.payload, pkt.payloadLen, u);
         Nodes.updateUser(pkt.hdr.from, u);
-        Serial.printf("│ NODEINFO: \"%s\" (%s)\n", u.longName, u.shortName);
+        Serial.printf("│ NODEINFO: \"%s\" (%s)%s\n",
+                      u.longName, u.shortName,
+                      pkt.wantResponse ? " [want_response]" : "");
 
         snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
                  (upSec / 3600) % 24, (upSec / 60) % 60);
@@ -936,6 +1001,11 @@ static void handleRx(const MeshPacket &pkt) {
         snprintf(info, sizeof(info), "* %s joined (%s)", u.longName, u.shortName);
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
         dirtyChat = dirtyNodes = dirtyTabs = true;
+
+        // Respond with our own NODEINFO so the requester knows who we are
+        if (pkt.wantResponse) {
+            Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
+        }
         break;
     }
 
@@ -962,10 +1032,34 @@ static void handleRx(const MeshPacket &pkt) {
 
     case ROUTING_APP: {
         if (pkt.requestId) {
-            // Determine ACK vs NAK from error_reason (field 3 of Routing)
-            // For now treat any ROUTING_APP with requestId as ACK
-            Channels.setAckState(pkt.requestId, DisplayLine::ACKED);
-            Serial.printf("│ ACK for 0x%08X\n", pkt.requestId);
+            // Decode inner Routing proto to check error_reason (field 3, varint)
+            uint32_t errorReason = 0;
+            {
+                size_t i = 0;
+                while (i < pkt.payloadLen) {
+                    uint64_t tag; i = pbReadVarint(pkt.payload, pkt.payloadLen, i, tag); if (!i) break;
+                    uint32_t f = tag >> 3, wt = tag & 7;
+                    if (wt == 0) {
+                        uint64_t v; i = pbReadVarint(pkt.payload, pkt.payloadLen, i, v); if (!i) break;
+                        if (f == 3) { errorReason = (uint32_t)v; break; }
+                    } else break;
+                }
+            }
+            bool isAck = (errorReason == 0);
+            if (isAck) {
+                Channels.setAckState(pkt.requestId, DisplayLine::ACKED);
+                Serial.printf("│ ACK for 0x%08X\n", pkt.requestId);
+            } else {
+                Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
+                Serial.printf("│ NAK for 0x%08X err=%lu\n", pkt.requestId, (unsigned long)errorReason);
+                // If this NAK is for a pending DM, show an error in the conversation
+                DmConv *conv = DMs.find(dmConvNodeId);
+                if (conv) {
+                    char errMsg[32];
+                    snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu", (unsigned long)errorReason);
+                    DMs.addMessage(dmConvNodeId, nullptr, "", errMsg, TFT_RED);
+                }
+            }
             dirtyChat = true;
         }
         break;
@@ -978,6 +1072,18 @@ static void handleRx(const MeshPacket &pkt) {
         break;
     }
 
+    // Proactively introduce ourselves to nodes we haven't identified yet.
+    // Routing ACK was already sent at the top of handleRx, so NODEINFO TX here
+    // does not delay it.
+    // updateFromPacket above already ran, so hasName=true if this was a NODEINFO packet.
+    {
+        NodeEntry *known = Nodes.find(pkt.hdr.from);
+        if (!known || !known->hasName) {
+            Serial.printf("[nodeinfo] new node !%08X — sending our info\n", pkt.hdr.from);
+            Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
+        }
+    }
+
     Serial.printf("└─────────────────────────────────────────\n");
 }
 
@@ -987,12 +1093,11 @@ static void onWebCfgSaved();  // forward declaration
 static void handleKey(char k) {
     if (k == KEY_NONE) return;
 
-    // ALT+E — toggle node list focus / close detail  (ESC in DM: close conv)
-    if (k == KEY_NODE_FOCUS || k == KEY_ESC) {
+    // ALT+E — toggle node list focus / close detail; close DM sub-views
+    if (k == KEY_NODE_FOCUS) {
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; }
             else if (dmConvOpen) { dmConvOpen = false; dirtyChat = dirtyInput = true; }
-            // ESC from list does nothing; left/right exits the tab
             return;
         }
         if (nodeDetailOpen) {
@@ -1118,9 +1223,19 @@ static void handleKey(char k) {
                     dirtyChat = true;
                 }
             } else if (dmConvOpen) {
-                // Roller/right/tab from conv → back to contact list
-                dmConvOpen = false;
-                dirtyChat = dirtyInput = true;
+                if (k == KEY_ROLLER && inputLen > 0) {
+                    // Trackball click with text typed → send (same as Enter)
+                    inputBuf[inputLen] = '\0';
+                    if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
+                        DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
+                    }
+                    inputLen = 0; inputBuf[0] = '\0';
+                    dirtyInput = dirtyChat = true;
+                } else {
+                    // Tab/right/roller (empty) → back to contact list
+                    dmConvOpen = false;
+                    dirtyChat = dirtyInput = true;
+                }
             } else if (k == KEY_ROLLER) {
                 // Roller on list item: "New DM" or open conv
                 if (dmListSel == 0) {
@@ -1336,6 +1451,7 @@ static void onWebCfgSaved() {
     p.putULong("telEnvIntv",   gCfg.telEnvIntervalS);
     p.putBool("cannedEn",      gCfg.cannedEnabled);
     p.putString("cannedMsgs",  gCfg.cannedMessages);
+    p.putULong("nodeIdOvr",    gCfg.nodeIdOverride);
     p.end();
     // Save channel config
     for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -1351,6 +1467,8 @@ static void onWebCfgSaved() {
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
     Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+    // Apply node ID override immediately (no reboot needed)
+    if (gCfg.nodeIdOverride != 0) myNodeId = gCfg.nodeIdOverride;
     // Broadcast updated node identity
     NodeEntry *me = Nodes.upsert(myNodeId);
     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
@@ -1397,6 +1515,12 @@ void setup() {
         uint8_t u;
         u = prefs.getUChar("loraSf",     0); if (u) gCfg.loraSf       = u;
         u = prefs.getUChar("loraCr",     0); if (u) gCfg.loraCr       = u;
+        // Migrate: CR=8 at SF11/BW250 was an old wrong default for LONG_FAST (should be CR=5).
+        // Auto-correct so existing saved configs get the right coding rate on next boot.
+        if (gCfg.loraCr == 8 && gCfg.loraSf == 11 && gCfg.loraBw == 250.0f) {
+            Serial.printf("[config] migrating loraCr 8→5 (LONG_FAST default fix)\n");
+            gCfg.loraCr = 5;
+        }
         u = prefs.getUChar("loraPower",  0); if (u) gCfg.loraPower    = u;
         u = prefs.getUChar("loraHopLim", 0); if (u) gCfg.loraHopLimit = u;
         if (prefs.isKey("gpsEnabled")) gCfg.gpsEnabled = prefs.getBool("gpsEnabled");
@@ -1435,7 +1559,14 @@ void setup() {
         ul = prefs.getULong("telEnvIntv",   0); if (ul) gCfg.telEnvIntervalS    = ul;
         if (prefs.isKey("cannedEn"))  gCfg.cannedEnabled    = prefs.getBool("cannedEn");
         String cm = prefs.getString("cannedMsgs", ""); if (cm.length()) strncpy(gCfg.cannedMessages, cm.c_str(), sizeof(gCfg.cannedMessages)-1);
+        ul = prefs.getULong("nodeIdOvr", 0); if (ul) gCfg.nodeIdOverride = (uint32_t)ul;
         prefs.end();
+    }
+
+    // Apply node ID override if set (allows restoring old Meshtastic identity)
+    if (gCfg.nodeIdOverride != 0) {
+        myNodeId = gCfg.nodeIdOverride;
+        Serial.printf("[camillia-mt] Node ID overridden to: !%08x\n", myNodeId);
     }
     // Load channel config from NVS
     for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -1542,6 +1673,11 @@ void loop() {
 
     // 1b. Service web config server if running
     webCfgLoop();
+    if (webCfgAnnounceRequested()) {
+        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+        Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
+        Serial.printf("[announce] manual NODEINFO + position broadcast\n");
+    }
 
     // 1c. Poll GPS
     gpsLoop();

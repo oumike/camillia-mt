@@ -38,7 +38,7 @@
 #define MESH_FREQ       906.875f  // MHz
 #define MESH_BW         250.0f    // kHz
 #define MESH_SF         11
-#define MESH_CR         8         // 4/8 coding rate
+#define MESH_CR         5         // 4/5 coding rate (Meshtastic LONG_FAST default)
 #define MESH_SYNC       0x2B      // Meshtastic sync word
 #define MESH_PREAMBLE   16
 #define MESH_POWER      22        // dBm (hardware max; ribl_config requests 30)

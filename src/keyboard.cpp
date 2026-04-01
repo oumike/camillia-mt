@@ -28,7 +28,9 @@ void TDeckKeyboard::begin() {
 }
 
 char TDeckKeyboard::read() {
-    // Drain trackball ISR state (no debounce — ISRs are authoritative)
+    unsigned long now = millis();
+
+    // Drain trackball ISR state
     noInterrupts();
     int8_t dx  = _dx;
     int8_t dy  = _dy;
@@ -37,14 +39,19 @@ char TDeckKeyboard::read() {
     _click = false;
     interrupts();
 
-    if (clk)    return KEY_ROLLER;
+    // Track the last time scroll motion was seen
+    if (dx != 0 || dy != 0) _lastScrollMs = now;
+
+    // Suppress accidental clicks that fire during or just after rolling:
+    // only register a click if the ball has been still for at least 200 ms.
+    if (clk && (now - _lastScrollMs >= 200)) return KEY_ROLLER;
+
     if (dx > 0) return KEY_NEXT_CHAN;
     if (dx < 0) return KEY_PREV_CHAN;
     if (dy < 0) return KEY_SCROLL_UP;
     if (dy > 0) return KEY_SCROLL_DN;
 
     // Keyboard MCU — debounced
-    unsigned long now = millis();
     if (now - _lastReadMs < 10) return KEY_NONE;
     Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
     if (!Wire.available()) return KEY_NONE;
@@ -60,7 +67,6 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0x0A: return KEY_ENTER;
         case 0x7F: return KEY_BACKSPACE;
         case 0x08: return KEY_BACKSPACE;
-        case 0x1B: return KEY_ESC;
         case 0x05: return KEY_NODE_FOCUS;  // ALT+E
         default:
             if (raw < 0x20 || raw > 0x7E)

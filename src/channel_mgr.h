@@ -53,8 +53,10 @@ public:
     // Build and transmit a text message on the active channel.
     bool sendText(uint32_t myNodeId, const char *text);
 
-    // Broadcast a NODEINFO_APP packet on LongFast so other nodes see us.
-    bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName);
+    // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
+    // Pass toNodeId for a unicast reply (e.g. responding to want_response).
+    bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName,
+                      uint32_t toNodeId = 0xFFFFFFFF);
 
     // Broadcast a POSITION_APP packet on LongFast with the given coordinates.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt);
