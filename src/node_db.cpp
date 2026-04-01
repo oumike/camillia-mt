@@ -69,6 +69,7 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
     if (u.longName[0])  { strncpy(e->longName,  u.longName,  sizeof(e->longName)  - 1); e->hasName = true; }
     if (u.shortName[0]) { strncpy(e->shortName, u.shortName, sizeof(e->shortName) - 1); e->hasName = true; }
+    if (u.hasPubKey)    { memcpy(e->pubKey, u.pubKey, 32); e->hasPubKey = true; }
 }
 
 void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &p) {

@@ -1,5 +1,10 @@
 #include "mesh_proto.h"
 #include "mbedtls/aes.h"
+#include "mbedtls/ccm.h"
+#include "mbedtls/ecdh.h"
+#include "mbedtls/ecp.h"
+#include "mbedtls/sha256.h"
+#include <esp_random.h>
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -30,20 +35,16 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
 // role: 0=PRIMARY, 1=SECONDARY, 2=DISABLED
 ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
     //           name          PSK       len  hash  name_buf  role
-    { "LongFast",  { 0x01 },   1, 0x08, {}, 0 },  // PRIMARY  (AQ==)
-    { "Michigan",  { 0x30 },   1, 0x1D, {}, 1 },  // SECONDARY (MA==)
-    { "DevTest",   { 0x01 },   1, 0x63, {}, 1 },  // SECONDARY (AQ==)
-    { "Sumat",     {
-        0x54,0xc2,0x22,0xfa,0x29,0x9a,0xe1,0x46,
-        0x3b,0x76,0x6c,0x28,0xa9,0xe3,0x32,0xb5,
-        0x2f,0xaf,0x1c,0x59,0xf9,0x53,0x75,0xad,
-        0x51,0xd0,0x38,0x4c,0x7b,0xea,0x16,0xdc }, 32, 0xD9, {}, 1 },  // SECONDARY (AES-256)
-    { "WMI",       { 0x30 },   1, 0x60, {}, 1 },  // SECONDARY (MA==)
-    { "YOOPER",    { 0x30 },   1, 0x2D, {}, 1 },  // SECONDARY (MA==)
-    { "Washtenaw", { 0x30 },   1, 0x77, {}, 1 },  // SECONDARY (MA==)
-    { "Muskegon",  { 0x30 },   1, 0x10, {}, 1 },  // SECONDARY (MA==)
-    { "DM",        { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, direct messages)
-    { "ANN",       { 0 },      0, 0xFF, {}, 2 },  // DISABLED  (virtual, announcements)
+    { "LongFast", { 0x01 },    1, 0x08, {}, 0 },  // PRIMARY  (AQ==)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1 },  // SECONDARY (unconfigured)
+    { "DM",       { 0 },       0, 0xFF, {}, 2 },  // DISABLED  (virtual, direct messages)
+    { "ANN",      { 0 },       0, 0xFF, {}, 2 },  // DISABLED  (virtual, announcements)
 };
 
 // ── Protobuf helpers ──────────────────────────────────────────
@@ -100,6 +101,8 @@ bool decodeData(const uint8_t *buf, size_t len,
 
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
     out.longName[0] = out.shortName[0] = '\0';
+    memset(out.pubKey, 0, 32);
+    out.hasPubKey = false;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -110,6 +113,9 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
                 memcpy(out.longName,  buf + i, sz); out.longName[sz]  = '\0';
             } else if (field == 3 && sz < sizeof(out.shortName)) {
                 memcpy(out.shortName, buf + i, sz); out.shortName[sz] = '\0';
+            } else if (field == 8 && sz == 32) {
+                memcpy(out.pubKey, buf + i, 32);
+                out.hasPubKey = true;
             }
             i += sz;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
@@ -242,6 +248,81 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 
+// ── PKI (Curve25519) encryption ───────────────────────────────
+// Meshtastic wire format: [ciphertext(N)] [CCM-tag(8)] [extraNonce(4)]
+// Nonce (8 bytes): [packetId_LE32(4)] [extraNonce_LE(4)]
+// Key: SHA256(ECDH(myPrivKey, recipientPubKey))
+// Caller sets hdr.channel = 0 to signal PKI to receiving nodes.
+static int _pki_rng(void *, uint8_t *buf, size_t len) {
+    esp_fill_random(buf, len);
+    return 0;
+}
+
+bool encryptPki(uint32_t packetId, uint32_t fromNode,
+                const uint8_t *recipientPubKey,
+                const uint8_t *plain, size_t plainLen,
+                uint8_t *out) {
+    (void)fromNode; // fromNode not in the 8-byte nonce (Meshtastic spec)
+
+    mbedtls_ecp_group grp;
+    mbedtls_mpi      d, z;
+    mbedtls_ecp_point Qp;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&Qp);
+
+    bool ok = false;
+    int step = 0;
+    do {
+        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) { step=1; break; }
+        if (mbedtls_mpi_read_binary(&d, myPrivKey, 32) != 0) { step=2; break; }
+        if (mbedtls_mpi_read_binary(&Qp.X, recipientPubKey, 32) != 0) { step=3; break; }
+        mbedtls_mpi_lset(&Qp.Y, 0);
+        mbedtls_mpi_lset(&Qp.Z, 1);
+
+        if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, _pki_rng, nullptr) != 0) { step=4; break; }
+
+        uint8_t sharedSecret[32];
+        if (mbedtls_mpi_write_binary(&z, sharedSecret, 32) != 0) { step=5; break; }
+
+        uint8_t aesKey[32];
+        mbedtls_sha256(sharedSecret, 32, aesKey, 0);
+
+        uint32_t extraNonce;
+        esp_fill_random(&extraNonce, sizeof(extraNonce));
+
+        uint8_t nonce[8];
+        memcpy(nonce,     &packetId,   4);
+        memcpy(nonce + 4, &extraNonce, 4);
+
+        mbedtls_ccm_context ccm;
+        mbedtls_ccm_init(&ccm);
+        int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, aesKey, 256);
+        if (ret != 0) { step=6; mbedtls_ccm_free(&ccm); break; }
+        uint8_t tag[8];
+        ret = mbedtls_ccm_encrypt_and_tag(&ccm, plainLen,
+                                           nonce, sizeof(nonce),
+                                           nullptr, 0,
+                                           plain, out,
+                                           tag, sizeof(tag));
+        mbedtls_ccm_free(&ccm);
+        if (ret != 0) { step=7; break; }
+
+        memcpy(out + plainLen,     tag,         8);
+        memcpy(out + plainLen + 8, &extraNonce, 4);
+        ok = true;
+    } while (false);
+
+    if (!ok) Serial.printf("[pki] encryptPki failed at step %d\n", step);
+
+    mbedtls_ecp_point_free(&Qp);
+    mbedtls_mpi_free(&z);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ok;
+}
+
 // ── Protobuf encoder ──────────────────────────────────────────
 static size_t pbWriteVarint(uint8_t *buf, uint64_t val) {
     size_t n = 0;
@@ -270,8 +351,8 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen) {
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
                       uint8_t *buf, size_t bufLen, bool wantResponse) {
-    // Build inner User message
-    uint8_t user[128]; size_t u = 0;
+    // Build inner User message (extra 34 bytes for field 8 = public_key)
+    uint8_t user[164]; size_t u = 0;
 
     char idStr[12]; snprintf(idStr, sizeof(idStr), "!%08x", nodeId);
     size_t idLen = strlen(idStr);
@@ -302,6 +383,14 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     // the sender is known-licensed.
     u += pbWriteVarint(user + u, (6 << 3) | 0);
     u += pbWriteVarint(user + u, 1); // true
+
+    // field 8 = public_key (bytes, 32 bytes).  Advertise our Curve25519 public key so
+    // other nodes can encrypt PKI DMs to us, and so we can encrypt DMs to them.
+    if (u + 35 <= sizeof(user)) { // 2 bytes tag+len + 32 bytes key
+        u += pbWriteVarint(user + u, (8 << 3) | 2);
+        u += pbWriteVarint(user + u, 32);
+        memcpy(user + u, myPubKey, 32); u += 32;
+    }
 
     // Wrap in Data message
     size_t n = 0;

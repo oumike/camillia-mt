@@ -101,6 +101,11 @@ void    expandPsk(uint8_t psk, uint8_t out[16]);
 // Compute the on-air channel hash (XOR of name bytes ^ XOR of expanded key bytes).
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen);
 
+// ── Curve25519 PKI key pair (generated once, stored in NVS) ──
+// Defined in main.cpp; used by mesh_proto.cpp and dm_mgr.cpp.
+extern uint8_t myPubKey[32];
+extern uint8_t myPrivKey[32];
+
 // ── Encryption / decryption ───────────────────────────────────
 // Try all known channel keys; returns channel index or -1.
 int  decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
@@ -110,6 +115,15 @@ int  decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
 bool encryptPayload(uint32_t packetId, uint32_t fromNode,
                     const uint8_t *key, uint8_t keyLen,
                     const uint8_t *plain, uint8_t *cipher, size_t len);
+
+// PKI-encrypt plain[plainLen] → out[plainLen + 12].
+// Uses Curve25519 ECDH(myPrivKey, recipientPubKey) → SHA256 → AES-CCM.
+// Wire format: [ciphertext(N)] [CCM-tag(8)] [extraNonce(4)]
+// hdr.channel must be set to 0 by the caller to signal PKI.
+bool encryptPki(uint32_t packetId, uint32_t fromNode,
+                const uint8_t *recipientPubKey,
+                const uint8_t *plain, size_t plainLen,
+                uint8_t *out);
 
 // ── Protobuf encoder ──────────────────────────────────────────
 // Encode a TEXT_MESSAGE_APP Data message. Returns encoded length.

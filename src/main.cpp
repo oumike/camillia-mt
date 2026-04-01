@@ -11,6 +11,8 @@
 #include "gps.h"
 #include "dm_mgr.h"
 #include <math.h>
+#include "mbedtls/ecp.h"
+#include "mbedtls/ecdh.h"
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -21,11 +23,16 @@ static TDeckKeyboard kb;
 static uint32_t myNodeId = 0;
 static RhinoConfig gCfg;
 
+// Curve25519 key pair for PKI-encrypted DMs (declared extern in mesh_proto.h)
+uint8_t myPubKey[32] = {};
+uint8_t myPrivKey[32] = {};
+
 // ── View state ────────────────────────────────────────────────
 #define VIEW_GPS      MAX_CHANNELS          // index 9 = GPS/compass page
 #define VIEW_SETTINGS (MAX_CHANNELS + 1)    // index 10 = settings page
 #define TOTAL_VIEWS   (MAX_CHANNELS + 2)    // 11 total
 static int  activeView   = 0;              // 0..8 channel, 9 GPS, 10 settings
+static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
 static int  settingsSel  = 0;         // highlighted settings row
 
 // ── DM sub-state ──────────────────────────────────────────────
@@ -83,8 +90,33 @@ static int      nodeListSel     = 0;
 static bool     nodeDetailOpen  = false;
 static uint32_t nodeDetailId    = 0;
 
+// ── View navigation helpers ───────────────────────────────────
+static bool isViewNavigable(int v) {
+    if (v == CHAN_DM) return false;
+    if (v >= 0 && v < MESH_CHANNELS)
+        return CHANNEL_KEYS[v].name[0] != '\0';
+    return true;  // CHAN_ANN, VIEW_GPS, VIEW_SETTINGS always reachable
+}
+
+static int nextView(int from) {
+    for (int n = 1; n < TOTAL_VIEWS; n++) {
+        int v = (from + n) % TOTAL_VIEWS;
+        if (isViewNavigable(v)) return v;
+    }
+    return from;
+}
+
+static int prevView(int from) {
+    for (int n = 1; n < TOTAL_VIEWS; n++) {
+        int v = (from + TOTAL_VIEWS - n) % TOTAL_VIEWS;
+        if (isViewNavigable(v)) return v;
+    }
+    return from;
+}
+
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
+    if (v == CHAN_DM) v = CHAN_ANN;   // DM panel temporarily disabled
     bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS
                          || activeView == CHAN_DM);
     activeView = v;
@@ -271,46 +303,64 @@ static void drawStatus() {
 static void drawTabs() {
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, TFT_BLACK);
     lcd.setTextSize(1);
-    // 9 channel tabs + GPS tab + CFG tab = 11 total → 29px each
-    const int TAB_W = LCD_W / TOTAL_VIEWS;
+
+    // Build full tab list with absolute x positions
+    struct TabEntry { int view; char label[16]; int x; int w; };
+    TabEntry tabs[TOTAL_VIEWS];
+    int tabCount = 0;
+    int xCursor  = 0;
+
     for (int i = 0; i < TOTAL_VIEWS; i++) {
-        int x = i * TAB_W;
-        bool isActive   = (i == activeView);
-        bool isSettings = (i == VIEW_SETTINGS);
-        bool isGps      = (i == VIEW_GPS);
-        bool isAnn      = (i == CHAN_ANN);
-        bool isDm       = (i == CHAN_DM);
+        if (!isViewNavigable(i)) continue;
+        char label[16] = {};
+        if      (i == VIEW_SETTINGS) strncpy(label, "CFG", sizeof(label));
+        else if (i == VIEW_GPS)      strncpy(label, "GPS", sizeof(label));
+        else if (i == CHAN_ANN)      strncpy(label, "ANN", sizeof(label));
+        else                         strncpy(label, CHANNEL_KEYS[i].name, sizeof(label) - 1);
+        int w = (int)strlen(label) * CHAR_W + 4;  // 2 px padding each side
+        tabs[tabCount] = { i, {}, xCursor, w };
+        strncpy(tabs[tabCount].label, label, sizeof(label));
+        tabCount++;
+        xCursor += w;
+    }
+
+    // Auto-scroll so the active tab is always fully visible
+    for (int t = 0; t < tabCount; t++) {
+        if (tabs[t].view != activeView) continue;
+        if (tabs[t].x < tabScrollX)
+            tabScrollX = tabs[t].x;
+        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W)
+            tabScrollX = tabs[t].x + tabs[t].w - LCD_W;
+        break;
+    }
+
+    // Render only tabs that intersect the visible window
+    for (int t = 0; t < tabCount; t++) {
+        int sx = tabs[t].x - tabScrollX;
+        if (sx + tabs[t].w <= 0) continue;
+        if (sx >= LCD_W)         break;
+
+        bool isActive = (tabs[t].view == activeView);
         uint16_t col;
-        if (isSettings) {
+        if (tabs[t].view == VIEW_SETTINGS) {
             col = isActive ? TFT_WHITE : COL_TAB_IDLE;
-        } else if (isGps) {
+        } else if (tabs[t].view == VIEW_GPS) {
             if      (isActive)       col = TFT_WHITE;
             else if (gpsHasFix())    col = TFT_GREEN;
             else if (gpsIsEnabled()) col = TFT_YELLOW;
             else                     col = COL_TAB_IDLE;
-        } else if (isDm) {
-            if      (isActive)         col = TFT_WHITE;
-            else if (DMs.hasUnread())  col = TFT_YELLOW;          // unread DM
-            else if (DMs.count() > 0)  col = (uint16_t)0xF81F;   // has convs (magenta)
-            else                       col = COL_TAB_IDLE;
-        } else if (isAnn) {
-            Channel &ch = Channels.get(i);
-            col = ch.unread ? TFT_CYAN : isActive ? TFT_CYAN : COL_TAB_IDLE;
+        } else if (tabs[t].view == CHAN_ANN) {
+            Channel &ch = Channels.get(tabs[t].view);
+            col = (ch.unread || isActive) ? TFT_CYAN : COL_TAB_IDLE;
         } else {
-            Channel &ch = Channels.get(i);
-            col = ch.unread  ? COL_TAB_UNREAD :
-                  isActive   ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
+            Channel &ch = Channels.get(tabs[t].view);
+            col = ch.unread ? COL_TAB_UNREAD :
+                  isActive  ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
         }
-        if (isActive) lcd.fillRect(x, STATUS_H, TAB_W - 1, TAB_H, 0x0013);
+        if (isActive) lcd.fillRect(sx, STATUS_H, tabs[t].w - 1, TAB_H, 0x0013);
         lcd.setTextColor(col, isActive ? 0x0013 : TFT_BLACK);
-        char label[8];
-        if      (isSettings) strncpy(label, "CFG", sizeof(label));
-        else if (isGps)      strncpy(label, "GPS", sizeof(label));
-        else if (isDm)       strncpy(label, "DM",  sizeof(label));
-        else if (isAnn)      strncpy(label, "ANN", sizeof(label));
-        else                 snprintf(label, sizeof(label), "%.4s", Channels.get(i).name);
-        lcd.setCursor(x + 1, STATUS_H + 1);
-        lcd.print(label);
+        lcd.setCursor(sx + 2, STATUS_H + 1);
+        lcd.print(tabs[t].label);
     }
     dirtyTabs = false;
 }
@@ -991,9 +1041,10 @@ static void handleRx(const MeshPacket &pkt) {
         UserInfo u;
         decodeUser(pkt.payload, pkt.payloadLen, u);
         Nodes.updateUser(pkt.hdr.from, u);
-        Serial.printf("│ NODEINFO: \"%s\" (%s)%s\n",
+        Serial.printf("│ NODEINFO: \"%s\" (%s)%s  pubKey=%s\n",
                       u.longName, u.shortName,
-                      pkt.wantResponse ? " [want_response]" : "");
+                      pkt.wantResponse ? " [want_response]" : "",
+                      u.hasPubKey ? "YES(32B)" : "none");
 
         snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
                  (upSec / 3600) % 24, (upSec / 60) % 60);
@@ -1185,10 +1236,14 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
                 } else {
                     bool ok = webCfgBegin(&gCfg, onWebCfgSaved);
-                    if (ok)
-                        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
-                    else
+                    if (ok) {
+                        if (webCfgIsOnboarding())
+                            snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
+                        else
+                            snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+                    } else {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
+                    }
                 }
             }
             dirtyChat = true;
@@ -1253,7 +1308,7 @@ static void handleKey(char k) {
                 }
             } else {
                 // Tab/right from list → cycle forward
-                goToView((activeView + 1) % TOTAL_VIEWS);
+                goToView(nextView(activeView));
             }
             return;
         }
@@ -1291,15 +1346,19 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
                 } else {
                     bool ok = webCfgBegin(&gCfg, onWebCfgSaved);
-                    if (ok)
-                        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
-                    else
+                    if (ok) {
+                        if (webCfgIsOnboarding())
+                            snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
+                        else
+                            snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+                    } else {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
+                    }
                 }
             }
             dirtyChat = true;
         } else if (activeView != VIEW_SETTINGS || settingsSel == 0) {
-            goToView((activeView + 1) % TOTAL_VIEWS);
+            goToView(nextView(activeView));
         }
 
     } else if (k == KEY_PREV_CHAN) {
@@ -1309,7 +1368,7 @@ static void handleKey(char k) {
             // else: fall through to tab cycle
         }
         if (activeView != VIEW_SETTINGS || settingsSel == 0)
-            goToView((activeView + TOTAL_VIEWS - 1) % TOTAL_VIEWS);
+            goToView(prevView(activeView));
 
     } else if (k == KEY_SCROLL_UP) {
         if (activeView == CHAN_DM) {
@@ -1500,6 +1559,44 @@ void setup() {
         prefs.end();
     }
 
+    // Load or generate Curve25519 key pair for PKI DMs
+    {
+        Preferences prefs;
+        prefs.begin("camillia", false);
+        bool haveKeys = (prefs.getBytes("privKey", myPrivKey, 32) == 32) &&
+                        (prefs.getBytes("pubKey",  myPubKey,  32) == 32);
+        if (!haveKeys) {
+            mbedtls_ecp_group grp;
+            mbedtls_mpi      d;
+            mbedtls_ecp_point Q;
+            mbedtls_ecp_group_init(&grp);
+            mbedtls_mpi_init(&d);
+            mbedtls_ecp_point_init(&Q);
+
+            auto rng = [](void *, uint8_t *buf, size_t len) -> int {
+                esp_fill_random(buf, len); return 0;
+            };
+
+            if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
+                mbedtls_ecp_gen_keypair(&grp, &d, &Q, rng, nullptr) == 0 &&
+                mbedtls_mpi_write_binary(&d, myPrivKey, 32) == 0 &&
+                mbedtls_mpi_write_binary(&Q.X, myPubKey, 32) == 0) {
+                prefs.putBytes("privKey", myPrivKey, 32);
+                prefs.putBytes("pubKey",  myPubKey,  32);
+                Serial.printf("[pki] generated new Curve25519 key pair\n");
+            } else {
+                Serial.printf("[pki] WARNING: key generation failed\n");
+            }
+
+            mbedtls_ecp_point_free(&Q);
+            mbedtls_mpi_free(&d);
+            mbedtls_ecp_group_free(&grp);
+        } else {
+            Serial.printf("[pki] loaded Curve25519 key pair from NVS\n");
+        }
+        prefs.end();
+    }
+
     // Load runtime config defaults, then overlay anything saved to NVS
     cfgInitDefaults(gCfg);
     {
@@ -1656,7 +1753,10 @@ void setup() {
 
     // Auto-start web config (TODO: gate on a setting or button before production)
     if (webCfgBegin(&gCfg, onWebCfgSaved)) {
-        snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
+        if (webCfgIsOnboarding())
+            snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
+        else
+            snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
         Channels.addMessage(CHAN_ANN, "", settingsStatus, TFT_DARKGREY);
     }
 

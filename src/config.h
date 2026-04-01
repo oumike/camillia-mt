@@ -46,8 +46,8 @@
 #define MESH_TCXO_V     1.6f      // TCXO voltage for T-Deck SX1262
 
 // ── Node identity (change to your callsign/name) ─────────────
-#define MY_LONG_NAME    "Rhino Dev MT"
-#define MY_SHORT_NAME   "RDMT"
+#define MY_LONG_NAME    "Camillia"
+#define MY_SHORT_NAME   "CaMi"
 
 // ── GPS hardware ──────────────────────────────────────────────
 // L76K GPS module connected to UART1 on T-Deck.

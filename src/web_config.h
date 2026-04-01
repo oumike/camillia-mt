@@ -24,3 +24,6 @@ const char *webCfgIP();
 
 // Returns true (and clears the flag) if the web UI requested a NODEINFO broadcast.
 bool webCfgAnnounceRequested();
+
+// True if the server is running in first-boot WiFi onboarding mode.
+bool webCfgIsOnboarding();

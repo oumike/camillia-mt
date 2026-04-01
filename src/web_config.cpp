@@ -1,10 +1,9 @@
 #include "web_config.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Preferences.h>
 #include <math.h>
 
-static const char    *kSSID            = "rhinohome";
-static const char    *kPass            = "fishfood is smelly";
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
 static const char    *kUser            = "admin";
@@ -12,6 +11,7 @@ static const char    *kPassword        = "admin";
 
 static WebServer      server(80);
 static bool           running          = false;
+static bool           gOnboarding      = false;
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
@@ -68,6 +68,34 @@ static const char kHead[] =
     ".ch-row{display:grid;grid-template-columns:1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
     ".ch-row label{margin:0;font-size:.85em}"
     "</style></head><body>";
+
+// ── Timezone table ────────────────────────────────────────────
+
+struct TzOption { const char *label; const char *posix; };
+static const TzOption kTzOptions[] = {
+    { "UTC",                                "UTC0"                                   },
+    { "US — Hawaii (UTC-10)",               "HST10"                                  },
+    { "US — Alaska (UTC-9/-8)",             "AKST9AKDT,M3.2.0,M11.1.0"              },
+    { "US — Pacific (UTC-8/-7)",            "PST8PDT,M3.2.0,M11.1.0"                },
+    { "US — Mountain (UTC-7/-6)",           "MST7MDT,M3.2.0,M11.1.0"                },
+    { "US — Arizona, no DST (UTC-7)",       "MST7"                                   },
+    { "US — Central (UTC-6/-5)",            "CST6CDT,M3.2.0,M11.1.0"                },
+    { "US — Eastern (UTC-5/-4)",            "EST5EDT,M3.2.0,M11.1.0"                },
+    { "Canada — Atlantic (UTC-4/-3)",       "AST4ADT,M3.2.0/0,M11.1.0/0"            },
+    { "Brazil — Brasilia (UTC-3)",          "BRT3BRST,M10.3.0/0,M2.3.0/0"           },
+    { "Argentina (UTC-3)",                  "ART3"                                   },
+    { "UK (UTC+0/+1)",                      "GMT0BST,M3.5.0/1,M10.5.0"              },
+    { "Western Europe — CET (UTC+1/+2)",    "CET-1CEST,M3.5.0,M10.5.0/3"           },
+    { "Eastern Europe — EET (UTC+2/+3)",    "EET-2EEST,M3.5.0/3,M10.5.0/4"         },
+    { "Russia — Moscow (UTC+3)",            "MSK-3"                                  },
+    { "India (UTC+5:30)",                   "IST-5:30"                               },
+    { "China / Singapore (UTC+8)",          "CST-8"                                  },
+    { "Japan / Korea (UTC+9)",              "JST-9"                                  },
+    { "Australia — Perth (UTC+8)",          "AWST-8"                                 },
+    { "Australia — Eastern (UTC+10/+11)",   "AEST-10AEDT,M10.1.0,M4.1.0/3"         },
+    { "New Zealand (UTC+12/+13)",           "NZST-12NZDT,M9.5.0,M4.1.0/3"          },
+};
+static const int kTzCount = (int)(sizeof(kTzOptions) / sizeof(kTzOptions[0]));
 
 // ── Login page ────────────────────────────────────────────────
 
@@ -143,14 +171,9 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
     html += gCfg->nodeShort; html += "'></label>";
-    // Node ID override
-    snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
-    html += "<label>Node ID Override "
-            "<span style='font-size:.8em;color:#888'>"
-            "(hex, e.g. a0a5e7b8 — leave blank or 00000000 to use MAC-derived ID)</span>"
-            "<input name='node_id_ovr' type='text' maxlength='8' "
-            "pattern='[0-9a-fA-F]{0,8}' value='";
-    html += (gCfg->nodeIdOverride ? tmp : ""); html += "'></label>";
+    // Node ID override (developer option — hidden for end users)
+    // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
+    // html += "<label>Node ID Override ...";
     html += "</details>";
 
     // ── Device ────────────────────────────────────────────────
@@ -187,9 +210,23 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
     html += "<label>Position Interval (s)<input name='pos_intv' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
-    html += "<label>Timezone (POSIX tzdef, e.g. EST5EDT,M3.2.0,M11.1.0)"
-            "<input name='tzdef' type='text' value='";
-    html += gCfg->tzDef; html += "'></label>";
+    // Timezone dropdown
+    {
+        bool tzMatched = false;
+        for (int i = 0; i < kTzCount && !tzMatched; i++)
+            if (strcmp(gCfg->tzDef, kTzOptions[i].posix) == 0) tzMatched = true;
+        html += "<label>Timezone<select name='tzdef'>";
+        if (!tzMatched && gCfg->tzDef[0]) {
+            html += "<option value='"; html += gCfg->tzDef;
+            html += "' selected>Custom: "; html += gCfg->tzDef; html += "</option>";
+        }
+        for (int i = 0; i < kTzCount; i++) {
+            html += "<option value='"; html += kTzOptions[i].posix; html += "'";
+            if (strcmp(gCfg->tzDef, kTzOptions[i].posix) == 0) html += " selected";
+            html += ">"; html += kTzOptions[i].label; html += "</option>";
+        }
+        html += "</select></label>";
+    }
     html += "</details>";
 
     // ── Position ──────────────────────────────────────────────
@@ -376,35 +413,7 @@ static void sendConfigPage(const char *msg = "") {
     html += tmp; html += "' style='max-width:150px'></label>";
     html += "</details>";
 
-    // ── Network ───────────────────────────────────────────────
-    html += "<details><summary>Network</summary>";
-    html += "<label>NTP Server<input name='ntp_server' type='text' value='";
-    html += gCfg->ntpServer; html += "'></label>";
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>MQTT</h3>";
-    html += "<div class='row2'>";
-    html += "<label>MQTT Enabled<select name='mqtt_enabled'>"
-            "<option value='1'"; if ( gCfg->mqttEnabled) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->mqttEnabled) html += " selected"; html += ">No</option>"
-            "</select></label>";
-    html += "<label>Encryption<select name='mqtt_encrypt'>"
-            "<option value='1'"; if ( gCfg->mqttEncryption) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->mqttEncryption) html += " selected"; html += ">No</option>"
-            "</select></label></div>";
-    html += "<label>Broker Address<input name='mqtt_server' type='text' value='";
-    html += gCfg->mqttServer; html += "'></label>";
-    html += "<div class='row2'>";
-    html += "<label>Username<input name='mqtt_user' type='text' value='";
-    html += gCfg->mqttUser; html += "'></label>";
-    html += "<label>Password<input name='mqtt_pass' type='text' value='";
-    html += gCfg->mqttPass; html += "'></label></div>";
-    html += "<div class='row2'>";
-    html += "<label>Root Topic<input name='mqtt_root' type='text' value='";
-    html += gCfg->mqttRoot; html += "'></label>";
-    html += "<label>Map Reporting<select name='mqtt_map_rpt'>"
-            "<option value='1'"; if ( gCfg->mqttMapReport) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->mqttMapReport) html += " selected"; html += ">No</option>"
-            "</select></label></div>";
-    html += "</details>";
+    // Network section removed (MQTT not used; strictly LoRa)
 
     // ── Display ───────────────────────────────────────────────
     html += "<details><summary>Display</summary>";
@@ -495,10 +504,78 @@ static void sendConfigPage(const char *msg = "") {
         "<input type='file' name='f' accept='.yaml,.yml'"
         " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
-        "</form>";
+        "</form>"
+        "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
+        "<form method='POST' action='/factory-reset'"
+        " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
+        "<button type='submit' style='background:#c0392b'>"
+        "Factory Reset</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Erases all NVS configuration (node identity, channels, keys) and reboots."
+        " The device will behave as if freshly flashed.</p>";
 
     html += "</body></html>";
     server.send(200, "text/html", html);
+}
+
+// ── Onboarding (WiFi setup) ───────────────────────────────────
+
+static void sendOnboardingPage(const char *err = "") {
+    String html = kHead;
+    html +=
+        "<h2>Camillia-MT Setup</h2>"
+        "<p style='color:#555;font-size:.95em'>"
+        "Enter your WiFi network name and password. The device will connect "
+        "and display its IP address on screen.</p>"
+        "<form method='POST' action='/onboard'>"
+        "<label>WiFi Name (SSID)"
+        "<input name='ssid' type='text' autofocus autocomplete='off' "
+        "placeholder='MyNetwork'></label>"
+        "<label>WiFi Password"
+        "<input name='pass' type='password' autocomplete='off'></label>"
+        "<button type='submit'>Connect</button>";
+    if (err[0]) {
+        html += "<p class='err'>";
+        html += err;
+        html += "</p>";
+    }
+    html += "</form></body></html>";
+    server.send(200, "text/html", html);
+}
+
+static void handleGetOnboard() {
+    sendOnboardingPage();
+}
+
+static void handlePostOnboard() {
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+    ssid.trim();
+    if (ssid.isEmpty()) {
+        sendOnboardingPage("WiFi name cannot be empty.");
+        return;
+    }
+    Preferences prefs;
+    prefs.begin("camillia", false);
+    prefs.putString("wifiSsid", ssid);
+    prefs.putString("wifiPass", pass);
+    prefs.end();
+
+    String html = kHead;
+    html +=
+        "<h2>WiFi Saved</h2>"
+        "<p>The device is rebooting and will connect to <b>";
+    html += ssid;
+    html +=
+        "</b>.</p>"
+        "<p>Once connected, the IP address will appear on the device screen. "
+        "Open that address in your browser to complete setup.</p>"
+        "</body></html>";
+    server.send(200, "text/html", html);
+    server.stop();
+    delay(500);
+    ESP.restart();
 }
 
 // ── Route handlers ────────────────────────────────────────────
@@ -538,8 +615,9 @@ static void handlePostSave() {
     strncpy(gCfg->nodeShort, shrt.c_str(), sizeof(gCfg->nodeShort) - 1);
     gCfg->nodeLong[sizeof(gCfg->nodeLong)   - 1] = '\0';
     gCfg->nodeShort[sizeof(gCfg->nodeShort) - 1] = '\0';
-    String ovr = server.arg("node_id_ovr");
-    gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
+    // Node ID override hidden for end users; preserve existing value
+    // String ovr = server.arg("node_id_ovr");
+    // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
 
     // Device
     gCfg->deviceRole        = (uint8_t)constrain(server.arg("role").toInt(),        0, 10);
@@ -598,14 +676,9 @@ static void handlePostSave() {
     gCfg->btFixedPin = (uint32_t)server.arg("bt_pin").toInt();
 
     // Network
-    strncpy(gCfg->ntpServer,  server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer)  - 1);
-    gCfg->mqttEnabled   = server.arg("mqtt_enabled").toInt() != 0;
-    gCfg->mqttEncryption= server.arg("mqtt_encrypt").toInt() != 0;
-    gCfg->mqttMapReport = server.arg("mqtt_map_rpt").toInt() != 0;
-    strncpy(gCfg->mqttServer, server.arg("mqtt_server").c_str(), sizeof(gCfg->mqttServer) - 1);
-    strncpy(gCfg->mqttUser,   server.arg("mqtt_user").c_str(),   sizeof(gCfg->mqttUser)   - 1);
-    strncpy(gCfg->mqttPass,   server.arg("mqtt_pass").c_str(),   sizeof(gCfg->mqttPass)   - 1);
-    strncpy(gCfg->mqttRoot,   server.arg("mqtt_root").c_str(),   sizeof(gCfg->mqttRoot)   - 1);
+    // NTP server removed from UI; preserve existing value
+    // strncpy(gCfg->ntpServer, server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer) - 1);
+    // MQTT removed; preserve existing values in config struct
 
     // Display
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
@@ -627,7 +700,15 @@ static void handlePostSave() {
     strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
 
     if (gOnSave) gOnSave();
-    sendConfigPage("Saved.");
+
+    server.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
+        "<h2>Saved.</h2>"
+        "<p>The device is rebooting. Reconnect in a few seconds.</p>"
+        "</body></html>");
+    server.stop();
+    delay(500);
+    ESP.restart();
 }
 
 // ── Announce ─────────────────────────────────────────────────
@@ -636,6 +717,38 @@ static void handlePostAnnounce() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     gAnnounceReq = true;
     sendConfigPage("NODEINFO broadcast queued.");
+}
+
+// ── Factory Reset ─────────────────────────────────────────────
+
+static void handlePostFactoryReset() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+
+    // Clear main config namespace (node identity, LoRa params, PKI keys, etc.)
+    {
+        Preferences p;
+        p.begin("camillia", false);
+        p.clear();
+        p.end();
+    }
+    // Clear per-channel key namespaces
+    for (int i = 0; i < 8; i++) {
+        char ns[12];
+        snprintf(ns, sizeof(ns), "mesh_ch%d", i);
+        Preferences p;
+        p.begin(ns, false);
+        p.clear();
+        p.end();
+    }
+
+    server.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
+        "<h2>Factory reset complete.</h2>"
+        "<p>All settings erased. The device is rebooting now.</p>"
+        "</body></html>");
+    server.stop();
+    delay(500);
+    ESP.restart();
 }
 
 // ── Export / Import ───────────────────────────────────────────
@@ -698,9 +811,37 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     gCfg    = cfg;
     gOnSave = onSave;
 
+    // Load saved WiFi credentials
+    Preferences prefs;
+    prefs.begin("camillia", true);
+    String savedSsid = prefs.getString("wifiSsid", "");
+    String savedPass = prefs.getString("wifiPass", "");
+    prefs.end();
+
+    const char *headers[] = {"Cookie"};
+    server.collectHeaders(headers, 1);
+
+    if (savedSsid.isEmpty()) {
+        // ── Onboarding mode: create an AP for WiFi setup ───────
+        gOnboarding = true;
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP("camillia-mt");
+        delay(100);
+        WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+
+        server.on("/",        HTTP_GET,  handleGetOnboard);
+        server.on("/onboard", HTTP_POST, handlePostOnboard);
+        server.begin();
+        running = true;
+        Serial.printf("[web] onboarding AP at http://%s/\n", ipBuf);
+        return true;
+    }
+
+    // ── Normal mode: connect to saved WiFi ────────────────────
+    gOnboarding = false;
     WiFi.mode(WIFI_STA);
-    WiFi.begin(kSSID, kPass);
-    Serial.printf("[web] connecting to \"%s\" ...\n", kSSID);
+    WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    Serial.printf("[web] connecting to \"%s\" ...\n", savedSsid.c_str());
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
@@ -715,9 +856,6 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
 
     WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-    const char *headers[] = {"Cookie"};
-    server.collectHeaders(headers, 1);
-
     server.on("/",        HTTP_GET,  handleGetRoot);
     server.on("/login",   HTTP_GET,  handleGetLogin);
     server.on("/login",   HTTP_POST, handlePostLogin);
@@ -725,7 +863,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
-    server.on("/import",  HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
@@ -738,12 +877,15 @@ void webCfgEnd() {
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    ipBuf[0] = '\0';
-    gCfg     = nullptr;
-    gOnSave  = nullptr;
-    running  = false;
+    ipBuf[0]    = '\0';
+    gCfg        = nullptr;
+    gOnSave     = nullptr;
+    running     = false;
+    gOnboarding = false;
     Serial.println("[web] stopped");
 }
+
+bool webCfgIsOnboarding() { return gOnboarding; }
 
 void webCfgLoop() {
     if (running) server.handleClient();

@@ -15,8 +15,10 @@ struct NodeEntry {
     uint32_t lastHeardMs;
     bool     hasPosition;
     bool     hasTelemetry;
-    bool     hasName;       // true once a real NODEINFO name has been received
+    bool     hasName;         // true once a real NODEINFO name has been received
     int      chanIdx;         // channel last heard on
+    uint8_t  pubKey[32];      // Curve25519 public key from their NODEINFO (field 8)
+    bool     hasPubKey;
 };
 
 class NodeDB {
