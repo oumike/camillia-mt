@@ -80,7 +80,7 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 
 ## Use of AI
 
-Hello!  I've been a developer professionally since about 2001 working on large list of technologies.  I've created this project in my spare time so I could contribute to my favorite new hobby (mesh networking) and try out coding with an AI partner (Claude).  Lots of this code has been touched by AI but as I go through the process I'm reviewing the code.  AI is tool, and like any other tool can be used well or used poorly.  I'm learning as I go and I hope the end product will reflect AI being used well.
+Hello!  I've been a developer professionally since about 2001 working on a large list of technologies.  I've created this project in my spare time so I could contribute to my favorite new hobby (mesh networking) and try out coding with an AI partner (Claude).  Lots of this code has been touched by AI but as I go through the process I'm reviewing the code.  AI is tool, and like any other tool can be used well or used poorly.  I'm learning as I go and I hope the end product will reflect AI being used well.
 
 ## License
 
