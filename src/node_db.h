@@ -23,7 +23,8 @@ struct NodeEntry {
 
 class NodeDB {
 public:
-    void init();
+    void init();          // zeros RAM, then loads persisted nodes from NVS
+    void clearPersisted(); // wipe "nodes" NVS namespace (factory reset)
 
     // Find or create entry for nodeId. Returns pointer (never null).
     NodeEntry *upsert(uint32_t nodeId);
@@ -42,6 +43,8 @@ private:
     NodeEntry _nodes[MAX_NODES];
     int       _count = 0;
     void      _sort();
+    void      _save(uint32_t nodeId);   // write one node blob to NVS
+    void      _saveIds();               // rewrite the nodeId index in NVS
 };
 
 extern NodeDB Nodes;

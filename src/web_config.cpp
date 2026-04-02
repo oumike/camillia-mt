@@ -1,4 +1,5 @@
 #include "web_config.h"
+#include "node_db.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -506,6 +507,13 @@ static void sendConfigPage(const char *msg = "") {
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>"
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
+        "<form method='POST' action='/clear-nodes'"
+        " onsubmit=\"return confirm('This will clear all discovered nodes and reboot. Continue?')\">"
+        "<button type='submit' style='background:#c0392b'>"
+        "Clear Nodes</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "Clears the persisted node database and reboots.</p>"
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -719,6 +727,21 @@ static void handlePostAnnounce() {
     sendConfigPage("NODEINFO broadcast queued.");
 }
 
+// ── Clear Nodes ───────────────────────────────────────────────
+
+static void handlePostClearNodes() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    Nodes.clearPersisted();
+    server.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
+        "<h2>Node database cleared.</h2>"
+        "<p>All discovered nodes erased. The device is rebooting now.</p>"
+        "</body></html>");
+    server.stop();
+    delay(500);
+    ESP.restart();
+}
+
 // ── Factory Reset ─────────────────────────────────────────────
 
 static void handlePostFactoryReset() {
@@ -740,6 +763,8 @@ static void handlePostFactoryReset() {
         p.clear();
         p.end();
     }
+    // Clear persisted node database
+    Nodes.clearPersisted();
 
     server.send(200, "text/html",
         "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
@@ -864,6 +889,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
     server.begin();
     running = true;

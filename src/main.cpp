@@ -141,7 +141,7 @@ static void goToView(int v) {
         if (!dmConvOpen && DMs.count() > 0)
             dmListSel = 1;
     }
-    if (v < MAX_CHANNELS) {
+    if (v < MESH_CHANNELS || v == CHAN_ANN) {
         Channels.setActive(v);
         if (wasFullWidth) dirtyDivider = true;   // restore divider after leaving full-width views
     }
@@ -1681,6 +1681,9 @@ void setup() {
         uint8_t role = cp.getUChar("role", 0xFF);
         if (role != 0xFF) CHANNEL_KEYS[i].role = role;
         cp.end();
+        // Recompute on-air hash from the loaded name + key (compile-time hash may be stale)
+        const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+        CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
     }
     Serial.printf("[camillia-mt] Name: %s (%s)\n", gCfg.nodeLong, gCfg.nodeShort);
 

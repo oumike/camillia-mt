@@ -5,3 +5,4 @@
 .vscode/ipch
 .claude
 builds
+resume-claude.sh

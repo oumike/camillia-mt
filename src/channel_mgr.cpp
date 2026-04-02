@@ -26,7 +26,7 @@ void ChannelMgr::init() {
         }
     }
     addMessage(CHAN_ANN, "", "Announcements channel ready", TFT_DARKGREY, 0);
-    setActive(2);  // TEMP: DevTest for testing
+    setActive(0);
 }
 
 void ChannelMgr::setActive(int idx) {
