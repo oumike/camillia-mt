@@ -127,7 +127,8 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
 
 // ── Protobuf encoder ──────────────────────────────────────────
 // Encode a TEXT_MESSAGE_APP Data message. Returns encoded length.
-size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen);
+// bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
+size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
 // wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).

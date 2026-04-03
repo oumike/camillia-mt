@@ -14,6 +14,8 @@ struct RhinoConfig {
     uint8_t loraSf, loraCr, loraPower, loraHopLimit;
     uint8_t  deviceRole;          // 0=CLIENT … 10=TAK_TRACKER
     uint8_t  rebroadcastMode;     // 0=ALL, 1=ALL_SKIP_DECODING, 2=LOCAL_ONLY, 3=KNOWN_ONLY
+    bool     okToMqtt;            // set Data.bitfield OK_TO_MQTT bit on outgoing packets
+    bool     ignoreMqtt;          // drop received packets with via_mqtt flag set
     uint32_t nodeInfoIntervalS;   // NodeInfo broadcast period (s), default 900
     uint32_t posIntervalS;        // Position broadcast period (s), default 1800
     char     region[12];          // Meshtastic region string, e.g. "US"

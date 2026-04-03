@@ -390,6 +390,14 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraHopLimit);
     html += "<label>Hop Limit (1&ndash;7)<input name='hop' type='number' min='1' max='7' value='";
     html += tmp; html += "'></label></div>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='ok_to_mqtt' value='1'";
+    if (gCfg->okToMqtt) html += " checked";
+    html += "> OK to MQTT &mdash; allow MQTT-connected nodes to forward your packets upstream</label>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='ignore_mqtt' value='1'";
+    if (gCfg->ignoreMqtt) html += " checked";
+    html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
     html += "</details>";
 
     // ── Bluetooth ─────────────────────────────────────────────
@@ -671,6 +679,8 @@ static void handlePostSave() {
         strncpy(gCfg->region, rgn.c_str(), sizeof(gCfg->region) - 1);
 
     // LoRa
+    gCfg->okToMqtt    = (server.arg("ok_to_mqtt")   == "1");
+    gCfg->ignoreMqtt  = (server.arg("ignore_mqtt")  == "1");
     gCfg->loraFreq     = server.arg("freq").toFloat();
     gCfg->loraBw       = server.arg("bw").toFloat();
     gCfg->loraSf       = (uint8_t)constrain(server.arg("sf").toInt(),  7, 12);

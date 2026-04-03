@@ -144,13 +144,14 @@ void ChannelMgr::expireAcks() {
     }
 }
 
-bool ChannelMgr::sendText(uint32_t myNodeId, const char *text) {
+bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
     uint32_t packetId = esp_random() ^ millis();
     uint8_t  proto[256], cipher[256];
 
-    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto));
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[_active];

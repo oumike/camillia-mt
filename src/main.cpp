@@ -50,6 +50,19 @@ static bool dirtyNodes    = true;
 static bool dirtyInput    = true;
 static bool dirtyDivider  = false;
 
+// ── Screen sleep state ────────────────────────────────────────
+static bool     screenAsleep   = false;
+static uint32_t lastActivityMs = 0;
+
+static void wakeScreen() {
+    lcd.setBrightness(128);
+    screenAsleep   = false;
+    lastActivityMs = millis();
+    // Force full redraw so nothing stale is visible after the backlight returns
+    dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
+    Serial.printf("[screen] woke\n");
+}
+
 // ── Input state ───────────────────────────────────────────────
 static char   inputBuf[MAX_INPUT_LEN + 1] = {0};
 static int    inputLen  = 0;
@@ -151,7 +164,7 @@ static void goToView(int v) {
 // ── Splash screen ─────────────────────────────────────────────
 static void drawSplash() {
     const uint16_t BG      = TFT_BLACK;
-    const uint16_t ACCENT  = TFT_GREEN;
+    const uint16_t ACCENT  = 0x0618;  // COL_TEAL (#00C0C0)
     const uint16_t TITLE   = TFT_CYAN;
     const uint16_t SUB     = TFT_WHITE;
     const uint16_t DIM     = 0x7BEF;  // mid-grey
@@ -177,7 +190,7 @@ static void drawSplash() {
     lcd.print(appName);
 
     // Subtitle
-    lcd.setTextSize(2);
+    lcd.setTextSize(1);
     lcd.setTextColor(SUB, BG);
     const char *sub = "Meshtastic Client";
     tw = strlen(sub) * 6 * 2;
@@ -220,7 +233,8 @@ static void drawSplash() {
 #define COL_TAB_IDLE    0x7BEF   // mid-grey
 #define COL_DIVIDER     0x39E7   // dark grey
 #define COL_INPUT_BG    0x0010   // very dark blue
-#define COL_CURSOR      TFT_GREEN
+#define COL_TEAL        0x0618   // #00C0C0 — active chat / incoming messages
+#define COL_CURSOR      COL_TEAL
 
 // ── Battery reading ───────────────────────────────────────────
 // T-Deck routes VBAT through a 1:1 divider to BATT_ADC_PIN (GPIO 4).
@@ -513,7 +527,7 @@ static void drawGps() {
         pr(COL_TAB_IDLE, "GPS: DISABLED");
     } else if (fix) {
         snprintf(buf, sizeof(buf), "GPS: FIX  sats:%d", sats);
-        pr(TFT_GREEN, buf);
+        pr(COL_TEAL, buf);
     } else {
         snprintf(buf, sizeof(buf), "GPS: searching  sats:%d", sats);
         pr(TFT_YELLOW, buf);
@@ -680,7 +694,7 @@ static void drawDmPicker() {
 
         bool     sel = (vi == dmPickerSel);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
-        uint16_t col = sel ? TFT_WHITE : TFT_GREEN;
+        uint16_t col = sel ? TFT_WHITE : COL_TEAL;
 
         lcd.fillRect(0, y, LCD_W, LINE_H, bg);
 
@@ -763,7 +777,7 @@ static void drawSettings() {
 
     // ── Status line (transient feedback) ─────────────────────
     if (settingsStatus[0]) {
-        lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+        lcd.setTextColor(COL_TEAL, TFT_BLACK);
         lcd.setCursor(2, CHAT_Y + r * LINE_H);
         lcd.print(settingsStatus);
     }
@@ -908,7 +922,7 @@ static void drawInput() {
     }
     lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_BG);
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_GREEN, COL_INPUT_BG);
+    lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
     lcd.setCursor(0, INPUT_Y + 2);
     lcd.print("> ");
 
@@ -956,6 +970,7 @@ static void sendRoutingAck(const MeshPacket &pkt) {
 static void handleRx(const MeshPacket &pkt) {
     if (isDuplicate(pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
+    if (gCfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return;  // bit 4 = via_mqtt
 
     bool isBcast = (pkt.hdr.to == 0xFFFFFFFF);
 
@@ -1018,7 +1033,7 @@ static void handleRx(const MeshPacket &pkt) {
             // Unicast DM addressed to us
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
-            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, TFT_GREEN,
+            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, COL_TEAL,
                            /*markUnread=*/!viewing, pkt.chanIdx);
             // If we're on the DM list (not inside a conv), jump straight into this one
             if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
@@ -1031,7 +1046,7 @@ static void handleRx(const MeshPacket &pkt) {
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
-            Channels.addMessage(pkt.chanIdx, prefix, tm.text, TFT_GREEN);
+            Channels.addMessage(pkt.chanIdx, prefix, tm.text, COL_TEAL);
             dirtyChat = dirtyTabs = true;
         }
         break;
@@ -1250,7 +1265,7 @@ static void handleKey(char k) {
         } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
                    && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
-            if (!Channels.sendText(myNodeId, inputBuf)) {
+            if (!Channels.sendText(myNodeId, inputBuf, gCfg.okToMqtt)) {
                 Channels.addMessage(Channels.activeIdx(), "",
                     "! TX failed", TFT_RED, 0);
                 dirtyChat = true;
@@ -1482,10 +1497,13 @@ static void onWebCfgSaved() {
     p.putInt("alt",          gCfg.alt);
     p.putUChar("devRole",     gCfg.deviceRole);
     p.putUChar("rebroadcast", gCfg.rebroadcastMode);
+    p.putBool("okToMqtt",    gCfg.okToMqtt);
+    p.putBool("ignoreMqtt",  gCfg.ignoreMqtt);
     p.putULong("nodeInfoIntv",gCfg.nodeInfoIntervalS);
     p.putULong("posIntv",     gCfg.posIntervalS);
     p.putString("region",     gCfg.region);
     p.putString("tzDef",       gCfg.tzDef);
+    Serial.printf("[cfg] saving screenOnSecs=%lu\n", (unsigned long)gCfg.screenOnSecs);
     p.putULong("screenOnSecs", gCfg.screenOnSecs);
     p.putUChar("dispUnits",    gCfg.displayUnits);
     p.putBool("compassNorth",  gCfg.compassNorthTop);
@@ -1493,14 +1511,15 @@ static void onWebCfgSaved() {
     p.putBool("btEnabled",     gCfg.btEnabled);
     p.putUChar("btMode",       gCfg.btMode);
     p.putULong("btFixedPin",   gCfg.btFixedPin);
-    p.putString("ntpServer",   gCfg.ntpServer);
-    p.putBool("mqttEnabled",   gCfg.mqttEnabled);
-    p.putString("mqttServer",  gCfg.mqttServer);
-    p.putString("mqttUser",    gCfg.mqttUser);
-    p.putString("mqttPass",    gCfg.mqttPass);
-    p.putString("mqttRoot",    gCfg.mqttRoot);
-    p.putBool("mqttEncrypt",   gCfg.mqttEncryption);
-    p.putBool("mqttMapRpt",    gCfg.mqttMapReport);
+    // Remove defunct MQTT/NTP keys to reclaim NVS space (MQTT removed from this app)
+    p.remove("ntpServer");
+    p.remove("mqttEnabled");
+    p.remove("mqttServer");
+    p.remove("mqttUser");
+    p.remove("mqttPass");
+    p.remove("mqttRoot");
+    p.remove("mqttEncrypt");
+    p.remove("mqttMapRpt");
     p.putBool("isPwrSaving",   gCfg.isPowerSaving);
     p.putULong("lsSecs",       gCfg.lsSecs);
     p.putULong("minWakeSecs",  gCfg.minWakeSecs);
@@ -1627,26 +1646,24 @@ void setup() {
         i = prefs.getInt("alt",  -1); if (i >= 0) gCfg.alt = (int32_t)i;
         uint8_t ro = prefs.getUChar("devRole",     0xFF); if (ro != 0xFF) gCfg.deviceRole     = ro;
         ro          = prefs.getUChar("rebroadcast", 0xFF); if (ro != 0xFF) gCfg.rebroadcastMode = ro;
+        if (prefs.isKey("okToMqtt"))   gCfg.okToMqtt   = prefs.getBool("okToMqtt");
+        if (prefs.isKey("ignoreMqtt")) gCfg.ignoreMqtt = prefs.getBool("ignoreMqtt");
         uint32_t ul;
         ul = prefs.getULong("nodeInfoIntv", 0); if (ul) gCfg.nodeInfoIntervalS = ul;
         ul = prefs.getULong("posIntv",      0); if (ul) gCfg.posIntervalS      = ul;
         String rgn = prefs.getString("region", ""); if (rgn.length()) strncpy(gCfg.region, rgn.c_str(), sizeof(gCfg.region)-1);
         String tz = prefs.getString("tzDef", ""); if (tz.length()) strncpy(gCfg.tzDef, tz.c_str(), sizeof(gCfg.tzDef)-1);
-        ul = prefs.getULong("screenOnSecs", 0); if (ul) gCfg.screenOnSecs = ul;
+        ul = prefs.getULong("screenOnSecs", 0);
+        Serial.printf("[cfg] loaded screenOnSecs=%lu (isKey=%d)\n",
+                      (unsigned long)ul, prefs.isKey("screenOnSecs") ? 1 : 0);
+        if (ul) gCfg.screenOnSecs = ul;
         ro = prefs.getUChar("dispUnits", 0xFF); if (ro != 0xFF) gCfg.displayUnits = ro;
         if (prefs.isKey("compassNorth")) gCfg.compassNorthTop = prefs.getBool("compassNorth");
         if (prefs.isKey("flipScreen"))   gCfg.flipScreen      = prefs.getBool("flipScreen");
         if (prefs.isKey("btEnabled"))    gCfg.btEnabled       = prefs.getBool("btEnabled");
         ro = prefs.getUChar("btMode", 0xFF); if (ro != 0xFF) gCfg.btMode = ro;
         ul = prefs.getULong("btFixedPin", 0); if (ul) gCfg.btFixedPin = ul;
-        String ns2 = prefs.getString("ntpServer",  ""); if (ns2.length()) strncpy(gCfg.ntpServer,  ns2.c_str(), sizeof(gCfg.ntpServer)-1);
-        if (prefs.isKey("mqttEnabled")) gCfg.mqttEnabled   = prefs.getBool("mqttEnabled");
-        String ms = prefs.getString("mqttServer", ""); if (ms.length()) strncpy(gCfg.mqttServer, ms.c_str(), sizeof(gCfg.mqttServer)-1);
-        String mu = prefs.getString("mqttUser",   ""); if (mu.length()) strncpy(gCfg.mqttUser,   mu.c_str(), sizeof(gCfg.mqttUser)-1);
-        String mp = prefs.getString("mqttPass",   ""); if (mp.length()) strncpy(gCfg.mqttPass,   mp.c_str(), sizeof(gCfg.mqttPass)-1);
-        String mr = prefs.getString("mqttRoot",   ""); if (mr.length()) strncpy(gCfg.mqttRoot,   mr.c_str(), sizeof(gCfg.mqttRoot)-1);
-        if (prefs.isKey("mqttEncrypt")) gCfg.mqttEncryption = prefs.getBool("mqttEncrypt");
-        if (prefs.isKey("mqttMapRpt"))  gCfg.mqttMapReport  = prefs.getBool("mqttMapRpt");
+        // MQTT/NTP keys removed — no longer loaded
         if (prefs.isKey("isPwrSaving")) gCfg.isPowerSaving  = prefs.getBool("isPwrSaving");
         ul = prefs.getULong("lsSecs",       0); if (ul) gCfg.lsSecs       = ul;
         ul = prefs.getULong("minWakeSecs",  0); if (ul) gCfg.minWakeSecs  = ul;
@@ -1698,6 +1715,7 @@ void setup() {
     lcd.setBrightness(128);
     lcd.fillScreen(TFT_BLACK);
     lcd.setTextSize(1);
+    lastActivityMs = millis();
 
     // Splash
     drawSplash();
@@ -1785,15 +1803,27 @@ void loop() {
     // 1c. Poll GPS
     gpsLoop();
 
+    uint32_t now = millis();
+
     // 2. Poll keyboard
     char k = kb.read();
-    if (k != KEY_NONE) handleKey(k);
+    if (k != KEY_NONE) {
+        if (screenAsleep) {
+            wakeScreen();   // any key wakes the screen; key is consumed (not passed through)
+        } else {
+            // Only real keys and roller click count as activity — not trackball scroll
+            // events which are ISR-driven and can fire spuriously.
+            bool isScroll = (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN ||
+                             k == KEY_SCROLL_UP || k == KEY_SCROLL_DN);
+            if (!isScroll) lastActivityMs = now;
+            handleKey(k);
+        }
+    }
 
     // 3. ACK expiry
     Channels.expireAcks();
 
     // 4. Cursor blink
-    uint32_t now = millis();
     if (now - lastBlink > CURSOR_BLINK_MS) {
         cursorOn  = !cursorOn;
         lastBlink = now;
@@ -1832,7 +1862,17 @@ void loop() {
         dirtyStatus  = true;
     }
 
-    // 7. Redraw dirty zones
+    // 6d. Screen timeout
+    if (!screenAsleep && gCfg.screenOnSecs > 0 &&
+        now - lastActivityMs > (uint32_t)gCfg.screenOnSecs * 1000UL) {
+        Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
+                      (now - lastActivityMs) / 1000UL, gCfg.screenOnSecs);
+        lcd.setBrightness(0);
+        screenAsleep = true;
+    }
+
+    // 7. Redraw dirty zones (skip while screen is off)
+    if (screenAsleep) return;
     if (dirtyStatus)  drawStatus();
     if (dirtyTabs)    drawTabs();
 

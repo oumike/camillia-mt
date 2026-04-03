@@ -79,6 +79,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.loraHopLimit = MESH_HOP_LIMIT;
     cfg.deviceRole        = MY_DEVICE_ROLE;
     cfg.rebroadcastMode   = MY_REBROADCAST;
+    cfg.okToMqtt          = true;   // allow MQTT nodes to forward our packets by default
+    cfg.ignoreMqtt        = false;  // process all packets regardless of via_mqtt flag
     cfg.nodeInfoIntervalS = MY_NODEINFO_INTV;
     cfg.posIntervalS      = MY_POS_INTV;
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);

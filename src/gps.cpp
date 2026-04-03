@@ -20,8 +20,25 @@ void gpsEnd() {
 
 void gpsLoop() {
     if (!_enabled) return;
-    while (_serial.available())
-        _gps.encode((char)_serial.read());
+    static uint32_t _lastDbg    = 0;
+    static uint32_t _totalBytes = 0;
+    while (_serial.available()) {
+        char c = (char)_serial.read();
+        _gps.encode(c);
+        _totalBytes++;
+    }
+    // Every 5 s print a one-line summary so we can confirm data flow
+    uint32_t now = millis();
+    if (now - _lastDbg >= 5000) {
+        _lastDbg = now;
+        Serial.printf("[gps] bytes=%lu  sats=%d  fix=%d  chars=%lu  sentences=%lu  failed=%lu\n",
+                      _totalBytes,
+                      _gps.satellites.isValid() ? (int)_gps.satellites.value() : -1,
+                      (int)_gps.location.isValid(),
+                      _gps.charsProcessed(),
+                      _gps.sentencesWithFix(),
+                      _gps.failedChecksum());
+    }
 }
 
 void gpsSetEnabled(bool en) {

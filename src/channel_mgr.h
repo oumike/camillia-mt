@@ -51,7 +51,7 @@ public:
     const DisplayLine *getLine(int chanIdx, int row) const;
 
     // Build and transmit a text message on the active channel.
-    bool sendText(uint32_t myNodeId, const char *text);
+    bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false);
 
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).

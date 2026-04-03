@@ -124,7 +124,8 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     snprintf(e->shortName, sizeof(e->shortName), "%04X", nodeId & 0xFFFF);
     snprintf(e->longName,  sizeof(e->longName),  "!%08x", nodeId);
 
-    _saveIds();  // add new / remove evicted from the index
+    _saveIds();   // add new / remove evicted from the index
+    _save(nodeId); // write initial blob so load() never finds an orphaned ID
     return e;
 }
 

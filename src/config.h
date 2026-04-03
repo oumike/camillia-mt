@@ -54,7 +54,7 @@
 #define HAS_GPS         1
 #define GPS_RX          44    // ESP32 RX ← GPS TX
 #define GPS_TX          43    // ESP32 TX → GPS RX
-#define GPS_BAUD        9600
+#define GPS_BAUD        38400
 
 #define MY_GPS_ENABLED  1     // runtime default (can be toggled via web config)
 
@@ -71,7 +71,7 @@
 #define MY_REGION        "US"
 
 // ── Display defaults ──────────────────────────────────────────
-#define MY_SCREEN_ON_SECS   300    // 5 min
+#define MY_SCREEN_ON_SECS   30     // 30 s
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
