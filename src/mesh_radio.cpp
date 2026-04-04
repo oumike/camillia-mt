@@ -75,6 +75,10 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     const uint8_t *cipher = buf + sizeof(MeshHdr);
 
     if (payloadLen > 0) {
+        // Preserve raw cipher for deferred PKI decrypt in handleRx
+        pkt.rawLen = (payloadLen <= sizeof(pkt.rawCipher)) ? payloadLen : 0;
+        if (pkt.rawLen) memcpy(pkt.rawCipher, cipher, payloadLen);
+
         uint8_t plain[256];
         pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, payloadLen);
         pkt.decrypted = (pkt.chanIdx >= 0);

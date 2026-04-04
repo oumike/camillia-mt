@@ -19,6 +19,7 @@ struct NodeEntry {
     int      chanIdx;         // channel last heard on
     uint8_t  pubKey[32];      // Curve25519 public key from their NODEINFO (field 8)
     bool     hasPubKey;
+    uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
 };
 
 class NodeDB {

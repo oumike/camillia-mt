@@ -26,6 +26,7 @@ static RhinoConfig gCfg;
 // Curve25519 key pair for PKI-encrypted DMs (declared extern in mesh_proto.h)
 uint8_t myPubKey[32] = {};
 uint8_t myPrivKey[32] = {};
+uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config load
 
 // ── View state ────────────────────────────────────────────────
 #define VIEW_GPS      MAX_CHANNELS          // index 9 = GPS/compass page
@@ -105,7 +106,6 @@ static uint32_t nodeDetailId    = 0;
 
 // ── View navigation helpers ───────────────────────────────────
 static bool isViewNavigable(int v) {
-    if (v == CHAN_DM) return false;
     if (v >= 0 && v < MESH_CHANNELS)
         return CHANNEL_KEYS[v].name[0] != '\0';
     return true;  // CHAN_ANN, VIEW_GPS, VIEW_SETTINGS always reachable
@@ -129,7 +129,6 @@ static int prevView(int from) {
 
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
-    if (v == CHAN_DM) v = CHAN_ANN;   // DM panel temporarily disabled
     bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS
                          || activeView == CHAN_DM);
     activeView = v;
@@ -171,38 +170,40 @@ static void drawSplash() {
 
     lcd.fillScreen(BG);
 
-    // Top accent bar
-    lcd.fillRect(0, 0, LCD_W, 4, ACCENT);
+    // Border frame — thick top/bottom bars, thin side lines
+    lcd.fillRect(0,         0,         LCD_W, 5,          ACCENT);
+    lcd.fillRect(0,         LCD_H - 5, LCD_W, 5,          ACCENT);
+    lcd.fillRect(0,         5,         2,     LCD_H - 10, ACCENT);
+    lcd.fillRect(LCD_W - 2, 5,         2,     LCD_H - 10, ACCENT);
 
-    // Bottom accent bar
-    lcd.fillRect(0, LCD_H - 4, LCD_W, 4, ACCENT);
-
-    // Side accent lines
-    lcd.fillRect(0, 4, 3, LCD_H - 8, ACCENT);
-    lcd.fillRect(LCD_W - 3, 4, 3, LCD_H - 8, ACCENT);
-
-    // App name — large cyan, centred
+    // App name — large cyan, centred  (textSize 4 → 24×32 px per char)
     lcd.setTextSize(4);
     lcd.setTextColor(TITLE, BG);
     const char *appName = "Camillia MT";
-    int tw = strlen(appName) * 6 * 4;
-    lcd.setCursor((LCD_W - tw) / 2, 60);
+    int tw = strlen(appName) * 6 * 4;  // 6px base × scale
+    lcd.setCursor((LCD_W - tw) / 2, 52);
     lcd.print(appName);
 
-    // Subtitle
-    lcd.setTextSize(1);
+    // Teal rule under title
+    lcd.fillRect(20, 98, LCD_W - 40, 2, ACCENT);
+
+    // Subtitle — size 2 (12×16 px per char), properly centred
+    lcd.setTextSize(2);
     lcd.setTextColor(SUB, BG);
     const char *sub = "Meshtastic Client";
     tw = strlen(sub) * 6 * 2;
-    lcd.setCursor((LCD_W - tw) / 2, 112);
+    lcd.setCursor((LCD_W - tw) / 2, 108);
     lcd.print(sub);
 
     const char *sub2 = "for T-Deck";
     tw = strlen(sub2) * 6 * 2;
-    lcd.setCursor((LCD_W - tw) / 2, 132);
+    lcd.setCursor((LCD_W - tw) / 2, 126);
     lcd.print(sub2);
 
-    // Long name
+    // Thin teal rule above node info
+    lcd.fillRect(40, 152, LCD_W - 80, 1, DIM);
+
+    // Node long name — size 1
     lcd.setTextSize(1);
     lcd.setTextColor(SUB, BG);
     tw = strlen(gCfg.nodeLong) * 6;
@@ -217,10 +218,12 @@ static void drawSplash() {
     lcd.setCursor((LCD_W - tw) / 2, 171);
     lcd.print(idBuf);
 
-    // Decorative dots row
-    lcd.setTextColor(ACCENT, BG);
-    lcd.setCursor((LCD_W - 11*6) / 2, 190);
-    lcd.print("* * * * * *");
+    // Version — bottom centre, dim
+    const char *ver = "v1.0";
+    tw = strlen(ver) * 6;
+    lcd.setTextColor(DIM, BG);
+    lcd.setCursor((LCD_W - tw) / 2, 210);
+    lcd.print(ver);
 
     delay(2000);
     lcd.fillScreen(BG);
@@ -397,24 +400,19 @@ static void drawChat() {
         int y = CHAT_Y + row * LINE_H;
         uint16_t col = dl->color;
 
-        // ACK indicator prefix (overrides first char of text with symbol)
-        char display[MSG_CHARS + 2];
-        strncpy(display, dl->text, MSG_CHARS);
-        display[MSG_CHARS] = '\0';
-
-        if (dl->packetId && dl->ack == DisplayLine::ACKED) {
-            int len = strlen(display);
-            if (len < MSG_CHARS) { display[len] = '+'; display[len + 1] = '\0'; }
-            else                 { display[len - 1] = '+'; }
-        } else if (dl->packetId && dl->ack == DisplayLine::NAKED) {
-            int len = strlen(display);
-            if (len < MSG_CHARS) { display[len] = '!'; display[len + 1] = '\0'; }
-            else                 { display[len - 1] = '!'; }
+        // Override color for sent messages based on ACK state
+        if (dl->packetId) {
+            switch (dl->ack) {
+                case DisplayLine::ACKED:       col = TFT_GREEN;  break;
+                case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; break;
+                case DisplayLine::NAKED:       col = TFT_RED;    break;
+                default: break;  // NONE / PENDING keep original color
+            }
         }
 
         lcd.setTextColor(col, TFT_BLACK);
         lcd.setCursor(0, y);
-        lcd.print(display);
+        lcd.print(dl->text);
     }
     dirtyChat = false;
 }
@@ -943,7 +941,7 @@ static void drawInput() {
 static void sendRoutingAck(const MeshPacket &pkt) {
     if (pkt.chanIdx < 0 || pkt.chanIdx >= MAX_CHANNELS) return;
 
-    uint8_t proto[32], cipher[32];
+    uint8_t proto[48], cipher[48];
     size_t protoLen = encodeRouting(pkt.hdr.id, myNodeId, proto, sizeof(proto));
     if (protoLen == 0) return;
 
@@ -951,23 +949,31 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     uint32_t ackId = esp_random() ^ millis();
     if (!encryptPayload(ackId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
 
-    uint8_t frame[sizeof(MeshHdr) + 32];
+    // Calculate hop limit matching Plai/Meshtastic convention:
+    // hop_start == hop_limit (fresh packet) so receiver sees "Delivered" not "Acknowledged by another node"
+    uint8_t origHopStart = (pkt.hdr.flags >> 5) & 0x07;
+    uint8_t origHopLimit = pkt.hdr.flags & 0x07;
+    uint8_t hopsUsed = (origHopStart >= origHopLimit) ? (origHopStart - origHopLimit) : MESH_HOP_LIMIT;
+    uint8_t ackHops  = ((hopsUsed + 2) <= MESH_HOP_LIMIT) ? (hopsUsed + 2) : MESH_HOP_LIMIT;
+    if (origHopStart == 0) ackHops = MESH_HOP_LIMIT;
+
+    uint8_t frame[sizeof(MeshHdr) + 48];
     MeshHdr hdr = {};
     hdr.to      = pkt.hdr.from;
     hdr.from    = myNodeId;
     hdr.id      = ackId;
     hdr.channel = ck.hash;
-    // hop_limit=0: direct-neighbor ACK — Meshtastic shows "Delivered" (not "Acknowledged by another node")
-    hdr.flags   = 0;
+    hdr.flags   = (ackHops & 0x07) | ((ackHops & 0x07) << 5);  // hop_limit = hop_start
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     Radio.transmit(frame, sizeof(hdr) + protoLen);
-    Serial.printf("[ack] routing ACK → !%08X for pkt 0x%08X\n", pkt.hdr.from, pkt.hdr.id);
+    Serial.printf("[ack] routing ACK → !%08X for pkt 0x%08X hops=%u\n",
+                  pkt.hdr.from, pkt.hdr.id, ackHops);
 }
 
 // ── Handle received packet ────────────────────────────────────
-static void handleRx(const MeshPacket &pkt) {
+static void handleRx(MeshPacket pkt) {
     if (isDuplicate(pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
     if (gCfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return;  // bit 4 = via_mqtt
@@ -1002,6 +1008,34 @@ static void handleRx(const MeshPacket &pkt) {
     // Update node DB from every received packet (before portnum switch so hasName is current)
     Nodes.updateFromPacket(pkt);
     dirtyNodes = true;
+
+    // For unicast PKI DMs (channel=0) that failed channel-key decryption, try PKI decrypt.
+    // This requires having previously received a NODEINFO with the sender's public key.
+    if (!pkt.decrypted && pkt.hdr.to == myNodeId
+            && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
+        NodeEntry *snd = Nodes.find(pkt.hdr.from);
+        if (snd && snd->hasPubKey) {
+            uint8_t pkiPlain[256];
+            size_t  pkiLen = 0;
+            if (decryptPki(pkt.hdr, pkt.rawCipher, pkt.rawLen, snd->pubKey, pkiPlain, pkiLen)) {
+                pkt.decrypted = true;
+                pkt.chanIdx   = 0;   // ACKs sent on primary channel
+                const uint8_t *payPtr = nullptr; size_t payLen = 0;
+                decodeData(pkiPlain, pkiLen, pkt.portnum, payPtr, payLen,
+                           pkt.requestId, pkt.wantResponse);
+                if (payPtr && payLen <= sizeof(pkt.payload)) {
+                    memcpy(pkt.payload, payPtr, payLen);
+                    pkt.payloadLen = payLen;
+                } else {
+                    pkt.payloadLen = 0;
+                }
+                // Send routing ACK (the early-ACK path at top missed this since it wasn't decrypted yet)
+                if ((pkt.hdr.flags & 0x08) && pkt.portnum != ROUTING_APP)
+                    sendRoutingAck(pkt);
+                Serial.printf("│ PKI decrypt OK  portnum=%lu\n", (unsigned long)pkt.portnum);
+            }
+        }
+    }
 
     if (!pkt.decrypted) {
         Serial.printf("│ (encrypted, unknown channel)\n");
@@ -1113,8 +1147,8 @@ static void handleRx(const MeshPacket &pkt) {
             }
             bool isAck = (errorReason == 0);
             if (isAck) {
-                Channels.setAckState(pkt.requestId, DisplayLine::ACKED);
-                Serial.printf("│ ACK for 0x%08X\n", pkt.requestId);
+                Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
+                Serial.printf("│ ACK for 0x%08X from !%08X\n", pkt.requestId, pkt.hdr.from);
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
                 Serial.printf("│ NAK for 0x%08X err=%lu\n", pkt.requestId, (unsigned long)errorReason);
@@ -1138,15 +1172,26 @@ static void handleRx(const MeshPacket &pkt) {
         break;
     }
 
-    // Proactively introduce ourselves to nodes we haven't identified yet.
-    // Routing ACK was already sent at the top of handleRx, so NODEINFO TX here
-    // does not delay it.
+    // Introduce ourselves to this node if:
+    //   - we've never heard from them before (!known)
+    //   - they're new and unnamed (!known->hasName)
+    //   - we haven't sent them our info in the last nodeInfoIntervalS seconds
+    //     (covers nodes that missed our boot broadcast or were out of range)
+    // Routing ACK was already sent earlier in handleRx, so this TX doesn't delay it.
     // updateFromPacket above already ran, so hasName=true if this was a NODEINFO packet.
     {
         NodeEntry *known = Nodes.find(pkt.hdr.from);
-        if (!known || !known->hasName) {
-            Serial.printf("[nodeinfo] new node !%08X — sending our info\n", pkt.hdr.from);
-            Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
+        uint32_t  elapsed = known ? (millis() - known->lastSentInfoMs) : UINT32_MAX;
+        bool needGreet = !known || !known->hasName ||
+                         elapsed > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL;
+        if (needGreet) {
+            Serial.printf("[nodeinfo] greeting !%08X (%s, last sent %lums ago)\n",
+                          pkt.hdr.from,
+                          (known && known->hasName) ? known->shortName : "new",
+                          elapsed == UINT32_MAX ? 0UL : (unsigned long)elapsed);
+            if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from)) {
+                if (known) known->lastSentInfoMs = millis();
+            }
         }
     }
 
@@ -1582,9 +1627,15 @@ void setup() {
     {
         Preferences prefs;
         prefs.begin("camillia", false);
-        bool haveKeys = (prefs.getBytes("privKey", myPrivKey, 32) == 32) &&
+        // pkiVer==2 means keys are stored in little-endian (wire format).
+        // Any other value means old big-endian keys — clear and regenerate.
+        bool haveKeys = (prefs.getInt("pkiVer", 0) == 2) &&
+                        (prefs.getBytes("privKey", myPrivKey, 32) == 32) &&
                         (prefs.getBytes("pubKey",  myPubKey,  32) == 32);
         if (!haveKeys) {
+            prefs.remove("privKey");
+            prefs.remove("pubKey");
+
             mbedtls_ecp_group grp;
             mbedtls_mpi      d;
             mbedtls_ecp_point Q;
@@ -1596,13 +1647,20 @@ void setup() {
                 esp_fill_random(buf, len); return 0;
             };
 
+            uint8_t privBuf[32], pubBuf[32];
             if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
                 mbedtls_ecp_gen_keypair(&grp, &d, &Q, rng, nullptr) == 0 &&
-                mbedtls_mpi_write_binary(&d, myPrivKey, 32) == 0 &&
-                mbedtls_mpi_write_binary(&Q.X, myPubKey, 32) == 0) {
+                mbedtls_mpi_write_binary(&d, privBuf, 32) == 0 &&
+                mbedtls_mpi_write_binary(&Q.X, pubBuf, 32) == 0) {
+                // Store as little-endian (Curve25519 wire format)
+                for (int i = 0; i < 32; i++) {
+                    myPrivKey[i] = privBuf[31-i];
+                    myPubKey[i]  = pubBuf[31-i];
+                }
                 prefs.putBytes("privKey", myPrivKey, 32);
                 prefs.putBytes("pubKey",  myPubKey,  32);
-                Serial.printf("[pki] generated new Curve25519 key pair\n");
+                prefs.putInt("pkiVer", 2);
+                Serial.printf("[pki] generated new Curve25519 key pair (LE)\n");
             } else {
                 Serial.printf("[pki] WARNING: key generation failed\n");
             }
@@ -1682,6 +1740,10 @@ void setup() {
         myNodeId = gCfg.nodeIdOverride;
         Serial.printf("[camillia-mt] Node ID overridden to: !%08x\n", myNodeId);
     }
+    // Expose device role globally so encodeNodeInfo can include it in NODEINFO packets
+    myDeviceRole = gCfg.deviceRole;
+    Serial.printf("[camillia-mt] Node !%08x  long='%s'  short='%s'  role=%u\n",
+                  myNodeId, gCfg.nodeLong, gCfg.nodeShort, gCfg.deviceRole);
     // Load channel config from NVS
     for (int i = 0; i < MESH_CHANNELS; i++) {
         char ns[12]; snprintf(ns, sizeof(ns), "mesh_ch%d", i);

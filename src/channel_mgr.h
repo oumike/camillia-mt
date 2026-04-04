@@ -7,7 +7,7 @@ struct DisplayLine {
     char     text[MSG_CHARS + 1];
     uint16_t color;
     uint32_t packetId;    // 0 = not a sent message
-    enum AckState : uint8_t { NONE, PENDING, ACKED, NAKED } ack;
+    enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED } ack;
 };
 
 struct Channel {
@@ -24,6 +24,7 @@ struct PendingAck {
     uint32_t sentMs;
     int      chanIdx;
     int      lineIdx;         // which line in channel buffer holds this message
+    uint32_t destNodeId;      // intended recipient (0xFFFFFFFF = broadcast)
     bool     active;
 };
 
@@ -44,6 +45,8 @@ public:
                    uint16_t color, uint32_t packetId = 0);
 
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
+    // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
+    void setAckStateFrom(uint32_t packetId, uint32_t fromNodeId);
     void expireAcks();   // call from loop() to timeout pending ACKs
 
     // Retrieve a display line for rendering (0=oldest visible at current scroll).

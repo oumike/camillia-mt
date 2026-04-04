@@ -136,6 +136,17 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
     }
 }
 
+void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
+    for (int i = 0; i < MAX_PENDING_ACK; i++) {
+        if (_pending[i].active && _pending[i].packetId == packetId) {
+            bool isDirect = (_pending[i].destNodeId == 0xFFFFFFFF) ||
+                            (_pending[i].destNodeId == fromNodeId);
+            setAckState(packetId, isDirect ? DisplayLine::ACKED : DisplayLine::ACKED_RELAY);
+            return;
+        }
+    }
+}
+
 void ChannelMgr::expireAcks() {
     uint32_t now = millis();
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
@@ -177,7 +188,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (!_pending[i].active) {
-            _pending[i] = { packetId, millis(), _active, _chans[_active].count, true };
+            _pending[i] = { packetId, millis(), _active, _chans[_active].count, 0xFFFFFFFF, true };
             break;
         }
     }

@@ -52,7 +52,9 @@ struct MeshPacket {
     uint32_t requestId;       // non-zero for ROUTING_APP ACK/NAK
     bool     wantResponse;    // Data.want_response: requester wants us to send our NODEINFO back
     bool     decrypted;
-    int      chanIdx;         // which channel key was used (-1 = none)
+    int      chanIdx;         // which channel key was used (-1 = none, -2 = PKI)
+    uint8_t  rawCipher[240];  // preserved raw cipher for deferred PKI decrypt in handleRx
+    size_t   rawLen;          // 0 if not stored
 };
 
 // ── Decoded app-layer payloads ────────────────────────────────
@@ -106,6 +108,10 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
 extern uint8_t myPubKey[32];
 extern uint8_t myPrivKey[32];
 
+// Device role (Config.DeviceConfig.Role) — 0=CLIENT, 2=ROUTER, etc.
+// Set from gCfg.deviceRole in setup() after config is loaded.
+extern uint8_t myDeviceRole;
+
 // ── Encryption / decryption ───────────────────────────────────
 // Try all known channel keys; returns channel index or -1.
 int  decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
@@ -124,6 +130,13 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
                 const uint8_t *recipientPubKey,
                 const uint8_t *plain, size_t plainLen,
                 uint8_t *out);
+
+// PKI-decrypt a received packet (hdr.channel == 0).
+// cipher: raw payload bytes (ciphertext + tag(8) + extraNonce(4))
+// cipherLen must be > 12; plain must be at least cipherLen-12 bytes.
+// plainLen is set to cipherLen-12 on success.
+bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
+                const uint8_t *senderPubKey, uint8_t *plain, size_t &plainLen);
 
 // ── Protobuf encoder ──────────────────────────────────────────
 // Encode a TEXT_MESSAGE_APP Data message. Returns encoded length.

@@ -66,17 +66,23 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 - [x] Web-based configuration UI (Wi-Fi AP + HTTP server)
 - [x] YAML config import/export via microSD
 - [x] Pretty IRC like interface
+- [x] GPS
+- [x] Consistent Node Information Storage
 
 ### In Progress
 
 - [ ] Direct messaging
-- [ ] GPS
 
 ### Planned
 
-- [ ] Consistent Node Information Storage
 - [ ] Persistent message history across reboots (write to SD)
 - [ ] Position sharing — configurable interval, manual override
+- [ ] Themes
+- [ ] Theme builder through web config
+
+### Thinking about
+- [ ] Wireless connectivity for MQTT Up/Download (I might just keep it radio only)
+
 
 ## Use of AI
 

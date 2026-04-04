@@ -83,6 +83,7 @@ bool decodeData(const uint8_t *buf, size_t len,
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
             if (field == 1) portnum = (uint32_t)v;
             else if (field == 3) wantResponse = (v != 0);
+            else if (field == 6) requestId = (uint32_t)v;   // request_id varint (Meshtastic standard)
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
@@ -262,8 +263,6 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
                 const uint8_t *recipientPubKey,
                 const uint8_t *plain, size_t plainLen,
                 uint8_t *out) {
-    (void)fromNode; // fromNode not in the 8-byte nonce (Meshtastic spec)
-
     mbedtls_ecp_group grp;
     mbedtls_mpi      d, z;
     mbedtls_ecp_point Qp;
@@ -272,19 +271,25 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
     mbedtls_mpi_init(&z);
     mbedtls_ecp_point_init(&Qp);
 
+    // Curve25519 keys on the wire are little-endian; mbedtls MPIs are big-endian — reverse both
+    uint8_t privBE[32], pubBE[32];
+    for (int i = 0; i < 32; i++) { privBE[i] = myPrivKey[31-i]; pubBE[i] = recipientPubKey[31-i]; }
+
     bool ok = false;
     int step = 0;
     do {
         if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) { step=1; break; }
-        if (mbedtls_mpi_read_binary(&d, myPrivKey, 32) != 0) { step=2; break; }
-        if (mbedtls_mpi_read_binary(&Qp.X, recipientPubKey, 32) != 0) { step=3; break; }
+        if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0) { step=2; break; }
+        if (mbedtls_mpi_read_binary(&Qp.X, pubBE, 32) != 0) { step=3; break; }
         mbedtls_mpi_lset(&Qp.Y, 0);
         mbedtls_mpi_lset(&Qp.Z, 1);
 
         if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, _pki_rng, nullptr) != 0) { step=4; break; }
 
-        uint8_t sharedSecret[32];
-        if (mbedtls_mpi_write_binary(&z, sharedSecret, 32) != 0) { step=5; break; }
+        // Write shared secret as little-endian (Meshtastic/Plai convention), then SHA256
+        uint8_t sharedBE[32], sharedSecret[32];
+        if (mbedtls_mpi_write_binary(&z, sharedBE, 32) != 0) { step=5; break; }
+        for (int i = 0; i < 32; i++) sharedSecret[i] = sharedBE[31-i];
 
         uint8_t aesKey[32];
         mbedtls_sha256(sharedSecret, 32, aesKey, 0);
@@ -292,9 +297,11 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
         uint32_t extraNonce;
         esp_fill_random(&extraNonce, sizeof(extraNonce));
 
-        uint8_t nonce[8];
+        // 13-byte nonce: [packetId_LE32][extraNonce_LE32][fromNode_LE32][0x00]
+        uint8_t nonce[13] = {};
         memcpy(nonce,     &packetId,   4);
         memcpy(nonce + 4, &extraNonce, 4);
+        memcpy(nonce + 8, &fromNode,   4);
 
         mbedtls_ccm_context ccm;
         mbedtls_ccm_init(&ccm);
@@ -315,6 +322,79 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
     } while (false);
 
     if (!ok) Serial.printf("[pki] encryptPki failed at step %d\n", step);
+
+    mbedtls_ecp_point_free(&Qp);
+    mbedtls_mpi_free(&z);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ok;
+}
+
+// ── PKI decrypt ───────────────────────────────────────────────
+// Wire format: [ciphertext(N)] [CCM-tag(8)] [extraNonce(4)]
+// Nonce (13 bytes): [packetId_LE32(4)] [extraNonce_LE32(4)] [fromNode_LE32(4)] [0x00]
+bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
+                const uint8_t *senderPubKey, uint8_t *plain, size_t &plainLen) {
+    if (cipherLen < 13) return false;   // need at least 1 byte of plaintext + 12 overhead
+
+    plainLen = cipherLen - 12;
+    const uint8_t *ciphertext = cipher;
+    const uint8_t *tag        = cipher + plainLen;      // tag[8]
+    uint32_t extraNonce;
+    memcpy(&extraNonce, cipher + plainLen + 8, 4);      // extraNonce[4]
+
+    mbedtls_ecp_group grp;
+    mbedtls_mpi      d, z;
+    mbedtls_ecp_point Qp;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_mpi_init(&z);
+    mbedtls_ecp_point_init(&Qp);
+
+    // Curve25519 keys on the wire are little-endian; mbedtls MPIs are big-endian — reverse both
+    uint8_t privBE[32], pubBE[32];
+    for (int i = 0; i < 32; i++) { privBE[i] = myPrivKey[31-i]; pubBE[i] = senderPubKey[31-i]; }
+
+    bool ok = false;
+    int step = 0;
+    do {
+        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) { step=1; break; }
+        if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0) { step=2; break; }
+        if (mbedtls_mpi_read_binary(&Qp.X, pubBE, 32) != 0) { step=3; break; }
+        mbedtls_mpi_lset(&Qp.Y, 0);
+        mbedtls_mpi_lset(&Qp.Z, 1);
+
+        if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, _pki_rng, nullptr) != 0) { step=4; break; }
+
+        // Write shared secret as little-endian (Meshtastic/Plai convention), then SHA256
+        uint8_t sharedBE[32], sharedSecret[32];
+        if (mbedtls_mpi_write_binary(&z, sharedBE, 32) != 0) { step=5; break; }
+        for (int i = 0; i < 32; i++) sharedSecret[i] = sharedBE[31-i];
+
+        uint8_t aesKey[32];
+        mbedtls_sha256(sharedSecret, 32, aesKey, 0);
+
+        // 13-byte nonce: [packetId_LE32][extraNonce_LE32][fromNode_LE32][0x00]
+        uint8_t nonce[13] = {};
+        memcpy(nonce,     &hdr.id,   4);
+        memcpy(nonce + 4, &extraNonce, 4);
+        memcpy(nonce + 8, &hdr.from, 4);
+
+        mbedtls_ccm_context ccm;
+        mbedtls_ccm_init(&ccm);
+        int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, aesKey, 256);
+        if (ret != 0) { step=6; mbedtls_ccm_free(&ccm); break; }
+        ret = mbedtls_ccm_auth_decrypt(&ccm, plainLen,
+                                        nonce, sizeof(nonce),
+                                        nullptr, 0,
+                                        ciphertext, plain,
+                                        tag, 8);
+        mbedtls_ccm_free(&ccm);
+        if (ret != 0) { step=7; break; }
+        ok = true;
+    } while (false);
+
+    if (!ok) Serial.printf("[pki] decryptPki failed at step %d\n", step);
 
     mbedtls_ecp_point_free(&Qp);
     mbedtls_mpi_free(&z);
@@ -389,9 +469,19 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     u += pbWriteVarint(user + u, (6 << 3) | 0);
     u += pbWriteVarint(user + u, 1); // true
 
+    // field 7 = role (Config.DeviceConfig.Role varint).
+    // Always encode even when 0 (CLIENT) so receiving nodes get an explicit value.
+    if (myDeviceRole != 0) {  // CLIENT (0) is proto default, omit to save bytes
+        u += pbWriteVarint(user + u, (7 << 3) | 0);
+        u += pbWriteVarint(user + u, myDeviceRole);
+    }
+
     // field 8 = public_key (bytes, 32 bytes).  Advertise our Curve25519 public key so
     // other nodes can encrypt PKI DMs to us, and so we can encrypt DMs to them.
-    if (u + 35 <= sizeof(user)) { // 2 bytes tag+len + 32 bytes key
+    // Only include if key is non-zero (i.e. key generation succeeded).
+    bool pubKeyValid = false;
+    for (int i = 0; i < 32; i++) { if (myPubKey[i]) { pubKeyValid = true; break; } }
+    if (pubKeyValid && u + 35 <= sizeof(user)) {
         u += pbWriteVarint(user + u, (8 << 3) | 2);
         u += pbWriteVarint(user + u, 32);
         memcpy(user + u, myPubKey, 32); u += 32;
@@ -453,18 +543,12 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
     n += pbWriteVarint(buf + n, innerLen);
     if (n + innerLen + 10 > bufLen) return 0;
     memcpy(buf + n, inner, innerLen); n += innerLen;
-    // Data field 5 (source), fixed32 — identifies who is sending this ACK
-    buf[n++] = (5 << 3) | 5;
-    buf[n++] = fromNodeId & 0xFF;
-    buf[n++] = (fromNodeId >>  8) & 0xFF;
-    buf[n++] = (fromNodeId >> 16) & 0xFF;
-    buf[n++] = (fromNodeId >> 24) & 0xFF;
-    // Data field 6 (request_id), fixed32 — ID of the packet being ACK'd
-    buf[n++] = (6 << 3) | 5;
-    buf[n++] = requestId & 0xFF;
-    buf[n++] = (requestId >>  8) & 0xFF;
-    buf[n++] = (requestId >> 16) & 0xFF;
-    buf[n++] = (requestId >> 24) & 0xFF;
+    // Data field 5 (source), varint — identifies who is sending this ACK
+    n += pbWriteVarint(buf + n, (5 << 3) | 0);
+    n += pbWriteVarint(buf + n, fromNodeId);
+    // Data field 6 (request_id), varint — ID of the packet being ACK'd
+    n += pbWriteVarint(buf + n, (6 << 3) | 0);
+    n += pbWriteVarint(buf + n, requestId);
     return n;
 }
 
