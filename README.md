@@ -17,10 +17,16 @@ No additional hardware required.
 
 ## Flashing
 
-Download the latest firmware from the [Releases](../../releases) page. Flash with [esptool](https://github.com/espressif/esptool) or any ESP32 flashing tool (e.g. [ESP Flash Tool](https://www.espressif.com/en/support/download/other-tools)):
+Download the latest firmware from the [Releases](../../releases) page, or build and flash it directly using [PlatformIO](https://platformio.org/):
 
 ```
-esptool.py --chip esp32s3 --port /dev/ttyUSB0 write_flash 0x0 camillia-mt.bin
+pio run --target upload --upload-port /dev/<wherever the tdeck port is, sometimes it's cu.usbmodem101>
+```
+
+Or, to build and monitor the serial output after flashing:
+
+```
+pio run --target upload --upload-port <wherever the tdeck port is, sometimes it's cu.usbmodem101> && pio device monitor
 ```
 
 After flashing, the device boots directly into the firmware. No build tools required.
