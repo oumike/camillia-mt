@@ -2,11 +2,6 @@
 
 Meshtastic-compatible mesh radio firmware for the LilyGo T-Deck (ESP32-S3).
 
-![Channel view](docs/screenshots/channel.png)
-![Node list](docs/screenshots/nodes.png)
-![GPS view](docs/screenshots/gps.png)
-![Web config](docs/screenshots/webconfig.png)
-
 ## Hardware
 
 - [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
