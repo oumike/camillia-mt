@@ -150,8 +150,15 @@ void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
 void ChannelMgr::expireAcks() {
     uint32_t now = millis();
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
-        if (_pending[i].active && now - _pending[i].sentMs > ACK_TIMEOUT_MS)
-            setAckState(_pending[i].packetId, DisplayLine::NAKED);
+        if (_pending[i].active && now - _pending[i].sentMs > ACK_TIMEOUT_MS) {
+            if (_pending[i].destNodeId == 0xFFFFFFFF) {
+                // Broadcast — no ACK expected from mesh; just clear pending without marking red.
+                // If an ACK was received it already cleared the entry via setAckState.
+                _pending[i].active = false;
+            } else {
+                setAckState(_pending[i].packetId, DisplayLine::NAKED);
+            }
+        }
     }
 }
 
@@ -179,6 +186,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     hdr.flags   = (1 << 3) |      // want_ack
                   (uint8_t)(MESH_HOP_LIMIT & 0x07) |
                   ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
     size_t frameLen = sizeof(hdr) + protoLen;
@@ -225,6 +233,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     hdr.channel = ck.hash;
     hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
                   ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
@@ -251,12 +260,13 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
         (uint8_t)(myNodeId      )
     };
 
-    // For broadcasts, set want_response so other nodes reply with their identity.
-    // For unicast responses, omit it to avoid infinite ping-pong.
+    // Never set want_response on NODEINFO — broadcasts with want_response=true cause
+    // every receiver to respond simultaneously, creating collisions.  Plai and official
+    // Meshtastic firmware both broadcast NODEINFO with want_response=false.
     bool isUnicast = (toNodeId != 0xFFFFFFFF);
     uint8_t proto[256], cipher[256];
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto), !isUnicast);
+                                     mac, proto, sizeof(proto), false);
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
@@ -273,6 +283,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     hdr.channel = ck.hash;
     hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
                   ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 

@@ -964,6 +964,7 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     hdr.id      = ackId;
     hdr.channel = ck.hash;
     hdr.flags   = (ackHops & 0x07) | ((ackHops & 0x07) << 5);  // hop_limit = hop_start
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
@@ -1151,13 +1152,24 @@ static void handleRx(MeshPacket pkt) {
                 Serial.printf("│ ACK for 0x%08X from !%08X\n", pkt.requestId, pkt.hdr.from);
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
-                Serial.printf("│ NAK for 0x%08X err=%lu\n", pkt.requestId, (unsigned long)errorReason);
-                // If this NAK is for a pending DM, show an error in the conversation
-                DmConv *conv = DMs.find(dmConvNodeId);
+                Serial.printf("│ NAK for 0x%08X err=%lu from !%08X\n",
+                              pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
+
+                // PKI_UNKNOWN_PUBKEY (35): sender doesn't have our public key yet.
+                // Respond with a unicast NODEINFO so they can retry with PKI.
+                if (errorReason == 35) {
+                    Serial.printf("[nak] PKI_UNKNOWN_PUBKEY — sending NODEINFO to !%08X\n", pkt.hdr.from);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
+                    NodeEntry *n = Nodes.find(pkt.hdr.from);
+                    if (n) n->lastSentInfoMs = millis();
+                }
+
+                // Show error in the DM conversation with the NAK sender (not just the open conv)
+                DmConv *conv = DMs.find(pkt.hdr.from);
                 if (conv) {
                     char errMsg[32];
                     snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu", (unsigned long)errorReason);
-                    DMs.addMessage(dmConvNodeId, nullptr, "", errMsg, TFT_RED);
+                    DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED);
                 }
             }
             dirtyChat = true;

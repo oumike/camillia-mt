@@ -181,6 +181,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     hdr.flags = (1 << 3) |  // want_ack
                 (uint8_t)(MESH_HOP_LIMIT & 0x07) |
                 ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
 
     size_t payloadLen = 0;
 

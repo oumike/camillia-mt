@@ -462,15 +462,11 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     u += pbWriteVarint(user + u, (5 << 3) | 0);
     u += pbWriteVarint(user + u, 50); // HardwareModel::T_DECK = 50
 
-    // field 6 = is_licensed (bool, varint).  Setting true so other nodes accept DMs from us:
-    // Meshtastic's RoutingModule filters packets from nodes with is_licensed=false when the
-    // receiving node is a licensed operator, and unlicensed receivers reject legacy DMs unless
-    // the sender is known-licensed.
-    u += pbWriteVarint(user + u, (6 << 3) | 0);
-    u += pbWriteVarint(user + u, 1); // true
+    // field 6 = is_licensed: omit (defaults to false).
+    // Official Meshtastic firmware STRIPS the public key when is_licensed=true,
+    // so setting it here would break PKI DMs with standard nodes.
 
     // field 7 = role (Config.DeviceConfig.Role varint).
-    // Always encode even when 0 (CLIENT) so receiving nodes get an explicit value.
     if (myDeviceRole != 0) {  // CLIENT (0) is proto default, omit to save bytes
         u += pbWriteVarint(user + u, (7 << 3) | 0);
         u += pbWriteVarint(user + u, myDeviceRole);
@@ -486,6 +482,8 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
         u += pbWriteVarint(user + u, 32);
         memcpy(user + u, myPubKey, 32); u += 32;
     }
+    Serial.printf("[nodeinfo] encode: pubKey=%s  user=%u bytes\n",
+                  pubKeyValid ? "YES" : "NO", (unsigned)u);
 
     // Wrap in Data message
     size_t n = 0;
@@ -543,12 +541,12 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
     n += pbWriteVarint(buf + n, innerLen);
     if (n + innerLen + 10 > bufLen) return 0;
     memcpy(buf + n, inner, innerLen); n += innerLen;
-    // Data field 5 (source), varint — identifies who is sending this ACK
-    n += pbWriteVarint(buf + n, (5 << 3) | 0);
-    n += pbWriteVarint(buf + n, fromNodeId);
-    // Data field 6 (request_id), varint — ID of the packet being ACK'd
-    n += pbWriteVarint(buf + n, (6 << 3) | 0);
-    n += pbWriteVarint(buf + n, requestId);
+    // Data field 5 (source), fixed32 — identifies who is sending this ACK
+    buf[n++] = (5 << 3) | 5;  // field 5, wire type 5 (fixed32)
+    memcpy(buf + n, &fromNodeId, 4); n += 4;
+    // Data field 6 (request_id), fixed32 — ID of the packet being ACK'd
+    buf[n++] = (6 << 3) | 5;  // field 6, wire type 5 (fixed32)
+    memcpy(buf + n, &requestId, 4); n += 4;
     return n;
 }
 

@@ -25,8 +25,9 @@ struct __attribute__((packed)) MeshHdr {
     uint32_t from;
     uint32_t id;
     uint8_t  flags;    // [2:0]=hop_limit [3]=want_ack [4]=via_mqtt [7:5]=hop_start
-    uint8_t  channel;  // channel hash
-    uint8_t  reserved[2];
+    uint8_t  channel;    // channel hash
+    uint8_t  next_hop;   // low byte of next-hop node (0 = no preference)
+    uint8_t  relay_node; // low byte of node that relayed this packet
 };
 
 // ── Meshtastic port numbers ───────────────────────────────────
@@ -35,9 +36,10 @@ enum PortNum : uint32_t {
     TEXT_MESSAGE_APP = 1,
     POSITION_APP     = 3,
     NODEINFO_APP     = 4,
-    ROUTING_APP      = 70,   // ACK/NAK packets (also carries traceroute)
+    ROUTING_APP      = 5,    // ACK/NAK packets (Meshtastic PortNum_ROUTING_APP)
     TELEMETRY_APP    = 67,
     NEIGHBORINFO_APP = 71,
+    TRACEROUTE_APP   = 70,   // traceroute (not ACK)
 };
 
 // ── Decoded incoming packet ───────────────────────────────────
