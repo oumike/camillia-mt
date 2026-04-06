@@ -58,6 +58,9 @@ struct RhinoConfig {
     // Module: Canned Messages
     bool     cannedEnabled;
     char     cannedMessages[200];
+
+    // Chat display
+    uint8_t  chatSpacing;   // 0=Tight(6px), 1=Normal(8px), 2=Loose(10px)
 };
 
 // Initialise from compile-time defaults. Call once before sdBegin().

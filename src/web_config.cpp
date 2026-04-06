@@ -3,6 +3,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <nvs_flash.h>
+#include <SD.h>
 #include <math.h>
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
@@ -443,6 +445,11 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->flipScreen) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->flipScreen) html += " selected"; html += ">No</option>"
             "</select></label></div>";
+    html += "<label>Chat Line Spacing (reboot required)<select name='chat_space'>"
+            "<option value='0'"; if (gCfg->chatSpacing == 0) html += " selected"; html += ">Tight</option>"
+            "<option value='1'"; if (gCfg->chatSpacing == 1) html += " selected"; html += ">Normal</option>"
+            "<option value='2'"; if (gCfg->chatSpacing == 2) html += " selected"; html += ">Loose</option>"
+            "</select></label>";
     html += "</details>";
 
     // ── Power ─────────────────────────────────────────────────
@@ -703,6 +710,7 @@ static void handlePostSave() {
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
+    gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
 
     // Power
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
@@ -757,24 +765,25 @@ static void handlePostClearNodes() {
 static void handlePostFactoryReset() {
     if (!isLoggedIn()) { redirect("/login"); return; }
 
-    // Clear main config namespace (node identity, LoRa params, PKI keys, etc.)
+    // Erase the entire NVS partition
+    nvs_flash_erase();
+    nvs_flash_init();
+
+    // Delete saved DM conversations from SD card
     {
-        Preferences p;
-        p.begin("camillia", false);
-        p.clear();
-        p.end();
+        File dir = SD.open("/camillia/dms");
+        if (dir && dir.isDirectory()) {
+            File f = dir.openNextFile();
+            while (f) {
+                String fp = String("/camillia/dms/") + f.name();
+                f.close();
+                SD.remove(fp.c_str());
+                f = dir.openNextFile();
+            }
+            dir.close();
+            SD.rmdir("/camillia/dms");
+        }
     }
-    // Clear per-channel key namespaces
-    for (int i = 0; i < 8; i++) {
-        char ns[12];
-        snprintf(ns, sizeof(ns), "mesh_ch%d", i);
-        Preferences p;
-        p.begin(ns, false);
-        p.clear();
-        p.end();
-    }
-    // Clear persisted node database
-    Nodes.clearPersisted();
 
     server.send(200, "text/html",
         "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
@@ -857,15 +866,26 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.collectHeaders(headers, 1);
 
     if (savedSsid.isEmpty()) {
-        // ── Onboarding mode: create an AP for WiFi setup ───────
+        // ── Onboarding mode: create an AP with full config ────
         gOnboarding = true;
         WiFi.mode(WIFI_AP);
         WiFi.softAP("camillia-mt");
         delay(100);
         WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-        server.on("/",        HTTP_GET,  handleGetOnboard);
+        // Serve both the onboarding WiFi page and full config
+        server.on("/setup",   HTTP_GET,  handleGetOnboard);
         server.on("/onboard", HTTP_POST, handlePostOnboard);
+        server.on("/",        HTTP_GET,  handleGetRoot);
+        server.on("/login",   HTTP_GET,  handleGetLogin);
+        server.on("/login",   HTTP_POST, handlePostLogin);
+        server.on("/save",    HTTP_POST, handlePostSave);
+        server.on("/logout",  HTTP_GET,  handleGetLogout);
+        server.on("/export",  HTTP_GET,  handleGetExport);
+        server.on("/announce",HTTP_POST, handlePostAnnounce);
+        server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+        server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
+        server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
         server.begin();
         running = true;
         Serial.printf("[web] onboarding AP at http://%s/\n", ipBuf);
@@ -881,10 +901,30 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
         if (millis() - start >= kConnectTimeout) {
-            Serial.println("[web] connect timeout");
+            Serial.println("[web] STA connect timeout — falling back to AP mode");
             WiFi.disconnect(true);
             WiFi.mode(WIFI_OFF);
-            return false;
+            delay(100);
+            WiFi.mode(WIFI_AP);
+            delay(100);
+            WiFi.softAP("camillia-mt");
+            delay(500);
+            WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+
+            server.on("/",        HTTP_GET,  handleGetRoot);
+            server.on("/login",   HTTP_GET,  handleGetLogin);
+            server.on("/login",   HTTP_POST, handlePostLogin);
+            server.on("/save",    HTTP_POST, handlePostSave);
+            server.on("/logout",  HTTP_GET,  handleGetLogout);
+            server.on("/export",  HTTP_GET,  handleGetExport);
+            server.on("/announce",HTTP_POST, handlePostAnnounce);
+            server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+            server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
+            server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
+            server.begin();
+            running = true;
+            Serial.printf("[web] AP fallback at http://%s/\n", ipBuf);
+            return true;
         }
         delay(100);
     }

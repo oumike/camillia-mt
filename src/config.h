@@ -103,6 +103,7 @@
 #define MY_TEL_ENV_INTV     7200
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
+#define MY_CHAT_SPACING     1   // 0=Tight(6px), 1=Normal(8px), 2=Loose(10px)
 
 // ── Display UI zones (landscape 320×240, font0 = 6×8 px) ─────
 #define LCD_W           320
@@ -122,9 +123,14 @@
 // Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
 #define CHAR_W            6
 #define CHAR_H            8   // actual font cell height (used for cursor / input bar)
-#define LINE_H           11   // row stride in chat/node/settings panels (8px char + 3px gap)
+// LINE_H and VISIBLE_LINES are runtime globals set at startup from chatSpacing config.
+// Declared in main.cpp, extern here so all modules can reference them.
+extern int LINE_H;          // row stride in channel/node/settings panels
+extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
+
+#define DM_LINE_H        11   // row stride in DM conversation view (8px char + 3px gap)
+#define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing
 #define MSG_CHARS       (MSG_W / CHAR_W)    // 38 chars per message line
-#define VISIBLE_LINES   (CHAT_H / LINE_H)   // 29 visible message rows
 #define NODE_CHARS      (NODE_W / CHAR_W)   // 14 chars in node pane
 
 // ── Message storage ───────────────────────────────────────────

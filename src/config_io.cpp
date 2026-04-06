@@ -116,6 +116,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.cannedEnabled      = MY_CANNED_EN;
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
+    cfg.chatSpacing        = MY_CHAT_SPACING;
 }
 
 // ── SD init ──────────────────────────────────────────────────

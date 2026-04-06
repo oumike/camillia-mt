@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <nvs_flash.h>
+#include <SD.h>
 #include "lgfx_tdeck.h"
 #include "keyboard.h"
 #include "mesh_radio.h"
@@ -13,6 +15,12 @@
 #include <math.h>
 #include "mbedtls/ecp.h"
 #include "mbedtls/ecdh.h"
+
+// ── Chat spacing (runtime, set once at startup from gCfg.chatSpacing) ─
+int LINE_H        = 8;     // default Normal
+int VISIBLE_LINES = CHAT_H / 8;
+
+static const int kSpacingPx[] = { 6, 8, 10 };  // Tight, Normal, Loose
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -90,11 +98,35 @@ static bool isDuplicate(uint32_t id) {
 }
 
 
+// ── SD card wipe helper ───────────────────────────────────────
+// Recursively delete all files under a directory, then remove it.
+static void sdRmDir(const char *path) {
+    File dir = SD.open(path);
+    if (!dir || !dir.isDirectory()) return;
+    File f = dir.openNextFile();
+    while (f) {
+        if (f.isDirectory()) {
+            String sub = String(path) + "/" + f.name();
+            f.close();
+            sdRmDir(sub.c_str());
+        } else {
+            String fp = String(path) + "/" + f.name();
+            f.close();
+            SD.remove(fp.c_str());
+        }
+        f = dir.openNextFile();
+    }
+    dir.close();
+    SD.rmdir(path);
+}
+
 // ── Settings ──────────────────────────────────────────────────
-#define SETTING_WEBCFG  0
-#define SETTING_EXPORT  1
-#define SETTING_IMPORT  2
-#define NUM_SETTINGS    3
+#define SETTING_WEBCFG        0
+#define SETTING_EXPORT        1
+#define SETTING_IMPORT        2
+#define SETTING_CHAT_SPACE    3
+#define SETTING_FACTORY_RESET 4
+#define NUM_SETTINGS          5
 
 static char settingsStatus[LCD_W / CHAR_W + 1] = "";
 
@@ -219,7 +251,7 @@ static void drawSplash() {
     lcd.print(idBuf);
 
     // Version — bottom centre, dim
-    const char *ver = "v0.0.4";
+    const char *ver = "v0.0.5";
     tw = strlen(ver) * 6;
     lcd.setTextColor(DIM, BG);
     lcd.setCursor((LCD_W - tw) / 2, 210);
@@ -603,25 +635,25 @@ static void drawDmList() {
         bool     sel = (dmListSel == 0);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint16_t col = sel ? TFT_WHITE : TFT_CYAN;
-        lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, bg);
+        lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, bg);
         lcd.setTextColor(col, bg);
         lcd.setCursor(0, CHAT_Y);
         lcd.print("  [ + New DM ]");
     }
 
     // Rows 1..: conversations (dmListSel 1..count)
-    const int rows = min(DMs.count(), VISIBLE_LINES - 1);
+    const int rows = min(DMs.count(), DM_VISIBLE - 1);
     for (int i = 0; i < rows; i++) {
         DmConv *c = DMs.getByRank(i);
         if (!c) break;
 
-        int      y   = CHAT_Y + (i + 1) * LINE_H;
+        int      y   = CHAT_Y + (i + 1) * DM_LINE_H;
         bool     sel = (dmListSel == i + 1);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint16_t col = sel ? TFT_WHITE
                            : c->unread ? TFT_YELLOW : (uint16_t)0xF81F;
 
-        lcd.fillRect(0, y, LCD_W, LINE_H, bg);
+        lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
 
         char row[DM_LINE_LEN + 1];
         snprintf(row, sizeof(row), " [%-4s] %.43s", c->shortName, c->lastText);
@@ -662,7 +694,7 @@ static void drawDmPicker() {
     dirtyNodes = false;
 
     // Header bar
-    lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, 0x001F);
+    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, 0x001F);
     lcd.setTextColor(TFT_WHITE, 0x001F);
     lcd.setCursor(0, CHAT_Y);
     lcd.print("  Select a node  (roll left to cancel)");
@@ -670,20 +702,20 @@ static void drawDmPicker() {
     int filteredCount = pickerNodeCount();
     if (filteredCount == 0) {
         lcd.setTextColor(COL_TAB_IDLE, TFT_BLACK);
-        lcd.setCursor(4, CHAT_Y + 3 * LINE_H);
+        lcd.setCursor(4, CHAT_Y + 3 * DM_LINE_H);
         lcd.print("No other nodes known yet");
         dirtyChat = false;
         return;
     }
 
-    const int MSG_ROWS   = VISIBLE_LINES - 1;
+    const int MSG_ROWS   = DM_VISIBLE - 1;
     int firstVisible = max(0, dmPickerSel - (MSG_ROWS - 1));
 
     for (int row = 0; row < MSG_ROWS; row++) {
         int vi = firstVisible + row;
-        int      y  = CHAT_Y + (row + 1) * LINE_H;
+        int      y  = CHAT_Y + (row + 1) * DM_LINE_H;
         if (vi >= filteredCount) {
-            lcd.fillRect(0, y, LCD_W, LINE_H, TFT_BLACK);
+            lcd.fillRect(0, y, LCD_W, DM_LINE_H, TFT_BLACK);
             continue;
         }
         NodeEntry *n = pickerNode(vi);
@@ -693,7 +725,7 @@ static void drawDmPicker() {
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint16_t col = sel ? TFT_WHITE : COL_TEAL;
 
-        lcd.fillRect(0, y, LCD_W, LINE_H, bg);
+        lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
 
         char entry[DM_LINE_LEN + 1];
         snprintf(entry, sizeof(entry), " [%-4s] %-28s !%08x",
@@ -717,7 +749,7 @@ static void drawDmConv() {
     DmConv *c = DMs.find(dmConvNodeId);
     if (!c) {
         lcd.setTextColor(TFT_RED, TFT_BLACK);
-        lcd.setCursor(4, CHAT_Y + LINE_H);
+        lcd.setCursor(4, CHAT_Y + DM_LINE_H);
         lcd.print("Conversation not found");
         dirtyChat = false;
         return;
@@ -726,17 +758,17 @@ static void drawDmConv() {
     // Header bar
     char hdr[DM_LINE_LEN + 1];
     snprintf(hdr, sizeof(hdr), " DM: %-4s  !%08x ", c->shortName, (unsigned)c->nodeId);
-    lcd.fillRect(0, CHAT_Y, LCD_W, LINE_H, 0x0013);
+    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, 0x0013);
     lcd.setTextColor(TFT_CYAN, 0x0013);
     lcd.setCursor(0, CHAT_Y);
     lcd.print(hdr);
 
-    // Messages (VISIBLE_LINES - 1 rows below the header)
-    const int MSG_ROWS = VISIBLE_LINES - 1;
+    // Messages (DM_VISIBLE - 1 rows below the header)
+    const int MSG_ROWS = DM_VISIBLE - 1;
     for (int row = 0; row < MSG_ROWS; row++) {
         const DmLine *dl = DMs.getLine(c, row, MSG_ROWS);
         if (!dl) continue;
-        int y = CHAT_Y + (row + 1) * LINE_H;
+        int y = CHAT_Y + (row + 1) * DM_LINE_H;
         lcd.setTextColor(dl->color, TFT_BLACK);
         lcd.setCursor(0, y);
         lcd.print(dl->text);
@@ -765,6 +797,13 @@ static void drawSettings() {
             snprintf(buf, sizeof(buf), "  [ Export Config ]");
         else if (i == SETTING_IMPORT)
             snprintf(buf, sizeof(buf), "  [ Import Config ]");
+        else if (i == SETTING_CHAT_SPACE) {
+            const char *labels[] = { "Tight", "Normal", "Loose" };
+            int idx = gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1;
+            snprintf(buf, sizeof(buf), "  [ Chat Spacing: %s ]", labels[idx]);
+        }
+        else if (i == SETTING_FACTORY_RESET)
+            snprintf(buf, sizeof(buf), "  [ Factory Reset ]");
         else if (webCfgRunning())
             snprintf(buf, sizeof(buf), "  [ Web Config : %s ]", webCfgIP());
         else
@@ -1319,6 +1358,26 @@ static void handleKey(char k) {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
                     }
                 }
+            } else if (settingsSel == SETTING_CHAT_SPACE) {
+                gCfg.chatSpacing = (gCfg.chatSpacing + 1) % 3;
+                { Preferences p; p.begin("camillia", false);
+                  p.putUChar("chatSpace", gCfg.chatSpacing); p.end(); }
+                const char *labels[] = { "Tight", "Normal", "Loose" };
+                snprintf(settingsStatus, sizeof(settingsStatus),
+                         "Chat: %s — rebooting...", labels[gCfg.chatSpacing]);
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
+            } else if (settingsSel == SETTING_FACTORY_RESET) {
+                nvs_flash_erase();
+                nvs_flash_init();
+                sdRmDir("/camillia/dms");
+                snprintf(settingsStatus, sizeof(settingsStatus), "Factory reset — rebooting...");
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
             }
             dirtyChat = true;
         } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
@@ -1430,6 +1489,26 @@ static void handleKey(char k) {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
                     }
                 }
+            } else if (settingsSel == SETTING_CHAT_SPACE) {
+                gCfg.chatSpacing = (gCfg.chatSpacing + 1) % 3;
+                { Preferences p; p.begin("camillia", false);
+                  p.putUChar("chatSpace", gCfg.chatSpacing); p.end(); }
+                const char *labels[] = { "Tight", "Normal", "Loose" };
+                snprintf(settingsStatus, sizeof(settingsStatus),
+                         "Chat: %s — rebooting...", labels[gCfg.chatSpacing]);
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
+            } else if (settingsSel == SETTING_FACTORY_RESET) {
+                nvs_flash_erase();
+                nvs_flash_init();
+                sdRmDir("/camillia/dms");
+                snprintf(settingsStatus, sizeof(settingsStatus), "Factory reset — rebooting...");
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
             }
             dirtyChat = true;
         } else if (activeView != VIEW_SETTINGS || settingsSel == 0) {
@@ -1454,7 +1533,7 @@ static void handleKey(char k) {
                 DmConv *c = DMs.find(dmConvNodeId);
                 if (c) {
                     int total = (c->count < MAX_DM_LINES) ? c->count : MAX_DM_LINES;
-                    int maxOff = total - (VISIBLE_LINES - 1);
+                    int maxOff = total - (DM_VISIBLE - 1);
                     c->scrollOff = min(c->scrollOff + 3, maxOff > 0 ? maxOff : 0);
                     dirtyChat = true;
                 }
@@ -1590,17 +1669,21 @@ static void onWebCfgSaved() {
     p.putBool("cannedEn",      gCfg.cannedEnabled);
     p.putString("cannedMsgs",  gCfg.cannedMessages);
     p.putULong("nodeIdOvr",    gCfg.nodeIdOverride);
+    p.putUChar("chatSpace",    gCfg.chatSpacing);
     p.end();
-    // Save channel config
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        char ns[12]; snprintf(ns, sizeof(ns), "mesh_ch%d", i);
-        Preferences cp; cp.begin(ns, false);
-        const char *nm = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        cp.putString("name", nm);
-        cp.putBytes("key",   CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
-        cp.putUChar("role",  CHANNEL_KEYS[i].role);
+    // Save channel config (single namespace to reduce NVS overhead)
+    {
+        Preferences cp; cp.begin("mesh_ch", false);
+        for (int i = 0; i < MESH_CHANNELS; i++) {
+            const char *nm = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+            char k[8];
+            snprintf(k, sizeof(k), "n%d", i);  cp.putString(k, nm);
+            snprintf(k, sizeof(k), "k%d", i);  cp.putBytes(k, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+            snprintf(k, sizeof(k), "r%d", i);  cp.putUChar(k, CHANNEL_KEYS[i].role);
+        }
         cp.end();
     }
+    Serial.println("[cfg] channels saved to NVS");
     // Apply GPS enable/disable immediately
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
@@ -1747,8 +1830,12 @@ void setup() {
         if (prefs.isKey("cannedEn"))  gCfg.cannedEnabled    = prefs.getBool("cannedEn");
         String cm = prefs.getString("cannedMsgs", ""); if (cm.length()) strncpy(gCfg.cannedMessages, cm.c_str(), sizeof(gCfg.cannedMessages)-1);
         ul = prefs.getULong("nodeIdOvr", 0); if (ul) gCfg.nodeIdOverride = (uint32_t)ul;
+        ro = prefs.getUChar("chatSpace", 0xFF); if (ro != 0xFF && ro <= 2) gCfg.chatSpacing = ro;
         prefs.end();
     }
+    // Apply chat spacing setting to runtime globals
+    LINE_H        = kSpacingPx[gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1];
+    VISIBLE_LINES = CHAT_H / LINE_H;
 
     // Apply node ID override if set (allows restoring old Meshtastic identity)
     if (gCfg.nodeIdOverride != 0) {
@@ -1759,25 +1846,30 @@ void setup() {
     myDeviceRole = gCfg.deviceRole;
     Serial.printf("[camillia-mt] Node !%08x  long='%s'  short='%s'  role=%u\n",
                   myNodeId, gCfg.nodeLong, gCfg.nodeShort, gCfg.deviceRole);
-    // Load channel config from NVS
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        char ns[12]; snprintf(ns, sizeof(ns), "mesh_ch%d", i);
-        Preferences cp; cp.begin(ns, true);
-        String nm = cp.getString("name", "");
-        if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
-            strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
-            CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
-            CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+    // Load channel config from NVS (single namespace)
+    {
+        Preferences cp; cp.begin("mesh_ch", true);
+        for (int i = 0; i < MESH_CHANNELS; i++) {
+            char k[8];
+            snprintf(k, sizeof(k), "n%d", i);
+            String nm = cp.getString(k, "");
+            if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
+                strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+                CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+                CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+            }
+            snprintf(k, sizeof(k), "k%d", i);
+            uint8_t kbuf[32];
+            size_t klen = cp.getBytes(k, kbuf, 32);
+            if (klen > 0) { memcpy(CHANNEL_KEYS[i].key, kbuf, klen); CHANNEL_KEYS[i].keyLen = (uint8_t)klen; }
+            snprintf(k, sizeof(k), "r%d", i);
+            uint8_t role = cp.getUChar(k, 0xFF);
+            if (role != 0xFF) CHANNEL_KEYS[i].role = role;
+            // Recompute on-air hash from the loaded name + key
+            const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+            CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
         }
-        uint8_t kbuf[32];
-        size_t klen = cp.getBytes("key", kbuf, 32);
-        if (klen > 0) { memcpy(CHANNEL_KEYS[i].key, kbuf, klen); CHANNEL_KEYS[i].keyLen = (uint8_t)klen; }
-        uint8_t role = cp.getUChar("role", 0xFF);
-        if (role != 0xFF) CHANNEL_KEYS[i].role = role;
         cp.end();
-        // Recompute on-air hash from the loaded name + key (compile-time hash may be stale)
-        const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
     }
     Serial.printf("[camillia-mt] Name: %s (%s)\n", gCfg.nodeLong, gCfg.nodeShort);
 
