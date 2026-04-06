@@ -122,7 +122,7 @@
 // Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
 #define CHAR_W            6
 #define CHAR_H            8   // actual font cell height (used for cursor / input bar)
-#define LINE_H            7   // row stride in chat/node/settings panels (tighter spacing)
+#define LINE_H           11   // row stride in chat/node/settings panels (8px char + 3px gap)
 #define MSG_CHARS       (MSG_W / CHAR_W)    // 38 chars per message line
 #define VISIBLE_LINES   (CHAT_H / LINE_H)   // 29 visible message rows
 #define NODE_CHARS      (NODE_W / CHAR_W)   // 14 chars in node pane

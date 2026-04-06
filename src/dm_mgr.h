@@ -48,6 +48,10 @@ public:
     // visibleRow: 0 = top of screen. visibleRows = total rows available.
     const DmLine *getLine(const DmConv *conv, int visibleRow, int visibleRows) const;
 
+    // Persistence (SD card)
+    void saveConv(const DmConv *c);
+    void loadAll();
+
 private:
     DmConv _convs[MAX_DM_CONVS];
     int    _count = 0;

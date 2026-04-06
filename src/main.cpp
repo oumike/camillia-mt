@@ -219,7 +219,7 @@ static void drawSplash() {
     lcd.print(idBuf);
 
     // Version — bottom centre, dim
-    const char *ver = "v1.0";
+    const char *ver = "v0.0.4";
     tw = strlen(ver) * 6;
     lcd.setTextColor(DIM, BG);
     lcd.setCursor((LCD_W - tw) / 2, 210);
@@ -635,26 +635,25 @@ static void drawDmList() {
 
 // ── Picker helpers: node list excluding self ──────────────────
 // Returns the nth node (0-based) excluding myNodeId.
-static NodeEntry *pickerNode(int sel) {
-    int vis = 0;
-    for (int i = 0; i < Nodes.count(); i++) {
+// Snapshot of node IDs taken when picker opens — prevents reordering while scrolling
+static uint32_t pickerIds[MAX_NODES];
+static int      pickerCount = 0;
+
+static void pickerSnapshot() {
+    pickerCount = 0;
+    for (int i = 0; i < Nodes.count() && pickerCount < MAX_NODES; i++) {
         NodeEntry *n = Nodes.getByRank(i);
-        if (!n || n->nodeId == myNodeId) continue;
-        if (vis == sel) return n;
-        vis++;
+        if (n && n->nodeId != myNodeId)
+            pickerIds[pickerCount++] = n->nodeId;
     }
-    return nullptr;
 }
 
-// Returns the number of nodes excluding myNodeId.
-static int pickerNodeCount() {
-    int count = 0;
-    for (int i = 0; i < Nodes.count(); i++) {
-        NodeEntry *n = Nodes.getByRank(i);
-        if (n && n->nodeId != myNodeId) count++;
-    }
-    return count;
+static NodeEntry *pickerNode(int sel) {
+    if (sel < 0 || sel >= pickerCount) return nullptr;
+    return Nodes.find(pickerIds[sel]);
 }
+
+static int pickerNodeCount() { return pickerCount; }
 
 // ── Draw: DM node picker ──────────────────────────────────────
 static void drawDmPicker() {
@@ -793,13 +792,13 @@ static void drawSettings() {
         lcd.print(s);
     };
 
-    snprintf(buf, sizeof(buf), "Long:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
+    snprintf(buf, sizeof(buf), "Long Name:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
     pr(buf);
 
-    snprintf(buf, sizeof(buf), "Short: %s", gCfg.nodeShort);
+    snprintf(buf, sizeof(buf), "Short Name: %s", gCfg.nodeShort);
     pr(buf);
 
-    snprintf(buf, sizeof(buf), "Freq:  %.3f MHz", gCfg.loraFreq);
+    snprintf(buf, sizeof(buf), "Frequency:  %.3f MHz", gCfg.loraFreq);
     pr(buf);
 
     snprintf(buf, sizeof(buf), "BW:%.0f  SF:%d  CR:4/%d",
@@ -1082,7 +1081,8 @@ static void handleRx(MeshPacket pkt) {
         } else {
             // Broadcast / relay message — goes to channel
             Channels.addMessage(pkt.chanIdx, prefix, tm.text, COL_TEAL);
-            dirtyChat = dirtyTabs = true;
+            if (!dmPickerOpen) dirtyChat = true;
+            dirtyTabs = true;
         }
         break;
     }
@@ -1101,7 +1101,8 @@ static void handleRx(MeshPacket pkt) {
         char info[60];
         snprintf(info, sizeof(info), "* %s joined (%s)", u.longName, u.shortName);
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
-        dirtyChat = dirtyNodes = dirtyTabs = true;
+        if (!dmPickerOpen) dirtyChat = true;
+        dirtyNodes = dirtyTabs = true;
 
         // Respond with our own NODEINFO so the requester knows who we are
         if (pkt.wantResponse) {
@@ -1172,7 +1173,7 @@ static void handleRx(MeshPacket pkt) {
                     DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED);
                 }
             }
-            dirtyChat = true;
+            if (!dmPickerOpen) dirtyChat = true;
         }
         break;
     }
@@ -1246,6 +1247,7 @@ static void handleKey(char k) {
                     // "New DM" button
                     dmPickerSel  = 0;
                     dmPickerOpen = true;
+                    pickerSnapshot();
                     dirtyChat = true;
                 } else {
                     DmConv *c = DMs.getByRank(dmListSel - 1);
@@ -1368,6 +1370,7 @@ static void handleKey(char k) {
                 if (dmListSel == 0) {
                     dmPickerSel  = 0;
                     dmPickerOpen = true;
+                    pickerSnapshot();
                     dirtyChat = true;
                 } else {
                     DmConv *c = DMs.getByRank(dmListSel - 1);
@@ -1796,13 +1799,11 @@ void setup() {
 
     // Keyboard
     kb.begin();
-    sdBegin();
 
     // Data modules
     Nodes.init();
     Channels.init();
     Channels.setActive(0);  // start on LongFast (channel 0)
-    DMs.init();
 
     // Register ourselves in the node DB immediately
     {
@@ -1824,6 +1825,10 @@ void setup() {
         lcd.print("LoRa init FAILED");
         while (true) delay(500);
     }
+
+    // SD card needs SPI bus — init after Radio.init() calls SPI.begin()
+    sdBegin();
+    DMs.init();
 
     // Let radio settle before first TX
     delay(200);

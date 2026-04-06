@@ -6,6 +6,7 @@
 #include "config.h"
 #include <esp_heap_caps.h>
 #include <string.h>
+#include <SD.h>
 
 DmMgr DMs;
 
@@ -13,6 +14,7 @@ DmMgr DMs;
 void DmMgr::init() {
     memset(_convs, 0, sizeof(_convs));
     _count = 0;
+    loadAll();
 }
 
 // ── find ──────────────────────────────────────────────────────
@@ -151,6 +153,7 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     }
 
     c->scrollOff = 0;  // jump to latest on new message
+    saveConv(c);       // save before _sort() — sort may move the struct in the array
     _sort();
 }
 
@@ -251,4 +254,126 @@ const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows
     int absIdx = conv->count - 1 - fromEnd;
     if (absIdx < 0) return nullptr;
     return &conv->lines[absIdx % MAX_DM_LINES];
+}
+
+// ── SD persistence ───────────────────────────────────────────
+// File format: /camillia/dms/XXXXXXXX.bin
+//   Header: magic(4) + nodeId(4) + shortName(5) + count(4) + numLines(4) + rxChanIdx(4) = 25 bytes
+//   Body:   numLines × DmLine entries, written oldest → newest
+
+static const char *kDmDir = "/camillia/dms";
+static const uint32_t DM_MAGIC = 0x434D444D;  // "CMDM"
+
+void DmMgr::saveConv(const DmConv *c) {
+    if (!c || !c->lines || c->count == 0) return;
+
+    SD.mkdir("/camillia");
+    SD.mkdir(kDmDir);
+
+    char path[40];
+    snprintf(path, sizeof(path), "%s/%08X.bin", kDmDir, c->nodeId);
+
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) {
+        Serial.printf("[dm] saveConv FAIL: can't open %s\n", path);
+        return;
+    }
+
+    // Header: magic(4) + nodeId(4) + shortName(5) + count(4) + numLines(4) + rxChanIdx(4) = 25 bytes
+    uint32_t magic = DM_MAGIC;
+    uint32_t nid   = c->nodeId;
+    int32_t  cnt   = c->count;
+    int32_t  nLines = (c->count < MAX_DM_LINES) ? c->count : MAX_DM_LINES;
+    int32_t  rxCh  = c->rxChanIdx;
+
+    f.write((const uint8_t *)&magic, 4);
+    f.write((const uint8_t *)&nid, 4);
+    f.write((const uint8_t *)c->shortName, 5);
+    f.write((const uint8_t *)&cnt, 4);
+    f.write((const uint8_t *)&nLines, 4);
+    f.write((const uint8_t *)&rxCh, 4);
+
+    // Lines: write in order from oldest to newest
+    int startIdx = (c->count <= MAX_DM_LINES) ? 0 : (c->count % MAX_DM_LINES);
+    size_t written = 0;
+    for (int i = 0; i < nLines; i++) {
+        int idx = (startIdx + i) % MAX_DM_LINES;
+        written += f.write((const uint8_t *)&c->lines[idx], sizeof(DmLine));
+    }
+
+    f.flush();
+    f.close();
+    Serial.printf("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
+}
+
+void DmMgr::loadAll() {
+    File dir = SD.open(kDmDir);
+    if (!dir || !dir.isDirectory()) {
+        Serial.printf("[dm] loadAll: no %s directory\n", kDmDir);
+        return;
+    }
+
+    File f = dir.openNextFile();
+    while (f) {
+        if (f.isDirectory() || f.size() < 25) {
+            f.close();
+            f = dir.openNextFile();
+            continue;
+        }
+
+        // Read header
+        uint32_t magic;
+        f.read((uint8_t *)&magic, 4);
+        if (magic != DM_MAGIC) {
+            Serial.printf("[dm] loadAll: bad magic in %s\n", f.name());
+            f.close(); f = dir.openNextFile(); continue;
+        }
+
+        uint32_t nodeId;
+        char shortName[5] = {};
+        int32_t count, numLines, rxChanIdx;
+
+        f.read((uint8_t *)&nodeId, 4);
+        f.read((uint8_t *)shortName, 5);
+        f.read((uint8_t *)&count, 4);
+        f.read((uint8_t *)&numLines, 4);
+        f.read((uint8_t *)&rxChanIdx, 4);
+
+        Serial.printf("[dm] loading %08X (%s): count=%d numLines=%d\n",
+                      nodeId, shortName, (int)count, (int)numLines);
+
+        if (numLines <= 0 || numLines > MAX_DM_LINES) {
+            f.close(); f = dir.openNextFile(); continue;
+        }
+
+        DmConv *c = findOrCreate(nodeId, shortName);
+        if (!c || !c->lines) { f.close(); f = dir.openNextFile(); continue; }
+
+        c->rxChanIdx = rxChanIdx;
+
+        // Read lines directly into the circular buffer
+        for (int i = 0; i < numLines; i++) {
+            DmLine line;
+            if (f.read((uint8_t *)&line, sizeof(DmLine)) != sizeof(DmLine)) break;
+            int idx = i % MAX_DM_LINES;
+            c->lines[idx] = line;
+        }
+        c->count = count;
+
+        // Set lastText from the newest line
+        if (numLines > 0) {
+            int newest = (count - 1) % MAX_DM_LINES;
+            strncpy(c->lastText, c->lines[newest].text, DM_LINE_LEN);
+            c->lastText[DM_LINE_LEN] = '\0';
+        }
+
+        Serial.printf("[dm] loaded %08X: %d lines\n", nodeId, (int)numLines);
+
+        f.close();
+        f = dir.openNextFile();
+    }
+    dir.close();
+
+    _sort();
+    Serial.printf("[dm] loadAll done: %d conversations\n", _count);
 }
