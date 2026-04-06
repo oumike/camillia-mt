@@ -545,10 +545,11 @@ static void drawGps() {
     const int DIM = 0x7BEF;      // mid-grey
 
     // ── Left panel: text rows ─────────────────────────────────
+    const int GH = 10;  // GPS panel always uses Loose spacing
     int row = 0;
     auto pr = [&](uint16_t col, const char *s) {
         lcd.setTextColor(col, TFT_BLACK);
-        lcd.setCursor(TX, CHAT_Y + row++ * LINE_H);
+        lcd.setCursor(TX, CHAT_Y + row++ * GH);
         lcd.print(s);
     };
 
@@ -778,6 +779,7 @@ static void drawDmConv() {
 
 // ── Draw: settings page ───────────────────────────────────────
 static void drawSettings() {
+    const int SH = 10;  // settings always use Loose spacing
     lcd.fillRect(0, CHAT_Y, LCD_W, CHAT_H, TFT_BLACK);
     lcd.setTextSize(1);
 
@@ -786,11 +788,11 @@ static void drawSettings() {
 
     // ── Action buttons ────────────────────────────────────────
     for (int i = 0; i < NUM_SETTINGS; i++, r++) {
-        int      y  = CHAT_Y + r * LINE_H;
+        int      y  = CHAT_Y + r * SH;
         bool     sel = (i == settingsSel);
         uint16_t bg  = sel ? 0x0013 : TFT_BLACK;
         uint16_t fg  = sel ? TFT_WHITE : COL_TAB_IDLE;
-        lcd.fillRect(0, y, LCD_W, LINE_H, bg);
+        lcd.fillRect(0, y, LCD_W, SH, bg);
         lcd.setTextColor(fg, bg);
         lcd.setCursor(0, y);
         if (i == SETTING_EXPORT)
@@ -814,20 +816,20 @@ static void drawSettings() {
     // ── Status line (transient feedback) ─────────────────────
     if (settingsStatus[0]) {
         lcd.setTextColor(COL_TEAL, TFT_BLACK);
-        lcd.setCursor(2, CHAT_Y + r * LINE_H);
+        lcd.setCursor(2, CHAT_Y + r * SH);
         lcd.print(settingsStatus);
     }
     r++;  // always advance past status slot
 
     // ── Separator ─────────────────────────────────────────────
-    lcd.drawFastHLine(2, CHAT_Y + r * LINE_H + LINE_H / 2, LCD_W - 4, COL_DIVIDER);
+    lcd.drawFastHLine(2, CHAT_Y + r * SH + SH / 2, LCD_W - 4, COL_DIVIDER);
     r++;
 
     // ── Read-only config info ─────────────────────────────────
     const uint16_t DIM = 0x7BEF;   // mid-grey
     auto pr = [&](const char *s) {
         lcd.setTextColor(DIM, TFT_BLACK);
-        lcd.setCursor(2, CHAT_Y + r++ * LINE_H);
+        lcd.setCursor(2, CHAT_Y + r++ * SH);
         lcd.print(s);
     };
 
