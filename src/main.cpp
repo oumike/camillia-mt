@@ -446,6 +446,15 @@ static void drawChat() {
         lcd.setCursor(0, y);
         lcd.print(dl->text);
     }
+
+    // Scroll indicator: show arrow when not at bottom
+    Channel &ch = Channels.get(active);
+    if (ch.scrollOff > 0) {
+        lcd.setTextColor(COL_TEAL, TFT_BLACK);
+        lcd.setCursor(MSG_W - CHAR_W * 3, CHAT_Y + CHAT_H - LINE_H);
+        lcd.print(" v ");
+    }
+
     dirtyChat = false;
 }
 
@@ -1554,7 +1563,7 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_SETTINGS) {
             settingsSel = max(0, settingsSel - 1);
             dirtyChat = true;
-        } else {
+        } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
             int maxOff = max(0, ch.count - VISIBLE_LINES);
             ch.scrollOff = min(ch.scrollOff + 3, maxOff);
@@ -1587,7 +1596,7 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_SETTINGS) {
             settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
             dirtyChat = true;
-        } else {
+        } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
             ch.scrollOff = max(0, ch.scrollOff - 3);
             dirtyChat = true;
@@ -1622,20 +1631,45 @@ static void handleKey(char k) {
 
 // ── Web config save callback ──────────────────────────────────
 static void onWebCfgSaved() {
-    // Persist all config fields to NVS
+    Serial.printf("[cfg] onWebCfgSaved: long='%s' short='%s'\n", gCfg.nodeLong, gCfg.nodeShort);
+
+    // Snapshot WiFi creds before clearing — they live in NVS only, not gCfg
+    char savedSsid[64] = {0}, savedPass[64] = {0};
+    {
+        Preferences r; r.begin("camillia", true);
+        strncpy(savedSsid, r.getString("wifiSsid", "").c_str(), sizeof(savedSsid) - 1);
+        strncpy(savedPass, r.getString("wifiPass", "").c_str(), sizeof(savedPass) - 1);
+        r.end();
+    }
+
+    // Clear both namespaces to defragment NVS — ESP32 NVS cannot compact
+    // in place, so stale tombstones accumulate until writes fail with
+    // NOT_ENOUGH_SPACE.  Clearing then rewriting guarantees space.
+    { Preferences p; p.begin("camillia", false); p.clear(); p.end(); }
+    { Preferences p; p.begin("mesh_ch",  false); p.clear(); p.end(); }
+    Serial.println("[cfg] NVS namespaces cleared");
+
+    // ── Write main config ────────────────────────────────────
     Preferences p; p.begin("camillia", false);
-    p.putString("nodeLong",  gCfg.nodeLong);
-    p.putString("nodeShort", gCfg.nodeShort);
-    p.putFloat("loraFreq",   gCfg.loraFreq);
-    p.putFloat("loraBw",     gCfg.loraBw);
-    p.putUChar("loraSf",     gCfg.loraSf);
-    p.putUChar("loraCr",     gCfg.loraCr);
-    p.putUChar("loraPower",  gCfg.loraPower);
-    p.putUChar("loraHopLim", gCfg.loraHopLimit);
-    p.putBool("gpsEnabled",  gCfg.gpsEnabled);
-    p.putInt("latI",         gCfg.latI);
-    p.putInt("lonI",         gCfg.lonI);
-    p.putInt("alt",          gCfg.alt);
+    // Re-save identity + WiFi keys wiped by clear()
+    p.putUInt("nodeId",       myNodeId);
+    p.putInt("pkiVer",        2);
+    p.putBytes("privKey",     myPrivKey, 32);
+    p.putBytes("pubKey",      myPubKey,  32);
+    if (savedSsid[0]) p.putString("wifiSsid", savedSsid);
+    if (savedPass[0])  p.putString("wifiPass", savedPass);
+    p.putString("nodeLong",   gCfg.nodeLong);
+    p.putString("nodeShort",  gCfg.nodeShort);
+    p.putFloat("loraFreq",    gCfg.loraFreq);
+    p.putFloat("loraBw",      gCfg.loraBw);
+    p.putUChar("loraSf",      gCfg.loraSf);
+    p.putUChar("loraCr",      gCfg.loraCr);
+    p.putUChar("loraPower",   gCfg.loraPower);
+    p.putUChar("loraHopLim",  gCfg.loraHopLimit);
+    p.putBool("gpsEnabled",   gCfg.gpsEnabled);
+    p.putInt("latI",          gCfg.latI);
+    p.putInt("lonI",          gCfg.lonI);
+    p.putInt("alt",           gCfg.alt);
     p.putUChar("devRole",     gCfg.deviceRole);
     p.putUChar("rebroadcast", gCfg.rebroadcastMode);
     p.putBool("okToMqtt",    gCfg.okToMqtt);
@@ -1643,37 +1677,29 @@ static void onWebCfgSaved() {
     p.putULong("nodeInfoIntv",gCfg.nodeInfoIntervalS);
     p.putULong("posIntv",     gCfg.posIntervalS);
     p.putString("region",     gCfg.region);
-    p.putString("tzDef",       gCfg.tzDef);
-    Serial.printf("[cfg] saving screenOnSecs=%lu\n", (unsigned long)gCfg.screenOnSecs);
-    p.putULong("screenOnSecs", gCfg.screenOnSecs);
-    p.putUChar("dispUnits",    gCfg.displayUnits);
-    p.putBool("compassNorth",  gCfg.compassNorthTop);
-    p.putBool("flipScreen",    gCfg.flipScreen);
-    p.putBool("btEnabled",     gCfg.btEnabled);
-    p.putUChar("btMode",       gCfg.btMode);
-    p.putULong("btFixedPin",   gCfg.btFixedPin);
-    // Remove defunct MQTT/NTP keys to reclaim NVS space (MQTT removed from this app)
-    p.remove("ntpServer");
-    p.remove("mqttEnabled");
-    p.remove("mqttServer");
-    p.remove("mqttUser");
-    p.remove("mqttPass");
-    p.remove("mqttRoot");
-    p.remove("mqttEncrypt");
-    p.remove("mqttMapRpt");
-    p.putBool("isPwrSaving",   gCfg.isPowerSaving);
-    p.putULong("lsSecs",       gCfg.lsSecs);
-    p.putULong("minWakeSecs",  gCfg.minWakeSecs);
-    p.putBool("telDevEn",      gCfg.telDeviceEnabled);
-    p.putULong("telDevIntv",   gCfg.telDeviceIntervalS);
-    p.putBool("telEnvEn",      gCfg.telEnvEnabled);
-    p.putULong("telEnvIntv",   gCfg.telEnvIntervalS);
-    p.putBool("cannedEn",      gCfg.cannedEnabled);
-    p.putString("cannedMsgs",  gCfg.cannedMessages);
-    p.putULong("nodeIdOvr",    gCfg.nodeIdOverride);
-    p.putUChar("chatSpace",    gCfg.chatSpacing);
+    p.putString("tzDef",      gCfg.tzDef);
+    p.putULong("screenOnSecs",gCfg.screenOnSecs);
+    p.putUChar("dispUnits",   gCfg.displayUnits);
+    p.putBool("compassNorth", gCfg.compassNorthTop);
+    p.putBool("flipScreen",   gCfg.flipScreen);
+    p.putBool("btEnabled",    gCfg.btEnabled);
+    p.putUChar("btMode",      gCfg.btMode);
+    p.putULong("btFixedPin",  gCfg.btFixedPin);
+    p.putBool("isPwrSaving",  gCfg.isPowerSaving);
+    p.putULong("lsSecs",      gCfg.lsSecs);
+    p.putULong("minWakeSecs", gCfg.minWakeSecs);
+    p.putBool("telDevEn",     gCfg.telDeviceEnabled);
+    p.putULong("telDevIntv",  gCfg.telDeviceIntervalS);
+    p.putBool("telEnvEn",     gCfg.telEnvEnabled);
+    p.putULong("telEnvIntv",  gCfg.telEnvIntervalS);
+    p.putBool("cannedEn",     gCfg.cannedEnabled);
+    p.putString("cannedMsgs", gCfg.cannedMessages);
+    p.putULong("nodeIdOvr",   gCfg.nodeIdOverride);
+    p.putUChar("chatSpace",   gCfg.chatSpacing);
     p.end();
-    // Save channel config (single namespace to reduce NVS overhead)
+    Serial.println("[cfg] main config saved to NVS");
+
+    // ── Write channel config ─────────────────────────────────
     {
         Preferences cp; cp.begin("mesh_ch", false);
         for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -1781,6 +1807,7 @@ void setup() {
         prefs.begin("camillia", true);
         String ln = prefs.getString("nodeLong",  "");
         String sn = prefs.getString("nodeShort", "");
+        Serial.printf("[cfg] NVS load: nodeLong='%s' nodeShort='%s'\n", ln.c_str(), sn.c_str());
         if (ln.length()) strncpy(gCfg.nodeLong,  ln.c_str(), sizeof(gCfg.nodeLong)  - 1);
         if (sn.length()) strncpy(gCfg.nodeShort, sn.c_str(), sizeof(gCfg.nodeShort) - 1);
         float f;
