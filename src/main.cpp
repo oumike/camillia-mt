@@ -251,7 +251,7 @@ static void drawSplash() {
     lcd.print(idBuf);
 
     // Version — bottom centre, dim
-    const char *ver = "v0.0.5";
+    const char *ver = "v0.0.6";
     tw = strlen(ver) * 6;
     lcd.setTextColor(DIM, BG);
     lcd.setCursor((LCD_W - tw) / 2, 210);
