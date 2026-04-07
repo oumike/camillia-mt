@@ -20,7 +20,8 @@
 class TDeckKeyboard {
 public:
     void begin();
-    char read();
+    char readTrackball();   // returns trackball/click event or KEY_NONE
+    char readKey();         // returns keyboard key or KEY_NONE
 
     // Public for static ISR access
     volatile int8_t _dx    = 0;

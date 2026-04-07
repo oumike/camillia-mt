@@ -251,7 +251,7 @@ static void drawSplash() {
     lcd.print(idBuf);
 
     // Version — bottom centre, dim
-    const char *ver = "v0.0.8";
+    const char *ver = APP_VERSION;
     tw = strlen(ver) * 6;
     lcd.setTextColor(DIM, BG);
     lcd.setCursor((LCD_W - tw) / 2, 210);
@@ -566,10 +566,13 @@ static void drawGps() {
     if (!gCfg.gpsEnabled) {
         pr(COL_TAB_IDLE, "GPS: DISABLED");
     } else if (fix) {
-        snprintf(buf, sizeof(buf), "GPS: FIX  sats:%d", sats);
+        uint32_t ttff = gpsSearchTimeMs();
+        snprintf(buf, sizeof(buf), "GPS: FIX  sats:%d  ttff:%lus", sats,
+                 (unsigned long)(ttff / 1000));
         pr(COL_TEAL, buf);
     } else {
-        snprintf(buf, sizeof(buf), "GPS: searching  sats:%d", sats);
+        uint32_t elapsed = gpsSearchTimeMs();
+        snprintf(buf, sizeof(buf), "GPS: searching %lus...", (unsigned long)(elapsed / 1000));
         pr(TFT_YELLOW, buf);
     }
     row++;  // blank line
@@ -859,17 +862,6 @@ static void drawSettings() {
              gCfg.loraPower, gCfg.loraHopLimit);
     pr(buf);
 
-    // GPS status
-    if (gCfg.gpsEnabled) {
-        if (gpsHasFix())
-            snprintf(buf, sizeof(buf), "GPS:  FIX  sats:%d", gpsSats());
-        else
-            snprintf(buf, sizeof(buf), "GPS:  searching...");
-    } else {
-        snprintf(buf, sizeof(buf), "GPS:  disabled");
-    }
-    pr(buf);
-
     dirtyChat = false;
 }
 
@@ -1023,6 +1015,15 @@ static void sendRoutingAck(const MeshPacket &pkt) {
 }
 
 // ── Handle received packet ────────────────────────────────────
+// Deferred NODEINFO sends — processed in loop() with pollInput() between each
+static const int MAX_DEFERRED = 4;
+static uint32_t deferredGreet[MAX_DEFERRED];
+static int      deferredCount = 0;
+
+static void queueGreet(uint32_t nodeId) {
+    if (deferredCount < MAX_DEFERRED) deferredGreet[deferredCount++] = nodeId;
+}
+
 static void handleRx(MeshPacket pkt) {
     if (isDuplicate(pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
@@ -1154,10 +1155,8 @@ static void handleRx(MeshPacket pkt) {
         if (!dmPickerOpen) dirtyChat = true;
         dirtyNodes = dirtyTabs = true;
 
-        // Respond with our own NODEINFO so the requester knows who we are
-        if (pkt.wantResponse) {
-            Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
-        }
+        // Defer our NODEINFO response so it doesn't block keyboard polling
+        if (pkt.wantResponse) queueGreet(pkt.hdr.from);
         break;
     }
 
@@ -1248,13 +1247,11 @@ static void handleRx(MeshPacket pkt) {
         bool needGreet = !known || !known->hasName ||
                          elapsed > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL;
         if (needGreet) {
-            Serial.printf("[nodeinfo] greeting !%08X (%s, last sent %lums ago)\n",
+            Serial.printf("[nodeinfo] queuing greeting for !%08X (%s, last sent %lums ago)\n",
                           pkt.hdr.from,
                           (known && known->hasName) ? known->shortName : "new",
                           elapsed == UINT32_MAX ? 0UL : (unsigned long)elapsed);
-            if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from)) {
-                if (known) known->lastSentInfoMs = millis();
-            }
+            queueGreet(pkt.hdr.from);
         }
     }
 
@@ -1729,6 +1726,17 @@ void setup() {
     Serial.begin(115200);
     delay(200);
 
+    // Ensure NVS is usable — if the partition layout changed (e.g. after
+    // a partition table update), the old data is garbage and init will fail.
+    // Erase and reinit so we don't boot-loop.
+    esp_err_t nvsErr = nvs_flash_init();
+    if (nvsErr == ESP_ERR_NVS_NO_FREE_PAGES || nvsErr == ESP_ERR_NVS_NEW_VERSION_FOUND
+        || nvsErr != ESP_OK) {
+        Serial.printf("[nvs] init failed (0x%x), erasing partition...\n", nvsErr);
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
     // Load or generate stable node ID + names from NVS
     {
         Preferences prefs;
@@ -1986,11 +1994,53 @@ void setup() {
     dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
 }
 
+// Poll keyboard + trackball; called multiple times per loop to avoid drops
+static void pollInput() {
+    uint32_t now = millis();
+
+    // Trackball
+    char tb = kb.readTrackball();
+    if (tb != KEY_NONE) {
+        if (screenAsleep) { wakeScreen(); return; }
+        handleKey(tb);
+    }
+
+    // Keyboard — drain up to 4 buffered keys
+    for (int ki = 0; ki < 4; ki++) {
+        char k = kb.readKey();
+        if (k == KEY_NONE) break;
+        if (screenAsleep) { wakeScreen(); break; }
+        lastActivityMs = now;
+        handleKey(k);
+    }
+}
+
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
+    // Poll input first — keyboard MCU has tiny buffer
+    pollInput();
+
     // 1. Poll radio
     MeshPacket pkt;
-    if (Radio.pollRx(pkt)) handleRx(pkt);
+    if (Radio.pollRx(pkt)) {
+        handleRx(pkt);
+        pollInput();   // poll again after heavy packet processing
+    }
+
+    // 1a. Process deferred NODEINFO greetings (one per loop, with input polling)
+    if (deferredCount > 0) {
+        uint32_t dest = deferredGreet[0];
+        // Shift queue
+        for (int i = 1; i < deferredCount; i++) deferredGreet[i-1] = deferredGreet[i];
+        deferredCount--;
+        pollInput();
+        Serial.printf("[nodeinfo] deferred greeting !%08X\n", dest);
+        if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, dest)) {
+            NodeEntry *n = Nodes.find(dest);
+            if (n) n->lastSentInfoMs = millis();
+        }
+        pollInput();
+    }
 
     // 1b. Service web config server if running
     webCfgLoop();
@@ -2004,21 +2054,6 @@ void loop() {
     gpsLoop();
 
     uint32_t now = millis();
-
-    // 2. Poll keyboard
-    char k = kb.read();
-    if (k != KEY_NONE) {
-        if (screenAsleep) {
-            wakeScreen();   // any key wakes the screen; key is consumed (not passed through)
-        } else {
-            // Only real keys and roller click count as activity — not trackball scroll
-            // events which are ISR-driven and can fire spuriously.
-            bool isScroll = (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN ||
-                             k == KEY_SCROLL_UP || k == KEY_SCROLL_DN);
-            if (!isScroll) lastActivityMs = now;
-            handleKey(k);
-        }
-    }
 
     // 3. ACK expiry
     Channels.expireAcks();
@@ -2075,6 +2110,7 @@ void loop() {
     if (screenAsleep) return;
     if (dirtyStatus)  drawStatus();
     if (dirtyTabs)    drawTabs();
+    pollInput();   // squeeze in a keyboard poll between redraws
 
     if (nodeDetailOpen) {
         // Detail overlay refreshes when chat or nodes go dirty

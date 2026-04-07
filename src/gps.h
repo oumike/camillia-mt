@@ -27,8 +27,14 @@ int32_t gpsLatI();
 int32_t gpsLonI();
 int32_t gpsAltM();
 
-// Satellite count (0 when no fix).
+// Satellite count (0 until a real fix is confirmed).
 uint8_t gpsSats();
+
+// Time since first fix was acquired (ms), or 0 if no fix yet.
+uint32_t gpsFixAgeMs();
+
+// Time spent searching (ms). If fix acquired, returns time-to-first-fix.
+uint32_t gpsSearchTimeMs();
 
 // Course over ground in degrees (0=N, 90=E). Valid only when moving with a fix.
 float gpsCourse();

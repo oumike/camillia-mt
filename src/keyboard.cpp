@@ -27,7 +27,7 @@ void TDeckKeyboard::begin() {
     attachInterrupt(digitalPinToInterrupt(TBALL_CLICK), _isrClick, FALLING);
 }
 
-char TDeckKeyboard::read() {
+char TDeckKeyboard::readTrackball() {
     unsigned long now = millis();
 
     // Drain trackball ISR state
@@ -42,8 +42,7 @@ char TDeckKeyboard::read() {
     // Track the last time scroll motion was seen
     if (dx != 0 || dy != 0) _lastScrollMs = now;
 
-    // Suppress accidental clicks that fire during or just after rolling:
-    // only register a click if the ball has been still for at least 200 ms.
+    // Suppress accidental clicks that fire during or just after rolling
     if (clk && (now - _lastScrollMs >= 200)) return KEY_ROLLER;
 
     if (dx > 0) return KEY_NEXT_CHAN;
@@ -51,7 +50,11 @@ char TDeckKeyboard::read() {
     if (dy < 0) return KEY_SCROLL_UP;
     if (dy > 0) return KEY_SCROLL_DN;
 
-    // Keyboard MCU — debounced
+    return KEY_NONE;
+}
+
+char TDeckKeyboard::readKey() {
+    unsigned long now = millis();
     if (now - _lastReadMs < 10) return KEY_NONE;
     Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
     if (!Wire.available()) return KEY_NONE;
