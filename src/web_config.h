@@ -27,3 +27,7 @@ bool webCfgAnnounceRequested();
 
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
+
+// Current WiFi credentials (updated by web UI save, used by NVS save callback)
+const char *webCfgWifiSsid();
+const char *webCfgWifiPass();

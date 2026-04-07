@@ -1633,21 +1633,14 @@ static void handleKey(char k) {
 static void onWebCfgSaved() {
     Serial.printf("[cfg] onWebCfgSaved: long='%s' short='%s'\n", gCfg.nodeLong, gCfg.nodeShort);
 
-    // Snapshot WiFi creds before clearing — they live in NVS only, not gCfg
-    char savedSsid[64] = {0}, savedPass[64] = {0};
-    {
-        Preferences r; r.begin("camillia", true);
-        strncpy(savedSsid, r.getString("wifiSsid", "").c_str(), sizeof(savedSsid) - 1);
-        strncpy(savedPass, r.getString("wifiPass", "").c_str(), sizeof(savedPass) - 1);
-        r.end();
-    }
-
-    // Clear both namespaces to defragment NVS — ESP32 NVS cannot compact
-    // in place, so stale tombstones accumulate until writes fail with
-    // NOT_ENOUGH_SPACE.  Clearing then rewriting guarantees space.
-    { Preferences p; p.begin("camillia", false); p.clear(); p.end(); }
-    { Preferences p; p.begin("mesh_ch",  false); p.clear(); p.end(); }
-    Serial.println("[cfg] NVS namespaces cleared");
+    // Erase the entire NVS partition to reclaim all pages.
+    // Preferences.clear() only tombstones keys — doesn't free pages.
+    // nvs_flash_erase() is the only way to truly defragment on ESP32.
+    // This wipes ALL namespaces (camillia, mesh_ch, nodes) so we must
+    // rewrite everything below.
+    nvs_flash_erase();
+    nvs_flash_init();
+    Serial.println("[cfg] NVS partition erased");
 
     // ── Write main config ────────────────────────────────────
     Preferences p; p.begin("camillia", false);
@@ -1656,8 +1649,8 @@ static void onWebCfgSaved() {
     p.putInt("pkiVer",        2);
     p.putBytes("privKey",     myPrivKey, 32);
     p.putBytes("pubKey",      myPubKey,  32);
-    if (savedSsid[0]) p.putString("wifiSsid", savedSsid);
-    if (savedPass[0])  p.putString("wifiPass", savedPass);
+    if (webCfgWifiSsid()[0]) p.putString("wifiSsid", webCfgWifiSsid());
+    if (webCfgWifiPass()[0]) p.putString("wifiPass", webCfgWifiPass());
     p.putString("nodeLong",   gCfg.nodeLong);
     p.putString("nodeShort",  gCfg.nodeShort);
     p.putFloat("loraFreq",    gCfg.loraFreq);
@@ -1708,10 +1701,15 @@ static void onWebCfgSaved() {
             snprintf(k, sizeof(k), "n%d", i);  cp.putString(k, nm);
             snprintf(k, sizeof(k), "k%d", i);  cp.putBytes(k, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
             snprintf(k, sizeof(k), "r%d", i);  cp.putUChar(k, CHANNEL_KEYS[i].role);
+            Serial.printf("[cfg] ch%d save: name='%s' keyLen=%u role=%u\n",
+                          i, nm, CHANNEL_KEYS[i].keyLen, CHANNEL_KEYS[i].role);
         }
         cp.end();
     }
     Serial.println("[cfg] channels saved to NVS");
+    // Re-save node database (wiped by nvs_flash_erase)
+    Nodes.saveAll();
+    Serial.println("[cfg] nodes re-saved to NVS");
     // Apply GPS enable/disable immediately
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
@@ -1897,6 +1895,8 @@ void setup() {
             // Recompute on-air hash from the loaded name + key
             const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
             CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+            Serial.printf("[cfg] ch%d load: name='%s' keyLen=%u role=%u hash=0x%02X\n",
+                          i, nm2, CHANNEL_KEYS[i].keyLen, CHANNEL_KEYS[i].role, CHANNEL_KEYS[i].hash);
         }
         cp.end();
     }

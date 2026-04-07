@@ -26,6 +26,7 @@ class NodeDB {
 public:
     void init();          // zeros RAM, then loads persisted nodes from NVS
     void clearPersisted(); // wipe "nodes" NVS namespace (factory reset)
+    void saveAll();        // rewrite all nodes to NVS (after partition erase)
 
     // Find or create entry for nodeId. Returns pointer (never null).
     NodeEntry *upsert(uint32_t nodeId);

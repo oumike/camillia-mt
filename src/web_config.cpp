@@ -20,6 +20,8 @@ static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
 static WebCfgSaveCb   gOnSave          = nullptr;
 static volatile bool  gAnnounceReq     = false;
+static char           gWifiSsid[64]    = "";
+static char           gWifiPass[64]    = "";
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -155,8 +157,18 @@ static int b64Decode(const char *in, uint8_t *out, int maxLen) {
 
 // ── Config page ───────────────────────────────────────────────
 
+// Helper: flush a chunk of HTML and reset the buffer
+static void sendChunk(String &html) {
+    server.sendContent(html);
+    html = "";
+}
+
 static void sendConfigPage(const char *msg = "") {
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
+
+    // Use chunked transfer to avoid building one giant String
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
 
     char tmp[96];
     String html = kHead;
@@ -178,6 +190,7 @@ static void sendConfigPage(const char *msg = "") {
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
     html += "</details>";
+    sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
     html += "<details open><summary>Device</summary>";
@@ -231,6 +244,7 @@ static void sendConfigPage(const char *msg = "") {
         html += "</select></label>";
     }
     html += "</details>";
+    sendChunk(html);
 
     // ── Position ──────────────────────────────────────────────
     html += "<details open><summary>Position</summary>";
@@ -251,6 +265,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Altitude m (fallback)<input name='alt' type='number' value='";
     html += tmp; html += "' style='max-width:120px'></label>";
     html += "</details>";
+    sendChunk(html);
 
     // ── Channels ──────────────────────────────────────────────
     html += "<details><summary>Channels</summary>";
@@ -285,6 +300,7 @@ static void sendConfigPage(const char *msg = "") {
         html += "</div>";
     }
     html += "</details>";
+    sendChunk(html);
 
     // ── LoRa Radio ────────────────────────────────────────────
     html += "<details open><summary>LoRa Radio</summary>";
@@ -401,6 +417,7 @@ static void sendConfigPage(const char *msg = "") {
     if (gCfg->ignoreMqtt) html += " checked";
     html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
     html += "</details>";
+    sendChunk(html);
 
     // ── Bluetooth ─────────────────────────────────────────────
     html += "<details><summary>Bluetooth</summary>";
@@ -423,6 +440,7 @@ static void sendConfigPage(const char *msg = "") {
             "<input name='bt_pin' type='number' min='0' max='999999' value='";
     html += tmp; html += "' style='max-width:150px'></label>";
     html += "</details>";
+    sendChunk(html);
 
     // Network section removed (MQTT not used; strictly LoRa)
 
@@ -451,6 +469,7 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='2'"; if (gCfg->chatSpacing == 2) html += " selected"; html += ">Loose</option>"
             "</select></label>";
     html += "</details>";
+    sendChunk(html);
 
     // ── Power ─────────────────────────────────────────────────
     html += "<details><summary>Power</summary>";
@@ -466,6 +485,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Min Wake (s)<input name='min_wake' type='number' min='0' value='";
     html += tmp; html += "'></label></div>";
     html += "</details>";
+    sendChunk(html);
 
     // ── Modules ───────────────────────────────────────────────
     html += "<details><summary>Modules</summary>";
@@ -497,8 +517,19 @@ static void sendConfigPage(const char *msg = "") {
             "<input name='canned_msgs' type='text' maxlength='199' value='";
     html += gCfg->cannedMessages; html += "'></label>";
     html += "</details>";
+    sendChunk(html);
+
+    // WiFi
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>WiFi</h3>"
+            "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
+    html += gWifiSsid;
+    html += "'></label>"
+            "<label>Password<input name='wifi_pass' type='password' maxlength='63' value='";
+    html += gWifiPass;
+    html += "'></label>";
 
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
+    sendChunk(html);
 
     // ── Backup & Restore ──────────────────────────────────────
     html +=
@@ -539,7 +570,8 @@ static void sendConfigPage(const char *msg = "") {
         " The device will behave as if freshly flashed.</p>";
 
     html += "</body></html>";
-    server.send(200, "text/html", html);
+    server.sendContent(html);
+    server.sendContent("");   // empty chunk signals end of response
 }
 
 // ── Onboarding (WiFi setup) ───────────────────────────────────
@@ -660,6 +692,9 @@ static void handlePostSave() {
         char field[16];
         snprintf(field, sizeof(field), "ch%d_name", i);
         String nm = server.arg(field);
+        Serial.printf("[cfg] ch%d: name='%s' key='%s' role='%s'\n", i,
+                      nm.c_str(), server.arg(String("ch") + i + "_key").c_str(),
+                      server.arg(String("ch") + i + "_role").c_str());
         if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
             strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
             CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
@@ -724,6 +759,17 @@ static void handlePostSave() {
     gCfg->telEnvIntervalS    = (uint32_t)max((long)60, server.arg("tel_env_intv").toInt());
     gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
     strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
+
+    // WiFi credentials — save directly to NVS (not part of gCfg)
+    {
+        String ssid = server.arg("wifi_ssid");
+        String pass = server.arg("wifi_pass");
+        ssid.trim(); pass.trim();
+        if (ssid.length() > 0) {
+            strncpy(gWifiSsid, ssid.c_str(), sizeof(gWifiSsid) - 1);
+            strncpy(gWifiPass, pass.c_str(), sizeof(gWifiPass) - 1);
+        }
+    }
 
     if (gOnSave) gOnSave();
 
@@ -861,6 +907,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     String savedSsid = prefs.getString("wifiSsid", "");
     String savedPass = prefs.getString("wifiPass", "");
     prefs.end();
+    strncpy(gWifiSsid, savedSsid.c_str(), sizeof(gWifiSsid) - 1);
+    strncpy(gWifiPass, savedPass.c_str(), sizeof(gWifiPass) - 1);
 
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
@@ -962,6 +1010,8 @@ void webCfgEnd() {
 }
 
 bool webCfgIsOnboarding() { return gOnboarding; }
+const char *webCfgWifiSsid() { return gWifiSsid; }
+const char *webCfgWifiPass() { return gWifiPass; }
 
 void webCfgLoop() {
     if (running) server.handleClient();

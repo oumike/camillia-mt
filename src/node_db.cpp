@@ -96,6 +96,12 @@ void NodeDB::clearPersisted() {
     p.end();
 }
 
+void NodeDB::saveAll() {
+    _saveIds();
+    for (int i = 0; i < _count; i++)
+        if (_nodes[i].nodeId) _save(_nodes[i].nodeId);
+}
+
 // ── Core operations ───────────────────────────────────────────
 
 NodeEntry *NodeDB::find(uint32_t nodeId) {
