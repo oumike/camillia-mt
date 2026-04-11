@@ -103,7 +103,7 @@
 #define MY_TEL_ENV_INTV     7200
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
-#define MY_CHAT_SPACING     1   // 0=Tight(6px), 1=Normal(8px), 2=Loose(10px)
+#define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 // ── Display UI zones (landscape 320×240, font0 = 6×8 px) ─────
 #define LCD_W           320
