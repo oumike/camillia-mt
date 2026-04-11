@@ -6,6 +6,7 @@
 #include <nvs_flash.h>
 #include <SD.h>
 #include <math.h>
+#include <ctype.h>
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
@@ -32,6 +33,20 @@ static bool isLoggedIn() {
     // String cookie = server.header("Cookie");
     // String needle = String("sess=") + sessionToken;
     // return cookie.indexOf(needle) >= 0;
+}
+
+static void buildExportFileName(const char *shortName, char *out, size_t outLen) {
+    char clean[24] = {};
+    size_t j = 0;
+    if (shortName) {
+        for (size_t i = 0; shortName[i] && j < sizeof(clean) - 1; i++) {
+            unsigned char c = (unsigned char)shortName[i];
+            if (isalnum(c) || c == '_' || c == '-') clean[j++] = (char)c;
+            else if (c == ' ' || c == '.')          clean[j++] = '_';
+        }
+    }
+    if (j == 0) strncpy(clean, "node", sizeof(clean) - 1);
+    snprintf(out, outLen, "%s_config.yaml", clean);
 }
 
 static void redirect(const char *path) {
@@ -541,10 +556,10 @@ static void sendConfigPage(const char *msg = "") {
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>"
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
-        "<p><a href='/export' download='config.yaml'"
+        "<p><a href='/export'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
-        "&#11015; Export config.yaml</a></p>"
+        "&#11015; Export Config</a></p>"
         "<form method='POST' action='/import' enctype='multipart/form-data'"
         " style='margin-top:.6em'>"
         "<label>Import a YAML config file.</label>  "
@@ -616,6 +631,17 @@ static void handlePostOnboard() {
     prefs.putString("wifiSsid", ssid);
     prefs.putString("wifiPass", pass);
     prefs.end();
+
+    strncpy(gWifiSsid, ssid.c_str(), sizeof(gWifiSsid) - 1);
+    gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
+    strncpy(gWifiPass, pass.c_str(), sizeof(gWifiPass) - 1);
+    gWifiPass[sizeof(gWifiPass) - 1] = '\0';
+    if (gCfg) {
+        strncpy(gCfg->wifiSsid, gWifiSsid, sizeof(gCfg->wifiSsid) - 1);
+        gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
+        strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
+        gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
+    }
 
     String html = kHead;
     html +=
@@ -767,7 +793,13 @@ static void handlePostSave() {
         ssid.trim(); pass.trim();
         if (ssid.length() > 0) {
             strncpy(gWifiSsid, ssid.c_str(), sizeof(gWifiSsid) - 1);
+            gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
             strncpy(gWifiPass, pass.c_str(), sizeof(gWifiPass) - 1);
+            gWifiPass[sizeof(gWifiPass) - 1] = '\0';
+            strncpy(gCfg->wifiSsid, gWifiSsid, sizeof(gCfg->wifiSsid) - 1);
+            gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
+            strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
+            gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
         }
     }
 
@@ -847,8 +879,12 @@ static void handleGetExport() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
     String yaml;
+    char fileName[48];
+    char cd[80];
+    buildExportFileName(gCfg->nodeShort, fileName, sizeof(fileName));
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
     cfgToYaml(*gCfg, yaml);
-    server.sendHeader("Content-Disposition", "attachment; filename=\"config.yaml\"");
+    server.sendHeader("Content-Disposition", cd);
     server.send(200, "text/x-yaml", yaml);
 }
 
@@ -883,8 +919,29 @@ static void handleImportDone() {
         sendConfigPage("Import failed: parse error.");
         return;
     }
+
+    // Apply imported WiFi credentials to runtime and NVS.
+    strncpy(gWifiSsid, gCfg->wifiSsid, sizeof(gWifiSsid) - 1);
+    gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
+    strncpy(gWifiPass, gCfg->wifiPass, sizeof(gWifiPass) - 1);
+    gWifiPass[sizeof(gWifiPass) - 1] = '\0';
+    {
+        Preferences prefs;
+        prefs.begin("camillia", false);
+        prefs.putString("wifiSsid", gWifiSsid);
+        prefs.putString("wifiPass", gWifiPass);
+        prefs.end();
+    }
+
     if (gOnSave) gOnSave();
-    sendConfigPage("Config imported and saved.");
+    server.send(200, "text/html",
+        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
+        "<h2>Import complete.</h2>"
+        "<p>Configuration imported successfully. The device is rebooting now.</p>"
+        "</body></html>");
+    server.stop();
+    delay(500);
+    ESP.restart();
 }
 
 static void handleGetLogout() {
@@ -908,7 +965,13 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     String savedPass = prefs.getString("wifiPass", "");
     prefs.end();
     strncpy(gWifiSsid, savedSsid.c_str(), sizeof(gWifiSsid) - 1);
+    gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
     strncpy(gWifiPass, savedPass.c_str(), sizeof(gWifiPass) - 1);
+    gWifiPass[sizeof(gWifiPass) - 1] = '\0';
+    strncpy(gCfg->wifiSsid, gWifiSsid, sizeof(gCfg->wifiSsid) - 1);
+    gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
+    strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
+    gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
 
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);

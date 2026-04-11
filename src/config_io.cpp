@@ -86,6 +86,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
     cfg.region[sizeof(cfg.region) - 1] = '\0';
     cfg.tzDef[0]           = '\0';
+    cfg.wifiSsid[0]        = '\0';
+    cfg.wifiPass[0]        = '\0';
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
@@ -132,6 +134,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out  = "# start of Meshtastic configure yaml\n";
     // canned_messages top-level
     out += "canned_messages: "; out += cfg.cannedMessages; out += "\n";
+    // WiFi credentials (for web config export/import portability)
+    out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
+    out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
     out += "config:\n";
     // bluetooth
     out += "  bluetooth:\n";
@@ -285,6 +290,14 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     strncpy(cfg.nodeShort, val, sizeof(cfg.nodeShort) - 1);
                 else if (!strcmp(key, "canned_messages"))
                     strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
+                else if (!strcmp(key, "wifi_ssid")) {
+                    strncpy(cfg.wifiSsid, val, sizeof(cfg.wifiSsid) - 1);
+                    cfg.wifiSsid[sizeof(cfg.wifiSsid) - 1] = '\0';
+                }
+                else if (!strcmp(key, "wifi_pass")) {
+                    strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
+                    cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
+                }
             }
         } else if (indent == 2) {
             if (!hasVal) {
