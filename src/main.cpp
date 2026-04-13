@@ -124,11 +124,172 @@ static void sdRmDir(const char *path) {
 #define SETTING_WEBCFG        0
 #define SETTING_EXPORT        1
 #define SETTING_IMPORT        2
-#define SETTING_CHAT_SPACE    3
-#define SETTING_FACTORY_RESET 4
-#define NUM_SETTINGS          5
+#define SETTING_THEME         3
+#define SETTING_CLEAR_NODES   4
+#define SETTING_FACTORY_RESET 5
+#define NUM_SETTINGS          6
 
 static char settingsStatus[LCD_W / CHAR_W + 1] = "";
+
+struct UiPalette {
+    uint16_t bgMain;
+    uint16_t statusTop;
+    uint16_t statusBg;
+    uint16_t panelBg;
+    uint16_t panelAlt;
+    uint16_t panelStrong;
+    uint16_t tabActive;
+    uint16_t tabUnread;
+    uint16_t tabIdle;
+    uint16_t divider;
+    uint16_t dividerHi;
+    uint16_t inputBg;
+    uint16_t inputTop;
+    uint16_t accent;
+    uint16_t cursor;
+    uint16_t textMain;
+    uint16_t textDim;
+    uint16_t textOnAccent;
+    uint16_t statusText;
+    uint16_t selectBg;
+    uint16_t selectAccent;
+    uint16_t nodeHot;
+    uint16_t nodeWarm;
+    uint16_t dmMuted;
+    uint16_t battGood;
+    uint16_t battWarn;
+    uint16_t battBad;
+    uint16_t splashTop;
+    uint16_t splashBottom;
+    uint16_t splashCardBg;
+    uint16_t splashCardEdge;
+    uint16_t splashCardEdgeHi;
+    uint16_t splashTitle;
+    uint16_t splashSub;
+    uint16_t splashDim;
+};
+
+static UiPalette gUi = {};
+
+#define COL_BG_MAIN        gUi.bgMain
+#define COL_STATUS_TOP     gUi.statusTop
+#define COL_STATUS_BG      gUi.statusBg
+#define COL_PANEL_BG       gUi.panelBg
+#define COL_PANEL_ALT      gUi.panelAlt
+#define COL_PANEL_STRONG   gUi.panelStrong
+#define COL_TAB_ACTIVE     gUi.tabActive
+#define COL_TAB_UNREAD     gUi.tabUnread
+#define COL_TAB_IDLE       gUi.tabIdle
+#define COL_DIVIDER        gUi.divider
+#define COL_DIVIDER_HI     gUi.dividerHi
+#define COL_INPUT_BG       gUi.inputBg
+#define COL_INPUT_TOP      gUi.inputTop
+#define COL_TEAL           gUi.accent
+#define COL_CURSOR         gUi.cursor
+#define COL_TEXT_MAIN      gUi.textMain
+#define COL_TEXT_DIM       gUi.textDim
+#define COL_TEXT_ON_ACCENT gUi.textOnAccent
+#define COL_STATUS_TEXT    gUi.statusText
+#define COL_SELECT_BG      gUi.selectBg
+#define COL_SELECT_ACCENT  gUi.selectAccent
+#define COL_NODE_HOT       gUi.nodeHot
+#define COL_NODE_WARM      gUi.nodeWarm
+#define COL_DM_MUTED       gUi.dmMuted
+#define COL_BATT_GOOD      gUi.battGood
+#define COL_BATT_WARN      gUi.battWarn
+#define COL_BATT_BAD       gUi.battBad
+#define COL_SPLASH_TOP     gUi.splashTop
+#define COL_SPLASH_BOTTOM  gUi.splashBottom
+#define COL_SPLASH_CARD    gUi.splashCardBg
+#define COL_SPLASH_EDGE    gUi.splashCardEdge
+#define COL_SPLASH_EDGE_HI gUi.splashCardEdgeHi
+#define COL_SPLASH_TITLE   gUi.splashTitle
+#define COL_SPLASH_SUB     gUi.splashSub
+#define COL_SPLASH_DIM     gUi.splashDim
+
+static uint8_t uiThemePresetIndex() {
+    if (gCfg.uiTheme == UI_THEME_EVERGREEN)
+        return (gCfg.uiMode == UI_MODE_LIGHT) ? 3 : 2;
+    return (gCfg.uiMode == UI_MODE_LIGHT) ? 1 : 0;
+}
+
+static const char *uiThemePresetName(uint8_t preset) {
+    switch (preset % 4) {
+        case 0: return "Camillia Dark";
+        case 1: return "Camillia Light";
+        case 2: return "Evergreen Dark";
+        default: return "Evergreen Light";
+    }
+}
+
+static void setUiThemePreset(uint8_t preset) {
+    switch (preset % 4) {
+        case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
+        case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
+        default: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+    }
+}
+
+static void persistUiTheme() {
+    Preferences p;
+    p.begin("camillia", false);
+    p.putUChar("uiTheme", gCfg.uiTheme);
+    p.putUChar("uiMode", gCfg.uiMode);
+    p.end();
+}
+
+static void applyUiTheme(bool markDirty = true) {
+    gCfg.uiTheme = (uint8_t)constrain((int)gCfg.uiTheme, 0, UI_THEME_COUNT - 1);
+    gCfg.uiMode  = (uint8_t)(gCfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+
+    if (gCfg.uiTheme == UI_THEME_EVERGREEN) {
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                0xE73C, 0xD697, 0xC5F4, 0xF7DE, 0xE71B, 0xDEB9,
+                0x2148, 0xA321, 0x5B0D, 0xA4F2, 0xBDB4, 0xE71B, 0xD677,
+                0x2D2A, 0x2D2A, 0x2148, 0x636E, 0xFFFF, 0x2148,
+                0x2D2A, 0x45AD, 0x1CAA, 0x2148, 0x7BAF,
+                0x2DA6, 0xBC40, 0xA000,
+                0xD697, 0xF7DE, 0xEF7C, 0xA4F2, 0xBDB4, 0x2148, 0x4AED, 0x7C31
+            };
+        } else {
+            gUi = {
+                0x00A8, 0x19EC, 0x114A, 0x11AA, 0x1A2C, 0x1A0B,
+                0xFFFF, 0xFD20, 0x8CF1, 0x3B8F, 0x4C31, 0x1A0B, 0x2B2D,
+                0x55B0, 0x55B0, 0xFFFF, 0xA554, 0xFFFF, 0xE77D,
+                0x2AED, 0x55B0, 0x86FF, 0xE73C, 0xC69A,
+                0x3666, 0xED80, 0xA000,
+                0x00A8, 0x228D, 0x1169, 0x4C31, 0x64D4, 0xFFFF, 0xB69A, 0x9D75
+            };
+        }
+    } else {
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                0xFF5D, 0xFD95, 0xFCF2, 0xFFDF, 0xFF1B, 0xFE96,
+                0x3127, 0xC983, 0x73AE, 0xBC92, 0xCD34, 0xFF1B, 0xFCD2,
+                0xB964, 0xB964, 0x20E6, 0x62CC, 0xFFFF, 0x2927,
+                0xB964, 0xDA8E, 0x2C8D, 0x2927, 0x8B2F,
+                0x2DA6, 0xBC40, 0xA000,
+                0xFE97, 0xFFDF, 0xFF9D, 0xBCB2, 0xCD54, 0x2927, 0x6AAB, 0x83AE
+            };
+        } else {
+            gUi = {
+                0x0843, 0x18A7, 0x1045, 0x1065, 0x18A7, 0x1846,
+                0xFFFF, 0xF46B, 0xA4B2, 0x39A8, 0x4A2A, 0x1846, 0x7228,
+                0xDA8E, 0xDA8E, 0xFFFF, 0xB596, 0xFFFF, 0xF79E,
+                0x7228, 0xDA8E, 0x66FF, 0xDEFB, 0xCE59,
+                0x2DA6, 0xFD20, 0xA000,
+                0x0801, 0x49C8, 0x1023, 0x6AAE, 0x83B2, 0xFFFF, 0xF6FB, 0xB596
+            };
+        }
+    }
+
+    if (markDirty) {
+        dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
+        dirtyDivider = true;
+    }
+}
 
 // ── Node list focus / detail ───────────────────────────────────
 static bool     nodeListFocused = false;
@@ -257,14 +418,13 @@ static void drawCamelliaMark(int cx, int cy) {
 }
 
 static void drawSplash() {
-    const uint16_t BG_TOP     = 0x0007;
-    const uint16_t BG_BOTTOM  = 0x08A7;
-    const uint16_t CARD_BG    = 0x0020;
-    const uint16_t CARD_EDGE  = 0x2C4A;
-    const uint16_t ACCENT     = 0x2E5A;
-    const uint16_t TITLE      = 0xFFFF;
-    const uint16_t SUB        = 0xC618;
-    const uint16_t DIM        = 0x8C71;
+    const uint16_t BG_TOP     = COL_SPLASH_TOP;
+    const uint16_t BG_BOTTOM  = COL_SPLASH_BOTTOM;
+    const uint16_t CARD_BG    = COL_SPLASH_CARD;
+    const uint16_t CARD_EDGE  = COL_SPLASH_EDGE;
+    const uint16_t TITLE      = COL_SPLASH_TITLE;
+    const uint16_t SUB        = COL_SPLASH_SUB;
+    const uint16_t DIM        = COL_SPLASH_DIM;
 
     for (int y = 0; y < LCD_H; y++) {
         int r1 = (BG_TOP >> 11) & 0x1F, g1 = (BG_TOP >> 5) & 0x3F, b1 = BG_TOP & 0x1F;
@@ -278,7 +438,7 @@ static void drawSplash() {
 
     lcd.fillRoundRect(16, 26, LCD_W - 32, 188, 8, CARD_BG);
     lcd.drawRoundRect(16, 26, LCD_W - 32, 188, 8, CARD_EDGE);
-    lcd.drawRoundRect(17, 27, LCD_W - 34, 186, 8, 0x10A5);
+    lcd.drawRoundRect(17, 27, LCD_W - 34, 186, 8, COL_SPLASH_EDGE_HI);
 
     lcd.setFont(&fonts::FreeSansBold18pt7b);
     lcd.setTextSize(1);
@@ -310,22 +470,10 @@ static void drawSplash() {
     lcd.setFont(&fonts::Font0);
 
     delay(1500);
-    lcd.fillScreen(0x0007);
+    lcd.fillScreen(COL_BG_MAIN);
 }
 
 // ── Colour helpers ────────────────────────────────────────────
-#define COL_BG_MAIN      0x0007
-#define COL_STATUS_BG    0x0041
-#define COL_PANEL_BG     0x0843
-#define COL_PANEL_ALT    0x1085
-#define COL_TAB_ACTIVE   0xFFFF
-#define COL_TAB_UNREAD   0xFD20
-#define COL_TAB_IDLE     0xA514
-#define COL_DIVIDER      0x2949
-#define COL_INPUT_BG     0x0843
-#define COL_TEAL         0x2E5A
-#define COL_CURSOR       COL_TEAL
-#define COL_TEXT_DIM     0x9CD3
 
 static uint16_t lerp565(uint16_t c1, uint16_t c2, uint8_t t) {
     int r1 = (c1 >> 11) & 0x1F, g1 = (c1 >> 5) & 0x3F, b1 = c1 & 0x1F;
@@ -384,8 +532,8 @@ static uint8_t _battPct = 0;
 // Drawn in status bar over the node pane column (x=NODE_X..LCD_W-1, y=0..STATUS_H-1)
 static void drawBattery() {
     const uint16_t bg = COL_STATUS_BG;
-    uint16_t col = _battPct >= 60 ? TFT_GREEN :
-                   _battPct >= 25 ? COL_TAB_UNREAD : TFT_RED;
+    uint16_t col = _battPct >= 60 ? COL_BATT_GOOD :
+                   _battPct >= 25 ? COL_BATT_WARN : COL_BATT_BAD;
 
     const int BAR_W = 18, BAR_H = 6;
     const int NUB_W = 2, NUB_H = 2;
@@ -419,13 +567,13 @@ static void drawBattery() {
 
 // ── Draw: status bar ─────────────────────────────────────────
 static void drawStatus() {
-    fillVerticalGradient(0, 0, NODE_X, STATUS_H, 0x0062, COL_STATUS_BG);
+    fillVerticalGradient(0, 0, NODE_X, STATUS_H, COL_STATUS_TOP, COL_STATUS_BG);
     lcd.fillRect(NODE_X, 0, NODE_W, STATUS_H, COL_STATUS_BG);
     lcd.drawFastHLine(0, STATUS_H - 1, LCD_W, COL_DIVIDER);
 
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_WHITE, COL_STATUS_BG);
+    lcd.setTextColor(COL_STATUS_TEXT, COL_STATUS_BG);
 
     uint32_t upSec = millis() / 1000;
     char chName[12] = {};
@@ -489,10 +637,10 @@ static void drawTabs() {
         bool isActive = (tabs[t].view == activeView);
         uint16_t col;
         if (tabs[t].view == VIEW_SETTINGS) {
-            col = isActive ? TFT_WHITE : COL_TAB_IDLE;
+            col = isActive ? COL_TEXT_ON_ACCENT : COL_TAB_IDLE;
         } else if (tabs[t].view == VIEW_GPS) {
-            if      (isActive)       col = TFT_WHITE;
-            else if (gpsHasFix())    col = TFT_GREEN;
+            if      (isActive)       col = COL_TEXT_ON_ACCENT;
+            else if (gpsHasFix())    col = COL_BATT_GOOD;
             else if (gpsIsEnabled()) col = COL_TAB_UNREAD;
             else                     col = COL_TAB_IDLE;
         } else if (tabs[t].view == CHAN_ANN) {
@@ -504,10 +652,10 @@ static void drawTabs() {
                   isActive  ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
         }
         if (isActive) {
-            lcd.fillRect(sx, STATUS_H + 1, tabs[t].w - 1, TAB_H - 2, 0x0864);
-            lcd.fillRect(sx, STATUS_H + TAB_H - 2, tabs[t].w - 1, 2, COL_TEAL);
+            lcd.fillRect(sx, STATUS_H + 1, tabs[t].w - 1, TAB_H - 2, COL_SELECT_BG);
+            lcd.fillRect(sx, STATUS_H + TAB_H - 2, tabs[t].w - 1, 2, COL_SELECT_ACCENT);
         }
-        lcd.setTextColor(col, isActive ? 0x0864 : COL_BG_MAIN);
+        lcd.setTextColor(col, isActive ? COL_SELECT_BG : COL_BG_MAIN);
         drawClippedText(sx + 2, STATUS_H + 1, tabs[t].w - 4, tabs[t].label);
     }
     lcd.setFont(&fonts::Font0);
@@ -517,7 +665,7 @@ static void drawTabs() {
 // ── Draw: vertical divider ────────────────────────────────────
 static void drawDivider() {
     lcd.fillRect(DIVIDER_X, CHAT_Y, 1, CHAT_H, COL_DIVIDER);
-    lcd.drawFastVLine(DIVIDER_X + 1, CHAT_Y, CHAT_H, 0x10A5);
+    lcd.drawFastVLine(DIVIDER_X + 1, CHAT_Y, CHAT_H, COL_DIVIDER_HI);
 }
 
 // ── Draw: message area ────────────────────────────────────────
@@ -553,7 +701,7 @@ static void drawChat() {
     // Scroll indicator: show arrow when not at bottom
     Channel &ch = Channels.get(active);
     if (ch.scrollOff > 0) {
-        lcd.setTextColor(COL_TEAL, TFT_BLACK);
+        lcd.setTextColor(COL_TEAL, COL_BG_MAIN);
         drawClippedText(MSG_W - 30, CHAT_Y + CHAT_H - LINE_H + 1, 28, "more");
     }
 
@@ -578,11 +726,11 @@ static void drawNodes() {
         if (!n) continue;
 
         bool     sel = nodeListFocused && (i == nodeListSel);
-        uint16_t bg  = sel ? 0x0864 : rowBg;
+        uint16_t bg  = sel ? COL_SELECT_BG : rowBg;
         uint32_t age = now - n->lastHeardMs;
-        uint16_t col = sel               ? TFT_WHITE    :
-                       (age < 60000UL)   ? TFT_CYAN     :
-                       (age < 3600000UL) ? TFT_WHITE    : COL_TAB_IDLE;
+        uint16_t col = sel               ? COL_TEXT_ON_ACCENT :
+                   (age < 60000UL)   ? COL_NODE_HOT       :
+                   (age < 3600000UL) ? COL_NODE_WARM      : COL_TAB_IDLE;
 
         if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, bg);
 
@@ -639,7 +787,7 @@ static void drawCompassRose(int cx, int cy, int cr, float heading) {
     lcd.drawLine(cx, cy, sx, sy, COL_TAB_IDLE);
 
     // Centre dot
-    lcd.fillCircle(cx, cy, 3, TFT_WHITE);
+    lcd.fillCircle(cx, cy, 3, COL_TEXT_MAIN);
 }
 
 static void drawGps() {
@@ -662,7 +810,7 @@ static void drawGps() {
     const int RIGHT_X = LEFT_W + 5;
     const int RIGHT_W = LCD_W - RIGHT_X - 1;
 
-    drawPanelFrame(4, CHAT_Y + 4, LEFT_W - 6, CHAT_H - 8, 0x1064, COL_DIVIDER);
+    drawPanelFrame(4, CHAT_Y + 4, LEFT_W - 6, CHAT_H - 8, COL_PANEL_STRONG, COL_DIVIDER);
     drawPanelFrame(RIGHT_X, CHAT_Y + 4, RIGHT_W, CHAT_H - 8, COL_PANEL_BG, COL_DIVIDER);
 
     // ── Left panel: text rows ─────────────────────────────────
@@ -670,8 +818,8 @@ static void drawGps() {
     int row = 0;
     auto pr = [&](uint16_t col, const char *s) {
         int y = CHAT_Y + 10 + row++ * GH;
-        lcd.fillRect(6, y, LEFT_W - 10, GH, 0x1064);
-        lcd.setTextColor(col, 0x1064);
+        lcd.fillRect(6, y, LEFT_W - 10, GH, COL_PANEL_STRONG);
+        lcd.setTextColor(col, COL_PANEL_STRONG);
         drawClippedText(TX, y, LEFT_W - 14, s);
     };
 
@@ -694,26 +842,26 @@ static void drawGps() {
     float lat = latI * 1e-7f;
     snprintf(buf, sizeof(buf), "Lat  %10.6f %c",
              lat >= 0 ? lat : -lat, lat >= 0 ? 'N' : 'S');
-    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+    pr(fix ? COL_TEXT_MAIN : (uint16_t)DIM, buf);
 
     // Longitude
     float lon = lonI * 1e-7f;
     snprintf(buf, sizeof(buf), "Lon  %10.6f %c",
              lon >= 0 ? lon : -lon, lon >= 0 ? 'E' : 'W');
-    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+    pr(fix ? COL_TEXT_MAIN : (uint16_t)DIM, buf);
 
     // Altitude
     snprintf(buf, sizeof(buf), "Alt  %d m", (int)altM);
-    pr(fix ? TFT_WHITE : (uint16_t)DIM, buf);
+    pr(fix ? COL_TEXT_MAIN : (uint16_t)DIM, buf);
 
     row++;  // blank line
 
     // Course / speed
     snprintf(buf, sizeof(buf), "Hdg  %.1f\xb0", course);
-    pr(fix ? TFT_CYAN : (uint16_t)DIM, buf);
+    pr(fix ? COL_NODE_HOT : (uint16_t)DIM, buf);
 
     snprintf(buf, sizeof(buf), "Spd  %.1f km/h", speed);
-    pr(fix ? TFT_CYAN : (uint16_t)DIM, buf);
+    pr(fix ? COL_NODE_HOT : (uint16_t)DIM, buf);
 
     row++;  // blank line
 
@@ -731,7 +879,7 @@ static void drawGps() {
     // Heading value below compass
     snprintf(buf, sizeof(buf), "%3.0f\xb0", fix ? course : 0.0f);
     int tw = lcd.textWidth(buf);
-    lcd.setTextColor(fix ? TFT_WHITE : (uint16_t)COL_TAB_IDLE, COL_PANEL_BG);
+    lcd.setTextColor(fix ? COL_TEXT_MAIN : (uint16_t)COL_TAB_IDLE, COL_PANEL_BG);
     lcd.drawString(buf, CX - tw / 2, CY + CR + 4);
 
     lcd.setFont(&fonts::Font0);
@@ -760,8 +908,8 @@ static void drawDmList() {
     // Row 0: "New DM" button (always present)
     {
         bool     sel = (dmListSel == 0);
-        uint16_t bg  = sel ? 0x0864 : COL_PANEL_ALT;
-        uint16_t col = sel ? TFT_WHITE : COL_TEAL;
+        uint16_t bg  = sel ? COL_SELECT_BG : COL_PANEL_ALT;
+        uint16_t col = sel ? COL_TEXT_ON_ACCENT : COL_TEAL;
         lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, bg);
         lcd.setTextColor(col, bg);
         drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "+ New DM conversation");
@@ -775,9 +923,9 @@ static void drawDmList() {
 
         int      y   = CHAT_Y + (i + 1) * DM_LINE_H;
         bool     sel = (dmListSel == i + 1);
-        uint16_t bg  = sel ? 0x0864 : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        uint16_t col = sel ? TFT_WHITE
-                           : c->unread ? COL_TAB_UNREAD : (uint16_t)0xF81F;
+        uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        uint16_t col = sel ? COL_TEXT_ON_ACCENT
+                   : c->unread ? COL_TAB_UNREAD : COL_DM_MUTED;
 
         lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
 
@@ -821,8 +969,8 @@ static void drawDmPicker() {
     dirtyNodes = false;
 
     // Header bar
-    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, 0x0864);
-    lcd.setTextColor(TFT_WHITE, 0x0864);
+    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, COL_SELECT_BG);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "Select recipient (roll left to cancel)");
 
     int filteredCount = pickerNodeCount();
@@ -848,8 +996,8 @@ static void drawDmPicker() {
         if (!n) break;
 
         bool     sel = (vi == dmPickerSel);
-        uint16_t bg  = sel ? 0x0864 : ((row & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        uint16_t col = sel ? TFT_WHITE : COL_TEAL;
+        uint16_t bg  = sel ? COL_SELECT_BG : ((row & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        uint16_t col = sel ? COL_TEXT_ON_ACCENT : COL_TEAL;
 
         lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
 
@@ -885,8 +1033,8 @@ static void drawDmConv() {
     // Header bar
     char hdr[DM_LINE_LEN + 1];
     snprintf(hdr, sizeof(hdr), "DM with %s (!%08x)", c->shortName, (unsigned)c->nodeId);
-    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, 0x0864);
-    lcd.setTextColor(COL_TEAL, 0x0864);
+    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, COL_SELECT_BG);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     drawClippedText(4, CHAT_Y + 1, LCD_W - 8, hdr);
 
     // Messages (DM_VISIBLE - 1 rows below the header)
@@ -914,8 +1062,8 @@ static void drawSettings() {
     char buf[LCD_W / CHAR_W + 2];
     int  r = 0;   // current row index
 
-    lcd.fillRect(0, CHAT_Y, LCD_W, SH, 0x0864);
-    lcd.setTextColor(TFT_WHITE, 0x0864);
+    lcd.fillRect(0, CHAT_Y, LCD_W, SH, COL_SELECT_BG);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "Settings");
     r++;
 
@@ -923,19 +1071,18 @@ static void drawSettings() {
     for (int i = 0; i < NUM_SETTINGS; i++, r++) {
         int      y  = CHAT_Y + r * SH;
         bool     sel = (i == settingsSel);
-        uint16_t bg  = sel ? 0x0864 : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        uint16_t fg  = sel ? TFT_WHITE : COL_TEXT_DIM;
+        uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        uint16_t fg  = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
         lcd.fillRect(0, y, LCD_W, SH, bg);
         lcd.setTextColor(fg, bg);
         if (i == SETTING_EXPORT)
             snprintf(buf, sizeof(buf), "Export Config");
         else if (i == SETTING_IMPORT)
             snprintf(buf, sizeof(buf), "Import Config");
-        else if (i == SETTING_CHAT_SPACE) {
-            const char *labels[] = { "Tight", "Normal", "Loose" };
-            int idx = gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1;
-            snprintf(buf, sizeof(buf), "Chat Spacing: %s", labels[idx]);
-        }
+        else if (i == SETTING_THEME)
+            snprintf(buf, sizeof(buf), "Theme: %s", uiThemePresetName(uiThemePresetIndex()));
+        else if (i == SETTING_CLEAR_NODES)
+            snprintf(buf, sizeof(buf), "Clear Nodes");
         else if (i == SETTING_FACTORY_RESET)
             snprintf(buf, sizeof(buf), "Factory Reset");
         else if (webCfgRunning())
@@ -1020,9 +1167,9 @@ static void drawNodeDetail(const NodeEntry *n) {
 
     // Identity
     snprintf(buf, sizeof(buf), "Long  : %s", n->longName[0] ? n->longName : "(unknown)");
-    pr(TFT_WHITE, buf);
+    pr(COL_TEXT_MAIN, buf);
     snprintf(buf, sizeof(buf), "Short : %s", n->shortName[0] ? n->shortName : "----");
-    pr(TFT_WHITE, buf);
+    pr(COL_TEXT_MAIN, buf);
     row++;
 
     // Connectivity
@@ -1033,38 +1180,38 @@ static void drawNodeDetail(const NodeEntry *n) {
         snprintf(buf, sizeof(buf), "Heard : %um %us ago",       (unsigned)(ageSec/60), (unsigned)(ageSec%60));
     else
         snprintf(buf, sizeof(buf), "Heard : %uh %um ago",       (unsigned)(ageSec/3600), (unsigned)((ageSec%3600)/60));
-    pr(TFT_WHITE, buf);
+    pr(COL_TEXT_MAIN, buf);
 
     snprintf(buf, sizeof(buf), "Hops  : %d   SNR: %+.1f dB", n->hops, n->snr);
-    pr(TFT_WHITE, buf);
+    pr(COL_TEXT_MAIN, buf);
 
     const char *chanName = (n->chanIdx >= 0 && n->chanIdx < MAX_CHANNELS)
                            ? CHANNEL_KEYS[n->chanIdx].name : "?";
     snprintf(buf, sizeof(buf), "Chan  : %s", chanName);
-    pr(TFT_WHITE, buf);
+    pr(COL_TEXT_MAIN, buf);
     row++;
 
     // Position
     if (n->hasPosition) {
-        pr(TFT_CYAN, "Position");
+        pr(COL_NODE_HOT, "Position");
         float lat = n->latI * 1e-7f;
         float lon = n->lonI * 1e-7f;
         snprintf(buf, sizeof(buf), "Lat   : %.5f %c",
                  lat >= 0 ? lat : -lat, lat >= 0 ? 'N' : 'S');
-        pr(TFT_WHITE, buf);
+        pr(COL_TEXT_MAIN, buf);
         snprintf(buf, sizeof(buf), "Lon   : %.5f %c",
                  lon >= 0 ? lon : -lon, lon >= 0 ? 'E' : 'W');
-        pr(TFT_WHITE, buf);
+        pr(COL_TEXT_MAIN, buf);
         snprintf(buf, sizeof(buf), "Alt   : %d m", (int)n->alt);
-        pr(TFT_WHITE, buf);
+        pr(COL_TEXT_MAIN, buf);
         row++;
     }
 
     // Telemetry
     if (n->hasTelemetry) {
-        pr(TFT_CYAN, "Telemetry");
+        pr(COL_NODE_HOT, "Telemetry");
         snprintf(buf, sizeof(buf), "Batt  : %.0f%%  %.2f V", n->battPct, n->voltage);
-        pr(TFT_WHITE, buf);
+        pr(COL_TEXT_MAIN, buf);
         row++;
     }
 
@@ -1086,7 +1233,7 @@ static void drawInput() {
         dirtyInput = false;
         return;
     }
-    fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, 0x0864, COL_INPUT_BG);
+    fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
     lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
     lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
@@ -1101,7 +1248,7 @@ static void drawInput() {
     while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
         visible.remove(0, 1);
     }
-    lcd.setTextColor(TFT_WHITE, COL_INPUT_BG);
+    lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
     lcd.drawString(visible.c_str(), textX, INPUT_Y + 2);
 
     // Cursor blink
@@ -1473,19 +1620,7 @@ static void handleKey(char k) {
             } else if (settingsSel == SETTING_IMPORT) {
                 bool ok = cfgImport(gCfg);
                 if (ok) {
-                    { Preferences p; p.begin("camillia", false);
-                      p.putString("nodeLong", gCfg.nodeLong);
-                                            p.putString("nodeShort", gCfg.nodeShort);
-                                            p.putString("wifiSsid", gCfg.wifiSsid);
-                                            p.putString("wifiPass", gCfg.wifiPass);
-                                            p.end(); }
-                    NodeEntry *me = Nodes.upsert(myNodeId);
-                    strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
-                    strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
-                    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
-                                      gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
-                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-                    dirtyStatus = dirtyNodes = true;
+                                        onWebCfgSaved();
                     snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK — rebooting...");
                     dirtyChat = true;
                     drawSettings();
@@ -1494,6 +1629,19 @@ static void handleKey(char k) {
                 } else {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
+            } else if (settingsSel == SETTING_THEME) {
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 4);
+                setUiThemePreset(p);
+                applyUiTheme();
+                persistUiTheme();
+                snprintf(settingsStatus, sizeof(settingsStatus), "Theme: %s", uiThemePresetName(p));
+            } else if (settingsSel == SETTING_CLEAR_NODES) {
+                Nodes.clearPersisted();
+                snprintf(settingsStatus, sizeof(settingsStatus), "Node DB cleared — rebooting...");
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
             } else if (settingsSel == SETTING_WEBCFG) {
                 if (webCfgRunning()) {
                     webCfgEnd();
@@ -1509,18 +1657,7 @@ static void handleKey(char k) {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
                     }
                 }
-            } else if (settingsSel == SETTING_CHAT_SPACE) {
-                gCfg.chatSpacing = (gCfg.chatSpacing + 1) % 3;
-                { Preferences p; p.begin("camillia", false);
-                  p.putUChar("chatSpace", gCfg.chatSpacing); p.end(); }
-                const char *labels[] = { "Tight", "Normal", "Loose" };
-                snprintf(settingsStatus, sizeof(settingsStatus),
-                         "Chat: %s — rebooting...", labels[gCfg.chatSpacing]);
-                dirtyChat = true;
-                drawSettings();
-                delay(1000);
-                ESP.restart();
-            } else if (settingsSel == SETTING_FACTORY_RESET) {
+                        } else if (settingsSel == SETTING_FACTORY_RESET) {
                 nvs_flash_erase();
                 nvs_flash_init();
                 sdRmDir("/camillia/dms");
@@ -1611,19 +1748,7 @@ static void handleKey(char k) {
             } else if (settingsSel == SETTING_IMPORT) {
                 bool ok = cfgImport(gCfg);
                 if (ok) {
-                    { Preferences p; p.begin("camillia", false);
-                      p.putString("nodeLong", gCfg.nodeLong);
-                                            p.putString("nodeShort", gCfg.nodeShort);
-                                            p.putString("wifiSsid", gCfg.wifiSsid);
-                                            p.putString("wifiPass", gCfg.wifiPass);
-                                            p.end(); }
-                    NodeEntry *me = Nodes.upsert(myNodeId);
-                    strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
-                    strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
-                    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
-                                      gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
-                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-                    dirtyStatus = dirtyNodes = true;
+                                        onWebCfgSaved();
                     snprintf(settingsStatus, sizeof(settingsStatus), "Imported OK — rebooting...");
                     dirtyChat = true;
                     drawSettings();
@@ -1632,6 +1757,19 @@ static void handleKey(char k) {
                 } else {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
+            } else if (settingsSel == SETTING_THEME) {
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 4);
+                setUiThemePreset(p);
+                applyUiTheme();
+                persistUiTheme();
+                snprintf(settingsStatus, sizeof(settingsStatus), "Theme: %s", uiThemePresetName(p));
+            } else if (settingsSel == SETTING_CLEAR_NODES) {
+                Nodes.clearPersisted();
+                snprintf(settingsStatus, sizeof(settingsStatus), "Node DB cleared — rebooting...");
+                dirtyChat = true;
+                drawSettings();
+                delay(1000);
+                ESP.restart();
             } else if (settingsSel == SETTING_WEBCFG) {
                 if (webCfgRunning()) {
                     webCfgEnd();
@@ -1647,18 +1785,7 @@ static void handleKey(char k) {
                         snprintf(settingsStatus, sizeof(settingsStatus), "Web start FAILED");
                     }
                 }
-            } else if (settingsSel == SETTING_CHAT_SPACE) {
-                gCfg.chatSpacing = (gCfg.chatSpacing + 1) % 3;
-                { Preferences p; p.begin("camillia", false);
-                  p.putUChar("chatSpace", gCfg.chatSpacing); p.end(); }
-                const char *labels[] = { "Tight", "Normal", "Loose" };
-                snprintf(settingsStatus, sizeof(settingsStatus),
-                         "Chat: %s — rebooting...", labels[gCfg.chatSpacing]);
-                dirtyChat = true;
-                drawSettings();
-                delay(1000);
-                ESP.restart();
-            } else if (settingsSel == SETTING_FACTORY_RESET) {
+                        } else if (settingsSel == SETTING_FACTORY_RESET) {
                 nvs_flash_erase();
                 nvs_flash_init();
                 sdRmDir("/camillia/dms");
@@ -1790,14 +1917,19 @@ static void onWebCfgSaved() {
     Serial.println("[cfg] NVS partition erased");
 
     // ── Write main config ────────────────────────────────────
+    const char *wifiSsid = webCfgWifiSsid();
+    const char *wifiPass = webCfgWifiPass();
+    if ((!wifiSsid || !wifiSsid[0]) && gCfg.wifiSsid[0]) wifiSsid = gCfg.wifiSsid;
+    if ((!wifiPass || !wifiPass[0]) && gCfg.wifiPass[0]) wifiPass = gCfg.wifiPass;
+
     Preferences p; p.begin("camillia", false);
     // Re-save identity + WiFi keys wiped by clear()
     p.putUInt("nodeId",       myNodeId);
     p.putInt("pkiVer",        2);
     p.putBytes("privKey",     myPrivKey, 32);
     p.putBytes("pubKey",      myPubKey,  32);
-    if (webCfgWifiSsid()[0]) p.putString("wifiSsid", webCfgWifiSsid());
-    if (webCfgWifiPass()[0]) p.putString("wifiPass", webCfgWifiPass());
+    if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
+    if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
     p.putString("nodeLong",   gCfg.nodeLong);
     p.putString("nodeShort",  gCfg.nodeShort);
     p.putFloat("loraFreq",    gCfg.loraFreq);
@@ -1822,6 +1954,8 @@ static void onWebCfgSaved() {
     p.putUChar("dispUnits",   gCfg.displayUnits);
     p.putBool("compassNorth", gCfg.compassNorthTop);
     p.putBool("flipScreen",   gCfg.flipScreen);
+    p.putUChar("uiTheme",     gCfg.uiTheme);
+    p.putUChar("uiMode",      gCfg.uiMode);
     p.putBool("btEnabled",    gCfg.btEnabled);
     p.putUChar("btMode",      gCfg.btMode);
     p.putULong("btFixedPin",  gCfg.btFixedPin);
@@ -1863,6 +1997,8 @@ static void onWebCfgSaved() {
     Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
     // Apply node ID override immediately (no reboot needed)
     if (gCfg.nodeIdOverride != 0) myNodeId = gCfg.nodeIdOverride;
+    // Apply updated display theme immediately.
+    applyUiTheme();
     // Broadcast updated node identity
     NodeEntry *me = Nodes.upsert(myNodeId);
     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
@@ -2001,6 +2137,8 @@ void setup() {
         ro = prefs.getUChar("dispUnits", 0xFF); if (ro != 0xFF) gCfg.displayUnits = ro;
         if (prefs.isKey("compassNorth")) gCfg.compassNorthTop = prefs.getBool("compassNorth");
         if (prefs.isKey("flipScreen"))   gCfg.flipScreen      = prefs.getBool("flipScreen");
+        ro = prefs.getUChar("uiTheme", 0xFF); if (ro != 0xFF && ro < UI_THEME_COUNT) gCfg.uiTheme = ro;
+        ro = prefs.getUChar("uiMode", 0xFF);  if (ro != 0xFF && ro <= UI_MODE_LIGHT) gCfg.uiMode = ro;
         if (prefs.isKey("btEnabled"))    gCfg.btEnabled       = prefs.getBool("btEnabled");
         ro = prefs.getUChar("btMode", 0xFF); if (ro != 0xFF) gCfg.btMode = ro;
         ul = prefs.getULong("btFixedPin", 0); if (ul) gCfg.btFixedPin = ul;
@@ -2021,6 +2159,7 @@ void setup() {
     // Apply chat spacing setting to runtime globals
     LINE_H        = kSpacingPx[gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1];
     VISIBLE_LINES = CHAT_H / LINE_H;
+    applyUiTheme(false);
 
     // Apply node ID override if set (allows restoring old Meshtastic identity)
     if (gCfg.nodeIdOverride != 0) {
@@ -2069,7 +2208,7 @@ void setup() {
     lcd.init();
     lcd.setRotation(1);
     lcd.setBrightness(128);
-    lcd.fillScreen(TFT_BLACK);
+    lcd.fillScreen(COL_BG_MAIN);
     lcd.setTextSize(1);
     lastActivityMs = millis();
 
@@ -2099,7 +2238,7 @@ void setup() {
 
     // LoRa
     if (!Radio.init()) {
-        lcd.setTextColor(TFT_RED, TFT_BLACK);
+        lcd.setTextColor(TFT_RED, COL_BG_MAIN);
         lcd.setCursor(10, 100);
         lcd.print("LoRa init FAILED");
         while (true) delay(500);

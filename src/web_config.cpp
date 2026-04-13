@@ -62,31 +62,37 @@ static const char kHead[] =
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Camillia MT</title>"
     "<style>"
-    "body{font-family:sans-serif;max-width:540px;margin:2em auto;padding:0 1em}"
-    "h2{color:#2a9d8f;margin-bottom:.2em}"
-    "h3{color:#555;margin:1.2em 0 .4em;border-bottom:1px solid #ddd;padding-bottom:.2em}"
-    "label{display:block;margin:.6em 0 .1em;font-size:.9em;color:#333}"
+        ":root{--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
+        "--text:#f4f6fb;--text-dim:#b0b8c8;--accent:#d7869d;--accent-ink:#ffffff}"
+        "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:620px;"
+        "margin:1.5em auto;padding:0 1em 2em;background:linear-gradient(180deg,var(--bg),var(--panel));"
+        "color:var(--text)}"
+        "h2{color:var(--accent);margin-bottom:.2em}"
+        "h3{color:var(--text-dim);margin:1.2em 0 .4em;border-bottom:1px solid var(--line);padding-bottom:.2em}"
+        "label{display:block;margin:.6em 0 .1em;font-size:.9em;color:var(--text)}"
     "input[type=text],input[type=number],input[type=password],select"
-      "{width:100%;padding:.35em;box-sizing:border-box;border:1px solid #ccc;border-radius:3px}"
-    "input[readonly]{background:#f5f5f5;color:#666}"
-    "button{margin-top:1.2em;padding:.5em 1.8em;background:#2a9d8f;color:#fff;"
-           "border:none;border-radius:3px;cursor:pointer;font-size:1em}"
-    ".msg{color:#2a9;margin:.5em 0}"
-    ".err{color:#e63;margin:.5em 0}"
-    ".logout{float:right;font-size:.9em;color:#2a9d8f;text-decoration:none}"
+            "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;"
+            "background:var(--panel-2);color:var(--text)}"
+        "input[readonly]{background:var(--panel);color:var(--text-dim)}"
+        "button{margin-top:1.2em;padding:.55em 1.8em;background:var(--accent);color:var(--accent-ink);"
+                     "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
+        ".msg{color:var(--accent);margin:.5em 0}"
+        ".err{color:#ff8d8d;margin:.5em 0}"
+        ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
     ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
     ".gps-note{margin:.4em 0;font-size:.9em}"
     ".gps-note button{padding:.2em .8em;font-size:.9em;margin-left:.4em}"
-    ".gps-hint{font-size:.8em;color:#888;margin:.2em 0 .6em}"
-    "details{border:1px solid #ddd;border-radius:4px;margin:.8em 0;padding:0 .8em}"
+        ".gps-hint{font-size:.8em;color:var(--text-dim);margin:.2em 0 .6em}"
+        "details{border:1px solid var(--line);border-radius:6px;margin:.8em 0;padding:0 .8em;background:var(--panel)}"
     "details[open]{padding-bottom:.8em}"
-    "summary{font-size:1em;font-weight:600;color:#2a9d8f;cursor:pointer;"
+        "summary{font-size:1em;font-weight:600;color:var(--accent);cursor:pointer;"
              "padding:.5em 0;list-style:none}"
     "summary::-webkit-details-marker{display:none}"
     "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
     "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
     ".ch-row{display:grid;grid-template-columns:1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
     ".ch-row label{margin:0;font-size:.85em}"
+        "@media (max-width:560px){.row2{grid-template-columns:1fr}}"
     "</style></head><body>";
 
 // ── Timezone table ────────────────────────────────────────────
@@ -187,6 +193,9 @@ static void sendConfigPage(const char *msg = "") {
 
     char tmp[96];
     String html = kHead;
+    uint8_t themePreset = (gCfg->uiTheme == UI_THEME_EVERGREEN)
+                        ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2)
+                        : (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
     html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
@@ -483,6 +492,32 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if (gCfg->chatSpacing == 1) html += " selected"; html += ">Normal</option>"
             "<option value='2'"; if (gCfg->chatSpacing == 2) html += " selected"; html += ">Loose</option>"
             "</select></label>";
+        html += "<label>Theme<select name='ui_theme_preset' id='sel-theme-preset'>"
+            "<option value='0'"; if (themePreset == 0) html += " selected"; html += ">Camillia Dark</option>"
+            "<option value='1'"; if (themePreset == 1) html += " selected"; html += ">Camillia Light</option>"
+            "<option value='2'"; if (themePreset == 2) html += " selected"; html += ">Evergreen Dark</option>"
+            "<option value='3'"; if (themePreset == 3) html += " selected"; html += ">Evergreen Light</option>"
+            "</select></label>";
+        html += "<script>"
+            "(function(){"
+            "var P={"
+                            "'0':{bg:'#10141d',panel:'#1a2230',panel2:'#232d3e',line:'#4a5b73',text:'#f4f6fb',dim:'#b0b8c8',accent:'#d7869d',ink:'#ffffff'},"
+                            "'1':{bg:'#f6ede9',panel:'#fff6f3',panel2:'#f4e2dc',line:'#cfb2ab',text:'#2e2220',dim:'#6f5c58',accent:'#b75a74',ink:'#ffffff'},"
+                            "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
+                            "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'}"
+            "};"
+            "function apply(){"
+              "var k=document.getElementById('sel-theme-preset').value;"
+              "var p=P[k]||P['0'];"
+              "var r=document.documentElement.style;"
+              "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
+              "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
+              "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
+            "}"
+            "document.getElementById('sel-theme-preset').addEventListener('change',apply);"
+            "apply();"
+            "})();"
+            "</script>";
     html += "</details>";
     sendChunk(html);
 
@@ -772,6 +807,17 @@ static void handlePostSave() {
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
     gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
+    if (server.hasArg("ui_theme_preset")) {
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 3);
+        if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
+        else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
+        else                  { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_LIGHT; }
+    } else {
+        // Backward-compatible fallback for older forms.
+        gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);
+        gCfg->uiMode  = (uint8_t)(server.arg("ui_mode").toInt() != 0 ? UI_MODE_LIGHT : UI_MODE_DARK);
+    }
 
     // Power
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;

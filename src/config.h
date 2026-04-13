@@ -75,6 +75,8 @@
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
+#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN
+#define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
 
 // ── Bluetooth defaults ─────────────────────────────────────────
 #define MY_BT_ENABLED       1

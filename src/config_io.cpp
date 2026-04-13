@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static const char *kPath = "/camillia/config.yaml";
 static bool sdReady = false;
@@ -55,6 +56,16 @@ static const char *kRebroadNames[] = {
 };
 static const int kNumRebroadModes = 5;
 
+static const char *kThemeNames[] = {
+    "CAMELLIA", "EVERGREEN"
+};
+static const int kNumThemes = 2;
+
+static const char *kThemeModeNames[] = {
+    "DARK", "LIGHT"
+};
+static const int kNumThemeModes = 2;
+
 static uint8_t findName(const char *val, const char **table, int n) {
     for (int i = 0; i < n; i++)
         if (!strcmp(val, table[i])) return (uint8_t)i;
@@ -92,6 +103,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
+    cfg.uiTheme            = MY_UI_THEME;
+    cfg.uiMode             = MY_UI_MODE;
     cfg.btEnabled          = MY_BT_ENABLED;
     cfg.btMode             = MY_BT_MODE;
     cfg.btFixedPin         = MY_BT_PIN;
@@ -161,6 +174,12 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
+    out += "    theme: ";
+    out += (cfg.uiTheme < kNumThemes) ? kThemeNames[cfg.uiTheme] : kThemeNames[0];
+    out += "\n";
+    out += "    themeMode: ";
+    out += (cfg.uiMode < kNumThemeModes) ? kThemeModeNames[cfg.uiMode] : kThemeModeNames[0];
+    out += "\n";
     // lora
     out += "  lora:\n";
     snprintf(tmp, sizeof(tmp), "    bandwidth: %.0f\n",    cfg.loraBw);       out += tmp;
@@ -383,6 +402,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
+                else if (!strcmp(key, "theme")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.uiTheme = (uint8_t)constrain(atoi(val), 0, UI_THEME_COUNT - 1);
+                    else
+                        cfg.uiTheme = findName(val, kThemeNames, kNumThemes);
+                }
+                else if (!strcmp(key, "themeMode")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.uiMode = (uint8_t)constrain(atoi(val), 0, 1);
+                    else
+                        cfg.uiMode = findName(val, kThemeModeNames, kNumThemeModes);
+                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {

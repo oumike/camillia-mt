@@ -3,6 +3,17 @@
 #include "config.h"
 #include "mesh_proto.h"
 
+enum UiThemeFamily : uint8_t {
+    UI_THEME_CAMELLIA = 0,
+    UI_THEME_EVERGREEN = 1,
+    UI_THEME_COUNT = 2
+};
+
+enum UiThemeMode : uint8_t {
+    UI_MODE_DARK = 0,
+    UI_MODE_LIGHT = 1
+};
+
 // Runtime config (loaded from SD or defaulted from compile-time #defines)
 struct RhinoConfig {
     char     nodeLong[40];
@@ -32,6 +43,8 @@ struct RhinoConfig {
     uint8_t  displayUnits;       // 0=METRIC, 1=IMPERIAL
     bool     compassNorthTop;
     bool     flipScreen;
+    uint8_t  uiTheme;            // UiThemeFamily
+    uint8_t  uiMode;             // UiThemeMode
 
     // Bluetooth
     bool     btEnabled;
