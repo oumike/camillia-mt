@@ -162,8 +162,13 @@ void ChannelMgr::expireAcks() {
     }
 }
 
-bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
+bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
+                          int chanIdx) {
     if (!Radio.isReady()) return false;
+
+    int txChan = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? chanIdx : _active;
+    if (txChan < 0 || txChan >= MESH_CHANNELS) return false;
+    if (_active != txChan) setActive(txChan);
 
     uint32_t packetId = esp_random() ^ millis();
     uint8_t  proto[256], cipher[256];
@@ -172,7 +177,11 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
-    const ChannelKey &ck = CHANNEL_KEYS[_active];
+    const ChannelKey &ck = CHANNEL_KEYS[txChan];
+    const char *txName = ck.name_buf[0] ? ck.name_buf : ck.name;
+    uint8_t effectiveKeyLen = (ck.keyLen == 1 && ck.key[0] == 0x00) ? 0 : ck.keyLen;
+    Serial.printf("[tx] ch%d name='%s' keyLen=%u effectiveKeyLen=%u hash=0x%02X\n",
+                  txChan, txName ? txName : "", ck.keyLen, effectiveKeyLen, ck.hash);
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;
 
@@ -182,7 +191,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     hdr.to      = 0xFFFFFFFF;     // broadcast
     hdr.from    = myNodeId;
     hdr.id      = packetId;
-    hdr.channel = CHANNEL_KEYS[_active].hash;
+    hdr.channel = CHANNEL_KEYS[txChan].hash;
     hdr.flags   = (1 << 3) |      // want_ack
                   (uint8_t)(MESH_HOP_LIMIT & 0x07) |
                   ((MESH_HOP_LIMIT & 0x07) << 5);
@@ -196,7 +205,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (!_pending[i].active) {
-            _pending[i] = { packetId, millis(), _active, _chans[_active].count, 0xFFFFFFFF, true };
+            _pending[i] = { packetId, millis(), txChan, _chans[txChan].count, 0xFFFFFFFF, true };
             break;
         }
     }
@@ -208,7 +217,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt) {
              (t / 3600) % 24, (t / 60) % 60);
     char prefix[20];
     snprintf(prefix, sizeof(prefix), "%s <me> ", timeStr);
-    addMessage(_active, prefix, text, TFT_WHITE, packetId);
+    addMessage(txChan, prefix, text, TFT_WHITE, packetId);
 
     return true;
 }

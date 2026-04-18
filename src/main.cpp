@@ -42,7 +42,66 @@ uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config 
 #define TOTAL_VIEWS   (MAX_CHANNELS + 2)    // 11 total
 static int  activeView   = 0;              // 0..8 channel, 9 GPS, 10 settings
 static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
+static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
+static int  panelReturnChannel = 0;       // channel to return to when closing DM/ANN/CFG
 static int  settingsSel  = 0;         // highlighted settings row
+static int  settingsNavSel = -1;      // -1 none, 0=UP, 1=DOWN (CFG touch nav buttons)
+static const int SETTINGS_ROW_H = 10;
+static const int SETTINGS_HDR_H = 16;
+
+struct PanelHitRect {
+    int x;
+    int y;
+    int w;
+    int h;
+};
+static bool panelCloseVisible = false;
+static PanelHitRect panelCloseRect = {0, 0, 0, 0};
+static bool panelUpVisible = false;
+static bool panelDownVisible = false;
+static PanelHitRect panelUpRect = {0, 0, 0, 0};
+static PanelHitRect panelDownRect = {0, 0, 0, 0};
+static bool dmNewVisible = false;
+static PanelHitRect dmNewRect = {0, 0, 0, 0};
+
+static void setPanelCloseRect(int x, int y, int w, int h) {
+    panelCloseVisible = true;
+    panelCloseRect = { x, y, w, h };
+}
+
+static void clearPanelCloseRect() {
+    panelCloseVisible = false;
+    panelCloseRect = {0, 0, 0, 0};
+    panelUpVisible = false;
+    panelDownVisible = false;
+    panelUpRect = {0, 0, 0, 0};
+    panelDownRect = {0, 0, 0, 0};
+    dmNewVisible = false;
+    dmNewRect = {0, 0, 0, 0};
+}
+
+static void setPanelScrollRects(int upX, int upY, int upW, int upH,
+                                int dnX, int dnY, int dnW, int dnH) {
+    panelUpVisible = true;
+    panelDownVisible = true;
+    panelUpRect = { upX, upY, upW, upH };
+    panelDownRect = { dnX, dnY, dnW, dnH };
+}
+
+static void setDmNewRect(int x, int y, int w, int h) {
+    dmNewVisible = true;
+    dmNewRect = { x, y, w, h };
+}
+
+static bool isPanelView(int v) {
+    return (v == CHAN_DM || v == CHAN_ANN || v == VIEW_SETTINGS);
+}
+
+static bool isTopTabView(int v) {
+    return !isPanelView(v) && v != VIEW_GPS;
+}
+
+static void closePanelToChannel();
 
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
@@ -79,10 +138,55 @@ static bool   cursorOn  = true;
 static uint32_t lastBlink      = 0;
 static uint32_t lastNodeInfo   = 0;
 static uint32_t lastPosition   = 0;
+static bool     touchDown      = false;
+static int32_t  touchStartX    = 0;
+static int32_t  touchStartY    = 0;
+static int32_t  touchLastX     = 0;
+static int32_t  touchLastY     = 0;
+static uint32_t touchDownMs    = 0;
+
+#define KBD_QUEUE_SIZE 96
+static char    kbdQueue[KBD_QUEUE_SIZE] = {0};
+static uint8_t kbdQHead = 0;
+static uint8_t kbdQTail = 0;
+static uint8_t kbdQCount = 0;
+
+static void queueKey(char k) {
+    if (kbdQCount >= KBD_QUEUE_SIZE) {
+        // Drop oldest when full so newest keypresses still get through.
+        kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
+        kbdQCount--;
+    }
+    kbdQueue[kbdQHead] = k;
+    kbdQHead = (uint8_t)((kbdQHead + 1) % KBD_QUEUE_SIZE);
+    kbdQCount++;
+}
+
+static bool dequeueKey(char &out) {
+    if (kbdQCount == 0) return false;
+    out = kbdQueue[kbdQTail];
+    kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
+    kbdQCount--;
+    return true;
+}
+
+static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
+    for (uint8_t i = 0; i < maxReads; i++) {
+        char k = kb.readKey();
+        if (k == KEY_NONE) break;
+        if (screenAsleep) {
+            wakeScreen();
+            break;
+        }
+        lastActivityMs = nowMs;
+        queueKey(k);
+    }
+}
 // Broadcast intervals are runtime-configurable via gCfg.nodeInfoIntervalS / posIntervalS
 
 // ── Packet counter ────────────────────────────────────────────
 static uint32_t pktCount = 0;
+static constexpr bool kVerboseRxSerial = false;
 
 // ── Packet deduplication (circular buffer of seen IDs) ────────
 #define DEDUP_SIZE 32
@@ -208,26 +312,32 @@ static UiPalette gUi = {};
 #define COL_SPLASH_DIM     gUi.splashDim
 
 static uint8_t uiThemePresetIndex() {
+    if (gCfg.uiTheme == UI_THEME_EARTHEN)
+        return (gCfg.uiMode == UI_MODE_LIGHT) ? 5 : 4;
     if (gCfg.uiTheme == UI_THEME_EVERGREEN)
         return (gCfg.uiMode == UI_MODE_LIGHT) ? 3 : 2;
     return (gCfg.uiMode == UI_MODE_LIGHT) ? 1 : 0;
 }
 
 static const char *uiThemePresetName(uint8_t preset) {
-    switch (preset % 4) {
+    switch (preset % 6) {
         case 0: return "Camillia Dark";
         case 1: return "Camillia Light";
         case 2: return "Evergreen Dark";
-        default: return "Evergreen Light";
+        case 3: return "Evergreen Light";
+        case 4: return "Earthy Dark";
+        default: return "Earthy Light";
     }
 }
 
 static void setUiThemePreset(uint8_t preset) {
-    switch (preset % 4) {
+    switch (preset % 6) {
         case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
         case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
-        default: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 3: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 4: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_DARK; break;
+        default: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
     }
 }
 
@@ -243,7 +353,27 @@ static void applyUiTheme(bool markDirty = true) {
     gCfg.uiTheme = (uint8_t)constrain((int)gCfg.uiTheme, 0, UI_THEME_COUNT - 1);
     gCfg.uiMode  = (uint8_t)(gCfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
 
-    if (gCfg.uiTheme == UI_THEME_EVERGREEN) {
+    if (gCfg.uiTheme == UI_THEME_EARTHEN) {
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                0xF7DE, 0xE6BA, 0xE658, 0xFFDF, 0xF75C, 0xEEB9,
+                0x4228, 0xB40B, 0x7B6D, 0xBD14, 0xCDB6, 0xF75C, 0xEEB9,
+                0xB40B, 0xB40B, 0x31A6, 0x6B4D, 0xFFFF, 0x39C7,
+                0xDDF7, 0xB40B, 0x9B65, 0xA3C8, 0x8C30,
+                0x3666, 0xBC40, 0xA000,
+                0xE6DA, 0xFFDF, 0xF75C, 0xCDB6, 0xDE58, 0x4228, 0x6B4D, 0x9CD3
+            };
+        } else {
+            gUi = {
+                0x1082, 0x2104, 0x18C3, 0x2104, 0x2945, 0x3186,
+                0xFDD0, 0xE4A8, 0x8C71, 0x5AEB, 0x736D, 0x2945, 0x39A7,
+                0xD38B, 0xD38B, 0xFFDF, 0xC618, 0xFFFF, 0xF7DE,
+                0x6B4D, 0xC38A, 0xE4A8, 0xB40B, 0xA514,
+                0x3666, 0xED80, 0xA000,
+                0x18A3, 0x4228, 0x2966, 0x6B2C, 0x83AE, 0xFFDF, 0xDEBA, 0xBDF7
+            };
+        }
+    } else if (gCfg.uiTheme == UI_THEME_EVERGREEN) {
         if (gCfg.uiMode == UI_MODE_LIGHT) {
             gUi = {
                 0xE73C, 0xD697, 0xC5F4, 0xF7DE, 0xE71B, 0xDEB9,
@@ -307,7 +437,7 @@ static bool isViewNavigable(int v) {
 static int nextView(int from) {
     for (int n = 1; n < TOTAL_VIEWS; n++) {
         int v = (from + n) % TOTAL_VIEWS;
-        if (isViewNavigable(v)) return v;
+        if (isTopTabView(v) && isViewNavigable(v)) return v;
     }
     return from;
 }
@@ -315,16 +445,26 @@ static int nextView(int from) {
 static int prevView(int from) {
     for (int n = 1; n < TOTAL_VIEWS; n++) {
         int v = (from + TOTAL_VIEWS - n) % TOTAL_VIEWS;
-        if (isViewNavigable(v)) return v;
+        if (isTopTabView(v) && isViewNavigable(v)) return v;
     }
     return from;
 }
 
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
+    if (v < 0 || v >= TOTAL_VIEWS) return;
+
+    if (isPanelView(v) && activeView != v) {
+        panelReturnChannel = (activeView >= 0 && activeView < MESH_CHANNELS)
+            ? activeView
+            : lastChannelView;
+    }
+
     bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS
                          || activeView == CHAN_DM);
     activeView = v;
+    clearPanelCloseRect();
+    settingsNavSel = -1;
     nodeListFocused = false;
     nodeDetailOpen  = false;
     dmConvOpen      = false;   // reset DM sub-state on any navigation
@@ -346,11 +486,46 @@ static void goToView(int v) {
         if (!dmConvOpen && DMs.count() > 0)
             dmListSel = 1;
     }
+    if (v >= 0 && v < MESH_CHANNELS) {
+        lastChannelView = v;
+    }
     if (v < MESH_CHANNELS || v == CHAN_ANN) {
         Channels.setActive(v);
         if (wasFullWidth) dirtyDivider = true;   // restore divider after leaving full-width views
     }
     dirtyTabs = dirtyChat = dirtyNodes = dirtyStatus = dirtyInput = true;
+}
+
+static void closePanelToChannel() {
+    int target = panelReturnChannel;
+    if (target < 0 || target >= MESH_CHANNELS || !isViewNavigable(target)) {
+        target = lastChannelView;
+    }
+    if (target < 0 || target >= MESH_CHANNELS || !isViewNavigable(target)) {
+        for (int i = 0; i < MESH_CHANNELS; i++) {
+            if (isViewNavigable(i)) { target = i; break; }
+        }
+    }
+    if (target >= 0 && target < MESH_CHANNELS) goToView(target);
+}
+
+static void settingsNavRects(int &upX, int &upY, int &upW, int &upH,
+                             int &dnX, int &dnY, int &dnW, int &dnH) {
+    const int MODAL_X = 8;
+    const int MODAL_Y = CHAT_Y + 4;
+    const int MODAL_W = LCD_W - 16;
+    const int MODAL_H = CHAT_H - 8;
+    const int BTN_W = 46;
+    const int BTN_H = 14;
+    const int GAP   = 6;
+    const int RIGHT_PAD = 4;
+    const int BOTTOM_PAD = 2;
+    upW = dnW = BTN_W;
+    upH = dnH = BTN_H;
+    dnY = MODAL_Y + MODAL_H - BTN_H - BOTTOM_PAD;
+    upY = dnY - BTN_H - GAP;
+    dnX = MODAL_X + MODAL_W - RIGHT_PAD - BTN_W;
+    upX = dnX;
 }
 
 // ── Splash screen ─────────────────────────────────────────────
@@ -513,6 +688,18 @@ static void drawClippedText(int x, int y, int maxW, const char *text) {
     lcd.drawString(s.c_str(), x, y);
 }
 
+static void drawSquirclePill(int x, int y, int w, int h,
+                             uint16_t fill, uint16_t stroke, bool emph = false) {
+    if (w < 6 || h < 6) return;
+    int r = min(max(2, h / 2 - 1), 6);
+    lcd.fillRoundRect(x, y, w, h, r, fill);
+    lcd.drawRoundRect(x, y, w, h, r, stroke);
+    if (emph && w > 8 && h > 8) {
+        int r2 = max(1, r - 1);
+        lcd.drawRoundRect(x + 1, y + 1, w - 2, h - 2, r2, COL_SELECT_ACCENT);
+    }
+}
+
 // ── Battery reading ───────────────────────────────────────────
 // T-Deck routes VBAT through a 1:1 divider to BATT_ADC_PIN (GPIO 4).
 // ADC attenuation must be set to ADC_11db (0-3.3 V) in setup().
@@ -534,10 +721,14 @@ static void drawBattery() {
     const uint16_t bg = COL_STATUS_BG;
     uint16_t col = _battPct >= 60 ? COL_BATT_GOOD :
                    _battPct >= 25 ? COL_BATT_WARN : COL_BATT_BAD;
+    bool gpsFix = gpsHasFix();
+    uint8_t sats = gpsSats();
+    uint16_t gpsCol = gpsFix ? COL_BATT_GOOD : COL_BATT_BAD;
 
     const int BAR_W = 18, BAR_H = 6;
     const int NUB_W = 2, NUB_H = 2;
     const int GAP   = 3;
+    const int GPS_DOT_R = 2;
     const int BY    = 2;
 
     lcd.setFont(&fonts::DejaVu9);
@@ -548,11 +739,24 @@ static void drawBattery() {
     char tbuf[6];
     snprintf(tbuf, sizeof(tbuf), "%3d%%", _battPct);
     int txtW = lcd.textWidth(tbuf);
-    int total = txtW + GAP + BAR_W + NUB_W;
-    int TX = NODE_X + (NODE_W - total) / 2;
+    char sbuf[4];
+    snprintf(sbuf, sizeof(sbuf), "%u", (unsigned)sats);
+    int satW = lcd.textWidth(sbuf);
+    int gpsW = GPS_DOT_R * 2 + 1 + 1 + satW;
+
+    int total = gpsW + GAP + txtW + GAP + BAR_W + NUB_W;
+    int GX = NODE_X + (NODE_W - total) / 2;
+    int TX = GX + gpsW + GAP;
     int BX = TX + txtW + GAP;
     int NX = BX + BAR_W;
     int NY = BY + (BAR_H - NUB_H) / 2 + 1;
+
+    int dotX = GX + GPS_DOT_R;
+    int dotY = BY + BAR_H / 2;
+    lcd.fillCircle(dotX, dotY, GPS_DOT_R, gpsCol);
+    lcd.drawCircle(dotX, dotY, GPS_DOT_R, COL_TEXT_MAIN);
+    lcd.setTextColor(gpsCol, bg);
+    lcd.drawString(sbuf, GX + GPS_DOT_R * 2 + 2, BY);
 
     lcd.setTextColor(col, bg);
     lcd.drawString(tbuf, TX, BY);
@@ -590,6 +794,66 @@ static void drawStatus() {
     dirtyStatus = false;
 }
 
+static void drawModalMaskAndFrame(int mx, int my, int mw, int mh) {
+    int topH = my - CHAT_Y;
+    if (topH > 0) lcd.fillRect(0, CHAT_Y, LCD_W, topH, COL_BG_MAIN);
+    if (mx > 0) lcd.fillRect(0, my, mx, mh, COL_BG_MAIN);
+    int rightX = mx + mw;
+    if (rightX < LCD_W) lcd.fillRect(rightX, my, LCD_W - rightX, mh, COL_BG_MAIN);
+    int botY = my + mh;
+    int chatBottom = CHAT_Y + CHAT_H;
+    if (botY < chatBottom) lcd.fillRect(0, botY, LCD_W, chatBottom - botY, COL_BG_MAIN);
+
+    // Important: do not repaint modal interior here.
+    // Callers draw content first, then this mask/frame; repainting interior would
+    // blank the panel contents.
+    lcd.drawRect(mx, my, mw, mh, COL_SELECT_ACCENT);
+    if (mw > 2 && mh > 2)
+        lcd.drawRect(mx + 1, my + 1, mw - 2, mh - 2, COL_DIVIDER_HI);
+}
+
+static void drawPanelCloseButton(int x, int y, int w, int h) {
+    uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+    drawSquirclePill(x, y, w, h, fill, COL_SELECT_ACCENT, false);
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(COL_TEXT_MAIN, fill);
+    int tw = lcd.textWidth("Close");
+    int tx = x + max(1, (w - tw) / 2);
+    int ty = y + max(0, (h - CHAR_H) / 2);
+    drawClippedText(tx, ty, w - (tx - x) - 1, "Close");
+    setPanelCloseRect(x, y, w, h);
+}
+
+static void drawPanelScrollButtons(int mx, int my, int mw, int mh) {
+    const int bw = 46;
+    const int bh = 14;
+    const int rightPad = 4;
+    const int bottomPad = 2;
+    const int gap = 6;
+
+    int dnX = mx + mw - bw - rightPad;
+    int dnY = my + mh - bh - bottomPad;
+    int upX = dnX;
+    int upY = dnY - bh - gap;
+
+    uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+    drawSquirclePill(upX, upY, bw, bh, fill, COL_SELECT_ACCENT, false);
+    drawSquirclePill(dnX, dnY, bw, bh, fill, COL_SELECT_ACCENT, false);
+
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(COL_TEXT_MAIN, fill);
+    int fontH = lcd.fontHeight();
+    int upTw = lcd.textWidth("UP");
+    int dnTw = lcd.textWidth("DOWN");
+    int upTx = upX + max(1, (bw - upTw) / 2);
+    int dnTx = dnX + max(1, (bw - dnTw) / 2);
+    int upTy = upY + max(0, (bh - fontH) / 2);
+    int dnTy = dnY + max(0, (bh - fontH) / 2);
+    lcd.drawString("UP", upTx, upTy);
+    lcd.drawString("DOWN", dnTx, dnTy);
+    setPanelScrollRects(upX, upY, bw, bh, dnX, dnY, bw, bh);
+}
+
 // ── Draw: tab bar ─────────────────────────────────────────────
 static void drawTabs() {
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, COL_BG_MAIN);
@@ -598,35 +862,45 @@ static void drawTabs() {
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
+    const int TAB_PAD_X = 5;
+    const int TAB_GAP   = 3;
+    const int PILL_H    = max(8, TAB_H - 4);
+    const int PILL_Y    = STATUS_H + (TAB_H - PILL_H) / 2;
+
     // Build full tab list with absolute x positions
     struct TabEntry { int view; char label[16]; int x; int w; };
     TabEntry tabs[TOTAL_VIEWS];
     int tabCount = 0;
-    int xCursor  = 0;
+    int xCursor  = 2;
 
     for (int i = 0; i < TOTAL_VIEWS; i++) {
+        if (!isTopTabView(i)) continue;
         if (!isViewNavigable(i)) continue;
         char label[16] = {};
         if      (i == VIEW_SETTINGS) strncpy(label, "CFG", sizeof(label));
         else if (i == VIEW_GPS)      strncpy(label, "GPS", sizeof(label));
         else if (i == CHAN_ANN)      strncpy(label, "ANN", sizeof(label));
         else                         strncpy(label, CHANNEL_KEYS[i].name, sizeof(label) - 1);
-        int w = lcd.textWidth(label) + 6;
+        int w = lcd.textWidth(label) + 2 * TAB_PAD_X;
         tabs[tabCount] = { i, {}, xCursor, w };
         strncpy(tabs[tabCount].label, label, sizeof(label));
         tabCount++;
-        xCursor += w;
+        xCursor += w + TAB_GAP;
     }
+
+    int totalTabW = max(0, xCursor - TAB_GAP + 2);
+    int maxScroll = max(0, totalTabW - LCD_W);
 
     // Auto-scroll so the active tab is always fully visible
     for (int t = 0; t < tabCount; t++) {
         if (tabs[t].view != activeView) continue;
         if (tabs[t].x < tabScrollX)
             tabScrollX = tabs[t].x;
-        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W)
-            tabScrollX = tabs[t].x + tabs[t].w - LCD_W;
+        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W - 2)
+            tabScrollX = tabs[t].x + tabs[t].w - (LCD_W - 2);
         break;
     }
+    tabScrollX = constrain(tabScrollX, 0, maxScroll);
 
     // Render only tabs that intersect the visible window
     for (int t = 0; t < tabCount; t++) {
@@ -635,28 +909,30 @@ static void drawTabs() {
         if (sx >= LCD_W)         break;
 
         bool isActive = (tabs[t].view == activeView);
-        uint16_t col;
+        uint16_t stateCol;
         if (tabs[t].view == VIEW_SETTINGS) {
-            col = isActive ? COL_TEXT_ON_ACCENT : COL_TAB_IDLE;
+            stateCol = isActive ? COL_TEXT_ON_ACCENT : COL_TAB_IDLE;
         } else if (tabs[t].view == VIEW_GPS) {
-            if      (isActive)       col = COL_TEXT_ON_ACCENT;
-            else if (gpsHasFix())    col = COL_BATT_GOOD;
-            else if (gpsIsEnabled()) col = COL_TAB_UNREAD;
-            else                     col = COL_TAB_IDLE;
+            if      (isActive)       stateCol = COL_TEXT_ON_ACCENT;
+            else if (gpsHasFix())    stateCol = COL_BATT_GOOD;
+            else if (gpsIsEnabled()) stateCol = COL_TAB_UNREAD;
+            else                     stateCol = COL_TAB_IDLE;
         } else if (tabs[t].view == CHAN_ANN) {
             Channel &ch = Channels.get(tabs[t].view);
-            col = (ch.unread || isActive) ? COL_TEAL : COL_TAB_IDLE;
+            stateCol = (ch.unread || isActive) ? COL_TEAL : COL_TAB_IDLE;
         } else {
             Channel &ch = Channels.get(tabs[t].view);
-            col = ch.unread ? COL_TAB_UNREAD :
-                  isActive  ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
+            stateCol = ch.unread ? COL_TAB_UNREAD :
+                       isActive  ? COL_TAB_ACTIVE  : COL_TAB_IDLE;
         }
-        if (isActive) {
-            lcd.fillRect(sx, STATUS_H + 1, tabs[t].w - 1, TAB_H - 2, COL_SELECT_BG);
-            lcd.fillRect(sx, STATUS_H + TAB_H - 2, tabs[t].w - 1, 2, COL_SELECT_ACCENT);
-        }
-        lcd.setTextColor(col, isActive ? COL_SELECT_BG : COL_BG_MAIN);
-        drawClippedText(sx + 2, STATUS_H + 1, tabs[t].w - 4, tabs[t].label);
+
+        uint16_t fillCol   = isActive ? COL_SELECT_BG : lerp565(COL_BG_MAIN, COL_PANEL_ALT, 96);
+        uint16_t outlineCol= isActive ? COL_SELECT_ACCENT : stateCol;
+        uint16_t textCol   = isActive ? COL_TEXT_ON_ACCENT : stateCol;
+
+        drawSquirclePill(sx, PILL_Y, tabs[t].w, PILL_H, fillCol, outlineCol, isActive);
+        lcd.setTextColor(textCol, fillCol);
+        drawClippedText(sx + TAB_PAD_X, PILL_Y + 1, tabs[t].w - 2 * TAB_PAD_X, tabs[t].label);
     }
     lcd.setFont(&fonts::Font0);
     dirtyTabs = false;
@@ -670,7 +946,13 @@ static void drawDivider() {
 
 // ── Draw: message area ────────────────────────────────────────
 static void drawChat() {
-    drawPanelFrame(0, CHAT_Y, MSG_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    clearPanelCloseRect();
+    int chatX = 0;
+    int chatW = MSG_W;
+    if (activeView == CHAN_ANN) {
+        chatW = LCD_W;
+    }
+    drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
@@ -679,7 +961,7 @@ static void drawChat() {
         const DisplayLine *dl = Channels.getLine(active, row);
         int y = CHAT_Y + row * LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
-        lcd.fillRect(1, y, MSG_W - 2, LINE_H, rowBg);
+        lcd.fillRect(chatX + 1, y, chatW - 2, LINE_H, rowBg);
         if (!dl) continue;
 
         uint16_t col = dl->color;
@@ -695,14 +977,27 @@ static void drawChat() {
         }
 
         lcd.setTextColor(col, rowBg);
-        drawClippedText(2, y + 1, MSG_W - 6, dl->text);
+        drawClippedText(chatX + 2, y + 1, chatW - 6, dl->text);
     }
 
     // Scroll indicator: show arrow when not at bottom
     Channel &ch = Channels.get(active);
     if (ch.scrollOff > 0) {
         lcd.setTextColor(COL_TEAL, COL_BG_MAIN);
-        drawClippedText(MSG_W - 30, CHAT_Y + CHAT_H - LINE_H + 1, 28, "more");
+        drawClippedText(chatX + chatW - 30, CHAT_Y + CHAT_H - LINE_H + 1, 28, "more");
+    }
+
+    if (activeView == CHAN_ANN) {
+        const int mx = 8;
+        const int my = CHAT_Y + 4;
+        const int mw = LCD_W - 16;
+        const int mh = CHAT_H - 8;
+        drawModalMaskAndFrame(mx, my, mw, mh);
+        lcd.fillRect(mx + 1, my + 1, mw - 2, 11, COL_SELECT_BG);
+        lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
+        drawClippedText(mx + 5, my + 2, mw - 10, "Announcements");
+        drawPanelScrollButtons(mx, my, mw, mh);
+        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
     }
 
     lcd.setFont(&fonts::Font0);
@@ -900,41 +1195,63 @@ static void openDmWith(NodeEntry *n) {
 
 // ── Draw: DM contact list ─────────────────────────────────────
 static void drawDmList() {
-    drawPanelFrame(0, CHAT_Y, LCD_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    clearPanelCloseRect();
+    const int mx = 8;
+    const int my = CHAT_Y + 4;
+    const int mw = LCD_W - 16;
+    const int mh = CHAT_H - 8;
+    const int ix = mx + 3;
+    const int iy = my + 3;
+    const int iw = mw - 6;
+    const int controlsTop = my + mh - 36;
+    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
     dirtyNodes = false;
 
-    // Row 0: "New DM" button (always present)
-    {
-        bool     sel = (dmListSel == 0);
-        uint16_t bg  = sel ? COL_SELECT_BG : COL_PANEL_ALT;
-        uint16_t col = sel ? COL_TEXT_ON_ACCENT : COL_TEAL;
-        lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, bg);
-        lcd.setTextColor(col, bg);
-        drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "+ New DM conversation");
-    }
-
-    // Rows 1..: conversations (dmListSel 1..count)
-    const int rows = min(DMs.count(), DM_VISIBLE - 1);
+    // Rows: conversations (dmListSel 1..count), with dmListSel 0 reserved for NEW DM button.
+    const int rows = min(DMs.count(), rowsVisible);
     for (int i = 0; i < rows; i++) {
         DmConv *c = DMs.getByRank(i);
         if (!c) break;
 
-        int      y   = CHAT_Y + (i + 1) * DM_LINE_H;
+        int      y   = iy + i * DM_LINE_H;
         bool     sel = (dmListSel == i + 1);
         uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
         uint16_t col = sel ? COL_TEXT_ON_ACCENT
                    : c->unread ? COL_TAB_UNREAD : COL_DM_MUTED;
 
-        lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
+        lcd.fillRect(ix, y, iw, DM_LINE_H, bg);
 
         char row[DM_LINE_LEN + 1];
         snprintf(row, sizeof(row), "[%s] %.44s", c->shortName, c->lastText);
 
         lcd.setTextColor(col, bg);
-        drawClippedText(4, y + 1, LCD_W - 8, row);
+        drawClippedText(ix + 4, y + 1, iw - 8, row);
     }
+
+    drawPanelScrollButtons(mx, my, mw, mh);
+
+    const int closeX = mx + (mw - 62) / 2;
+    const int closeY = my + mh - 12;
+    const int newW = 68;
+    const int newH = 10;
+    const int newX = max(mx + 3, closeX - newW - 4);
+    const int newY = closeY;
+    bool newSel = (dmListSel == 0);
+    uint16_t newFill = newSel ? COL_SELECT_BG : lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+    drawSquirclePill(newX, newY, newW, newH, newFill, COL_SELECT_ACCENT, newSel);
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(newSel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN, newFill);
+    int ntw = lcd.textWidth("NEW DM");
+    drawClippedText(newX + max(1, (newW - ntw) / 2), newY + max(0, (newH - CHAR_H) / 2), newW - 2, "NEW DM");
+    setDmNewRect(newX, newY, newW, newH);
+
+    drawPanelCloseButton(closeX, closeY, 62, 10);
+
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
 }
@@ -963,33 +1280,48 @@ static int pickerNodeCount() { return pickerCount; }
 
 // ── Draw: DM node picker ──────────────────────────────────────
 static void drawDmPicker() {
-    drawPanelFrame(0, CHAT_Y, LCD_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    clearPanelCloseRect();
+    const int mx = 8;
+    const int my = CHAT_Y + 4;
+    const int mw = LCD_W - 16;
+    const int mh = CHAT_H - 8;
+    const int ix = mx + 3;
+    const int iy = my + 3;
+    const int iw = mw - 6;
+    const int controlsTop = my + mh - 36;
+    const int closeY = my + mh - 12;
+    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
     dirtyNodes = false;
 
     // Header bar
-    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, COL_SELECT_BG);
+    lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
-    drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "Select recipient (roll left to cancel)");
+    drawClippedText(ix + 4, iy + 1, iw - 8, "Select recipient");
 
     int filteredCount = pickerNodeCount();
     if (filteredCount == 0) {
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
-        drawClippedText(4, CHAT_Y + 3 * DM_LINE_H + 1, LCD_W - 8, "No other nodes known yet");
+        drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
+        drawPanelScrollButtons(mx, my, mw, mh);
+        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
         lcd.setFont(&fonts::Font0);
         dirtyChat = false;
         return;
     }
 
-    const int MSG_ROWS   = DM_VISIBLE - 1;
+    const int MSG_ROWS   = rowsVisible - 1;
     int firstVisible = max(0, dmPickerSel - (MSG_ROWS - 1));
 
     for (int row = 0; row < MSG_ROWS; row++) {
         int vi = firstVisible + row;
-        int      y  = CHAT_Y + (row + 1) * DM_LINE_H;
+        int      y  = iy + (row + 1) * DM_LINE_H;
         if (vi >= filteredCount) {
-            lcd.fillRect(0, y, LCD_W, DM_LINE_H, (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+            lcd.fillRect(ix, y, iw, DM_LINE_H, (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
             continue;
         }
         NodeEntry *n = pickerNode(vi);
@@ -999,7 +1331,7 @@ static void drawDmPicker() {
         uint16_t bg  = sel ? COL_SELECT_BG : ((row & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
         uint16_t col = sel ? COL_TEXT_ON_ACCENT : COL_TEAL;
 
-        lcd.fillRect(0, y, LCD_W, DM_LINE_H, bg);
+        lcd.fillRect(ix, y, iw, DM_LINE_H, bg);
 
         char entry[DM_LINE_LEN + 1];
         snprintf(entry, sizeof(entry), "[%s] %-28s !%08x",
@@ -1008,15 +1340,32 @@ static void drawDmPicker() {
                  (unsigned)n->nodeId);
 
         lcd.setTextColor(col, bg);
-        drawClippedText(4, y + 1, LCD_W - 8, entry);
+        drawClippedText(ix + 4, y + 1, iw - 8, entry);
     }
+
+    drawPanelScrollButtons(mx, my, mw, mh);
+    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
 }
 
 // ── Draw: DM conversation view ────────────────────────────────
 static void drawDmConv() {
-    drawPanelFrame(0, CHAT_Y, LCD_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    clearPanelCloseRect();
+    const int mx = 8;
+    const int my = CHAT_Y + 4;
+    const int mw = LCD_W - 16;
+    const int mh = CHAT_H - 8;
+    const int ix = mx + 3;
+    const int iy = my + 3;
+    const int iw = mw - 6;
+    const int controlsTop = my + mh - 36;
+    const int closeY = my + mh - 12;
+    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
     dirtyNodes = false;
@@ -1024,7 +1373,9 @@ static void drawDmConv() {
     DmConv *c = DMs.find(dmConvNodeId);
     if (!c) {
         lcd.setTextColor(TFT_RED, COL_PANEL_BG);
-        drawClippedText(4, CHAT_Y + DM_LINE_H + 1, LCD_W - 8, "Conversation not found");
+        drawClippedText(ix + 4, iy + DM_LINE_H + 1, iw - 8, "Conversation not found");
+        drawPanelScrollButtons(mx, my, mw, mh);
+        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
         lcd.setFont(&fonts::Font0);
         dirtyChat = false;
         return;
@@ -1033,47 +1384,85 @@ static void drawDmConv() {
     // Header bar
     char hdr[DM_LINE_LEN + 1];
     snprintf(hdr, sizeof(hdr), "DM with %s (!%08x)", c->shortName, (unsigned)c->nodeId);
-    lcd.fillRect(0, CHAT_Y, LCD_W, DM_LINE_H, COL_SELECT_BG);
+    lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
-    drawClippedText(4, CHAT_Y + 1, LCD_W - 8, hdr);
+    drawClippedText(ix + 4, iy + 1, iw - 8, hdr);
 
     // Messages (DM_VISIBLE - 1 rows below the header)
-    const int MSG_ROWS = DM_VISIBLE - 1;
+    const int MSG_ROWS = rowsVisible - 1;
     for (int row = 0; row < MSG_ROWS; row++) {
-        int y = CHAT_Y + (row + 1) * DM_LINE_H;
+        int y = iy + (row + 1) * DM_LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
-        lcd.fillRect(0, y, LCD_W, DM_LINE_H, rowBg);
+        lcd.fillRect(ix, y, iw, DM_LINE_H, rowBg);
         const DmLine *dl = DMs.getLine(c, row, MSG_ROWS);
         if (!dl) continue;
         lcd.setTextColor(dl->color, rowBg);
-        drawClippedText(4, y + 1, LCD_W - 8, dl->text);
+        drawClippedText(ix + 4, y + 1, iw - 8, dl->text);
     }
+
+    drawPanelScrollButtons(mx, my, mw, mh);
+    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
 }
 
 // ── Draw: settings page ───────────────────────────────────────
 static void drawSettings() {
-    const int SH = 10;  // settings always use Loose spacing
-    drawPanelFrame(0, CHAT_Y, LCD_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    clearPanelCloseRect();
+    const int SH = SETTINGS_ROW_H;
+    const int mx = 8;
+    const int my = CHAT_Y + 4;
+    const int mw = LCD_W - 16;
+    const int mh = CHAT_H - 8;
+    const int ix = mx + 3;
+    const int iw = mw - 6;
+    const int controlsTop = my + mh - 36;
+    const int closeY = my + mh - 12;
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
     char buf[LCD_W / CHAR_W + 2];
-    int  r = 0;   // current row index
+    int y = my + 1;
 
-    lcd.fillRect(0, CHAT_Y, LCD_W, SH, COL_SELECT_BG);
+    lcd.fillRect(ix, y, iw, SETTINGS_HDR_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
-    drawClippedText(4, CHAT_Y + 1, LCD_W - 8, "Settings");
-    r++;
+    drawClippedText(ix + 4, y + (SETTINGS_HDR_H - SH) / 2 + 1, iw - 8, "Settings");
+
+    int upX, upY, upW, upH, dnX, dnY, dnW, dnH;
+    settingsNavRects(upX, upY, upW, upH, dnX, dnY, dnW, dnH);
+    bool upSel = (settingsNavSel == 0);
+    bool dnSel = (settingsNavSel == 1);
+    uint16_t upFill = upSel ? COL_SELECT_ACCENT : COL_SELECT_BG;
+    uint16_t dnFill = dnSel ? COL_SELECT_ACCENT : COL_SELECT_BG;
+    drawSquirclePill(upX, upY, upW, upH, upFill, COL_TEXT_ON_ACCENT, upSel);
+    drawSquirclePill(dnX, dnY, dnW, dnH, dnFill, COL_TEXT_ON_ACCENT, dnSel);
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, upFill);
+    int fontH = lcd.fontHeight();
+    int upTw = lcd.textWidth("UP");
+    int upTx = upX + max(1, (upW - upTw) / 2);
+    int upTy = upY + max(0, (upH - fontH) / 2);
+    lcd.drawString("UP", upTx, upTy);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, dnFill);
+    int dnTw = lcd.textWidth("DOWN");
+    int dnTx = dnX + max(1, (dnW - dnTw) / 2);
+    int dnTy = dnY + max(0, (dnH - fontH) / 2);
+    lcd.drawString("DOWN", dnTx, dnTy);
+    setPanelScrollRects(upX, upY, upW, upH, dnX, dnY, dnW, dnH);
+    lcd.setFont(&fonts::DejaVu9);
+    y += SETTINGS_HDR_H;
 
     // ── Action buttons ────────────────────────────────────────
-    for (int i = 0; i < NUM_SETTINGS; i++, r++) {
-        int      y  = CHAT_Y + r * SH;
+    for (int i = 0; i < NUM_SETTINGS; i++, y += SH) {
+        if (y + SH > controlsTop - 1) break;
         bool     sel = (i == settingsSel);
         uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
         uint16_t fg  = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
-        lcd.fillRect(0, y, LCD_W, SH, bg);
+        lcd.fillRect(ix, y, iw, SH, bg);
         lcd.setTextColor(fg, bg);
         if (i == SETTING_EXPORT)
             snprintf(buf, sizeof(buf), "Export Config");
@@ -1089,28 +1478,32 @@ static void drawSettings() {
             snprintf(buf, sizeof(buf), "Web Config: %s", webCfgIP());
         else
             snprintf(buf, sizeof(buf), "Web Config: OFF");
-        drawClippedText(4, y + 1, LCD_W - 8, buf);
+        drawClippedText(ix + 4, y + 1, iw - 8, buf);
     }
 
     // ── Status line (transient feedback) ─────────────────────
-    if (settingsStatus[0]) {
-        lcd.fillRect(0, CHAT_Y + r * SH, LCD_W, SH, COL_PANEL_BG);
+    if (settingsStatus[0] && y + SH <= controlsTop - 1) {
+        lcd.fillRect(ix, y, iw, SH, COL_PANEL_BG);
         lcd.setTextColor(COL_TEAL, COL_PANEL_BG);
-        drawClippedText(2, CHAT_Y + r * SH, LCD_W - 4, settingsStatus);
+        drawClippedText(ix + 2, y, iw - 4, settingsStatus);
     }
-    r++;  // always advance past status slot
+    y += SH;  // always advance past status slot
 
     // ── Separator ─────────────────────────────────────────────
-    lcd.drawFastHLine(2, CHAT_Y + r * SH + SH / 2, LCD_W - 4, COL_DIVIDER);
-    r++;
+    if (y + SH <= controlsTop - 1)
+        lcd.drawFastHLine(ix + 2, y + SH / 2, iw - 4, COL_DIVIDER);
+    y += SH;
 
     // ── Read-only config info ─────────────────────────────────
     const uint16_t DIM = COL_TEXT_DIM;
+    int infoRow = 0;
     auto pr = [&](const char *s) {
-        uint16_t bg = ((r & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        lcd.fillRect(0, CHAT_Y + r * SH, LCD_W, SH, bg);
+        if (y + SH > controlsTop - 1) return;
+        uint16_t bg = ((infoRow++ & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        lcd.fillRect(ix, y, iw, SH, bg);
         lcd.setTextColor(DIM, bg);
-        drawClippedText(2, CHAT_Y + r++ * SH, LCD_W - 4, s);
+        drawClippedText(ix + 2, y, iw - 4, s);
+        y += SH;
     };
 
     snprintf(buf, sizeof(buf), "Long Name:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
@@ -1129,6 +1522,8 @@ static void drawSettings() {
     snprintf(buf, sizeof(buf), "Pwr:%d dBm  Hops:%d",
              gCfg.loraPower, gCfg.loraHopLimit);
     pr(buf);
+
+    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1220,43 +1615,153 @@ static void drawNodeDetail(const NodeEntry *n) {
     dirtyChat = false;
 }
 
-// ── Draw: input bar ───────────────────────────────────────────
-static void drawInput() {
-    // Show input bar only in channel views and DM conv view (not picker, not list)
+static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
-    if ((activeView == CHAN_ANN)
+    return !((activeView == CHAN_ANN)
             || (activeView == CHAN_DM && !dmNeedsInput)
             || (activeView == VIEW_GPS)
-            || (activeView == VIEW_SETTINGS)) {
-        // Non-text view — blank the input area
-        lcd.fillRect(0, INPUT_Y, LCD_W, INPUT_H, COL_BG_MAIN);
-        dirtyInput = false;
+            || (activeView == VIEW_SETTINGS));
+}
+
+static void handleKey(char k);
+
+struct NavButtonRect {
+    int x;
+    int y;
+    int w;
+    int h;
+};
+
+static void navButtonRects(NavButtonRect b[5]) {
+    const int PAD = 3;
+    const int GAP = 4;
+    const int rowY = INPUT_Y + 13;
+    const int rowH = max(8, INPUT_H - 15);
+    const int bw = (LCD_W - 2 * PAD - 4 * GAP) / 5;
+    int x = PAD;
+    for (int i = 0; i < 5; i++) {
+        b[i] = { x, rowY, bw, rowH };
+        x += bw + GAP;
+    }
+}
+
+static bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
+    return (x >= rx && x < (rx + rw) && y >= ry && y < (ry + rh));
+}
+
+static void handleTouchTap(int x, int y) {
+    if (screenAsleep || nodeDetailOpen) return;
+
+    if (dmNewVisible
+        && pointInRect(x, y, dmNewRect.x, dmNewRect.y, dmNewRect.w, dmNewRect.h)
+        && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
+        dmListSel  = 0;
+        dmPickerSel  = 0;
+        dmPickerOpen = true;
+        pickerSnapshot();
+        dirtyChat = true;
         return;
     }
+
+    if (panelCloseVisible
+        && pointInRect(x, y, panelCloseRect.x, panelCloseRect.y,
+                       panelCloseRect.w, panelCloseRect.h)) {
+        closePanelToChannel();
+        return;
+    }
+
+    if (panelUpVisible
+        && pointInRect(x, y, panelUpRect.x, panelUpRect.y,
+                       panelUpRect.w, panelUpRect.h)) {
+        handleKey(KEY_SCROLL_UP);
+        return;
+    }
+
+    if (panelDownVisible
+        && pointInRect(x, y, panelDownRect.x, panelDownRect.y,
+                       panelDownRect.w, panelDownRect.h)) {
+        handleKey(KEY_SCROLL_DN);
+        return;
+    }
+
+    NavButtonRect b[5];
+    navButtonRects(b);
+    if (pointInRect(x, y, b[0].x, b[0].y, b[0].w, b[0].h)) {
+        goToView(prevView(activeView));
+    } else if (pointInRect(x, y, b[1].x, b[1].y, b[1].w, b[1].h)) {
+        if (activeView != CHAN_DM) goToView(CHAN_DM);
+    } else if (pointInRect(x, y, b[2].x, b[2].y, b[2].w, b[2].h)) {
+        if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+    } else if (pointInRect(x, y, b[3].x, b[3].y, b[3].w, b[3].h)) {
+        if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+    } else if (pointInRect(x, y, b[4].x, b[4].y, b[4].w, b[4].h)) {
+        goToView(nextView(activeView));
+    }
+}
+
+// ── Draw: input bar ───────────────────────────────────────────
+static void drawInput() {
+    bool showTextInput = isTextInputView();
     fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
     lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
+    lcd.drawFastHLine(0, INPUT_Y + 12, LCD_W, COL_DIVIDER_HI);
     lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
-    lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-    lcd.drawString(">>", 2, INPUT_Y + 2);
 
-    // Show trailing input segment that fits in available pixel width.
-    int textX = 2 + lcd.textWidth(">>") + 3;
-    int availW = LCD_W - textX - 4;
-    String visible(inputBuf);
-    while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
-        visible.remove(0, 1);
-    }
-    lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
-    lcd.drawString(visible.c_str(), textX, INPUT_Y + 2);
+    if (showTextInput) {
+        lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
+        lcd.drawString(">>", 2, INPUT_Y + 2);
 
-    // Cursor blink
-    if (cursorOn) {
-        int cx = textX + lcd.textWidth(visible.c_str()) + 1;
-        int ch = min(INPUT_H - 4, lcd.fontHeight());
-        lcd.fillRect(cx, INPUT_Y + (INPUT_H - ch) / 2, 2, ch, COL_CURSOR);
+        // Show trailing input segment that fits in available pixel width.
+        int textX = 2 + lcd.textWidth(">>") + 3;
+        int availW = LCD_W - textX - 4;
+        String visible(inputBuf);
+        while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
+            visible.remove(0, 1);
+        }
+        lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
+        lcd.drawString(visible.c_str(), textX, INPUT_Y + 2);
+
+        if (cursorOn) {
+            int cx = textX + lcd.textWidth(visible.c_str()) + 1;
+            int ch = min(8, lcd.fontHeight());
+            lcd.fillRect(cx, INPUT_Y + 2, 2, ch, COL_CURSOR);
+        }
+    } else {
+        // Non-text views keep the top row visually clean.
     }
+
+    NavButtonRect b[5];
+    navButtonRects(b);
+    uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
+    for (int i = 0; i < 5; i++) {
+        drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
+    }
+
+    // Bracket the middle 3 buttons (DM / ANN / CFG) from the outer nav buttons.
+    int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
+    int sepX2 = (b[3].x + b[3].w + b[4].x) / 2;
+    int sepY  = b[0].y + 1;
+    int sepH  = max(1, b[0].h - 2);
+    // Stronger divider between "Previous" and the middle group.
+    lcd.fillRect(max(0, sepX1 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
+    lcd.drawFastVLine(sepX1 + 1, sepY, sepH, COL_DIVIDER_HI);
+    // Match right-side bracket style between "CFG" and "Next".
+    lcd.fillRect(max(0, sepX2 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
+    lcd.drawFastVLine(sepX2 + 1, sepY, sepH, COL_DIVIDER_HI);
+
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(COL_TEXT_MAIN, btnFill);
+    const char *labels[5] = { "Previous", "DM", "ANN", "CFG", "Next" };
+    for (int i = 0; i < 5; i++) {
+        int tw = lcd.textWidth(labels[i]);
+        int tx = b[i].x + max(1, (b[i].w - tw) / 2);
+        int ty = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
+        if (tw <= b[i].w - 2) lcd.drawString(labels[i], tx, ty);
+        else                  drawClippedText(b[i].x + 1, ty, b[i].w - 2, labels[i]);
+    }
+
     lcd.setFont(&fonts::Font0);
     dirtyInput = false;
 }
@@ -1293,8 +1798,10 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     Radio.transmit(frame, sizeof(hdr) + protoLen);
-    Serial.printf("[ack] routing ACK → !%08X for pkt 0x%08X hops=%u\n",
-                  pkt.hdr.from, pkt.hdr.id, ackHops);
+    if (kVerboseRxSerial) {
+        Serial.printf("[ack] routing ACK -> !%08X for pkt 0x%08X hops=%u\n",
+                      pkt.hdr.from, pkt.hdr.id, ackHops);
+    }
 }
 
 // ── Handle received packet ────────────────────────────────────
@@ -1308,6 +1815,9 @@ static void queueGreet(uint32_t nodeId) {
 }
 
 static void handleRx(MeshPacket pkt) {
+    // Keep draining the keyboard even while packet handling is busy.
+    pumpKeyboardRaw(12, millis());
+
     if (isDuplicate(pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
     if (gCfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return;  // bit 4 = via_mqtt
@@ -1328,20 +1838,22 @@ static void handleRx(MeshPacket pkt) {
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     uint8_t hopStart = (pkt.hdr.flags >> 5) & 0x07;
 
-    // Serial log (always)
-    Serial.printf("\n┌─ PKT #%lu ───────────────────────────────\n", pktCount);
-    Serial.printf("│ RSSI:%.1f SNR:%.2f Len:%u Chan:%d\n",
-                  pkt.rssi, pkt.snr, sizeof(MeshHdr) + pkt.payloadLen, pkt.chanIdx);
-    if (isBcast)
-        Serial.printf("│ From:!%08x  To:BCAST  Hops:%u/%u  flags:0x%02x\n",
-                      pkt.hdr.from, hopLimit, hopStart, pkt.hdr.flags);
-    else
-        Serial.printf("│ From:!%08x  To:!%08x  Hops:%u/%u  flags:0x%02x\n",
-                      pkt.hdr.from, pkt.hdr.to, hopLimit, hopStart, pkt.hdr.flags);
+    if (kVerboseRxSerial) {
+        Serial.printf("\n[rx] pkt#%lu rssi=%.1f snr=%.2f len=%u ch=%d\n",
+                      pktCount, pkt.rssi, pkt.snr,
+                      (unsigned)(sizeof(MeshHdr) + pkt.payloadLen), pkt.chanIdx);
+        if (isBcast)
+            Serial.printf("[rx] from=!%08x to=BCAST hops=%u/%u flags=0x%02x\n",
+                          pkt.hdr.from, hopLimit, hopStart, pkt.hdr.flags);
+        else
+            Serial.printf("[rx] from=!%08x to=!%08x hops=%u/%u flags=0x%02x\n",
+                          pkt.hdr.from, pkt.hdr.to, hopLimit, hopStart, pkt.hdr.flags);
+    }
 
     // Update node DB from every received packet (before portnum switch so hasName is current)
     Nodes.updateFromPacket(pkt);
     dirtyNodes = true;
+    pumpKeyboardRaw(8, millis());
 
     // For unicast PKI DMs (channel=0) that failed channel-key decryption, try PKI decrypt.
     // This requires having previously received a NODEINFO with the sender's public key.
@@ -1366,14 +1878,17 @@ static void handleRx(MeshPacket pkt) {
                 // Send routing ACK (the early-ACK path at top missed this since it wasn't decrypted yet)
                 if ((pkt.hdr.flags & 0x08) && pkt.portnum != ROUTING_APP)
                     sendRoutingAck(pkt);
-                Serial.printf("│ PKI decrypt OK  portnum=%lu\n", (unsigned long)pkt.portnum);
+                if (kVerboseRxSerial) {
+                    Serial.printf("[rx] pki decrypt OK portnum=%lu\n", (unsigned long)pkt.portnum);
+                }
             }
         }
     }
 
     if (!pkt.decrypted) {
-        Serial.printf("│ (encrypted, unknown channel)\n");
-        Serial.printf("└─────────────────────────────────────────\n");
+        if (kVerboseRxSerial) {
+            Serial.printf("[rx] encrypted packet on unknown channel\n");
+        }
         return;
     }
 
@@ -1388,7 +1903,9 @@ static void handleRx(MeshPacket pkt) {
         strncpy(tm.text, (const char *)pkt.payload,
                 min(pkt.payloadLen, sizeof(tm.text) - 1));
         tm.text[min(pkt.payloadLen, sizeof(tm.text) - 1)] = '\0';
-        Serial.printf("│ TEXT: \"%s\"\n", tm.text);
+        if (kVerboseRxSerial) {
+            Serial.printf("[rx] text: \"%s\"\n", tm.text);
+        }
 
         // Sender display: use short name (real or hex fallback set by node DB)
         NodeEntry *n = Nodes.find(pkt.hdr.from);
@@ -1425,10 +1942,12 @@ static void handleRx(MeshPacket pkt) {
         UserInfo u;
         decodeUser(pkt.payload, pkt.payloadLen, u);
         Nodes.updateUser(pkt.hdr.from, u);
-        Serial.printf("│ NODEINFO: \"%s\" (%s)%s  pubKey=%s\n",
-                      u.longName, u.shortName,
-                      pkt.wantResponse ? " [want_response]" : "",
-                      u.hasPubKey ? "YES(32B)" : "none");
+        if (kVerboseRxSerial) {
+            Serial.printf("[rx] nodeinfo: \"%s\" (%s)%s pubKey=%s\n",
+                          u.longName, u.shortName,
+                          pkt.wantResponse ? " [want_response]" : "",
+                          u.hasPubKey ? "YES(32B)" : "none");
+        }
 
         snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
                  (upSec / 3600) % 24, (upSec / 60) % 60);
@@ -1447,8 +1966,10 @@ static void handleRx(MeshPacket pkt) {
         PositionInfo pos;
         decodePosition(pkt.payload, pkt.payloadLen, pos);
         Nodes.updatePosition(pkt.hdr.from, pos);
-        Serial.printf("│ POSITION: %.5f, %.5f  alt:%dm\n",
-                      pos.latI * 1e-7f, pos.lonI * 1e-7f, pos.alt);
+        if (kVerboseRxSerial) {
+            Serial.printf("[rx] position: %.5f, %.5f alt:%dm\n",
+                          pos.latI * 1e-7f, pos.lonI * 1e-7f, pos.alt);
+        }
         dirtyNodes = true;
         break;
     }
@@ -1458,7 +1979,9 @@ static void handleRx(MeshPacket pkt) {
         decodeTelemetry(pkt.payload, pkt.payloadLen, tel);
         if (tel.valid) {
             Nodes.updateTelemetry(pkt.hdr.from, tel);
-            Serial.printf("│ TELEMETRY: bat=%.0f%% %.2fV\n", tel.battPct, tel.voltage);
+            if (kVerboseRxSerial) {
+                Serial.printf("[rx] telemetry: bat=%.0f%% %.2fV\n", tel.battPct, tel.voltage);
+            }
         }
         dirtyNodes = true;
         break;
@@ -1482,16 +2005,18 @@ static void handleRx(MeshPacket pkt) {
             bool isAck = (errorReason == 0);
             if (isAck) {
                 Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
-                Serial.printf("│ ACK for 0x%08X from !%08X\n", pkt.requestId, pkt.hdr.from);
+                if (kVerboseRxSerial) {
+                    Serial.printf("[rx] ACK for 0x%08X from !%08X\n", pkt.requestId, pkt.hdr.from);
+                }
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
-                Serial.printf("│ NAK for 0x%08X err=%lu from !%08X\n",
+                Serial.printf("[rx] NAK for 0x%08X err=%lu from !%08X\n",
                               pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
 
                 // PKI_UNKNOWN_PUBKEY (35): sender doesn't have our public key yet.
                 // Respond with a unicast NODEINFO so they can retry with PKI.
                 if (errorReason == 35) {
-                    Serial.printf("[nak] PKI_UNKNOWN_PUBKEY — sending NODEINFO to !%08X\n", pkt.hdr.from);
+                    Serial.printf("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
                     Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) n->lastSentInfoMs = millis();
@@ -1511,9 +2036,11 @@ static void handleRx(MeshPacket pkt) {
     }
 
     default:
-        Serial.printf("│ %s port=%lu payload=%u bytes\n",
-                      portnumName(pkt.portnum), pkt.portnum,
-                      (unsigned)pkt.payloadLen);
+        if (kVerboseRxSerial) {
+            Serial.printf("[rx] %s port=%lu payload=%u bytes\n",
+                          portnumName(pkt.portnum), pkt.portnum,
+                          (unsigned)pkt.payloadLen);
+        }
         break;
     }
 
@@ -1530,15 +2057,17 @@ static void handleRx(MeshPacket pkt) {
         bool needGreet = !known || !known->hasName ||
                          elapsed > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL;
         if (needGreet) {
-            Serial.printf("[nodeinfo] queuing greeting for !%08X (%s, last sent %lums ago)\n",
-                          pkt.hdr.from,
-                          (known && known->hasName) ? known->shortName : "new",
-                          elapsed == UINT32_MAX ? 0UL : (unsigned long)elapsed);
+            if (kVerboseRxSerial) {
+                Serial.printf("[nodeinfo] queuing greeting for !%08X (%s, last sent %lums ago)\n",
+                              pkt.hdr.from,
+                              (known && known->hasName) ? known->shortName : "new",
+                              elapsed == UINT32_MAX ? 0UL : (unsigned long)elapsed);
+            }
             queueGreet(pkt.hdr.from);
         }
     }
 
-    Serial.printf("└─────────────────────────────────────────\n");
+    pumpKeyboardRaw(8, millis());
 }
 
 static void onWebCfgSaved();  // forward declaration
@@ -1630,7 +2159,7 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
             } else if (settingsSel == SETTING_THEME) {
-                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 4);
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
                 setUiThemePreset(p);
                 applyUiTheme();
                 persistUiTheme();
@@ -1671,8 +2200,10 @@ static void handleKey(char k) {
         } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
                    && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
-            if (!Channels.sendText(myNodeId, inputBuf, gCfg.okToMqtt)) {
-                Channels.addMessage(Channels.activeIdx(), "",
+            int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
+                         ? activeView : Channels.activeIdx();
+            if (!Channels.sendText(myNodeId, inputBuf, gCfg.okToMqtt, txChan)) {
+                Channels.addMessage(txChan, "",
                     "! TX failed", TFT_RED, 0);
                 dirtyChat = true;
             }
@@ -1758,7 +2289,7 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
             } else if (settingsSel == SETTING_THEME) {
-                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 4);
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
                 setUiThemePreset(p);
                 applyUiTheme();
                 persistUiTheme();
@@ -1835,6 +2366,7 @@ static void handleKey(char k) {
             nodeListSel = max(0, nodeListSel - 1);
             dirtyNodes = true;
         } else if (activeView == VIEW_SETTINGS) {
+            settingsNavSel = -1;
             settingsSel = max(0, settingsSel - 1);
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
@@ -1868,6 +2400,7 @@ static void handleKey(char k) {
             nodeListSel = min(cap, nodeListSel + 1);
             dirtyNodes = true;
         } else if (activeView == VIEW_SETTINGS) {
+            settingsNavSel = -1;
             settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
@@ -2177,6 +2710,7 @@ void setup() {
             char k[8];
             snprintf(k, sizeof(k), "n%d", i);
             String nm = cp.getString(k, "");
+            nm.trim();
             if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
                 strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
                 CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
@@ -2283,23 +2817,50 @@ void setup() {
     dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
 }
 
-// Poll keyboard + trackball; called multiple times per loop to avoid drops
+// Poll touch + keyboard; called multiple times per loop to avoid drops
 static void pollInput() {
     uint32_t now = millis();
 
-    // Trackball
-    char tb = kb.readTrackball();
-    if (tb != KEY_NONE) {
-        if (screenAsleep) { wakeScreen(); return; }
-        handleKey(tb);
+    // While asleep, allow a single trackball press to wake the screen.
+    // Navigation remains touch/keyboard-only once awake.
+    if (screenAsleep) {
+        if (kb.readTrackball() == KEY_ROLLER) {
+            wakeScreen();
+            return;
+        }
     }
 
-    // Keyboard — drain up to 4 buffered keys
-    for (int ki = 0; ki < 4; ki++) {
-        char k = kb.readKey();
-        if (k == KEY_NONE) break;
-        if (screenAsleep) { wakeScreen(); break; }
+    // Touchscreen tap handling (for on-screen channel nav buttons)
+    int32_t tx = 0, ty = 0;
+    bool t = lcd.getTouch(&tx, &ty);
+    if (t) {
+        if (screenAsleep) { wakeScreen(); return; }
         lastActivityMs = now;
+        if (!touchDown) {
+            touchDown = true;
+            touchStartX = tx;
+            touchStartY = ty;
+            touchDownMs = now;
+        }
+        touchLastX = tx;
+        touchLastY = ty;
+    } else if (touchDown) {
+        bool shortTap = (now - touchDownMs) <= 450;
+        bool steady   = (abs(touchLastX - touchStartX) <= 18)
+                     && (abs(touchLastY - touchStartY) <= 18);
+        if (shortTap && steady) {
+            int tapX = (touchStartX + touchLastX) / 2;
+            int tapY = (touchStartY + touchLastY) / 2;
+            handleTouchTap(tapX, tapY);
+        }
+        touchDown = false;
+    }
+
+    // Pull fresh keyboard bytes, then consume queued keys.
+    pumpKeyboardRaw(24, now);
+    for (int ki = 0; ki < 24; ki++) {
+        char k;
+        if (!dequeueKey(k)) break;
         handleKey(k);
     }
 }
@@ -2419,7 +2980,7 @@ void loop() {
             else if (activeView == CHAN_DM)                            drawDmList();
             else                                                       drawChat();
         }
-        if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
+        if (activeView < MESH_CHANNELS) {
             if (dirtyNodes) drawNodes();
         }
         if (dirtyInput) drawInput();

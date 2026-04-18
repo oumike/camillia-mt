@@ -35,8 +35,8 @@ static int b64Decode(const char *in, uint8_t *out, int maxLen) {
         if      (c >= 'A' && c <= 'Z') v = c - 'A';
         else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
         else if (c >= '0' && c <= '9') v = c - '0' + 52;
-        else if (c == '+') v = 62;
-        else if (c == '/') v = 63;
+        else if (c == '+' || c == '-') v = 62;
+        else if (c == '/' || c == '_') v = 63;
         else continue;
         acc = (acc << 6) | (uint32_t)v; bits += 6;
         if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
@@ -57,9 +57,9 @@ static const char *kRebroadNames[] = {
 static const int kNumRebroadModes = 5;
 
 static const char *kThemeNames[] = {
-    "CAMELLIA", "EVERGREEN"
+    "CAMELLIA", "EVERGREEN", "EARTHEN"
 };
-static const int kNumThemes = 2;
+static const int kNumThemes = 3;
 
 static const char *kThemeModeNames[] = {
     "DARK", "LIGHT"
@@ -70,6 +70,22 @@ static uint8_t findName(const char *val, const char **table, int n) {
     for (int i = 0; i < n; i++)
         if (!strcmp(val, table[i])) return (uint8_t)i;
     return 0;
+}
+
+static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
+    if (!dst || dstSize == 0) return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    while (*src && isspace((unsigned char)*src)) src++;
+    size_t len = strlen(src);
+    while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
+
+    size_t n = (len < (dstSize - 1)) ? len : (dstSize - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
 // ── Defaults ─────────────────────────────────────────────────
@@ -268,23 +284,22 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
         const char *t = line + indent;
         if (t[0] == '#' || t[0] == '\0') continue;
 
-        // Legacy channel list item: "  - name: foo"
-        if (indent == 2 && t[0] == '-' && t[1] == ' ') {
-            chanIdx++;
-            if (chanIdx >= MAX_CHANNELS) break;
-            const char *after = t + 2;
-            char *c2 = strchr((char *)after, ':');
-            if (c2) {
-                *c2 = '\0';
-                const char *v2 = c2 + 1;
+        // Channel list item. Accept both normal "- name:" and malformed lines
+        // with accidental leading junk before "- name:".
+        if (!strcmp(section, "channels")) {
+            const char *nameItem = strstr(t, "- name:");
+            if (nameItem) {
+                chanIdx++;
+                if (chanIdx >= MAX_CHANNELS) break;
+                const char *v2 = nameItem + 7;
                 while (*v2 == ' ') v2++;
-                if (!strcmp(after, "name")) {
-                    strncpy(CHANNEL_KEYS[chanIdx].name_buf, v2,
-                            sizeof(CHANNEL_KEYS[0].name_buf) - 1);
+                if (*v2) {
+                    copyTrimmed(CHANNEL_KEYS[chanIdx].name_buf,
+                                sizeof(CHANNEL_KEYS[0].name_buf), v2);
                     CHANNEL_KEYS[chanIdx].name = CHANNEL_KEYS[chanIdx].name_buf;
                 }
+                continue;
             }
-            continue;
         }
 
         char *colon = strchr((char *)t, ':');
@@ -360,8 +375,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (chanIdx >= 0 && chanIdx < MAX_CHANNELS) {
                 // Legacy channel properties
                 if (!strcmp(key, "name")) {
-                    strncpy(CHANNEL_KEYS[chanIdx].name_buf, val,
-                            sizeof(CHANNEL_KEYS[0].name_buf) - 1);
+                    copyTrimmed(CHANNEL_KEYS[chanIdx].name_buf,
+                                sizeof(CHANNEL_KEYS[0].name_buf), val);
                     CHANNEL_KEYS[chanIdx].name = CHANNEL_KEYS[chanIdx].name_buf;
                 } else if (!strcmp(key, "key")) {
                     int kl = b64Decode(val, CHANNEL_KEYS[chanIdx].key, 32);

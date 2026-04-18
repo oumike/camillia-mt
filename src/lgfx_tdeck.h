@@ -6,6 +6,7 @@ class LGFX_TDeck : public lgfx::LGFX_Device {
     lgfx::Panel_ST7789 _panel;
     lgfx::Bus_SPI      _bus;
     lgfx::Light_PWM    _light;
+    lgfx::Touch_GT911   _touch;
 
 public:
     LGFX_TDeck() {
@@ -40,6 +41,23 @@ public:
             cfg.pwm_channel = 0;
             _light.config(cfg);
             _panel.setLight(&_light);
+        }
+        {
+            auto cfg = _touch.config();
+            cfg.x_min           = 0;
+            cfg.x_max           = 239;
+            cfg.y_min           = 0;
+            cfg.y_max           = 319;
+            cfg.pin_int         = TOUCH_INT;
+            cfg.bus_shared      = true;
+            cfg.offset_rotation = 0;
+            cfg.i2c_port        = TOUCH_I2C_PORT;
+            cfg.i2c_addr        = TOUCH_ADDR;
+            cfg.pin_sda         = TOUCH_SDA;
+            cfg.pin_scl         = TOUCH_SCL;
+            cfg.freq            = 400000;
+            _touch.config(cfg);
+            _panel.setTouch(&_touch);
         }
         setPanel(&_panel);
     }

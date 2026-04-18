@@ -5,6 +5,7 @@ TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 
 void TDeckKeyboard::begin() {
     Wire.begin(KB_SDA, KB_SCL, 100000UL);
+    Wire.setClock(400000UL);
     delay(50);
     Wire.beginTransmission(KB_ADDR);
     Wire.endTransmission();
@@ -54,13 +55,12 @@ char TDeckKeyboard::readTrackball() {
 }
 
 char TDeckKeyboard::readKey() {
-    unsigned long now = millis();
-    if (now - _lastReadMs < 10) return KEY_NONE;
+    // Read immediately; higher-level poll loop already controls cadence.
+    // A local gate here prevents draining buffered bursts and drops keys.
     Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
     if (!Wire.available()) return KEY_NONE;
     uint8_t raw = Wire.read();
     if (raw == 0x00 || raw == 0xFF) return KEY_NONE;
-    _lastReadMs = now;
     return mapKey(raw);
 }
 

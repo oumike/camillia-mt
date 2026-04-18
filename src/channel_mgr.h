@@ -53,8 +53,10 @@ public:
     // Returns nullptr if out of range.
     const DisplayLine *getLine(int chanIdx, int row) const;
 
-    // Build and transmit a text message on the active channel.
-    bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false);
+    // Build and transmit a text message on a mesh channel.
+    // chanIdx: 0..MESH_CHANNELS-1, or -1 to use current active channel.
+    bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false,
+                  int chanIdx = -1);
 
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).
