@@ -6,7 +6,8 @@
 enum UiThemeFamily : uint8_t {
     UI_THEME_CAMELLIA = 0,
     UI_THEME_EVERGREEN = 1,
-    UI_THEME_COUNT = 2
+    UI_THEME_EARTHEN = 2,
+    UI_THEME_COUNT = 3
 };
 
 enum UiThemeMode : uint8_t {

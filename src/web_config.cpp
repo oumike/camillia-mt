@@ -23,6 +23,9 @@ static WebCfgSaveCb   gOnSave          = nullptr;
 static volatile bool  gAnnounceReq     = false;
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
+static char           gFlashMsg[128]   = "";
+static bool           gRebootPending   = false;
+static uint32_t       gRebootAtMs      = 0;
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -52,6 +55,22 @@ static void buildExportFileName(const char *shortName, char *out, size_t outLen)
 static void redirect(const char *path) {
     server.sendHeader("Location", path);
     server.send(303);
+}
+
+static void setFlashMsg(const char *msg) {
+    if (!msg) { gFlashMsg[0] = '\0'; return; }
+    strncpy(gFlashMsg, msg, sizeof(gFlashMsg) - 1);
+    gFlashMsg[sizeof(gFlashMsg) - 1] = '\0';
+}
+
+static void redirectHomeWithFlash(const char *msg = "") {
+    if (msg && msg[0]) setFlashMsg(msg);
+    redirect("/");
+}
+
+static void scheduleReboot(uint32_t delayMs) {
+    gRebootPending = true;
+    gRebootAtMs = millis() + delayMs;
 }
 
 // ── HTML helpers ──────────────────────────────────────────────
@@ -167,8 +186,8 @@ static int b64Decode(const char *in, uint8_t *out, int maxLen) {
         if      (c >= 'A' && c <= 'Z') v = c - 'A';
         else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
         else if (c >= '0' && c <= '9') v = c - '0' + 52;
-        else if (c == '+') v = 62;
-        else if (c == '/') v = 63;
+        else if (c == '+' || c == '-') v = 62;
+        else if (c == '/' || c == '_') v = 63;
         else continue;
         acc = (acc << 6) | (uint32_t)v; bits += 6;
         if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
@@ -193,9 +212,10 @@ static void sendConfigPage(const char *msg = "") {
 
     char tmp[96];
     String html = kHead;
-    uint8_t themePreset = (gCfg->uiTheme == UI_THEME_EVERGREEN)
-                        ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2)
-                        : (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
+    uint8_t themePreset =
+        (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
+        (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
+                                                (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
     html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
@@ -497,6 +517,8 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if (themePreset == 1) html += " selected"; html += ">Camillia Light</option>"
             "<option value='2'"; if (themePreset == 2) html += " selected"; html += ">Evergreen Dark</option>"
             "<option value='3'"; if (themePreset == 3) html += " selected"; html += ">Evergreen Light</option>"
+            "<option value='4'"; if (themePreset == 4) html += " selected"; html += ">Earthy Dark</option>"
+            "<option value='5'"; if (themePreset == 5) html += " selected"; html += ">Earthy Light</option>"
             "</select></label>";
         html += "<script>"
             "(function(){"
@@ -504,7 +526,9 @@ static void sendConfigPage(const char *msg = "") {
                             "'0':{bg:'#10141d',panel:'#1a2230',panel2:'#232d3e',line:'#4a5b73',text:'#f4f6fb',dim:'#b0b8c8',accent:'#d7869d',ink:'#ffffff'},"
                             "'1':{bg:'#f6ede9',panel:'#fff6f3',panel2:'#f4e2dc',line:'#cfb2ab',text:'#2e2220',dim:'#6f5c58',accent:'#b75a74',ink:'#ffffff'},"
                             "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
-                            "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'}"
+                            "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'},"
+                            "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
+                            "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'}"
             "};"
             "function apply(){"
               "var k=document.getElementById('sel-theme-preset').value;"
@@ -698,7 +722,11 @@ static void handlePostOnboard() {
 
 static void handleGetRoot() {
     if (!isLoggedIn()) { redirect("/login"); return; }
-    sendConfigPage();
+    char msg[sizeof(gFlashMsg)];
+    strncpy(msg, gFlashMsg, sizeof(msg));
+    msg[sizeof(msg) - 1] = '\0';
+    gFlashMsg[0] = '\0';
+    sendConfigPage(msg);
 }
 
 static void handleGetLogin() {
@@ -753,6 +781,7 @@ static void handlePostSave() {
         char field[16];
         snprintf(field, sizeof(field), "ch%d_name", i);
         String nm = server.arg(field);
+        nm.trim();
         Serial.printf("[cfg] ch%d: name='%s' key='%s' role='%s'\n", i,
                       nm.c_str(), server.arg(String("ch") + i + "_key").c_str(),
                       server.arg(String("ch") + i + "_role").c_str());
@@ -808,11 +837,13 @@ static void handlePostSave() {
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
     gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 3);
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 5);
         if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
-        else                  { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 3) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 4) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_DARK; }
+        else                  { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_LIGHT; }
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);
@@ -850,15 +881,8 @@ static void handlePostSave() {
     }
 
     if (gOnSave) gOnSave();
-
-    server.send(200, "text/html",
-        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
-        "<h2>Saved.</h2>"
-        "<p>The device is rebooting. Reconnect in a few seconds.</p>"
-        "</body></html>");
-    server.stop();
-    delay(500);
-    ESP.restart();
+    scheduleReboot(900);
+    redirectHomeWithFlash("Saved. Rebooting now...");
 }
 
 // ── Announce ─────────────────────────────────────────────────
@@ -866,7 +890,7 @@ static void handlePostSave() {
 static void handlePostAnnounce() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     gAnnounceReq = true;
-    sendConfigPage("NODEINFO broadcast queued.");
+    redirectHomeWithFlash("NODEINFO broadcast queued.");
 }
 
 // ── Clear Nodes ───────────────────────────────────────────────
@@ -874,14 +898,8 @@ static void handlePostAnnounce() {
 static void handlePostClearNodes() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     Nodes.clearPersisted();
-    server.send(200, "text/html",
-        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
-        "<h2>Node database cleared.</h2>"
-        "<p>All discovered nodes erased. The device is rebooting now.</p>"
-        "</body></html>");
-    server.stop();
-    delay(500);
-    ESP.restart();
+    scheduleReboot(900);
+    redirectHomeWithFlash("Node database cleared. Rebooting now...");
 }
 
 // ── Factory Reset ─────────────────────────────────────────────
@@ -909,14 +927,8 @@ static void handlePostFactoryReset() {
         }
     }
 
-    server.send(200, "text/html",
-        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
-        "<h2>Factory reset complete.</h2>"
-        "<p>All settings erased. The device is rebooting now.</p>"
-        "</body></html>");
-    server.stop();
-    delay(500);
-    ESP.restart();
+    scheduleReboot(900);
+    redirectHomeWithFlash("Factory reset complete. Rebooting now...");
 }
 
 // ── Export / Import ───────────────────────────────────────────
@@ -958,11 +970,11 @@ static void handleImportDone() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { redirect("/"); return; }
     if (!importOk || importLen == 0) {
-        sendConfigPage("Import failed: no data received.");
+        redirectHomeWithFlash("Import failed: no data received.");
         return;
     }
     if (!cfgImportFromBuf(importBuf, importLen, *gCfg)) {
-        sendConfigPage("Import failed: parse error.");
+        redirectHomeWithFlash("Import failed: parse error.");
         return;
     }
 
@@ -980,14 +992,8 @@ static void handleImportDone() {
     }
 
     if (gOnSave) gOnSave();
-    server.send(200, "text/html",
-        "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:2em'>"
-        "<h2>Import complete.</h2>"
-        "<p>Configuration imported successfully. The device is rebooting now.</p>"
-        "</body></html>");
-    server.stop();
-    delay(500);
-    ESP.restart();
+    scheduleReboot(900);
+    redirectHomeWithFlash("Import complete. Rebooting now...");
 }
 
 static void handleGetLogout() {
@@ -1003,6 +1009,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
 
     gCfg    = cfg;
     gOnSave = onSave;
+    gFlashMsg[0] = '\0';
+    gRebootPending = false;
+    gRebootAtMs = 0;
 
     // Load saved WiFi credentials
     Preferences prefs;
@@ -1107,6 +1116,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
 void webCfgEnd() {
     if (!running) return;
     sessionToken[0] = '\0';
+    gFlashMsg[0] = '\0';
+    gRebootPending = false;
+    gRebootAtMs = 0;
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -1123,7 +1135,15 @@ const char *webCfgWifiSsid() { return gWifiSsid; }
 const char *webCfgWifiPass() { return gWifiPass; }
 
 void webCfgLoop() {
-    if (running) server.handleClient();
+    if (!running) return;
+
+    server.handleClient();
+    if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
+        gRebootPending = false;
+        server.stop();
+        delay(100);
+        ESP.restart();
+    }
 }
 
 bool webCfgRunning() { return running; }

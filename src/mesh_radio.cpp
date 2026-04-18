@@ -3,6 +3,7 @@
 
 volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
+static constexpr bool kVerboseRadioIo = false;
 
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
@@ -60,10 +61,12 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         return false;
     }
 
-    // Dump raw header bytes for wire-format verification
-    Serial.printf("[radio] RX hdr: ");
-    for (size_t i = 0; i < 16 && i < len; i++) Serial.printf("%02x ", buf[i]);
-    Serial.println();
+    if (kVerboseRadioIo) {
+        // Dump raw header bytes for wire-format verification
+        Serial.printf("[radio] RX hdr: ");
+        for (size_t i = 0; i < 16 && i < len; i++) Serial.printf("%02x ", buf[i]);
+        Serial.println();
+    }
 
     pkt.rssi  = _radio.getRSSI();
     pkt.snr   = _radio.getSNR();
@@ -104,15 +107,19 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 }
 
 bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
-    // Dump header bytes for wire-format verification
-    Serial.printf("[radio] TX hdr: ");
-    for (size_t i = 0; i < 16 && i < len; i++) Serial.printf("%02x ", buf[i]);
-    Serial.println();
+    if (kVerboseRadioIo) {
+        // Dump header bytes for wire-format verification
+        Serial.printf("[radio] TX hdr: ");
+        for (size_t i = 0; i < 16 && i < len; i++) Serial.printf("%02x ", buf[i]);
+        Serial.println();
+    }
 
     _rxFlag = false;    // clear any stale DIO1 flag before TX
     int state = _radio.transmit(const_cast<uint8_t*>(buf), len);
-    Serial.printf("[radio] TX state=%d (%s)\n", state,
-                  state == RADIOLIB_ERR_NONE ? "OK" : "FAIL");
+    if (kVerboseRadioIo || state != RADIOLIB_ERR_NONE) {
+        Serial.printf("[radio] TX state=%d (%s)\n", state,
+                      state == RADIOLIB_ERR_NONE ? "OK" : "FAIL");
+    }
     _rxFlag = false;    // discard TX_DONE ISR trigger
     _radio.startReceive();
     return state == RADIOLIB_ERR_NONE;
