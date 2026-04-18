@@ -3,6 +3,8 @@
 
 NodeDB Nodes;
 
+static const uint32_t kNodePersistMinMs = 10000;  // throttle hot-path NVS writes
+
 // ── NVS layout ────────────────────────────────────────────────
 // Namespace : "nodes"
 // Key "ids" : blob of uint32_t[n]  — list of known nodeIds
@@ -53,6 +55,7 @@ void NodeDB::init() {
         e->hasPubKey    = (b.flags & 4) != 0;
         e->hasTelemetry = (b.flags & 8) != 0;
         e->lastHeardMs  = 0;  // unknown after reboot
+        e->lastPersistMs = 0;
     }
     p.end();
     Serial.printf("[nodedb] loaded %d node(s) from NVS\n", _count);
@@ -132,6 +135,7 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
 
     _saveIds();   // add new / remove evicted from the index
     _save(nodeId); // write initial blob so load() never finds an orphaned ID
+    e->lastPersistMs = millis();
     return e;
 }
 
@@ -172,24 +176,50 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
 
 void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
-    if (u.longName[0])  { strncpy(e->longName,  u.longName,  sizeof(e->longName)  - 1); e->hasName = true; }
-    if (u.shortName[0]) { strncpy(e->shortName, u.shortName, sizeof(e->shortName) - 1); e->hasName = true; }
-    if (u.hasPubKey)    { memcpy(e->pubKey, u.pubKey, 32); e->hasPubKey = true; }
-    _save(nodeId);
+    bool changed = false;
+    if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
+        strncpy(e->longName,  u.longName,  sizeof(e->longName)  - 1);
+        e->hasName = true;
+        changed = true;
+    }
+    if (u.shortName[0] && strncmp(e->shortName, u.shortName, sizeof(e->shortName) - 1) != 0) {
+        strncpy(e->shortName, u.shortName, sizeof(e->shortName) - 1);
+        e->hasName = true;
+        changed = true;
+    }
+    if (u.hasPubKey && memcmp(e->pubKey, u.pubKey, 32) != 0) {
+        memcpy(e->pubKey, u.pubKey, 32);
+        e->hasPubKey = true;
+        changed = true;
+    }
+    if (changed) {
+        _save(nodeId);
+        e->lastPersistMs = millis();
+    }
 }
 
 void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {
     NodeEntry *e = upsert(nodeId);
+    bool changed = (e->latI != pos.latI) || (e->lonI != pos.lonI) || (e->alt != pos.alt);
     e->latI = pos.latI; e->lonI = pos.lonI; e->alt = pos.alt;
     e->hasPosition = (pos.latI != 0 || pos.lonI != 0);
-    _save(nodeId);
+    uint32_t now = millis();
+    if (changed && (now - e->lastPersistMs >= kNodePersistMinMs)) {
+        _save(nodeId);
+        e->lastPersistMs = now;
+    }
 }
 
 void NodeDB::updateTelemetry(uint32_t nodeId, const TelemetryInfo &t) {
     if (!t.valid) return;
     NodeEntry *e = upsert(nodeId);
+    bool changed = (e->battPct != t.battPct) || (e->voltage != t.voltage) || !e->hasTelemetry;
     e->battPct      = t.battPct;
     e->voltage      = t.voltage;
     e->hasTelemetry = true;
-    _save(nodeId);
+    uint32_t now = millis();
+    if (changed && (now - e->lastPersistMs >= kNodePersistMinMs)) {
+        _save(nodeId);
+        e->lastPersistMs = now;
+    }
 }

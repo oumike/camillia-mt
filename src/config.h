@@ -27,6 +27,15 @@
 #define KB_ADDR       0x55
 #define KB_INT          46
 
+// ── Touch controller (shared I2C bus) ───────────────────────
+// Meshtastic T-Deck profile: GT911 on I2C0 (SDA=18/SCL=8), addr 0x5D, INT=16.
+#define TOUCH_SDA       18
+#define TOUCH_SCL        8
+#define TOUCH_ADDR      0x5D
+#define TOUCH_INT       16
+#define TOUCH_RST       -1
+#define TOUCH_I2C_PORT   0
+
 // ── Trackball (optical encoder, direct GPIO, active-low) ─────
 #define TBALL_UP         3
 #define TBALL_DOWN       2
@@ -75,7 +84,7 @@
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
-#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN
+#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN
 #define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
 
 // ── Bluetooth defaults ─────────────────────────────────────────
@@ -112,15 +121,15 @@
 #define LCD_H           240
 
 #define STATUS_H         10   // top status bar
-#define TAB_H            10   // channel tab bar
+#define TAB_H            14   // channel tab bar (taller for labeled pills)
 #define MSG_W           230   // message pane width
 #define NODE_X          231   // node pane left edge
 #define NODE_W           89   // node pane width
 #define DIVIDER_X       230   // 1px vertical divider
-#define CHAT_Y           20   // top of chat/node area (STATUS_H + TAB_H)
-#define CHAT_H          208   // height of chat area  (LCD_H - CHAT_Y - INPUT_H)
-#define INPUT_H          12   // input bar height
-#define INPUT_Y         228   // top of input bar     (LCD_H - INPUT_H)
+#define CHAT_Y           24   // top of chat/node area (STATUS_H + TAB_H)
+#define CHAT_H          190   // height of chat area  (LCD_H - CHAT_Y - INPUT_H)
+#define INPUT_H          26   // input area (typed text + touch nav buttons)
+#define INPUT_Y         214   // top of input area    (LCD_H - INPUT_H)
 
 // Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
 #define CHAR_W            6

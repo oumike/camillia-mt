@@ -19,11 +19,30 @@ void expandPsk(uint8_t psk, uint8_t out[16]) {
     out[15] = psk;
 }
 
+static void resolveMeshKey(const uint8_t *key, uint8_t keyLen,
+                           uint8_t expanded[16],
+                           const uint8_t *&outKey, uint8_t &outLen) {
+    outKey = key;
+    outLen = keyLen;
+
+    // Meshtastic PSK index 0 (AA==) disables channel encryption.
+    if (keyLen == 1 && key && key[0] == 0x00) {
+        outLen = 0;
+        return;
+    }
+
+    if (keyLen == 1 && key) {
+        expandPsk(key[0], expanded);
+        outKey = expanded;
+        outLen = 16;
+    }
+}
+
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen) {
     uint8_t exp[16];
     const uint8_t *k = key;
     uint8_t kl = keyLen;
-    if (keyLen == 1) { expandPsk(key[0], exp); k = exp; kl = 16; }
+    resolveMeshKey(key, keyLen, exp, k, kl);
     uint8_t h = 0;
     for (const char *p = name; *p; p++) h ^= (uint8_t)*p;
     for (int i = 0; i < kl; i++) h ^= k[i];
@@ -218,7 +237,7 @@ int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
         uint8_t exp[16];
         const uint8_t *keyPtr = CHANNEL_KEYS[i].key;
         uint8_t keyLen = CHANNEL_KEYS[i].keyLen;
-        if (keyLen == 1) { expandPsk(CHANNEL_KEYS[i].key[0], exp); keyPtr = exp; keyLen = 16; }
+        resolveMeshKey(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, exp, keyPtr, keyLen);
         if (keyLen == 0) {
             memcpy(plain, cipher, len);
         } else {
@@ -243,9 +262,9 @@ int decryptPacket(const MeshHdr &hdr, const uint8_t *cipher,
 bool encryptPayload(uint32_t packetId, uint32_t fromNode,
                     const uint8_t *key, uint8_t keyLen,
                     const uint8_t *plain, uint8_t *cipher, size_t len) {
-    if (keyLen == 0) { memcpy(cipher, plain, len); return true; }
     uint8_t exp[16];
-    if (keyLen == 1) { expandPsk(key[0], exp); key = exp; keyLen = 16; }
+    resolveMeshKey(key, keyLen, exp, key, keyLen);
+    if (keyLen == 0) { memcpy(cipher, plain, len); return true; }
     return aesCtr(key, keyLen, packetId, fromNode, plain, cipher, len);
 }
 

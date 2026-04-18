@@ -32,7 +32,6 @@ public:
     unsigned long _lastScrollMs = 0;  // tracks most recent scroll event for click guard
 
 private:
-    unsigned long _lastReadMs = 0;
     char mapKey(uint8_t raw);
 
     static void IRAM_ATTR _isrRight();

@@ -20,6 +20,7 @@ struct NodeEntry {
     uint8_t  pubKey[32];      // Curve25519 public key from their NODEINFO (field 8)
     bool     hasPubKey;
     uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
+    uint32_t lastPersistMs;   // throttles NVS writes for hot update paths
 };
 
 class NodeDB {
