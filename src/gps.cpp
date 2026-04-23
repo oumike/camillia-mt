@@ -1,5 +1,6 @@
 #include "gps.h"
 #include "config.h"
+#include "debug_flags.h"
 #include <TinyGPSPlus.h>
 
 // Minimum ms after GPS start before we trust fix data.
@@ -22,13 +23,13 @@ void gpsBegin() {
     _firstFixMs    = 0;
     _prevSentences = 0;
     _totalBytes    = 0;
-    Serial.println("[gps] started on UART1");
+    debugLogGps("[gps] started on UART1\n");
 }
 
 void gpsEnd() {
     _serial.end();
     _enabled = false;
-    Serial.println("[gps] stopped");
+    debugLogGps("[gps] stopped\n");
 }
 
 void gpsLoop() {
@@ -48,23 +49,24 @@ void gpsLoop() {
         && _gps.location.isValid()
         && _gps.location.age() < 5000) {
         _firstFixMs = now;
-        Serial.printf("[gps] first fix after %lums  sats=%d\n",
-                      (unsigned long)(_firstFixMs - _startMs),
-                      _gps.satellites.isValid() ? (int)_gps.satellites.value() : 0);
+        debugLogGps("[gps] first fix after %lums sats=%d\n",
+                    (unsigned long)(_firstFixMs - _startMs),
+                    _gps.satellites.isValid() ? (int)_gps.satellites.value() : 0);
     }
 
-    // Every 5 s print a one-line summary
-    if (now - _lastDbg >= 5000) {
+    if (debugGpsEnabled() && (now - _lastDbg >= 5000)) {
         _lastDbg = now;
         uint32_t sf = _gps.sentencesWithFix();
-        Serial.printf("[gps] sats=%d  fix=%d  q=%c  sf=%lu(+%lu)  age=%lums  hdop=%.1f  pos=%.6f,%.6f\n",
-                      _gps.satellites.isValid() ? (int)_gps.satellites.value() : -1,
-                      (int)_gps.location.isValid(),
-                      _gps.location.isValid() ? (char)_gps.location.FixQuality() : '?',
-                      sf, sf - _prevSentences,
-                      _gps.location.isValid() ? (unsigned long)_gps.location.age() : 0UL,
-                      _gps.hdop.isValid() ? _gps.hdop.hdop() : 99.9,
-                      _gps.location.lat(), _gps.location.lng());
+        debugLogGps("[gps] sats=%d fix=%d q=%c sf=%lu(+%lu) age=%lums hdop=%.1f pos=%.6f,%.6f bytes=%lu\n",
+                    _gps.satellites.isValid() ? (int)_gps.satellites.value() : -1,
+                    (int)_gps.location.isValid(),
+                    _gps.location.isValid() ? (char)_gps.location.FixQuality() : '?',
+                    (unsigned long)sf,
+                    (unsigned long)(sf - _prevSentences),
+                    _gps.location.isValid() ? (unsigned long)_gps.location.age() : 0UL,
+                    _gps.hdop.isValid() ? _gps.hdop.hdop() : 99.9,
+                    _gps.location.lat(), _gps.location.lng(),
+                    (unsigned long)_totalBytes);
         _prevSentences = sf;
     }
 }

@@ -55,6 +55,7 @@ void NodeDB::init() {
         e->hasPubKey    = (b.flags & 4) != 0;
         e->hasTelemetry = (b.flags & 8) != 0;
         e->lastHeardMs  = 0;  // unknown after reboot
+        e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
     }
     p.end();
@@ -97,6 +98,10 @@ void NodeDB::clearPersisted() {
     Preferences p; p.begin("nodes", false);
     p.clear();
     p.end();
+
+    // Keep runtime state consistent with storage immediately.
+    memset(_nodes, 0, sizeof(_nodes));
+    _count = 0;
 }
 
 void NodeDB::saveAll() {
@@ -200,11 +205,15 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
 
 void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {
     NodeEntry *e = upsert(nodeId);
+    uint32_t now = millis();
+    e->lastPosMs = now;
+    bool hadPosition = e->hasPosition;
+    bool hasNewPosition = (pos.latI != 0 || pos.lonI != 0);
     bool changed = (e->latI != pos.latI) || (e->lonI != pos.lonI) || (e->alt != pos.alt);
     e->latI = pos.latI; e->lonI = pos.lonI; e->alt = pos.alt;
-    e->hasPosition = (pos.latI != 0 || pos.lonI != 0);
-    uint32_t now = millis();
-    if (changed && (now - e->lastPersistMs >= kNodePersistMinMs)) {
+    e->hasPosition = hasNewPosition;
+    bool firstValidPosition = hasNewPosition && !hadPosition;
+    if (changed && (firstValidPosition || (now - e->lastPersistMs >= kNodePersistMinMs))) {
         _save(nodeId);
         e->lastPersistMs = now;
     }

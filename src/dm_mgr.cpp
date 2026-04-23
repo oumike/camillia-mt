@@ -3,6 +3,7 @@
 #include "mesh_proto.h"
 #include "node_db.h"
 #include "lgfx_tdeck.h"
+#include "debug_flags.h"
 #include "config.h"
 #include <esp_heap_caps.h>
 #include <string.h>
@@ -159,10 +160,10 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
 
 // ── sendDm ────────────────────────────────────────────────────
 bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
-    Serial.printf("[dm] sendDm called: to=!%08X  text='%.30s'\n", toNodeId, text);
+    debugLogMessages("[dm] sendDm called: to=!%08X  text='%.30s'\n", toNodeId, text);
 
     if (!Radio.isReady()) {
-        Serial.printf("[dm] sendDm FAIL: radio not ready\n");
+        debugLogMessages("[dm] sendDm FAIL: radio not ready\n");
         return false;
     }
 
@@ -171,9 +172,9 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     uint8_t  cipher[280]; // 256 proto + 12 PKI overhead + margin
 
     size_t protoLen = encodeTextMessage(text, proto, sizeof(proto));
-    Serial.printf("[dm] protoLen=%u\n", (unsigned)protoLen);
+    debugLogMessages("[dm] protoLen=%u\n", (unsigned)protoLen);
     if (protoLen == 0) {
-        Serial.printf("[dm] sendDm FAIL: encode failed\n");
+        debugLogMessages("[dm] sendDm FAIL: encode failed\n");
         return false;
     }
 
@@ -190,50 +191,50 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 
     // Prefer PKI if we have the recipient's Curve25519 public key
     NodeEntry *node = Nodes.find(toNodeId);
-    Serial.printf("[dm] node=%s  hasPubKey=%d\n",
-                  node ? "found" : "null", node ? (int)node->hasPubKey : -1);
+    debugLogMessages("[dm] node=%s  hasPubKey=%d\n",
+                     node ? "found" : "null", node ? (int)node->hasPubKey : -1);
 
     if (node && node->hasPubKey) {
         hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
-        Serial.printf("[dm] using PKI path\n");
+        debugLogMessages("[dm] using PKI path\n");
         if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
-            Serial.printf("[dm] sendDm FAIL: PKI encrypt failed\n");
+            debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
             return false;
         }
         payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
-        Serial.printf("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
+        debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
     } else {
         // Fall back to channel-key encryption
         DmConv *conv = find(toNodeId);
         int chanIdx = (conv && conv->rxChanIdx >= 0) ? conv->rxChanIdx : 0;
         const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
         hdr.channel = ck.hash;
-        Serial.printf("[dm] using chan-key path: chanIdx=%d (%s) keyLen=%d hash=0x%02X\n",
-                      chanIdx, ck.name, ck.keyLen, ck.hash);
+        debugLogMessages("[dm] using chan-key path: chanIdx=%d (%s) keyLen=%d hash=0x%02X\n",
+                 chanIdx, ck.name, ck.keyLen, ck.hash);
 
         if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                             proto, cipher, protoLen)) {
-            Serial.printf("[dm] sendDm FAIL: encrypt failed\n");
+            debugLogMessages("[dm] sendDm FAIL: encrypt failed\n");
             return false;
         }
         payloadLen = protoLen;
     }
 
-    Serial.printf("[dm] transmitting: frameLen=%u\n", (unsigned)(sizeof(MeshHdr) + payloadLen));
+    debugLogMessages("[dm] transmitting: frameLen=%u\n", (unsigned)(sizeof(MeshHdr) + payloadLen));
     uint8_t frame[sizeof(MeshHdr) + 280];
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, payloadLen);
 
     if (!Radio.transmit(frame, sizeof(MeshHdr) + payloadLen)) {
-        Serial.printf("[dm] sendDm FAIL: radio TX failed\n");
+        debugLogMessages("[dm] sendDm FAIL: radio TX failed\n");
         return false;
     }
 
-    Serial.printf("[dm] TX OK\n");
+    debugLogMessages("[dm] TX OK\n");
 
     // Add outgoing message to local conversation (not marked unread)
     DmConv *conv = find(toNodeId);
-    Serial.printf("[dm] addMessage conv=%s\n", conv ? "found" : "NULL - msg won't show!");
+    debugLogMessages("[dm] addMessage conv=%s\n", conv ? "found" : "NULL - msg won't show!");
     if (conv) {
         uint32_t upSec = millis() / 1000;
         char prefix[20];
@@ -275,7 +276,7 @@ void DmMgr::saveConv(const DmConv *c) {
 
     File f = SD.open(path, FILE_WRITE);
     if (!f) {
-        Serial.printf("[dm] saveConv FAIL: can't open %s\n", path);
+        debugLogMessages("[dm] saveConv FAIL: can't open %s\n", path);
         return;
     }
 
@@ -303,13 +304,13 @@ void DmMgr::saveConv(const DmConv *c) {
 
     f.flush();
     f.close();
-    Serial.printf("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
+    debugLogMessages("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
 }
 
 void DmMgr::loadAll() {
     File dir = SD.open(kDmDir);
     if (!dir || !dir.isDirectory()) {
-        Serial.printf("[dm] loadAll: no %s directory\n", kDmDir);
+        debugLogMessages("[dm] loadAll: no %s directory\n", kDmDir);
         return;
     }
 
@@ -325,7 +326,7 @@ void DmMgr::loadAll() {
         uint32_t magic;
         f.read((uint8_t *)&magic, 4);
         if (magic != DM_MAGIC) {
-            Serial.printf("[dm] loadAll: bad magic in %s\n", f.name());
+            debugLogMessages("[dm] loadAll: bad magic in %s\n", f.name());
             f.close(); f = dir.openNextFile(); continue;
         }
 
@@ -339,8 +340,8 @@ void DmMgr::loadAll() {
         f.read((uint8_t *)&numLines, 4);
         f.read((uint8_t *)&rxChanIdx, 4);
 
-        Serial.printf("[dm] loading %08X (%s): count=%d numLines=%d\n",
-                      nodeId, shortName, (int)count, (int)numLines);
+        debugLogMessages("[dm] loading %08X (%s): count=%d numLines=%d\n",
+                 nodeId, shortName, (int)count, (int)numLines);
 
         if (numLines <= 0 || numLines > MAX_DM_LINES) {
             f.close(); f = dir.openNextFile(); continue;
@@ -367,7 +368,7 @@ void DmMgr::loadAll() {
             c->lastText[DM_LINE_LEN] = '\0';
         }
 
-        Serial.printf("[dm] loaded %08X: %d lines\n", nodeId, (int)numLines);
+        debugLogMessages("[dm] loaded %08X: %d lines\n", nodeId, (int)numLines);
 
         f.close();
         f = dir.openNextFile();
@@ -375,5 +376,5 @@ void DmMgr::loadAll() {
     dir.close();
 
     _sort();
-    Serial.printf("[dm] loadAll done: %d conversations\n", _count);
+    debugLogMessages("[dm] loadAll done: %d conversations\n", _count);
 }

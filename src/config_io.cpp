@@ -88,6 +88,13 @@ static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
     dst[n] = '\0';
 }
 
+static bool parseBoolValue(const char *val) {
+    if (!val || !val[0]) return false;
+    if (!strcmp(val, "true") || !strcmp(val, "TRUE") || !strcmp(val, "1")) return true;
+    if (!strcmp(val, "false") || !strcmp(val, "FALSE") || !strcmp(val, "0")) return false;
+    return atoi(val) != 0;
+}
+
 // ── Defaults ─────────────────────────────────────────────────
 void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.nodeLong,  MY_LONG_NAME,  sizeof(cfg.nodeLong)  - 1);
@@ -148,6 +155,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.chatSpacing        = MY_CHAT_SPACING;
+    cfg.debugAcks          = MY_DBG_ACKS;
+    cfg.debugMessages      = MY_DBG_MESSAGES;
+    cfg.debugGps           = MY_DBG_GPS;
 }
 
 // ── SD init ──────────────────────────────────────────────────
@@ -166,6 +176,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+    snprintf(tmp, sizeof(tmp), "debug_acks: %s\n", cfg.debugAcks ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "debug_messages: %s\n", cfg.debugMessages ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "debug_gps: %s\n", cfg.debugGps ? "true" : "false"); out += tmp;
     out += "config:\n";
     // bluetooth
     out += "  bluetooth:\n";
@@ -332,6 +345,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
                     cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
                 }
+                else if (!strcmp(key, "debug_acks"))
+                    cfg.debugAcks = parseBoolValue(val);
+                else if (!strcmp(key, "debug_messages"))
+                    cfg.debugMessages = parseBoolValue(val);
+                else if (!strcmp(key, "debug_gps"))
+                    cfg.debugGps = parseBoolValue(val);
             }
         } else if (indent == 2) {
             if (!hasVal) {

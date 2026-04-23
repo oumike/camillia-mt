@@ -2,6 +2,9 @@
 #include <Preferences.h>
 #include <nvs_flash.h>
 #include <SD.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include "lgfx_tdeck.h"
 #include "keyboard.h"
 #include "mesh_radio.h"
@@ -12,6 +15,7 @@
 #include "web_config.h"
 #include "gps.h"
 #include "dm_mgr.h"
+#include "debug_flags.h"
 #include <math.h>
 #include "mbedtls/ecp.h"
 #include "mbedtls/ecdh.h"
@@ -48,6 +52,11 @@ static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsNavSel = -1;      // -1 none, 0=UP, 1=DOWN (CFG touch nav buttons)
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
+static const int TOUCH_BTN_W = 58;
+static const int TOUCH_BTN_H = 24;
+static const int TOUCH_BTN_STACK_GAP = 6;
+static const int TOUCH_BTN_BOTTOM_PAD = 5;
+static const int NAV_BTN_COUNT = 5;
 
 struct PanelHitRect {
     int x;
@@ -63,6 +72,7 @@ static PanelHitRect panelUpRect = {0, 0, 0, 0};
 static PanelHitRect panelDownRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
+
 
 static void setPanelCloseRect(int x, int y, int w, int h) {
     panelCloseVisible = true;
@@ -186,7 +196,6 @@ static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
 
 // ── Packet counter ────────────────────────────────────────────
 static uint32_t pktCount = 0;
-static constexpr bool kVerboseRxSerial = false;
 
 // ── Packet deduplication (circular buffer of seen IDs) ────────
 #define DEDUP_SIZE 32
@@ -515,17 +524,17 @@ static void settingsNavRects(int &upX, int &upY, int &upW, int &upH,
     const int MODAL_Y = CHAT_Y + 4;
     const int MODAL_W = LCD_W - 16;
     const int MODAL_H = CHAT_H - 8;
-    const int BTN_W = 46;
-    const int BTN_H = 14;
-    const int GAP   = 6;
+    const int BTN_W = TOUCH_BTN_W;
+    const int BTN_H = TOUCH_BTN_H;
+    const int GAP   = TOUCH_BTN_STACK_GAP;
     const int RIGHT_PAD = 4;
-    const int BOTTOM_PAD = 2;
+    const int BOTTOM_PAD = TOUCH_BTN_BOTTOM_PAD;
     upW = dnW = BTN_W;
     upH = dnH = BTN_H;
     dnY = MODAL_Y + MODAL_H - BTN_H - BOTTOM_PAD;
-    upY = dnY - BTN_H - GAP;
+    upY = dnY;
     dnX = MODAL_X + MODAL_W - RIGHT_PAD - BTN_W;
-    upX = dnX;
+    upX = dnX - BTN_W - GAP;
 }
 
 // ── Splash screen ─────────────────────────────────────────────
@@ -825,16 +834,16 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
 }
 
 static void drawPanelScrollButtons(int mx, int my, int mw, int mh) {
-    const int bw = 46;
-    const int bh = 14;
+    const int bw = TOUCH_BTN_W;
+    const int bh = TOUCH_BTN_H;
     const int rightPad = 4;
-    const int bottomPad = 2;
-    const int gap = 6;
+    const int bottomPad = TOUCH_BTN_BOTTOM_PAD;
+    const int gap = TOUCH_BTN_STACK_GAP;
 
     int dnX = mx + mw - bw - rightPad;
     int dnY = my + mh - bh - bottomPad;
-    int upX = dnX;
-    int upY = dnY - bh - gap;
+    int upX = dnX - bw - gap;
+    int upY = dnY;
 
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
     drawSquirclePill(upX, upY, bw, bh, fill, COL_SELECT_ACCENT, false);
@@ -992,12 +1001,17 @@ static void drawChat() {
         const int my = CHAT_Y + 4;
         const int mw = LCD_W - 16;
         const int mh = CHAT_H - 8;
+        const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
         drawModalMaskAndFrame(mx, my, mw, mh);
         lcd.fillRect(mx + 1, my + 1, mw - 2, 11, COL_SELECT_BG);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
         drawClippedText(mx + 5, my + 2, mw - 10, "Announcements");
+        // Keep announcement text from appearing underneath the control row.
+        lcd.fillRect(mx + 1, controlsTop, mw - 2, my + mh - controlsTop - 1, COL_PANEL_BG);
         drawPanelScrollButtons(mx, my, mw, mh);
-        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+        drawPanelCloseButton(mx + 3,
+                     my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                     TOUCH_BTN_W, TOUCH_BTN_H);
     }
 
     lcd.setFont(&fonts::Font0);
@@ -1203,7 +1217,7 @@ static void drawDmList() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - 36;
+    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -1235,11 +1249,11 @@ static void drawDmList() {
 
     drawPanelScrollButtons(mx, my, mw, mh);
 
-    const int closeX = mx + (mw - 62) / 2;
-    const int closeY = my + mh - 12;
-    const int newW = 68;
-    const int newH = 10;
-    const int newX = max(mx + 3, closeX - newW - 4);
+    const int closeX = mx + 3;
+    const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+    const int newW = TOUCH_BTN_W;
+    const int newH = TOUCH_BTN_H;
+    const int newX = closeX + newW + 4;
     const int newY = closeY;
     bool newSel = (dmListSel == 0);
     uint16_t newFill = newSel ? COL_SELECT_BG : lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
@@ -1250,7 +1264,7 @@ static void drawDmList() {
     drawClippedText(newX + max(1, (newW - ntw) / 2), newY + max(0, (newH - CHAR_H) / 2), newW - 2, "NEW DM");
     setDmNewRect(newX, newY, newW, newH);
 
-    drawPanelCloseButton(closeX, closeY, 62, 10);
+    drawPanelCloseButton(closeX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1288,8 +1302,7 @@ static void drawDmPicker() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - 36;
-    const int closeY = my + mh - 12;
+    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -1308,7 +1321,9 @@ static void drawDmPicker() {
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
         drawPanelScrollButtons(mx, my, mw, mh);
-        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+        drawPanelCloseButton(mx + 3,
+                     my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                     TOUCH_BTN_W, TOUCH_BTN_H);
         lcd.setFont(&fonts::Font0);
         dirtyChat = false;
         return;
@@ -1344,7 +1359,9 @@ static void drawDmPicker() {
     }
 
     drawPanelScrollButtons(mx, my, mw, mh);
-    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+    drawPanelCloseButton(mx + 3,
+                         my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                         TOUCH_BTN_W, TOUCH_BTN_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1360,8 +1377,7 @@ static void drawDmConv() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - 36;
-    const int closeY = my + mh - 12;
+    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -1375,7 +1391,9 @@ static void drawDmConv() {
         lcd.setTextColor(TFT_RED, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + DM_LINE_H + 1, iw - 8, "Conversation not found");
         drawPanelScrollButtons(mx, my, mw, mh);
-        drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+        drawPanelCloseButton(mx + 3,
+                     my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                     TOUCH_BTN_W, TOUCH_BTN_H);
         lcd.setFont(&fonts::Font0);
         dirtyChat = false;
         return;
@@ -1401,7 +1419,9 @@ static void drawDmConv() {
     }
 
     drawPanelScrollButtons(mx, my, mw, mh);
-    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+    drawPanelCloseButton(mx + 3,
+                         my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                         TOUCH_BTN_W, TOUCH_BTN_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1417,8 +1437,7 @@ static void drawSettings() {
     const int mh = CHAT_H - 8;
     const int ix = mx + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - 36;
-    const int closeY = my + mh - 12;
+    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -1523,7 +1542,9 @@ static void drawSettings() {
              gCfg.loraPower, gCfg.loraHopLimit);
     pr(buf);
 
-    drawPanelCloseButton(mx + (mw - 62) / 2, my + mh - 12, 62, 10);
+    drawPanelCloseButton(mx + 3,
+                         my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
+                         TOUCH_BTN_W, TOUCH_BTN_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1632,14 +1653,18 @@ struct NavButtonRect {
     int h;
 };
 
-static void navButtonRects(NavButtonRect b[5]) {
+static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
     const int PAD = 3;
     const int GAP = 4;
-    const int rowY = INPUT_Y + 13;
-    const int rowH = max(8, INPUT_H - 15);
-    const int bw = (LCD_W - 2 * PAD - 4 * GAP) / 5;
-    int x = PAD;
-    for (int i = 0; i < 5; i++) {
+    const int rowH = TOUCH_BTN_H;
+    const int rowY = INPUT_Y + INPUT_H - rowH - 2;
+    int bw = TOUCH_BTN_W;
+    int x = max(PAD, (LCD_W - (NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP)) / 2);
+    if (x + NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP > LCD_W - PAD) {
+        bw = (LCD_W - 2 * PAD - (NAV_BTN_COUNT - 1) * GAP) / NAV_BTN_COUNT;
+        x = PAD;
+    }
+    for (int i = 0; i < NAV_BTN_COUNT; i++) {
         b[i] = { x, rowY, bw, rowH };
         x += bw + GAP;
     }
@@ -1684,7 +1709,7 @@ static void handleTouchTap(int x, int y) {
         return;
     }
 
-    NavButtonRect b[5];
+    NavButtonRect b[NAV_BTN_COUNT];
     navButtonRects(b);
     if (pointInRect(x, y, b[0].x, b[0].y, b[0].w, b[0].h)) {
         goToView(prevView(activeView));
@@ -1732,19 +1757,19 @@ static void drawInput() {
         // Non-text views keep the top row visually clean.
     }
 
-    NavButtonRect b[5];
+    NavButtonRect b[NAV_BTN_COUNT];
     navButtonRects(b);
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < NAV_BTN_COUNT; i++) {
         drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
     }
 
-    // Bracket the middle 3 buttons (DM / ANN / CFG) from the outer nav buttons.
+    // Bracket app buttons (DM / MAPS / ANN / CFG) from outer nav buttons.
     int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
     int sepX2 = (b[3].x + b[3].w + b[4].x) / 2;
     int sepY  = b[0].y + 1;
     int sepH  = max(1, b[0].h - 2);
-    // Stronger divider between "Previous" and the middle group.
+    // Stronger divider between "Previous" and the app group.
     lcd.fillRect(max(0, sepX1 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
     lcd.drawFastVLine(sepX1 + 1, sepY, sepH, COL_DIVIDER_HI);
     // Match right-side bracket style between "CFG" and "Next".
@@ -1753,8 +1778,8 @@ static void drawInput() {
 
     lcd.setFont(&fonts::Font0);
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
-    const char *labels[5] = { "Previous", "DM", "ANN", "CFG", "Next" };
-    for (int i = 0; i < 5; i++) {
+    const char *labels[NAV_BTN_COUNT] = { "Previous", "DM", "ANN", "CFG", "Next" };
+    for (int i = 0; i < NAV_BTN_COUNT; i++) {
         int tw = lcd.textWidth(labels[i]);
         int tx = b[i].x + max(1, (b[i].w - tw) / 2);
         int ty = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
@@ -1798,10 +1823,8 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     Radio.transmit(frame, sizeof(hdr) + protoLen);
-    if (kVerboseRxSerial) {
-        Serial.printf("[ack] routing ACK -> !%08X for pkt 0x%08X hops=%u\n",
-                      pkt.hdr.from, pkt.hdr.id, ackHops);
-    }
+    debugLogAcks("[ack] routing ACK -> !%08X for pkt 0x%08X hops=%u\n",
+                 pkt.hdr.from, pkt.hdr.id, ackHops);
 }
 
 // ── Handle received packet ────────────────────────────────────
@@ -1838,7 +1861,7 @@ static void handleRx(MeshPacket pkt) {
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     uint8_t hopStart = (pkt.hdr.flags >> 5) & 0x07;
 
-    if (kVerboseRxSerial) {
+    if (debugMessagesEnabled()) {
         Serial.printf("\n[rx] pkt#%lu rssi=%.1f snr=%.2f len=%u ch=%d\n",
                       pktCount, pkt.rssi, pkt.snr,
                       (unsigned)(sizeof(MeshHdr) + pkt.payloadLen), pkt.chanIdx);
@@ -1878,7 +1901,7 @@ static void handleRx(MeshPacket pkt) {
                 // Send routing ACK (the early-ACK path at top missed this since it wasn't decrypted yet)
                 if ((pkt.hdr.flags & 0x08) && pkt.portnum != ROUTING_APP)
                     sendRoutingAck(pkt);
-                if (kVerboseRxSerial) {
+                if (debugMessagesEnabled()) {
                     Serial.printf("[rx] pki decrypt OK portnum=%lu\n", (unsigned long)pkt.portnum);
                 }
             }
@@ -1886,8 +1909,13 @@ static void handleRx(MeshPacket pkt) {
     }
 
     if (!pkt.decrypted) {
-        if (kVerboseRxSerial) {
-            Serial.printf("[rx] encrypted packet on unknown channel\n");
+        if (debugMessagesEnabled()) {
+            static uint32_t sLastUnknownChanLogMs = 0;
+            uint32_t nowMs = millis();
+            if (nowMs - sLastUnknownChanLogMs >= 2000) {
+                Serial.printf("[rx] encrypted packet on unknown channel\n");
+                sLastUnknownChanLogMs = nowMs;
+            }
         }
         return;
     }
@@ -1903,7 +1931,7 @@ static void handleRx(MeshPacket pkt) {
         strncpy(tm.text, (const char *)pkt.payload,
                 min(pkt.payloadLen, sizeof(tm.text) - 1));
         tm.text[min(pkt.payloadLen, sizeof(tm.text) - 1)] = '\0';
-        if (kVerboseRxSerial) {
+        if (debugMessagesEnabled()) {
             Serial.printf("[rx] text: \"%s\"\n", tm.text);
         }
 
@@ -1942,7 +1970,7 @@ static void handleRx(MeshPacket pkt) {
         UserInfo u;
         decodeUser(pkt.payload, pkt.payloadLen, u);
         Nodes.updateUser(pkt.hdr.from, u);
-        if (kVerboseRxSerial) {
+        if (debugMessagesEnabled()) {
             Serial.printf("[rx] nodeinfo: \"%s\" (%s)%s pubKey=%s\n",
                           u.longName, u.shortName,
                           pkt.wantResponse ? " [want_response]" : "",
@@ -1966,7 +1994,7 @@ static void handleRx(MeshPacket pkt) {
         PositionInfo pos;
         decodePosition(pkt.payload, pkt.payloadLen, pos);
         Nodes.updatePosition(pkt.hdr.from, pos);
-        if (kVerboseRxSerial) {
+        if (debugMessagesEnabled() && (pos.latI != 0 || pos.lonI != 0)) {
             Serial.printf("[rx] position: %.5f, %.5f alt:%dm\n",
                           pos.latI * 1e-7f, pos.lonI * 1e-7f, pos.alt);
         }
@@ -1979,7 +2007,7 @@ static void handleRx(MeshPacket pkt) {
         decodeTelemetry(pkt.payload, pkt.payloadLen, tel);
         if (tel.valid) {
             Nodes.updateTelemetry(pkt.hdr.from, tel);
-            if (kVerboseRxSerial) {
+            if (debugMessagesEnabled()) {
                 Serial.printf("[rx] telemetry: bat=%.0f%% %.2fV\n", tel.battPct, tel.voltage);
             }
         }
@@ -2005,18 +2033,18 @@ static void handleRx(MeshPacket pkt) {
             bool isAck = (errorReason == 0);
             if (isAck) {
                 Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
-                if (kVerboseRxSerial) {
+                if (debugAcksEnabled()) {
                     Serial.printf("[rx] ACK for 0x%08X from !%08X\n", pkt.requestId, pkt.hdr.from);
                 }
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
-                Serial.printf("[rx] NAK for 0x%08X err=%lu from !%08X\n",
-                              pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
+                debugLogAcks("[rx] NAK for 0x%08X err=%lu from !%08X\n",
+                             pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
 
                 // PKI_UNKNOWN_PUBKEY (35): sender doesn't have our public key yet.
                 // Respond with a unicast NODEINFO so they can retry with PKI.
                 if (errorReason == 35) {
-                    Serial.printf("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
+                    debugLogAcks("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
                     Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) n->lastSentInfoMs = millis();
@@ -2036,7 +2064,7 @@ static void handleRx(MeshPacket pkt) {
     }
 
     default:
-        if (kVerboseRxSerial) {
+        if (debugMessagesEnabled()) {
             Serial.printf("[rx] %s port=%lu payload=%u bytes\n",
                           portnumName(pkt.portnum), pkt.portnum,
                           (unsigned)pkt.payloadLen);
@@ -2057,7 +2085,7 @@ static void handleRx(MeshPacket pkt) {
         bool needGreet = !known || !known->hasName ||
                          elapsed > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL;
         if (needGreet) {
-            if (kVerboseRxSerial) {
+            if (debugMessagesEnabled()) {
                 Serial.printf("[nodeinfo] queuing greeting for !%08X (%s, last sent %lums ago)\n",
                               pkt.hdr.from,
                               (known && known->hasName) ? known->shortName : "new",
@@ -2189,6 +2217,7 @@ static void handleKey(char k) {
                         } else if (settingsSel == SETTING_FACTORY_RESET) {
                 nvs_flash_erase();
                 nvs_flash_init();
+                    Nodes.clearPersisted();
                 sdRmDir("/camillia/dms");
                 snprintf(settingsStatus, sizeof(settingsStatus), "Factory reset — rebooting...");
                 dirtyChat = true;
@@ -2319,6 +2348,7 @@ static void handleKey(char k) {
                         } else if (settingsSel == SETTING_FACTORY_RESET) {
                 nvs_flash_erase();
                 nvs_flash_init();
+                    Nodes.clearPersisted();
                 sdRmDir("/camillia/dms");
                 snprintf(settingsStatus, sizeof(settingsStatus), "Factory reset — rebooting...");
                 dirtyChat = true;
@@ -2503,6 +2533,9 @@ static void onWebCfgSaved() {
     p.putString("cannedMsgs", gCfg.cannedMessages);
     p.putULong("nodeIdOvr",   gCfg.nodeIdOverride);
     p.putUChar("chatSpace",   gCfg.chatSpacing);
+    p.putBool("dbgAcks",      gCfg.debugAcks);
+    p.putBool("dbgMsgs",      gCfg.debugMessages);
+    p.putBool("dbgGps",       gCfg.debugGps);
     p.end();
     Serial.println("[cfg] main config saved to NVS");
 
@@ -2524,6 +2557,7 @@ static void onWebCfgSaved() {
     // Re-save node database (wiped by nvs_flash_erase)
     Nodes.saveAll();
     Serial.println("[cfg] nodes re-saved to NVS");
+    debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
     // Apply GPS enable/disable immediately
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
@@ -2687,8 +2721,12 @@ void setup() {
         String cm = prefs.getString("cannedMsgs", ""); if (cm.length()) strncpy(gCfg.cannedMessages, cm.c_str(), sizeof(gCfg.cannedMessages)-1);
         ul = prefs.getULong("nodeIdOvr", 0); if (ul) gCfg.nodeIdOverride = (uint32_t)ul;
         ro = prefs.getUChar("chatSpace", 0xFF); if (ro != 0xFF && ro <= 2) gCfg.chatSpacing = ro;
+        if (prefs.isKey("dbgAcks")) gCfg.debugAcks = prefs.getBool("dbgAcks");
+        if (prefs.isKey("dbgMsgs")) gCfg.debugMessages = prefs.getBool("dbgMsgs");
+        if (prefs.isKey("dbgGps"))  gCfg.debugGps = prefs.getBool("dbgGps");
         prefs.end();
     }
+    debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
     // Apply chat spacing setting to runtime globals
     LINE_H        = kSpacingPx[gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1];
     VISIBLE_LINES = CHAT_H / LINE_H;
@@ -2785,12 +2823,12 @@ void setup() {
     // Let radio settle before first TX
     delay(200);
     bool niOk = Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-    Serial.printf("[camillia-mt] NODEINFO broadcast %s\n", niOk ? "sent" : "FAILED");
+    debugLogMessages("[camillia-mt] NODEINFO broadcast %s\n", niOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", niOk ? "* Announced (NODEINFO)" : "! NODEINFO failed",
                         niOk ? TFT_DARKGREY : TFT_RED);
 
     bool posOk = Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
-    Serial.printf("[camillia-mt] POSITION broadcast %s\n", posOk ? "sent" : "FAILED");
+    debugLogMessages("[camillia-mt] POSITION broadcast %s\n", posOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", posOk ? "* Position broadcast" : "! POSITION failed",
                         posOk ? TFT_DARKGREY : TFT_RED);
 
@@ -2884,7 +2922,7 @@ void loop() {
         for (int i = 1; i < deferredCount; i++) deferredGreet[i-1] = deferredGreet[i];
         deferredCount--;
         pollInput();
-        Serial.printf("[nodeinfo] deferred greeting !%08X\n", dest);
+        debugLogMessages("[nodeinfo] deferred greeting !%08X\n", dest);
         if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, dest)) {
             NodeEntry *n = Nodes.find(dest);
             if (n) n->lastSentInfoMs = millis();
@@ -2897,7 +2935,7 @@ void loop() {
     if (webCfgAnnounceRequested()) {
         Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
         Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
-        Serial.printf("[announce] manual NODEINFO + position broadcast\n");
+        debugLogMessages("[announce] manual NODEINFO + position broadcast\n");
     }
 
     // 1c. Poll GPS

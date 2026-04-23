@@ -79,6 +79,11 @@ struct RhinoConfig {
 
     // Chat display
     uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
+
+    // Serial debug categories
+    bool     debugAcks;
+    bool     debugMessages;
+    bool     debugGps;
 };
 
 // Initialise from compile-time defaults. Call once before sdBegin().

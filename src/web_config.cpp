@@ -7,6 +7,7 @@
 #include <SD.h>
 #include <math.h>
 #include <ctype.h>
+#include "debug_flags.h"
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
@@ -80,6 +81,7 @@ static const char kHead[] =
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Camillia MT</title>"
+    "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
     "<style>"
         ":root{--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
         "--text:#f4f6fb;--text-dim:#b0b8c8;--accent:#d7869d;--accent-ink:#ffffff}"
@@ -98,6 +100,27 @@ static const char kHead[] =
         ".msg{color:var(--accent);margin:.5em 0}"
         ".err{color:#ff8d8d;margin:.5em 0}"
         ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
+        ".tab-row{display:flex;gap:.5em;margin:1em 0 .4em}"
+        ".tab-btn{margin:0;padding:.45em 1em;background:var(--panel-2);color:var(--text);"
+             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.9em;font-weight:600}"
+        ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
+        ".tab-panel{display:none}"
+        ".tab-panel.active{display:block}"
+        ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
+        ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
+        ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
+        ".map-mini-btn{margin:0;padding:.35em .75em;background:var(--panel-2);color:var(--text);"
+             "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.82em;font-weight:600}"
+        ".map-mini-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
+        ".map-mini-btn:disabled{opacity:.6;cursor:default}"
+        ".map-legend{display:flex;justify-content:space-between;font-size:.8em;color:var(--text-dim);margin-top:.35em;gap:.5em}"
+        ".node-list{margin-top:.8em;display:grid;grid-template-columns:1fr;gap:.5em}"
+        ".node-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
+        ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
+        ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
+        ".node-meta b{color:var(--text)}"
+        ".leaflet-container{font:12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
+        ".leaflet-control-attribution{font-size:.65em}"
     ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
     ".gps-note{margin:.4em 0;font-size:.9em}"
     ".gps-note button{padding:.2em .8em;font-size:.9em;margin-left:.4em}"
@@ -216,9 +239,149 @@ static void sendConfigPage(const char *msg = "") {
         (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
         (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
                                                 (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
+    int totalNodes = Nodes.count();
+    int mapPointCount = 0;
+    String mapPoints = "[";
+    String nodeCards = "";
+    uint32_t nowMs = millis();
+    auto unzz = [](uint32_t v) -> int32_t {
+        return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
+    };
+    auto coordInRange = [](float lat, float lon) -> bool {
+        return !(lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f);
+    };
+    auto extractNodeCoords = [&](const NodeEntry *n, float &lat, float &lon) -> bool {
+        if (!n) return false;
+        bool hasCoords = (n->latI != 0 || n->lonI != 0);
+        if (!n->hasPosition && !hasCoords) return false;
+        lat = n->latI * 1e-7f;
+        lon = n->lonI * 1e-7f;
+        if (coordInRange(lat, lon)) return true;
+        // Backward compatibility: older firmware decoded signed lat/lon without zigzag.
+        int32_t latRecovered = unzz((uint32_t)n->latI);
+        int32_t lonRecovered = unzz((uint32_t)n->lonI);
+        float latRec = latRecovered * 1e-7f;
+        float lonRec = lonRecovered * 1e-7f;
+        if (!coordInRange(latRec, lonRec)) return false;
+        lat = latRec;
+        lon = lonRec;
+        return true;
+    };
+    for (int i = 0; i < totalNodes; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (!n) continue;
+
+        float lat = 0.0f;
+        float lon = 0.0f;
+        bool hasLocation = extractNodeCoords(n, lat, lon);
+        if (hasLocation) {
+            if (mapPointCount > 0) mapPoints += ",";
+            snprintf(tmp, sizeof(tmp), "{\"lat\":%.7f,\"lon\":%.7f}", lat, lon);
+            mapPoints += tmp;
+            mapPointCount++;
+        }
+
+        char idBuf[16];
+        snprintf(idBuf, sizeof(idBuf), "!%08X", n->nodeId);
+        const char *shortName = n->shortName[0] ? n->shortName : "----";
+        const char *longName  = n->longName[0]  ? n->longName  : "(unnamed)";
+        const char *chanName = "-";
+        if (n->chanIdx >= 0 && n->chanIdx < MAX_CHANNELS) {
+            const ChannelKey &ck = CHANNEL_KEYS[n->chanIdx];
+            const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+            if (nm && nm[0]) chanName = nm;
+        }
+
+        char heardBuf[40];
+        if (n->lastHeardMs == 0 || nowMs < n->lastHeardMs) {
+            snprintf(heardBuf, sizeof(heardBuf), "unknown");
+        } else {
+            snprintf(heardBuf, sizeof(heardBuf), "%lus ago",
+                     (unsigned long)((nowMs - n->lastHeardMs) / 1000UL));
+        }
+
+        char locBuf[96];
+        if (hasLocation) {
+            snprintf(locBuf, sizeof(locBuf), "%.6f, %.6f (alt %dm)", lat, lon, (int)n->alt);
+        } else {
+            snprintf(locBuf, sizeof(locBuf), "unknown");
+        }
+
+        char posSeenBuf[40];
+        if (n->lastPosMs == 0 || nowMs < n->lastPosMs) {
+            snprintf(posSeenBuf, sizeof(posSeenBuf), "never");
+        } else {
+            snprintf(posSeenBuf, sizeof(posSeenBuf), "%lus ago",
+                     (unsigned long)((nowMs - n->lastPosMs) / 1000UL));
+        }
+
+        char posStateBuf[48];
+        if (n->lastPosMs == 0) {
+            snprintf(posStateBuf, sizeof(posStateBuf), "no POSITION packets");
+        } else if (n->hasPosition) {
+            snprintf(posStateBuf, sizeof(posStateBuf), "position valid");
+        } else {
+            snprintf(posStateBuf, sizeof(posStateBuf), "packet seen, no fix");
+        }
+
+        char rawPosBuf[64];
+        snprintf(rawPosBuf, sizeof(rawPosBuf), "%ld, %ld", (long)n->latI, (long)n->lonI);
+
+        char telemBuf[72];
+        if (n->hasTelemetry) {
+            snprintf(telemBuf, sizeof(telemBuf), "%.0f%% / %.2fV", n->battPct, n->voltage);
+        } else {
+            snprintf(telemBuf, sizeof(telemBuf), "none");
+        }
+
+        char linkBuf[72];
+        if (n->lastHeardMs != 0) {
+            snprintf(linkBuf, sizeof(linkBuf), "SNR %.1f dB, hops %u", n->snr, (unsigned)n->hops);
+        } else {
+            snprintf(linkBuf, sizeof(linkBuf), "unknown");
+        }
+
+        nodeCards += "<div class='node-card'>";
+        nodeCards += "<div class='node-title'>";
+        nodeCards += shortName;
+        nodeCards += " -- ";
+        nodeCards += longName;
+        nodeCards += "</div>";
+        nodeCards += "<div class='node-meta'><b>ID:</b> ";
+        nodeCards += idBuf;
+        nodeCards += "  <b>Channel:</b> ";
+        nodeCards += chanName;
+        nodeCards += "  <b>Last Heard:</b> ";
+        nodeCards += heardBuf;
+        nodeCards += "</div>";
+        nodeCards += "<div class='node-meta'><b>Location:</b> ";
+        nodeCards += locBuf;
+        nodeCards += "</div>";
+        nodeCards += "<div class='node-meta'><b>Position Pkt:</b> ";
+        nodeCards += posSeenBuf;
+        nodeCards += "  <b>State:</b> ";
+        nodeCards += posStateBuf;
+        nodeCards += "  <b>Raw:</b> ";
+        nodeCards += rawPosBuf;
+        nodeCards += "</div>";
+        nodeCards += "<div class='node-meta'><b>Telemetry:</b> ";
+        nodeCards += telemBuf;
+        nodeCards += "  <b>Link:</b> ";
+        nodeCards += linkBuf;
+        nodeCards += "</div>";
+        nodeCards += "</div>";
+    }
+    mapPoints += "]";
     html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
+
+        html += "<div class='tab-row'>"
+            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
+            "</div>";
+        html += "<div class='tab-panel active' id='tab-config'>";
 
     html += "<form method='POST' action='/save'>";
 
@@ -593,6 +756,24 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
     sendChunk(html);
 
+        // ── Debug ─────────────────────────────────────────────────
+        html += "<details><summary>Debug</summary>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='dbg_acks' value='1'";
+        if (gCfg->debugAcks) html += " checked";
+        html += "> ACKS</label>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='dbg_msgs' value='1'";
+        if (gCfg->debugMessages) html += " checked";
+        html += "> Messages</label>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='dbg_gps' value='1'";
+        if (gCfg->debugGps) html += " checked";
+        html += "> GPS</label>";
+        html += "<p class='gps-hint'>Enables tagged serial debug output for the selected categories only.</p>";
+        html += "</details>";
+        sendChunk(html);
+
     // WiFi
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>WiFi</h3>"
             "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
@@ -604,6 +785,8 @@ static void sendConfigPage(const char *msg = "") {
 
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
     sendChunk(html);
+
+    html += "</div><div class='tab-panel' id='tab-utils'>";
 
     // ── Backup & Restore ──────────────────────────────────────
     html +=
@@ -642,6 +825,123 @@ static void sendConfigPage(const char *msg = "") {
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
         " The device will behave as if freshly flashed.</p>";
+
+    html += "</div><div class='tab-panel' id='tab-map'>";
+    html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
+    html += "<p class='gps-hint'>Positioned nodes: ";
+    snprintf(tmp, sizeof(tmp), "%d", mapPointCount);
+    html += tmp;
+    html += " / ";
+    snprintf(tmp, sizeof(tmp), "%d", totalNodes);
+    html += tmp;
+    html += ". Heat intensity increases where multiple nodes overlap.</p>";
+    html += "<div class='map-controls'>"
+            "<button type='button' id='map-fit-btn' class='map-mini-btn' onclick='fitNodeMap()'>Fit Nodes</button>"
+            "<button type='button' class='map-mini-btn' onclick='worldNodeMap()'>World View</button>"
+            "<button type='button' id='map-heat-btn' class='map-mini-btn active' onclick='toggleNodeHeat()'>Heat: On</button>"
+            "</div>";
+    html += "<div class='map-wrap'>"
+            "<div id='node-heatmap' class='map-canvas'></div>"
+            "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
+            "</div>";
+    html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
+    html += "<p class='gps-hint'>Device and location details for discovered nodes.</p>";
+    html += "<div class='node-list'>";
+    if (nodeCards.length() > 0) html += nodeCards;
+    else html += "<div class='node-card'><div class='node-meta'>No nodes discovered yet.</div></div>";
+    html += "</div>";
+    html += "<script>var NODE_HEAT_POINTS=";
+    html += mapPoints;
+    html += ";</script>";
+
+    html += "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
+            "<script src='https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js'></script>";
+
+        html += "</div>"
+                        "<script>"
+                        "var nodeMap=null;"
+                        "var nodeMarkerLayer=null;"
+                        "var nodeHeatLayer=null;"
+                        "var nodeHeatOn=true;"
+                        "function setMapStatus(msg){"
+                            "var el=document.getElementById('map-status');"
+                            "if(el)el.textContent=msg||'';"
+                        "}"
+                        "function ensureNodeMap(){"
+                            "var mapEl=document.getElementById('node-heatmap');"
+                            "if(!mapEl)return;"
+                            "if(!window.L){"
+                                "mapEl.innerHTML='<div style=\"padding:1em;color:#ffd0d0\">Map library unavailable. Check internet access for tile/CDN loading.</div>';"
+                                "setMapStatus('Basemap unavailable');"
+                                "return;"
+                            "}"
+                            "if(nodeMap){nodeMap.invalidateSize();return;}"
+                            "nodeMap=L.map('node-heatmap',{zoomControl:true,worldCopyJump:true,minZoom:2,maxZoom:19});"
+                            "var base=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{" 
+                                "maxZoom:19,attribution:'&copy; OpenStreetMap contributors'"
+                            "}).addTo(nodeMap);"
+                            "base.on('tileerror',function(){setMapStatus('Basemap tile load issue');});"
+                            "nodeMarkerLayer=L.featureGroup().addTo(nodeMap);"
+                            "var pts=(window.NODE_HEAT_POINTS||[]);"
+                            "var heatPts=[];"
+                            "for(var i=0;i<pts.length;i++){"
+                                "var p=pts[i];"
+                                "if(!isFinite(p.lat)||!isFinite(p.lon))continue;"
+                                "var ll=[p.lat,p.lon];"
+                                "heatPts.push([p.lat,p.lon,0.9]);"
+                                "L.circleMarker(ll,{radius:5,weight:1,color:'#fff0b2',fillColor:'#ff7a45',fillOpacity:0.8}).addTo(nodeMarkerLayer);"
+                            "}"
+                            "if(window.L.heatLayer&&heatPts.length){"
+                                "nodeHeatLayer=L.heatLayer(heatPts,{radius:26,blur:22,maxZoom:13,"
+                                    "gradient:{0.2:'#2b83ba',0.45:'#abdda4',0.65:'#fdae61',0.9:'#d7191c'}}).addTo(nodeMap);"
+                                "nodeHeatOn=true;"
+                            "} else {"
+                                "nodeHeatOn=false;"
+                                "var hb=document.getElementById('map-heat-btn');"
+                                "if(hb){hb.textContent='Heat: N/A';hb.disabled=true;hb.classList.remove('active');}"
+                            "}"
+                            "if(nodeMarkerLayer.getLayers().length){"
+                                "nodeMap.fitBounds(nodeMarkerLayer.getBounds(),{padding:[18,18],maxZoom:13});"
+                                "setMapStatus(nodeMarkerLayer.getLayers().length+' positioned node'+(nodeMarkerLayer.getLayers().length===1?'':'s'));"
+                            "} else {"
+                                "nodeMap.setView([20,0],2);"
+                                "setMapStatus('No node positions yet');"
+                            "}"
+                        "}"
+                        "function fitNodeMap(){"
+                            "ensureNodeMap();"
+                            "if(nodeMap&&nodeMarkerLayer&&nodeMarkerLayer.getLayers().length){"
+                                "nodeMap.fitBounds(nodeMarkerLayer.getBounds(),{padding:[18,18],maxZoom:13});"
+                            "}"
+                        "}"
+                        "function worldNodeMap(){"
+                            "ensureNodeMap();"
+                            "if(nodeMap)nodeMap.setView([20,0],2);"
+                        "}"
+                        "function toggleNodeHeat(){"
+                            "ensureNodeMap();"
+                            "var hb=document.getElementById('map-heat-btn');"
+                            "if(!nodeMap||!nodeHeatLayer){if(hb)hb.classList.remove('active');return;}"
+                            "if(nodeHeatOn){nodeMap.removeLayer(nodeHeatLayer);nodeHeatOn=false;if(hb){hb.textContent='Heat: Off';hb.classList.remove('active');}}"
+                            "else{nodeHeatLayer.addTo(nodeMap);nodeHeatOn=true;if(hb){hb.textContent='Heat: On';hb.classList.add('active');}}"
+                        "}"
+                        "function switchTab(tab){"
+                            "var isCfg=(tab==='config');"
+                            "var isUtil=(tab==='utils');"
+                            "var isMap=(tab==='map');"
+                            "document.getElementById('tab-config').classList.toggle('active',isCfg);"
+                            "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
+                            "document.getElementById('tab-map').classList.toggle('active',isMap);"
+                            "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
+                            "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
+                            "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
+                            "if(isMap){ensureNodeMap();setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();},0);}"
+                        "}"
+                        "window.addEventListener('resize',function(){"
+                            "var mapTab=document.getElementById('tab-map');"
+                            "if(mapTab&&mapTab.classList.contains('active')&&nodeMap)nodeMap.invalidateSize();"
+                        "});"
+                        "</script>";
 
     html += "</body></html>";
     server.sendContent(html);
@@ -782,9 +1082,11 @@ static void handlePostSave() {
         snprintf(field, sizeof(field), "ch%d_name", i);
         String nm = server.arg(field);
         nm.trim();
-        Serial.printf("[cfg] ch%d: name='%s' key='%s' role='%s'\n", i,
-                      nm.c_str(), server.arg(String("ch") + i + "_key").c_str(),
-                      server.arg(String("ch") + i + "_role").c_str());
+        if (debugMessagesEnabled()) {
+            Serial.printf("[cfg] ch%d: name='%s' key='%s' role='%s'\n", i,
+                          nm.c_str(), server.arg(String("ch") + i + "_key").c_str(),
+                          server.arg(String("ch") + i + "_role").c_str());
+        }
         if (nm.length() > 0 && nm.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
             strncpy(CHANNEL_KEYS[i].name_buf, nm.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
             CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
@@ -862,6 +1164,9 @@ static void handlePostSave() {
     gCfg->telEnvIntervalS    = (uint32_t)max((long)60, server.arg("tel_env_intv").toInt());
     gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
     strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
+    gCfg->debugAcks          = (server.arg("dbg_acks") == "1");
+    gCfg->debugMessages      = (server.arg("dbg_msgs") == "1");
+    gCfg->debugGps           = (server.arg("dbg_gps") == "1");
 
     // WiFi credentials — save directly to NVS (not part of gCfg)
     {
@@ -910,6 +1215,7 @@ static void handlePostFactoryReset() {
     // Erase the entire NVS partition
     nvs_flash_erase();
     nvs_flash_init();
+    Nodes.clearPersisted();
 
     // Delete saved DM conversations from SD card
     {

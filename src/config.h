@@ -115,6 +115,9 @@
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
+#define MY_DBG_ACKS         0
+#define MY_DBG_MESSAGES     0
+#define MY_DBG_GPS          0
 
 // ── Display UI zones (landscape 320×240, font0 = 6×8 px) ─────
 #define LCD_W           320
@@ -127,9 +130,9 @@
 #define NODE_W           89   // node pane width
 #define DIVIDER_X       230   // 1px vertical divider
 #define CHAT_Y           24   // top of chat/node area (STATUS_H + TAB_H)
-#define CHAT_H          190   // height of chat area  (LCD_H - CHAT_Y - INPUT_H)
-#define INPUT_H          26   // input area (typed text + touch nav buttons)
-#define INPUT_Y         214   // top of input area    (LCD_H - INPUT_H)
+#define INPUT_H          52   // input area (typed text + touch nav buttons)
+#define CHAT_H         (LCD_H - CHAT_Y - INPUT_H) // height of chat area
+#define INPUT_Y        (LCD_H - INPUT_H)          // top of input area
 
 // Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
 #define CHAR_W            6

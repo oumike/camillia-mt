@@ -20,13 +20,14 @@ struct NodeEntry {
     uint8_t  pubKey[32];      // Curve25519 public key from their NODEINFO (field 8)
     bool     hasPubKey;
     uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
+    uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths
 };
 
 class NodeDB {
 public:
     void init();          // zeros RAM, then loads persisted nodes from NVS
-    void clearPersisted(); // wipe "nodes" NVS namespace (factory reset)
+    void clearPersisted(); // wipe "nodes" NVS namespace and clear runtime node cache
     void saveAll();        // rewrite all nodes to NVS (after partition erase)
 
     // Find or create entry for nodeId. Returns pointer (never null).

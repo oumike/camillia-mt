@@ -1,6 +1,7 @@
 #include "channel_mgr.h"
 #include "mesh_radio.h"
 #include "lgfx_tdeck.h"
+#include "debug_flags.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
 
@@ -180,8 +181,8 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     const ChannelKey &ck = CHANNEL_KEYS[txChan];
     const char *txName = ck.name_buf[0] ? ck.name_buf : ck.name;
     uint8_t effectiveKeyLen = (ck.keyLen == 1 && ck.key[0] == 0x00) ? 0 : ck.keyLen;
-    Serial.printf("[tx] ch%d name='%s' keyLen=%u effectiveKeyLen=%u hash=0x%02X\n",
-                  txChan, txName ? txName : "", ck.keyLen, effectiveKeyLen, ck.hash);
+    debugLogMessages("[tx] ch%d name='%s' keyLen=%u effectiveKeyLen=%u hash=0x%02X\n",
+                     txChan, txName ? txName : "", ck.keyLen, effectiveKeyLen, ck.hash);
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;
 
@@ -247,7 +248,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    Serial.printf("[position] transmit %s\n", ok ? "OK" : "FAILED");
+    debugLogMessages("[position] transmit %s\n", ok ? "OK" : "FAILED");
     return ok;
 }
 
@@ -296,10 +297,10 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
-    Serial.printf("[nodeinfo] %s to !%08X  proto=%u bytes\n",
-                  isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen);
+    debugLogMessages("[nodeinfo] %s to !%08X  proto=%u bytes\n",
+                     isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    Serial.printf("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
+    debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
     return ok;
 }

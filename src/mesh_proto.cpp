@@ -1,4 +1,5 @@
 #include "mesh_proto.h"
+#include "debug_flags.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/ccm.h"
 #include "mbedtls/ecdh.h"
@@ -145,16 +146,18 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
 
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out) {
     out.latI = out.lonI = out.alt = 0;
+    auto unzz = [](uint32_t v) -> int32_t {
+        return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
+    };
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
         uint32_t field = tag >> 3, wtype = tag & 7;
         if (wtype == 0) {
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
-            int32_t sv = (int32_t)v;
-            if (field == 1) out.latI = sv;
-            else if (field == 2) out.lonI = sv;
-            else if (field == 3) out.alt  = sv;
+            if (field == 1) out.latI = unzz((uint32_t)v);     // sint32 zigzag
+            else if (field == 2) out.lonI = unzz((uint32_t)v); // sint32 zigzag
+            else if (field == 3) out.alt  = (int32_t)(uint32_t)v; // int32 varint
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
     }
     return true;
@@ -340,7 +343,7 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
         ok = true;
     } while (false);
 
-    if (!ok) Serial.printf("[pki] encryptPki failed at step %d\n", step);
+    if (!ok) debugLogMessages("[pki] encryptPki failed at step %d\n", step);
 
     mbedtls_ecp_point_free(&Qp);
     mbedtls_mpi_free(&z);
@@ -413,7 +416,7 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
         ok = true;
     } while (false);
 
-    if (!ok) Serial.printf("[pki] decryptPki failed at step %d\n", step);
+    if (!ok) debugLogMessages("[pki] decryptPki failed at step %d\n", step);
 
     mbedtls_ecp_point_free(&Qp);
     mbedtls_mpi_free(&z);
@@ -501,8 +504,8 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
         u += pbWriteVarint(user + u, 32);
         memcpy(user + u, myPubKey, 32); u += 32;
     }
-    Serial.printf("[nodeinfo] encode: pubKey=%s  user=%u bytes\n",
-                  pubKeyValid ? "YES" : "NO", (unsigned)u);
+    debugLogMessages("[nodeinfo] encode: pubKey=%s  user=%u bytes\n",
+                     pubKeyValid ? "YES" : "NO", (unsigned)u);
 
     // Wrap in Data message
     size_t n = 0;
