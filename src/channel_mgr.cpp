@@ -1,11 +1,41 @@
 #include "channel_mgr.h"
 #include "mesh_radio.h"
+#include "node_db.h"
 #include "lgfx_tdeck.h"
 #include "debug_flags.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
 
 ChannelMgr Channels;
+
+static void addLiveTxLine(const char *text, uint16_t color = TFT_DARKGREY) {
+    char prefix[12];
+    uint32_t upSec = millis() / 1000;
+    snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
+             (upSec / 60) % 60, upSec % 60);
+    Channels.addMessage(CHAN_ANN, prefix, text, color);
+}
+
+static bool hasUsableShortName(const NodeEntry *n) {
+    if (!n || !n->shortName[0]) return false;
+    const char *s = n->shortName;
+    bool q = (s[0] == '?' && s[1] == '?' && s[2] == '?' && s[3] == '?' && s[4] == '\0');
+    bool d = (s[0] == '-' && s[1] == '-' && s[2] == '-' && s[3] == '-' && s[4] == '\0');
+    return !(q || d);
+}
+
+static void liveNodeLabel(uint32_t nodeId, char *out, size_t outLen) {
+    if (nodeId == 0xFFFFFFFF) {
+        snprintf(out, outLen, "BCAST");
+        return;
+    }
+    NodeEntry *n = Nodes.find(nodeId);
+    if (hasUsableShortName(n)) {
+        snprintf(out, outLen, "%s", n->shortName);
+    } else {
+        snprintf(out, outLen, "!%08X", nodeId);
+    }
+}
 
 void ChannelMgr::init() {
     memset(_pending, 0, sizeof(_pending));
@@ -26,7 +56,7 @@ void ChannelMgr::init() {
             Serial.printf("[chanmgr] PSRAM alloc failed for ch%d, using DRAM\n", i);
         }
     }
-    addMessage(CHAN_ANN, "", "Announcements channel ready", TFT_DARKGREY, 0);
+    addMessage(CHAN_ANN, "", "Live channel ready", TFT_DARKGREY, 0);
     setActive(0);
 }
 
@@ -35,6 +65,13 @@ void ChannelMgr::setActive(int idx) {
     _active = idx;
     _chans[idx].unread    = false;
     _chans[idx].scrollOff = 0;   // snap to bottom
+}
+
+void ChannelMgr::clearChannel(int idx) {
+    if (idx < 0 || idx >= MAX_CHANNELS) return;
+    _chans[idx].count = 0;
+    _chans[idx].scrollOff = 0;
+    _chans[idx].unread = false;
 }
 
 void ChannelMgr::nextChannel() { setActive((_active + 1) % MAX_CHANNELS); }
@@ -71,7 +108,16 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
     bool firstLine = true;
     const int CONT_INDENT = 2;   // spaces for continuation lines
 
-    while (pos <= textLen) {
+    // Preserve existing behavior for empty message bodies.
+    if (textLen == 0) {
+        if (prefixLen > 0) snprintf(line, sizeof(line), "%.*s", prefixLen, prefix);
+        else line[0] = '\0';
+        DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
+        _pushLine(ch, line, color, packetId, ack);
+        return;
+    }
+
+    while (pos < textLen) {
         int lineStart = firstLine ? prefixLen : CONT_INDENT;
         int avail     = MSG_CHARS - lineStart;
         if (avail <= 0) avail = 1;
@@ -102,9 +148,6 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         pos += take;
         if (pos < textLen && text[pos] == ' ') pos++; // skip space after wrap
         firstLine = false;
-
-        if (take == 0 && remaining == 0) break; // empty text
-        if (remaining == 0) break;
     }
 }
 
@@ -201,7 +244,17 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     memcpy(frame + sizeof(hdr), cipher, protoLen);
     size_t frameLen = sizeof(hdr) + protoLen;
 
-    if (!Radio.transmit(frame, frameLen)) return false;
+    if (!Radio.transmit(frame, frameLen)) {
+        addLiveTxLine("T TXT B ER", TFT_RED);
+        return false;
+    }
+
+    {
+        char live[56];
+        snprintf(live, sizeof(live), "T TXT B c%d %08X",
+                 txChan, packetId);
+        addLiveTxLine(live, TFT_WHITE);
+    }
 
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
@@ -249,6 +302,12 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[position] transmit %s\n", ok ? "OK" : "FAILED");
+    {
+        char live[56];
+        snprintf(live, sizeof(live), "T POS B %08X %s",
+                 packetId, ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
     return ok;
 }
 
@@ -302,5 +361,15 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
+    {
+        char dst[16];
+        liveNodeLabel(toNodeId, dst, sizeof(dst));
+        char live[64];
+        snprintf(live, sizeof(live), "T NOD %s %s %s",
+                 isUnicast ? "U" : "B",
+                 dst,
+                 ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
     return ok;
 }

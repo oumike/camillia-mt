@@ -35,6 +35,7 @@ public:
     Channel &get(int idx)       { return _chans[idx]; }
     int      activeIdx() const  { return _active; }
     void     setActive(int idx);
+    void     clearChannel(int idx);
     void     nextChannel();
     void     prevChannel();
 

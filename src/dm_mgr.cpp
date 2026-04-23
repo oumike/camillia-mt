@@ -2,6 +2,7 @@
 #include "mesh_radio.h"
 #include "mesh_proto.h"
 #include "node_db.h"
+#include "channel_mgr.h"
 #include "lgfx_tdeck.h"
 #include "debug_flags.h"
 #include "config.h"
@@ -10,6 +11,34 @@
 #include <SD.h>
 
 DmMgr DMs;
+
+static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
+    char prefix[12];
+    uint32_t upSec = millis() / 1000;
+    snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
+             (upSec / 60) % 60, upSec % 60);
+    Channels.addMessage(CHAN_ANN, prefix, text, color);
+}
+
+static bool hasUsableShortName(const char *s) {
+    if (!s || !s[0]) return false;
+    bool q = (s[0] == '?' && s[1] == '?' && s[2] == '?' && s[3] == '?' && s[4] == '\0');
+    bool d = (s[0] == '-' && s[1] == '-' && s[2] == '-' && s[3] == '-' && s[4] == '\0');
+    return !(q || d);
+}
+
+static void liveDmNodeLabel(uint32_t nodeId, const char *hintShort, char *out, size_t outLen) {
+    if (hasUsableShortName(hintShort)) {
+        snprintf(out, outLen, "%s", hintShort);
+        return;
+    }
+    NodeEntry *n = Nodes.find(nodeId);
+    if (n && hasUsableShortName(n->shortName)) {
+        snprintf(out, outLen, "%s", n->shortName);
+    } else {
+        snprintf(out, outLen, "!%08X", nodeId);
+    }
+}
 
 // ── init ──────────────────────────────────────────────────────
 void DmMgr::init() {
@@ -164,6 +193,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 
     if (!Radio.isReady()) {
         debugLogMessages("[dm] sendDm FAIL: radio not ready\n");
+        addLiveDmLine("T DM ER radio", TFT_RED);
         return false;
     }
 
@@ -188,6 +218,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
 
     size_t payloadLen = 0;
+    bool usedPki = false;
 
     // Prefer PKI if we have the recipient's Curve25519 public key
     NodeEntry *node = Nodes.find(toNodeId);
@@ -196,9 +227,11 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 
     if (node && node->hasPubKey) {
         hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
+        usedPki = true;
         debugLogMessages("[dm] using PKI path\n");
         if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
             debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
+            addLiveDmLine("T DM ER pki", TFT_RED);
             return false;
         }
         payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
@@ -215,6 +248,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                             proto, cipher, protoLen)) {
             debugLogMessages("[dm] sendDm FAIL: encrypt failed\n");
+            addLiveDmLine("T DM ER enc", TFT_RED);
             return false;
         }
         payloadLen = protoLen;
@@ -227,10 +261,22 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 
     if (!Radio.transmit(frame, sizeof(MeshHdr) + payloadLen)) {
         debugLogMessages("[dm] sendDm FAIL: radio TX failed\n");
+        addLiveDmLine("T DM ER tx", TFT_RED);
         return false;
     }
 
     debugLogMessages("[dm] TX OK\n");
+    {
+        DmConv *conv = find(toNodeId);
+        char who[16];
+        liveDmNodeLabel(toNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
+        char live[64];
+        snprintf(live, sizeof(live), "T DM %s %s %08X",
+                 usedPki ? "PKI" : "CHAN",
+                 who,
+                 packetId);
+        addLiveDmLine(live, TFT_WHITE);
+    }
 
     // Add outgoing message to local conversation (not marked unread)
     DmConv *conv = find(toNodeId);

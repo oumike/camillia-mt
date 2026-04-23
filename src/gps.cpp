@@ -127,3 +127,18 @@ float gpsCourse() {
 float gpsSpeedKmh() {
     return _gps.speed.isValid() ? (float)_gps.speed.kmph() : 0.0f;
 }
+
+bool gpsUtcDateTime(int &year, int &month, int &day,
+                    int &hour, int &minute, int &second) {
+    if (!gpsHasFix()) return false;
+    if (!_gps.date.isValid() || !_gps.time.isValid()) return false;
+    if (_gps.date.age() > 5000 || _gps.time.age() > 5000) return false;
+
+    year   = _gps.date.year();
+    month  = _gps.date.month();
+    day    = _gps.date.day();
+    hour   = _gps.time.hour();
+    minute = _gps.time.minute();
+    second = _gps.time.second();
+    return true;
+}

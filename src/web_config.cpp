@@ -1,5 +1,6 @@
 #include "web_config.h"
 #include "node_db.h"
+#include "channel_mgr.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -8,6 +9,7 @@
 #include <math.h>
 #include <ctype.h>
 #include "debug_flags.h"
+#include "gps.h"
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
@@ -74,6 +76,36 @@ static void scheduleReboot(uint32_t delayMs) {
     gRebootAtMs = millis() + delayMs;
 }
 
+static uint8_t readBatteryPctWeb() {
+    int32_t sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogRead(BATT_ADC_PIN);
+    float vadc = (sum / 8.0f) * (3.3f / 4095.0f);
+    float vbat = vadc * BATT_DIV;
+    int pct = (int)((vbat - BATT_VMIN) / (BATT_VMAX - BATT_VMIN) * 100.0f);
+    return (uint8_t)(pct < 0 ? 0 : pct > 100 ? 100 : pct);
+}
+
+static void appendJsonEscaped(String &out, const char *s) {
+    if (!s) return;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+        unsigned char c = *p;
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\b') out += "\\b";
+        else if (c == '\f') out += "\\f";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c < 0x20) {
+            char u[7];
+            snprintf(u, sizeof(u), "\\u%04X", (unsigned)c);
+            out += u;
+        } else {
+            out += (char)c;
+        }
+    }
+}
+
 // ── HTML helpers ──────────────────────────────────────────────
 
 static const char kHead[] =
@@ -100,7 +132,14 @@ static const char kHead[] =
         ".msg{color:var(--accent);margin:.5em 0}"
         ".err{color:#ff8d8d;margin:.5em 0}"
         ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
-        ".tab-row{display:flex;gap:.5em;margin:1em 0 .4em}"
+           ".tab-row{display:flex;align-items:center;gap:.6em;margin:1em 0 .4em;flex-wrap:wrap}"
+           ".tab-btns{display:flex;gap:.5em;flex-wrap:wrap}"
+           ".tab-metrics{margin-left:auto;display:flex;gap:.4em;align-items:center;flex-wrap:wrap}"
+           ".metric-chip{padding:.28em .62em;border-radius:999px;border:1px solid var(--line);"
+               "background:var(--panel-2);font-size:.78em;font-weight:700;line-height:1.2;white-space:nowrap}"
+           ".metric-good{color:#8ef2b8;border-color:#3e8f66}"
+           ".metric-warn{color:#ffd181;border-color:#a57a2d}"
+           ".metric-bad{color:#ff9f9f;border-color:#a75454}"
         ".tab-btn{margin:0;padding:.45em 1em;background:var(--panel-2);color:var(--text);"
              "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.9em;font-weight:600}"
         ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
@@ -119,6 +158,19 @@ static const char kHead[] =
         ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
         ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
         ".node-meta b{color:var(--text)}"
+        ".live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
+        ".live-toolbar{display:flex;justify-content:space-between;align-items:center;gap:.5em;margin-bottom:.45em}"
+        ".live-toolbar span{font-size:.68em;color:var(--text-dim)}"
+        ".live-feed{height:300px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg)}"
+        ".live-line{padding:.11em .34em;border-bottom:1px solid rgba(255,255,255,.04);"
+            "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.66em;line-height:1.18;color:#dfe7ef}"
+        ".live-line:nth-child(odd){background:var(--panel-2)}"
+        ".live-line.live-rx{color:#67d8ff}"
+        ".live-line.live-tx{color:#ffd56b}"
+        ".live-line.live-ack{color:#89e7a5}"
+        ".live-line.live-dm{color:#f2a4ff}"
+        ".live-line.live-enc{color:#ffbe73}"
+        ".live-line.live-err{color:#ff8f8f;font-weight:700}"
         ".leaflet-container{font:12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
         ".leaflet-control-attribution{font-size:.65em}"
     ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
@@ -148,7 +200,7 @@ static const TzOption kTzOptions[] = {
     { "US — Mountain (UTC-7/-6)",           "MST7MDT,M3.2.0,M11.1.0"                },
     { "US — Arizona, no DST (UTC-7)",       "MST7"                                   },
     { "US — Central (UTC-6/-5)",            "CST6CDT,M3.2.0,M11.1.0"                },
-    { "US — Eastern (UTC-5/-4)",            "EST5EDT,M3.2.0,M11.1.0"                },
+    { "US — Eastern (Detroit) (UTC-5/-4)",  "EST5EDT,M3.2.0,M11.1.0"                },
     { "Canada — Atlantic (UTC-4/-3)",       "AST4ADT,M3.2.0/0,M11.1.0/0"            },
     { "Brazil — Brasilia (UTC-3)",          "BRT3BRST,M10.3.0/0,M2.3.0/0"           },
     { "Argentina (UTC-3)",                  "ART3"                                   },
@@ -240,6 +292,18 @@ static void sendConfigPage(const char *msg = "") {
         (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
                                                 (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
     int totalNodes = Nodes.count();
+    uint8_t battPct = readBatteryPctWeb();
+    const char *battCls = (battPct >= 60) ? "metric-good" : ((battPct >= 25) ? "metric-warn" : "metric-bad");
+    bool gpsEn = gpsIsEnabled();
+    bool gpsFix = gpsHasFix();
+    uint8_t gpsSat = gpsSats();
+    const char *gpsCls = !gpsEn ? "metric-bad" : (gpsFix ? "metric-good" : "metric-warn");
+    char battChip[24];
+    snprintf(battChip, sizeof(battChip), "BAT %u%%", (unsigned)battPct);
+    char gpsChip[48];
+    if (!gpsEn) snprintf(gpsChip, sizeof(gpsChip), "GPS OFF");
+    else if (gpsFix) snprintf(gpsChip, sizeof(gpsChip), "GPS FIX %u", (unsigned)gpsSat);
+    else snprintf(gpsChip, sizeof(gpsChip), "GPS SEARCH %u", (unsigned)gpsSat);
     int mapPointCount = 0;
     String mapPoints = "[";
     String nodeCards = "";
@@ -376,11 +440,20 @@ static void sendConfigPage(const char *msg = "") {
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
 
-        html += "<div class='tab-row'>"
+        html += "<div class='tab-row'><div class='tab-btns'>"
             "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
-            "</div>";
+            "</div><div class='tab-metrics'><span class='metric-chip ";
+        html += battCls;
+        html += "'>";
+        html += battChip;
+        html += "</span><span class='metric-chip ";
+        html += gpsCls;
+        html += "'>";
+        html += gpsChip;
+        html += "</span></div></div>";
         html += "<div class='tab-panel active' id='tab-config'>";
 
     html += "<form method='POST' action='/save'>";
@@ -826,6 +899,17 @@ static void sendConfigPage(const char *msg = "") {
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
         " The device will behave as if freshly flashed.</p>";
 
+    html += "</div><div class='tab-panel' id='tab-live'>";
+    html += "<h3 style='margin-top:1.2em'>Live RX/TX</h3>"
+            "<p class='gps-hint'>Streams the Announcements feed from the device, similar to the on-device ANN view.</p>"
+            "<div class='live-wrap'>"
+            "<div class='live-toolbar'>"
+            "<button type='button' class='map-mini-btn' onclick='clearLiveFeed()'>Clear View</button>"
+            "<span id='live-status'>Paused</span>"
+            "</div>"
+            "<div id='live-feed' class='live-feed'></div>"
+            "</div>";
+
     html += "</div><div class='tab-panel' id='tab-map'>";
     html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
@@ -863,9 +947,75 @@ static void sendConfigPage(const char *msg = "") {
                         "var nodeMarkerLayer=null;"
                         "var nodeHeatLayer=null;"
                         "var nodeHeatOn=true;"
+                        "var livePollTimer=null;"
+                        "var liveCursor=-1;"
                         "function setMapStatus(msg){"
                             "var el=document.getElementById('map-status');"
                             "if(el)el.textContent=msg||'';"
+                        "}"
+                        "function setLiveStatus(msg){"
+                            "var el=document.getElementById('live-status');"
+                            "if(el)el.textContent=msg||'';"
+                        "}"
+                        "function clearLiveFeed(){"
+                            "var box=document.getElementById('live-feed');"
+                            "if(box)box.innerHTML='';"
+                        "}"
+                        "function liveBodyText(t){"
+                            "var s=(t||'').trimStart();"
+                            "if(s.length>=6&&s.charCodeAt(0)>=48&&s.charCodeAt(0)<=57&&s.charCodeAt(1)>=48&&s.charCodeAt(1)<=57&&s.charAt(2)===':'&&s.charCodeAt(3)>=48&&s.charCodeAt(3)<=57&&s.charCodeAt(4)>=48&&s.charCodeAt(4)<=57&&s.charAt(5)===' ')s=s.slice(6).trimStart();"
+                            "return s;"
+                        "}"
+                        "function liveTypeClass(t){"
+                            "var s=liveBodyText(t);"
+                            "if(!s)return '';"
+                            "if(s.indexOf(' ER')>=0)return 'live-err';"
+                            "if(s.indexOf('T ACK')===0)return 'live-ack';"
+                            "if(s.indexOf('T DM')===0)return 'live-dm';"
+                            "if(s.indexOf('R ')===0&&s.indexOf(' ENC ')>=0)return 'live-enc';"
+                            "if(s.indexOf('R ')===0)return 'live-rx';"
+                            "if(s.indexOf('T ')===0)return 'live-tx';"
+                            "return '';"
+                        "}"
+                        "function appendLiveLines(lines){"
+                            "var box=document.getElementById('live-feed');"
+                            "if(!box||!lines||!lines.length)return;"
+                            "var autoScroll=(box.scrollTop+box.clientHeight+18)>=box.scrollHeight;"
+                            "for(var i=0;i<lines.length;i++){"
+                                "var txt=(lines[i]&&lines[i].t)?lines[i].t:'';"
+                                "var cls=liveTypeClass(txt);"
+                                "var row=document.createElement('div');"
+                                "row.className=cls?('live-line '+cls):'live-line';"
+                                "row.textContent=txt;"
+                                "box.appendChild(row);"
+                            "}"
+                            "while(box.childElementCount>400){box.removeChild(box.firstChild);}"
+                            "if(autoScroll)box.scrollTop=box.scrollHeight;"
+                        "}"
+                        "function pollLiveFeed(){"
+                            "var url='/live-data';"
+                            "if(liveCursor>=0)url+='?after='+liveCursor;"
+                            "fetch(url,{cache:'no-store'})"
+                                ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})"
+                                ".then(function(d){"
+                                    "var cnt=(d&&d.lines&&d.lines.length)?d.lines.length:0;"
+                                    "if(cnt)appendLiveLines(d.lines);"
+                                    "if(d&&typeof d.total==='number')liveCursor=d.total-1;"
+                                    "setLiveStatus(cnt?('+'+cnt+' update'+(cnt===1?'':'s')):'Listening...');"
+                                "})"
+                                ".catch(function(){setLiveStatus('Live feed unavailable');});"
+                        "}"
+                        "function startLivePolling(){"
+                            "if(livePollTimer)return;"
+                            "setLiveStatus('Connecting...');"
+                            "pollLiveFeed();"
+                            "livePollTimer=setInterval(pollLiveFeed,1500);"
+                        "}"
+                        "function stopLivePolling(){"
+                            "if(!livePollTimer)return;"
+                            "clearInterval(livePollTimer);"
+                            "livePollTimer=null;"
+                            "setLiveStatus('Paused');"
                         "}"
                         "function ensureNodeMap(){"
                             "var mapEl=document.getElementById('node-heatmap');"
@@ -928,13 +1078,17 @@ static void sendConfigPage(const char *msg = "") {
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isUtil=(tab==='utils');"
+                            "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
+                            "document.getElementById('tab-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-map').classList.toggle('active',isMap);"
                             "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
+                            "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
+                            "if(isLive)startLivePolling();else stopLivePolling();"
                             "if(isMap){ensureNodeMap();setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();},0);}"
                         "}"
                         "window.addEventListener('resize',function(){"
@@ -1190,6 +1344,50 @@ static void handlePostSave() {
     redirectHomeWithFlash("Saved. Rebooting now...");
 }
 
+static void handleGetLiveData() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    int after = -1;
+    if (server.hasArg("after")) after = server.arg("after").toInt();
+
+    Channel &ann = Channels.get(CHAN_ANN);
+    int total = ann.count;
+    int oldest = max(0, total - MAX_MSG_LINES);
+    int from = (after >= 0) ? (after + 1) : (total - 40);
+    if (from < oldest) from = oldest;
+    if (from < 0) from = 0;
+    if (from > total) from = total;
+
+    String out;
+    out.reserve(4096);
+    out += "{\"total\":";
+    out += String(total);
+    out += ",\"from\":";
+    out += String(from);
+    out += ",\"lines\":[";
+
+    if (ann.lines) {
+        bool first = true;
+        for (int i = from; i < total; i++) {
+            const DisplayLine &dl = ann.lines[i % MAX_MSG_LINES];
+            if (!first) out += ",";
+            first = false;
+            out += "{\"i\":";
+            out += String(i);
+            out += ",\"t\":\"";
+            appendJsonEscaped(out, dl.text);
+            out += "\"}";
+        }
+    }
+
+    out += "]}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", out);
+}
+
 // ── Announce ─────────────────────────────────────────────────
 
 static void handlePostAnnounce() {
@@ -1352,6 +1550,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
         server.on("/login",   HTTP_GET,  handleGetLogin);
         server.on("/login",   HTTP_POST, handlePostLogin);
         server.on("/save",    HTTP_POST, handlePostSave);
+        server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
@@ -1387,6 +1586,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
             server.on("/login",   HTTP_GET,  handleGetLogin);
             server.on("/login",   HTTP_POST, handlePostLogin);
             server.on("/save",    HTTP_POST, handlePostSave);
+            server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
@@ -1407,6 +1607,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/login",   HTTP_GET,  handleGetLogin);
     server.on("/login",   HTTP_POST, handlePostLogin);
     server.on("/save",    HTTP_POST, handlePostSave);
+    server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/announce",HTTP_POST, handlePostAnnounce);

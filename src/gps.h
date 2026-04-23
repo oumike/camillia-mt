@@ -41,3 +41,8 @@ float gpsCourse();
 
 // Speed over ground in km/h.
 float gpsSpeedKmh();
+
+// UTC date/time from GPS fix (year, month, day, hour, minute, second).
+// Returns false until a valid fix with valid date+time is available.
+bool gpsUtcDateTime(int &year, int &month, int &day,
+					int &hour, int &minute, int &second);

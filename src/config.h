@@ -78,6 +78,7 @@
 #define MY_NODEINFO_INTV  900      // 15 min (seconds)
 #define MY_POS_INTV      1800      // 30 min (seconds)
 #define MY_REGION        "US"
+#define MY_TZ_DEF        "EST5EDT,M3.2.0,M11.1.0"   // Eastern (Detroit)
 
 // ── Display defaults ──────────────────────────────────────────
 #define MY_SCREEN_ON_SECS   30     // 30 s
@@ -123,13 +124,13 @@
 #define LCD_W           320
 #define LCD_H           240
 
-#define STATUS_H         10   // top status bar
+#define STATUS_H         28   // top status bar
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
 #define MSG_W           230   // message pane width
 #define NODE_X          231   // node pane left edge
 #define NODE_W           89   // node pane width
 #define DIVIDER_X       230   // 1px vertical divider
-#define CHAT_Y           24   // top of chat/node area (STATUS_H + TAB_H)
+#define CHAT_Y   (STATUS_H + TAB_H) // top of chat/node area
 #define INPUT_H          52   // input area (typed text + touch nav buttons)
 #define CHAT_H         (LCD_H - CHAT_Y - INPUT_H) // height of chat area
 #define INPUT_Y        (LCD_H - INPUT_H)          // top of input area
@@ -150,7 +151,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 // ── Message storage ───────────────────────────────────────────
 #define MESH_CHANNELS     8   // number of actual LoRa channels (0-7)
 #define CHAN_DM           8   // Direct Messages tab (virtual, local-only)
-#define CHAN_ANN          9   // Announcements tab   (virtual, local-only)
+#define CHAN_ANN          9   // Live feed tab       (virtual, local-only)
 #define MAX_CHANNELS     10   // MESH_CHANNELS + DM + ANN
 #define MAX_MSG_LINES   400   // display lines per channel (in PSRAM)
 #define MAX_INPUT_LEN   200

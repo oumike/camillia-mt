@@ -146,6 +146,7 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
 
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out) {
     out.latI = out.lonI = out.alt = 0;
+    // Legacy compatibility: older builds encoded lat/lon as sint32 varints.
     auto unzz = [](uint32_t v) -> int32_t {
         return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
     };
@@ -153,11 +154,22 @@ bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out) {
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
         uint32_t field = tag >> 3, wtype = tag & 7;
-        if (wtype == 0) {
+        if (wtype == 5) {
+            // Current Meshtastic Position.latitude_i/longitude_i are sfixed32.
+            if (i + 4 > len) break;
+            uint32_t v = (uint32_t)buf[i]
+                       | ((uint32_t)buf[i + 1] << 8)
+                       | ((uint32_t)buf[i + 2] << 16)
+                       | ((uint32_t)buf[i + 3] << 24);
+            if (field == 1) out.latI = (int32_t)v;
+            else if (field == 2) out.lonI = (int32_t)v;
+            else if (field == 3) out.alt  = (int32_t)v;
+            i += 4;
+        } else if (wtype == 0) {
             uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
-            if (field == 1) out.latI = unzz((uint32_t)v);     // sint32 zigzag
-            else if (field == 2) out.lonI = unzz((uint32_t)v); // sint32 zigzag
-            else if (field == 3) out.alt  = (int32_t)(uint32_t)v; // int32 varint
+            if (field == 1) out.latI = unzz((uint32_t)v);
+            else if (field == 2) out.lonI = unzz((uint32_t)v);
+            else if (field == 3) out.alt  = (int32_t)(uint32_t)v;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
     }
     return true;
@@ -527,13 +539,22 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen) {
     uint8_t pos[32]; size_t p = 0;
 
-    // lat/lon are sint32 in Meshtastic proto — zigzag encode
-    auto zz = [](int32_t v) -> uint32_t {
-        return ((uint32_t)v << 1) ^ (uint32_t)(v >> 31);
+    // Meshtastic Position.latitude_i/longitude_i are sfixed32.
+    auto writeFixed32 = [&](uint32_t field, int32_t value) -> bool {
+        if (p + 5 > sizeof(pos)) return false;
+        pos[p++] = (uint8_t)((field << 3) | 5);
+        uint32_t v = (uint32_t)value;
+        pos[p++] = (uint8_t)(v & 0xFF);
+        pos[p++] = (uint8_t)((v >> 8) & 0xFF);
+        pos[p++] = (uint8_t)((v >> 16) & 0xFF);
+        pos[p++] = (uint8_t)((v >> 24) & 0xFF);
+        return true;
     };
-    p += pbWriteVarint(pos + p, (1 << 3) | 0); p += pbWriteVarint(pos + p, zz(latI));
-    p += pbWriteVarint(pos + p, (2 << 3) | 0); p += pbWriteVarint(pos + p, zz(lonI));
+
+    if (!writeFixed32(1, latI) || !writeFixed32(2, lonI)) return 0;
+
     // altitude is int32 — plain varint (two's complement for negatives)
+    if (p + 6 > sizeof(pos)) return 0;
     p += pbWriteVarint(pos + p, (3 << 3) | 0); p += pbWriteVarint(pos + p, (uint32_t)alt);
 
     // Wrap in Data message

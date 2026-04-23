@@ -151,7 +151,7 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
                       uint8_t *buf, size_t bufLen, bool wantResponse = true);
 
-// Encode a POSITION_APP Data message. lat/lon are sint32 (degrees * 1e7),
+// Encode a POSITION_APP Data message. lat/lon are sfixed32 (degrees * 1e7),
 // alt is int32 (meters). Returns encoded length.
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen);

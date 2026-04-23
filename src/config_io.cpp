@@ -119,7 +119,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.posIntervalS      = MY_POS_INTV;
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
     cfg.region[sizeof(cfg.region) - 1] = '\0';
-    cfg.tzDef[0]           = '\0';
+    strncpy(cfg.tzDef, MY_TZ_DEF, sizeof(cfg.tzDef) - 1);
+    cfg.tzDef[sizeof(cfg.tzDef) - 1] = '\0';
     cfg.wifiSsid[0]        = '\0';
     cfg.wifiPass[0]        = '\0';
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
