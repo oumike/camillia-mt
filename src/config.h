@@ -124,14 +124,14 @@
 #define LCD_W           320
 #define LCD_H           240
 
-#define STATUS_H         28   // top status bar
+#define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
 #define MSG_W           230   // message pane width
 #define NODE_X          231   // node pane left edge
 #define NODE_W           89   // node pane width
 #define DIVIDER_X       230   // 1px vertical divider
 #define CHAT_Y   (STATUS_H + TAB_H) // top of chat/node area
-#define INPUT_H          52   // input area (typed text + touch nav buttons)
+#define INPUT_H          37   // input area (typed text + touch nav buttons)
 #define CHAT_H         (LCD_H - CHAT_Y - INPUT_H) // height of chat area
 #define INPUT_Y        (LCD_H - INPUT_H)          // top of input area
 

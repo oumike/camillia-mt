@@ -43,22 +43,24 @@ uint8_t myPrivKey[32] = {};
 uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config load
 
 // ── View state ────────────────────────────────────────────────
-#define VIEW_GPS      MAX_CHANNELS          // index 9 = GPS/compass page
-#define VIEW_SETTINGS (MAX_CHANNELS + 1)    // index 10 = settings page
-#define TOTAL_VIEWS   (MAX_CHANNELS + 2)    // 11 total
-static int  activeView   = 0;              // 0..8 channel, 9 GPS, 10 settings
+#define VIEW_GPS      MAX_CHANNELS
+#define VIEW_MAP      (MAX_CHANNELS + 1)
+#define VIEW_SETTINGS (MAX_CHANNELS + 2)
+#define TOTAL_VIEWS   (MAX_CHANNELS + 3)
+static int  activeView   = 0;              // 0..9 channels, 10 GPS, 11 MAP, 12 settings
 static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
-static int  panelReturnChannel = 0;       // channel to return to when closing DM/ANN/CFG
+static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG
 static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsNavSel = -1;      // -1 none, 0=UP, 1=DOWN (CFG touch nav buttons)
+static int  mapsListSel = 0;          // highlighted node row in MAP panel
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
 static const int TOUCH_BTN_W = 58;
 static const int TOUCH_BTN_H = 24;
 static const int TOUCH_BTN_STACK_GAP = 6;
 static const int TOUCH_BTN_BOTTOM_PAD = 5;
-static const int NAV_BTN_COUNT = 5;
+static const int NAV_BTN_COUNT = 6;
 
 struct PanelHitRect {
     int x;
@@ -76,6 +78,28 @@ static PanelHitRect panelUpRect = {0, 0, 0, 0};
 static PanelHitRect panelDownRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
+
+enum MapControlAction {
+    MAP_CTL_ZOOM_IN = 0,
+    MAP_CTL_ZOOM_OUT,
+    MAP_CTL_LIST_PREV,
+    MAP_CTL_LIST_NEXT,
+    MAP_CTL_ME,
+    MAP_CTL_COUNT,
+};
+
+static bool mapCtlVisible[MAP_CTL_COUNT] = {};
+static PanelHitRect mapCtlRect[MAP_CTL_COUNT] = {};
+
+static bool  mapViewManual = false;
+static float mapViewCenterLat = 0.0f;
+static float mapViewCenterLon = 0.0f;
+static float mapViewLatSpan = 180.0f;
+static float mapViewLonSpan = 360.0f;
+static float mapLastCenterLat = 0.0f;
+static float mapLastCenterLon = 0.0f;
+static float mapLastLatSpan = 180.0f;
+static float mapLastLonSpan = 360.0f;
 
 
 static void setPanelCloseRect(int x, int y, int w, int h) {
@@ -99,6 +123,10 @@ static void clearPanelCloseRect() {
     panelDownRect = {0, 0, 0, 0};
     dmNewVisible = false;
     dmNewRect = {0, 0, 0, 0};
+    for (int i = 0; i < MAP_CTL_COUNT; i++) {
+        mapCtlVisible[i] = false;
+        mapCtlRect[i] = {0, 0, 0, 0};
+    }
 }
 
 static void setPanelScrollRects(int upX, int upY, int upW, int upH,
@@ -114,8 +142,15 @@ static void setDmNewRect(int x, int y, int w, int h) {
     dmNewRect = { x, y, w, h };
 }
 
+static void setMapControlRect(MapControlAction action, int x, int y, int w, int h) {
+    int ai = (int)action;
+    if (ai < 0 || ai >= MAP_CTL_COUNT) return;
+    mapCtlVisible[ai] = true;
+    mapCtlRect[ai] = { x, y, w, h };
+}
+
 static bool isPanelView(int v) {
-    return (v == CHAN_DM || v == CHAN_ANN || v == VIEW_SETTINGS);
+    return (v == CHAN_DM || v == CHAN_ANN || v == VIEW_MAP || v == VIEW_SETTINGS);
 }
 
 static bool isTopTabView(int v) {
@@ -123,6 +158,7 @@ static bool isTopTabView(int v) {
 }
 
 static void closePanelToChannel();
+static void mapClampViewport();
 
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
@@ -452,7 +488,7 @@ static uint32_t nodeDetailId    = 0;
 static bool isViewNavigable(int v) {
     if (v >= 0 && v < MESH_CHANNELS)
         return CHANNEL_KEYS[v].name[0] != '\0';
-    return true;  // CHAN_ANN, VIEW_GPS, VIEW_SETTINGS always reachable
+    return true;  // panel + utility views are always reachable
 }
 
 static int nextView(int from) {
@@ -481,7 +517,7 @@ static void goToView(int v) {
             : lastChannelView;
     }
 
-    bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS
+    bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS || activeView == VIEW_MAP
                          || activeView == CHAN_DM);
     activeView = v;
     clearPanelCloseRect();
@@ -506,6 +542,9 @@ static void goToView(int v) {
         // Even if no unread, pre-select the most recent conversation (not "New DM")
         if (!dmConvOpen && DMs.count() > 0)
             dmListSel = 1;
+    }
+    if (v == VIEW_MAP) {
+        mapsListSel = constrain(mapsListSel, 0, max(0, Nodes.count() - 1));
     }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
@@ -812,14 +851,15 @@ static void drawBattery() {
         col     = lerp565(col,     COL_TEXT_MAIN, 72);
     }
 
-    const int BAR_H = 13;
-    const int NUB_W = 3, NUB_H = 5;
+    const int BAR_H = 14;
+    const int NUB_W = 3, NUB_H = 6;
     const int ICON_GAP_WIDE = 6;
     const int ICON_GAP_TIGHT = 4;
-    const int GPS_DOT_R = 4;
-    const int WIFI_W = 13;
+    const int GPS_DOT_R = 5;
+    const int WIFI_W = 15;
+    const int WIFI_H = 12;
     const int AP_PAD_X = 4;
-    const int AP_H = 11;
+    const int AP_H = 12;
 
     lcd.setFont(&fonts::Font0);
     lcd.setTextSize(1);
@@ -882,28 +922,44 @@ static void drawBattery() {
         int apTy = apY + max(0, (AP_H - CHAR_H) / 2);
         lcd.drawString("AP", apTx, apTy);
     } else {
-        auto drawWifiGlyph = [&](int x, int y, uint16_t c, uint16_t outline, bool disconnected) {
-            int cx = x + WIFI_W / 2;
-            lcd.drawFastHLine(cx - 6, y + 1, 13, outline);
-            lcd.drawFastHLine(cx - 5, y + 2, 11, outline);
-            lcd.drawFastHLine(cx - 4, y + 3, 9, outline);
-            lcd.drawFastHLine(cx - 3, y + 4, 7, outline);
-            lcd.drawFastHLine(cx - 2, y + 5, 5, outline);
-            lcd.drawFastHLine(cx - 1, y + 6, 3, outline);
-            lcd.drawPixel(cx, y + 7, outline);
-
-            lcd.drawFastHLine(cx - 5, y + 1, 11, c);
-            lcd.drawFastHLine(cx - 4, y + 2, 9, c);
-            lcd.drawFastHLine(cx - 3, y + 3, 7, c);
-            lcd.drawFastHLine(cx - 2, y + 4, 5, c);
-            lcd.drawFastHLine(cx - 1, y + 5, 3, c);
-            lcd.drawPixel(cx, y + 6, c);
-            if (disconnected) {
-                lcd.drawLine(x + 1, y + 8, x + WIFI_W - 2, y + 1, outline);
-                lcd.drawLine(x + 1, y + 7, x + WIFI_W - 2, y + 1, c);
+        auto drawUpperArc = [&](int cx, int cy, int r, uint16_t col) {
+            int px = 0;
+            int py = r;
+            int d = 1 - r;
+            while (px <= py) {
+                lcd.drawPixel(cx + px, cy - py, col);
+                lcd.drawPixel(cx - px, cy - py, col);
+                lcd.drawPixel(cx + py, cy - px, col);
+                lcd.drawPixel(cx - py, cy - px, col);
+                if (d < 0) d += 2 * px + 3;
+                else {
+                    d += 2 * (px - py) + 5;
+                    py--;
+                }
+                px++;
             }
         };
-        int wifiY = max(0, (STATUS_H - 9) / 2);
+
+        auto drawWifiGlyph = [&](int x, int y, uint16_t c, uint16_t outline, bool disconnected) {
+            int cx = x + WIFI_W / 2;
+            int cy = y + WIFI_H - 2;
+
+            drawUpperArc(cx, cy, 6, outline);
+            drawUpperArc(cx, cy, 4, outline);
+            drawUpperArc(cx, cy, 2, outline);
+            drawUpperArc(cx, cy, 5, c);
+            drawUpperArc(cx, cy, 3, c);
+            drawUpperArc(cx, cy, 1, c);
+
+            lcd.fillCircle(cx, cy, 1, c);
+            lcd.drawPixel(cx, cy + 1, outline);
+
+            if (disconnected) {
+                lcd.drawLine(x + 1, y + WIFI_H - 1, x + WIFI_W - 2, y + 1, outline);
+                lcd.drawLine(x + 1, y + WIFI_H - 2, x + WIFI_W - 2, y + 1, c);
+            }
+        };
+        int wifiY = max(0, (STATUS_H - WIFI_H) / 2);
         drawWifiGlyph(WX, wifiY, wifiCol, iconStroke, !wifiConnected);
     }
 
@@ -1260,6 +1316,433 @@ static void drawLivePanel(bool fullRedraw) {
     lcd.setFont(&fonts::Font0);
     dirtyLiveRows = false;
     if (fullRedraw) dirtyChat = false;
+}
+
+static int32_t decodeZigZag32(uint32_t v) {
+    return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
+}
+
+static bool mapCoordInRange(float lat, float lon) {
+    return !(lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f);
+}
+
+static bool mapExtractNodeCoords(const NodeEntry *n, float &lat, float &lon) {
+    if (!n) return false;
+    bool hasCoords = (n->latI != 0 || n->lonI != 0);
+    if (!n->hasPosition && !hasCoords) return false;
+
+    lat = n->latI * 1e-7f;
+    lon = n->lonI * 1e-7f;
+    if (mapCoordInRange(lat, lon)) return true;
+
+    // Backward compatibility for older packets stored with non-zigzag decode.
+    int32_t latRecovered = decodeZigZag32((uint32_t)n->latI);
+    int32_t lonRecovered = decodeZigZag32((uint32_t)n->lonI);
+    float latRec = latRecovered * 1e-7f;
+    float lonRec = lonRecovered * 1e-7f;
+    if (!mapCoordInRange(latRec, lonRec)) return false;
+
+    lat = latRec;
+    lon = lonRec;
+    return true;
+}
+
+static bool mapIsApMode() {
+    wifi_mode_t mode = WiFi.getMode();
+    bool ap = (mode == WIFI_AP);
+#ifdef WIFI_AP_STA
+    ap = ap || (mode == WIFI_AP_STA);
+#endif
+    return ap;
+}
+
+static bool mapCanDownloadTiles() {
+    if (mapIsApMode()) return false;
+    return WiFi.status() == WL_CONNECTED;
+}
+
+static bool mapEnsureDir(const char *path) {
+    if (SD.exists(path)) return true;
+    return SD.mkdir(path);
+}
+
+static String mapTilePath(uint8_t z, int x, int y) {
+    String p = "/camillia/tiles/";
+    p += String((unsigned)z);
+    p += "/";
+    p += String(x);
+    p += "/";
+    p += String(y);
+    p += ".png";
+    return p;
+}
+
+static bool mapEnsureTileDirs(uint8_t z, int x) {
+    if (!mapEnsureDir("/camillia")) return false;
+    if (!mapEnsureDir("/camillia/tiles")) return false;
+
+    String zDir = String("/camillia/tiles/") + String((unsigned)z);
+    if (!mapEnsureDir(zDir.c_str())) return false;
+
+    String xDir = zDir + "/" + String(x);
+    if (!mapEnsureDir(xDir.c_str())) return false;
+    return true;
+}
+
+static bool mapDownloadTile(uint8_t z, int x, int y, const char *path) {
+    if (!mapCanDownloadTiles()) return false;
+    if (!mapEnsureTileDirs(z, x)) return false;
+
+    String url = "https://tile.openstreetmap.org/";
+    url += String((unsigned)z);
+    url += "/";
+    url += String(x);
+    url += "/";
+    url += String(y);
+    url += ".png";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(10000);
+
+    HTTPClient http;
+    if (!http.begin(client, url)) return false;
+    http.addHeader("User-Agent", "camillia-mt/1.0");
+
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        http.end();
+        return false;
+    }
+
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) {
+        http.end();
+        return false;
+    }
+
+    int written = http.writeToStream(&f);
+    f.close();
+    http.end();
+
+    bool ok = (written > 0);
+    if (!ok) SD.remove(path);
+    return ok;
+}
+
+static bool mapEnsureTileFile(uint8_t z, int x, int y, bool allowDownload,
+                              String &path, bool &downloaded) {
+    downloaded = false;
+    path = mapTilePath(z, x, y);
+    if (SD.exists(path.c_str())) return true;
+    if (!allowDownload) return false;
+
+    if (!mapDownloadTile(z, x, y, path.c_str())) return false;
+    downloaded = true;
+    return true;
+}
+
+static void drawMapPanel() {
+    clearPanelCloseRect();
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+    const int navRowY = INPUT_Y + INPUT_H - TOUCH_BTN_H - 2;
+    const int mapPanelBottom = navRowY - 1;
+    const int mh = max(CHAT_H, mapPanelBottom - my + 1);
+    const int mapNavBtnH = 22;
+    const int mapNavBottomPad = 2;
+    const int mapNavGap = 3;
+    const int titleH = 11;
+    const int ix = mx + 3;
+    const int iw = mw - 6;
+    const int controlsTop = my + mh - (mapNavBtnH + mapNavBottomPad);
+    const int mapY = my + titleH + 2;
+    const int mapH = max(64, controlsTop - mapY - 2);
+    const int colGap = 4;
+    const int listW = min(96, max(72, iw / 3));
+    const int mapX = ix;
+    const int listX = ix + iw - listW;
+    const int mapW = max(90, listX - mapX - colGap);
+    const int listY = mapY;
+    const int listHeaderH = 10;
+    const int rowH = 9;
+    const int rowsVisible = max(1, (mapH - listHeaderH - 1) / rowH);
+    const int totalNodes = Nodes.count();
+    mapsListSel = constrain(mapsListSel, 0, max(0, totalNodes - 1));
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(1);
+
+    int positionedCount = 0;
+    float minLat = 90.0f, maxLat = -90.0f;
+    float minLon = 180.0f, maxLon = -180.0f;
+    for (int i = 0; i < totalNodes; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        float lat = 0.0f, lon = 0.0f;
+        if (!mapExtractNodeCoords(n, lat, lon)) continue;
+        positionedCount++;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+    }
+
+    float autoMinLat = -90.0f, autoMaxLat = 90.0f;
+    float autoMinLon = -180.0f, autoMaxLon = 180.0f;
+    if (positionedCount >= 2) {
+        float latSpan = maxLat - minLat;
+        float lonSpan = maxLon - minLon;
+        float latPad = max(0.5f, latSpan * 0.15f);
+        float lonPad = max(0.5f, lonSpan * 0.15f);
+        autoMinLat = max(-90.0f, minLat - latPad);
+        autoMaxLat = min( 90.0f, maxLat + latPad);
+        autoMinLon = max(-180.0f, minLon - lonPad);
+        autoMaxLon = min( 180.0f, maxLon + lonPad);
+    } else if (positionedCount == 1) {
+        float cLat = 0.5f * (minLat + maxLat);
+        float cLon = 0.5f * (minLon + maxLon);
+        autoMinLat = max(-90.0f, cLat - 12.0f);
+        autoMaxLat = min( 90.0f, cLat + 12.0f);
+        autoMinLon = max(-180.0f, cLon - 18.0f);
+        autoMaxLon = min( 180.0f, cLon + 18.0f);
+    }
+
+    float autoCenterLat = 0.5f * (autoMinLat + autoMaxLat);
+    float autoCenterLon = 0.5f * (autoMinLon + autoMaxLon);
+    float autoLatSpan = max(0.001f, autoMaxLat - autoMinLat);
+    float autoLonSpan = max(0.001f, autoMaxLon - autoMinLon);
+
+    if (!mapViewManual) {
+        mapViewCenterLat = autoCenterLat;
+        mapViewCenterLon = autoCenterLon;
+        mapViewLatSpan = autoLatSpan;
+        mapViewLonSpan = autoLonSpan;
+    }
+    mapClampViewport();
+
+    mapLastCenterLat = mapViewCenterLat;
+    mapLastCenterLon = mapViewCenterLon;
+    mapLastLatSpan = mapViewLatSpan;
+    mapLastLonSpan = mapViewLonSpan;
+
+    float viewMinLat = mapViewCenterLat - (mapViewLatSpan * 0.5f);
+    float viewMaxLat = mapViewCenterLat + (mapViewLatSpan * 0.5f);
+    float viewMinLon = mapViewCenterLon - (mapViewLonSpan * 0.5f);
+    float viewMaxLon = mapViewCenterLon + (mapViewLonSpan * 0.5f);
+
+    char hdr[44];
+    snprintf(hdr, sizeof(hdr), "Node Map %d/%d (%s)",
+             positionedCount, totalNodes, mapViewManual ? "manual" : "fit");
+    lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
+    drawClippedText(mx + 5, my + 2, mw - 10, hdr);
+
+    lcd.fillRect(mapX + 1, mapY + 1, mapW - 2, mapH - 2, COL_PANEL_STRONG);
+    drawPanelFrame(mapX, mapY, mapW, mapH, COL_PANEL_STRONG, COL_DIVIDER);
+    lcd.fillRect(listX + 1, listY + 1, listW - 2, mapH - 2, COL_PANEL_BG);
+    drawPanelFrame(listX, listY, listW, mapH, COL_PANEL_BG, COL_DIVIDER);
+    lcd.fillRect(listX + 1, listY + 1, listW - 2, listHeaderH, COL_PANEL_ALT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    drawClippedText(listX + 3, listY + 2, listW - 6, "Nodes");
+
+    float latRange = viewMaxLat - viewMinLat;
+    float lonRange = viewMaxLon - viewMinLon;
+    if (latRange < 0.001f) latRange = 0.001f;
+    if (lonRange < 0.001f) lonRange = 0.001f;
+
+    auto lonToX = [&](float lon) -> int {
+        float t = (lon - viewMinLon) / lonRange;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        return mapX + 2 + (int)(t * (float)(mapW - 5));
+    };
+    auto latToY = [&](float lat) -> int {
+        float t = (viewMaxLat - lat) / latRange;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        return mapY + 2 + (int)(t * (float)(mapH - 5));
+    };
+
+    bool apMode = mapIsApMode();
+    bool allowDownloads = mapCanDownloadTiles();
+    bool useTileBackdrop = !apMode;
+    bool downloadedAnyTile = false;
+
+    if (useTileBackdrop) {
+        double lonSpanForZoom = max(1.0, (double)mapViewLonSpan);
+        double zoomRaw = log2(((double)mapW * 360.0) / (256.0 * lonSpanForZoom));
+        int z = constrain((int)floor(zoomRaw), 0, 6);
+        int tileCount = 1 << z;
+
+        auto lonToWorldX = [&](double lonDeg) -> double {
+            return ((lonDeg + 180.0) / 360.0) * (256.0 * tileCount);
+        };
+        auto latToWorldY = [&](double latDeg) -> double {
+            double clamped = max(-85.05112878, min(85.05112878, latDeg));
+            double rad = clamped * M_PI / 180.0;
+            double merc = log(tan(rad) + 1.0 / cos(rad));
+            return (1.0 - merc / M_PI) * 0.5 * (256.0 * tileCount);
+        };
+
+        double centerWX = lonToWorldX(mapViewCenterLon);
+        double centerWY = latToWorldY(mapViewCenterLat);
+        double leftWX = centerWX - (double)mapW * 0.5;
+        double topWY = centerWY - (double)mapH * 0.5;
+
+        int tx0 = (int)floor(leftWX / 256.0);
+        int ty0 = (int)floor(topWY / 256.0);
+        int tx1 = (int)floor((leftWX + mapW - 1) / 256.0);
+        int ty1 = (int)floor((topWY + mapH - 1) / 256.0);
+
+        int fetchBudget = allowDownloads ? 2 : 0;
+
+        lcd.setClipRect(mapX + 1, mapY + 1, mapW - 2, mapH - 2);
+        lcd.fillRect(mapX + 1, mapY + 1, mapW - 2, mapH - 2, COL_PANEL_STRONG);
+
+        for (int ty = ty0; ty <= ty1; ty++) {
+            if (ty < 0 || ty >= tileCount) continue;
+            for (int tx = tx0; tx <= tx1; tx++) {
+                int wrappedX = tx % tileCount;
+                if (wrappedX < 0) wrappedX += tileCount;
+
+                int drawX = mapX + (int)(tx * 256.0 - leftWX);
+                int drawY = mapY + (int)(ty * 256.0 - topWY);
+
+                String tilePath;
+                bool downloaded = false;
+                bool hasTile = mapEnsureTileFile((uint8_t)z, wrappedX, ty,
+                                                fetchBudget > 0, tilePath, downloaded);
+                if (downloaded && fetchBudget > 0) {
+                    fetchBudget--;
+                    downloadedAnyTile = true;
+                }
+
+                if (hasTile) {
+                    lcd.drawPngFile(SD, tilePath.c_str(), drawX, drawY);
+                } else {
+                    uint16_t fb = (((wrappedX + ty) & 1) ? COL_PANEL_STRONG : COL_PANEL_ALT);
+                    lcd.fillRect(drawX, drawY, 256, 256, fb);
+                    lcd.drawRect(drawX, drawY, 256, 256, COL_DIVIDER);
+                }
+            }
+        }
+
+        lcd.clearClipRect();
+    } else {
+        // AP mode fallback: keep the existing lightweight map rendering.
+        for (int g = 1; g < 4; g++) {
+            int gx = mapX + (g * (mapW - 1)) / 4;
+            int gy = mapY + (g * (mapH - 1)) / 4;
+            lcd.drawFastVLine(gx, mapY + 1, mapH - 2, COL_DIVIDER_HI);
+            lcd.drawFastHLine(mapX + 1, gy, mapW - 2, COL_DIVIDER_HI);
+        }
+    }
+
+    uint32_t selectedNodeId = 0;
+    if (totalNodes > 0) {
+        NodeEntry *sel = Nodes.getByRank(mapsListSel);
+        if (sel) selectedNodeId = sel->nodeId;
+    }
+
+    uint32_t nowMs = millis();
+    for (int i = 0; i < totalNodes; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        float lat = 0.0f, lon = 0.0f;
+        if (!mapExtractNodeCoords(n, lat, lon)) continue;
+
+        int px = lonToX(lon);
+        int py = latToY(lat);
+        uint16_t col = COL_TAB_IDLE;
+        if (n->lastHeardMs != 0 && nowMs >= n->lastHeardMs) {
+            uint32_t age = nowMs - n->lastHeardMs;
+            if (age < 60000UL) col = COL_NODE_HOT;
+            else if (age < 3600000UL) col = COL_NODE_WARM;
+        }
+        int radius = (n->nodeId == selectedNodeId) ? 3 : 2;
+        lcd.fillCircle(px, py, radius, col);
+        if (n->nodeId == selectedNodeId) {
+            lcd.drawCircle(px, py, radius + 2, COL_SELECT_ACCENT);
+        }
+    }
+    if (positionedCount == 0) {
+        lcd.setFont(&fonts::Font0);
+        lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_STRONG);
+        drawClippedText(mapX + 6, mapY + mapH / 2 - 4, mapW - 12, "No positioned nodes yet");
+        lcd.setFont(&fonts::DejaVu9);
+    }
+
+    const int listRowsTop = listY + listHeaderH + 1;
+    if (totalNodes == 0) {
+        lcd.fillRect(listX + 1, listRowsTop, listW - 2, rowH, COL_PANEL_BG);
+        lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
+        drawClippedText(listX + 2, listRowsTop + 1, listW - 4, "None");
+    } else {
+        int firstVisible = max(0, mapsListSel - (rowsVisible - 1));
+        int maxFirst = max(0, totalNodes - rowsVisible);
+        if (firstVisible > maxFirst) firstVisible = maxFirst;
+
+        for (int row = 0; row < rowsVisible; row++) {
+            int idx = firstVisible + row;
+            int y = listRowsTop + row * rowH;
+            uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
+            lcd.fillRect(listX + 1, y, listW - 2, rowH, rowBg);
+            if (idx >= totalNodes) continue;
+
+            NodeEntry *n = Nodes.getByRank(idx);
+            if (!n) continue;
+
+            bool sel = (idx == mapsListSel);
+            uint16_t bg = sel ? COL_SELECT_BG : rowBg;
+            if (sel) lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+
+            bool hasLocation = false;
+            float lat = 0.0f, lon = 0.0f;
+            hasLocation = mapExtractNodeCoords(n, lat, lon);
+            const char *sn = n->shortName[0] ? n->shortName : "----";
+            uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
+            lcd.setTextColor(fg, bg);
+            drawClippedText(listX + 3, y + 1, listW - 6, sn);
+        }
+    }
+
+    const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
+    const int closeW = 46;
+    drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
+
+    const int ctlCount = MAP_CTL_COUNT;
+    const int minCtlX = mx + 3 + closeW + 4;
+    int btnW[MAP_CTL_COUNT] = { 30, 30, 80, 60, 30 };
+    const char *labels[MAP_CTL_COUNT] = { "+", "-", "Previous Node", "Next Node", "ME" };
+
+    int controlsW = 0;
+    for (int i = 0; i < ctlCount; i++) controlsW += btnW[i];
+    controlsW += (ctlCount - 1) * mapNavGap;
+
+    int ctlStartX = minCtlX;
+    int maxCtlEnd = mx + mw - 4;
+    int extraW = (maxCtlEnd - minCtlX) - controlsW;
+    if (extraW > 0) ctlStartX += extraW / 2;
+
+    for (int i = 0; i < ctlCount; i++) {
+        int bx = ctlStartX;
+        for (int j = 0; j < i; j++) bx += btnW[j] + mapNavGap;
+        uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+        drawSquirclePill(bx, btnY, btnW[i], mapNavBtnH, fill, COL_SELECT_ACCENT, false);
+        lcd.setFont(&fonts::Font0);
+        lcd.setTextColor(COL_TEXT_MAIN, fill);
+        int tw = lcd.textWidth(labels[i]);
+        int tx = bx + max(1, (btnW[i] - tw) / 2);
+        int ty = btnY + max(0, (mapNavBtnH - CHAR_H) / 2);
+        drawClippedText(tx, ty, btnW[i] - (tx - bx) - 1, labels[i]);
+        setMapControlRect((MapControlAction)i, bx, btnY, btnW[i], mapNavBtnH);
+    }
+
+    lcd.setFont(&fonts::Font0);
+    dirtyNodes = false;
+    dirtyChat = downloadedAnyTile;
 }
 
 // ── Draw: node list ───────────────────────────────────────────
@@ -1884,6 +2367,7 @@ static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
     return !((activeView == CHAN_ANN)
             || (activeView == CHAN_DM && !dmNeedsInput)
+            || (activeView == VIEW_MAP)
             || (activeView == VIEW_GPS)
             || (activeView == VIEW_SETTINGS));
 }
@@ -1901,7 +2385,8 @@ static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
     const int PAD = 3;
     const int GAP = 4;
     const int rowH = TOUCH_BTN_H;
-    const int rowY = INPUT_Y + INPUT_H - rowH - 2;
+    const int rowBottomPad = (activeView == VIEW_MAP) ? 2 : 0;
+    const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
     int bw = TOUCH_BTN_W;
     int x = max(PAD, (LCD_W - (NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP)) / 2);
     if (x + NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP > LCD_W - PAD) {
@@ -1916,6 +2401,109 @@ static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
 
 static bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
     return (x >= rx && x < (rx + rw) && y >= ry && y < (ry + rh));
+}
+
+static void mapClampViewport() {
+    mapViewLatSpan = max(4.0f, min(180.0f, mapViewLatSpan));
+    mapViewLonSpan = max(8.0f, min(360.0f, mapViewLonSpan));
+
+    if (mapViewLatSpan >= 179.9f) {
+        mapViewCenterLat = 0.0f;
+    } else {
+        float half = mapViewLatSpan * 0.5f;
+        float minCenter = -90.0f + half;
+        float maxCenter = 90.0f - half;
+        mapViewCenterLat = max(minCenter, min(maxCenter, mapViewCenterLat));
+    }
+
+    if (mapViewLonSpan >= 359.9f) {
+        mapViewCenterLon = 0.0f;
+    } else {
+        float half = mapViewLonSpan * 0.5f;
+        float minCenter = -180.0f + half;
+        float maxCenter = 180.0f - half;
+        mapViewCenterLon = max(minCenter, min(maxCenter, mapViewCenterLon));
+    }
+}
+
+static void mapStartManualView() {
+    if (mapViewManual) return;
+    mapViewManual = true;
+    mapViewCenterLat = mapLastCenterLat;
+    mapViewCenterLon = mapLastCenterLon;
+    mapViewLatSpan = mapLastLatSpan;
+    mapViewLonSpan = mapLastLonSpan;
+    mapClampViewport();
+}
+
+static bool mapSelectNodeById(uint32_t nodeId) {
+    int cnt = Nodes.count();
+    for (int i = 0; i < cnt; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (n && n->nodeId == nodeId) {
+            mapsListSel = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool mapCenterOnSelectedNode() {
+    NodeEntry *sel = Nodes.getByRank(mapsListSel);
+    if (!sel) return false;
+
+    float lat = 0.0f;
+    float lon = 0.0f;
+    if (!mapExtractNodeCoords(sel, lat, lon)) return false;
+
+    mapViewManual = true;
+    mapViewCenterLat = lat;
+    mapViewCenterLon = lon;
+    mapClampViewport();
+    return true;
+}
+
+static void mapApplyControl(MapControlAction action) {
+    if (action == MAP_CTL_LIST_PREV) {
+        mapsListSel = max(0, mapsListSel - 1);
+        mapCenterOnSelectedNode();
+        dirtyChat = true;
+        return;
+    }
+
+    if (action == MAP_CTL_LIST_NEXT) {
+        int cap = max(0, Nodes.count() - 1);
+        mapsListSel = min(cap, mapsListSel + 1);
+        mapCenterOnSelectedNode();
+        dirtyChat = true;
+        return;
+    }
+
+    if (action == MAP_CTL_ME) {
+        if (mapSelectNodeById(myNodeId)) {
+            mapCenterOnSelectedNode();
+            dirtyChat = true;
+        }
+        return;
+    }
+
+    mapStartManualView();
+
+    switch (action) {
+        case MAP_CTL_ZOOM_IN:
+            mapViewLatSpan *= 0.75f;
+            mapViewLonSpan *= 0.75f;
+            break;
+        case MAP_CTL_ZOOM_OUT:
+            mapViewLatSpan *= 1.35f;
+            mapViewLonSpan *= 1.35f;
+            break;
+        default:
+            break;
+    }
+
+    mapClampViewport();
+    dirtyChat = true;
 }
 
 static void handleTouchTap(int x, int y) {
@@ -1965,6 +2553,17 @@ static void handleTouchTap(int x, int y) {
         return;
     }
 
+    if (activeView == VIEW_MAP) {
+        for (int i = 0; i < MAP_CTL_COUNT; i++) {
+            if (!mapCtlVisible[i]) continue;
+            if (pointInRect(x, y, mapCtlRect[i].x, mapCtlRect[i].y,
+                            mapCtlRect[i].w, mapCtlRect[i].h)) {
+                mapApplyControl((MapControlAction)i);
+                return;
+            }
+        }
+    }
+
     NavButtonRect b[NAV_BTN_COUNT];
     navButtonRects(b);
     if (pointInRect(x, y, b[0].x, b[0].y, b[0].w, b[0].h)) {
@@ -1972,10 +2571,12 @@ static void handleTouchTap(int x, int y) {
     } else if (pointInRect(x, y, b[1].x, b[1].y, b[1].w, b[1].h)) {
         if (activeView != CHAN_DM) goToView(CHAN_DM);
     } else if (pointInRect(x, y, b[2].x, b[2].y, b[2].w, b[2].h)) {
-        if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+        if (activeView != VIEW_MAP) goToView(VIEW_MAP);
     } else if (pointInRect(x, y, b[3].x, b[3].y, b[3].w, b[3].h)) {
-        if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+        if (activeView != CHAN_ANN) goToView(CHAN_ANN);
     } else if (pointInRect(x, y, b[4].x, b[4].y, b[4].w, b[4].h)) {
+        if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+    } else if (pointInRect(x, y, b[5].x, b[5].y, b[5].w, b[5].h)) {
         goToView(nextView(activeView));
     }
 }
@@ -1983,16 +2584,33 @@ static void handleTouchTap(int x, int y) {
 // ── Draw: input bar ───────────────────────────────────────────
 static void drawInput() {
     bool showTextInput = isTextInputView();
-    fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
-    lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
-    lcd.drawFastHLine(0, INPUT_Y + 12, LCD_W, COL_DIVIDER_HI);
-    lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    NavButtonRect b[NAV_BTN_COUNT];
+    navButtonRects(b);
+
+    if (activeView == VIEW_MAP) {
+        int navTop = max(INPUT_Y, b[0].y);
+        fillVerticalGradient(0, navTop, LCD_W, LCD_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
+        lcd.drawFastHLine(0, navTop, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    } else if (showTextInput) {
+        fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
+        lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    } else {
+        fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
+        lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    }
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
     if (showTextInput) {
+        int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
+        int midY = min(b[0].y - 1, textY + lcd.fontHeight() + 1);
+        lcd.drawFastHLine(0, midY, LCD_W, COL_DIVIDER_HI);
+
         lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-        lcd.drawString(">>", 2, INPUT_Y + 2);
+        lcd.drawString(">>", 2, textY);
 
         // Show trailing input segment that fits in available pixel width.
         int textX = 2 + lcd.textWidth(">>") + 3;
@@ -2002,19 +2620,17 @@ static void drawInput() {
             visible.remove(0, 1);
         }
         lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
-        lcd.drawString(visible.c_str(), textX, INPUT_Y + 2);
+        lcd.drawString(visible.c_str(), textX, textY);
 
         if (cursorOn) {
             int cx = textX + lcd.textWidth(visible.c_str()) + 1;
             int ch = min(8, lcd.fontHeight());
-            lcd.fillRect(cx, INPUT_Y + 2, 2, ch, COL_CURSOR);
+            lcd.fillRect(cx, textY, 2, ch, COL_CURSOR);
         }
     } else {
         // Non-text views keep the top row visually clean.
     }
 
-    NavButtonRect b[NAV_BTN_COUNT];
-    navButtonRects(b);
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
         drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
@@ -2022,7 +2638,7 @@ static void drawInput() {
 
     // Bracket app buttons (DM / MAPS / LIVE / CFG) from outer nav buttons.
     int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
-    int sepX2 = (b[3].x + b[3].w + b[4].x) / 2;
+    int sepX2 = (b[4].x + b[4].w + b[5].x) / 2;
     int sepY  = b[0].y + 1;
     int sepH  = max(1, b[0].h - 2);
     // Stronger divider between "Previous" and the app group.
@@ -2034,7 +2650,7 @@ static void drawInput() {
 
     lcd.setFont(&fonts::Font0);
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
-    const char *labels[NAV_BTN_COUNT] = { "Previous", "DM", "LIVE", "CFG", "Next" };
+    const char *labels[NAV_BTN_COUNT] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
         int tw = lcd.textWidth(labels[i]);
         int tx = b[i].x + max(1, (b[i].w - tw) / 2);
@@ -2486,6 +3102,11 @@ static void handleKey(char k) {
             if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
             return;
         }
+        if (activeView == VIEW_MAP) {
+            NodeEntry *n = Nodes.getByRank(mapsListSel);
+            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+            return;
+        }
         if (activeView == VIEW_SETTINGS) {
             if (settingsSel == SETTING_EXPORT) {
                 bool ok = cfgExport(gCfg);
@@ -2544,7 +3165,7 @@ static void handleKey(char k) {
             }
             dirtyChat = true;
         } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
-                   && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
+               && activeView != VIEW_MAP && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
             int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
                          ? activeView : Channels.activeIdx();
@@ -2559,6 +3180,7 @@ static void handleKey(char k) {
 
     } else if (k == KEY_BACKSPACE) {
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
+                            && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen > 0 && textAllowed) {
@@ -2712,6 +3334,8 @@ static void handleKey(char k) {
         } else if (nodeListFocused) {
             nodeListSel = max(0, nodeListSel - 1);
             dirtyNodes = true;
+        } else if (activeView == VIEW_MAP) {
+            mapApplyControl(MAP_CTL_LIST_PREV);
         } else if (activeView == VIEW_SETTINGS) {
             settingsNavSel = -1;
             settingsSel = max(0, settingsSel - 1);
@@ -2746,6 +3370,8 @@ static void handleKey(char k) {
             int cap = max(0, Nodes.count() - 1);
             nodeListSel = min(cap, nodeListSel + 1);
             dirtyNodes = true;
+        } else if (activeView == VIEW_MAP) {
+            mapApplyControl(MAP_CTL_LIST_NEXT);
         } else if (activeView == VIEW_SETTINGS) {
             settingsNavSel = -1;
             settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
@@ -2757,7 +3383,9 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_PAGE_UP) {
-        if (activeView < MAX_CHANNELS) {
+        if (activeView == VIEW_MAP) {
+            mapApplyControl(MAP_CTL_ZOOM_IN);
+        } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
             int maxOff = max(0, ch.count - VISIBLE_LINES);
             ch.scrollOff = min(ch.scrollOff + VISIBLE_LINES, maxOff);
@@ -2765,7 +3393,9 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_PAGE_DN) {
-        if (activeView < MAX_CHANNELS) {
+        if (activeView == VIEW_MAP) {
+            mapApplyControl(MAP_CTL_ZOOM_OUT);
+        } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
             ch.scrollOff = 0;
             dirtyChat = true;
@@ -2773,6 +3403,7 @@ static void handleKey(char k) {
 
     } else if (k >= 0x20 && k < 0x7F) {
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
+                            && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen < MAX_INPUT_LEN && textAllowed) {
@@ -3202,12 +3833,14 @@ static void pollInput() {
         touchLastX = tx;
         touchLastY = ty;
     } else if (touchDown) {
-        bool shortTap = (now - touchDownMs) <= 450;
-        bool steady   = (abs(touchLastX - touchStartX) <= 18)
-                     && (abs(touchLastY - touchStartY) <= 18);
+        uint32_t tapHoldLimit = (activeView == VIEW_MAP) ? 2500 : 450;
+        int driftLimit = (activeView == VIEW_MAP) ? 26 : 18;
+        bool shortTap = (now - touchDownMs) <= tapHoldLimit;
+        bool steady   = (abs(touchLastX - touchStartX) <= driftLimit)
+                     && (abs(touchLastY - touchStartY) <= driftLimit);
         if (shortTap && steady) {
-            int tapX = (touchStartX + touchLastX) / 2;
-            int tapY = (touchStartY + touchLastY) / 2;
+            int tapX = (activeView == VIEW_MAP) ? touchLastX : (touchStartX + touchLastX) / 2;
+            int tapY = (activeView == VIEW_MAP) ? touchLastY : (touchStartY + touchLastY) / 2;
             handleTouchTap(tapX, tapY);
         }
         touchDown = false;
@@ -3325,6 +3958,9 @@ void loop() {
         dirtyTabs = true;
         if (activeView == CHAN_ANN) dirtyLiveRows = true;
     }
+    if (activeView == VIEW_MAP && dirtyNodes) {
+        dirtyChat = true;
+    }
 
     // Keep wall clock display responsive even if other status elements are static.
     static uint32_t lastClockDrawTickMs = 0;
@@ -3361,6 +3997,7 @@ void loop() {
         if (dirtyChat) {
             if      (activeView == VIEW_SETTINGS)                      drawSettings();
             else if (activeView == VIEW_GPS)                           drawGps();
+            else if (activeView == VIEW_MAP)                           drawMapPanel();
             else if (activeView == CHAN_ANN)                           drawLivePanel(true);
             else if (activeView == CHAN_DM && dmPickerOpen)            drawDmPicker();
             else if (activeView == CHAN_DM && dmConvOpen)              drawDmConv();
