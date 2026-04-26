@@ -261,10 +261,10 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     DmConv *conv = find(toNodeId);
     debugLogMessages("[dm] addMessage conv=%s\n", conv ? "found" : "NULL - msg won't show!");
     if (conv) {
-        uint32_t upSec = millis() / 1000;
-        char prefix[20];
-        snprintf(prefix, sizeof(prefix), "%02lu:%02lu <me> ",
-                 (upSec / 3600) % 24, (upSec / 60) % 60);
+        char timePrefix[12];
+        liveBuildPrefix(timePrefix, sizeof(timePrefix));
+        char prefix[24];
+        snprintf(prefix, sizeof(prefix), "%s<me> ", timePrefix);
         addMessage(toNodeId, conv->shortName, prefix, text, TFT_WHITE, false);
     }
     return true;
@@ -273,12 +273,13 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 // ── getLine ───────────────────────────────────────────────────
 const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows) const {
     if (!conv || !conv->lines) return nullptr;
+    if (visibleRow < 0 || visibleRow >= visibleRows) return nullptr;
     int total = (conv->count < MAX_DM_LINES) ? conv->count : MAX_DM_LINES;
-    // visibleRow 0 = top of screen (oldest in view), visibleRows-1 = bottom (newest)
-    int fromEnd = conv->scrollOff + (visibleRows - 1 - visibleRow);
-    if (fromEnd < 0 || fromEnd >= total) return nullptr;
-    int absIdx = conv->count - 1 - fromEnd;
-    if (absIdx < 0) return nullptr;
+    int oldest = conv->count - total;
+    int newest = conv->count - 1 - conv->scrollOff;
+    if (newest < oldest) return nullptr;
+    int absIdx = newest - visibleRow;
+    if (absIdx < oldest || absIdx >= conv->count) return nullptr;
     return &conv->lines[absIdx % MAX_DM_LINES];
 }
 

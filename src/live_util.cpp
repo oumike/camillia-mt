@@ -1,5 +1,6 @@
 #include "live_util.h"
 #include "node_db.h"
+#include <time.h>
 
 bool liveShortNameUsable(const char *shortName) {
     if (!shortName || !shortName[0]) return false;
@@ -12,10 +13,15 @@ bool liveShortNameUsable(const char *shortName) {
 
 void liveBuildPrefix(char *out, size_t outLen) {
     if (!out || outLen == 0) return;
-    uint32_t upSec = millis() / 1000;
-    snprintf(out, outLen, "%02lu:%02lu ",
-             (unsigned long)((upSec / 60) % 60),
-             (unsigned long)(upSec % 60));
+    time_t nowEpoch = time(nullptr);
+    if (nowEpoch < 1700000000) {
+        snprintf(out, outLen, "--:-- ");
+        return;
+    }
+
+    struct tm localTm;
+    localtime_r(&nowEpoch, &localTm);
+    snprintf(out, outLen, "%02d:%02d ", localTm.tm_hour, localTm.tm_min);
 }
 
 void liveNodeLabel(uint32_t nodeId, char *out, size_t outLen, bool useBroadcastLabel) {
