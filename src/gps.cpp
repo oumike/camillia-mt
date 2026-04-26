@@ -7,6 +7,8 @@
 // The L76K's hot-start cache emits stale GGA with quality=1 and
 // previous-session sats immediately; this blanking window filters it.
 static const uint32_t GPS_WARMUP_MS = 10000;
+static const uint32_t GPS_SATS_MAX_AGE_MS = 5000;
+static const uint32_t GPS_SATS_HOLD_MS = 12000;
 
 static TinyGPSPlus    _gps;
 static HardwareSerial _serial(1);   // UART1
@@ -15,6 +17,59 @@ static uint32_t       _startMs       = 0;     // millis() when GPS was started
 static uint32_t       _firstFixMs    = 0;     // millis() when first real fix arrived (0 = none yet)
 static uint32_t       _prevSentences = 0;     // sentencesWithFix at last check
 static uint32_t       _totalBytes    = 0;
+static uint8_t        _lastSats      = 0;
+static uint32_t       _lastSatsMs    = 0;
+
+// Some firmwares update GSA regularly while GGA satellite fields can remain stale.
+// Track both GN and GP talkers and prefer fresh GSA "satellites used" counts.
+static TinyGPSCustom  _gngsaSat01(_gps, "GNGSA", 3);
+static TinyGPSCustom  _gngsaSat02(_gps, "GNGSA", 4);
+static TinyGPSCustom  _gngsaSat03(_gps, "GNGSA", 5);
+static TinyGPSCustom  _gngsaSat04(_gps, "GNGSA", 6);
+static TinyGPSCustom  _gngsaSat05(_gps, "GNGSA", 7);
+static TinyGPSCustom  _gngsaSat06(_gps, "GNGSA", 8);
+static TinyGPSCustom  _gngsaSat07(_gps, "GNGSA", 9);
+static TinyGPSCustom  _gngsaSat08(_gps, "GNGSA", 10);
+static TinyGPSCustom  _gngsaSat09(_gps, "GNGSA", 11);
+static TinyGPSCustom  _gngsaSat10(_gps, "GNGSA", 12);
+static TinyGPSCustom  _gngsaSat11(_gps, "GNGSA", 13);
+static TinyGPSCustom  _gngsaSat12(_gps, "GNGSA", 14);
+static TinyGPSCustom* _gngsaSats[12] = {
+    &_gngsaSat01, &_gngsaSat02, &_gngsaSat03, &_gngsaSat04,
+    &_gngsaSat05, &_gngsaSat06, &_gngsaSat07, &_gngsaSat08,
+    &_gngsaSat09, &_gngsaSat10, &_gngsaSat11, &_gngsaSat12
+};
+
+static TinyGPSCustom  _gpgsaSat01(_gps, "GPGSA", 3);
+static TinyGPSCustom  _gpgsaSat02(_gps, "GPGSA", 4);
+static TinyGPSCustom  _gpgsaSat03(_gps, "GPGSA", 5);
+static TinyGPSCustom  _gpgsaSat04(_gps, "GPGSA", 6);
+static TinyGPSCustom  _gpgsaSat05(_gps, "GPGSA", 7);
+static TinyGPSCustom  _gpgsaSat06(_gps, "GPGSA", 8);
+static TinyGPSCustom  _gpgsaSat07(_gps, "GPGSA", 9);
+static TinyGPSCustom  _gpgsaSat08(_gps, "GPGSA", 10);
+static TinyGPSCustom  _gpgsaSat09(_gps, "GPGSA", 11);
+static TinyGPSCustom  _gpgsaSat10(_gps, "GPGSA", 12);
+static TinyGPSCustom  _gpgsaSat11(_gps, "GPGSA", 13);
+static TinyGPSCustom  _gpgsaSat12(_gps, "GPGSA", 14);
+static TinyGPSCustom* _gpgsaSats[12] = {
+    &_gpgsaSat01, &_gpgsaSat02, &_gpgsaSat03, &_gpgsaSat04,
+    &_gpgsaSat05, &_gpgsaSat06, &_gpgsaSat07, &_gpgsaSat08,
+    &_gpgsaSat09, &_gpgsaSat10, &_gpgsaSat11, &_gpgsaSat12
+};
+
+static uint8_t gsaSatsUsed(TinyGPSCustom* const sats[12], bool &fresh) {
+    fresh = false;
+    uint8_t used = 0;
+    for (int i = 0; i < 12; i++) {
+        TinyGPSCustom *term = sats[i];
+        if (!term) continue;
+        if (term->isValid() && term->age() < GPS_SATS_MAX_AGE_MS) fresh = true;
+        const char *prn = term->value();
+        if (prn && prn[0] != '\0') used++;
+    }
+    return used;
+}
 
 void gpsBegin() {
     _serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
@@ -23,6 +78,8 @@ void gpsBegin() {
     _firstFixMs    = 0;
     _prevSentences = 0;
     _totalBytes    = 0;
+    _lastSats      = 0;
+    _lastSatsMs    = 0;
     debugLogGps("[gps] started on UART1\n");
 }
 
@@ -107,7 +164,52 @@ uint8_t gpsSats() {
     if (!_enabled) return 0;
     // Don't report stale cached sat count during warmup
     if (millis() - _startMs < GPS_WARMUP_MS) return 0;
-    return _gps.satellites.isValid() ? (uint8_t)_gps.satellites.value() : 0;
+
+    uint32_t now = millis();
+
+    // Prefer fresh GSA-based "satellites used" when available.
+    bool gngsaFresh = false;
+    uint8_t gngsaUsed = gsaSatsUsed(_gngsaSats, gngsaFresh);
+
+    bool gpgsaFresh = false;
+    uint8_t gpgsaUsed = gsaSatsUsed(_gpgsaSats, gpgsaFresh);
+
+    bool hasFresh = false;
+    uint8_t sats = 0;
+    if (gngsaFresh || gpgsaFresh) {
+        // GN and GP can alternate; use the best fresh reading.
+        hasFresh = true;
+        sats = max(gngsaUsed, gpgsaUsed);
+    }
+
+    // Fallback to GGA sats if it is fresh.
+    if (!hasFresh && _gps.satellites.isValid() && _gps.satellites.age() < GPS_SATS_MAX_AGE_MS) {
+        hasFresh = true;
+        sats = (uint8_t)_gps.satellites.value();
+    }
+
+    if (hasFresh) {
+        if (sats > 0) {
+            _lastSats = sats;
+            _lastSatsMs = now;
+            return sats;
+        }
+        // A transient zero can appear between sentence updates; smooth it while fix is valid.
+        if (gpsHasFix() && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
+            return _lastSats;
+        _lastSats = 0;
+        _lastSatsMs = now;
+        return 0;
+    }
+
+    // No fresh sat sentence right now; keep the last valid count briefly.
+    if (gpsHasFix() && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
+        return _lastSats;
+
+    _lastSats = 0;
+    _lastSatsMs = now;
+
+    return 0;
 }
 
 uint32_t gpsFixAgeMs() {

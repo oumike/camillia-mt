@@ -150,6 +150,7 @@ static const char kHead[] =
         ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
         ".map-mini-btn{margin:0;padding:.35em .75em;background:var(--panel-2);color:var(--text);"
              "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.82em;font-weight:600}"
+           ".map-mini-right{margin-left:auto}"
         ".map-mini-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
         ".map-mini-btn:disabled{opacity:.6;cursor:default}"
         ".map-legend{display:flex;justify-content:space-between;font-size:.8em;color:var(--text-dim);margin-top:.35em;gap:.5em}"
@@ -314,6 +315,9 @@ static void sendConfigPage(const char *msg = "") {
     auto coordInRange = [](float lat, float lon) -> bool {
         return !(lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f);
     };
+    float mapMeLat = gCfg->latI * 1e-7f;
+    float mapMeLon = gCfg->lonI * 1e-7f;
+    bool mapHasMe = coordInRange(mapMeLat, mapMeLon);
     auto extractNodeCoords = [&](const NodeEntry *n, float &lat, float &lon) -> bool {
         if (!n) return false;
         bool hasCoords = (n->latI != 0 || n->lonI != 0);
@@ -922,8 +926,10 @@ static void sendConfigPage(const char *msg = "") {
     html += "<div class='map-controls'>"
             "<button type='button' id='map-fit-btn' class='map-mini-btn' onclick='fitNodeMap()'>Fit Nodes</button>"
             "<button type='button' class='map-mini-btn' onclick='worldNodeMap()'>World View</button>"
-            "<button type='button' id='map-heat-btn' class='map-mini-btn active' onclick='toggleNodeHeat()'>Heat: On</button>"
-            "</div>";
+            "<button type='button' id='map-heat-btn' class='map-mini-btn active' onclick='toggleNodeHeat()'>Heat: On</button>";
+        html += "<button type='button' id='map-me-btn' class='map-mini-btn map-mini-right' onclick='centerOnMeMap()'";
+        if (!mapHasMe) html += " disabled";
+        html += ">ME</button></div>";
     html += "<div class='map-wrap'>"
             "<div id='node-heatmap' class='map-canvas'></div>"
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
@@ -936,6 +942,13 @@ static void sendConfigPage(const char *msg = "") {
     html += "</div>";
     html += "<script>var NODE_HEAT_POINTS=";
     html += mapPoints;
+    html += ";var NODE_ME_POINT=";
+    if (mapHasMe) {
+        snprintf(tmp, sizeof(tmp), "{lat:%.7f,lon:%.7f}", mapMeLat, mapMeLon);
+        html += tmp;
+    } else {
+        html += "null";
+    }
     html += ";</script>";
 
     html += "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
@@ -1067,6 +1080,15 @@ static void sendConfigPage(const char *msg = "") {
                         "function worldNodeMap(){"
                             "ensureNodeMap();"
                             "if(nodeMap)nodeMap.setView([20,0],2);"
+                        "}"
+                        "function centerOnMeMap(){"
+                            "ensureNodeMap();"
+                            "var me=window.NODE_ME_POINT;"
+                            "if(!nodeMap||!me||!isFinite(me.lat)||!isFinite(me.lon)){setMapStatus('Device position unavailable');return;}"
+                            "var z=nodeMap.getZoom();"
+                            "if(!isFinite(z)||z<13)z=13;"
+                            "nodeMap.setView([me.lat,me.lon],z);"
+                            "setMapStatus('Centered on this device');"
                         "}"
                         "function toggleNodeHeat(){"
                             "ensureNodeMap();"

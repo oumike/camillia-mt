@@ -354,6 +354,14 @@ void DmMgr::saveConv(const DmConv *c) {
 }
 
 void DmMgr::loadAll() {
+    // Ensure DM storage directories exist before opening to avoid noisy VFS errors.
+    SD.mkdir("/camillia");
+    if (!SD.exists(kDmDir)) {
+        SD.mkdir(kDmDir);
+        debugLogMessages("[dm] loadAll: created %s\n", kDmDir);
+        return;
+    }
+
     File dir = SD.open(kDmDir);
     if (!dir || !dir.isDirectory()) {
         debugLogMessages("[dm] loadAll: no %s directory\n", kDmDir);

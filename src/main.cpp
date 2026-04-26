@@ -96,10 +96,17 @@ static float mapViewCenterLat = 0.0f;
 static float mapViewCenterLon = 0.0f;
 static float mapViewLatSpan = 180.0f;
 static float mapViewLonSpan = 360.0f;
+static const float MAP_MIN_LAT_SPAN = 0.05f;
+static const float MAP_MIN_LON_SPAN = 0.05f;
+static const int MAP_MAX_TILE_ZOOM = 17;
 static float mapLastCenterLat = 0.0f;
 static float mapLastCenterLon = 0.0f;
 static float mapLastLatSpan = 180.0f;
 static float mapLastLonSpan = 360.0f;
+static uint32_t mapLastDrawMs = 0;
+static bool mapNodeFreezeActive = false;
+static uint32_t mapFrozenNodeIds[MAX_NODES];
+static int mapFrozenNodeCount = 0;
 
 
 static void setPanelCloseRect(int x, int y, int w, int h) {
@@ -159,6 +166,8 @@ static bool isTopTabView(int v) {
 
 static void closePanelToChannel();
 static void mapClampViewport();
+static int mapVisibleNodeCount();
+static NodeEntry *mapVisibleNodeByIndex(int idx);
 
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
@@ -511,6 +520,8 @@ static int prevView(int from) {
 static void goToView(int v) {
     if (v < 0 || v >= TOTAL_VIEWS) return;
 
+    int prev = activeView;
+
     if (isPanelView(v) && activeView != v) {
         panelReturnChannel = (activeView >= 0 && activeView < MESH_CHANNELS)
             ? activeView
@@ -544,7 +555,20 @@ static void goToView(int v) {
             dmListSel = 1;
     }
     if (v == VIEW_MAP) {
-        mapsListSel = constrain(mapsListSel, 0, max(0, Nodes.count() - 1));
+        if (prev != VIEW_MAP) {
+            mapFrozenNodeCount = 0;
+            int cnt = Nodes.count();
+            for (int i = 0; i < cnt && mapFrozenNodeCount < MAX_NODES; i++) {
+                NodeEntry *n = Nodes.getByRank(i);
+                if (!n) continue;
+                mapFrozenNodeIds[mapFrozenNodeCount++] = n->nodeId;
+            }
+            mapNodeFreezeActive = true;
+        }
+        mapsListSel = constrain(mapsListSel, 0, max(0, mapNodeFreezeActive ? (mapFrozenNodeCount - 1) : (Nodes.count() - 1)));
+    } else if (prev == VIEW_MAP) {
+        mapNodeFreezeActive = false;
+        mapFrozenNodeCount = 0;
     }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
@@ -875,8 +899,8 @@ static void drawBattery() {
     char sbuf[4];
     snprintf(sbuf, sizeof(sbuf), "%u", (unsigned)sats);
     int satW = lcd.textWidth(sbuf);
-    bool showSats = true;
-    int gpsW = GPS_DOT_R * 2 + 2 + satW;
+    bool showSats = (sats > 0);
+    int gpsW = showSats ? (GPS_DOT_R * 2 + 2 + satW) : (GPS_DOT_R * 2 + 1);
     bool wifiShowApText = wifiApMode;
     int wifiW = wifiShowApText ? (lcd.textWidth("AP") + AP_PAD_X * 2) : WIFI_W;
     int gap = ICON_GAP_WIDE;
@@ -1179,6 +1203,7 @@ static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
     int chatW = MSG_W;
+    int controlsTop = CHAT_Y + CHAT_H - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
@@ -1210,9 +1235,14 @@ static void drawChat() {
     // Scroll indicator: show arrow when not at bottom
     Channel &ch = Channels.get(active);
     if (ch.scrollOff > 0) {
-        lcd.setTextColor(COL_TEAL, COL_BG_MAIN);
-        drawClippedText(chatX + chatW - 30, CHAT_Y + CHAT_H - LINE_H + 1, 28, "more");
+        lcd.setTextColor(COL_TEAL, COL_PANEL_BG);
+        drawClippedText(chatX + 3, controlsTop - LINE_H + 1, 40, "more");
     }
+
+    // Touch scroll controls for regular mesh channel panels.
+    lcd.fillRect(chatX + 1, controlsTop, chatW - 2,
+                 CHAT_Y + CHAT_H - controlsTop - 1, COL_PANEL_BG);
+    drawPanelScrollButtons(chatX, CHAT_Y, chatW, CHAT_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1233,6 +1263,140 @@ static const char *skipLiveLinePrefix(const char *s) {
         while (*s == ' ') s++;
     }
     return s;
+}
+
+static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, const char **bodyOut) {
+    if (!s) s = "";
+    if (tsOut && tsOutLen > 0) tsOut[0] = '\0';
+    if (!bodyOut) return false;
+
+    while (*s == ' ') s++;
+    *bodyOut = s;
+
+    size_t len = strlen(s);
+    if (len < 6) return false;
+    if (isDigitChar(s[0]) && isDigitChar(s[1]) &&
+            s[2] == ':' &&
+            isDigitChar(s[3]) && isDigitChar(s[4]) &&
+            s[5] == ' ') {
+        if (tsOut && tsOutLen >= 6) {
+            memcpy(tsOut, s, 5);
+            tsOut[5] = '\0';
+        }
+        s += 6;
+        while (*s == ' ') s++;
+        *bodyOut = s;
+        return true;
+    }
+    return false;
+}
+
+static const char *livePortLabel(const char *tag) {
+    if (!tag || !tag[0]) return "data";
+    if (strcmp(tag, "T") == 0) return "text";
+    if (strcmp(tag, "N") == 0) return "nodeinfo";
+    if (strcmp(tag, "P") == 0) return "position";
+    if (strcmp(tag, "E") == 0) return "telemetry";
+    if (strcmp(tag, "A") == 0) return "routing";
+    return "data";
+}
+
+static const char *liveDestLabel(const char *tag) {
+    if (!tag || !tag[0]) return "node";
+    if (strcmp(tag, "B") == 0 || strcmp(tag, "BCAST") == 0) return "broadcast";
+    if (strcmp(tag, "M") == 0) return "me";
+    if (strcmp(tag, "U") == 0) return "node";
+    return "node";
+}
+
+static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    out[0] = '\0';
+
+    char ts[6];
+    const char *body = "";
+    liveTimestampAndBody(dl.text, ts, sizeof(ts), &body);
+
+    char who[20] = {0};
+    char dst[8] = {0};
+    char tag[12] = {0};
+    char stat[12] = {0};
+    char id[16] = {0};
+    int ch = -1;
+
+    if (sscanf(body, "R %19[^>]>%7s %11s c%d", who, dst, tag, &ch) == 4) {
+        if (ts[0]) snprintf(out, outLen, "%s RX %s from %s to %s on ch%d",
+                            ts, livePortLabel(tag), who, liveDestLabel(dst), ch);
+        else snprintf(out, outLen, "RX %s from %s to %s on ch%d",
+                      livePortLabel(tag), who, liveDestLabel(dst), ch);
+        return;
+    }
+
+    if (sscanf(body, "R %19s ENC %11s", who, stat) == 2) {
+        if (ts[0]) snprintf(out, outLen, "%s RX encrypted packet from %s (hash %s)",
+                            ts, who, stat);
+        else snprintf(out, outLen, "RX encrypted packet from %s (hash %s)",
+                      who, stat);
+        return;
+    }
+
+    if (sscanf(body, "T ACK %19s %11s", who, stat) == 2) {
+        if (ts[0]) snprintf(out, outLen, "%s TX routing ACK to %s (%s)",
+                            ts, who, stat);
+        else snprintf(out, outLen, "TX routing ACK to %s (%s)", who, stat);
+        return;
+    }
+
+    if (sscanf(body, "T TXT %7s c%d %15s", dst, &ch, id) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX text to %s on ch%d id:%s",
+                            ts, liveDestLabel(dst), ch, id);
+        else snprintf(out, outLen, "TX text to %s on ch%d id:%s",
+                      liveDestLabel(dst), ch, id);
+        return;
+    }
+
+    if (sscanf(body, "T TXT %7s ER", dst) == 1) {
+        if (ts[0]) snprintf(out, outLen, "%s TX text to %s FAILED",
+                            ts, liveDestLabel(dst));
+        else snprintf(out, outLen, "TX text to %s FAILED", liveDestLabel(dst));
+        return;
+    }
+
+    if (sscanf(body, "T POS %7s %15s %11s", dst, id, stat) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX position to %s id:%s (%s)",
+                            ts, liveDestLabel(dst), id, stat);
+        else snprintf(out, outLen, "TX position to %s id:%s (%s)",
+                      liveDestLabel(dst), id, stat);
+        return;
+    }
+
+    if (sscanf(body, "T NOD %7s %19s %11s", dst, who, stat) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX nodeinfo %s to %s (%s)",
+                            ts,
+                            (strcmp(dst, "U") == 0) ? "unicast" : "broadcast",
+                            who,
+                            stat);
+        else snprintf(out, outLen, "TX nodeinfo %s to %s (%s)",
+                      (strcmp(dst, "U") == 0) ? "unicast" : "broadcast",
+                      who,
+                      stat);
+        return;
+    }
+
+    if (sscanf(body, "T DM %11s %19s %15s", tag, who, id) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX DM to %s via %s id:%s",
+                            ts, who, tag, id);
+        else snprintf(out, outLen, "TX DM to %s via %s id:%s", who, tag, id);
+        return;
+    }
+
+    if (sscanf(body, "T DM ER %11s", stat) == 1) {
+        if (ts[0]) snprintf(out, outLen, "%s TX DM FAILED (%s)", ts, stat);
+        else snprintf(out, outLen, "TX DM FAILED (%s)", stat);
+        return;
+    }
+
+    snprintf(out, outLen, "%s", dl.text);
 }
 
 static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
@@ -1305,7 +1469,9 @@ static void drawLivePanel(bool fullRedraw) {
             }
         }
         lcd.setTextColor(col, rowBg);
-        drawClippedText(left + 2, y, innerW - 4, dl.text);
+        char rendered[96];
+        formatLiveLineText(dl, rendered, sizeof(rendered));
+        drawClippedText(left + 2, y, innerW - 4, rendered);
     }
 
     if (ch.scrollOff > 0) {
@@ -1460,7 +1626,9 @@ static void drawMapPanel() {
     const int mapY = my + titleH + 2;
     const int mapH = max(64, controlsTop - mapY - 2);
     const int colGap = 4;
-    const int listW = min(96, max(72, iw / 3));
+    // Node list only shows short names; size for ~5 characters to favor map area.
+    const int listChars = 5;
+    const int listW = min(58, max(44, listChars * CHAR_W + 12));
     const int mapX = ix;
     const int listX = ix + iw - listW;
     const int mapW = max(90, listX - mapX - colGap);
@@ -1468,7 +1636,7 @@ static void drawMapPanel() {
     const int listHeaderH = 10;
     const int rowH = 9;
     const int rowsVisible = max(1, (mapH - listHeaderH - 1) / rowH);
-    const int totalNodes = Nodes.count();
+    const int totalNodes = mapVisibleNodeCount();
     mapsListSel = constrain(mapsListSel, 0, max(0, totalNodes - 1));
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -1480,7 +1648,7 @@ static void drawMapPanel() {
     float minLat = 90.0f, maxLat = -90.0f;
     float minLon = 180.0f, maxLon = -180.0f;
     for (int i = 0; i < totalNodes; i++) {
-        NodeEntry *n = Nodes.getByRank(i);
+        NodeEntry *n = mapVisibleNodeByIndex(i);
         float lat = 0.0f, lon = 0.0f;
         if (!mapExtractNodeCoords(n, lat, lon)) continue;
         positionedCount++;
@@ -1572,9 +1740,9 @@ static void drawMapPanel() {
     bool downloadedAnyTile = false;
 
     if (useTileBackdrop) {
-        double lonSpanForZoom = max(1.0, (double)mapViewLonSpan);
+        double lonSpanForZoom = max((double)MAP_MIN_LON_SPAN, (double)mapViewLonSpan);
         double zoomRaw = log2(((double)mapW * 360.0) / (256.0 * lonSpanForZoom));
-        int z = constrain((int)floor(zoomRaw), 0, 6);
+        int z = constrain((int)floor(zoomRaw), 0, MAP_MAX_TILE_ZOOM);
         int tileCount = 1 << z;
 
         auto lonToWorldX = [&](double lonDeg) -> double {
@@ -1633,9 +1801,13 @@ static void drawMapPanel() {
         lcd.clearClipRect();
     } else {
         // AP mode fallback: keep the existing lightweight map rendering.
-        for (int g = 1; g < 4; g++) {
-            int gx = mapX + (g * (mapW - 1)) / 4;
-            int gy = mapY + (g * (mapH - 1)) / 4;
+        int gridSteps = 4;
+        if (mapViewLatSpan < 40.0f || mapViewLonSpan < 80.0f) gridSteps = 6;
+        if (mapViewLatSpan < 10.0f || mapViewLonSpan < 20.0f) gridSteps = 8;
+        if (mapViewLatSpan < 2.0f || mapViewLonSpan < 4.0f) gridSteps = 10;
+        for (int g = 1; g < gridSteps; g++) {
+            int gx = mapX + (g * (mapW - 1)) / gridSteps;
+            int gy = mapY + (g * (mapH - 1)) / gridSteps;
             lcd.drawFastVLine(gx, mapY + 1, mapH - 2, COL_DIVIDER_HI);
             lcd.drawFastHLine(mapX + 1, gy, mapW - 2, COL_DIVIDER_HI);
         }
@@ -1643,13 +1815,13 @@ static void drawMapPanel() {
 
     uint32_t selectedNodeId = 0;
     if (totalNodes > 0) {
-        NodeEntry *sel = Nodes.getByRank(mapsListSel);
+        NodeEntry *sel = mapVisibleNodeByIndex(mapsListSel);
         if (sel) selectedNodeId = sel->nodeId;
     }
 
     uint32_t nowMs = millis();
     for (int i = 0; i < totalNodes; i++) {
-        NodeEntry *n = Nodes.getByRank(i);
+        NodeEntry *n = mapVisibleNodeByIndex(i);
         float lat = 0.0f, lon = 0.0f;
         if (!mapExtractNodeCoords(n, lat, lon)) continue;
 
@@ -1691,7 +1863,7 @@ static void drawMapPanel() {
             lcd.fillRect(listX + 1, y, listW - 2, rowH, rowBg);
             if (idx >= totalNodes) continue;
 
-            NodeEntry *n = Nodes.getByRank(idx);
+            NodeEntry *n = mapVisibleNodeByIndex(idx);
             if (!n) continue;
 
             bool sel = (idx == mapsListSel);
@@ -1717,18 +1889,31 @@ static void drawMapPanel() {
     int btnW[MAP_CTL_COUNT] = { 30, 30, 80, 60, 30 };
     const char *labels[MAP_CTL_COUNT] = { "+", "-", "Previous Node", "Next Node", "ME" };
 
-    int controlsW = 0;
-    for (int i = 0; i < ctlCount; i++) controlsW += btnW[i];
-    controlsW += (ctlCount - 1) * mapNavGap;
-
-    int ctlStartX = minCtlX;
+    const int meIdx = (int)MAP_CTL_ME;
+    int btnX[MAP_CTL_COUNT] = {0};
     int maxCtlEnd = mx + mw - 4;
-    int extraW = (maxCtlEnd - minCtlX) - controlsW;
-    if (extraW > 0) ctlStartX += extraW / 2;
+
+    // Pin ME to the far right; center the remaining controls in the space to its left.
+    int meX = maxCtlEnd - btnW[meIdx];
+    btnX[meIdx] = meX;
+
+    int leftCount = meIdx;
+    int leftControlsW = 0;
+    for (int i = 0; i < leftCount; i++) leftControlsW += btnW[i];
+    if (leftCount > 0) leftControlsW += (leftCount - 1) * mapNavGap;
+
+    int leftStartX = minCtlX;
+    int leftAvailW = (meX - mapNavGap) - minCtlX;
+    if (leftAvailW > leftControlsW) leftStartX += (leftAvailW - leftControlsW) / 2;
+
+    int runX = leftStartX;
+    for (int i = 0; i < leftCount; i++) {
+        btnX[i] = runX;
+        runX += btnW[i] + mapNavGap;
+    }
 
     for (int i = 0; i < ctlCount; i++) {
-        int bx = ctlStartX;
-        for (int j = 0; j < i; j++) bx += btnW[j] + mapNavGap;
+        int bx = btnX[i];
         uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
         drawSquirclePill(bx, btnY, btnW[i], mapNavBtnH, fill, COL_SELECT_ACCENT, false);
         lcd.setFont(&fonts::Font0);
@@ -1741,6 +1926,7 @@ static void drawMapPanel() {
     }
 
     lcd.setFont(&fonts::Font0);
+    mapLastDrawMs = millis();
     dirtyNodes = false;
     dirtyChat = downloadedAnyTile;
 }
@@ -2404,8 +2590,8 @@ static bool pointInRect(int x, int y, int rx, int ry, int rw, int rh) {
 }
 
 static void mapClampViewport() {
-    mapViewLatSpan = max(4.0f, min(180.0f, mapViewLatSpan));
-    mapViewLonSpan = max(8.0f, min(360.0f, mapViewLonSpan));
+    mapViewLatSpan = max(MAP_MIN_LAT_SPAN, min(180.0f, mapViewLatSpan));
+    mapViewLonSpan = max(MAP_MIN_LON_SPAN, min(360.0f, mapViewLonSpan));
 
     if (mapViewLatSpan >= 179.9f) {
         mapViewCenterLat = 0.0f;
@@ -2436,10 +2622,22 @@ static void mapStartManualView() {
     mapClampViewport();
 }
 
+static int mapVisibleNodeCount() {
+    if (mapNodeFreezeActive) return mapFrozenNodeCount;
+    return Nodes.count();
+}
+
+static NodeEntry *mapVisibleNodeByIndex(int idx) {
+    if (idx < 0) return nullptr;
+    if (!mapNodeFreezeActive) return Nodes.getByRank(idx);
+    if (idx >= mapFrozenNodeCount) return nullptr;
+    return Nodes.find(mapFrozenNodeIds[idx]);
+}
+
 static bool mapSelectNodeById(uint32_t nodeId) {
-    int cnt = Nodes.count();
+    int cnt = mapVisibleNodeCount();
     for (int i = 0; i < cnt; i++) {
-        NodeEntry *n = Nodes.getByRank(i);
+        NodeEntry *n = mapVisibleNodeByIndex(i);
         if (n && n->nodeId == nodeId) {
             mapsListSel = i;
             return true;
@@ -2449,7 +2647,7 @@ static bool mapSelectNodeById(uint32_t nodeId) {
 }
 
 static bool mapCenterOnSelectedNode() {
-    NodeEntry *sel = Nodes.getByRank(mapsListSel);
+    NodeEntry *sel = mapVisibleNodeByIndex(mapsListSel);
     if (!sel) return false;
 
     float lat = 0.0f;
@@ -2472,7 +2670,7 @@ static void mapApplyControl(MapControlAction action) {
     }
 
     if (action == MAP_CTL_LIST_NEXT) {
-        int cap = max(0, Nodes.count() - 1);
+        int cap = max(0, mapVisibleNodeCount() - 1);
         mapsListSel = min(cap, mapsListSel + 1);
         mapCenterOnSelectedNode();
         dirtyChat = true;
@@ -2491,12 +2689,12 @@ static void mapApplyControl(MapControlAction action) {
 
     switch (action) {
         case MAP_CTL_ZOOM_IN:
-            mapViewLatSpan *= 0.75f;
-            mapViewLonSpan *= 0.75f;
+            mapViewLatSpan *= 0.65f;
+            mapViewLonSpan *= 0.65f;
             break;
         case MAP_CTL_ZOOM_OUT:
-            mapViewLatSpan *= 1.35f;
-            mapViewLonSpan *= 1.35f;
+            mapViewLatSpan *= 1.45f;
+            mapViewLonSpan *= 1.45f;
             break;
         default:
             break;
@@ -2913,7 +3111,7 @@ static void handleRx(MeshPacket pkt) {
         snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
                  (upSec / 3600) % 24, (upSec / 60) % 60);
         char info[60];
-        snprintf(info, sizeof(info), "* %s joined (%s)", u.longName, u.shortName);
+        snprintf(info, sizeof(info), "%s (%s) identified.", u.longName, u.shortName);
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
         if (!dmPickerOpen) dirtyChat = true;
         dirtyNodes = dirtyTabs = true;
@@ -3103,7 +3301,7 @@ static void handleKey(char k) {
             return;
         }
         if (activeView == VIEW_MAP) {
-            NodeEntry *n = Nodes.getByRank(mapsListSel);
+            NodeEntry *n = mapVisibleNodeByIndex(mapsListSel);
             if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
             return;
         }
@@ -3958,8 +4156,9 @@ void loop() {
         dirtyTabs = true;
         if (activeView == CHAN_ANN) dirtyLiveRows = true;
     }
-    if (activeView == VIEW_MAP && dirtyNodes) {
-        dirtyChat = true;
+    if (activeView == VIEW_MAP && !nodeDetailOpen) {
+        // Keep map nodes visually frozen while map is focused.
+        dirtyNodes = false;
     }
 
     // Keep wall clock display responsive even if other status elements are static.
