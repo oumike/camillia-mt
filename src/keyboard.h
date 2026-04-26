@@ -1,4 +1,5 @@
 #pragma once
+// T-Deck keyboard and trackball event decoding.
 #include <Wire.h>
 #include "config.h"
 

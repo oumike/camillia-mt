@@ -1,5 +1,7 @@
 #pragma once
 
+// Board, radio, UI, and default runtime configuration constants.
+
 // ── Power & Peripherals ──────────────────────────────────────
 #define BOARD_POWERON   10
 #define BOARD_BUZZER     4

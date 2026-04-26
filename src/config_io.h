@@ -1,4 +1,5 @@
 #pragma once
+// Persistent configuration import/export and runtime config model.
 #include <Arduino.h>
 #include "config.h"
 #include "mesh_proto.h"

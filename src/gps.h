@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+// GPS lifecycle, fix state, and telemetry accessors.
+
 // ── GPS module (L76K via UART1) ───────────────────────────────
 // Pins: GPS_RX / GPS_TX / GPS_BAUD defined in config.h
 

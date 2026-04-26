@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+// Runtime debug category toggles and printf-style logging helpers.
+
 void debugSetFlags(bool acksEnabled, bool messagesEnabled, bool gpsEnabled);
 
 bool debugAcksEnabled();

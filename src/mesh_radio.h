@@ -1,4 +1,5 @@
 #pragma once
+// SX1262 radio wrapper for init, RX polling, and blocking TX operations.
 #include <Arduino.h>
 #include <RadioLib.h>
 #include "mesh_proto.h"

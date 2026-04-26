@@ -1,4 +1,5 @@
 #pragma once
+// In-memory + persisted database of known mesh nodes and telemetry/position state.
 #include <Arduino.h>
 #include "mesh_proto.h"
 

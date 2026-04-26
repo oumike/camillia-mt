@@ -1,4 +1,5 @@
 #pragma once
+// Direct-message storage, rendering model, send path, and SD persistence.
 #include <Arduino.h>
 #include "config.h"
 

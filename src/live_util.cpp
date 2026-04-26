@@ -1,0 +1,50 @@
+#include "live_util.h"
+#include "node_db.h"
+
+bool liveShortNameUsable(const char *shortName) {
+    if (!shortName || !shortName[0]) return false;
+    bool q = (shortName[0] == '?' && shortName[1] == '?' &&
+              shortName[2] == '?' && shortName[3] == '?' && shortName[4] == '\0');
+    bool d = (shortName[0] == '-' && shortName[1] == '-' &&
+              shortName[2] == '-' && shortName[3] == '-' && shortName[4] == '\0');
+    return !(q || d);
+}
+
+void liveBuildPrefix(char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    uint32_t upSec = millis() / 1000;
+    snprintf(out, outLen, "%02lu:%02lu ",
+             (unsigned long)((upSec / 60) % 60),
+             (unsigned long)(upSec % 60));
+}
+
+void liveNodeLabel(uint32_t nodeId, char *out, size_t outLen, bool useBroadcastLabel) {
+    if (!out || outLen == 0) return;
+
+    if (useBroadcastLabel && nodeId == 0xFFFFFFFF) {
+        snprintf(out, outLen, "BCAST");
+        return;
+    }
+
+    NodeEntry *n = Nodes.find(nodeId);
+    if (n && liveShortNameUsable(n->shortName)) {
+        snprintf(out, outLen, "%s", n->shortName);
+    } else {
+        snprintf(out, outLen, "!%08X", nodeId);
+    }
+}
+
+void liveNodeLabelWithHint(uint32_t nodeId,
+                           const char *hintShort,
+                           char *out,
+                           size_t outLen,
+                           bool useBroadcastLabel) {
+    if (!out || outLen == 0) return;
+
+    if (liveShortNameUsable(hintShort)) {
+        snprintf(out, outLen, "%s", hintShort);
+        return;
+    }
+
+    liveNodeLabel(nodeId, out, outLen, useBroadcastLabel);
+}

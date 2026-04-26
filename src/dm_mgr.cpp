@@ -1,4 +1,5 @@
 #include "dm_mgr.h"
+#include "live_util.h"
 #include "mesh_radio.h"
 #include "mesh_proto.h"
 #include "node_db.h"
@@ -14,30 +15,8 @@ DmMgr DMs;
 
 static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
     char prefix[12];
-    uint32_t upSec = millis() / 1000;
-    snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
-             (upSec / 60) % 60, upSec % 60);
+    liveBuildPrefix(prefix, sizeof(prefix));
     Channels.addMessage(CHAN_ANN, prefix, text, color);
-}
-
-static bool hasUsableShortName(const char *s) {
-    if (!s || !s[0]) return false;
-    bool q = (s[0] == '?' && s[1] == '?' && s[2] == '?' && s[3] == '?' && s[4] == '\0');
-    bool d = (s[0] == '-' && s[1] == '-' && s[2] == '-' && s[3] == '-' && s[4] == '\0');
-    return !(q || d);
-}
-
-static void liveDmNodeLabel(uint32_t nodeId, const char *hintShort, char *out, size_t outLen) {
-    if (hasUsableShortName(hintShort)) {
-        snprintf(out, outLen, "%s", hintShort);
-        return;
-    }
-    NodeEntry *n = Nodes.find(nodeId);
-    if (n && hasUsableShortName(n->shortName)) {
-        snprintf(out, outLen, "%s", n->shortName);
-    } else {
-        snprintf(out, outLen, "!%08X", nodeId);
-    }
 }
 
 // ── init ──────────────────────────────────────────────────────
@@ -269,7 +248,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     {
         DmConv *conv = find(toNodeId);
         char who[16];
-        liveDmNodeLabel(toNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
+        liveNodeLabelWithHint(toNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
         char live[64];
         snprintf(live, sizeof(live), "T DM %s %s %08X",
                  usedPki ? "PKI" : "CHAN",

@@ -1,4 +1,5 @@
 #pragma once
+// Meshtastic packet structures, protobuf encode/decode, and crypto helpers.
 #include <Arduino.h>
 #include "config.h"
 

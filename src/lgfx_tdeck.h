@@ -1,4 +1,5 @@
 #pragma once
+// LovyanGFX display + touch profile for LilyGO T-Deck hardware.
 #include <LovyanGFX.hpp>
 #include "config.h"
 

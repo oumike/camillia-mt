@@ -1,4 +1,5 @@
 #include "config_io.h"
+#include "base64_util.h"
 #include <SD.h>
 #include <SPI.h>
 #include <stdio.h>
@@ -8,41 +9,6 @@
 
 static const char *kPath = "/camillia/config.yaml";
 static bool sdReady = false;
-
-// ── Base64 helpers ────────────────────────────────────────────
-static const char kB64Chars[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void b64Encode(const uint8_t *in, size_t len, char *out) {
-    size_t o = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t b = (uint32_t)in[i] << 16;
-        if (i + 1 < len) b |= (uint32_t)in[i+1] << 8;
-        if (i + 2 < len) b |= (uint32_t)in[i+2];
-        out[o++] = kB64Chars[(b >> 18) & 0x3F];
-        out[o++] = kB64Chars[(b >> 12) & 0x3F];
-        out[o++] = (i + 1 < len) ? kB64Chars[(b >>  6) & 0x3F] : '=';
-        out[o++] = (i + 2 < len) ? kB64Chars[ b        & 0x3F] : '=';
-    }
-    out[o] = '\0';
-}
-
-static int b64Decode(const char *in, uint8_t *out, int maxLen) {
-    uint32_t acc = 0; int bits = 0, o = 0;
-    for (const char *p = in; *p && *p != '='; p++) {
-        int v;
-        char c = *p;
-        if      (c >= 'A' && c <= 'Z') v = c - 'A';
-        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') v = c - '0' + 52;
-        else if (c == '+' || c == '-') v = 62;
-        else if (c == '/' || c == '_') v = 63;
-        else continue;
-        acc = (acc << 6) | (uint32_t)v; bits += 6;
-        if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
-    }
-    return o;
-}
 
 // ── Role / rebroadcast name tables ───────────────────────────
 static const char *kRoleNames[] = {
@@ -263,7 +229,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     for (int i = 0; i < MESH_CHANNELS; i++) {
         const ChannelKey &ch = CHANNEL_KEYS[i];
         const char *nm = ch.name_buf[0] ? ch.name_buf : ch.name;
-        b64Encode(ch.key, ch.keyLen, b64buf);
+        base64Encode(ch.key, ch.keyLen, b64buf);
         const char *roleStr = (ch.role == 1) ? "SECONDARY" : (ch.role == 2) ? "DISABLED" : "PRIMARY";
         snprintf(tmp, sizeof(tmp),
                  "  - name: %s\n    role: %s\n    key: %s\n    hash: %02x\n",
@@ -399,7 +365,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                                 sizeof(CHANNEL_KEYS[0].name_buf), val);
                     CHANNEL_KEYS[chanIdx].name = CHANNEL_KEYS[chanIdx].name_buf;
                 } else if (!strcmp(key, "key")) {
-                    int kl = b64Decode(val, CHANNEL_KEYS[chanIdx].key, 32);
+                    int kl = base64Decode(val, CHANNEL_KEYS[chanIdx].key, 32);
                     if (kl > 0) CHANNEL_KEYS[chanIdx].keyLen = (uint8_t)kl;
                 } else if (!strcmp(key, "hash")) {
                     CHANNEL_KEYS[chanIdx].hash = (uint8_t)strtol(val, nullptr, 16);

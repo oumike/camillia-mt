@@ -1,4 +1,5 @@
 #pragma once
+// Channel manager for mesh chat/LIVE views, line wrapping, and ACK tracking.
 #include <Arduino.h>
 #include "config.h"
 #include "mesh_proto.h"

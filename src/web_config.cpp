@@ -1,4 +1,5 @@
 #include "web_config.h"
+#include "base64_util.h"
 #include "node_db.h"
 #include "channel_mgr.h"
 #include <WiFi.h>
@@ -235,40 +236,6 @@ static void sendLoginPage(const char *err = "") {
     }
     html += "</form></body></html>";
     server.send(200, "text/html", html);
-}
-
-static const char kB64Chars[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void b64Encode(const uint8_t *in, size_t len, char *out) {
-    size_t o = 0;
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t b = (uint32_t)in[i] << 16;
-        if (i + 1 < len) b |= (uint32_t)in[i+1] << 8;
-        if (i + 2 < len) b |= (uint32_t)in[i+2];
-        out[o++] = kB64Chars[(b >> 18) & 0x3F];
-        out[o++] = kB64Chars[(b >> 12) & 0x3F];
-        out[o++] = (i + 1 < len) ? kB64Chars[(b >>  6) & 0x3F] : '=';
-        out[o++] = (i + 2 < len) ? kB64Chars[ b        & 0x3F] : '=';
-    }
-    out[o] = '\0';
-}
-
-static int b64Decode(const char *in, uint8_t *out, int maxLen) {
-    uint32_t acc = 0; int bits = 0, o = 0;
-    for (const char *p = in; *p && *p != '='; p++) {
-        int v;
-        char c = *p;
-        if      (c >= 'A' && c <= 'Z') v = c - 'A';
-        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') v = c - '0' + 52;
-        else if (c == '+' || c == '-') v = 62;
-        else if (c == '/' || c == '_') v = 63;
-        else continue;
-        acc = (acc << 6) | (uint32_t)v; bits += 6;
-        if (bits >= 8) { bits -= 8; if (o < maxLen) out[o++] = (uint8_t)((acc >> bits) & 0xFF); }
-    }
-    return o;
 }
 
 // ── Config page ───────────────────────────────────────────────
@@ -558,7 +525,7 @@ static void sendConfigPage(const char *msg = "") {
     char b64buf[48];
     for (int i = 0; i < MESH_CHANNELS; i++) {
         const ChannelKey &ch = CHANNEL_KEYS[i];
-        b64Encode(ch.key, ch.keyLen, b64buf);
+        base64Encode(ch.key, ch.keyLen, b64buf);
         html += "<div class='ch-row'>";
         // Name
         snprintf(tmp, sizeof(tmp), "ch%d_name", i);
@@ -1273,7 +1240,7 @@ static void handlePostSave() {
         kh.trim();
         if (kh.length() >= 2) {
             uint8_t kbuf[32];
-            int klen = b64Decode(kh.c_str(), kbuf, 32);
+            int klen = base64Decode(kh.c_str(), kbuf, 32);
             if (klen > 0) { memcpy(CHANNEL_KEYS[i].key, kbuf, klen); CHANNEL_KEYS[i].keyLen = (uint8_t)klen; }
         }
         snprintf(field, sizeof(field), "ch%d_role", i);

@@ -1,4 +1,5 @@
 #pragma once
+// Embedded web configuration server lifecycle and state/query APIs.
 #include "config_io.h"
 
 // Called by the web server after it writes new values into *cfg.

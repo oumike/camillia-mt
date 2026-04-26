@@ -10,6 +10,7 @@
 #include "mesh_radio.h"
 #include "mesh_proto.h"
 #include "node_db.h"
+#include "live_util.h"
 #include "channel_mgr.h"
 #include "config_io.h"
 #include "web_config.h"
@@ -1252,19 +1253,6 @@ static bool isDigitChar(char c) {
     return (c >= '0' && c <= '9');
 }
 
-static const char *skipLiveLinePrefix(const char *s) {
-    if (!s) return "";
-    while (*s == ' ') s++;
-    if (isDigitChar(s[0]) && isDigitChar(s[1]) &&
-            s[2] == ':' &&
-            isDigitChar(s[3]) && isDigitChar(s[4]) &&
-            s[5] == ' ') {
-        s += 6;
-        while (*s == ' ') s++;
-    }
-    return s;
-}
-
 static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, const char **bodyOut) {
     if (!s) s = "";
     if (tsOut && tsOutLen > 0) tsOut[0] = '\0';
@@ -1400,7 +1388,8 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
 }
 
 static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
-    const char *body = skipLiveLinePrefix(dl.text);
+    const char *body = "";
+    liveTimestampAndBody(dl.text, nullptr, 0, &body);
     if (!body[0]) return (dl.color == TFT_DARKGREY) ? TFT_WHITE : dl.color;
 
     if (strstr(body, " ER")) return TFT_RED;
@@ -2873,28 +2862,9 @@ static const char *livePortTag(uint32_t portnum) {
     }
 }
 
-static bool hasUsableShortName(const NodeEntry *n) {
-    if (!n || !n->shortName[0]) return false;
-    const char *s = n->shortName;
-    bool q = (s[0] == '?' && s[1] == '?' && s[2] == '?' && s[3] == '?' && s[4] == '\0');
-    bool d = (s[0] == '-' && s[1] == '-' && s[2] == '-' && s[3] == '-' && s[4] == '\0');
-    return !(q || d);
-}
-
-static void liveNodeLabel(uint32_t nodeId, char *out, size_t outLen) {
-    NodeEntry *n = Nodes.find(nodeId);
-    if (hasUsableShortName(n)) {
-        snprintf(out, outLen, "%s", n->shortName);
-    } else {
-        snprintf(out, outLen, "!%08X", nodeId);
-    }
-}
-
 static void addLiveLine(const char *text, uint16_t color = TFT_DARKGREY) {
     char prefix[12];
-    uint32_t upSec = millis() / 1000;
-    snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
-             (upSec / 60) % 60, upSec % 60);
+    liveBuildPrefix(prefix, sizeof(prefix));
     Channels.addMessage(CHAN_ANN, prefix, text, color);
     dirtyTabs = true;
     if (activeView == CHAN_ANN) dirtyLiveRows = true;

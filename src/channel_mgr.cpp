@@ -1,6 +1,6 @@
 #include "channel_mgr.h"
+#include "live_util.h"
 #include "mesh_radio.h"
-#include "node_db.h"
 #include "lgfx_tdeck.h"
 #include "debug_flags.h"
 #include "esp_heap_caps.h"
@@ -10,31 +10,8 @@ ChannelMgr Channels;
 
 static void addLiveTxLine(const char *text, uint16_t color = TFT_DARKGREY) {
     char prefix[12];
-    uint32_t upSec = millis() / 1000;
-    snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
-             (upSec / 60) % 60, upSec % 60);
+    liveBuildPrefix(prefix, sizeof(prefix));
     Channels.addMessage(CHAN_ANN, prefix, text, color);
-}
-
-static bool hasUsableShortName(const NodeEntry *n) {
-    if (!n || !n->shortName[0]) return false;
-    const char *s = n->shortName;
-    bool q = (s[0] == '?' && s[1] == '?' && s[2] == '?' && s[3] == '?' && s[4] == '\0');
-    bool d = (s[0] == '-' && s[1] == '-' && s[2] == '-' && s[3] == '-' && s[4] == '\0');
-    return !(q || d);
-}
-
-static void liveNodeLabel(uint32_t nodeId, char *out, size_t outLen) {
-    if (nodeId == 0xFFFFFFFF) {
-        snprintf(out, outLen, "BCAST");
-        return;
-    }
-    NodeEntry *n = Nodes.find(nodeId);
-    if (hasUsableShortName(n)) {
-        snprintf(out, outLen, "%s", n->shortName);
-    } else {
-        snprintf(out, outLen, "!%08X", nodeId);
-    }
 }
 
 void ChannelMgr::init() {
@@ -363,7 +340,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
     {
         char dst[16];
-        liveNodeLabel(toNodeId, dst, sizeof(dst));
+        liveNodeLabel(toNodeId, dst, sizeof(dst), true);
         char live[64];
         snprintf(live, sizeof(live), "T NOD %s %s %s",
                  isUnicast ? "U" : "B",
