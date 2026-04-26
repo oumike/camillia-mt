@@ -117,6 +117,9 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     int prefixLen = prefix ? strlen(prefix) : 0;
     snprintf(full, sizeof(full), "%s%s", prefix ? prefix : "", text);
     int len = strlen(full);
+    static constexpr int MAX_WRAP_LINES = 64;
+    char wrapped[MAX_WRAP_LINES][DM_LINE_LEN + 1];
+    int wrappedCount = 0;
 
     if (len == 0) {
         _pushLine(*c, "", color);
@@ -154,11 +157,21 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
         int end = (int)strlen(lineBuf) - 1;
         while (end >= 0 && lineBuf[end] == ' ') lineBuf[end--] = '\0';
 
-        _pushLine(*c, lineBuf, color);
+        if (wrappedCount < MAX_WRAP_LINES) {
+            strncpy(wrapped[wrappedCount], lineBuf, DM_LINE_LEN);
+            wrapped[wrappedCount][DM_LINE_LEN] = '\0';
+            wrappedCount++;
+        }
 
         pos += take;
         while (pos < len && full[pos] == ' ') pos++;
         firstLine = false;
+    }
+
+    // Conversation view is newest-at-top; reverse insertion keeps wrapped
+    // messages readable from top to bottom.
+    for (int i = wrappedCount - 1; i >= 0; i--) {
+        _pushLine(*c, wrapped[i], color);
     }
 
     c->scrollOff = 0;  // jump to latest on new message

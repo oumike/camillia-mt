@@ -25,7 +25,7 @@
 
 // ── Chat spacing (runtime, set once at startup from gCfg.chatSpacing) ─
 int LINE_H        = 10;     // default Normal
-int VISIBLE_LINES = CHAT_H / 10;
+int VISIBLE_LINES = (CHAT_H - 2) / 10;
 
 static const int kSpacingPx[] = { 8, 10, 12 };  // Tight, Normal, Loose
 
@@ -1136,6 +1136,7 @@ static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
     int chatW = MSG_W;
+    const int chatInnerY = CHAT_Y + 1;
     drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
@@ -1160,7 +1161,7 @@ static void drawChat() {
 
     for (int row = 0; row < VISIBLE_LINES; row++) {
         const DisplayLine *dl = Channels.getLine(active, row);
-        int y = CHAT_Y + row * LINE_H;
+        int y = chatInnerY + row * LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
         lcd.fillRect(chatX + 1, y, chatW - 2, LINE_H, rowBg);
         if (!dl) continue;
@@ -1194,7 +1195,7 @@ static void drawChat() {
     if (ch.scrollOff > 0) {
         uint16_t moreBg = COL_PANEL_ALT;
         lcd.setTextColor(COL_TEAL, moreBg);
-        drawClippedText(chatX + chatW - 34, CHAT_Y + 1, 32, "more");
+        drawClippedText(chatX + chatW - 34, chatInnerY + 1, 32, "more");
     }
 
     lcd.setFont(&fonts::Font0);
@@ -3761,7 +3762,7 @@ void setup() {
     applyTimezoneFromConfig();
     // Apply chat spacing setting to runtime globals
     LINE_H        = kSpacingPx[gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1];
-    VISIBLE_LINES = CHAT_H / LINE_H;
+    VISIBLE_LINES = max(1, (CHAT_H - 2) / LINE_H);
     applyUiTheme(false);
 
     // Apply node ID override if set (allows restoring old Meshtastic identity)

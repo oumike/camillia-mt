@@ -79,6 +79,9 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
                              uint16_t color, uint32_t packetId) {
     Channel &ch = _chans[chanIdx];
     char line[MSG_CHARS + 1];
+    static constexpr int MAX_WRAP_LINES = 64;
+    char wrapped[MAX_WRAP_LINES][MSG_CHARS + 1];
+    int wrappedCount = 0;
     int  prefixLen = strlen(prefix);
     int  textLen   = strlen(text);
     int  pos       = 0;          // position in text
@@ -116,15 +119,25 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             snprintf(line, sizeof(line), "%*s%.*s", CONT_INDENT, "", take, text + pos);
         }
 
-        // ACK indicator on first line of sent messages
-        DisplayLine::AckState ack = (firstLine && packetId) ?
-            DisplayLine::PENDING : DisplayLine::NONE;
-
-        _pushLine(ch, line, color, firstLine ? packetId : 0, ack);
+        if (wrappedCount < MAX_WRAP_LINES) {
+            strncpy(wrapped[wrappedCount], line, MSG_CHARS);
+            wrapped[wrappedCount][MSG_CHARS] = '\0';
+            wrappedCount++;
+        }
 
         pos += take;
         if (pos < textLen && text[pos] == ' ') pos++; // skip space after wrap
         firstLine = false;
+    }
+
+    // UI is newest-at-top; push wrapped lines in reverse so each long message
+    // still reads top-down (first line first, continuation lines below).
+    for (int i = wrappedCount - 1; i >= 0; i--) {
+        bool logicalFirst = (i == 0);
+        DisplayLine::AckState ack = (logicalFirst && packetId)
+            ? DisplayLine::PENDING
+            : DisplayLine::NONE;
+        _pushLine(ch, wrapped[i], color, logicalFirst ? packetId : 0, ack);
     }
 }
 
