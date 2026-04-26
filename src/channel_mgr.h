@@ -8,14 +8,14 @@ struct DisplayLine {
     char     text[MSG_CHARS + 1];
     uint16_t color;
     uint32_t packetId;    // 0 = not a sent message
-    enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED } ack;
+    enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
 };
 
 struct Channel {
     const char  *name;        // points into CHANNEL_KEYS[i].name
     DisplayLine *lines;       // PSRAM circular buffer
     int          count;       // total lines ever added
-    int          scrollOff;   // 0 = bottom (latest)
+    int          scrollOff;   // 0 = latest at top
     bool         unread;
     bool         active;      // has been allocated
 };
@@ -49,9 +49,9 @@ public:
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
     // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
     void setAckStateFrom(uint32_t packetId, uint32_t fromNodeId);
-    void expireAcks();   // call from loop() to timeout pending ACKs
+    bool expireAcks();   // call from loop(); returns true when any ACK state changed
 
-    // Retrieve a display line for rendering (0=oldest visible at current scroll).
+    // Retrieve a display line for rendering (0=newest visible at current scroll).
     // Returns nullptr if out of range.
     const DisplayLine *getLine(int chanIdx, int row) const;
 
