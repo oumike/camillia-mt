@@ -4,7 +4,8 @@
 // Returns true when a short name is usable for UI/log display.
 bool liveShortNameUsable(const char *shortName);
 
-// Build uptime prefix in MM:SS form with trailing space (e.g. "03:42 ").
+// Build wall-clock prefix in HH:MM form with trailing space (e.g. "14:32 ").
+// If the device clock is not set yet, returns "--:-- ".
 void liveBuildPrefix(char *out, size_t outLen);
 
 // Format a node label using NodeDB short name when possible, otherwise !<nodeId>.

@@ -41,7 +41,7 @@ void ChannelMgr::setActive(int idx) {
     if (idx < 0 || idx >= MAX_CHANNELS) return;
     _active = idx;
     _chans[idx].unread    = false;
-    _chans[idx].scrollOff = 0;   // snap to bottom
+    _chans[idx].scrollOff = 0;   // snap to latest-at-top
 }
 
 void ChannelMgr::clearChannel(int idx) {
@@ -132,10 +132,13 @@ const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {
     const Channel &ch = _chans[chanIdx];
     int total = ch.count;
     if (total == 0) return nullptr;
-    // row 0 = top of visible area; row (VISIBLE_LINES-1) = bottom
-    // scrollOff 0 = most recent lines visible
-    int lineIdx = total - VISIBLE_LINES + row - ch.scrollOff;
-    if (lineIdx < 0 || lineIdx >= total) return nullptr;
+    // row 0 = newest visible line at the top; larger rows are older lines.
+    int stored = (total < MAX_MSG_LINES) ? total : MAX_MSG_LINES;
+    int oldest = total - stored;
+    int newest = total - 1 - ch.scrollOff;
+    if (newest < oldest) return nullptr;
+    int lineIdx = newest - row;
+    if (lineIdx < oldest || lineIdx >= total) return nullptr;
     return &ch.lines[lineIdx % MAX_MSG_LINES];
 }
 
@@ -168,24 +171,36 @@ void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
     }
 }
 
-void ChannelMgr::expireAcks() {
+bool ChannelMgr::expireAcks() {
     uint32_t now = millis();
+    bool changed = false;
+    static constexpr uint32_t kBroadcastConfirmMs = 1500;
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
-        if (_pending[i].active && now - _pending[i].sentMs > ACK_TIMEOUT_MS) {
-            if (_pending[i].destNodeId == 0xFFFFFFFF) {
-                // Broadcast — no ACK expected from mesh; just clear pending without marking red.
-                // If an ACK was received it already cleared the entry via setAckState.
-                _pending[i].active = false;
-            } else {
+        if (!_pending[i].active) continue;
+        uint32_t ageMs = now - _pending[i].sentMs;
+        if (_pending[i].destNodeId == 0xFFFFFFFF) {
+            // Channel text is broadcast; many peers do not return explicit routing ACKs.
+            // After a short settle window, treat successful RF TX as confirmed for UI status.
+            if (ageMs > kBroadcastConfirmMs) {
+                setAckState(_pending[i].packetId, DisplayLine::ACKED);
+                changed = true;
+            }
+        } else {
+            if (ageMs > ACK_TIMEOUT_MS) {
                 setAckState(_pending[i].packetId, DisplayLine::NAKED);
+                changed = true;
             }
         }
     }
+    return changed;
 }
 
 bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
                           int chanIdx) {
-    if (!Radio.isReady()) return false;
+    if (!Radio.isReady()) {
+        addLiveTxLine("T TXT B NR", TFT_RED);
+        return false;
+    }
 
     int txChan = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? chanIdx : _active;
     if (txChan < 0 || txChan >= MESH_CHANNELS) return false;
@@ -221,8 +236,21 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     memcpy(frame + sizeof(hdr), cipher, protoLen);
     size_t frameLen = sizeof(hdr) + protoLen;
 
+    char timePrefix[12];
+    liveBuildPrefix(timePrefix, sizeof(timePrefix));
+    char prefix[24];
+    snprintf(prefix, sizeof(prefix), "%s<me> ", timePrefix);
+
     if (!Radio.transmit(frame, frameLen)) {
         addLiveTxLine("T TXT B ER", TFT_RED);
+        int firstLine = addMessage(txChan, prefix, text, TFT_RED, packetId);
+        if (firstLine >= 0) {
+            Channel &ch = _chans[txChan];
+            int idx = firstLine % MAX_MSG_LINES;
+            if (ch.lines[idx].packetId == packetId) {
+                ch.lines[idx].ack = DisplayLine::TX_FAILED;
+            }
+        }
         return false;
     }
 
@@ -233,22 +261,16 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
         addLiveTxLine(live, TFT_WHITE);
     }
 
+    // Add to display first so ACK updates always have a visible line to target.
+    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId);
+
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (!_pending[i].active) {
-            _pending[i] = { packetId, millis(), txChan, _chans[txChan].count, 0xFFFFFFFF, true };
+            _pending[i] = { packetId, millis(), txChan, firstLine, 0xFFFFFFFF, true };
             break;
         }
     }
-
-    // Add to display
-    char   timeStr[8];
-    time_t t = millis() / 1000;
-    snprintf(timeStr, sizeof(timeStr), "%02lu:%02lu",
-             (t / 3600) % 24, (t / 60) % 60);
-    char prefix[20];
-    snprintf(prefix, sizeof(prefix), "%s <me> ", timeStr);
-    addMessage(txChan, prefix, text, TFT_WHITE, packetId);
 
     return true;
 }

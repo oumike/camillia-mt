@@ -33,13 +33,28 @@ bool MeshRadio::init() {
 
 bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t power) {
     if (!_ready) return false;
-    _radio.standby();
-    _radio.setFrequency(freq);
-    _radio.setSpreadingFactor(sf);
-    _radio.setBandwidth(bw);
-    _radio.setCodingRate(cr);
-    _radio.setOutputPower(power);
-    _radio.startReceive();
+    bool ok = true;
+    int state = _radio.standby();
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.setFrequency(freq);
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.setSpreadingFactor(sf);
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.setBandwidth(bw);
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.setCodingRate(cr);
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.setOutputPower(power);
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+    state = _radio.startReceive();
+    if (state != RADIOLIB_ERR_NONE) ok = false;
+
+    if (!ok) {
+        Serial.printf("[radio] reconfigure failed  %.3f MHz  SF%d  BW%.0f  CR4/%d  %ddBm\n",
+                      freq, sf, bw, cr, power);
+        return false;
+    }
+
     Serial.printf("[radio] reconfigured  %.3f MHz  SF%d  BW%.0f  CR4/%d  %ddBm\n",
                   freq, sf, bw, cr, power);
     return true;

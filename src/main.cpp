@@ -53,13 +53,11 @@ static int  tabScrollX   = 0;             // horizontal scroll offset for tab ba
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
 static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG
 static int  settingsSel  = 0;         // highlighted settings row
-static int  settingsNavSel = -1;      // -1 none, 0=UP, 1=DOWN (CFG touch nav buttons)
 static int  mapsListSel = 0;          // highlighted node row in MAP panel
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
 static const int TOUCH_BTN_W = 58;
 static const int TOUCH_BTN_H = 24;
-static const int TOUCH_BTN_STACK_GAP = 6;
 static const int TOUCH_BTN_BOTTOM_PAD = 5;
 static const int NAV_BTN_COUNT = 6;
 
@@ -73,10 +71,6 @@ static bool panelCloseVisible = false;
 static PanelHitRect panelCloseRect = {0, 0, 0, 0};
 static bool panelClearVisible = false;
 static PanelHitRect panelClearRect = {0, 0, 0, 0};
-static bool panelUpVisible = false;
-static bool panelDownVisible = false;
-static PanelHitRect panelUpRect = {0, 0, 0, 0};
-static PanelHitRect panelDownRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
 
@@ -125,24 +119,12 @@ static void clearPanelCloseRect() {
     panelCloseRect = {0, 0, 0, 0};
     panelClearVisible = false;
     panelClearRect = {0, 0, 0, 0};
-    panelUpVisible = false;
-    panelDownVisible = false;
-    panelUpRect = {0, 0, 0, 0};
-    panelDownRect = {0, 0, 0, 0};
     dmNewVisible = false;
     dmNewRect = {0, 0, 0, 0};
     for (int i = 0; i < MAP_CTL_COUNT; i++) {
         mapCtlVisible[i] = false;
         mapCtlRect[i] = {0, 0, 0, 0};
     }
-}
-
-static void setPanelScrollRects(int upX, int upY, int upW, int upH,
-                                int dnX, int dnY, int dnW, int dnH) {
-    panelUpVisible = true;
-    panelDownVisible = true;
-    panelUpRect = { upX, upY, upW, upH };
-    panelDownRect = { dnX, dnY, dnW, dnH };
 }
 
 static void setDmNewRect(int x, int y, int w, int h) {
@@ -533,7 +515,6 @@ static void goToView(int v) {
                          || activeView == CHAN_DM);
     activeView = v;
     clearPanelCloseRect();
-    settingsNavSel = -1;
     nodeListFocused = false;
     nodeDetailOpen  = false;
     dmConvOpen      = false;   // reset DM sub-state on any navigation
@@ -592,25 +573,6 @@ static void closePanelToChannel() {
         }
     }
     if (target >= 0 && target < MESH_CHANNELS) goToView(target);
-}
-
-static void settingsNavRects(int &upX, int &upY, int &upW, int &upH,
-                             int &dnX, int &dnY, int &dnW, int &dnH) {
-    const int MODAL_X = 8;
-    const int MODAL_Y = CHAT_Y + 4;
-    const int MODAL_W = LCD_W - 16;
-    const int MODAL_H = CHAT_H - 8;
-    const int BTN_W = TOUCH_BTN_W;
-    const int BTN_H = TOUCH_BTN_H;
-    const int GAP   = TOUCH_BTN_STACK_GAP;
-    const int RIGHT_PAD = 4;
-    const int BOTTOM_PAD = TOUCH_BTN_BOTTOM_PAD;
-    upW = dnW = BTN_W;
-    upH = dnH = BTN_H;
-    dnY = MODAL_Y + MODAL_H - BTN_H - BOTTOM_PAD;
-    upY = dnY;
-    dnX = MODAL_X + MODAL_W - RIGHT_PAD - BTN_W;
-    upX = dnX - BTN_W - GAP;
 }
 
 // ── Splash screen ─────────────────────────────────────────────
@@ -1079,36 +1041,6 @@ static void drawPanelClearButton(int x, int y, int w, int h) {
     setPanelClearRect(x, y, w, h);
 }
 
-static void drawPanelScrollButtons(int mx, int my, int mw, int mh) {
-    const int bw = TOUCH_BTN_W;
-    const int bh = TOUCH_BTN_H;
-    const int rightPad = 4;
-    const int bottomPad = TOUCH_BTN_BOTTOM_PAD;
-    const int gap = TOUCH_BTN_STACK_GAP;
-
-    int dnX = mx + mw - bw - rightPad;
-    int dnY = my + mh - bh - bottomPad;
-    int upX = dnX - bw - gap;
-    int upY = dnY;
-
-    uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
-    drawSquirclePill(upX, upY, bw, bh, fill, COL_SELECT_ACCENT, false);
-    drawSquirclePill(dnX, dnY, bw, bh, fill, COL_SELECT_ACCENT, false);
-
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextColor(COL_TEXT_MAIN, fill);
-    int fontH = lcd.fontHeight();
-    int upTw = lcd.textWidth("UP");
-    int dnTw = lcd.textWidth("DOWN");
-    int upTx = upX + max(1, (bw - upTw) / 2);
-    int dnTx = dnX + max(1, (bw - dnTw) / 2);
-    int upTy = upY + max(0, (bh - fontH) / 2);
-    int dnTy = dnY + max(0, (bh - fontH) / 2);
-    lcd.drawString("UP", upTx, upTy);
-    lcd.drawString("DOWN", dnTx, dnTy);
-    setPanelScrollRects(upX, upY, bw, bh, dnX, dnY, bw, bh);
-}
-
 // ── Draw: tab bar ─────────────────────────────────────────────
 static void drawTabs() {
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, COL_BG_MAIN);
@@ -1204,12 +1136,28 @@ static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
     int chatW = MSG_W;
-    int controlsTop = CHAT_Y + CHAT_H - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
     int active = Channels.activeIdx();
+
+    auto txStatusSymbol = [](const DisplayLine *dl) -> const char * {
+        if (!dl || !dl->packetId) return nullptr;
+        switch (dl->ack) {
+            case DisplayLine::ACKED:
+            case DisplayLine::ACKED_RELAY:
+                return "o";
+            case DisplayLine::TX_FAILED:
+                return "-";
+            case DisplayLine::PENDING:
+            case DisplayLine::NAKED:
+            case DisplayLine::NONE:
+            default:
+                return "...";
+        }
+    };
+
     for (int row = 0; row < VISIBLE_LINES; row++) {
         const DisplayLine *dl = Channels.getLine(active, row);
         int y = CHAT_Y + row * LINE_H;
@@ -1225,25 +1173,29 @@ static void drawChat() {
                 case DisplayLine::ACKED:       col = TFT_GREEN;  break;
                 case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; break;
                 case DisplayLine::NAKED:       col = TFT_RED;    break;
+                case DisplayLine::TX_FAILED:   col = TFT_RED;    break;
                 default: break;  // NONE / PENDING keep original color
             }
         }
 
         lcd.setTextColor(col, rowBg);
-        drawClippedText(chatX + 2, y + 1, chatW - 6, dl->text);
+        const char *sym = txStatusSymbol(dl);
+        if (sym) {
+            char rendered[MSG_CHARS + 8];
+            snprintf(rendered, sizeof(rendered), "%-3s %s", sym, dl->text);
+            drawClippedText(chatX + 2, y + 1, chatW - 6, rendered);
+        } else {
+            drawClippedText(chatX + 2, y + 1, chatW - 6, dl->text);
+        }
     }
 
-    // Scroll indicator: show arrow when not at bottom
+    // Scroll indicator: show when newer lines exist above the visible window.
     Channel &ch = Channels.get(active);
     if (ch.scrollOff > 0) {
-        lcd.setTextColor(COL_TEAL, COL_PANEL_BG);
-        drawClippedText(chatX + 3, controlsTop - LINE_H + 1, 40, "more");
+        uint16_t moreBg = COL_PANEL_ALT;
+        lcd.setTextColor(COL_TEAL, moreBg);
+        drawClippedText(chatX + chatW - 34, CHAT_Y + 1, 32, "more");
     }
-
-    // Touch scroll controls for regular mesh channel panels.
-    lcd.fillRect(chatX + 1, controlsTop, chatW - 2,
-                 CHAT_Y + CHAT_H - controlsTop - 1, COL_PANEL_BG);
-    drawPanelScrollButtons(chatX, CHAT_Y, chatW, CHAT_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -1263,10 +1215,13 @@ static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, co
 
     size_t len = strlen(s);
     if (len < 6) return false;
-    if (isDigitChar(s[0]) && isDigitChar(s[1]) &&
-            s[2] == ':' &&
-            isDigitChar(s[3]) && isDigitChar(s[4]) &&
-            s[5] == ' ') {
+    bool hhmm = isDigitChar(s[0]) && isDigitChar(s[1]) &&
+                s[2] == ':' &&
+                isDigitChar(s[3]) && isDigitChar(s[4]) &&
+                s[5] == ' ';
+    bool unset = (s[0] == '-' && s[1] == '-' && s[2] == ':' &&
+                  s[3] == '-' && s[4] == '-' && s[5] == ' ');
+    if (hhmm || unset) {
         if (tsOut && tsOutLen >= 6) {
             memcpy(tsOut, s, 5);
             tsOut[5] = '\0';
@@ -1418,10 +1373,9 @@ static void drawLivePanel(bool fullRedraw) {
 
     Channel &ch = Channels.get(CHAN_ANN);
     int total = ch.count;
-    int oldest = max(0, total - MAX_MSG_LINES);
-    int start = total - rowsVisible - ch.scrollOff;
-    if (start < oldest) start = oldest;
-    if (start < 0) start = 0;
+    int stored = min(total, MAX_MSG_LINES);
+    int oldest = total - stored;
+    int newest = total - 1 - ch.scrollOff;
 
     if (fullRedraw) {
         clearPanelCloseRect();
@@ -1431,7 +1385,6 @@ static void drawLivePanel(bool fullRedraw) {
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
         drawClippedText(mx + 5, my + 2, mw - 10, "Live RX/TX");
         lcd.fillRect(mx + 1, controlsTop, mw - 2, my + mh - controlsTop - 1, COL_PANEL_BG);
-        drawPanelScrollButtons(mx, my, mw, mh);
         const int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
         const int closeX = mx + 3;
         drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
@@ -1444,7 +1397,7 @@ static void drawLivePanel(bool fullRedraw) {
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
         lcd.fillRect(left, y, innerW, rowH, rowBg);
 
-        int lineIdx = start + row;
+        int lineIdx = newest - row;
         if (lineIdx < oldest || lineIdx >= total) continue;
         const DisplayLine &dl = ch.lines[lineIdx % MAX_MSG_LINES];
 
@@ -1454,6 +1407,7 @@ static void drawLivePanel(bool fullRedraw) {
                 case DisplayLine::ACKED:       col = TFT_GREEN;  break;
                 case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; break;
                 case DisplayLine::NAKED:       col = TFT_RED;    break;
+                case DisplayLine::TX_FAILED:   col = TFT_RED;    break;
                 default: break;
             }
         }
@@ -1464,8 +1418,8 @@ static void drawLivePanel(bool fullRedraw) {
     }
 
     if (ch.scrollOff > 0) {
-        lcd.setTextColor(COL_TEAL, COL_PANEL_BG);
-        drawClippedText(left + innerW - 30, controlsTop - rowH + 1, 28, "more");
+        lcd.setTextColor(COL_TEAL, COL_PANEL_ALT);
+        drawClippedText(left + innerW - 30, msgTop + 1, 28, "more");
     }
 
     lcd.setFont(&fonts::Font0);
@@ -2149,8 +2103,6 @@ static void drawDmList() {
         drawClippedText(ix + 4, y + 1, iw - 8, row);
     }
 
-    drawPanelScrollButtons(mx, my, mw, mh);
-
     const int closeX = mx + 3;
     const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     const int newW = TOUCH_BTN_W;
@@ -2222,7 +2174,6 @@ static void drawDmPicker() {
     if (filteredCount == 0) {
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
-        drawPanelScrollButtons(mx, my, mw, mh);
         drawPanelCloseButton(mx + 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
@@ -2260,7 +2211,6 @@ static void drawDmPicker() {
         drawClippedText(ix + 4, y + 1, iw - 8, entry);
     }
 
-    drawPanelScrollButtons(mx, my, mw, mh);
     drawPanelCloseButton(mx + 3,
                          my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                          TOUCH_BTN_W, TOUCH_BTN_H);
@@ -2292,7 +2242,6 @@ static void drawDmConv() {
     if (!c) {
         lcd.setTextColor(TFT_RED, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + DM_LINE_H + 1, iw - 8, "Conversation not found");
-        drawPanelScrollButtons(mx, my, mw, mh);
         drawPanelCloseButton(mx + 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
@@ -2320,7 +2269,6 @@ static void drawDmConv() {
         drawClippedText(ix + 4, y + 1, iw - 8, dl->text);
     }
 
-    drawPanelScrollButtons(mx, my, mw, mh);
     drawPanelCloseButton(mx + 3,
                          my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                          TOUCH_BTN_W, TOUCH_BTN_H);
@@ -2353,28 +2301,6 @@ static void drawSettings() {
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     drawClippedText(ix + 4, y + (SETTINGS_HDR_H - SH) / 2 + 1, iw - 8, "Settings");
 
-    int upX, upY, upW, upH, dnX, dnY, dnW, dnH;
-    settingsNavRects(upX, upY, upW, upH, dnX, dnY, dnW, dnH);
-    bool upSel = (settingsNavSel == 0);
-    bool dnSel = (settingsNavSel == 1);
-    uint16_t upFill = upSel ? COL_SELECT_ACCENT : COL_SELECT_BG;
-    uint16_t dnFill = dnSel ? COL_SELECT_ACCENT : COL_SELECT_BG;
-    drawSquirclePill(upX, upY, upW, upH, upFill, COL_TEXT_ON_ACCENT, upSel);
-    drawSquirclePill(dnX, dnY, dnW, dnH, dnFill, COL_TEXT_ON_ACCENT, dnSel);
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextColor(COL_TEXT_ON_ACCENT, upFill);
-    int fontH = lcd.fontHeight();
-    int upTw = lcd.textWidth("UP");
-    int upTx = upX + max(1, (upW - upTw) / 2);
-    int upTy = upY + max(0, (upH - fontH) / 2);
-    lcd.drawString("UP", upTx, upTy);
-    lcd.setTextColor(COL_TEXT_ON_ACCENT, dnFill);
-    int dnTw = lcd.textWidth("DOWN");
-    int dnTx = dnX + max(1, (dnW - dnTw) / 2);
-    int dnTy = dnY + max(0, (dnH - fontH) / 2);
-    lcd.drawString("DOWN", dnTx, dnTy);
-    setPanelScrollRects(upX, upY, upW, upH, dnX, dnY, dnW, dnH);
-    lcd.setFont(&fonts::DejaVu9);
     y += SETTINGS_HDR_H;
 
     // ── Action buttons ────────────────────────────────────────
@@ -2726,20 +2652,6 @@ static void handleTouchTap(int x, int y) {
         return;
     }
 
-    if (panelUpVisible
-        && pointInRect(x, y, panelUpRect.x, panelUpRect.y,
-                       panelUpRect.w, panelUpRect.h)) {
-        handleKey(KEY_SCROLL_UP);
-        return;
-    }
-
-    if (panelDownVisible
-        && pointInRect(x, y, panelDownRect.x, panelDownRect.y,
-                       panelDownRect.w, panelDownRect.h)) {
-        handleKey(KEY_SCROLL_DN);
-        return;
-    }
-
     if (activeView == VIEW_MAP) {
         for (int i = 0; i < MAP_CTL_COUNT; i++) {
             if (!mapCtlVisible[i]) continue;
@@ -3022,7 +2934,8 @@ static void handleRx(MeshPacket pkt) {
     }
 
     // Build time prefix
-    uint32_t upSec = pkt.rxMs / 1000;
+    char timePrefix[12];
+    liveBuildPrefix(timePrefix, sizeof(timePrefix));
     char prefix[24];
 
     switch (pkt.portnum) {
@@ -3040,8 +2953,7 @@ static void handleRx(MeshPacket pkt) {
         NodeEntry *n = Nodes.find(pkt.hdr.from);
         const char *sender = (n && n->shortName[0]) ? n->shortName : "????";
 
-        snprintf(prefix, sizeof(prefix), "%02lu:%02lu [%s] ",
-                 (upSec / 3600) % 24, (upSec / 60) % 60, sender);
+        snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
 
         if (pkt.hdr.to == myNodeId) {
             // Unicast DM addressed to us
@@ -3078,8 +2990,7 @@ static void handleRx(MeshPacket pkt) {
                           u.hasPubKey ? "YES(32B)" : "none");
         }
 
-        snprintf(prefix, sizeof(prefix), "%02lu:%02lu ",
-                 (upSec / 3600) % 24, (upSec / 60) % 60);
+        snprintf(prefix, sizeof(prefix), "%s", timePrefix);
         char info[60];
         snprintf(info, sizeof(info), "%s (%s) identified.", u.longName, u.shortName);
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
@@ -3505,12 +3416,12 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_PREV);
         } else if (activeView == VIEW_SETTINGS) {
-            settingsNavSel = -1;
             settingsSel = max(0, settingsSel - 1);
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
-            int maxOff = max(0, ch.count - VISIBLE_LINES);
+            int stored = min(ch.count, MAX_MSG_LINES);
+            int maxOff = max(0, stored - VISIBLE_LINES);
             ch.scrollOff = min(ch.scrollOff + 3, maxOff);
             dirtyChat = true;
         }
@@ -3541,7 +3452,6 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_NEXT);
         } else if (activeView == VIEW_SETTINGS) {
-            settingsNavSel = -1;
             settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
@@ -3555,7 +3465,8 @@ static void handleKey(char k) {
             mapApplyControl(MAP_CTL_ZOOM_IN);
         } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
-            int maxOff = max(0, ch.count - VISIBLE_LINES);
+            int stored = min(ch.count, MAX_MSG_LINES);
+            int maxOff = max(0, stored - VISIBLE_LINES);
             ch.scrollOff = min(ch.scrollOff + VISIBLE_LINES, maxOff);
             dirtyChat = true;
         }
@@ -3678,7 +3589,10 @@ static void onWebCfgSaved() {
     // Apply GPS enable/disable immediately
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
-    Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+    if (!Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw, gCfg.loraSf, gCfg.loraCr, gCfg.loraPower)) {
+        Serial.println("[cfg] WARNING: LoRa reconfigure failed after web save");
+        Channels.addMessage(CHAN_ANN, "", "! LoRa reconfigure failed", TFT_RED);
+    }
     // Apply node ID override immediately (no reboot needed)
     if (gCfg.nodeIdOverride != 0) myNodeId = gCfg.nodeIdOverride;
     // Apply updated display theme immediately.
@@ -3934,6 +3848,14 @@ void setup() {
         while (true) delay(500);
     }
 
+    // Always apply persisted radio config after init so NVS values take effect on boot.
+    bool rfCfgOk = Radio.reconfigure(gCfg.loraFreq, gCfg.loraBw,
+                                     gCfg.loraSf, gCfg.loraCr, gCfg.loraPower);
+    if (!rfCfgOk) {
+        Serial.println("[camillia-mt] WARNING: failed to apply saved LoRa config");
+        Channels.addMessage(CHAN_ANN, "", "! LoRa config apply failed", TFT_RED);
+    }
+
     // SD card needs SPI bus — init after Radio.init() calls SPI.begin()
     sdBegin();
     DMs.init();
@@ -3976,14 +3898,19 @@ void setup() {
 // Poll touch + keyboard; called multiple times per loop to avoid drops
 static void pollInput() {
     uint32_t now = millis();
+    char tb = kb.readTrackball();
 
-    // While asleep, allow a single trackball press to wake the screen.
-    // Navigation remains touch/keyboard-only once awake.
+    // Allow trackball activity to wake the screen.
     if (screenAsleep) {
-        if (kb.readTrackball() == KEY_ROLLER) {
+        if (tb != KEY_NONE) {
             wakeScreen();
             return;
         }
+    }
+
+    if (tb != KEY_NONE) {
+        lastActivityMs = now;
+        handleKey(tb);
     }
 
     // Touchscreen tap handling (for on-screen channel nav buttons)
@@ -4077,7 +4004,10 @@ void loop() {
     }
 
     // 3. ACK expiry
-    Channels.expireAcks();
+    if (Channels.expireAcks()) {
+        dirtyChat = true;
+        if (activeView == CHAN_ANN) dirtyLiveRows = true;
+    }
 
     // 4. Cursor blink
     if (now - lastBlink > CURSOR_BLINK_MS) {

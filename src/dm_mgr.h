@@ -16,7 +16,7 @@ struct DmConv {
     uint32_t nodeId;
     char     shortName[5];
     int      count;           // total lines pushed (may exceed MAX_DM_LINES)
-    int      scrollOff;       // 0 = latest visible
+    int      scrollOff;       // 0 = latest visible at top
     DmLine  *lines;           // PSRAM-allocated circular buffer [MAX_DM_LINES]
     char     lastText[DM_LINE_LEN + 1];  // most recent message (list preview)
     uint32_t lastMs;
@@ -46,7 +46,7 @@ public:
     bool sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text);
 
     // Scroll-aware line fetch for rendering.
-    // visibleRow: 0 = top of screen. visibleRows = total rows available.
+    // visibleRow: 0 = newest line at top. visibleRows = total rows available.
     const DmLine *getLine(const DmConv *conv, int visibleRow, int visibleRows) const;
 
     // Persistence (SD card)

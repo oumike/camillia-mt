@@ -30,6 +30,8 @@ void TDeckKeyboard::begin() {
 
 char TDeckKeyboard::readTrackball() {
     unsigned long now = millis();
+    static unsigned long lastMoveEmitMs = 0;
+    const unsigned long moveDebounceMs = 45;
 
     // Drain trackball ISR state
     noInterrupts();
@@ -46,10 +48,13 @@ char TDeckKeyboard::readTrackball() {
     // Suppress accidental clicks that fire during or just after rolling
     if (clk && (now - _lastScrollMs >= 200)) return KEY_ROLLER;
 
-    if (dx > 0) return KEY_NEXT_CHAN;
-    if (dx < 0) return KEY_PREV_CHAN;
-    if (dy < 0) return KEY_SCROLL_UP;
-    if (dy > 0) return KEY_SCROLL_DN;
+    // Ignore overly-frequent movement pulses (trackball bounce/noise).
+    if ((dy != 0 || dx != 0) && (now - lastMoveEmitMs < moveDebounceMs)) return KEY_NONE;
+
+    if (dy < 0) { lastMoveEmitMs = now; return KEY_SCROLL_UP; }
+    if (dy > 0) { lastMoveEmitMs = now; return KEY_SCROLL_DN; }
+
+    if (dx != 0) lastMoveEmitMs = now;
 
     return KEY_NONE;
 }
