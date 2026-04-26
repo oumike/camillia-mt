@@ -73,16 +73,18 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 ### In Progress
 
 - [ ] Direct messaging
+- [ ] Re-enable web config session authentication
+- [ ] Gate web config auto-start behind onboarding/settings/button
 
 ### Planned
 
 - [ ] Persistent message history across reboots (write to SD)
-- [ ] Position sharing — configurable interval, manual override
+- [ ] Position sharing (configurable interval, manual override)
 - [ ] Themes
 - [ ] Theme builder through web config
 
-### Thinking about
-- [ ] Wireless connectivity for MQTT Up/Download (I might just keep it radio only)
+### Thinking About
+- [ ] Wireless MQTT uplink/downlink support (may keep radio-only by default)
 
 
 ## Use of AI
