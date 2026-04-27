@@ -1253,6 +1253,23 @@ static const char *liveDestLabel(const char *tag) {
     return "node";
 }
 
+static const char *routingErrorName(uint32_t errorReason) {
+    switch (errorReason) {
+    case 0:  return "NONE";
+    case 1:  return "NO_ROUTE";
+    case 2:  return "GOT_NAK";
+    case 3:  return "TIMEOUT";
+    case 4:  return "NO_INTERFACE";
+    case 5:  return "MAX_RETRANSMIT";
+    case 6:  return "NO_CHANNEL";
+    case 7:  return "TOO_LARGE";
+    case 8:  return "NO_RESPONSE";
+    case 9:  return "DUTY_CYCLE_LIMIT";
+    case 35: return "PKI_UNKNOWN_PUBKEY";
+    default: return nullptr;
+    }
+}
+
 static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) {
     if (!out || outLen == 0) return;
     out[0] = '\0';
@@ -2056,7 +2073,9 @@ static void drawGps() {
 static void openDmWith(NodeEntry *n) {
     if (!n) return;
     const char *sn = n->shortName[0] ? n->shortName : "????";
-    DMs.findOrCreate(n->nodeId, sn);
+    DmConv *c = DMs.findOrCreate(n->nodeId, sn);
+    if (c && c->rxChanIdx < 0 && n->chanIdx >= 0 && n->chanIdx < MESH_CHANNELS)
+        c->rxChanIdx = n->chanIdx;
     DMs.markRead(n->nodeId);
     dmConvNodeId = n->nodeId;
     dmConvOpen   = true;
@@ -3051,8 +3070,14 @@ static void handleRx(MeshPacket pkt) {
                 }
             } else {
                 Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
-                debugLogAcks("[rx] NAK for 0x%08X err=%lu from !%08X\n",
-                             pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
+                const char *errName = routingErrorName(errorReason);
+                if (errName) {
+                    debugLogAcks("[rx] NAK for 0x%08X err=%lu(%s) from !%08X\n",
+                                 pkt.requestId, (unsigned long)errorReason, errName, pkt.hdr.from);
+                } else {
+                    debugLogAcks("[rx] NAK for 0x%08X err=%lu from !%08X\n",
+                                 pkt.requestId, (unsigned long)errorReason, pkt.hdr.from);
+                }
 
                 // PKI_UNKNOWN_PUBKEY (35): sender doesn't have our public key yet.
                 // Respond with a unicast NODEINFO so they can retry with PKI.
@@ -3066,9 +3091,13 @@ static void handleRx(MeshPacket pkt) {
                 // Show error in the DM conversation with the NAK sender (not just the open conv)
                 DmConv *conv = DMs.find(pkt.hdr.from);
                 if (conv) {
-                    char errMsg[32];
-                    snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu", (unsigned long)errorReason);
-                    DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED);
+                    char errMsg[44];
+                    if (errName)
+                        snprintf(errMsg, sizeof(errMsg), "! NAK %s(%lu)", errName, (unsigned long)errorReason);
+                    else
+                        snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu", (unsigned long)errorReason);
+                    DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED,
+                                   false, pkt.chanIdx);
                 }
             }
             if (!dmPickerOpen) dirtyChat = true;

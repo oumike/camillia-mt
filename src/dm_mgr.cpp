@@ -118,8 +118,15 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     snprintf(full, sizeof(full), "%s%s", prefix ? prefix : "", text);
     int len = strlen(full);
     static constexpr int MAX_WRAP_LINES = 64;
-    char wrapped[MAX_WRAP_LINES][DM_LINE_LEN + 1];
+    char *wrapped = (char *)heap_caps_malloc(MAX_WRAP_LINES * (DM_LINE_LEN + 1),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wrapped)
+        wrapped = (char *)malloc(MAX_WRAP_LINES * (DM_LINE_LEN + 1));
     int wrappedCount = 0;
+
+    auto wrappedLine = [&](int idx) -> char * {
+        return wrapped + (idx * (DM_LINE_LEN + 1));
+    };
 
     if (len == 0) {
         _pushLine(*c, "", color);
@@ -157,10 +164,14 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
         int end = (int)strlen(lineBuf) - 1;
         while (end >= 0 && lineBuf[end] == ' ') lineBuf[end--] = '\0';
 
-        if (wrappedCount < MAX_WRAP_LINES) {
-            strncpy(wrapped[wrappedCount], lineBuf, DM_LINE_LEN);
-            wrapped[wrappedCount][DM_LINE_LEN] = '\0';
+        if (wrapped && wrappedCount < MAX_WRAP_LINES) {
+            char *dst = wrappedLine(wrappedCount);
+            strncpy(dst, lineBuf, DM_LINE_LEN);
+            dst[DM_LINE_LEN] = '\0';
             wrappedCount++;
+        } else if (!wrapped) {
+            // Low-memory fallback: keep chat usable even if wrapping cache can't be allocated.
+            _pushLine(*c, lineBuf, color);
         }
 
         pos += take;
@@ -171,8 +182,10 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     // Conversation view is newest-at-top; reverse insertion keeps wrapped
     // messages readable from top to bottom.
     for (int i = wrappedCount - 1; i >= 0; i--) {
-        _pushLine(*c, wrapped[i], color);
+        _pushLine(*c, wrappedLine(i), color);
     }
+
+    if (wrapped) free(wrapped);
 
     c->scrollOff = 0;  // jump to latest on new message
     saveConv(c);       // save before _sort() — sort may move the struct in the array
@@ -230,12 +243,30 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
     } else {
         // Fall back to channel-key encryption
+        int chanIdx = -1;
+        const char *chanSource = "primary";
+
         DmConv *conv = find(toNodeId);
-        int chanIdx = (conv && conv->rxChanIdx >= 0) ? conv->rxChanIdx : 0;
+        if (conv && conv->rxChanIdx >= 0 && conv->rxChanIdx < MESH_CHANNELS) {
+            chanIdx = conv->rxChanIdx;
+            chanSource = "dm";
+        } else if (node && node->chanIdx >= 0 && node->chanIdx < MESH_CHANNELS) {
+            chanIdx = node->chanIdx;
+            chanSource = "node";
+        } else {
+            int active = Channels.activeIdx();
+            if (active >= 0 && active < MESH_CHANNELS) {
+                chanIdx = active;
+                chanSource = "active";
+            } else {
+                chanIdx = 0;
+            }
+        }
+
         const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
         hdr.channel = ck.hash;
-        debugLogMessages("[dm] using chan-key path: chanIdx=%d (%s) keyLen=%d hash=0x%02X\n",
-                 chanIdx, ck.name, ck.keyLen, ck.hash);
+        debugLogMessages("[dm] using chan-key path: chanIdx=%d (%s) source=%s keyLen=%d hash=0x%02X\n",
+                 chanIdx, ck.name, chanSource, ck.keyLen, ck.hash);
 
         if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                             proto, cipher, protoLen)) {
