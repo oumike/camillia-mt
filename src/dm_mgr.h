@@ -6,6 +6,7 @@
 #define MAX_DM_CONVS    16
 #define MAX_DM_LINES   200
 #define DM_LINE_LEN     53   // LCD_W / CHAR_W = 320/6
+#define MAX_DM_PENDING_TX 12
 
 struct DmLine {
     char     text[DM_LINE_LEN + 1];
@@ -45,6 +46,10 @@ public:
     // Build and transmit a unicast DM. Adds outgoing message to conversation.
     bool sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text);
 
+    // Apply routing ACK/NAK result to the matching DM TX context.
+    // Returns true when requestId matched a tracked DM transmit.
+    bool handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_t errorReason);
+
     // Scroll-aware line fetch for rendering.
     // visibleRow: 0 = newest line at top. visibleRows = total rows available.
     const DmLine *getLine(const DmConv *conv, int visibleRow, int visibleRows) const;
@@ -54,8 +59,17 @@ public:
     void loadAll();
 
 private:
+    struct PendingTx {
+        uint32_t packetId;
+        uint32_t nodeId;
+        uint32_t sentMs;
+        bool     usedPki;
+        bool     active;
+    };
+
     DmConv _convs[MAX_DM_CONVS];
     int    _count = 0;
+    PendingTx _pendingTx[MAX_DM_PENDING_TX];
 
     void _sort();
     void _pushLine(DmConv &c, const char *text, uint16_t color);

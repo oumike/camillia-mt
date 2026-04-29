@@ -172,7 +172,17 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     NodeEntry *e = upsert(pkt.hdr.from);
     e->lastHeardMs = pkt.rxMs;
     e->snr         = pkt.snr;
-    e->chanIdx     = pkt.chanIdx;
+    // Routing ACK/NAK can arrive on a fallback channel and should not drive
+    // future DM channel selection.
+    bool isRoutingAckOrNak = (pkt.portnum == ROUTING_APP && pkt.requestId != 0);
+    if (!isRoutingAckOrNak && pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS) {
+        e->chanIdx = pkt.chanIdx;
+        // Channel hash 0 is PKI marker, not a channel-key hash.
+        if (pkt.hdr.channel != 0) {
+            e->chanHash = pkt.hdr.channel;
+            e->hasChanHash = true;
+        }
+    }
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     uint8_t hopStart = (pkt.hdr.flags >> 5) & 0x07;
     e->hops = (hopStart > hopLimit) ? (hopStart - hopLimit) : 0;
@@ -195,6 +205,8 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     if (u.hasPubKey && memcmp(e->pubKey, u.pubKey, 32) != 0) {
         memcpy(e->pubKey, u.pubKey, 32);
         e->hasPubKey = true;
+        e->pkiNoChannel = false;
+        e->legacyDmNoChannel = false;
         changed = true;
     }
     if (changed) {

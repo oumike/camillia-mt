@@ -62,8 +62,9 @@ public:
 
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).
+    // For unicast, wantResponse=true can be used to request peer NODEINFO.
     bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName,
-                      uint32_t toNodeId = 0xFFFFFFFF);
+                      uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false);
 
     // Broadcast a POSITION_APP packet on LongFast with the given coordinates.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt);

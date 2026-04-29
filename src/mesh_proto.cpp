@@ -2,9 +2,8 @@
 #include "debug_flags.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/ccm.h"
-#include "mbedtls/ecdh.h"
-#include "mbedtls/ecp.h"
 #include "mbedtls/sha256.h"
+#include <Curve25519.h>
 #include <esp_random.h>
 
 // ── PSK expansion ─────────────────────────────────────────────
@@ -288,45 +287,32 @@ bool encryptPayload(uint32_t packetId, uint32_t fromNode,
 // Nonce (8 bytes): [packetId_LE32(4)] [extraNonce_LE(4)]
 // Key: SHA256(ECDH(myPrivKey, recipientPubKey))
 // Caller sets hdr.channel = 0 to signal PKI to receiving nodes.
-static int _pki_rng(void *, uint8_t *buf, size_t len) {
-    esp_fill_random(buf, len);
-    return 0;
+static bool derivePkiAesKey(const uint8_t *remotePubKey, uint8_t outAesKey[32]) {
+    if (!remotePubKey) return false;
+
+    uint8_t sharedKey[32];
+    uint8_t localPriv[32];
+    memcpy(sharedKey, remotePubKey, 32);
+    memcpy(localPriv, myPrivKey, 32);
+
+    // Match Meshtastic firmware behavior (Curve25519::dh2 + SHA256).
+    if (!Curve25519::dh2(sharedKey, localPriv)) {
+        return false;
+    }
+
+    mbedtls_sha256(sharedKey, 32, outAesKey, 0);
+    return true;
 }
 
 bool encryptPki(uint32_t packetId, uint32_t fromNode,
                 const uint8_t *recipientPubKey,
                 const uint8_t *plain, size_t plainLen,
                 uint8_t *out) {
-    mbedtls_ecp_group grp;
-    mbedtls_mpi      d, z;
-    mbedtls_ecp_point Qp;
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_mpi_init(&d);
-    mbedtls_mpi_init(&z);
-    mbedtls_ecp_point_init(&Qp);
-
-    // Curve25519 keys on the wire are little-endian; mbedtls MPIs are big-endian — reverse both
-    uint8_t privBE[32], pubBE[32];
-    for (int i = 0; i < 32; i++) { privBE[i] = myPrivKey[31-i]; pubBE[i] = recipientPubKey[31-i]; }
-
     bool ok = false;
     int step = 0;
     do {
-        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) { step=1; break; }
-        if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0) { step=2; break; }
-        if (mbedtls_mpi_read_binary(&Qp.X, pubBE, 32) != 0) { step=3; break; }
-        mbedtls_mpi_lset(&Qp.Y, 0);
-        mbedtls_mpi_lset(&Qp.Z, 1);
-
-        if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, _pki_rng, nullptr) != 0) { step=4; break; }
-
-        // Write shared secret as little-endian (Meshtastic/Plai convention), then SHA256
-        uint8_t sharedBE[32], sharedSecret[32];
-        if (mbedtls_mpi_write_binary(&z, sharedBE, 32) != 0) { step=5; break; }
-        for (int i = 0; i < 32; i++) sharedSecret[i] = sharedBE[31-i];
-
         uint8_t aesKey[32];
-        mbedtls_sha256(sharedSecret, 32, aesKey, 0);
+    if (!derivePkiAesKey(recipientPubKey, aesKey)) { step = 1; break; }
 
         uint32_t extraNonce;
         esp_fill_random(&extraNonce, sizeof(extraNonce));
@@ -340,7 +326,7 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
         mbedtls_ccm_context ccm;
         mbedtls_ccm_init(&ccm);
         int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, aesKey, 256);
-        if (ret != 0) { step=6; mbedtls_ccm_free(&ccm); break; }
+        if (ret != 0) { step=2; mbedtls_ccm_free(&ccm); break; }
         uint8_t tag[8];
         ret = mbedtls_ccm_encrypt_and_tag(&ccm, plainLen,
                                            nonce, sizeof(nonce),
@@ -348,7 +334,7 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
                                            plain, out,
                                            tag, sizeof(tag));
         mbedtls_ccm_free(&ccm);
-        if (ret != 0) { step=7; break; }
+        if (ret != 0) { step=3; break; }
 
         memcpy(out + plainLen,     tag,         8);
         memcpy(out + plainLen + 8, &extraNonce, 4);
@@ -356,11 +342,6 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
     } while (false);
 
     if (!ok) debugLogMessages("[pki] encryptPki failed at step %d\n", step);
-
-    mbedtls_ecp_point_free(&Qp);
-    mbedtls_mpi_free(&z);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_group_free(&grp);
     return ok;
 }
 
@@ -377,36 +358,11 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
     uint32_t extraNonce;
     memcpy(&extraNonce, cipher + plainLen + 8, 4);      // extraNonce[4]
 
-    mbedtls_ecp_group grp;
-    mbedtls_mpi      d, z;
-    mbedtls_ecp_point Qp;
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_mpi_init(&d);
-    mbedtls_mpi_init(&z);
-    mbedtls_ecp_point_init(&Qp);
-
-    // Curve25519 keys on the wire are little-endian; mbedtls MPIs are big-endian — reverse both
-    uint8_t privBE[32], pubBE[32];
-    for (int i = 0; i < 32; i++) { privBE[i] = myPrivKey[31-i]; pubBE[i] = senderPubKey[31-i]; }
-
     bool ok = false;
     int step = 0;
     do {
-        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) { step=1; break; }
-        if (mbedtls_mpi_read_binary(&d, privBE, 32) != 0) { step=2; break; }
-        if (mbedtls_mpi_read_binary(&Qp.X, pubBE, 32) != 0) { step=3; break; }
-        mbedtls_mpi_lset(&Qp.Y, 0);
-        mbedtls_mpi_lset(&Qp.Z, 1);
-
-        if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, _pki_rng, nullptr) != 0) { step=4; break; }
-
-        // Write shared secret as little-endian (Meshtastic/Plai convention), then SHA256
-        uint8_t sharedBE[32], sharedSecret[32];
-        if (mbedtls_mpi_write_binary(&z, sharedBE, 32) != 0) { step=5; break; }
-        for (int i = 0; i < 32; i++) sharedSecret[i] = sharedBE[31-i];
-
         uint8_t aesKey[32];
-        mbedtls_sha256(sharedSecret, 32, aesKey, 0);
+        if (!derivePkiAesKey(senderPubKey, aesKey)) { step = 1; break; }
 
         // 13-byte nonce: [packetId_LE32][extraNonce_LE32][fromNode_LE32][0x00]
         uint8_t nonce[13] = {};
@@ -417,23 +373,18 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
         mbedtls_ccm_context ccm;
         mbedtls_ccm_init(&ccm);
         int ret = mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, aesKey, 256);
-        if (ret != 0) { step=6; mbedtls_ccm_free(&ccm); break; }
+        if (ret != 0) { step=2; mbedtls_ccm_free(&ccm); break; }
         ret = mbedtls_ccm_auth_decrypt(&ccm, plainLen,
                                         nonce, sizeof(nonce),
                                         nullptr, 0,
                                         ciphertext, plain,
                                         tag, 8);
         mbedtls_ccm_free(&ccm);
-        if (ret != 0) { step=7; break; }
+        if (ret != 0) { step=3; break; }
         ok = true;
     } while (false);
 
     if (!ok) debugLogMessages("[pki] decryptPki failed at step %d\n", step);
-
-    mbedtls_ecp_point_free(&Qp);
-    mbedtls_mpi_free(&z);
-    mbedtls_mpi_free(&d);
-    mbedtls_ecp_group_free(&grp);
     return ok;
 }
 
@@ -464,6 +415,24 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t
         n += pbWriteVarint(buf + n, (9 << 3) | 0);
         n += pbWriteVarint(buf + n, bitfield);
     }
+    return n;
+}
+
+size_t encodeTextMessageUnicast(const char *text,
+                                uint32_t fromNode, uint32_t toNode,
+                                uint8_t *buf, size_t bufLen) {
+    size_t n = encodeTextMessage(text, buf, bufLen, 0);
+    if (n == 0) return 0;
+    if (n + 10 > bufLen) return 0;
+
+    // Data field 4 (dest), fixed32
+    buf[n++] = (4 << 3) | 5;
+    memcpy(buf + n, &toNode, 4); n += 4;
+
+    // Data field 5 (source), fixed32
+    buf[n++] = (5 << 3) | 5;
+    memcpy(buf + n, &fromNode, 4); n += 4;
+
     return n;
 }
 
@@ -568,12 +537,12 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     return n;
 }
 
-size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
+size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
                      uint8_t *buf, size_t bufLen) {
-    // Inner Routing proto: field 3 (error_reason), varint = 0 (NONE = success)
+    // Inner Routing proto: field 3 (error_reason), varint
     uint8_t inner[4]; size_t innerLen = 0;
     inner[innerLen++] = (3 << 3) | 0;  // field 3, varint
-    inner[innerLen++] = 0;              // NONE
+    innerLen += pbWriteVarint(inner + innerLen, errorReason);
 
     size_t n = 0;
     // Data field 1 (portnum = ROUTING_APP), varint

@@ -22,6 +22,7 @@ static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
 // ── init ──────────────────────────────────────────────────────
 void DmMgr::init() {
     memset(_convs, 0, sizeof(_convs));
+    memset(_pendingTx, 0, sizeof(_pendingTx));
     _count = 0;
     loadAll();
 }
@@ -110,7 +111,7 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     c->lastText[DM_LINE_LEN] = '\0';
     c->lastMs = millis();
     if (markUnread) c->unread = true;
-    if (chanIdx >= 0) c->rxChanIdx = chanIdx;
+    if (chanIdx >= 0 && chanIdx < MESH_CHANNELS) c->rxChanIdx = chanIdx;
 
     // Combine prefix + text then word-wrap at DM_LINE_LEN
     char full[512];
@@ -206,7 +207,33 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     uint8_t  proto[256];
     uint8_t  cipher[280]; // 256 proto + 12 PKI overhead + margin
 
-    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto));
+    // Conversation IDs can become stale across reboots/resets. If we have a fresher
+    // node with the same short name, send to that node ID instead.
+    uint32_t resolvedToNodeId = toNodeId;
+    DmConv *convHint = find(toNodeId);
+    NodeEntry *initialNode = Nodes.find(toNodeId);
+    uint32_t bestHeardMs = initialNode ? initialNode->lastHeardMs : 0;
+    if (convHint && convHint->shortName[0]) {
+        for (int i = 0; i < Nodes.count(); i++) {
+            NodeEntry *cand = Nodes.getByRank(i);
+            if (!cand || !cand->shortName[0]) continue;
+            if (strncmp(cand->shortName, convHint->shortName, sizeof(convHint->shortName) - 1) != 0)
+                continue;
+            if (cand->lastHeardMs > bestHeardMs) {
+                resolvedToNodeId = cand->nodeId;
+                bestHeardMs = cand->lastHeardMs;
+            }
+        }
+    }
+    if (resolvedToNodeId != toNodeId) {
+        debugLogMessages("[dm] remap destination by shortName '%s': !%08X -> !%08X\n",
+                         convHint ? convHint->shortName : "????", toNodeId, resolvedToNodeId);
+    }
+
+    // getByRank() sorts NodeDB in place; reacquire pointer after remap loop.
+    NodeEntry *node = Nodes.find(resolvedToNodeId);
+
+    size_t protoLen = encodeTextMessageUnicast(text, myNodeId, resolvedToNodeId, proto, sizeof(proto));
     debugLogMessages("[dm] protoLen=%u\n", (unsigned)protoLen);
     if (protoLen == 0) {
         debugLogMessages("[dm] sendDm FAIL: encode failed\n");
@@ -214,7 +241,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     }
 
     MeshHdr hdr = {};
-    hdr.to    = toNodeId;
+    hdr.to    = resolvedToNodeId;
     hdr.from  = myNodeId;
     hdr.id    = packetId;
     hdr.flags = (1 << 3) |  // want_ack
@@ -226,11 +253,39 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     bool usedPki = false;
 
     // Prefer PKI if we have the recipient's Curve25519 public key
-    NodeEntry *node = Nodes.find(toNodeId);
     debugLogMessages("[dm] node=%s  hasPubKey=%d\n",
                      node ? "found" : "null", node ? (int)node->hasPubKey : -1);
 
-    if (node && node->hasPubKey) {
+    // Match modern Meshtastic behavior for direct messages:
+    // no legacy channel fallback for TEXT DMs. If peer pubkey is unknown,
+    // request NODEINFO and fail fast.
+    bool usePki = node && node->hasPubKey;
+
+    if (!usePki) {
+        DmConv *conv = find(toNodeId);
+        char who[16];
+        liveNodeLabelWithHint(resolvedToNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
+        char live[72];
+        snprintf(live, sizeof(live), "T DM ER noPK %s t%08X", who, resolvedToNodeId);
+        addLiveDmLine(live, TFT_RED);
+
+        const uint32_t now = millis();
+        if (!node || now - node->lastSentInfoMs > 5000) {
+            NodeEntry *me = Nodes.find(myNodeId);
+            const char *myLong = (me && me->longName[0]) ? me->longName : MY_LONG_NAME;
+            const char *myShort = (me && me->shortName[0]) ? me->shortName : MY_SHORT_NAME;
+            bool reqOk = Channels.sendNodeInfo(myNodeId, myLong, myShort, resolvedToNodeId, true);
+            if (node && reqOk) node->lastSentInfoMs = now;
+            debugLogMessages("[dm] no pubkey for !%08X, requested NODEINFO (%s)\n",
+                             resolvedToNodeId, reqOk ? "sent" : "failed");
+        } else {
+            debugLogMessages("[dm] no pubkey for !%08X, NODEINFO request throttled\n",
+                             resolvedToNodeId);
+        }
+        return false;
+    }
+
+    if (usePki) {
         hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
         usedPki = true;
         debugLogMessages("[dm] using PKI path\n");
@@ -241,40 +296,6 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         }
         payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
         debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
-    } else {
-        // Fall back to channel-key encryption
-        int chanIdx = -1;
-        const char *chanSource = "primary";
-
-        DmConv *conv = find(toNodeId);
-        if (conv && conv->rxChanIdx >= 0 && conv->rxChanIdx < MESH_CHANNELS) {
-            chanIdx = conv->rxChanIdx;
-            chanSource = "dm";
-        } else if (node && node->chanIdx >= 0 && node->chanIdx < MESH_CHANNELS) {
-            chanIdx = node->chanIdx;
-            chanSource = "node";
-        } else {
-            int active = Channels.activeIdx();
-            if (active >= 0 && active < MESH_CHANNELS) {
-                chanIdx = active;
-                chanSource = "active";
-            } else {
-                chanIdx = 0;
-            }
-        }
-
-        const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
-        hdr.channel = ck.hash;
-        debugLogMessages("[dm] using chan-key path: chanIdx=%d (%s) source=%s keyLen=%d hash=0x%02X\n",
-                 chanIdx, ck.name, chanSource, ck.keyLen, ck.hash);
-
-        if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                            proto, cipher, protoLen)) {
-            debugLogMessages("[dm] sendDm FAIL: encrypt failed\n");
-            addLiveDmLine("T DM ER enc", TFT_RED);
-            return false;
-        }
-        payloadLen = protoLen;
     }
 
     debugLogMessages("[dm] transmitting: frameLen=%u\n", (unsigned)(sizeof(MeshHdr) + payloadLen));
@@ -288,16 +309,36 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         return false;
     }
 
+    // Track this DM TX so ROUTING_APP ACK/NAK handling can react based on
+    // whether this packet used PKI or channel-key encryption.
+    {
+        int slot = -1;
+        int oldest = 0;
+        for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+            if (!_pendingTx[i].active) {
+                slot = i;
+                break;
+            }
+            if (_pendingTx[i].sentMs < _pendingTx[oldest].sentMs)
+                oldest = i;
+        }
+        if (slot < 0) slot = oldest;
+        _pendingTx[slot] = { packetId, resolvedToNodeId, millis(), usedPki, true };
+        debugLogMessages("[dm] track tx: slot=%d req=%08X to=!%08X mode=%s pkiNoChannel=%d legacyNoChan=%d\n",
+                         slot, packetId, resolvedToNodeId,
+                         usedPki ? "PKI" : "CHAN",
+                 (node && node->hasPubKey) ? (int)node->pkiNoChannel : -1,
+                 (node && node->hasPubKey) ? (int)node->legacyDmNoChannel : -1);
+    }
+
     debugLogMessages("[dm] TX OK\n");
     {
         DmConv *conv = find(toNodeId);
         char who[16];
-        liveNodeLabelWithHint(toNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
-        char live[64];
-        snprintf(live, sizeof(live), "T DM %s %s %08X",
-                 usedPki ? "PKI" : "CHAN",
-                 who,
-                 packetId);
+        liveNodeLabelWithHint(resolvedToNodeId, conv ? conv->shortName : nullptr, who, sizeof(who));
+        char live[72];
+        snprintf(live, sizeof(live), "T DM PKI %s %08X t%08X",
+                 who, packetId, resolvedToNodeId);
         addLiveDmLine(live, TFT_WHITE);
     }
 
@@ -311,6 +352,130 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         snprintf(prefix, sizeof(prefix), "%s<me> ", timePrefix);
         addMessage(toNodeId, conv->shortName, prefix, text, TFT_WHITE, false);
     }
+    return true;
+}
+
+bool DmMgr::handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_t errorReason) {
+    int match = -1;
+    bool usedIdOnlyFallback = false;
+    int activeTx = 0;
+    for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+        if (_pendingTx[i].active) activeTx++;
+    }
+
+    debugLogMessages("[dm] routing result: from=!%08X req=%08X err=%lu activeTx=%d\n",
+                     fromNodeId, requestId, (unsigned long)errorReason, activeTx);
+
+    // Prefer exact match by packet ID + recipient.
+    for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+        if (!_pendingTx[i].active) continue;
+        if (_pendingTx[i].packetId == requestId && _pendingTx[i].nodeId == fromNodeId) {
+            match = i;
+            break;
+        }
+    }
+
+    // Fallback: packet ID-only match.
+    if (match < 0) {
+        for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+            if (!_pendingTx[i].active) continue;
+            if (_pendingTx[i].packetId == requestId) {
+                match = i;
+                usedIdOnlyFallback = true;
+                break;
+            }
+        }
+    }
+
+    if (match < 0) {
+        debugLogMessages("[dm] routing result unmatched: from=!%08X req=%08X err=%lu\n",
+                         fromNodeId, requestId, (unsigned long)errorReason);
+        return false;
+    }
+
+    const bool usedPki = _pendingTx[match].usedPki;
+    const uint32_t trackedNodeId = _pendingTx[match].nodeId;
+    const uint32_t ageMs = millis() - _pendingTx[match].sentMs;
+    debugLogMessages("[dm] routing match: slot=%d kind=%s trackedTo=!%08X age=%lums mode=%s\n",
+                     match,
+                     usedIdOnlyFallback ? "req-only" : "exact",
+                     trackedNodeId,
+                     (unsigned long)ageMs,
+                     usedPki ? "PKI" : "CHAN");
+
+    _pendingTx[match].active = false;
+
+    NodeEntry *nTracked = Nodes.find(trackedNodeId);
+    NodeEntry *nFrom = Nodes.find(fromNodeId);
+    NodeEntry *n = nTracked ? nTracked : nFrom;
+    if (!n) {
+        debugLogMessages("[dm] routing match had no node entry for !%08X\n", fromNodeId);
+        return true;
+    }
+
+    NodeEntry *aliasNode = nullptr;
+    if (nTracked && nFrom && nTracked != nFrom) {
+        if (nTracked->shortName[0] && nFrom->shortName[0] &&
+            strncmp(nTracked->shortName, nFrom->shortName, sizeof(nTracked->shortName) - 1) == 0) {
+            aliasNode = nFrom;
+            debugLogMessages("[dm] routing alias: tracked=!%08X from=!%08X short=%s\n",
+                             trackedNodeId, fromNodeId, nTracked->shortName);
+        } else {
+            debugLogMessages("[dm] routing id mismatch: tracked=!%08X from=!%08X\n",
+                             trackedNodeId, fromNodeId);
+        }
+    }
+
+    if (errorReason == 6) { // NO_CHANNEL
+        if (usedPki) {
+            // If the peer already rejected legacy channel DMs, keep trying PKI
+            // to avoid bouncing between two guaranteed-fail modes.
+            if (n->legacyDmNoChannel && n->hasPubKey) {
+                n->pkiNoChannel = false;
+                debugLogMessages("[dm] NAK NO_CHANNEL on PKI DM to !%08X but legacy DM rejected -> keep PKI\n", fromNodeId);
+            } else {
+                n->pkiNoChannel = true;
+                debugLogMessages("[dm] NAK NO_CHANNEL on PKI DM to !%08X -> disable PKI for node\n", fromNodeId);
+            }
+            if (aliasNode) {
+                aliasNode->pkiNoChannel = n->pkiNoChannel;
+                aliasNode->legacyDmNoChannel = n->legacyDmNoChannel;
+            }
+        } else {
+            // Modern firmware can reject legacy channel-encrypted DMs with
+            // NO_CHANNEL; stick to PKI after observing this once.
+            n->legacyDmNoChannel = true;
+            n->pkiNoChannel = false;
+            n->chanIdx = -1;
+            n->hasChanHash = false;
+            n->chanHash = 0;
+            if (aliasNode) {
+                aliasNode->legacyDmNoChannel = true;
+                aliasNode->pkiNoChannel = false;
+                aliasNode->chanIdx = -1;
+                aliasNode->hasChanHash = false;
+                aliasNode->chanHash = 0;
+            }
+            debugLogMessages("[dm] NAK NO_CHANNEL on channel DM to !%08X -> mark legacy DM rejected, clear channel hash, prefer PKI\n", fromNodeId);
+        }
+    } else if (errorReason == 0) {
+        // ACK: stay on the mode that worked.
+        n->pkiNoChannel = usedPki ? false : true;
+        n->legacyDmNoChannel = false;
+        if (aliasNode) {
+            aliasNode->pkiNoChannel = n->pkiNoChannel;
+            aliasNode->legacyDmNoChannel = false;
+        }
+    }
+
+    debugLogMessages("[dm] routing apply: applyNode=!%08X from=!%08X err=%lu mode=%s -> pkiNoChannel=%d legacyNoChan=%d\n",
+                     n->nodeId,
+                     fromNodeId,
+                     (unsigned long)errorReason,
+                     usedPki ? "PKI" : "CHAN",
+                     (int)n->pkiNoChannel,
+                     (int)n->legacyDmNoChannel);
+
     return true;
 }
 

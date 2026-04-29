@@ -20,8 +20,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
-#include "mbedtls/ecp.h"
-#include "mbedtls/ecdh.h"
+#include <Curve25519.h>
 
 // ── Chat spacing (runtime, set once at startup from gCfg.chatSpacing) ─
 int LINE_H        = 10;     // default Normal
@@ -42,6 +41,23 @@ static RhinoConfig gCfg;
 uint8_t myPubKey[32] = {};
 uint8_t myPrivKey[32] = {};
 uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config load
+
+static bool deriveCurve25519Public(const uint8_t privBytes[32], uint8_t outPub[32]) {
+    bool nonZero = false;
+    for (int i = 0; i < 32; i++) {
+        if (privBytes[i] != 0) {
+            nonZero = true;
+            break;
+        }
+    }
+    if (!nonZero) return false;
+
+    uint8_t privLocal[32];
+    memcpy(privLocal, privBytes, 32);
+    // Public API: eval() returns false only for invalid input point x.
+    // With x=nullptr (basepoint 9), this is a suitable public-key derivation check.
+    return Curve25519::eval(outPub, privLocal, nullptr);
+}
 
 // ── View state ────────────────────────────────────────────────
 #define VIEW_GPS      MAX_CHANNELS
@@ -1285,11 +1301,46 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
     char id[16] = {0};
     int ch = -1;
 
+    char hashHex[4] = {0};
+    if (sscanf(body, "R %19[^>]>%7s %11s c%d h%3s", who, dst, tag, &ch, hashHex) == 5) {
+        if (ts[0]) snprintf(out, outLen, "%s RX %s from %s to %s on ch%d hash %s",
+                            ts, livePortLabel(tag), who, liveDestLabel(dst), ch, hashHex);
+        else snprintf(out, outLen, "RX %s from %s to %s on ch%d hash %s",
+                      livePortLabel(tag), who, liveDestLabel(dst), ch, hashHex);
+        return;
+    }
+
     if (sscanf(body, "R %19[^>]>%7s %11s c%d", who, dst, tag, &ch) == 4) {
         if (ts[0]) snprintf(out, outLen, "%s RX %s from %s to %s on ch%d",
                             ts, livePortLabel(tag), who, liveDestLabel(dst), ch);
         else snprintf(out, outLen, "RX %s from %s to %s on ch%d",
                       livePortLabel(tag), who, liveDestLabel(dst), ch);
+        return;
+    }
+
+    uint32_t reqId = 0;
+    uint32_t err = 0;
+    if (sscanf(body, "R ACK %19s %8lx h%3s", who, &reqId, hashHex) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s RX routing ACK from %s req:%08lX hash:%s",
+                            ts, who, (unsigned long)reqId, hashHex);
+        else snprintf(out, outLen, "RX routing ACK from %s req:%08lX hash:%s",
+                      who, (unsigned long)reqId, hashHex);
+        return;
+    }
+
+    if (sscanf(body, "R NAK %19s %8lx err%lu h%3s", who, &reqId, &err, hashHex) == 4) {
+        const char *errName = routingErrorName(err);
+        if (ts[0]) {
+            if (errName) snprintf(out, outLen, "%s RX routing NAK from %s req:%08lX %s(%lu) hash:%s",
+                                  ts, who, (unsigned long)reqId, errName, (unsigned long)err, hashHex);
+            else snprintf(out, outLen, "%s RX routing NAK from %s req:%08lX err:%lu hash:%s",
+                          ts, who, (unsigned long)reqId, (unsigned long)err, hashHex);
+        } else {
+            if (errName) snprintf(out, outLen, "RX routing NAK from %s req:%08lX %s(%lu) hash:%s",
+                                  who, (unsigned long)reqId, errName, (unsigned long)err, hashHex);
+            else snprintf(out, outLen, "RX routing NAK from %s req:%08lX err:%lu hash:%s",
+                          who, (unsigned long)reqId, (unsigned long)err, hashHex);
+        }
         return;
     }
 
@@ -2802,45 +2853,58 @@ static void addLiveLine(const char *text, uint16_t color = TFT_DARKGREY) {
     if (activeView == CHAN_ANN) dirtyLiveRows = true;
 }
 
-static void sendRoutingAck(const MeshPacket &pkt) {
-    if (pkt.chanIdx < 0 || pkt.chanIdx >= MAX_CHANNELS) return;
+static void sendRoutingResult(uint32_t toNodeId, uint32_t reqId, uint32_t errorReason,
+                              uint8_t origFlags, int txChanIdx) {
+    if (txChanIdx < 0 || txChanIdx >= MESH_CHANNELS) return;
 
     uint8_t proto[48], cipher[48];
-    size_t protoLen = encodeRouting(pkt.hdr.id, myNodeId, proto, sizeof(proto));
+    size_t protoLen = encodeRouting(reqId, myNodeId, errorReason, proto, sizeof(proto));
     if (protoLen == 0) return;
 
-    const ChannelKey &ck = CHANNEL_KEYS[pkt.chanIdx];
-    uint32_t ackId = esp_random() ^ millis();
-    if (!encryptPayload(ackId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
+    const ChannelKey &ck = CHANNEL_KEYS[txChanIdx];
+    uint32_t routingId = esp_random() ^ millis();
+    if (!encryptPayload(routingId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
 
     // Calculate hop limit matching Plai/Meshtastic convention:
     // hop_start == hop_limit (fresh packet) so receiver sees "Delivered" not "Acknowledged by another node"
-    uint8_t origHopStart = (pkt.hdr.flags >> 5) & 0x07;
-    uint8_t origHopLimit = pkt.hdr.flags & 0x07;
+    uint8_t origHopStart = (origFlags >> 5) & 0x07;
+    uint8_t origHopLimit = origFlags & 0x07;
     uint8_t hopsUsed = (origHopStart >= origHopLimit) ? (origHopStart - origHopLimit) : MESH_HOP_LIMIT;
-    uint8_t ackHops  = ((hopsUsed + 2) <= MESH_HOP_LIMIT) ? (hopsUsed + 2) : MESH_HOP_LIMIT;
-    if (origHopStart == 0) ackHops = MESH_HOP_LIMIT;
+    uint8_t respHops  = ((hopsUsed + 2) <= MESH_HOP_LIMIT) ? (hopsUsed + 2) : MESH_HOP_LIMIT;
+    if (origHopStart == 0) respHops = MESH_HOP_LIMIT;
 
     uint8_t frame[sizeof(MeshHdr) + 48];
     MeshHdr hdr = {};
-    hdr.to      = pkt.hdr.from;
+    hdr.to      = toNodeId;
     hdr.from    = myNodeId;
-    hdr.id      = ackId;
+    hdr.id      = routingId;
     hdr.channel = ck.hash;
-    hdr.flags   = (ackHops & 0x07) | ((ackHops & 0x07) << 5);  // hop_limit = hop_start
+    hdr.flags   = (respHops & 0x07) | ((respHops & 0x07) << 5);  // hop_limit = hop_start
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool txOk = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    debugLogAcks("[ack] routing ACK -> !%08X for pkt 0x%08X hops=%u\n",
-                 pkt.hdr.from, pkt.hdr.id, ackHops);
+    debugLogAcks("[ack] routing %s -> !%08X for pkt 0x%08X err=%lu hops=%u ch=%d\n",
+                 errorReason == 0 ? "ACK" : "NAK", toNodeId, reqId,
+                 (unsigned long)errorReason, respHops, txChanIdx);
     char who[16];
-    liveNodeLabel(pkt.hdr.from, who, sizeof(who));
-    char live[56];
-    snprintf(live, sizeof(live), "T ACK %s %s",
-             who, txOk ? "OK" : "ER");
+    liveNodeLabel(toNodeId, who, sizeof(who));
+    char live[72];
+    if (errorReason == 0) {
+        snprintf(live, sizeof(live), "T ACK %s %s",
+                 who, txOk ? "OK" : "ER");
+    } else {
+        snprintf(live, sizeof(live), "T NAK %s %08X err%lu %s",
+                 who, reqId, (unsigned long)errorReason,
+                 txOk ? "OK" : "ER");
+    }
     addLiveLine(live, txOk ? TFT_DARKGREY : TFT_RED);
+}
+
+static void sendRoutingAck(const MeshPacket &pkt) {
+    if (pkt.chanIdx < 0 || pkt.chanIdx >= MESH_CHANNELS) return;
+    sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0, pkt.hdr.flags, pkt.chanIdx);
 }
 
 // ── Handle received packet ────────────────────────────────────
@@ -2931,6 +2995,27 @@ static void handleRx(MeshPacket pkt) {
         snprintf(live, sizeof(live), "R %s ENC %02X",
                  who, pkt.hdr.channel);
         addLiveLine(live, TFT_DARKGREY);
+
+        // If we are receiving PKI packets to us that we cannot decrypt,
+        // proactively request fresh NODEINFO/public key from that node.
+        if (pkt.hdr.to == myNodeId && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
+            // Meshtastic peers send NODEINFO after receiving PKI_UNKNOWN_PUBKEY.
+            if (pkt.hdr.flags & 0x08) {
+                sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 35, pkt.hdr.flags, 0);
+            }
+
+            NodeEntry *n = Nodes.find(pkt.hdr.from);
+            if (n) {
+                uint32_t now = millis();
+                if (now - n->lastSentInfoMs > 5000) {
+                    if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                              pkt.hdr.from, true)) {
+                        n->lastSentInfoMs = now;
+                    }
+                }
+            }
+        }
+
         if (debugMessagesEnabled()) {
             static uint32_t sLastUnknownChanLogMs = 0;
             uint32_t nowMs = millis();
@@ -2945,11 +3030,11 @@ static void handleRx(MeshPacket pkt) {
     {
         char who[16];
         liveNodeLabel(pkt.hdr.from, who, sizeof(who));
-        char live[64];
+        char live[72];
         const char *dst = (pkt.hdr.to == 0xFFFFFFFF) ? "B" :
                           ((pkt.hdr.to == myNodeId) ? "M" : "U");
-        snprintf(live, sizeof(live), "R %s>%s %s c%d",
-                 who, dst, livePortTag(pkt.portnum), pkt.chanIdx);
+        snprintf(live, sizeof(live), "R %s>%s %s c%d h%02X",
+                 who, dst, livePortTag(pkt.portnum), pkt.chanIdx, pkt.hdr.channel);
         addLiveLine(live, TFT_CYAN);
     }
 
@@ -3011,8 +3096,10 @@ static void handleRx(MeshPacket pkt) {
         }
 
         snprintf(prefix, sizeof(prefix), "%s", timePrefix);
-        char info[60];
-        snprintf(info, sizeof(info), "%s (%s) identified.", u.longName, u.shortName);
+        char info[84];
+        snprintf(info, sizeof(info), "%s (%s) identified%s.",
+             u.longName, u.shortName,
+             u.hasPubKey ? " [PK]" : " [noPK]");
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
         if (!dmPickerOpen) dirtyChat = true;
         dirtyNodes = dirtyTabs = true;
@@ -3063,6 +3150,21 @@ static void handleRx(MeshPacket pkt) {
                 }
             }
             bool isAck = (errorReason == 0);
+            bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
+            {
+                char who[16];
+                liveNodeLabel(pkt.hdr.from, who, sizeof(who));
+                char live[80];
+                if (isAck) {
+                    snprintf(live, sizeof(live), "R ACK %s %08X h%02X",
+                             who, pkt.requestId, pkt.hdr.channel);
+                    addLiveLine(live, TFT_GREEN);
+                } else {
+                    snprintf(live, sizeof(live), "R NAK %s %08X err%lu h%02X",
+                             who, pkt.requestId, (unsigned long)errorReason, pkt.hdr.channel);
+                    addLiveLine(live, TFT_RED);
+                }
+            }
             if (isAck) {
                 Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
                 if (debugAcksEnabled()) {
@@ -3083,21 +3185,50 @@ static void handleRx(MeshPacket pkt) {
                 // Respond with a unicast NODEINFO so they can retry with PKI.
                 if (errorReason == 35) {
                     debugLogAcks("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
-                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from, true);
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) n->lastSentInfoMs = millis();
+                }
+
+                // NO_CHANNEL means our last DM channel guess was wrong.
+                // Clear sticky channel hints so next send can re-select a channel.
+                if (errorReason == 6) {
+                    NodeEntry *n = Nodes.find(pkt.hdr.from);
+                    if (n) {
+                        // For non-DM NO_CHANNEL events, flip PKI suppression when we have
+                        // a pubkey to avoid getting stuck on one mode forever.
+                        if (!dmRoutingMatched && n->hasPubKey && !n->legacyDmNoChannel) {
+                            n->pkiNoChannel = !n->pkiNoChannel;
+                        }
+
+                        // Request peer NODEINFO (unicast + want_response) so pubkey state
+                        // refreshes quickly for PKI fallback.
+                        uint32_t now = millis();
+                        if (now - n->lastSentInfoMs > 5000) {
+                            if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                                      pkt.hdr.from, true)) {
+                                n->lastSentInfoMs = now;
+                            }
+                        }
+                        // Routing NAKs can arrive on fallback paths; do not learn
+                        // channel identity from them. Only clear sticky channel index.
+                        n->chanIdx = -1;
+                    }
                 }
 
                 // Show error in the DM conversation with the NAK sender (not just the open conv)
                 DmConv *conv = DMs.find(pkt.hdr.from);
                 if (conv) {
+                    if (errorReason == 6) {
+                        conv->rxChanIdx = -1;
+                    }
                     char errMsg[44];
                     if (errName)
                         snprintf(errMsg, sizeof(errMsg), "! NAK %s(%lu)", errName, (unsigned long)errorReason);
                     else
                         snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu", (unsigned long)errorReason);
                     DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED,
-                                   false, pkt.chanIdx);
+                                   false, -1);
                 }
             }
             if (!dmPickerOpen) dirtyChat = true;
@@ -3124,7 +3255,9 @@ static void handleRx(MeshPacket pkt) {
     {
         NodeEntry *known = Nodes.find(pkt.hdr.from);
         uint32_t  elapsed = known ? (millis() - known->lastSentInfoMs) : UINT32_MAX;
-        bool needGreet = !known || !known->hasName ||
+        const uint32_t greetCooldownMs = 5000;
+        bool needGreet = !known ||
+                         (!known->hasName && elapsed > greetCooldownMs) ||
                          elapsed > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL;
         if (needGreet) {
             if (debugMessagesEnabled()) {
@@ -3678,42 +3811,57 @@ void setup() {
         bool haveKeys = (prefs.getInt("pkiVer", 0) == 2) &&
                         (prefs.getBytes("privKey", myPrivKey, 32) == 32) &&
                         (prefs.getBytes("pubKey",  myPubKey,  32) == 32);
+        if (haveKeys) {
+            uint8_t derived[32] = {};
+            bool validLE = deriveCurve25519Public(myPrivKey, derived) &&
+                           memcmp(derived, myPubKey, 32) == 0;
+
+            if (!validLE) {
+                // If a prior build saved BE keys while still writing pkiVer=2,
+                // auto-convert instead of rotating identity.
+                uint8_t privLE[32], pubLE[32];
+                for (int i = 0; i < 32; i++) {
+                    privLE[i] = myPrivKey[31 - i];
+                    pubLE[i]  = myPubKey[31 - i];
+                }
+
+                bool validBE = deriveCurve25519Public(privLE, derived) &&
+                               memcmp(derived, pubLE, 32) == 0;
+                if (validBE) {
+                    memcpy(myPrivKey, privLE, 32);
+                    memcpy(myPubKey,  pubLE,  32);
+                    prefs.putBytes("privKey", myPrivKey, 32);
+                    prefs.putBytes("pubKey",  myPubKey,  32);
+                    prefs.putInt("pkiVer", 2);
+                    validLE = true;
+                    Serial.printf("[pki] converted stored Curve25519 keys from BE to LE\n");
+                }
+            }
+
+            if (!validLE) {
+                Serial.printf("[pki] keypair validation failed, regenerating\n");
+                haveKeys = false;
+            }
+        }
+
         if (!haveKeys) {
             prefs.remove("privKey");
             prefs.remove("pubKey");
 
-            mbedtls_ecp_group grp;
-            mbedtls_mpi      d;
-            mbedtls_ecp_point Q;
-            mbedtls_ecp_group_init(&grp);
-            mbedtls_mpi_init(&d);
-            mbedtls_ecp_point_init(&Q);
-
-            auto rng = [](void *, uint8_t *buf, size_t len) -> int {
-                esp_fill_random(buf, len); return 0;
-            };
-
-            uint8_t privBuf[32], pubBuf[32];
-            if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
-                mbedtls_ecp_gen_keypair(&grp, &d, &Q, rng, nullptr) == 0 &&
-                mbedtls_mpi_write_binary(&d, privBuf, 32) == 0 &&
-                mbedtls_mpi_write_binary(&Q.X, pubBuf, 32) == 0) {
-                // Store as little-endian (Curve25519 wire format)
-                for (int i = 0; i < 32; i++) {
-                    myPrivKey[i] = privBuf[31-i];
-                    myPubKey[i]  = pubBuf[31-i];
-                }
+            Curve25519::dh1(myPubKey, myPrivKey);
+            uint8_t derived[32] = {};
+            bool valid = deriveCurve25519Public(myPrivKey, derived) &&
+                         memcmp(derived, myPubKey, 32) == 0;
+            if (valid) {
                 prefs.putBytes("privKey", myPrivKey, 32);
                 prefs.putBytes("pubKey",  myPubKey,  32);
                 prefs.putInt("pkiVer", 2);
                 Serial.printf("[pki] generated new Curve25519 key pair (LE)\n");
             } else {
-                Serial.printf("[pki] WARNING: key generation failed\n");
+                memset(myPrivKey, 0, sizeof(myPrivKey));
+                memset(myPubKey, 0, sizeof(myPubKey));
+                Serial.printf("[pki] WARNING: generated keypair failed validation\n");
             }
-
-            mbedtls_ecp_point_free(&Q);
-            mbedtls_mpi_free(&d);
-            mbedtls_ecp_group_free(&grp);
         } else {
             Serial.printf("[pki] loaded Curve25519 key pair from NVS\n");
         }

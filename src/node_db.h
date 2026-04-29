@@ -18,8 +18,12 @@ struct NodeEntry {
     bool     hasTelemetry;
     bool     hasName;         // true once a real NODEINFO name has been received
     int      chanIdx;         // channel last heard on
+    uint8_t  chanHash;        // raw on-air channel hash last heard from this node
+    bool     hasChanHash;
     uint8_t  pubKey[32];      // Curve25519 public key from their NODEINFO (field 8)
     bool     hasPubKey;
+    bool     pkiNoChannel;    // temporarily suppress PKI DM attempts after NO_CHANNEL(6)
+    bool     legacyDmNoChannel; // peer returned NO_CHANNEL for channel-encrypted DM
     uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
     uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths

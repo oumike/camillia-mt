@@ -146,6 +146,12 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
 // bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
+// Encode a unicast TEXT_MESSAGE_APP Data message with explicit Data.dest/source.
+// Use for DM interoperability with peers that validate decoded destination fields.
+size_t encodeTextMessageUnicast(const char *text,
+                                uint32_t fromNode, uint32_t toNode,
+                                uint8_t *buf, size_t bufLen);
+
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
 // wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
@@ -157,9 +163,10 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen);
 
-// Encode a ROUTING_APP success ACK Data message.
+// Encode a ROUTING_APP Data message.
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).
-size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId,
+// errorReason = Routing.error_reason (0 = ACK success, non-zero = NAK).
+size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
                      uint8_t *buf, size_t bufLen);
 
 // ── Port name helper ──────────────────────────────────────────
