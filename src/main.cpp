@@ -410,6 +410,8 @@ static UiPalette gUi = {};
 #define COL_SPLASH_DIM     gUi.splashDim
 
 static uint8_t uiThemePresetIndex() {
+    if (gCfg.uiTheme == UI_THEME_SOLARIZED)
+        return (gCfg.uiMode == UI_MODE_LIGHT) ? 7 : 6;
     if (gCfg.uiTheme == UI_THEME_EARTHEN)
         return (gCfg.uiMode == UI_MODE_LIGHT) ? 5 : 4;
     if (gCfg.uiTheme == UI_THEME_EVERGREEN)
@@ -418,24 +420,28 @@ static uint8_t uiThemePresetIndex() {
 }
 
 static const char *uiThemePresetName(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: return "Camillia Dark";
         case 1: return "Camillia Light";
         case 2: return "Evergreen Dark";
         case 3: return "Evergreen Light";
         case 4: return "Earthy Dark";
-        default: return "Earthy Light";
+        case 5: return "Earthy Light";
+        case 6: return "Solarized Dark";
+        default: return "Solarized Light";
     }
 }
 
 static void setUiThemePreset(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
         case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
         case 3: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 4: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_DARK; break;
-        default: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 5: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 6: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_DARK; break;
+        default: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_LIGHT; break;
     }
 }
 
@@ -451,7 +457,27 @@ static void applyUiTheme(bool markDirty = true) {
     gCfg.uiTheme = (uint8_t)constrain((int)gCfg.uiTheme, 0, UI_THEME_COUNT - 1);
     gCfg.uiMode  = (uint8_t)(gCfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
 
-    if (gCfg.uiTheme == UI_THEME_EARTHEN) {
+    if (gCfg.uiTheme == UI_THEME_SOLARIZED) {
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                0xFFBC, 0xEF5A, 0xEF5A, 0xFFBC, 0xEF5A, 0x9514,
+                0x245A, 0xD1B0, 0x9514, 0x9514, 0x84B2, 0xEF5A, 0x9514,
+                0x2D13, 0x2D13, 0x0146, 0x5B6E, 0xFFBC, 0x0146,
+                0x245A, 0x2D13, 0xB440, 0xCA42, 0x9514,
+                0x84C0, 0xB440, 0xD985,
+                0xEF5A, 0xFFBC, 0xFFBC, 0x9514, 0x84B2, 0x0146, 0x63D0, 0x9514
+            };
+        } else {
+            gUi = {
+                0x0146, 0x01A8, 0x01A8, 0x01A8, 0x5B6E, 0x63D0,
+                0x245A, 0xD1B0, 0x63D0, 0x5B6E, 0x84B2, 0x01A8, 0x5B6E,
+                0x2D13, 0x2D13, 0xEF5A, 0x9514, 0x0146, 0xEF5A,
+                0x5B6E, 0x2D13, 0xB440, 0xCA42, 0x9514,
+                0x84C0, 0xB440, 0xD985,
+                0x0146, 0x01A8, 0x01A8, 0x5B6E, 0x63D0, 0xEF5A, 0x84B2, 0x9514
+            };
+        }
+    } else if (gCfg.uiTheme == UI_THEME_EARTHEN) {
         if (gCfg.uiMode == UI_MODE_LIGHT) {
             gUi = {
                 0xF7DE, 0xE6BA, 0xE658, 0xFFDF, 0xF75C, 0xEEB9,
@@ -3574,7 +3600,7 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
             } else if (settingsSel == SETTING_THEME) {
-                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 8);
                 setUiThemePreset(p);
                 applyUiTheme();
                 persistUiTheme();
@@ -3706,7 +3732,7 @@ static void handleKey(char k) {
                     snprintf(settingsStatus, sizeof(settingsStatus), "Import FAILED (no file?)");
                 }
             } else if (settingsSel == SETTING_THEME) {
-                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
+                uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 8);
                 setUiThemePreset(p);
                 applyUiTheme();
                 persistUiTheme();
@@ -3883,6 +3909,7 @@ static void onWebCfgSaved() {
     // ── Write main config ────────────────────────────────────
     const char *wifiSsid = webCfgWifiSsid();
     const char *wifiPass = webCfgWifiPass();
+    const char *webPass = gCfg.webCfgPass[0] ? gCfg.webCfgPass : "admin";
     if ((!wifiSsid || !wifiSsid[0]) && gCfg.wifiSsid[0]) wifiSsid = gCfg.wifiSsid;
     if ((!wifiPass || !wifiPass[0]) && gCfg.wifiPass[0]) wifiPass = gCfg.wifiPass;
 
@@ -3894,6 +3921,7 @@ static void onWebCfgSaved() {
     p.putBytes("pubKey",      myPubKey,  32);
     if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
     if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
+    p.putString("webPass", webPass);
     p.putString("nodeLong",   gCfg.nodeLong);
     p.putString("nodeShort",  gCfg.nodeShort);
     p.putFloat("loraFreq",    gCfg.loraFreq);
@@ -4144,7 +4172,16 @@ void setup() {
         if (prefs.isKey("dbgAcks")) gCfg.debugAcks = prefs.getBool("dbgAcks");
         if (prefs.isKey("dbgMsgs")) gCfg.debugMessages = prefs.getBool("dbgMsgs");
         if (prefs.isKey("dbgGps"))  gCfg.debugGps = prefs.getBool("dbgGps");
+        String wcfgPass = prefs.getString("webPass", "");
+        if (wcfgPass.length()) {
+            strncpy(gCfg.webCfgPass, wcfgPass.c_str(), sizeof(gCfg.webCfgPass) - 1);
+            gCfg.webCfgPass[sizeof(gCfg.webCfgPass) - 1] = '\0';
+        }
         prefs.end();
+    }
+    if (!gCfg.webCfgPass[0]) {
+        strncpy(gCfg.webCfgPass, "admin", sizeof(gCfg.webCfgPass) - 1);
+        gCfg.webCfgPass[sizeof(gCfg.webCfgPass) - 1] = '\0';
     }
     debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
     applyTimezoneFromConfig();

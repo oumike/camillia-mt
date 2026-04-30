@@ -15,7 +15,7 @@
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
 static const char    *kUser            = "admin";
-static const char    *kPassword        = "admin";
+static const char    *kDefaultWebPass  = "admin";
 
 static WebServer      server(80);
 static bool           running          = false;
@@ -33,13 +33,16 @@ static uint32_t       gRebootAtMs      = 0;
 
 // ── Helpers ───────────────────────────────────────────────────
 
+static const char *currentWebCfgPassword() {
+    if (gCfg && gCfg->webCfgPass[0]) return gCfg->webCfgPass;
+    return kDefaultWebPass;
+}
+
 static bool isLoggedIn() {
-    // TODO: re-enable session auth before production
-    return true;
-    // if (!sessionToken[0]) return false;
-    // String cookie = server.header("Cookie");
-    // String needle = String("sess=") + sessionToken;
-    // return cookie.indexOf(needle) >= 0;
+    if (!sessionToken[0]) return false;
+    String cookie = server.header("Cookie");
+    String needle = String("sess=") + sessionToken;
+    return cookie.indexOf(needle) >= 0;
 }
 
 static void buildExportFileName(const char *shortName, char *out, size_t outLen) {
@@ -256,6 +259,7 @@ static void sendConfigPage(const char *msg = "") {
     char tmp[96];
     String html = kHead;
     uint8_t themePreset =
+        (gCfg->uiTheme == UI_THEME_SOLARIZED) ? (gCfg->uiMode == UI_MODE_LIGHT ? 7 : 6) :
         (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
         (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
                                                 (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
@@ -441,6 +445,13 @@ static void sendConfigPage(const char *msg = "") {
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
     html += "</details>";
+
+        html += "<details><summary>Web Config Access</summary>";
+        html += "<label>Username<input type='text' value='admin' readonly></label>";
+        html += "<label>Password (leave blank to keep current)"
+            "<input name='web_pass' type='password' maxlength='63' autocomplete='new-password'"
+            " placeholder='Enter new password'></label>";
+        html += "</details>";
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
@@ -726,6 +737,8 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='3'"; if (themePreset == 3) html += " selected"; html += ">Evergreen Light</option>"
             "<option value='4'"; if (themePreset == 4) html += " selected"; html += ">Earthy Dark</option>"
             "<option value='5'"; if (themePreset == 5) html += " selected"; html += ">Earthy Light</option>"
+            "<option value='6'"; if (themePreset == 6) html += " selected"; html += ">Solarized Dark</option>"
+            "<option value='7'"; if (themePreset == 7) html += " selected"; html += ">Solarized Light</option>"
             "</select></label>";
         html += "<script>"
             "(function(){"
@@ -735,7 +748,9 @@ static void sendConfigPage(const char *msg = "") {
                             "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
                             "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'},"
                             "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
-                            "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'}"
+                            "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'},"
+                            "'6':{bg:'#002b36',panel:'#073642',panel2:'#0b4552',line:'#586e75',text:'#eee8d5',dim:'#93a1a1',accent:'#2aa198',ink:'#002b36'},"
+                            "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'}"
             "};"
             "function apply(){"
               "var k=document.getElementById('sel-theme-preset').value;"
@@ -1180,7 +1195,7 @@ static void handleGetLogin() {
 static void handlePostLogin() {
     String u = server.arg("u");
     String p = server.arg("p");
-    if (u == kUser && p == kPassword) {
+    if (u == kUser && p == currentWebCfgPassword()) {
         uint32_t r1 = esp_random(), r2 = esp_random();
         snprintf(sessionToken, sizeof(sessionToken), "%08x%08x", r1, r2);
         String cookie = String("sess=") + sessionToken + "; Path=/; HttpOnly";
@@ -1202,6 +1217,18 @@ static void handlePostSave() {
     strncpy(gCfg->nodeShort, shrt.c_str(), sizeof(gCfg->nodeShort) - 1);
     gCfg->nodeLong[sizeof(gCfg->nodeLong)   - 1] = '\0';
     gCfg->nodeShort[sizeof(gCfg->nodeShort) - 1] = '\0';
+
+    // Web config auth (username is fixed to admin)
+    String webPass = server.arg("web_pass");
+    if (webPass.length() > 0) {
+        strncpy(gCfg->webCfgPass, webPass.c_str(), sizeof(gCfg->webCfgPass) - 1);
+        gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
+    }
+    if (!gCfg->webCfgPass[0]) {
+        strncpy(gCfg->webCfgPass, kDefaultWebPass, sizeof(gCfg->webCfgPass) - 1);
+        gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
+    }
+
     // Node ID override hidden for end users; preserve existing value
     // String ovr = server.arg("node_id_ovr");
     // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
@@ -1282,13 +1309,15 @@ static void handlePostSave() {
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
     gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 5);
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 7);
         if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 3) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 4) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_DARK; }
-        else                  { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 5) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 6) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_DARK; }
+        else                  { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_LIGHT; }
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);
@@ -1470,6 +1499,10 @@ static void handleImportDone() {
         redirectHomeWithFlash("Import failed: parse error.");
         return;
     }
+    if (!gCfg->webCfgPass[0]) {
+        strncpy(gCfg->webCfgPass, kDefaultWebPass, sizeof(gCfg->webCfgPass) - 1);
+        gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
+    }
 
     // Apply imported WiFi credentials to runtime and NVS.
     strncpy(gWifiSsid, gCfg->wifiSsid, sizeof(gWifiSsid) - 1);
@@ -1511,6 +1544,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     prefs.begin("camillia", true);
     String savedSsid = prefs.getString("wifiSsid", "");
     String savedPass = prefs.getString("wifiPass", "");
+    String savedWebPass = prefs.getString("webPass", "");
     prefs.end();
     strncpy(gWifiSsid, savedSsid.c_str(), sizeof(gWifiSsid) - 1);
     gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
@@ -1520,6 +1554,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
     strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
     gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
+    if (savedWebPass.length() == 0) savedWebPass = kDefaultWebPass;
+    strncpy(gCfg->webCfgPass, savedWebPass.c_str(), sizeof(gCfg->webCfgPass) - 1);
+    gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
 
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);

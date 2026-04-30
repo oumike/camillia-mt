@@ -8,7 +8,8 @@ enum UiThemeFamily : uint8_t {
     UI_THEME_CAMELLIA = 0,
     UI_THEME_EVERGREEN = 1,
     UI_THEME_EARTHEN = 2,
-    UI_THEME_COUNT = 3
+    UI_THEME_SOLARIZED = 3,
+    UI_THEME_COUNT = 4
 };
 
 enum UiThemeMode : uint8_t {
@@ -39,6 +40,7 @@ struct RhinoConfig {
     // WiFi (web config)
     char     wifiSsid[64];
     char     wifiPass[64];
+    char     webCfgPass[64];
 
     // Display
     uint32_t screenOnSecs;

@@ -8,6 +8,7 @@
 #include <ctype.h>
 
 static const char *kPath = "/camillia/config.yaml";
+static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
 
 // ── Role / rebroadcast name tables ───────────────────────────
@@ -23,9 +24,9 @@ static const char *kRebroadNames[] = {
 static const int kNumRebroadModes = 5;
 
 static const char *kThemeNames[] = {
-    "CAMELLIA", "EVERGREEN", "EARTHEN"
+    "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED"
 };
-static const int kNumThemes = 3;
+static const int kNumThemes = 4;
 
 static const char *kThemeModeNames[] = {
     "DARK", "LIGHT"
@@ -89,6 +90,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.tzDef[sizeof(cfg.tzDef) - 1] = '\0';
     cfg.wifiSsid[0]        = '\0';
     cfg.wifiPass[0]        = '\0';
+    strncpy(cfg.webCfgPass, "admin", sizeof(cfg.webCfgPass) - 1);
+    cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
@@ -143,6 +146,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+    out += "webcfg_user: "; out += kWebCfgUser; out += "\n";
+    out += "webcfg_pass: "; out += cfg.webCfgPass; out += "\n";
     snprintf(tmp, sizeof(tmp), "debug_acks: %s\n", cfg.debugAcks ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "debug_messages: %s\n", cfg.debugMessages ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "debug_gps: %s\n", cfg.debugGps ? "true" : "false"); out += tmp;
@@ -311,6 +316,13 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "wifi_pass")) {
                     strncpy(cfg.wifiPass, val, sizeof(cfg.wifiPass) - 1);
                     cfg.wifiPass[sizeof(cfg.wifiPass) - 1] = '\0';
+                }
+                else if (!strcmp(key, "webcfg_user")) {
+                    // Username is currently fixed to admin; accept key for compatibility.
+                }
+                else if (!strcmp(key, "webcfg_pass")) {
+                    strncpy(cfg.webCfgPass, val, sizeof(cfg.webCfgPass) - 1);
+                    cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
                 }
                 else if (!strcmp(key, "debug_acks"))
                     cfg.debugAcks = parseBoolValue(val);
