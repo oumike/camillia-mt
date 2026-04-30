@@ -35,6 +35,7 @@ public:
     int       count() const { return _count; }
     bool      hasUnread() const;
     void      markRead(uint32_t nodeId);
+    bool      deleteConv(uint32_t nodeId);
 
     // Add a message (word-wrapped) to a conversation.
     // markUnread: set to false for outgoing or seed messages.

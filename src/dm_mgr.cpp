@@ -74,6 +74,44 @@ void DmMgr::markRead(uint32_t nodeId) {
     if (c) c->unread = false;
 }
 
+bool DmMgr::deleteConv(uint32_t nodeId) {
+    int idx = -1;
+    for (int i = 0; i < _count; i++) {
+        if (_convs[i].nodeId == nodeId) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) return false;
+
+    for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+        if (_pendingTx[i].active && _pendingTx[i].nodeId == nodeId)
+            _pendingTx[i].active = false;
+    }
+
+    if (_convs[idx].lines) {
+        free(_convs[idx].lines);
+        _convs[idx].lines = nullptr;
+    }
+
+    char path[40];
+    snprintf(path, sizeof(path), "/camillia/dms/%08X.bin", nodeId);
+    if (SD.exists(path)) {
+        if (!SD.remove(path))
+            debugLogMessages("[dm] deleteConv: failed to remove %s\n", path);
+    }
+
+    for (int i = idx; i < _count - 1; i++) {
+        _convs[i] = _convs[i + 1];
+    }
+    _count--;
+    if (_count >= 0)
+        memset(&_convs[_count], 0, sizeof(DmConv));
+
+    debugLogMessages("[dm] deleteConv: removed !%08X (remaining=%d)\n", nodeId, _count);
+    return true;
+}
+
 // ── _sort: insertion sort by lastMs descending ────────────────
 void DmMgr::_sort() {
     for (int i = 1; i < _count; i++) {

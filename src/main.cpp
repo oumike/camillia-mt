@@ -76,6 +76,8 @@ static const int TOUCH_BTN_W = 58;
 static const int TOUCH_BTN_H = 24;
 static const int TOUCH_BTN_BOTTOM_PAD = 5;
 static const int NAV_BTN_COUNT = 6;
+static const int CHAN_NODE_COL_W = 42;
+static const int CHAN_NODE_TEXT_PAD_X = 3;
 
 struct PanelHitRect {
     int x;
@@ -89,6 +91,12 @@ static bool panelClearVisible = false;
 static PanelHitRect panelClearRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
+static bool dmDeleteVisible = false;
+static PanelHitRect dmDeleteRect = {0, 0, 0, 0};
+static bool dmDeleteYesVisible = false;
+static PanelHitRect dmDeleteYesRect = {0, 0, 0, 0};
+static bool dmDeleteNoVisible = false;
+static PanelHitRect dmDeleteNoRect = {0, 0, 0, 0};
 
 enum MapControlAction {
     MAP_CTL_ZOOM_IN = 0,
@@ -137,6 +145,12 @@ static void clearPanelCloseRect() {
     panelClearRect = {0, 0, 0, 0};
     dmNewVisible = false;
     dmNewRect = {0, 0, 0, 0};
+    dmDeleteVisible = false;
+    dmDeleteRect = {0, 0, 0, 0};
+    dmDeleteYesVisible = false;
+    dmDeleteYesRect = {0, 0, 0, 0};
+    dmDeleteNoVisible = false;
+    dmDeleteNoRect = {0, 0, 0, 0};
     for (int i = 0; i < MAP_CTL_COUNT; i++) {
         mapCtlVisible[i] = false;
         mapCtlRect[i] = {0, 0, 0, 0};
@@ -146,6 +160,21 @@ static void clearPanelCloseRect() {
 static void setDmNewRect(int x, int y, int w, int h) {
     dmNewVisible = true;
     dmNewRect = { x, y, w, h };
+}
+
+static void setDmDeleteRect(int x, int y, int w, int h) {
+    dmDeleteVisible = true;
+    dmDeleteRect = { x, y, w, h };
+}
+
+static void setDmDeleteYesRect(int x, int y, int w, int h) {
+    dmDeleteYesVisible = true;
+    dmDeleteYesRect = { x, y, w, h };
+}
+
+static void setDmDeleteNoRect(int x, int y, int w, int h) {
+    dmDeleteNoVisible = true;
+    dmDeleteNoRect = { x, y, w, h };
 }
 
 static void setMapControlRect(MapControlAction action, int x, int y, int w, int h) {
@@ -174,6 +203,10 @@ static bool     dmPickerOpen = false;  // true = showing node picker ("New DM")
 static int      dmListSel    = 0;      // 0 = "New DM" button, 1+ = conversation index
 static int      dmPickerSel  = 0;      // selected row in node picker
 static uint32_t dmConvNodeId = 0;      // node ID of open conversation
+static bool     dmDeleteConfirmOpen = false;
+static bool     dmDeleteConfirmSelDelete = false;
+static uint32_t dmDeleteTargetNodeId = 0;
+static char     dmDeleteTargetShort[5] = {0};
 
 // ── Dirty flags ───────────────────────────────────────────────
 static bool dirtyStatus   = true;
@@ -1008,7 +1041,11 @@ static void drawStatus() {
     int flowerCx = x + shortW + 9;
     drawCamelliaMarkTiny(flowerCx, STATUS_H / 2);
 
-    int timeX = flowerCx + 10;
+    int timeW = lcd.textWidth(timeBuf);
+    int minTimeX = flowerCx + 10;
+    int maxTimeX = NODE_X - timeW - 4;
+    int timeX = (LCD_W - timeW) / 2;
+    timeX = constrain(timeX, minTimeX, maxTimeX);
     drawClippedText(timeX, infoY, NODE_X - timeX - 4, timeBuf);
     drawBattery();
     lcd.setFont(&fonts::Font0);
@@ -1143,15 +1180,16 @@ static void drawTabs() {
 
 // ── Draw: vertical divider ────────────────────────────────────
 static void drawDivider() {
-    lcd.fillRect(DIVIDER_X, CHAT_Y, 1, CHAT_H, COL_DIVIDER);
-    lcd.drawFastVLine(DIVIDER_X + 1, CHAT_Y, CHAT_H, COL_DIVIDER_HI);
+    const int dividerX = LCD_W - CHAN_NODE_COL_W - 1;
+    lcd.fillRect(dividerX, CHAT_Y, 1, CHAT_H, COL_DIVIDER);
+    lcd.drawFastVLine(dividerX + 1, CHAT_Y, CHAT_H, COL_DIVIDER_HI);
 }
 
 // ── Draw: message area ────────────────────────────────────────
 static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
-    int chatW = MSG_W;
+    int chatW = LCD_W - CHAN_NODE_COL_W - 1;
     const int chatInnerY = CHAT_Y + 1;
     drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
@@ -1199,7 +1237,7 @@ static void drawChat() {
         const char *sym = txStatusSymbol(dl);
         if (sym) {
             char rendered[MSG_CHARS + 8];
-            snprintf(rendered, sizeof(rendered), "%-3s %s", sym, dl->text);
+            snprintf(rendered, sizeof(rendered), "%s%s", sym, dl->text);
             drawClippedText(chatX + 2, y + 1, chatW - 6, rendered);
         } else {
             drawClippedText(chatX + 2, y + 1, chatW - 6, dl->text);
@@ -1435,10 +1473,9 @@ static void drawLivePanel(bool fullRedraw) {
     const int left = mx + 1;
     const int innerW = mw - 2;
     const int msgTop = my + titleH + 2;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
     // Font0 is 7px tall; use 8px rows for a touch more breathing room.
     const int rowH = 8;
-    const int rowsVisible = max(1, (controlsTop - msgTop) / rowH);
+    const int rowsVisible = max(1, (my + mh - msgTop - 1) / rowH);
 
     Channel &ch = Channels.get(CHAN_ANN);
     int total = ch.count;
@@ -1453,11 +1490,6 @@ static void drawLivePanel(bool fullRedraw) {
         lcd.setFont(&fonts::Font0);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
         drawClippedText(mx + 5, my + 2, mw - 10, "Live RX/TX");
-        lcd.fillRect(mx + 1, controlsTop, mw - 2, my + mh - controlsTop - 1, COL_PANEL_BG);
-        const int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
-        const int closeX = mx + 3;
-        drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
-        drawPanelClearButton(closeX + TOUCH_BTN_W + 4, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
     }
 
     lcd.setFont(&fonts::Font0);
@@ -1490,6 +1522,11 @@ static void drawLivePanel(bool fullRedraw) {
         lcd.setTextColor(COL_TEAL, COL_PANEL_ALT);
         drawClippedText(left + innerW - 30, msgTop + 1, 28, "more");
     }
+
+    const int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+    const int closeX = mx + mw - TOUCH_BTN_W - 3;
+    drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
+    drawPanelClearButton(closeX - TOUCH_BTN_W - 4, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
 
     lcd.setFont(&fonts::Font0);
     dirtyLiveRows = false;
@@ -1894,32 +1931,37 @@ static void drawMapPanel() {
 
     const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
     const int closeW = 46;
-    drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
 
     const int ctlCount = MAP_CTL_COUNT;
-    const int minCtlX = mx + 3 + closeW + 4;
     int btnW[MAP_CTL_COUNT] = { 30, 30, 80, 60, 30 };
     const char *labels[MAP_CTL_COUNT] = { "+", "-", "Previous Node", "Next Node", "ME" };
 
     const int meIdx = (int)MAP_CTL_ME;
     int btnX[MAP_CTL_COUNT] = {0};
-    int maxCtlEnd = mx + mw - 4;
+    const int meX = mx + 3;
+    const int closeX = mx + mw - closeW - 4;
 
-    // Pin ME to the far right; center the remaining controls in the space to its left.
-    int meX = maxCtlEnd - btnW[meIdx];
+    // Swap placement: ME at far left, Close at far right.
     btnX[meIdx] = meX;
+    drawPanelCloseButton(closeX, btnY, closeW, mapNavBtnH);
 
-    int leftCount = meIdx;
-    int leftControlsW = 0;
-    for (int i = 0; i < leftCount; i++) leftControlsW += btnW[i];
-    if (leftCount > 0) leftControlsW += (leftCount - 1) * mapNavGap;
+    int centerCount = ctlCount - 1;
+    int centerControlsW = 0;
+    for (int i = 0; i < ctlCount; i++) {
+        if (i == meIdx) continue;
+        centerControlsW += btnW[i];
+    }
+    if (centerCount > 1) centerControlsW += (centerCount - 1) * mapNavGap;
 
-    int leftStartX = minCtlX;
-    int leftAvailW = (meX - mapNavGap) - minCtlX;
-    if (leftAvailW > leftControlsW) leftStartX += (leftAvailW - leftControlsW) / 2;
+    int centerStartX = meX + btnW[meIdx] + 4;
+    int centerEndX = closeX - 4;
+    int centerAvailW = centerEndX - centerStartX;
+    if (centerAvailW > centerControlsW)
+        centerStartX += (centerAvailW - centerControlsW) / 2;
 
-    int runX = leftStartX;
-    for (int i = 0; i < leftCount; i++) {
+    int runX = centerStartX;
+    for (int i = 0; i < ctlCount; i++) {
+        if (i == meIdx) continue;
         btnX[i] = runX;
         runX += btnW[i] + mapNavGap;
     }
@@ -1945,7 +1987,9 @@ static void drawMapPanel() {
 
 // ── Draw: node list ───────────────────────────────────────────
 static void drawNodes() {
-    drawPanelFrame(NODE_X, CHAT_Y, NODE_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    const int nodeX = LCD_W - CHAN_NODE_COL_W;
+    const int nodeW = CHAN_NODE_COL_W;
+    drawPanelFrame(nodeX, CHAT_Y, nodeW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
@@ -1956,7 +2000,7 @@ static void drawNodes() {
         NodeEntry *n = Nodes.getByRank(i);
         int      y   = CHAT_Y + i * LINE_H;
         uint16_t rowBg = (i & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
-        lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, rowBg);
+        lcd.fillRect(nodeX + 1, y, nodeW - 2, LINE_H, rowBg);
         if (!n) continue;
 
         bool     sel = nodeListFocused && (i == nodeListSel);
@@ -1966,18 +2010,15 @@ static void drawNodes() {
                    (age < 60000UL)   ? COL_NODE_HOT       :
                    (age < 3600000UL) ? COL_NODE_WARM      : COL_TAB_IDLE;
 
-        if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, bg);
-
-        char r[32];
-        if (n->hasTelemetry && n->battPct > 0)
-            snprintf(r, sizeof(r), "%s %d %+.0f %d%%",
-                     n->shortName, n->hops, n->snr, (int)n->battPct);
-        else
-            snprintf(r, sizeof(r), "%s %d %+.0f",
-                     n->shortName, n->hops, n->snr);
+        if (sel) lcd.fillRect(nodeX + 1, y, nodeW - 2, LINE_H, bg);
 
         lcd.setTextColor(col, bg);
-        drawClippedText(NODE_X + 2, y + 1, NODE_W - 4, r);
+        const char *sn = n->shortName[0] ? n->shortName : "----";
+        const int textRight = nodeX + nodeW - 2 - CHAN_NODE_TEXT_PAD_X;
+        int textX = textRight - lcd.textWidth(sn);
+        if (textX < nodeX + 1 + CHAN_NODE_TEXT_PAD_X)
+            textX = nodeX + 1 + CHAN_NODE_TEXT_PAD_X;
+        drawClippedText(textX, y + 1, textRight - textX + 1, sn);
     }
     lcd.setFont(&fonts::Font0);
     dirtyNodes = false;
@@ -2134,6 +2175,55 @@ static void openDmWith(NodeEntry *n) {
     dirtyChat = dirtyInput = true;
 }
 
+static DmConv *dmSelectedConv() {
+    if (dmListSel <= 0) return nullptr;
+    return DMs.getByRank(dmListSel - 1);
+}
+
+static void dmBeginDeleteConfirm() {
+    DmConv *c = dmSelectedConv();
+    if (!c) return;
+    dmDeleteTargetNodeId = c->nodeId;
+    snprintf(dmDeleteTargetShort, sizeof(dmDeleteTargetShort), "%s",
+             c->shortName[0] ? c->shortName : "????");
+    dmDeleteConfirmSelDelete = false;
+    dmDeleteConfirmOpen = true;
+    dirtyChat = true;
+}
+
+static void dmCancelDeleteConfirm() {
+    dmDeleteConfirmOpen = false;
+    dmDeleteConfirmSelDelete = false;
+    dmDeleteTargetNodeId = 0;
+    dmDeleteTargetShort[0] = '\0';
+    dirtyChat = true;
+}
+
+static void dmApplyDeleteConfirm() {
+    uint32_t target = dmDeleteTargetNodeId;
+    bool deleted = (target != 0) ? DMs.deleteConv(target) : false;
+
+    dmDeleteConfirmOpen = false;
+    dmDeleteConfirmSelDelete = false;
+    dmDeleteTargetNodeId = 0;
+    dmDeleteTargetShort[0] = '\0';
+
+    if (deleted) {
+        if (dmConvOpen && dmConvNodeId == target) {
+            dmConvOpen = false;
+            dmConvNodeId = 0;
+            dirtyInput = true;
+        }
+        int cap = DMs.count();
+        if (cap <= 0) dmListSel = 0;
+        else if (dmListSel > cap) dmListSel = cap;
+        else if (dmListSel == 0) dmListSel = 1;
+        dirtyTabs = true;
+    }
+
+    dirtyChat = true;
+}
+
 // ── Draw: DM contact list ─────────────────────────────────────
 static void drawDmList() {
     clearPanelCloseRect();
@@ -2144,8 +2234,7 @@ static void drawDmList() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
-    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+    const int rowsVisible = max(1, (my + mh - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -2174,11 +2263,12 @@ static void drawDmList() {
         drawClippedText(ix + 4, y + 1, iw - 8, row);
     }
 
-    const int closeX = mx + 3;
+    const int deleteX = mx + 3;
+    const int closeX = mx + mw - TOUCH_BTN_W - 3;
     const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     const int newW = TOUCH_BTN_W;
     const int newH = TOUCH_BTN_H;
-    const int newX = closeX + newW + 4;
+    const int newX = closeX - newW - 4;
     const int newY = closeY;
     bool newSel = (dmListSel == 0);
     uint16_t newFill = newSel ? COL_SELECT_BG : lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
@@ -2190,6 +2280,69 @@ static void drawDmList() {
     setDmNewRect(newX, newY, newW, newH);
 
     drawPanelCloseButton(closeX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
+
+    const bool canDelete = (dmSelectedConv() != nullptr);
+    uint16_t delFill = canDelete
+                       ? lerp565(COL_PANEL_BG, COL_TAB_UNREAD, 72)
+                       : lerp565(COL_PANEL_BG, COL_PANEL_ALT, 96);
+    drawSquirclePill(deleteX, closeY, TOUCH_BTN_W, TOUCH_BTN_H,
+                     delFill, COL_SELECT_ACCENT, false);
+    lcd.setTextColor(canDelete ? COL_TEXT_MAIN : COL_TEXT_DIM, delFill);
+    int dtw = lcd.textWidth("DELETE");
+    drawClippedText(deleteX + max(1, (TOUCH_BTN_W - dtw) / 2),
+                    closeY + max(0, (TOUCH_BTN_H - CHAR_H) / 2),
+                    TOUCH_BTN_W - 2,
+                    "DELETE");
+    if (canDelete)
+        setDmDeleteRect(deleteX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
+
+    if (dmDeleteConfirmOpen) {
+        const int dw = 220;
+        const int dh = 84;
+        const int dx = mx + (mw - dw) / 2;
+        const int dy = my + (mh - dh) / 2;
+        const int btnW = 78;
+        const int btnH = TOUCH_BTN_H;
+        const int btnGap = 8;
+        const int btnY = dy + dh - btnH - 8;
+        const int confirmX = dx + (dw - (btnW * 2 + btnGap)) / 2;
+        const int cancelX = confirmX + btnW + btnGap;
+
+        drawPanelFrame(dx, dy, dw, dh, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+        lcd.setFont(&fonts::Font0);
+        lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+
+        char prompt[48];
+        snprintf(prompt, sizeof(prompt), "Delete DM with %s?", dmDeleteTargetShort[0] ? dmDeleteTargetShort : "????");
+        drawClippedText(dx + 8, dy + 8, dw - 16, prompt);
+        drawClippedText(dx + 8, dy + 18, dw - 16, "This cannot be undone.");
+
+        uint16_t confirmFill = dmDeleteConfirmSelDelete
+                               ? COL_SELECT_BG
+                               : lerp565(COL_PANEL_BG, COL_TAB_UNREAD, 72);
+        drawSquirclePill(confirmX, btnY, btnW, btnH, confirmFill,
+                         COL_SELECT_ACCENT, dmDeleteConfirmSelDelete);
+        lcd.setTextColor(dmDeleteConfirmSelDelete ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN, confirmFill);
+        int ytw = lcd.textWidth("DELETE");
+        drawClippedText(confirmX + max(1, (btnW - ytw) / 2),
+                        btnY + max(0, (btnH - CHAR_H) / 2),
+                        btnW - 2,
+                        "DELETE");
+        setDmDeleteYesRect(confirmX, btnY, btnW, btnH);
+
+        uint16_t cancelFill = dmDeleteConfirmSelDelete
+                              ? lerp565(COL_PANEL_BG, COL_PANEL_ALT, 96)
+                              : COL_SELECT_BG;
+        drawSquirclePill(cancelX, btnY, btnW, btnH, cancelFill,
+                         COL_SELECT_ACCENT, !dmDeleteConfirmSelDelete);
+        lcd.setTextColor(dmDeleteConfirmSelDelete ? COL_TEXT_MAIN : COL_TEXT_ON_ACCENT, cancelFill);
+        int ctw = lcd.textWidth("CANCEL");
+        drawClippedText(cancelX + max(1, (btnW - ctw) / 2),
+                        btnY + max(0, (btnH - CHAR_H) / 2),
+                        btnW - 2,
+                        "CANCEL");
+        setDmDeleteNoRect(cancelX, btnY, btnW, btnH);
+    }
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -2227,8 +2380,7 @@ static void drawDmPicker() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
-    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+    const int rowsVisible = max(1, (my + mh - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -2245,7 +2397,7 @@ static void drawDmPicker() {
     if (filteredCount == 0) {
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
-        drawPanelCloseButton(mx + 3,
+        drawPanelCloseButton(mx + mw - TOUCH_BTN_W - 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
         lcd.setFont(&fonts::Font0);
@@ -2282,7 +2434,7 @@ static void drawDmPicker() {
         drawClippedText(ix + 4, y + 1, iw - 8, entry);
     }
 
-    drawPanelCloseButton(mx + 3,
+    drawPanelCloseButton(mx + mw - TOUCH_BTN_W - 3,
                          my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                          TOUCH_BTN_W, TOUCH_BTN_H);
 
@@ -2300,8 +2452,7 @@ static void drawDmConv() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
-    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+    const int rowsVisible = max(1, (my + mh - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -2313,7 +2464,7 @@ static void drawDmConv() {
     if (!c) {
         lcd.setTextColor(TFT_RED, COL_PANEL_BG);
         drawClippedText(ix + 4, iy + DM_LINE_H + 1, iw - 8, "Conversation not found");
-        drawPanelCloseButton(mx + 3,
+        drawPanelCloseButton(mx + mw - TOUCH_BTN_W - 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
         lcd.setFont(&fonts::Font0);
@@ -2340,7 +2491,7 @@ static void drawDmConv() {
         drawClippedText(ix + 4, y + 1, iw - 8, dl->text);
     }
 
-    drawPanelCloseButton(mx + 3,
+    drawPanelCloseButton(mx + mw - TOUCH_BTN_W - 3,
                          my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                          TOUCH_BTN_W, TOUCH_BTN_H);
 
@@ -2441,7 +2592,7 @@ static void drawSettings() {
              gCfg.loraPower, gCfg.loraHopLimit);
     pr(buf);
 
-    drawPanelCloseButton(mx + 3,
+    drawPanelCloseButton(mx + mw - TOUCH_BTN_W - 3,
                          my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                          TOUCH_BTN_W, TOUCH_BTN_H);
 
@@ -2693,6 +2844,22 @@ static void mapApplyControl(MapControlAction action) {
 static void handleTouchTap(int x, int y) {
     if (screenAsleep || nodeDetailOpen) return;
 
+    if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen && dmDeleteConfirmOpen) {
+        if (dmDeleteYesVisible
+            && pointInRect(x, y, dmDeleteYesRect.x, dmDeleteYesRect.y,
+                           dmDeleteYesRect.w, dmDeleteYesRect.h)) {
+            dmApplyDeleteConfirm();
+            return;
+        }
+        if (dmDeleteNoVisible
+            && pointInRect(x, y, dmDeleteNoRect.x, dmDeleteNoRect.y,
+                           dmDeleteNoRect.w, dmDeleteNoRect.h)) {
+            dmCancelDeleteConfirm();
+            return;
+        }
+        return;
+    }
+
     if (dmNewVisible
         && pointInRect(x, y, dmNewRect.x, dmNewRect.y, dmNewRect.w, dmNewRect.h)
         && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
@@ -2701,6 +2868,13 @@ static void handleTouchTap(int x, int y) {
         dmPickerOpen = true;
         pickerSnapshot();
         dirtyChat = true;
+        return;
+    }
+
+    if (dmDeleteVisible
+        && pointInRect(x, y, dmDeleteRect.x, dmDeleteRect.y, dmDeleteRect.w, dmDeleteRect.h)
+        && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
+        dmBeginDeleteConfirm();
         return;
     }
 
@@ -2802,8 +2976,11 @@ static void drawInput() {
     }
 
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
+    bool dmUnread = DMs.hasUnread() && !(activeView == CHAN_DM && dmConvOpen);
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
-        drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
+        uint16_t outline = COL_TEAL;
+        if (i == 1 && dmUnread) outline = COL_TAB_UNREAD;
+        drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, outline, false);
     }
 
     // Bracket app buttons (DM / MAPS / LIVE / CFG) from outer nav buttons.
@@ -2819,9 +2996,10 @@ static void drawInput() {
     lcd.drawFastVLine(sepX2 + 1, sepY, sepH, COL_DIVIDER_HI);
 
     lcd.setFont(&fonts::Font0);
-    lcd.setTextColor(COL_TEXT_MAIN, btnFill);
     const char *labels[NAV_BTN_COUNT] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
+        uint16_t labelCol = (i == 1 && dmUnread) ? COL_TAB_UNREAD : COL_TEXT_MAIN;
+        lcd.setTextColor(labelCol, btnFill);
         int tw = lcd.textWidth(labels[i]);
         int tx = b[i].x + max(1, (b[i].w - tw) / 2);
         int ty = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
@@ -3064,16 +3242,21 @@ static void handleRx(MeshPacket pkt) {
             // Unicast DM addressed to us
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
+            bool markUnread = !viewing;
             DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, COL_TEAL,
-                           /*markUnread=*/!viewing, pkt.chanIdx);
+                           /*markUnread=*/markUnread, pkt.chanIdx);
+            bool openedDmConv = false;
             // If we're on the DM list (not inside a conv), jump straight into this one
             if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
                 DMs.markRead(pkt.hdr.from);
                 dmConvNodeId = pkt.hdr.from;
                 dmConvOpen   = true;
                 viewing      = true;
+                openedDmConv = true;
+                dirtyInput = true;
             }
             if (viewing) dirtyChat = true;
+            if (markUnread && !openedDmConv) dirtyInput = true;
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
@@ -3278,6 +3461,30 @@ static void onWebCfgSaved();  // forward declaration
 // ── Handle keyboard input ─────────────────────────────────────
 static void handleKey(char k) {
     if (k == KEY_NONE) return;
+
+    if (activeView == CHAN_DM && dmDeleteConfirmOpen && !dmConvOpen && !dmPickerOpen) {
+        if (k == KEY_ENTER || k == KEY_ROLLER) {
+            if (dmDeleteConfirmSelDelete) dmApplyDeleteConfirm();
+            else dmCancelDeleteConfirm();
+            return;
+        }
+        if (k == KEY_BACKSPACE || k == KEY_NODE_FOCUS || k == 'n' || k == 'N') {
+            dmCancelDeleteConfirm();
+            return;
+        }
+        if (k == 'y' || k == 'Y') {
+            dmDeleteConfirmSelDelete = true;
+            dmApplyDeleteConfirm();
+            return;
+        }
+        if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN ||
+            k == KEY_TAB || k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+            dmDeleteConfirmSelDelete = !dmDeleteConfirmSelDelete;
+            dirtyChat = true;
+            return;
+        }
+        return;
+    }
 
     // ALT+E — toggle node list focus / close detail; close DM sub-views
     if (k == KEY_NODE_FOCUS) {
@@ -3644,6 +3851,10 @@ static void handleKey(char k) {
         }
 
     } else if (k >= 0x20 && k < 0x7F) {
+        if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen && (k == 'd' || k == 'D')) {
+            dmBeginDeleteConfirm();
+            return;
+        }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
                             && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
