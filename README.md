@@ -69,18 +69,20 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 - [x] Pretty IRC like interface
 - [x] GPS
 - [x] Consistent Node Information Storage
+- [x] Direct messaging
+- [x] Re-enable web config session authentication
+- [x] Gate web config auto-start behind onboarding/settings/button
+- [x] Themes
+
 
 ### In Progress
 
-- [ ] Direct messaging
 - [ ] Re-enable web config session authentication
-- [ ] Gate web config auto-start behind onboarding/settings/button
 
 ### Planned
 
 - [ ] Persistent message history across reboots (write to SD)
 - [ ] Position sharing (configurable interval, manual override)
-- [ ] Themes
 - [ ] Theme builder through web config
 
 ### Thinking About
