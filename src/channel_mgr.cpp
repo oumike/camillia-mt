@@ -140,11 +140,8 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             wrappedCount++;
         } else if (!wrapped) {
             // Low-memory fallback: keep chat usable even if wrap cache alloc fails.
-            bool logicalFirst = firstLine;
-            DisplayLine::AckState ack = (logicalFirst && packetId)
-                ? DisplayLine::PENDING
-                : DisplayLine::NONE;
-            _pushLine(ch, line, color, logicalFirst ? packetId : 0, ack);
+            DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
+            _pushLine(ch, line, color, packetId, ack);
         }
 
         pos += take;
@@ -156,11 +153,8 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         // UI is newest-at-top; push wrapped lines in reverse so each long message
         // still reads top-down (first line first, continuation lines below).
         for (int i = wrappedCount - 1; i >= 0; i--) {
-            bool logicalFirst = (i == 0);
-            DisplayLine::AckState ack = (logicalFirst && packetId)
-                ? DisplayLine::PENDING
-                : DisplayLine::NONE;
-            _pushLine(ch, wrappedLine(i), color, logicalFirst ? packetId : 0, ack);
+            DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
+            _pushLine(ch, wrappedLine(i), color, packetId, ack);
         }
         free(wrapped);
     }
@@ -185,12 +179,11 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
             _pending[i].active = false;
-            // Find the line in the channel and update its ack state
+            // Update all wrapped lines that belong to this message.
             Channel &ch = _chans[_pending[i].chanIdx];
             for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
                 if (ch.lines[j].packetId == packetId) {
                     ch.lines[j].ack = state;
-                    break;
                 }
             }
             return;
@@ -290,12 +283,11 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     if (!Radio.transmit(frame, frameLen)) {
         addLiveTxLine("T TXT B ER", TFT_RED);
-        int firstLine = addMessage(txChan, prefix, text, TFT_RED, packetId);
-        if (firstLine >= 0) {
-            Channel &ch = _chans[txChan];
-            int idx = firstLine % MAX_MSG_LINES;
-            if (ch.lines[idx].packetId == packetId) {
-                ch.lines[idx].ack = DisplayLine::TX_FAILED;
+        addMessage(txChan, prefix, text, TFT_RED, packetId);
+        Channel &ch = _chans[txChan];
+        for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
+            if (ch.lines[j].packetId == packetId) {
+                ch.lines[j].ack = DisplayLine::TX_FAILED;
             }
         }
         return false;

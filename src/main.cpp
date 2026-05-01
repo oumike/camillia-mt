@@ -1225,6 +1225,7 @@ static void drawChat() {
 
     auto txStatusSymbol = [](const DisplayLine *dl) -> const char * {
         if (!dl || !dl->packetId) return nullptr;
+        if (dl->text[0] == ' ' && dl->text[1] == ' ') return nullptr;
         switch (dl->ack) {
             case DisplayLine::ACKED:
             case DisplayLine::ACKED_RELAY:
