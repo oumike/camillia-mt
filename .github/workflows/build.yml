@@ -2,8 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [ main ]          # CI build — compile check only, no release
-    tags:     [ 'v*.*.*' ]      # Release build — creates a draft release
+    tags:     [ 'v*.*.*' ]      # Tag build — creates a draft release
+  release:
+    types: [published]
 
 jobs:
   build:
@@ -40,7 +41,7 @@ jobs:
 
       # ── Draft release with all three files attached ───────────
       - name: Create draft release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           draft: true
