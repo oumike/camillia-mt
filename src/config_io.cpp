@@ -132,9 +132,15 @@ void cfgInitDefaults(RhinoConfig &cfg) {
 
 // ── SD init ──────────────────────────────────────────────────
 bool sdBegin() {
+#if (SD_CS < 0)
+    sdReady = false;
+    Serial.println("[sd] disabled");
+    return sdReady;
+#else
     sdReady = SD.begin(SD_CS, SPI, 4000000);
     Serial.printf("[sd] %s\n", sdReady ? "mounted" : "not found");
     return sdReady;
+#endif
 }
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────

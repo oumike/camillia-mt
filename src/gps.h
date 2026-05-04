@@ -24,6 +24,9 @@ bool gpsIsEnabled();
 // True if a valid fix has been received within the last 5 seconds.
 bool gpsHasFix();
 
+// True once valid NMEA sentences are seen from the GPS UART stream.
+bool gpsHasNmeaStream();
+
 // Position as scaled integers (degrees × 1e7). Valid only when gpsHasFix().
 int32_t gpsLatI();
 int32_t gpsLonI();

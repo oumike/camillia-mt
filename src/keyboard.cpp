@@ -4,13 +4,16 @@
 TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 
 void TDeckKeyboard::begin() {
+#if HAS_KEYBOARD
     Wire.begin(KB_SDA, KB_SCL, 100000UL);
     Wire.setClock(400000UL);
     delay(50);
     Wire.beginTransmission(KB_ADDR);
     Wire.endTransmission();
     delay(50);
+#endif
 
+#if HAS_TRACKBALL
     pinMode(TBALL_UP,    INPUT_PULLUP);
     pinMode(TBALL_DOWN,  INPUT_PULLUP);
     pinMode(TBALL_LEFT,  INPUT_PULLUP);
@@ -26,9 +29,13 @@ void TDeckKeyboard::begin() {
     attachInterrupt(digitalPinToInterrupt(TBALL_RIGHT), _isrDown,  FALLING);
     attachInterrupt(digitalPinToInterrupt(TBALL_UP),    _isrUp,    FALLING);
     attachInterrupt(digitalPinToInterrupt(TBALL_CLICK), _isrClick, FALLING);
+#endif
 }
 
 char TDeckKeyboard::readTrackball() {
+#if !HAS_TRACKBALL
+    return KEY_NONE;
+#else
     unsigned long now = millis();
     static unsigned long lastMoveEmitMs = 0;
     const unsigned long moveDebounceMs = 45;
@@ -57,9 +64,13 @@ char TDeckKeyboard::readTrackball() {
     if (dx != 0) lastMoveEmitMs = now;
 
     return KEY_NONE;
+#endif
 }
 
 char TDeckKeyboard::readKey() {
+#if !HAS_KEYBOARD
+    return KEY_NONE;
+#else
     // Read immediately; higher-level poll loop already controls cadence.
     // A local gate here prevents draining buffered bursts and drops keys.
     Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
@@ -67,6 +78,7 @@ char TDeckKeyboard::readKey() {
     uint8_t raw = Wire.read();
     if (raw == 0x00 || raw == 0xFF) return KEY_NONE;
     return mapKey(raw);
+#endif
 }
 
 char TDeckKeyboard::mapKey(uint8_t raw) {

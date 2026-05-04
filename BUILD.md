@@ -19,9 +19,24 @@ Build, flash, and open serial monitor (115200 baud):
 ./build-upload-monitor.sh
 ```
 
+Build for Heltec V4 (horizontal):
+```
+./build-upload-monitor.sh --heltec
+```
+
+Build for Heltec V4 (vertical UI env):
+```
+./build-upload-monitor.sh --vertical
+```
+
 Build only (no flash):
 ```
 pio run -e tdeck
+```
+
+Build only (Heltec vertical env):
+```
+pio run -e heltec-v4-vertical
 ```
 
 Open serial monitor without rebuilding:
@@ -41,7 +56,13 @@ pio device monitor
 
 ## Flashing a release binary
 
-Download `camillia-mt-vX.Y.Z.bin` and `flash.sh` from the [Releases](https://github.com/oumike/camillia-mt/releases) page, then:
+Download the image for your device and `flash.sh` from the [Releases](https://github.com/oumike/camillia-mt/releases) page, then:
+
+- `camillia-mt-tdeck-vX.Y.Z.bin`
+- `camillia-mt-heltec-vX.Y.Z.bin`
+- `camillia-mt-heltec-vertical-vX.Y.Z.bin`
+
+Then run:
 
 ```
 ./flash.sh camillia-mt-vX.Y.Z.bin [port]
