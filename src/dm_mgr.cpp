@@ -96,10 +96,12 @@ bool DmMgr::deleteConv(uint32_t nodeId) {
 
     char path[40];
     snprintf(path, sizeof(path), "/camillia/dms/%08X.bin", nodeId);
+#if HAS_SD_CARD
     if (SD.exists(path)) {
         if (!SD.remove(path))
             debugLogMessages("[dm] deleteConv: failed to remove %s\n", path);
     }
+#endif
 
     for (int i = idx; i < _count - 1; i++) {
         _convs[i] = _convs[i + 1];
@@ -539,6 +541,10 @@ static const char *kDmDir = "/camillia/dms";
 static const uint32_t DM_MAGIC = 0x434D444D;  // "CMDM"
 
 void DmMgr::saveConv(const DmConv *c) {
+#if !HAS_SD_CARD
+    (void)c;
+    return;
+#else
     if (!c || !c->lines || c->count == 0) return;
 
     SD.mkdir("/camillia");
@@ -578,9 +584,13 @@ void DmMgr::saveConv(const DmConv *c) {
     f.flush();
     f.close();
     debugLogMessages("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
+#endif
 }
 
 void DmMgr::loadAll() {
+#if !HAS_SD_CARD
+    return;
+#else
     // Ensure DM storage directories exist before opening to avoid noisy VFS errors.
     SD.mkdir("/camillia");
     if (!SD.exists(kDmDir)) {
@@ -658,4 +668,5 @@ void DmMgr::loadAll() {
 
     _sort();
     debugLogMessages("[dm] loadAll done: %d conversations\n", _count);
+#endif
 }

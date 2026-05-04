@@ -27,7 +27,7 @@ echo "Updated VERSION to $TAG"
 
 # Build firmware
 echo "Building firmware..."
-~/.platformio/penv/bin/pio run
+~/.platformio/penv/bin/pio run -e tdeck -e heltec-v4 -e heltec-v4-vertical
 echo "Build successful."
 
 # Commit and push all changes

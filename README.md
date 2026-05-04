@@ -1,10 +1,11 @@
 # Camillia-MT
 
-Meshtastic-compatible mesh radio firmware for the LilyGo T-Deck (ESP32-S3).
+Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
 ## Hardware
 
 - [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
+- Heltec WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 
 No additional hardware required.
 
@@ -20,13 +21,32 @@ No additional hardware required.
 Download the latest firmware from the [Releases](../../releases) page, or build and flash it directly using [PlatformIO](https://platformio.org/):
 
 ```
-pio run --target upload --upload-port /dev/<wherever the tdeck port is, sometimes it's cu.usbmodem101>
+pio run -e tdeck --target upload --upload-port /dev/<tdeck-port>
+```
+
+For Heltec V4 expansion kit builds:
+
+```
+pio run -e heltec-v4 --target upload --upload-port /dev/<heltec-port>
+```
+
+For vertical Heltec UI builds (separate env):
+
+```
+pio run -e heltec-v4-vertical --target upload --upload-port /dev/<heltec-port>
+```
+
+Using the helper script:
+
+```
+./build-upload-monitor.sh --heltec
+./build-upload-monitor.sh --vertical
 ```
 
 Or, to build and monitor the serial output after flashing:
 
 ```
-pio run --target upload --upload-port <wherever the tdeck port is, sometimes it's cu.usbmodem101> && pio device monitor
+pio run -e tdeck --target upload --upload-port /dev/<port> && pio device monitor
 ```
 
 After flashing, the device boots directly into the firmware. No build tools required.
