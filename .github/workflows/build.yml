@@ -27,7 +27,10 @@ jobs:
         run: pip install platformio
 
       - name: Build firmware
-        run: pio run -e tdeck
+        run: |
+          pio run -e tdeck
+          pio run -e heltec-v4
+          pio run -e heltec-v4-vertical
 
       # ── Rename artifacts to include tag version ───────────────
       - name: Collect artifacts
@@ -35,9 +38,18 @@ jobs:
         run: |
           TAG=${GITHUB_REF_NAME}
           mkdir dist
-          cp .pio/build/tdeck/firmware.bin  dist/camillia-mt-${TAG}.bin
-          cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-${TAG}.elf
-          cp .pio/build/tdeck/firmware.map  dist/camillia-mt-${TAG}.map 2>/dev/null || true
+
+          cp .pio/build/tdeck/firmware.bin  dist/camillia-mt-tdeck-${TAG}.bin
+          cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-tdeck-${TAG}.elf
+          cp .pio/build/tdeck/firmware.map  dist/camillia-mt-tdeck-${TAG}.map 2>/dev/null || true
+
+          cp .pio/build/heltec-v4/firmware.bin  dist/camillia-mt-heltec-${TAG}.bin
+          cp .pio/build/heltec-v4/firmware.elf  dist/camillia-mt-heltec-${TAG}.elf
+          cp .pio/build/heltec-v4/firmware.map  dist/camillia-mt-heltec-${TAG}.map 2>/dev/null || true
+
+          cp .pio/build/heltec-v4-vertical/firmware.bin  dist/camillia-mt-heltec-vertical-${TAG}.bin
+          cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
+          cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
 
       # ── Draft release with all three files attached ───────────
       - name: Create draft release

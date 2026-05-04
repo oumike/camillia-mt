@@ -268,13 +268,15 @@ static void sendConfigPage(const char *msg = "") {
     const char *battCls = (battPct >= 60) ? "metric-good" : ((battPct >= 25) ? "metric-warn" : "metric-bad");
     bool gpsEn = gpsIsEnabled();
     bool gpsFix = gpsHasFix();
+    bool gpsNmea = gpsHasNmeaStream();
     uint8_t gpsSat = gpsSats();
-    const char *gpsCls = !gpsEn ? "metric-bad" : (gpsFix ? "metric-good" : "metric-warn");
+    const char *gpsCls = !gpsEn ? "metric-bad" : (gpsFix ? "metric-good" : (gpsNmea ? "metric-warn" : "metric-bad"));
     char battChip[24];
     snprintf(battChip, sizeof(battChip), "BAT %u%%", (unsigned)battPct);
     char gpsChip[48];
     if (!gpsEn) snprintf(gpsChip, sizeof(gpsChip), "GPS OFF");
     else if (gpsFix) snprintf(gpsChip, sizeof(gpsChip), "GPS FIX %u", (unsigned)gpsSat);
+    else if (!gpsNmea) snprintf(gpsChip, sizeof(gpsChip), "GPS NO DATA");
     else snprintf(gpsChip, sizeof(gpsChip), "GPS SEARCH %u", (unsigned)gpsSat);
     int mapPointCount = 0;
     String mapPoints = "[";
@@ -847,7 +849,7 @@ static void sendConfigPage(const char *msg = "") {
 
     html += "</div><div class='tab-panel' id='tab-utils'>";
 
-    // ── Backup & Restore ──────────────────────────────────────
+    // ── Diagnostics / Utilities ───────────────────────────────
     html +=
         "<h3 style='margin-top:1.5em'>Diagnostics</h3>"
         "<form method='POST' action='/announce'>"
@@ -855,7 +857,10 @@ static void sendConfigPage(const char *msg = "") {
         "&#128225; Send NODEINFO Broadcast</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
-        "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>"
+        "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
+
+#if HAS_SD_CARD
+    html +=
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
@@ -867,7 +872,10 @@ static void sendConfigPage(const char *msg = "") {
         "<input type='file' name='f' accept='.yaml,.yml'"
         " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
-        "</form>"
+        "</form>";
+#endif
+
+    html +=
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes and reboot. Continue?')\">"
@@ -1433,7 +1441,8 @@ static void handlePostFactoryReset() {
     nvs_flash_init();
     Nodes.clearPersisted();
 
-    // Delete saved DM conversations from SD card
+    // Delete saved DM conversations from SD card (if supported on this board)
+#if HAS_SD_CARD
     {
         File dir = SD.open("/camillia/dms");
         if (dir && dir.isDirectory()) {
@@ -1448,6 +1457,7 @@ static void handlePostFactoryReset() {
             SD.rmdir("/camillia/dms");
         }
     }
+#endif
 
     scheduleReboot(900);
     redirectHomeWithFlash("Factory reset complete. Rebooting now...");
@@ -1455,6 +1465,7 @@ static void handlePostFactoryReset() {
 
 // ── Export / Import ───────────────────────────────────────────
 
+#if HAS_SD_CARD
 static void handleGetExport() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
@@ -1521,6 +1532,7 @@ static void handleImportDone() {
     scheduleReboot(900);
     redirectHomeWithFlash("Import complete. Rebooting now...");
 }
+#endif
 
 static void handleGetLogout() {
     sessionToken[0] = '\0';
@@ -1578,9 +1590,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
         server.on("/save",    HTTP_POST, handlePostSave);
         server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
-        server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
+    #if HAS_SD_CARD
+        server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+    #endif
         server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
         server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
         server.begin();
@@ -1614,9 +1628,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
             server.on("/save",    HTTP_POST, handlePostSave);
             server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
-            server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
+#if HAS_SD_CARD
+            server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+#endif
             server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
             server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
             server.begin();
@@ -1635,9 +1651,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/save",    HTTP_POST, handlePostSave);
     server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
-    server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
+#if HAS_SD_CARD
+    server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+#endif
     server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
     server.begin();

@@ -8,7 +8,20 @@ static constexpr bool kVerboseRadioIo = false;
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
 bool MeshRadio::init() {
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+
+#if (LORA_FEM_POWER_PIN >= 0)
+    pinMode(LORA_FEM_POWER_PIN, OUTPUT);
+    digitalWrite(LORA_FEM_POWER_PIN, HIGH);
+#endif
+#if (LORA_FEM_ENABLE_PIN >= 0)
+    pinMode(LORA_FEM_ENABLE_PIN, OUTPUT);
+    digitalWrite(LORA_FEM_ENABLE_PIN, HIGH);
+#endif
+#if (LORA_FEM_TX_MODE_PIN >= 0)
+    pinMode(LORA_FEM_TX_MODE_PIN, OUTPUT);
+    digitalWrite(LORA_FEM_TX_MODE_PIN, HIGH);
+#endif
 
     int state = _radio.begin(MESH_FREQ, MESH_BW, MESH_SF, MESH_CR,
                              MESH_SYNC, MESH_POWER, MESH_PREAMBLE,

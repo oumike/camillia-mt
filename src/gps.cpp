@@ -9,6 +9,31 @@
 static const uint32_t GPS_WARMUP_MS = 10000;
 static const uint32_t GPS_SATS_MAX_AGE_MS = 5000;
 static const uint32_t GPS_SATS_HOLD_MS = 12000;
+static const uint32_t GPS_BAUD_PROBE_START_MS = 9000;
+static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 7000;
+static const uint32_t GPS_STREAM_STALL_MS = 15000;
+
+static const uint32_t GPS_BAUD_PROBE_LIST[] = {
+    (uint32_t)GPS_BAUD,
+    9600,
+    38400,
+    115200,
+};
+static const size_t GPS_BAUD_PROBE_COUNT = sizeof(GPS_BAUD_PROBE_LIST) / sizeof(GPS_BAUD_PROBE_LIST[0]);
+
+struct GpsProbePort {
+    int8_t rx;
+    int8_t tx;
+};
+
+static const GpsProbePort GPS_PORT_PROBE_LIST[] = {
+    { GPS_RX, GPS_TX },
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    { 44, 43 },
+    { 38, 39 },
+#endif
+};
+static const size_t GPS_PORT_PROBE_COUNT = sizeof(GPS_PORT_PROBE_LIST) / sizeof(GPS_PORT_PROBE_LIST[0]);
 
 static TinyGPSPlus    _gps;
 static HardwareSerial _serial(1);   // UART1
@@ -19,6 +44,14 @@ static uint32_t       _prevSentences = 0;     // sentencesWithFix at last check
 static uint32_t       _totalBytes    = 0;
 static uint8_t        _lastSats      = 0;
 static uint32_t       _lastSatsMs    = 0;
+static uint8_t        _baudProbeIdx  = 0;
+static uint8_t        _portProbeIdx  = 0;
+static uint32_t       _activeBaud    = GPS_BAUD;
+static int8_t         _activeRx      = GPS_RX;
+static int8_t         _activeTx      = GPS_TX;
+static uint32_t       _lastProbeMs   = 0;
+static uint32_t       _lastByteMs    = 0;
+static bool           _nmeaSeen      = false;
 
 // Some firmwares update GSA regularly while GGA satellite fields can remain stale.
 // Track both GN and GP talkers and prefer fresh GSA "satellites used" counts.
@@ -58,6 +91,10 @@ static TinyGPSCustom* _gpgsaSats[12] = {
     &_gpgsaSat09, &_gpgsaSat10, &_gpgsaSat11, &_gpgsaSat12
 };
 
+// GSV field 3 carries satellites in view, useful before the first full fix.
+static TinyGPSCustom _gngsvSatsView(_gps, "GNGSV", 3);
+static TinyGPSCustom _gpgsvSatsView(_gps, "GPGSV", 3);
+
 static uint8_t gsaSatsUsed(TinyGPSCustom* const sats[12], bool &fresh) {
     fresh = false;
     uint8_t used = 0;
@@ -71,8 +108,55 @@ static uint8_t gsaSatsUsed(TinyGPSCustom* const sats[12], bool &fresh) {
     return used;
 }
 
+static uint8_t parseCustomU8(TinyGPSCustom &term, bool &fresh) {
+    fresh = false;
+    if (!term.isValid()) return 0;
+    if (term.age() >= GPS_SATS_MAX_AGE_MS) return 0;
+    fresh = true;
+    int v = atoi(term.value());
+    if (v < 0) v = 0;
+    if (v > 99) v = 99;
+    return (uint8_t)v;
+}
+
+static void gpsApplyPortAndBaud(int8_t rx, int8_t tx, uint32_t baud) {
+    _serial.end();
+    _serial.begin(baud, SERIAL_8N1, rx, tx);
+    _activeRx = rx;
+    _activeTx = tx;
+    _activeBaud = baud;
+}
+
+static bool gpsNextProbeConfig() {
+    if (GPS_BAUD_PROBE_COUNT == 0 || GPS_PORT_PROBE_COUNT == 0) return false;
+
+    size_t combos = GPS_BAUD_PROBE_COUNT * GPS_PORT_PROBE_COUNT;
+    for (size_t attempt = 0; attempt < combos; attempt++) {
+        _baudProbeIdx = (uint8_t)((_baudProbeIdx + 1) % GPS_BAUD_PROBE_COUNT);
+        if (_baudProbeIdx == 0) {
+            _portProbeIdx = (uint8_t)((_portProbeIdx + 1) % GPS_PORT_PROBE_COUNT);
+        }
+
+        const GpsProbePort &p = GPS_PORT_PROBE_LIST[_portProbeIdx];
+        uint32_t candidateBaud = GPS_BAUD_PROBE_LIST[_baudProbeIdx];
+        if (p.rx < 0 || p.tx < 0) continue;
+        if (candidateBaud == _activeBaud && p.rx == _activeRx && p.tx == _activeTx) continue;
+
+        gpsApplyPortAndBaud(p.rx, p.tx, candidateBaud);
+        debugLogGps("[gps] probing baud=%lu (rx=%d tx=%d)\n",
+                    (unsigned long)candidateBaud, (int)p.rx, (int)p.tx);
+        return true;
+    }
+    return false;
+}
+
 void gpsBegin() {
-    _serial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX, GPS_TX);
+    _baudProbeIdx  = 0;
+    _portProbeIdx  = 0;
+    _activeRx      = GPS_PORT_PROBE_LIST[0].rx;
+    _activeTx      = GPS_PORT_PROBE_LIST[0].tx;
+    _activeBaud    = GPS_BAUD;
+    gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
     _enabled       = true;
     _startMs       = millis();
     _firstFixMs    = 0;
@@ -80,7 +164,11 @@ void gpsBegin() {
     _totalBytes    = 0;
     _lastSats      = 0;
     _lastSatsMs    = 0;
-    debugLogGps("[gps] started on UART1\n");
+    _lastProbeMs   = _startMs;
+    _lastByteMs    = _startMs;
+    _nmeaSeen      = false;
+    debugLogGps("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
+                (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
 }
 
 void gpsEnd() {
@@ -94,10 +182,34 @@ void gpsLoop() {
     static uint32_t _lastDbg = 0;
     uint32_t now = millis();
 
+    bool sawBytes = false;
     while (_serial.available()) {
         char c = (char)_serial.read();
         _gps.encode(c);
         _totalBytes++;
+        sawBytes = true;
+    }
+    if (sawBytes) {
+        _lastByteMs = now;
+    }
+
+    if (!_nmeaSeen && _gps.passedChecksum() > 0) {
+        _nmeaSeen = true;
+        debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
+    }
+
+    if (!_nmeaSeen
+        && (now - _startMs) >= GPS_BAUD_PROBE_START_MS
+        && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
+        _lastProbeMs = now;
+        gpsNextProbeConfig();
+    }
+
+    if (_nmeaSeen && (now - _lastByteMs) >= GPS_STREAM_STALL_MS) {
+        debugLogGps("[gps] stream stalled for %lums, restarting UART1 at baud=%lu\n",
+                    (unsigned long)(now - _lastByteMs), (unsigned long)_activeBaud);
+        gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+        _lastByteMs = now;
     }
 
     // Detect first real fix: only after warmup to ignore stale hot-start data
@@ -148,6 +260,10 @@ bool gpsHasFix() {
     return true;
 }
 
+bool gpsHasNmeaStream() {
+    return _enabled && _nmeaSeen;
+}
+
 int32_t gpsLatI() {
     return (int32_t)(_gps.location.lat() * 1e7);
 }
@@ -186,6 +302,18 @@ uint8_t gpsSats() {
     if (!hasFresh && _gps.satellites.isValid() && _gps.satellites.age() < GPS_SATS_MAX_AGE_MS) {
         hasFresh = true;
         sats = (uint8_t)_gps.satellites.value();
+    }
+
+    // Some modules report satellites in view via GSV before GSA/GGA stabilize.
+    if (!hasFresh) {
+        bool gngsvFresh = false;
+        bool gpgsvFresh = false;
+        uint8_t gngsv = parseCustomU8(_gngsvSatsView, gngsvFresh);
+        uint8_t gpgsv = parseCustomU8(_gpgsvSatsView, gpgsvFresh);
+        if (gngsvFresh || gpgsvFresh) {
+            hasFresh = true;
+            sats = max(gngsv, gpgsv);
+        }
     }
 
     if (hasFresh) {
