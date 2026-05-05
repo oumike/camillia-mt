@@ -314,11 +314,13 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     return true;
 }
 
-bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt) {
+bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
+                              bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
     uint8_t proto[64], cipher[64];
-    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto));
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // always LongFast
@@ -351,7 +353,8 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
 
 bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                               const char *longName, const char *shortName,
-                              uint32_t toNodeId, bool wantResponse) {
+                              uint32_t toNodeId, bool wantResponse,
+                              bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
     // Build a MAC address consistent with myNodeId.
@@ -372,8 +375,9 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     bool isUnicast = (toNodeId != 0xFFFFFFFF);
     bool reqReply = isUnicast && wantResponse;
     uint8_t proto[256], cipher[256];
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto), reqReply);
+                                     mac, proto, sizeof(proto), reqReply, bitfield);
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility

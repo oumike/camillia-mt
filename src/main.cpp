@@ -3939,7 +3939,7 @@ static void handleRx(MeshPacket pkt) {
                 uint32_t now = millis();
                 if (now - n->lastSentInfoMs > 5000) {
                     if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
-                                              pkt.hdr.from, true)) {
+                                              pkt.hdr.from, true, gCfg.okToMqtt)) {
                         n->lastSentInfoMs = now;
                     }
                 }
@@ -4120,7 +4120,8 @@ static void handleRx(MeshPacket pkt) {
                 // Respond with a unicast NODEINFO so they can retry with PKI.
                 if (errorReason == 35) {
                     debugLogAcks("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
-                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from, true);
+                    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                          pkt.hdr.from, true, gCfg.okToMqtt);
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) n->lastSentInfoMs = millis();
                 }
@@ -4141,7 +4142,7 @@ static void handleRx(MeshPacket pkt) {
                         uint32_t now = millis();
                         if (now - n->lastSentInfoMs > 5000) {
                             if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
-                                                      pkt.hdr.from, true)) {
+                                                      pkt.hdr.from, true, gCfg.okToMqtt)) {
                                 n->lastSentInfoMs = now;
                             }
                         }
@@ -4685,7 +4686,8 @@ static void onWebCfgSaved() {
     NodeEntry *me = Nodes.upsert(myNodeId);
     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
     strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
-    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+    Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                          0xFFFFFFFF, false, gCfg.okToMqtt);
     dirtyStatus = dirtyNodes = true;
 }
 
@@ -4988,12 +4990,14 @@ void setup() {
 
     // Let radio settle before first TX
     delay(200);
-    bool niOk = Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+    bool niOk = Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                      0xFFFFFFFF, false, gCfg.okToMqtt);
     debugLogMessages("[camillia-mt] NODEINFO broadcast %s\n", niOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", niOk ? "* Announced (NODEINFO)" : "! NODEINFO failed",
                         niOk ? TFT_DARKGREY : TFT_RED);
 
-    bool posOk = Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
+    bool posOk = Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt,
+                                       gCfg.okToMqtt);
     debugLogMessages("[camillia-mt] POSITION broadcast %s\n", posOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", posOk ? "* Position broadcast" : "! POSITION failed",
                         posOk ? TFT_DARKGREY : TFT_RED);
@@ -5143,7 +5147,8 @@ void loop() {
         deferredCount--;
         pollInput();
         debugLogMessages("[nodeinfo] deferred greeting !%08X\n", dest);
-        if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, dest)) {
+        if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                  dest, false, gCfg.okToMqtt)) {
             NodeEntry *n = Nodes.find(dest);
             if (n) n->lastSentInfoMs = millis();
         }
@@ -5153,8 +5158,10 @@ void loop() {
     // 1b. Service web config server if running
     webCfgLoop();
     if (webCfgAnnounceRequested()) {
-        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-        Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
+        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                      0xFFFFFFFF, false, gCfg.okToMqtt);
+        Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt,
+                      gCfg.okToMqtt);
         debugLogMessages("[announce] manual NODEINFO + position broadcast\n");
     }
 
@@ -5212,7 +5219,8 @@ void loop() {
     // 5. Periodic NODEINFO re-announcement
     if (now - lastNodeInfo > (uint32_t)gCfg.nodeInfoIntervalS * 1000UL) {
         lastNodeInfo = now;
-        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
+        Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                      0xFFFFFFFF, false, gCfg.okToMqtt);
     }
 
     // 6. Periodic position broadcast
@@ -5221,7 +5229,7 @@ void loop() {
         // Prefer live GPS fix; fall back to manual/last-known config position
         int32_t posLat = gCfg.latI, posLon = gCfg.lonI, posAlt = gCfg.alt;
         if (gpsHasFix()) { posLat = gpsLatI(); posLon = gpsLonI(); posAlt = gpsAltM(); }
-        Channels.sendPosition(myNodeId, posLat, posLon, posAlt);
+        Channels.sendPosition(myNodeId, posLat, posLon, posAlt, gCfg.okToMqtt);
     }
 
     // 6b. Auto-refresh GPS view every second

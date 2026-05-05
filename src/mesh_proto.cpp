@@ -438,7 +438,8 @@ size_t encodeTextMessageUnicast(const char *text,
 
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
-                      uint8_t *buf, size_t bufLen, bool wantResponse) {
+                      uint8_t *buf, size_t bufLen,
+                      bool wantResponse, uint32_t bitfield) {
     // Build inner User message (extra 34 bytes for field 8 = public_key)
     uint8_t user[164]; size_t u = 0;
 
@@ -501,11 +502,17 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
         n += pbWriteVarint(buf + n, (3 << 3) | 0);  // field 3, varint
         n += pbWriteVarint(buf + n, 1);              // true
     }
+    // field 9 (bitfield), varint — include when non-zero (e.g. OK_TO_MQTT)
+    if (bitfield) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (9 << 3) | 0);
+        n += pbWriteVarint(buf + n, bitfield);
+    }
     return n;
 }
 
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
-                      uint8_t *buf, size_t bufLen) {
+                      uint8_t *buf, size_t bufLen, uint32_t bitfield) {
     uint8_t pos[32]; size_t p = 0;
 
     // Meshtastic Position.latitude_i/longitude_i are sfixed32.
@@ -534,6 +541,12 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     n += pbWriteVarint(buf + n, p);
     if (n + p > bufLen) return 0;
     memcpy(buf + n, pos, p); n += p;
+    // field 9 (bitfield), varint — include when non-zero (e.g. OK_TO_MQTT)
+    if (bitfield) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (9 << 3) | 0);
+        n += pbWriteVarint(buf + n, bitfield);
+    }
     return n;
 }
 

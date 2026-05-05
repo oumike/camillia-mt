@@ -154,14 +154,17 @@ size_t encodeTextMessageUnicast(const char *text,
 
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
 // wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).
+// bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
 size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       const char *shortName, const uint8_t *mac6,
-                      uint8_t *buf, size_t bufLen, bool wantResponse = true);
+                      uint8_t *buf, size_t bufLen,
+                      bool wantResponse = true, uint32_t bitfield = 0);
 
 // Encode a POSITION_APP Data message. lat/lon are sfixed32 (degrees * 1e7),
 // alt is int32 (meters). Returns encoded length.
+// bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
-                      uint8_t *buf, size_t bufLen);
+                      uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // Encode a ROUTING_APP Data message.
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).
