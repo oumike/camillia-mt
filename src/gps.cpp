@@ -9,8 +9,16 @@
 static const uint32_t GPS_WARMUP_MS = 10000;
 static const uint32_t GPS_SATS_MAX_AGE_MS = 5000;
 static const uint32_t GPS_SATS_HOLD_MS = 12000;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static const uint32_t GPS_BAUD_PROBE_START_MS = 3000;
+static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 2000;
+static const uint32_t GPS_CHECKSUM_STALE_REPROBE_MS = 8000;
+static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 2;
+#else
 static const uint32_t GPS_BAUD_PROBE_START_MS = 9000;
 static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 7000;
+static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 1;
+#endif
 static const uint32_t GPS_STREAM_STALL_MS = 15000;
 
 static const uint32_t GPS_BAUD_PROBE_LIST[] = {
@@ -29,8 +37,18 @@ struct GpsProbePort {
 static const GpsProbePort GPS_PORT_PROBE_LIST[] = {
     { GPS_RX, GPS_TX },
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Some Heltec revisions/modules are labeled opposite from effective UART wiring.
+    { GPS_RX, -1 },
+    { GPS_TX, GPS_RX },
+    { GPS_TX, -1 },
     { 44, 43 },
+    { 44, -1 },
+    { 43, 44 },
+    { 43, -1 },
     { 38, 39 },
+    { 38, -1 },
+    { 39, 38 },
+    { 39, -1 },
 #endif
 };
 static const size_t GPS_PORT_PROBE_COUNT = sizeof(GPS_PORT_PROBE_LIST) / sizeof(GPS_PORT_PROBE_LIST[0]);
@@ -51,6 +69,8 @@ static int8_t         _activeRx      = GPS_RX;
 static int8_t         _activeTx      = GPS_TX;
 static uint32_t       _lastProbeMs   = 0;
 static uint32_t       _lastByteMs    = 0;
+static uint32_t       _lastChecksumMs = 0;
+static uint32_t       _lastPassedChecksum = 0;
 static bool           _nmeaSeen      = false;
 
 // Some firmwares update GSA regularly while GGA satellite fields can remain stale.
@@ -166,6 +186,8 @@ void gpsBegin() {
     _lastSatsMs    = 0;
     _lastProbeMs   = _startMs;
     _lastByteMs    = _startMs;
+    _lastChecksumMs = _startMs;
+    _lastPassedChecksum = _gps.passedChecksum();
     _nmeaSeen      = false;
     debugLogGps("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
                 (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
@@ -193,10 +215,33 @@ void gpsLoop() {
         _lastByteMs = now;
     }
 
-    if (!_nmeaSeen && _gps.passedChecksum() > 0) {
+    uint32_t passed = _gps.passedChecksum();
+    if (passed != _lastPassedChecksum) {
+        _lastPassedChecksum = passed;
+        _lastChecksumMs = now;
+    }
+
+    if (!_nmeaSeen && passed >= GPS_MIN_CHECKSUM_FOR_STREAM) {
         _nmeaSeen = true;
         debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
     }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Heltec boards can occasionally latch onto a noisy UART config that yields
+    // sporadic checksum passes once, then no real sentence progress. Re-probe.
+    if (_nmeaSeen
+        && !gpsHasFix()
+        && passed > 0
+        && (now - _lastChecksumMs) >= GPS_CHECKSUM_STALE_REPROBE_MS
+        && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
+        debugLogGps("[gps] checksum stale (%lums) without fix on baud=%lu rx=%d tx=%d, probing next\n",
+                    (unsigned long)(now - _lastChecksumMs),
+                    (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
+        _nmeaSeen = false;
+        _lastProbeMs = now;
+        gpsNextProbeConfig();
+    }
+#endif
 
     if (!_nmeaSeen
         && (now - _startMs) >= GPS_BAUD_PROBE_START_MS

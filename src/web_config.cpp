@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include "debug_flags.h"
 #include "gps.h"
+#include "battery_util.h"
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 
@@ -81,12 +82,7 @@ static void scheduleReboot(uint32_t delayMs) {
 }
 
 static uint8_t readBatteryPctWeb() {
-    int32_t sum = 0;
-    for (int i = 0; i < 8; i++) sum += analogRead(BATT_ADC_PIN);
-    float vadc = (sum / 8.0f) * (3.3f / 4095.0f);
-    float vbat = vadc * BATT_DIV;
-    int pct = (int)((vbat - BATT_VMIN) / (BATT_VMAX - BATT_VMIN) * 100.0f);
-    return (uint8_t)(pct < 0 ? 0 : pct > 100 ? 100 : pct);
+    return batteryReadPercent();
 }
 
 static void appendJsonEscaped(String &out, const char *s) {
@@ -859,7 +855,6 @@ static void sendConfigPage(const char *msg = "") {
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
 
-#if HAS_SD_CARD
     html +=
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export'"
@@ -873,7 +868,6 @@ static void sendConfigPage(const char *msg = "") {
         " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>";
-#endif
 
     html +=
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
@@ -1418,7 +1412,7 @@ static void handleGetLiveData() {
 
 static void handlePostAnnounce() {
     if (!isLoggedIn()) { redirect("/login"); return; }
-    gAnnounceReq = true;
+    webCfgQueueAnnounce();
     redirectHomeWithFlash("NODEINFO broadcast queued.");
 }
 
@@ -1465,7 +1459,6 @@ static void handlePostFactoryReset() {
 
 // ── Export / Import ───────────────────────────────────────────
 
-#if HAS_SD_CARD
 static void handleGetExport() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
@@ -1532,7 +1525,6 @@ static void handleImportDone() {
     scheduleReboot(900);
     redirectHomeWithFlash("Import complete. Rebooting now...");
 }
-#endif
 
 static void handleGetLogout() {
     sessionToken[0] = '\0';
@@ -1591,10 +1583,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
         server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
-    #if HAS_SD_CARD
         server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-    #endif
         server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
         server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
         server.begin();
@@ -1629,10 +1619,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
             server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
-#if HAS_SD_CARD
             server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-#endif
             server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
             server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
             server.begin();
@@ -1652,10 +1640,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
-#if HAS_SD_CARD
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-#endif
     server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
     server.begin();
@@ -1704,4 +1690,8 @@ bool webCfgAnnounceRequested() {
     if (!gAnnounceReq) return false;
     gAnnounceReq = false;
     return true;
+}
+
+void webCfgQueueAnnounce() {
+    gAnnounceReq = true;
 }

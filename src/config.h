@@ -69,6 +69,9 @@
 #define TOUCH_INT       16
 #define TOUCH_RST       -1
 #define TOUCH_I2C_PORT   0
+#ifndef TOUCH_POLL_ENABLED
+#define TOUCH_POLL_ENABLED 1
+#endif
 
 // Trackball
 #define HAS_TRACKBALL    1
@@ -91,6 +94,8 @@
 // Battery ADC
 #define BATT_ADC_PIN    4
 #define BATT_DIV        2.0f
+#define BATT_SENSE_ENABLE_PIN    -1
+#define BATT_SENSE_ENABLE_LEVEL  LOW
 
 #define MESH_TCXO_V     1.6f
 
@@ -151,6 +156,9 @@
 #define TOUCH_INT       -1
 #define TOUCH_RST       44
 #define TOUCH_I2C_PORT   1
+#ifndef TOUCH_POLL_ENABLED
+#define TOUCH_POLL_ENABLED 1
+#endif
 
 #define HAS_TRACKBALL    0
 #define TBALL_UP        -1
@@ -170,6 +178,8 @@
 
 #define BATT_ADC_PIN    1
 #define BATT_DIV        5.1205f
+#define BATT_SENSE_ENABLE_PIN    37
+#define BATT_SENSE_ENABLE_LEVEL  LOW
 
 #define MESH_TCXO_V     1.8f
 #endif
@@ -317,6 +327,12 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define BATT_VMAX       4.2f   // LiPo full (V)
 #ifndef BATT_DIV
 #define BATT_DIV        2.0f
+#endif
+#ifndef BATT_SENSE_ENABLE_PIN
+#define BATT_SENSE_ENABLE_PIN    -1
+#endif
+#ifndef BATT_SENSE_ENABLE_LEVEL
+#define BATT_SENSE_ENABLE_LEVEL  LOW
 #endif
 
 // ── Timing ───────────────────────────────────────────────────

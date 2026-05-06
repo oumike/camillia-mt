@@ -26,6 +26,9 @@ const char *webCfgIP();
 // Returns true (and clears the flag) if the web UI requested a NODEINFO broadcast.
 bool webCfgAnnounceRequested();
 
+// Queue a NODEINFO+position re-announce to be processed in the main loop.
+void webCfgQueueAnnounce();
+
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
 
