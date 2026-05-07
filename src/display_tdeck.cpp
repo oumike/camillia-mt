@@ -1,0 +1,48 @@
+#include "display_profile.h"
+#include "config.h"
+#include "display_splash_common.h"
+
+#if defined(DEVICE_TDECK)
+namespace {
+constexpr DisplayUiProfile kDisplayUiProfile = {
+    {
+        false,
+        1.0f,
+        2,
+        9,
+        10,
+        4,
+    },
+    {
+        5,
+        3,
+        2,
+        2,
+        8,
+        1,
+    },
+    {
+        16,
+        26,
+        26,
+        8,
+        1.0f,
+        12,
+        -4,
+        28,
+        15,
+        1500,
+    },
+};
+}
+
+const DisplayUiProfile &displayUiProfile() {
+    return kDisplayUiProfile;
+}
+
+void displayDrawSplash(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
+                       const DisplaySplashPalette &palette,
+                       const DisplaySplashData &data) {
+    display_splash_detail::drawSplashCommon(lcd, profile, palette, data);
+}
+#endif

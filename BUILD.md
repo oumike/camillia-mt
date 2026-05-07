@@ -24,6 +24,11 @@ Build for Heltec V4 (horizontal):
 ./build-upload-monitor.sh --heltec
 ```
 
+Build for Cardputer + Cap LoRa/GPS:
+```
+./build-upload-monitor.sh --cardputer
+```
+
 Build for Heltec V4 (vertical UI env):
 ```
 ./build-upload-monitor.sh --vertical
@@ -32,6 +37,11 @@ Build for Heltec V4 (vertical UI env):
 Build only (no flash):
 ```
 pio run -e tdeck
+```
+
+Build only (Cardputer + Cap LoRa/GPS):
+```
+pio run -e cardputer-cap
 ```
 
 Build only (Heltec vertical env):
@@ -59,6 +69,7 @@ pio device monitor
 Download the image for your device and `flash.sh` from the [Releases](https://github.com/oumike/camillia-mt/releases) page, then:
 
 - `camillia-mt-tdeck-vX.Y.Z.bin`
+- `camillia-mt-cardputer-cap-vX.Y.Z.bin`
 - `camillia-mt-heltec-vX.Y.Z.bin`
 - `camillia-mt-heltec-vertical-vX.Y.Z.bin`
 

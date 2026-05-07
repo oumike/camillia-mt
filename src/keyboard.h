@@ -35,6 +35,19 @@ public:
 private:
     char mapKey(uint8_t raw);
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    static constexpr uint8_t CARDPUTER_QUEUE_SIZE = 16;
+    char _cardputerQueue[CARDPUTER_QUEUE_SIZE] = {0};
+    uint8_t _cardputerHead = 0;
+    uint8_t _cardputerTail = 0;
+    uint8_t _cardputerCount = 0;
+    bool _cardputerEnterDown = false;
+
+    void enqueueCardputerKey(char key);
+    char dequeueCardputerKey();
+    void pumpCardputerKeys();
+#endif
+
     static void IRAM_ATTR _isrRight();
     static void IRAM_ATTR _isrLeft();
     static void IRAM_ATTR _isrUp();

@@ -1,6 +1,11 @@
 #include "mesh_radio.h"
 #include <SPI.h>
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Unified.h>
+#include <utility/PI4IOE5V6408_Class.hpp>
+#endif
+
 volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
@@ -9,6 +14,16 @@ void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
 bool MeshRadio::init() {
     SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    m5::PI4IOE5V6408_Class ioexp(0x43, 400000, &m5::In_I2C);
+    if (ioexp.begin()) {
+        ioexp.setDirection(0, true);
+        ioexp.setHighImpedance(0, false);
+        ioexp.digitalWrite(0, true);
+        Serial.println("[radio] enabled Cardputer Cap LoRa-1262 IO expander");
+    }
+#endif
 
 #if (LORA_FEM_POWER_PIN >= 0)
     pinMode(LORA_FEM_POWER_PIN, OUTPUT);

@@ -118,6 +118,8 @@ public:
             cfg.pin_rst      = TFT_RST;
             cfg.panel_width  = TFT_PANEL_WIDTH;
             cfg.panel_height = TFT_PANEL_HEIGHT;
+            cfg.offset_x     = TFT_PANEL_OFFSET_X;
+            cfg.offset_y     = TFT_PANEL_OFFSET_Y;
             cfg.invert       = TFT_INVERT;
             cfg.rgb_order    = TFT_RGB_ORDER;
             _panel.config(cfg);

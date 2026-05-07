@@ -2,7 +2,7 @@
 
 // Board, radio, UI, and default runtime configuration constants.
 
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
 #define DEVICE_TDECK 1
 #endif
 
@@ -98,6 +98,99 @@
 #define BATT_SENSE_ENABLE_LEVEL  LOW
 
 #define MESH_TCXO_V     1.6f
+#define HAS_PSRAM       1
+#define DEVICE_LCD_PORTRAIT_W   240
+#define DEVICE_LCD_PORTRAIT_H   320
+#define DEVICE_LCD_LANDSCAPE_W  320
+#define DEVICE_LCD_LANDSCAPE_H  240
+
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#define BOARD_POWERON   -1
+#define BOARD_BUZZER    -1
+#define BOARD_VEXT_ENABLE    -1
+#define BOARD_VEXT_ON_LEVEL  HIGH
+
+// Display SPI (Cardputer / Cardputer-Adv ST7789V2, landscape 240x135)
+#define TFT_SPI_HOST    SPI3_HOST
+#define TFT_SPI_SCK     36
+#define TFT_SPI_MISO    -1
+#define TFT_SPI_MOSI    35
+#define TFT_SPI_3WIRE   true
+#define TFT_SPI_WRITE_HZ 40000000
+#define TFT_SPI_READ_HZ  4000000
+#define TFT_CS          37
+#define TFT_DC          34
+#define TFT_BL          38
+#define TFT_BL_INVERT   false
+#define TFT_BL_FREQ     256
+#define TFT_BL_PWM_CH   7
+#define TFT_BRIGHTNESS_DEFAULT 180
+#define TFT_RST         33
+#define TFT_PANEL_WIDTH 135
+#define TFT_PANEL_HEIGHT 240
+#define TFT_PANEL_OFFSET_X 53
+#define TFT_PANEL_OFFSET_Y 40
+#define TFT_INVERT      true
+#define TFT_RGB_ORDER   false
+
+// Cap LoRa868 / LoRa-1262 and GPS wiring for Cardputer-Adv.
+#define LORA_SPI_SCK    40
+#define LORA_SPI_MISO   39
+#define LORA_SPI_MOSI   14
+#define LORA_CS         5
+#define LORA_DIO1       4
+#define LORA_RST        3
+#define LORA_BUSY       6
+#define LORA_FEM_POWER_PIN   -1
+#define LORA_FEM_ENABLE_PIN  -1
+#define LORA_FEM_TX_MODE_PIN -1
+
+// microSD shares the same SPI bus as the LoRa cap.
+#define SD_CS           12
+#define HAS_SD_CARD     1
+
+// Cardputer keyboard is handled through the M5Cardputer library.
+#define HAS_KEYBOARD    1
+#define KB_SDA          -1
+#define KB_SCL          -1
+#define KB_ADDR       0x00
+#define KB_INT          -1
+
+#define HAS_TOUCH        0
+#define TOUCH_SDA       -1
+#define TOUCH_SCL       -1
+#define TOUCH_ADDR      0x00
+#define TOUCH_INT       -1
+#define TOUCH_RST       -1
+#define TOUCH_I2C_PORT   0
+#define TOUCH_POLL_ENABLED 0
+
+#define HAS_TRACKBALL    0
+#define TBALL_UP        -1
+#define TBALL_DOWN      -1
+#define TBALL_LEFT      -1
+#define TBALL_RIGHT     -1
+#define TBALL_CLICK     -1
+
+#define USER_BUTTON_PIN   0
+#define USER_BUTTON_ACTIVE_LEVEL LOW
+
+#define HAS_GPS         1
+#define GPS_RX          15
+#define GPS_TX          13
+#define GPS_BAUD        115200
+
+#define BATT_ADC_PIN    10
+#define BATT_DIV        1.5f
+#define BATT_SENSE_ENABLE_PIN    -1
+#define BATT_SENSE_ENABLE_LEVEL  LOW
+
+#define MESH_TCXO_V     3.0f
+#define HAS_PSRAM       0
+#define DEVICE_LCD_PORTRAIT_W   135
+#define DEVICE_LCD_PORTRAIT_H   240
+#define DEVICE_LCD_LANDSCAPE_W  240
+#define DEVICE_LCD_LANDSCAPE_H  135
 
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #define BOARD_POWERON   7
@@ -182,6 +275,11 @@
 #define BATT_SENSE_ENABLE_LEVEL  LOW
 
 #define MESH_TCXO_V     1.8f
+#define HAS_PSRAM       1
+#define DEVICE_LCD_PORTRAIT_W   240
+#define DEVICE_LCD_PORTRAIT_H   320
+#define DEVICE_LCD_LANDSCAPE_W  320
+#define DEVICE_LCD_LANDSCAPE_H  240
 #endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
@@ -196,6 +294,14 @@
 #define SPI_SCK         LORA_SPI_SCK
 #define SPI_MISO        LORA_SPI_MISO
 #define SPI_MOSI        LORA_SPI_MOSI
+
+#ifndef TFT_PANEL_OFFSET_X
+#define TFT_PANEL_OFFSET_X 0
+#endif
+
+#ifndef TFT_PANEL_OFFSET_Y
+#define TFT_PANEL_OFFSET_Y 0
+#endif
 
 // ── Meshtastic LoRa (LongFast preset, US 915 MHz) ────────────
 #define MESH_FREQ       906.875f  // MHz
@@ -268,9 +374,18 @@
 
 // ── Display UI zones (font0 = 6×8 px) ───────────────────────
 #if DEVICE_UI_VERTICAL
-#define LCD_W           240
-#define LCD_H           320
+#define LCD_W           DEVICE_LCD_PORTRAIT_W
+#define LCD_H           DEVICE_LCD_PORTRAIT_H
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define STATUS_H         20
+#define TAB_H            12
+#define MSG_W            92
+#define NODE_X           93
+#define NODE_W           42
+#define DIVIDER_X        92
+#define INPUT_H          18
+#else
 #define STATUS_H         28   // top status bar
 #define TAB_H            14   // channel tab bar
 #define MSG_W           170   // message pane width
@@ -278,10 +393,20 @@
 #define NODE_W           69   // node pane width
 #define DIVIDER_X       170   // 1px vertical divider
 #define INPUT_H          42   // touch controls fit better in portrait
+#endif
 #else
-#define LCD_W           320
-#define LCD_H           240
+#define LCD_W           DEVICE_LCD_LANDSCAPE_W
+#define LCD_H           DEVICE_LCD_LANDSCAPE_H
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define STATUS_H         18
+#define TAB_H            12
+#define MSG_W           172
+#define NODE_X          173
+#define NODE_W           67
+#define DIVIDER_X       172
+#define INPUT_H          18
+#else
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
 #define MSG_W           230   // message pane width
@@ -289,6 +414,7 @@
 #define NODE_W           89   // node pane width
 #define DIVIDER_X       230   // 1px vertical divider
 #define INPUT_H          37   // input area (typed text + touch nav buttons)
+#endif
 #endif
 
 #define CHAT_Y   (STATUS_H + TAB_H) // top of chat/node area
@@ -313,7 +439,11 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define CHAN_DM           8   // Direct Messages tab (virtual, local-only)
 #define CHAN_ANN          9   // Live feed tab       (virtual, local-only)
 #define MAX_CHANNELS     10   // MESH_CHANNELS + DM + ANN
-#define MAX_MSG_LINES   400   // display lines per channel (in PSRAM)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define MAX_MSG_LINES   100   // DRAM-sized history for Cardputer
+#else
+#define MAX_MSG_LINES   400   // display lines per channel
+#endif
 #define MAX_INPUT_LEN   200
 #define MAX_NODES        64
 #define MAX_PENDING_ACK   8
