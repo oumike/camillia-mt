@@ -183,6 +183,8 @@ static void mapClampViewport();
 static int mapVisibleNodeCount();
 static NodeEntry *mapVisibleNodeByIndex(int idx);
 static int panelOverlayBottomY();
+static bool isTextInputView();
+static void handleKey(char k);
 
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
@@ -272,6 +274,12 @@ static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
         char k = kb.readKey();
         if (k == KEY_NONE) break;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    uint8_t rawKey = (uint8_t)k;
+    if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
+    if (rawKey == 0x29) k = KEY_ESCAPE;
+    if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
+    Serial.printf("[cp-kb-main] raw key=0x%02X norm=0x%02X view=%d settingsSel=%d asleep=%d\n",
+              rawKey, (uint8_t)k, activeView, settingsSel, screenAsleep ? 1 : 0);
         if (k == KEY_ENTER) {
             Serial.printf("[cp-main] readKey ENTER screenAsleep=%d activeView=%d settingsSel=%d\n",
                           screenAsleep ? 1 : 0, activeView, settingsSel);
@@ -279,10 +287,19 @@ static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
 #endif
         if (screenAsleep) {
             wakeScreen();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if (k == KEY_ENTER) {
+                handleKey(k);
+            }
+#endif
             break;
         }
         lastActivityMs = nowMs;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        handleKey(k);
+#else
         queueKey(k);
+#endif
     }
 }
 // Broadcast intervals are runtime-configurable via gCfg.nodeInfoIntervalS / posIntervalS
@@ -386,6 +403,10 @@ struct UiPalette {
 
 static UiPalette gUi = {};
 
+static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
+    return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
+}
+
 #define COL_BG_MAIN        gUi.bgMain
 #define COL_STATUS_TOP     gUi.statusTop
 #define COL_STATUS_BG      gUi.statusBg
@@ -423,6 +444,8 @@ static UiPalette gUi = {};
 #define COL_SPLASH_DIM     gUi.splashDim
 
 static uint8_t uiThemePresetIndex() {
+    if (gCfg.uiTheme == UI_THEME_SOLARIZED)
+        return (gCfg.uiMode == UI_MODE_LIGHT) ? 7 : 6;
     if (gCfg.uiTheme == UI_THEME_EARTHEN)
         return (gCfg.uiMode == UI_MODE_LIGHT) ? 5 : 4;
     if (gCfg.uiTheme == UI_THEME_EVERGREEN)
@@ -431,24 +454,28 @@ static uint8_t uiThemePresetIndex() {
 }
 
 static const char *uiThemePresetName(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: return "Camillia Dark";
         case 1: return "Camillia Light";
         case 2: return "Evergreen Dark";
         case 3: return "Evergreen Light";
         case 4: return "Earthy Dark";
-        default: return "Earthy Light";
+        case 5: return "Earthy Light";
+        case 6: return "Solarized Dark";
+        default: return "Solarized Light";
     }
 }
 
 static void setUiThemePreset(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
         case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
         case 3: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 4: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_DARK; break;
-        default: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 5: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 6: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_DARK; break;
+        default: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_LIGHT; break;
     }
 }
 
@@ -502,6 +529,43 @@ static void applyUiTheme(bool markDirty = true) {
                 0x2AED, 0x55B0, 0x86FF, 0xE73C, 0xC69A,
                 0x3666, 0xED80, 0xA000,
                 0x00A8, 0x228D, 0x1169, 0x4C31, 0x64D4, 0xFFFF, 0xB69A, 0x9D75
+            };
+        }
+    } else if (gCfg.uiTheme == UI_THEME_SOLARIZED) {
+        const uint16_t base03 = rgb565(0x00, 0x2b, 0x36);
+        const uint16_t base02 = rgb565(0x07, 0x36, 0x42);
+        const uint16_t base01 = rgb565(0x58, 0x6e, 0x75);
+        const uint16_t base00 = rgb565(0x65, 0x7b, 0x83);
+        const uint16_t base0 = rgb565(0x83, 0x94, 0x96);
+        const uint16_t base1 = rgb565(0x93, 0xa1, 0xa1);
+        const uint16_t base2 = rgb565(0xee, 0xe8, 0xd5);
+        const uint16_t base3 = rgb565(0xfd, 0xf6, 0xe3);
+        const uint16_t yellow = rgb565(0xb5, 0x89, 0x00);
+        const uint16_t orange = rgb565(0xcb, 0x4b, 0x16);
+        const uint16_t red = rgb565(0xdc, 0x32, 0x2f);
+        const uint16_t magenta = rgb565(0xd3, 0x36, 0x82);
+        const uint16_t violet = rgb565(0x6c, 0x71, 0xc4);
+        const uint16_t blue = rgb565(0x26, 0x8b, 0xd2);
+        const uint16_t cyan = rgb565(0x2a, 0xa1, 0x98);
+        const uint16_t green = rgb565(0x85, 0x99, 0x00);
+
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                base3, base2, base2, base3, base2, rgb565(0xe7, 0xe1, 0xcf),
+                blue, orange, base1, base1, base0, base2, base2,
+                cyan, blue, base01, base00, base3, base01,
+                rgb565(0xe8, 0xe2, 0xd0), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base2, base3, rgb565(0xf8, 0xf1, 0xdd), base1, base0, blue, cyan, base00
+            };
+        } else {
+            gUi = {
+                base03, base02, base02, base02, rgb565(0x0c, 0x3c, 0x47), rgb565(0x11, 0x45, 0x52),
+                blue, orange, base01, base01, base00, base02, base02,
+                cyan, yellow, base1, base0, base3, base1,
+                rgb565(0x0e, 0x46, 0x55), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base03, base02, rgb565(0x0b, 0x40, 0x4b), base01, base00, base3, cyan, base0
             };
         }
     } else {
@@ -657,7 +721,11 @@ static bool cardputerChannelNavReady() {
 
 static bool cardputerPanelShortcutReady() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    return !(softKbVisible || hwTypingLock || inputLen > 0);
+    if (softKbVisible) return false;
+    // Keep panel hotkeys active in non-text views (CFG/ANN/MAP/DM list),
+    // even if the chat input buffer still contains stale text.
+    if (isTextInputView() && (hwTypingLock || inputLen > 0)) return false;
+    return true;
 #else
     return false;
 #endif
@@ -682,6 +750,14 @@ static bool showPanelCloseButtons() {
 static char remapCardputerDirectionalKey(char k) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (!cardputerPanelShortcutReady()) return k;
+
+    if (activeView == VIEW_MAP) {
+        if (k == ';') return KEY_SCROLL_UP;
+        if (k == '.') return KEY_SCROLL_DN;
+        if (k == ',') return KEY_PAGE_DN;
+        if (k == '/') return KEY_PAGE_UP;
+        return k;
+    }
 
     if (k == ';') return KEY_SCROLL_UP;
     if (k == '.') return KEY_SCROLL_DN;
@@ -1515,9 +1591,15 @@ static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
 }
 
 static void drawLivePanel(bool fullRedraw) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+#else
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
+#endif
     const int mh = panelOverlayBottomY() - my + 1;
     const int titleH = 11;
     const int left = mx + 1;
@@ -1540,6 +1622,9 @@ static void drawLivePanel(bool fullRedraw) {
     if (fullRedraw) {
         clearPanelCloseRect();
         drawModalMaskAndFrame(mx, my, mw, mh);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+#endif
         lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
         lcd.setFont(&fonts::Font0);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
@@ -1712,6 +1797,15 @@ static bool mapEnsureTileFile(uint8_t z, int x, int y, bool allowDownload,
 
 static void drawMapPanel() {
     clearPanelCloseRect();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int mapNavBtnH = 0;
+    const int mapNavBottomPad = 0;
+    const int mapNavGap = 0;
+#else
     const int mx = 0;
     const int my = CHAT_Y;
     const int mw = LCD_W;
@@ -1721,6 +1815,7 @@ static void drawMapPanel() {
     const int mapNavBtnH = 22;
     const int mapNavBottomPad = 2;
     const int mapNavGap = 3;
+#endif
     const int titleH = 11;
     const int ix = mx + 3;
     const int iw = mw - 6;
@@ -1838,7 +1933,9 @@ static void drawMapPanel() {
 
     bool apMode = mapIsApMode();
     bool allowDownloads = mapCanDownloadTiles();
-    bool useTileBackdrop = !apMode && HAS_SD_CARD;
+    // Cached tiles remain useful even when the device is in AP mode.
+    // Only network downloads should depend on Wi-Fi connectivity.
+    bool useTileBackdrop = HAS_SD_CARD;
     bool downloadedAnyTile = false;
 
     if (useTileBackdrop) {
@@ -1982,6 +2079,7 @@ static void drawMapPanel() {
         }
     }
 
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
     const int closeW = 46;
     drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
@@ -2026,6 +2124,7 @@ static void drawMapPanel() {
         drawClippedText(tx, ty, btnW[i] - (tx - bx) - 1, labels[i]);
         setMapControlRect((MapControlAction)i, bx, btnY, btnW[i], mapNavBtnH);
     }
+#endif
 
     lcd.setFont(&fonts::Font0);
     mapLastDrawMs = millis();
@@ -2757,6 +2856,11 @@ static void drawNodeDetail(const NodeEntry *n) {
 
 static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        return hwTypingLock || inputLen > 0;
+    }
+#endif
     return !((activeView == CHAN_ANN)
             || (activeView == CHAN_DM && !dmNeedsInput)
             || (activeView == VIEW_MAP)
@@ -2769,7 +2873,11 @@ static bool panelCoversInputArea() {
 }
 
 static int panelOverlayBottomY() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return LCD_H - 1;
+#else
     return INPUT_Y + INPUT_H - 1;
+#endif
 }
 
 static void handleKey(char k);
@@ -3059,9 +3167,47 @@ static int mapVisibleNodeCount() {
 
 static NodeEntry *mapVisibleNodeByIndex(int idx) {
     if (idx < 0) return nullptr;
-    if (!mapNodeFreezeActive) return Nodes.getByRank(idx);
-    if (idx >= mapFrozenNodeCount) return nullptr;
-    return Nodes.find(mapFrozenNodeIds[idx]);
+    if (mapNodeFreezeActive) {
+        NodeEntry *self = nullptr;
+        int selfFrozenIndex = -1;
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (n && n->nodeId == myNodeId) {
+                self = n;
+                selfFrozenIndex = i;
+                break;
+            }
+        }
+
+        if (self) {
+            if (idx == 0) return self;
+            idx -= 1;
+        }
+
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            if (i == selfFrozenIndex) continue;
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (!n) continue;
+            if (idx == 0) return n;
+            idx -= 1;
+        }
+        return nullptr;
+    }
+
+    NodeEntry *self = Nodes.find(myNodeId);
+    if (self) {
+        if (idx == 0) return self;
+        idx -= 1;
+    }
+
+    int cnt = Nodes.count();
+    for (int rank = 0; rank < cnt; rank++) {
+        NodeEntry *n = Nodes.getByRank(rank);
+        if (!n || n->nodeId == myNodeId) continue;
+        if (idx == 0) return n;
+        idx -= 1;
+    }
+    return nullptr;
 }
 
 static bool mapSelectNodeById(uint32_t nodeId) {
@@ -3134,10 +3280,10 @@ static void mapApplyControl(MapControlAction action) {
     dirtyChat = true;
 }
 
-static void handleTouchTap(int x, int y) {
-    if (screenAsleep || nodeDetailOpen) return;
+static bool handleTouchTap(int x, int y) {
+    if (screenAsleep || nodeDetailOpen) return false;
 
-    if (softKeyboardHandleTap(x, y)) return;
+    if (softKeyboardHandleTap(x, y)) return true;
 
     if (dmNewVisible
         && pointInRect(x, y, dmNewRect.x, dmNewRect.y, dmNewRect.w, dmNewRect.h)
@@ -3147,14 +3293,20 @@ static void handleTouchTap(int x, int y) {
         dmPickerOpen = true;
         pickerSnapshot();
         dirtyChat = true;
-        return;
+    #if defined(DEVICE_TDECK)
+        Serial.printf("[tdeck-touch-hit] dm-new x=%d y=%d\n", x, y);
+    #endif
+        return true;
     }
 
     if (panelCloseVisible
         && pointInRect(x, y, panelCloseRect.x, panelCloseRect.y,
                        panelCloseRect.w, panelCloseRect.h)) {
+    #if defined(DEVICE_TDECK)
+        Serial.printf("[tdeck-touch-hit] panel-close x=%d y=%d\n", x, y);
+    #endif
         closePanelToChannel();
-        return;
+        return true;
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
@@ -3165,8 +3317,11 @@ static void handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_UP].y,
                            dmCtlRect[DM_CTL_UP].w,
                            dmCtlRect[DM_CTL_UP].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] dm-up x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_UP);
-            return;
+            return true;
         }
         if (dmCtlVisible[DM_CTL_DOWN]
             && pointInRect(x, y,
@@ -3174,8 +3329,11 @@ static void handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_DOWN].y,
                            dmCtlRect[DM_CTL_DOWN].w,
                            dmCtlRect[DM_CTL_DOWN].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] dm-down x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_DN);
-            return;
+            return true;
         }
     }
 #endif
@@ -3185,8 +3343,11 @@ static void handleTouchTap(int x, int y) {
             if (!mapCtlVisible[i]) continue;
             if (pointInRect(x, y, mapCtlRect[i].x, mapCtlRect[i].y,
                             mapCtlRect[i].w, mapCtlRect[i].h)) {
+#if defined(DEVICE_TDECK)
+                Serial.printf("[tdeck-touch-hit] map-ctl=%d x=%d y=%d\n", i, x, y);
+#endif
                 mapApplyControl((MapControlAction)i);
-                return;
+                return true;
             }
         }
     }
@@ -3198,8 +3359,11 @@ static void handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_UP].y,
                            settingsCtlRect[SETTINGS_CTL_UP].w,
                            settingsCtlRect[SETTINGS_CTL_UP].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] settings-up x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_UP);
-            return;
+            return true;
         }
         if (settingsCtlVisible[SETTINGS_CTL_DOWN]
             && pointInRect(x, y,
@@ -3207,8 +3371,11 @@ static void handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_DOWN].y,
                            settingsCtlRect[SETTINGS_CTL_DOWN].w,
                            settingsCtlRect[SETTINGS_CTL_DOWN].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] settings-down x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_DN);
-            return;
+            return true;
         }
     }
 
@@ -3218,7 +3385,7 @@ static void handleTouchTap(int x, int y) {
         softKbShift = false;
         softKeyboardClearPressed();
         dirtyInput = true;
-        return;
+        return true;
     }
 #endif
 
@@ -3227,11 +3394,21 @@ static void handleTouchTap(int x, int y) {
     if (!panelCoversInputArea()) {
         for (int i = 0; i < navButtonCount(); i++) {
             if (pointInRect(x, y, b[i].x, b[i].y, b[i].w, b[i].h)) {
+#if defined(DEVICE_TDECK)
+                Serial.printf("[tdeck-touch-hit] nav=%d x=%d y=%d rx=%d ry=%d rw=%d rh=%d\n",
+                              i, x, y, b[i].x, b[i].y, b[i].w, b[i].h);
+#endif
                 activateNavButton(i);
-                return;
+                return true;
             }
         }
     }
+
+#if defined(DEVICE_TDECK)
+    Serial.printf("[tdeck-touch-hit] miss x=%d y=%d view=%d covers=%d\n",
+                  x, y, activeView, panelCoversInputArea() ? 1 : 0);
+#endif
+    return false;
 }
 
 // ── Draw: input bar ───────────────────────────────────────────
@@ -3273,16 +3450,25 @@ static void drawInput() {
     if (showTextInput) {
         int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
         int kbX = 0, kbY = 0, kbW = 0, kbH = 0;
+        const int composerH = lcd.fontHeight() + 6;
         if (softKeyboardBounds(kbX, kbY, kbW, kbH)) {
-            const int composerH = lcd.fontHeight() + 6;
             const int composerY = max(CHAT_Y + 1, kbY - composerH - 2);
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
             lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
             lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
         } else {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            const int composerBottom = max(CHAT_Y + composerH, b[0].y - 2);
+            const int composerY = max(CHAT_Y + 1, composerBottom - composerH);
+            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
+            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+            textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
+#else
             int midY = min(b[0].y - 1, textY + lcd.fontHeight() + 1);
             lcd.drawFastHLine(0, midY, LCD_W, COL_DIVIDER_HI);
+#endif
         }
 
         lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
@@ -3780,6 +3966,7 @@ static void handleRx(MeshPacket pkt) {
 static void onWebCfgSaved();  // forward declaration
 
 static void activateSettingsSelection() {
+    Serial.printf("[cp-kb-main] cfg activate settingsSel=%d\n", settingsSel);
 #if HAS_SD_CARD
     if (settingsSel == SETTING_EXPORT) {
         bool ok = cfgExport(gCfg);
@@ -3807,7 +3994,7 @@ static void activateSettingsSelection() {
 #endif
 
     if (settingsSel == SETTING_THEME) {
-        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
+        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 8);
         setUiThemePreset(p);
         applyUiTheme();
         persistUiTheme();
@@ -3856,8 +4043,12 @@ static void handleKey(char k) {
     if (k == KEY_NONE) return;
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    uint8_t rawKey = (uint8_t)k;
+    if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
+    if (rawKey == 0x29) k = KEY_ESCAPE;
+    if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
     if (k == KEY_ENTER) {
-        Serial.printf("[cp-main] handleKey ENTER activeView=%d settingsSel=%d nodeDetail=%d nodeFocused=%d dmPicker=%d dmConv=%d inputLen=%u\n",
+        Serial.printf("[cp-kb-main] handle ENTER activeView=%d settingsSel=%d nodeDetail=%d nodeFocused=%d dmPicker=%d dmConv=%d inputLen=%u\n",
                       activeView, settingsSel,
                       nodeDetailOpen ? 1 : 0,
                       nodeListFocused ? 1 : 0,
@@ -3868,6 +4059,16 @@ static void handleKey(char k) {
 #endif
 
     k = remapCardputerDirectionalKey(k);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
+        hwTypingLock = false;
+        inputLen = 0;
+        inputBuf[0] = '\0';
+        dirtyInput = true;
+        return;
+    }
+#endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (cardputerPanelShortcutReady()) {
@@ -3882,7 +4083,8 @@ static void handleKey(char k) {
                 return;
             case 'm':
             case 'M':
-                if (activeView != VIEW_MAP) goToView(VIEW_MAP);
+                if (activeView == VIEW_MAP) mapApplyControl(MAP_CTL_ME);
+                else goToView(VIEW_MAP);
                 return;
             case 'l':
             case 'L':
@@ -3920,7 +4122,21 @@ static void handleKey(char k) {
     }
 
     if (k == KEY_ENTER) {
+        bool wasTyping = hwTypingLock || inputLen > 0;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
+            hwTypingLock = true;
+            dirtyInput = true;
+            return;
+        }
+#endif
         hwTypingLock = false;
+        if (activeView == VIEW_SETTINGS) {
+            Serial.printf("[cfg-enter] KEY_ENTER activeView=%d settingsSel=%d\n",
+                          activeView, settingsSel);
+            activateSettingsSelection();
+            return;
+        }
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
                 openDmWith(pickerNode(dmPickerSel));
@@ -3970,11 +4186,7 @@ static void handleKey(char k) {
             if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
             return;
         }
-        if (activeView == VIEW_SETTINGS) {
-            Serial.printf("[cfg-enter] KEY_ENTER activeView=%d settingsSel=%d\n",
-                          activeView, settingsSel);
-            activateSettingsSelection();
-        } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
+        if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
                && activeView != VIEW_MAP && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
             int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
@@ -3996,6 +4208,7 @@ static void handleKey(char k) {
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen > 0 && textAllowed) {
             inputBuf[--inputLen] = '\0'; dirtyInput = true;
+            if (inputLen == 0) hwTypingLock = false;
         }
 
     } else if (k == KEY_NEXT_CHAN) {
@@ -4175,6 +4388,11 @@ static void handleKey(char k) {
                             && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView >= 0 && activeView < MESH_CHANNELS && !(hwTypingLock || inputLen > 0)) {
+            return;
+        }
+#endif
         if (inputLen < MAX_INPUT_LEN && textAllowed) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
@@ -4507,8 +4725,10 @@ void setup() {
 #endif
     batteryInitAdc();
 
-    // Keyboard setup may initialize board support that the Cardputer display depends on.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer display support depends on board init performed by kb.begin().
     kb.begin();
+#endif
 
     // Display
     lcd.init();
@@ -4520,6 +4740,12 @@ void setup() {
 
     // Splash
     drawSplash();
+
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Match the known-good T-Deck/Heltec startup order: bring up display/touch
+    // first, then initialize the keyboard sidecar.
+    kb.begin();
+#endif
 
     // Data modules
     Nodes.init();
@@ -4637,12 +4863,24 @@ static void pollInput() {
     // Touchscreen tap handling (for on-screen channel nav buttons)
 #if TOUCH_POLL_ENABLED
     static uint32_t lastTouchPollMs = 0;
+#if defined(DEVICE_TDECK)
+    static bool touchDiagActive = false;
+    static uint32_t lastTouchDiagMs = 0;
+    static bool touchHandledOnPress = false;
+#endif
     if (now - lastTouchPollMs >= 16) {
         lastTouchPollMs = now;
 
         int32_t tx = 0, ty = 0;
         bool t = lcd.getTouch(&tx, &ty);
         if (t) {
+#if defined(DEVICE_TDECK)
+            if (!touchDiagActive || (now - lastTouchDiagMs >= 250)) {
+                lastTouchDiagMs = now;
+                touchDiagActive = true;
+                Serial.printf("[tdeck-touch] down x=%ld y=%ld view=%d\n", (long)tx, (long)ty, activeView);
+            }
+#endif
             if (screenAsleep) { wakeScreen(); return; }
             lastActivityMs = now;
             if (!touchDown) {
@@ -4650,6 +4888,9 @@ static void pollInput() {
                 touchStartX = tx;
                 touchStartY = ty;
                 touchDownMs = now;
+#if defined(DEVICE_TDECK)
+                touchHandledOnPress = handleTouchTap((int)tx, (int)ty);
+#endif
             }
             touchLastX = tx;
             touchLastY = ty;
@@ -4661,11 +4902,26 @@ static void pollInput() {
             bool shortTap = (now - touchDownMs) <= tapHoldLimit;
             bool steady   = (abs(touchLastX - touchStartX) <= driftLimit)
                          && (abs(touchLastY - touchStartY) <= driftLimit);
+#if defined(DEVICE_TDECK)
+            if (touchDiagActive) {
+                touchDiagActive = false;
+                Serial.printf("[tdeck-touch] up x=%ld y=%ld short=%d steady=%d\n",
+                              (long)touchLastX, (long)touchLastY,
+                              shortTap ? 1 : 0, steady ? 1 : 0);
+            }
+#endif
+#if defined(DEVICE_TDECK)
+            if (!touchHandledOnPress && shortTap && steady) {
+#else
             if (shortTap && steady) {
+#endif
                 int tapX = (activeView == VIEW_MAP) ? touchLastX : (touchStartX + touchLastX) / 2;
                 int tapY = (activeView == VIEW_MAP) ? touchLastY : (touchStartY + touchLastY) / 2;
                 handleTouchTap(tapX, tapY);
             }
+#if defined(DEVICE_TDECK)
+            touchHandledOnPress = false;
+#endif
             touchDown = false;
         } else {
             softKeyboardClearPressed();
@@ -4680,6 +4936,13 @@ static void pollInput() {
     for (int ki = 0; ki < 24; ki++) {
         char k;
         if (!dequeueKey(k)) break;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (k == KEY_ENTER && activeView == VIEW_SETTINGS) {
+            Serial.printf("[cp-kb-main] poll fallback ENTER->CFG settingsSel=%d\n", settingsSel);
+            activateSettingsSelection();
+            continue;
+        }
+#endif
         handleKey(k);
     }
 }
@@ -4689,7 +4952,8 @@ void loop() {
     // Poll input first — keyboard MCU has tiny buffer
     pollInput();
 
-    // If we left a text-entry view, release any stale hardware typing lock.
+    // Clear typing lock only after leaving input-capable views; explicit compose
+    // mode now handles empty-buffer exit via Escape, send, or backspace-to-empty.
     if (hwTypingLock && !isTextInputView()) hwTypingLock = false;
 
     // 1. Poll radio

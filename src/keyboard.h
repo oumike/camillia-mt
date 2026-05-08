@@ -8,6 +8,7 @@
 #define KEY_BACKSPACE   0x08
 #define KEY_TAB         0x09
 #define KEY_ENTER       0x0A
+#define KEY_ESCAPE      0x1B
 // Synthetic navigation codes
 #define KEY_PREV_CHAN   0x80
 #define KEY_NEXT_CHAN   0x81

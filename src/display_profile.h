@@ -29,10 +29,13 @@ struct DisplaySplashProfile {
     int cardRadius;
     float titleFontScale;
     int titleTopInset;
+    int flowerOffsetX;
     int flowerOffsetY;
+    float flowerScale;
     int idBottomOffset;
     int versionBottomOffset;
     uint16_t holdMs;
+    bool holdOnScreen;
 };
 
 struct DisplayUiProfile {

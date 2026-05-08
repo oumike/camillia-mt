@@ -24,14 +24,17 @@ constexpr DisplayUiProfile kDisplayUiProfile = {
     {
         10,
         16,
-        18,
+        8,
         6,
-        0.82f,
+        0.68f,
         10,
-        -6,
+        0,
+        -1,
+        0.44f,
         24,
         12,
         1500,
+        false,
     },
 };
 }
