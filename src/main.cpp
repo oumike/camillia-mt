@@ -239,12 +239,6 @@ static uint8_t kbdQTail = 0;
 static uint8_t kbdQCount = 0;
 
 static void queueKey(char k) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (k == KEY_ENTER) {
-        Serial.printf("[cp-main] queueKey ENTER count=%u activeView=%d settingsSel=%d\n",
-                      (unsigned)kbdQCount, activeView, settingsSel);
-    }
-#endif
     if (kbdQCount >= KBD_QUEUE_SIZE) {
         // Drop oldest when full so newest keypresses still get through.
         kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
@@ -260,12 +254,6 @@ static bool dequeueKey(char &out) {
     out = kbdQueue[kbdQTail];
     kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
     kbdQCount--;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (out == KEY_ENTER) {
-        Serial.printf("[cp-main] dequeueKey ENTER remaining=%u activeView=%d settingsSel=%d\n",
-                      (unsigned)kbdQCount, activeView, settingsSel);
-    }
-#endif
     return true;
 }
 
@@ -278,12 +266,6 @@ static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
     if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
     if (rawKey == 0x29) k = KEY_ESCAPE;
     if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
-    Serial.printf("[cp-kb-main] raw key=0x%02X norm=0x%02X view=%d settingsSel=%d asleep=%d\n",
-              rawKey, (uint8_t)k, activeView, settingsSel, screenAsleep ? 1 : 0);
-        if (k == KEY_ENTER) {
-            Serial.printf("[cp-main] readKey ENTER screenAsleep=%d activeView=%d settingsSel=%d\n",
-                          screenAsleep ? 1 : 0, activeView, settingsSel);
-        }
 #endif
         if (screenAsleep) {
             wakeScreen();
@@ -802,6 +784,9 @@ static void goToView(int v) {
                 DMs.markRead(c->nodeId);
                 dmConvNodeId = c->nodeId;
                 dmConvOpen   = true;
+#if defined(DEVICE_TDECK)
+                if (inputLen == 0) hwTypingLock = true;
+#endif
                 break;
             }
         }
@@ -1622,9 +1607,7 @@ static void drawLivePanel(bool fullRedraw) {
     if (fullRedraw) {
         clearPanelCloseRect();
         drawModalMaskAndFrame(mx, my, mw, mh);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
         drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
-#endif
         lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
         lcd.setFont(&fonts::Font0);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
@@ -1659,6 +1642,12 @@ static void drawLivePanel(bool fullRedraw) {
         char rendered[96];
         formatLiveLineText(dl, rendered, sizeof(rendered));
         drawClippedText(left + 2, y, innerW - 4, rendered);
+    }
+
+    // Clear any partial row gap before footer controls to avoid stale pixels.
+    int rowsBottom = msgTop + rowsVisible * rowH;
+    if (rowsBottom < controlsTop) {
+        lcd.fillRect(left, rowsBottom, innerW, controlsTop - rowsBottom, COL_PANEL_BG);
     }
 
     if (ch.scrollOff > 0) {
@@ -1809,9 +1798,7 @@ static void drawMapPanel() {
     const int mx = 0;
     const int my = CHAT_Y;
     const int mw = LCD_W;
-    const int navRowY = INPUT_Y + INPUT_H - TOUCH_BTN_H - 2;
-    const int mapPanelBottom = navRowY - 1;
-    const int mh = max(CHAT_H, mapPanelBottom - my + 1);
+    const int mh = panelOverlayBottomY() - my + 1;
     const int mapNavBtnH = 22;
     const int mapNavBottomPad = 2;
     const int mapNavGap = 3;
@@ -2089,28 +2076,30 @@ static void drawMapPanel() {
     int btnW[MAP_CTL_COUNT] = { 30, 30, 80, 60, 30 };
     const char *labels[MAP_CTL_COUNT] = { "+", "-", "Previous Node", "Next Node", "ME" };
 
+    const int plusIdx = (int)MAP_CTL_ZOOM_IN;
+    const int minusIdx = (int)MAP_CTL_ZOOM_OUT;
+    const int prevIdx = (int)MAP_CTL_LIST_PREV;
+    const int nextIdx = (int)MAP_CTL_LIST_NEXT;
     const int meIdx = (int)MAP_CTL_ME;
     int btnX[MAP_CTL_COUNT] = {0};
     int maxCtlEnd = mx + mw - 4;
 
-    // Pin ME to the far right; center the remaining controls in the space to its left.
+    // Pin ME to the far right.
     int meX = maxCtlEnd - btnW[meIdx];
     btnX[meIdx] = meX;
 
-    int leftCount = meIdx;
-    int leftControlsW = 0;
-    for (int i = 0; i < leftCount; i++) leftControlsW += btnW[i];
-    if (leftCount > 0) leftControlsW += (leftCount - 1) * mapNavGap;
+    // Place zoom controls directly to the left of ME and swap their order:
+    // [ ... Previous / Next ... ]  -  +  ME
+    btnX[plusIdx] = meX - mapNavGap - btnW[plusIdx];
+    btnX[minusIdx] = btnX[plusIdx] - mapNavGap - btnW[minusIdx];
 
+    // Center Previous/Next in the remaining space to the left of zoom controls.
+    int leftControlsW = btnW[prevIdx] + mapNavGap + btnW[nextIdx];
     int leftStartX = minCtlX;
-    int leftAvailW = (meX - mapNavGap) - minCtlX;
+    int leftAvailW = (btnX[minusIdx] - mapNavGap) - minCtlX;
     if (leftAvailW > leftControlsW) leftStartX += (leftAvailW - leftControlsW) / 2;
-
-    int runX = leftStartX;
-    for (int i = 0; i < leftCount; i++) {
-        btnX[i] = runX;
-        runX += btnW[i] + mapNavGap;
-    }
+    btnX[prevIdx] = leftStartX;
+    btnX[nextIdx] = leftStartX + btnW[prevIdx] + mapNavGap;
 
     for (int i = 0; i < ctlCount; i++) {
         int bx = btnX[i];
@@ -2337,6 +2326,9 @@ static void openDmWith(NodeEntry *n) {
     DMs.markRead(n->nodeId);
     dmConvNodeId = n->nodeId;
     dmConvOpen   = true;
+#if defined(DEVICE_TDECK)
+    if (inputLen == 0) hwTypingLock = true;
+#endif
     dmPickerOpen = false;
     dirtyChat = dirtyInput = true;
 }
@@ -2429,8 +2421,53 @@ static void drawDmList() {
 // ── Picker helpers: node list excluding self ──────────────────
 // Returns the nth node (0-based) excluding myNodeId.
 // Snapshot of node IDs taken when picker opens — prevents reordering while scrolling
+static constexpr int DM_PICKER_FILTER_MAX = 24;
 static uint32_t pickerIds[MAX_NODES];
 static int      pickerCount = 0;
+static uint32_t pickerFilteredIds[MAX_NODES];
+static int      pickerFilteredCount = 0;
+static char     dmPickerFilter[DM_PICKER_FILTER_MAX + 1] = {0};
+static int      dmPickerFilterLen = 0;
+
+static char asciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static bool containsNoCase(const char *text, const char *needle) {
+    if (!needle || !needle[0]) return true;
+    if (!text || !text[0]) return false;
+    for (int i = 0; text[i]; i++) {
+        int j = 0;
+        while (needle[j] && text[i + j]
+               && asciiLower(text[i + j]) == asciiLower(needle[j])) {
+            j++;
+        }
+        if (!needle[j]) return true;
+    }
+    return false;
+}
+
+static bool pickerMatch(NodeEntry *n) {
+    if (!n) return false;
+    if (dmPickerFilterLen == 0) return true;
+    if (containsNoCase(n->shortName, dmPickerFilter)) return true;
+    if (containsNoCase(n->longName, dmPickerFilter)) return true;
+    return false;
+}
+
+static void pickerApplyFilter() {
+    pickerFilteredCount = 0;
+    for (int i = 0; i < pickerCount && pickerFilteredCount < MAX_NODES; i++) {
+        NodeEntry *n = Nodes.find(pickerIds[i]);
+        if (!pickerMatch(n)) continue;
+        pickerFilteredIds[pickerFilteredCount++] = pickerIds[i];
+    }
+    if (pickerFilteredCount <= 0) {
+        dmPickerSel = 0;
+        return;
+    }
+    dmPickerSel = constrain(dmPickerSel, 0, pickerFilteredCount - 1);
+}
 
 static void pickerSnapshot() {
     pickerCount = 0;
@@ -2439,14 +2476,17 @@ static void pickerSnapshot() {
         if (n && n->nodeId != myNodeId)
             pickerIds[pickerCount++] = n->nodeId;
     }
+    dmPickerFilterLen = 0;
+    dmPickerFilter[0] = '\0';
+    pickerApplyFilter();
 }
 
 static NodeEntry *pickerNode(int sel) {
-    if (sel < 0 || sel >= pickerCount) return nullptr;
-    return Nodes.find(pickerIds[sel]);
+    if (sel < 0 || sel >= pickerFilteredCount) return nullptr;
+    return Nodes.find(pickerFilteredIds[sel]);
 }
 
-static int pickerNodeCount() { return pickerCount; }
+static int pickerNodeCount() { return pickerFilteredCount; }
 
 // ── Draw: DM node picker ──────────────────────────────────────
 static void drawDmPicker() {
@@ -2473,12 +2513,23 @@ static void drawDmPicker() {
     // Header bar
     lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
-    drawClippedText(ix + 4, iy + 1, iw - 8, "Select recipient");
+    char pickerHeader[DM_LINE_LEN + 1];
+    if (dmPickerFilterLen > 0)
+        snprintf(pickerHeader, sizeof(pickerHeader), "Select recipient [%s]", dmPickerFilter);
+    else
+        snprintf(pickerHeader, sizeof(pickerHeader), "Select recipient");
+    drawClippedText(ix + 4, iy + 1, iw - 8, pickerHeader);
 
     int filteredCount = pickerNodeCount();
     if (filteredCount == 0) {
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
-        drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
+        if (dmPickerFilterLen > 0) {
+            char noMatch[DM_LINE_LEN + 1];
+            snprintf(noMatch, sizeof(noMatch), "No matches for: %s", dmPickerFilter);
+            drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, noMatch);
+        } else {
+            drawClippedText(ix + 4, iy + 3 * DM_LINE_H + 1, iw - 8, "No other nodes known yet");
+        }
         drawPanelCloseButton(mx + 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
@@ -2556,7 +2607,7 @@ static void drawDmConv() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = CHAT_H - 8;
+    const int mh = panelOverlayBottomY() - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
@@ -2634,6 +2685,11 @@ static void drawDmConv() {
 #endif
 
     lcd.setFont(&fonts::Font0);
+#if defined(DEVICE_TDECK)
+    // DM conversation repaints can overwrite the prompt strip; request an
+    // input-bar pass so the composer prompt remains visible.
+    dirtyInput = true;
+#endif
     dirtyChat = false;
 }
 
@@ -2869,7 +2925,11 @@ static bool isTextInputView() {
 }
 
 static bool panelCoversInputArea() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
     return isPanelView(activeView) && !isTextInputView();
+#else
+    return isPanelView(activeView);
+#endif
 }
 
 static int panelOverlayBottomY() {
@@ -3293,18 +3353,12 @@ static bool handleTouchTap(int x, int y) {
         dmPickerOpen = true;
         pickerSnapshot();
         dirtyChat = true;
-    #if defined(DEVICE_TDECK)
-        Serial.printf("[tdeck-touch-hit] dm-new x=%d y=%d\n", x, y);
-    #endif
         return true;
     }
 
     if (panelCloseVisible
         && pointInRect(x, y, panelCloseRect.x, panelCloseRect.y,
                        panelCloseRect.w, panelCloseRect.h)) {
-    #if defined(DEVICE_TDECK)
-        Serial.printf("[tdeck-touch-hit] panel-close x=%d y=%d\n", x, y);
-    #endif
         closePanelToChannel();
         return true;
     }
@@ -3317,9 +3371,6 @@ static bool handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_UP].y,
                            dmCtlRect[DM_CTL_UP].w,
                            dmCtlRect[DM_CTL_UP].h)) {
-#if defined(DEVICE_TDECK)
-            Serial.printf("[tdeck-touch-hit] dm-up x=%d y=%d\n", x, y);
-#endif
             handleKey(KEY_SCROLL_UP);
             return true;
         }
@@ -3329,9 +3380,6 @@ static bool handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_DOWN].y,
                            dmCtlRect[DM_CTL_DOWN].w,
                            dmCtlRect[DM_CTL_DOWN].h)) {
-#if defined(DEVICE_TDECK)
-            Serial.printf("[tdeck-touch-hit] dm-down x=%d y=%d\n", x, y);
-#endif
             handleKey(KEY_SCROLL_DN);
             return true;
         }
@@ -3343,9 +3391,6 @@ static bool handleTouchTap(int x, int y) {
             if (!mapCtlVisible[i]) continue;
             if (pointInRect(x, y, mapCtlRect[i].x, mapCtlRect[i].y,
                             mapCtlRect[i].w, mapCtlRect[i].h)) {
-#if defined(DEVICE_TDECK)
-                Serial.printf("[tdeck-touch-hit] map-ctl=%d x=%d y=%d\n", i, x, y);
-#endif
                 mapApplyControl((MapControlAction)i);
                 return true;
             }
@@ -3359,9 +3404,6 @@ static bool handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_UP].y,
                            settingsCtlRect[SETTINGS_CTL_UP].w,
                            settingsCtlRect[SETTINGS_CTL_UP].h)) {
-#if defined(DEVICE_TDECK)
-            Serial.printf("[tdeck-touch-hit] settings-up x=%d y=%d\n", x, y);
-#endif
             handleKey(KEY_SCROLL_UP);
             return true;
         }
@@ -3371,9 +3413,6 @@ static bool handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_DOWN].y,
                            settingsCtlRect[SETTINGS_CTL_DOWN].w,
                            settingsCtlRect[SETTINGS_CTL_DOWN].h)) {
-#if defined(DEVICE_TDECK)
-            Serial.printf("[tdeck-touch-hit] settings-down x=%d y=%d\n", x, y);
-#endif
             handleKey(KEY_SCROLL_DN);
             return true;
         }
@@ -3394,20 +3433,11 @@ static bool handleTouchTap(int x, int y) {
     if (!panelCoversInputArea()) {
         for (int i = 0; i < navButtonCount(); i++) {
             if (pointInRect(x, y, b[i].x, b[i].y, b[i].w, b[i].h)) {
-#if defined(DEVICE_TDECK)
-                Serial.printf("[tdeck-touch-hit] nav=%d x=%d y=%d rx=%d ry=%d rw=%d rh=%d\n",
-                              i, x, y, b[i].x, b[i].y, b[i].w, b[i].h);
-#endif
                 activateNavButton(i);
                 return true;
             }
         }
     }
-
-#if defined(DEVICE_TDECK)
-    Serial.printf("[tdeck-touch-hit] miss x=%d y=%d view=%d covers=%d\n",
-                  x, y, activeView, panelCoversInputArea() ? 1 : 0);
-#endif
     return false;
 }
 
@@ -3423,6 +3453,45 @@ static void drawInput() {
     }
 
     if (panelCoversInputArea()) {
+#if defined(DEVICE_TDECK)
+    if (showTextInput && activeView == CHAN_DM && (inputLen > 0 || hwTypingLock)) {
+            lcd.setFont(&fonts::DejaVu9);
+            lcd.setTextSize(1);
+            const int composerH = lcd.fontHeight() + 6;
+            const int composerY = INPUT_Y + 1;
+            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
+            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+
+            const int textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
+            lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
+            lcd.drawString(">>", 2, textY);
+
+            int textX = 2 + lcd.textWidth(">>") + 3;
+            int availW = LCD_W - textX - 4;
+            String visible(inputBuf);
+            while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
+                visible.remove(0, 1);
+            }
+            lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
+            lcd.drawString(visible.c_str(), textX, textY);
+
+            if (cursorOn) {
+                int cx = textX + lcd.textWidth(visible.c_str()) + 1;
+                int ch = min(8, lcd.fontHeight());
+                lcd.fillRect(cx, textY, 2, ch, COL_CURSOR);
+            }
+
+            lcd.setFont(&fonts::Font0);
+        }
+#endif
+#if !HAS_KEYBOARD
+        // Panels lock out nav/input bar, but touch-only devices still need
+        // the soft keyboard overlay while composing in DM conversations.
+        if (softKbVisible && softKeyboardInputView()) {
+            drawSoftKeyboardOverlay();
+        }
+#endif
         dirtyInput = false;
         return;
     }
@@ -3763,9 +3832,12 @@ static void handleRx(MeshPacket pkt) {
                 DMs.markRead(pkt.hdr.from);
                 dmConvNodeId = pkt.hdr.from;
                 dmConvOpen   = true;
+#if defined(DEVICE_TDECK)
+                if (inputLen == 0) hwTypingLock = true;
+#endif
                 viewing      = true;
             }
-            if (viewing) dirtyChat = true;
+            if (viewing) dirtyChat = dirtyInput = true;
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
@@ -3966,7 +4038,6 @@ static void handleRx(MeshPacket pkt) {
 static void onWebCfgSaved();  // forward declaration
 
 static void activateSettingsSelection() {
-    Serial.printf("[cp-kb-main] cfg activate settingsSel=%d\n", settingsSel);
 #if HAS_SD_CARD
     if (settingsSel == SETTING_EXPORT) {
         bool ok = cfgExport(gCfg);
@@ -4047,15 +4118,9 @@ static void handleKey(char k) {
     if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
     if (rawKey == 0x29) k = KEY_ESCAPE;
     if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
-    if (k == KEY_ENTER) {
-        Serial.printf("[cp-kb-main] handle ENTER activeView=%d settingsSel=%d nodeDetail=%d nodeFocused=%d dmPicker=%d dmConv=%d inputLen=%u\n",
-                      activeView, settingsSel,
-                      nodeDetailOpen ? 1 : 0,
-                      nodeListFocused ? 1 : 0,
-                      dmPickerOpen ? 1 : 0,
-                      dmConvOpen ? 1 : 0,
-                      (unsigned)inputLen);
-    }
+    bool inChannelComposeMode = (activeView >= 0 && activeView < MESH_CHANNELS)
+                             && (hwTypingLock || inputLen > 0);
+    if (inChannelComposeMode && (k == '~' || k == '`')) k = KEY_ESCAPE;
 #endif
 
     k = remapCardputerDirectionalKey(k);
@@ -4065,6 +4130,7 @@ static void handleKey(char k) {
         hwTypingLock = false;
         inputLen = 0;
         inputBuf[0] = '\0';
+        dirtyChat = true;
         dirtyInput = true;
         return;
     }
@@ -4153,6 +4219,9 @@ static void handleKey(char k) {
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
+#if defined(DEVICE_TDECK)
+                        if (inputLen == 0) hwTypingLock = true;
+#endif
                         dirtyChat = dirtyInput = dirtyTabs = true;
                     }
                 }
@@ -4164,7 +4233,11 @@ static void handleKey(char k) {
                         // TX failed — add a local error line so the user knows
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
                     }
+#if defined(DEVICE_TDECK)
+                    hwTypingLock = true;
+#else
                     hwTypingLock = false;
+#endif
                     inputLen = 0; inputBuf[0] = '\0';
                     dirtyInput = dirtyChat = true;
                 }
@@ -4202,6 +4275,14 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_BACKSPACE) {
+        if (activeView == CHAN_DM && dmPickerOpen) {
+            if (dmPickerFilterLen > 0) {
+                dmPickerFilter[--dmPickerFilterLen] = '\0';
+                pickerApplyFilter();
+                dirtyChat = true;
+            }
+            return;
+        }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
                             && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
@@ -4209,6 +4290,11 @@ static void handleKey(char k) {
         if (inputLen > 0 && textAllowed) {
             inputBuf[--inputLen] = '\0'; dirtyInput = true;
             if (inputLen == 0) hwTypingLock = false;
+        } else if (textAllowed && inputLen == 0 && hwTypingLock) {
+            // Backspace on an empty active prompt exits compose mode.
+            hwTypingLock = false;
+            dirtyInput = true;
+            if (isPanelView(activeView)) dirtyChat = true;
         }
 
     } else if (k == KEY_NEXT_CHAN) {
@@ -4240,7 +4326,11 @@ static void handleKey(char k) {
                     if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
                     }
+#if defined(DEVICE_TDECK)
+                    hwTypingLock = true;
+#else
                     hwTypingLock = false;
+#endif
                     inputLen = 0; inputBuf[0] = '\0';
                     dirtyInput = dirtyChat = true;
                 } else {
@@ -4261,6 +4351,9 @@ static void handleKey(char k) {
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
+#if defined(DEVICE_TDECK)
+                        if (inputLen == 0) hwTypingLock = true;
+#endif
                         dirtyChat = dirtyInput = dirtyTabs = true;
                     }
                 }
@@ -4384,15 +4477,26 @@ static void handleKey(char k) {
         }
 
     } else if (k >= 0x20 && k < 0x7F) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && !dmPickerOpen
+            && !(hwTypingLock || inputLen > 0)) {
+            return;
+        }
+#endif
+        if (activeView == CHAN_DM && dmPickerOpen) {
+            if (dmPickerFilterLen < DM_PICKER_FILTER_MAX) {
+                dmPickerFilter[dmPickerFilterLen++] = k;
+                dmPickerFilter[dmPickerFilterLen] = '\0';
+                pickerApplyFilter();
+                dirtyChat = true;
+            }
+            return;
+        }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
                             && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-        if (activeView >= 0 && activeView < MESH_CHANNELS && !(hwTypingLock || inputLen > 0)) {
-            return;
-        }
-#endif
         if (inputLen < MAX_INPUT_LEN && textAllowed) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
@@ -4864,8 +4968,6 @@ static void pollInput() {
 #if TOUCH_POLL_ENABLED
     static uint32_t lastTouchPollMs = 0;
 #if defined(DEVICE_TDECK)
-    static bool touchDiagActive = false;
-    static uint32_t lastTouchDiagMs = 0;
     static bool touchHandledOnPress = false;
 #endif
     if (now - lastTouchPollMs >= 16) {
@@ -4874,13 +4976,6 @@ static void pollInput() {
         int32_t tx = 0, ty = 0;
         bool t = lcd.getTouch(&tx, &ty);
         if (t) {
-#if defined(DEVICE_TDECK)
-            if (!touchDiagActive || (now - lastTouchDiagMs >= 250)) {
-                lastTouchDiagMs = now;
-                touchDiagActive = true;
-                Serial.printf("[tdeck-touch] down x=%ld y=%ld view=%d\n", (long)tx, (long)ty, activeView);
-            }
-#endif
             if (screenAsleep) { wakeScreen(); return; }
             lastActivityMs = now;
             if (!touchDown) {
@@ -4902,14 +4997,6 @@ static void pollInput() {
             bool shortTap = (now - touchDownMs) <= tapHoldLimit;
             bool steady   = (abs(touchLastX - touchStartX) <= driftLimit)
                          && (abs(touchLastY - touchStartY) <= driftLimit);
-#if defined(DEVICE_TDECK)
-            if (touchDiagActive) {
-                touchDiagActive = false;
-                Serial.printf("[tdeck-touch] up x=%ld y=%ld short=%d steady=%d\n",
-                              (long)touchLastX, (long)touchLastY,
-                              shortTap ? 1 : 0, steady ? 1 : 0);
-            }
-#endif
 #if defined(DEVICE_TDECK)
             if (!touchHandledOnPress && shortTap && steady) {
 #else
@@ -4938,7 +5025,6 @@ static void pollInput() {
         if (!dequeueKey(k)) break;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         if (k == KEY_ENTER && activeView == VIEW_SETTINGS) {
-            Serial.printf("[cp-kb-main] poll fallback ENTER->CFG settingsSel=%d\n", settingsSel);
             activateSettingsSelection();
             continue;
         }

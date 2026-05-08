@@ -17,31 +17,6 @@ static char normalizeCardputerKey(char key) {
         || raw == 0x08 || raw == 0x7F) return KEY_BACKSPACE;
     return key;
 }
-
-static void logCardputerWord(const std::vector<char> &word) {
-    Serial.print("[cp-kb] word=");
-    if (word.empty()) {
-        Serial.print("<empty>");
-        return;
-    }
-    Serial.print('"');
-    for (char key : word) {
-        if (key == '\r') Serial.print("\\r");
-        else if (key == '\n') Serial.print("\\n");
-        else if ((uint8_t)key < 0x20 || (uint8_t)key > 0x7E) Serial.printf("\\x%02X", (uint8_t)key);
-        else Serial.print(key);
-    }
-    Serial.print('"');
-}
-
-static void logCardputerHidKeys(const std::vector<uint8_t> &hidKeys) {
-    Serial.print(" hid=[");
-    for (size_t i = 0; i < hidKeys.size(); ++i) {
-        if (i) Serial.print(',');
-        Serial.printf("0x%02X", hidKeys[i]);
-    }
-    Serial.print(']');
-}
 #endif
 
 TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
@@ -138,24 +113,8 @@ char TDeckKeyboard::readKey() {
     }
 #endif
     uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
-    if (!Wire.available()) {
-#if defined(DEVICE_TDECK)
-        static uint32_t lastKbI2cDiagMs = 0;
-        if (count == 0 && now - lastKbI2cDiagMs >= 1000) {
-            lastKbI2cDiagMs = now;
-            Serial.println("[tdeck-kb] requestFrom returned 0 bytes");
-        }
-#endif
-        return KEY_NONE;
-    }
+    if (!Wire.available()) return KEY_NONE;
     uint8_t raw = Wire.read();
-#if defined(DEVICE_TDECK)
-    static uint32_t lastKbReadDiagMs = 0;
-    if (raw != 0x00 && raw != 0xFF && now - lastKbReadDiagMs >= 500) {
-        lastKbReadDiagMs = now;
-        Serial.printf("[tdeck-kb] raw=0x%02X\n", raw);
-    }
-#endif
     if (raw == 0x00 || raw == 0xFF) return KEY_NONE;
     return mapKey(raw);
 #endif
@@ -189,57 +148,22 @@ void TDeckKeyboard::pumpCardputerKeys() {
     bool pressed = M5Cardputer.Keyboard.isPressed();
 
     bool enterPressed = M5Cardputer.BtnA.isPressed() || status.enter;
-    bool hidEnter = false;
     for (uint8_t hidKey : status.hid_keys) {
         if (hidKey == (uint8_t)CARDPUTER_HID_ENTER) {
             enterPressed = true;
-            hidEnter = true;
             break;
         }
     }
-    bool wordEnter = false;
     if (!enterPressed) {
         for (char key : status.word) {
             if (key == '\r' || key == '\n') {
                 enterPressed = true;
-                wordEnter = true;
                 break;
             }
         }
-    }
-    if (!wordEnter) {
-        for (char key : status.word) {
-            if (key == '\r' || key == '\n') {
-                wordEnter = true;
-                break;
-            }
-        }
-    }
-
-    if (changed) {
-        Serial.printf("[cp-kb] change pressed=%d btnA=%d enter=%d tab=%d del=%d fn=%d shift=%d ctrl=%d alt=%d opt=%d size=%u ",
-                      pressed ? 1 : 0,
-                      M5Cardputer.BtnA.isPressed() ? 1 : 0,
-                      status.enter ? 1 : 0,
-                      status.tab ? 1 : 0,
-                      status.del ? 1 : 0,
-                      status.fn ? 1 : 0,
-                      status.shift ? 1 : 0,
-                      status.ctrl ? 1 : 0,
-                      status.alt ? 1 : 0,
-                      status.opt ? 1 : 0,
-                      (unsigned)status.word.size());
-        logCardputerWord(status.word);
-        logCardputerHidKeys(status.hid_keys);
-        Serial.println();
     }
 
     if (enterPressed && !_cardputerEnterDown) {
-        Serial.printf("[cp-kb] enter rising btnA=%d state.enter=%d hidEnter=%d wordEnter=%d\n",
-                      M5Cardputer.BtnA.isPressed() ? 1 : 0,
-                      status.enter ? 1 : 0,
-                      hidEnter ? 1 : 0,
-                      wordEnter ? 1 : 0);
         enqueueCardputerKey(KEY_ENTER);
         // Treat Enter as a discrete high-priority action so it reaches
         // main-loop handling even if other key state changes occur this tick.
@@ -304,10 +228,7 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0x7F: return KEY_BACKSPACE;
         case 0x08: return KEY_BACKSPACE;
         case 0x05: return KEY_NODE_FOCUS;  // ALT+E
-        default:
-            if (raw < 0x20 || raw > 0x7E)
-                Serial.printf("[kb] raw=0x%02X\n", raw);
-            return (char)raw;
+        default:   return (char)raw;
     }
 }
 

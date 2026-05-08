@@ -9,6 +9,17 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
 No additional hardware required.
 
+## Supported Devices
+
+- LilyGo T-Deck (`tdeck`): keyboard + trackball + touch input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
+- M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`): keyboard-driven input/navigation, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
+- Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config); microSD is not enabled in this profile.
+- Heltec WiFi LoRa 32 V4 + TFT expansion kit, vertical UI (`heltec-v4-vertical`): same functionality as `heltec-v4` with a vertical-oriented UI layout.
+
+Notes:
+- All keyboard-specific shortcuts apply to keyboard builds (`tdeck` and `cardputer-cap`).
+- Environmental telemetry via BME280 is available on Heltec V4 expansion builds when a compatible sensor is present.
+
 ## Features
 
 - **8 configurable LoRa channels** — each independently named, keyed, and color-coded
