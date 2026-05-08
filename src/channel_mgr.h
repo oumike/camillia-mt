@@ -65,11 +65,11 @@ public:
     // For unicast, wantResponse=true can be used to request peer NODEINFO.
     bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName,
                       uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false,
-                      bool okToMqtt = false);
+                      bool unusedCompat = false);
 
     // Broadcast a POSITION_APP packet on LongFast with the given coordinates.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                      bool okToMqtt = false);
+                      bool unusedCompat = false);
 
 private:
     Channel    _chans[MAX_CHANNELS];

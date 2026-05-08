@@ -4,7 +4,11 @@
 #include "config.h"
 
 #define MAX_DM_CONVS    16
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define MAX_DM_LINES    80
+#else
 #define MAX_DM_LINES   200
+#endif
 #define DM_LINE_LEN     53   // LCD_W / CHAR_W = 320/6
 #define MAX_DM_PENDING_TX 12
 
@@ -18,7 +22,7 @@ struct DmConv {
     char     shortName[5];
     int      count;           // total lines pushed (may exceed MAX_DM_LINES)
     int      scrollOff;       // 0 = latest visible at top
-    DmLine  *lines;           // PSRAM-allocated circular buffer [MAX_DM_LINES]
+    DmLine  *lines;           // circular buffer [MAX_DM_LINES]
     char     lastText[DM_LINE_LEN + 1];  // most recent message (list preview)
     uint32_t lastMs;
     bool     unread;          // true if there are messages not yet viewed
@@ -35,7 +39,6 @@ public:
     int       count() const { return _count; }
     bool      hasUnread() const;
     void      markRead(uint32_t nodeId);
-    bool      deleteConv(uint32_t nodeId);
 
     // Add a message (word-wrapped) to a conversation.
     // markUnread: set to false for outgoing or seed messages.

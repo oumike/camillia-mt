@@ -8,6 +8,19 @@
 
 ChannelMgr Channels;
 
+static DisplayLine *allocChannelLines() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return (DisplayLine *)malloc(MAX_MSG_LINES * sizeof(DisplayLine));
+#else
+    DisplayLine *lines = (DisplayLine *)heap_caps_malloc(
+        MAX_MSG_LINES * sizeof(DisplayLine),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (lines) return lines;
+    Serial.println("[chanmgr] PSRAM alloc failed, falling back to DRAM");
+    return (DisplayLine *)malloc(MAX_MSG_LINES * sizeof(DisplayLine));
+#endif
+}
+
 static void addLiveTxLine(const char *text, uint16_t color = TFT_DARKGREY) {
     char prefix[12];
     liveBuildPrefix(prefix, sizeof(prefix));
@@ -22,16 +35,9 @@ void ChannelMgr::init() {
         _chans[i].scrollOff = 0;
         _chans[i].unread    = false;
         _chans[i].active    = true;
-        // Allocate line buffer in PSRAM
-        _chans[i].lines = (DisplayLine *)heap_caps_malloc(
-            MAX_MSG_LINES * sizeof(DisplayLine),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!_chans[i].lines) {
-            // Fallback to regular heap with fewer lines
-            _chans[i].lines = (DisplayLine *)malloc(
-                100 * sizeof(DisplayLine));
-            Serial.printf("[chanmgr] PSRAM alloc failed for ch%d, using DRAM\n", i);
-        }
+        _chans[i].lines = allocChannelLines();
+        if (!_chans[i].lines)
+            Serial.printf("[chanmgr] alloc failed for ch%d\n", i);
     }
     addMessage(CHAN_ANN, "", "Live channel ready", TFT_DARKGREY, 0);
     setActive(0);
@@ -39,13 +45,7 @@ void ChannelMgr::init() {
 
 void ChannelMgr::setActive(int idx) {
     if (idx < 0 || idx >= MAX_CHANNELS) return;
-
-    // _active tracks only real mesh channels (0..MESH_CHANNELS-1).
-    // Virtual tabs (DM/ANN) can clear unread/scroll state, but must not
-    // become the fallback TX channel.
-    if (idx < MESH_CHANNELS) {
-        _active = idx;
-    }
+    _active = idx;
     _chans[idx].unread    = false;
     _chans[idx].scrollOff = 0;   // snap to latest-at-top
 }
@@ -57,8 +57,8 @@ void ChannelMgr::clearChannel(int idx) {
     _chans[idx].unread = false;
 }
 
-void ChannelMgr::nextChannel() { setActive((_active + 1) % MESH_CHANNELS); }
-void ChannelMgr::prevChannel() { setActive((_active + MESH_CHANNELS - 1) % MESH_CHANNELS); }
+void ChannelMgr::nextChannel() { setActive((_active + 1) % MAX_CHANNELS); }
+void ChannelMgr::prevChannel() { setActive((_active + MAX_CHANNELS - 1) % MAX_CHANNELS); }
 
 void ChannelMgr::_pushLine(Channel &ch, const char *text, uint16_t color,
                             uint32_t packetId, DisplayLine::AckState ack) {
@@ -86,10 +86,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
     Channel &ch = _chans[chanIdx];
     char line[MSG_CHARS + 1];
     static constexpr int MAX_WRAP_LINES = 64;
-    char *wrapped = (char *)heap_caps_malloc(MAX_WRAP_LINES * (MSG_CHARS + 1),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!wrapped)
-        wrapped = (char *)malloc(MAX_WRAP_LINES * (MSG_CHARS + 1));
+    char wrapped[MAX_WRAP_LINES][MSG_CHARS + 1];
     int wrappedCount = 0;
     int  prefixLen = strlen(prefix);
     int  textLen   = strlen(text);
@@ -97,17 +94,12 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
     bool firstLine = true;
     const int CONT_INDENT = 2;   // spaces for continuation lines
 
-    auto wrappedLine = [&](int idx) -> char * {
-        return wrapped + (idx * (MSG_CHARS + 1));
-    };
-
     // Preserve existing behavior for empty message bodies.
     if (textLen == 0) {
         if (prefixLen > 0) snprintf(line, sizeof(line), "%.*s", prefixLen, prefix);
         else line[0] = '\0';
         DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
         _pushLine(ch, line, color, packetId, ack);
-        if (wrapped) free(wrapped);
         return;
     }
 
@@ -133,15 +125,10 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             snprintf(line, sizeof(line), "%*s%.*s", CONT_INDENT, "", take, text + pos);
         }
 
-        if (wrapped && wrappedCount < MAX_WRAP_LINES) {
-            char *dst = wrappedLine(wrappedCount);
-            strncpy(dst, line, MSG_CHARS);
-            dst[MSG_CHARS] = '\0';
+        if (wrappedCount < MAX_WRAP_LINES) {
+            strncpy(wrapped[wrappedCount], line, MSG_CHARS);
+            wrapped[wrappedCount][MSG_CHARS] = '\0';
             wrappedCount++;
-        } else if (!wrapped) {
-            // Low-memory fallback: keep chat usable even if wrap cache alloc fails.
-            DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
-            _pushLine(ch, line, color, packetId, ack);
         }
 
         pos += take;
@@ -149,14 +136,14 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         firstLine = false;
     }
 
-    if (wrapped) {
-        // UI is newest-at-top; push wrapped lines in reverse so each long message
-        // still reads top-down (first line first, continuation lines below).
-        for (int i = wrappedCount - 1; i >= 0; i--) {
-            DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
-            _pushLine(ch, wrappedLine(i), color, packetId, ack);
-        }
-        free(wrapped);
+    // UI is newest-at-top; push wrapped lines in reverse so each long message
+    // still reads top-down (first line first, continuation lines below).
+    for (int i = wrappedCount - 1; i >= 0; i--) {
+        bool logicalFirst = (i == 0);
+        DisplayLine::AckState ack = (logicalFirst && packetId)
+            ? DisplayLine::PENDING
+            : DisplayLine::NONE;
+        _pushLine(ch, wrapped[i], color, logicalFirst ? packetId : 0, ack);
     }
 }
 
@@ -179,11 +166,12 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
             _pending[i].active = false;
-            // Update all wrapped lines that belong to this message.
+            // Find the line in the channel and update its ack state
             Channel &ch = _chans[_pending[i].chanIdx];
             for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
                 if (ch.lines[j].packetId == packetId) {
                     ch.lines[j].ack = state;
+                    break;
                 }
             }
             return;
@@ -234,10 +222,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     }
 
     int txChan = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? chanIdx : _active;
-    if (txChan < 0 || txChan >= MESH_CHANNELS) {
-        txChan = 0;
-        addLiveTxLine("T TXT B F0", TFT_RED);  // fallback to LongFast
-    }
+    if (txChan < 0 || txChan >= MESH_CHANNELS) return false;
     if (_active != txChan) setActive(txChan);
 
     uint32_t packetId = esp_random() ^ millis();
@@ -245,10 +230,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield);
-    if (protoLen == 0) {
-        addLiveTxLine("T TXT B E0", TFT_RED); // encode failed
-        return false;
-    }
+    if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[txChan];
     const char *txName = ck.name_buf[0] ? ck.name_buf : ck.name;
@@ -256,10 +238,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     debugLogMessages("[tx] ch%d name='%s' keyLen=%u effectiveKeyLen=%u hash=0x%02X\n",
                      txChan, txName ? txName : "", ck.keyLen, effectiveKeyLen, ck.hash);
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                        proto, cipher, protoLen)) {
-        addLiveTxLine("T TXT B E1", TFT_RED); // encrypt failed
-        return false;
-    }
+                        proto, cipher, protoLen)) return false;
 
     // Build MeshHdr
     uint8_t frame[sizeof(MeshHdr) + 256];
@@ -283,11 +262,12 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     if (!Radio.transmit(frame, frameLen)) {
         addLiveTxLine("T TXT B ER", TFT_RED);
-        addMessage(txChan, prefix, text, TFT_RED, packetId);
-        Channel &ch = _chans[txChan];
-        for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
-            if (ch.lines[j].packetId == packetId) {
-                ch.lines[j].ack = DisplayLine::TX_FAILED;
+        int firstLine = addMessage(txChan, prefix, text, TFT_RED, packetId);
+        if (firstLine >= 0) {
+            Channel &ch = _chans[txChan];
+            int idx = firstLine % MAX_MSG_LINES;
+            if (ch.lines[idx].packetId == packetId) {
+                ch.lines[idx].ack = DisplayLine::TX_FAILED;
             }
         }
         return false;
@@ -315,12 +295,12 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 }
 
 bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                              bool okToMqtt) {
+                              bool unusedCompat) {
+    (void)unusedCompat;
     if (!Radio.isReady()) return false;
 
     uint8_t proto[64], cipher[64];
-    uint32_t bitfield = okToMqtt ? 0x01 : 0;
-    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), bitfield);
+    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto));
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // always LongFast
@@ -354,7 +334,8 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
 bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                               const char *longName, const char *shortName,
                               uint32_t toNodeId, bool wantResponse,
-                              bool okToMqtt) {
+                              bool unusedCompat) {
+    (void)unusedCompat;
     if (!Radio.isReady()) return false;
 
     // Build a MAC address consistent with myNodeId.
@@ -375,9 +356,8 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     bool isUnicast = (toNodeId != 0xFFFFFFFF);
     bool reqReply = isUnicast && wantResponse;
     uint8_t proto[256], cipher[256];
-    uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto), reqReply, bitfield);
+                                     mac, proto, sizeof(proto), reqReply);
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
@@ -404,28 +384,13 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
     {
-        bool havePubKey = false;
-        for (int i = 0; i < 32; i++) {
-            if (myPubKey[i] != 0) {
-                havePubKey = true;
-                break;
-            }
-        }
         char dst[16];
         liveNodeLabel(toNodeId, dst, sizeof(dst), true);
-        char live[76];
-        if (havePubKey) {
-            snprintf(live, sizeof(live), "T NOD %s %s %s pk%02X%02X",
-                     isUnicast ? "U" : "B",
-                     dst,
-                     ok ? "OK" : "ER",
-                     myPubKey[0], myPubKey[1]);
-        } else {
-            snprintf(live, sizeof(live), "T NOD %s %s %s pk----",
-                     isUnicast ? "U" : "B",
-                     dst,
-                     ok ? "OK" : "ER");
-        }
+        char live[64];
+        snprintf(live, sizeof(live), "T NOD %s %s %s",
+                 isUnicast ? "U" : "B",
+                 dst,
+                 ok ? "OK" : "ER");
         addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;

@@ -18,6 +18,7 @@
 #include "dm_mgr.h"
 #include "debug_flags.h"
 #include "battery_util.h"
+#include "display_profile.h"
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
@@ -70,8 +71,6 @@ struct PanelHitRect {
 };
 static bool panelCloseVisible = false;
 static PanelHitRect panelCloseRect = {0, 0, 0, 0};
-static bool panelClearVisible = false;
-static PanelHitRect panelClearRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
 
@@ -126,16 +125,9 @@ static void setPanelCloseRect(int x, int y, int w, int h) {
     panelCloseRect = { x, y, w, h };
 }
 
-static void setPanelClearRect(int x, int y, int w, int h) {
-    panelClearVisible = true;
-    panelClearRect = { x, y, w, h };
-}
-
 static void clearPanelCloseRect() {
     panelCloseVisible = false;
     panelCloseRect = {0, 0, 0, 0};
-    panelClearVisible = false;
-    panelClearRect = {0, 0, 0, 0};
     dmNewVisible = false;
     dmNewRect = {0, 0, 0, 0};
     for (int i = 0; i < MAP_CTL_COUNT; i++) {
@@ -190,6 +182,9 @@ static void closePanelToChannel();
 static void mapClampViewport();
 static int mapVisibleNodeCount();
 static NodeEntry *mapVisibleNodeByIndex(int idx);
+static int panelOverlayBottomY();
+static bool isTextInputView();
+static void handleKey(char k);
 
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
@@ -244,6 +239,12 @@ static uint8_t kbdQTail = 0;
 static uint8_t kbdQCount = 0;
 
 static void queueKey(char k) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (k == KEY_ENTER) {
+        Serial.printf("[cp-main] queueKey ENTER count=%u activeView=%d settingsSel=%d\n",
+                      (unsigned)kbdQCount, activeView, settingsSel);
+    }
+#endif
     if (kbdQCount >= KBD_QUEUE_SIZE) {
         // Drop oldest when full so newest keypresses still get through.
         kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
@@ -259,6 +260,12 @@ static bool dequeueKey(char &out) {
     out = kbdQueue[kbdQTail];
     kbdQTail = (uint8_t)((kbdQTail + 1) % KBD_QUEUE_SIZE);
     kbdQCount--;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (out == KEY_ENTER) {
+        Serial.printf("[cp-main] dequeueKey ENTER remaining=%u activeView=%d settingsSel=%d\n",
+                      (unsigned)kbdQCount, activeView, settingsSel);
+    }
+#endif
     return true;
 }
 
@@ -266,12 +273,33 @@ static void pumpKeyboardRaw(uint8_t maxReads, uint32_t nowMs) {
     for (uint8_t i = 0; i < maxReads; i++) {
         char k = kb.readKey();
         if (k == KEY_NONE) break;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    uint8_t rawKey = (uint8_t)k;
+    if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
+    if (rawKey == 0x29) k = KEY_ESCAPE;
+    if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
+    Serial.printf("[cp-kb-main] raw key=0x%02X norm=0x%02X view=%d settingsSel=%d asleep=%d\n",
+              rawKey, (uint8_t)k, activeView, settingsSel, screenAsleep ? 1 : 0);
+        if (k == KEY_ENTER) {
+            Serial.printf("[cp-main] readKey ENTER screenAsleep=%d activeView=%d settingsSel=%d\n",
+                          screenAsleep ? 1 : 0, activeView, settingsSel);
+        }
+#endif
         if (screenAsleep) {
             wakeScreen();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if (k == KEY_ENTER) {
+                handleKey(k);
+            }
+#endif
             break;
         }
         lastActivityMs = nowMs;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        handleKey(k);
+#else
         queueKey(k);
+#endif
     }
 }
 // Broadcast intervals are runtime-configurable via gCfg.nodeInfoIntervalS / posIntervalS
@@ -317,7 +345,7 @@ static void sdRmDir(const char *path) {
 
 // ── Settings ──────────────────────────────────────────────────
 #define SETTING_WEBCFG        0
-#if defined(DEVICE_TDECK)
+#if HAS_SD_CARD
 #define SETTING_EXPORT        1
 #define SETTING_IMPORT        2
 #define SETTING_THEME         3
@@ -375,6 +403,10 @@ struct UiPalette {
 
 static UiPalette gUi = {};
 
+static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
+    return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
+}
+
 #define COL_BG_MAIN        gUi.bgMain
 #define COL_STATUS_TOP     gUi.statusTop
 #define COL_STATUS_BG      gUi.statusBg
@@ -412,6 +444,8 @@ static UiPalette gUi = {};
 #define COL_SPLASH_DIM     gUi.splashDim
 
 static uint8_t uiThemePresetIndex() {
+    if (gCfg.uiTheme == UI_THEME_SOLARIZED)
+        return (gCfg.uiMode == UI_MODE_LIGHT) ? 7 : 6;
     if (gCfg.uiTheme == UI_THEME_EARTHEN)
         return (gCfg.uiMode == UI_MODE_LIGHT) ? 5 : 4;
     if (gCfg.uiTheme == UI_THEME_EVERGREEN)
@@ -420,24 +454,28 @@ static uint8_t uiThemePresetIndex() {
 }
 
 static const char *uiThemePresetName(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: return "Camillia Dark";
         case 1: return "Camillia Light";
         case 2: return "Evergreen Dark";
         case 3: return "Evergreen Light";
         case 4: return "Earthy Dark";
-        default: return "Earthy Light";
+        case 5: return "Earthy Light";
+        case 6: return "Solarized Dark";
+        default: return "Solarized Light";
     }
 }
 
 static void setUiThemePreset(uint8_t preset) {
-    switch (preset % 6) {
+    switch (preset % 8) {
         case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
         case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
         case 3: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
         case 4: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_DARK; break;
-        default: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 5: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
+        case 6: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_DARK; break;
+        default: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_LIGHT; break;
     }
 }
 
@@ -491,6 +529,43 @@ static void applyUiTheme(bool markDirty = true) {
                 0x2AED, 0x55B0, 0x86FF, 0xE73C, 0xC69A,
                 0x3666, 0xED80, 0xA000,
                 0x00A8, 0x228D, 0x1169, 0x4C31, 0x64D4, 0xFFFF, 0xB69A, 0x9D75
+            };
+        }
+    } else if (gCfg.uiTheme == UI_THEME_SOLARIZED) {
+        const uint16_t base03 = rgb565(0x00, 0x2b, 0x36);
+        const uint16_t base02 = rgb565(0x07, 0x36, 0x42);
+        const uint16_t base01 = rgb565(0x58, 0x6e, 0x75);
+        const uint16_t base00 = rgb565(0x65, 0x7b, 0x83);
+        const uint16_t base0 = rgb565(0x83, 0x94, 0x96);
+        const uint16_t base1 = rgb565(0x93, 0xa1, 0xa1);
+        const uint16_t base2 = rgb565(0xee, 0xe8, 0xd5);
+        const uint16_t base3 = rgb565(0xfd, 0xf6, 0xe3);
+        const uint16_t yellow = rgb565(0xb5, 0x89, 0x00);
+        const uint16_t orange = rgb565(0xcb, 0x4b, 0x16);
+        const uint16_t red = rgb565(0xdc, 0x32, 0x2f);
+        const uint16_t magenta = rgb565(0xd3, 0x36, 0x82);
+        const uint16_t violet = rgb565(0x6c, 0x71, 0xc4);
+        const uint16_t blue = rgb565(0x26, 0x8b, 0xd2);
+        const uint16_t cyan = rgb565(0x2a, 0xa1, 0x98);
+        const uint16_t green = rgb565(0x85, 0x99, 0x00);
+
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                base3, base2, base2, base3, base2, rgb565(0xe7, 0xe1, 0xcf),
+                blue, orange, base1, base1, base0, base2, base2,
+                cyan, blue, base01, base00, base3, base01,
+                rgb565(0xe8, 0xe2, 0xd0), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base2, base3, rgb565(0xf8, 0xf1, 0xdd), base1, base0, blue, cyan, base00
+            };
+        } else {
+            gUi = {
+                base03, base02, base02, base02, rgb565(0x0c, 0x3c, 0x47), rgb565(0x11, 0x45, 0x52),
+                blue, orange, base01, base01, base00, base02, base02,
+                cyan, yellow, base1, base0, base3, base1,
+                rgb565(0x0e, 0x46, 0x55), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base03, base02, rgb565(0x0b, 0x40, 0x4b), base01, base00, base3, cyan, base0
             };
         }
     } else {
@@ -550,6 +625,150 @@ static int prevView(int from) {
     return from;
 }
 
+static void goToView(int v);
+
+static int nextMeshChannelView(int from) {
+    if (from < 0 || from >= MESH_CHANNELS) return from;
+    for (int n = 1; n < MESH_CHANNELS; n++) {
+        int v = (from + n) % MESH_CHANNELS;
+        if (isViewNavigable(v)) return v;
+    }
+    return from;
+}
+
+static int prevMeshChannelView(int from) {
+    if (from < 0 || from >= MESH_CHANNELS) return from;
+    for (int n = 1; n < MESH_CHANNELS; n++) {
+        int v = (from + MESH_CHANNELS - n) % MESH_CHANNELS;
+        if (isViewNavigable(v)) return v;
+    }
+    return from;
+}
+
+static int navButtonCount() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return 4;
+#else
+    return NAV_BTN_COUNT;
+#endif
+}
+
+static const char *navButtonLabel(int idx) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    static const char *labels[] = { "DM", "MAP", "LIVE", "CFG" };
+#else
+    static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
+#endif
+    return labels[idx];
+}
+
+static void activateNavButton(int idx) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    switch (idx) {
+        case 0:
+            if (activeView != CHAN_DM) goToView(CHAN_DM);
+            break;
+        case 1:
+            if (activeView != VIEW_MAP) goToView(VIEW_MAP);
+            break;
+        case 2:
+            if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+            break;
+        case 3:
+            if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+            break;
+        default:
+            break;
+    }
+#else
+    switch (idx) {
+        case 0:
+            goToView(prevView(activeView));
+            break;
+        case 1:
+            if (activeView != CHAN_DM) goToView(CHAN_DM);
+            break;
+        case 2:
+            if (activeView != VIEW_MAP) goToView(VIEW_MAP);
+            break;
+        case 3:
+            if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+            break;
+        case 4:
+            if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+            break;
+        case 5:
+            goToView(nextView(activeView));
+            break;
+        default:
+            break;
+    }
+#endif
+}
+
+static bool cardputerChannelNavReady() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    bool typing = softKbVisible || hwTypingLock || inputLen > 0;
+    return !typing
+        && !nodeDetailOpen
+        && !nodeListFocused
+        && activeView >= 0
+        && activeView < MESH_CHANNELS;
+#else
+    return false;
+#endif
+}
+
+static bool cardputerPanelShortcutReady() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (softKbVisible) return false;
+    // Keep panel hotkeys active in non-text views (CFG/ANN/MAP/DM list),
+    // even if the chat input buffer still contains stale text.
+    if (isTextInputView() && (hwTypingLock || inputLen > 0)) return false;
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool showPanelScrollButtons() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return false;
+#else
+    return true;
+#endif
+}
+
+static bool showPanelCloseButtons() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return false;
+#else
+    return true;
+#endif
+}
+
+static char remapCardputerDirectionalKey(char k) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (!cardputerPanelShortcutReady()) return k;
+
+    if (activeView == VIEW_MAP) {
+        if (k == ';') return KEY_SCROLL_UP;
+        if (k == '.') return KEY_SCROLL_DN;
+        if (k == ',') return KEY_PAGE_DN;
+        if (k == '/') return KEY_PAGE_UP;
+        return k;
+    }
+
+    if (k == ';') return KEY_SCROLL_UP;
+    if (k == '.') return KEY_SCROLL_DN;
+    if (cardputerChannelNavReady()) {
+        if (k == ',') return KEY_PREV_CHAN;
+        if (k == '/') return KEY_NEXT_CHAN;
+    }
+#endif
+    return k;
+}
+
 // ── View navigation ───────────────────────────────────────────
 static void goToView(int v) {
     if (v < 0 || v >= TOTAL_VIEWS) return;
@@ -606,6 +825,10 @@ static void goToView(int v) {
         mapNodeFreezeActive = false;
         mapFrozenNodeCount = 0;
     }
+    if (v == CHAN_ANN && prev != CHAN_ANN) {
+        Channels.clearChannel(CHAN_ANN);
+        dirtyLiveRows = false;
+    }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
     }
@@ -630,69 +853,6 @@ static void closePanelToChannel() {
 }
 
 // ── Splash screen ─────────────────────────────────────────────
-static void drawCamelliaMark(int cx, int cy) {
-    const uint16_t SHADOW      = 0x18E4;
-    const uint16_t PETAL_OUTER = 0xF9CF;
-    const uint16_t PETAL_MID   = 0xFADF;
-    const uint16_t PETAL_INNER = 0xFF7D;
-    const uint16_t PETAL_HILITE= 0xFFDF;
-    const uint16_t PETAL_EDGE  = 0xD8A7;
-    const uint16_t CENTER      = 0xFD20;
-    const uint16_t CENTER_DOT  = 0xFEA0;
-    const uint16_t STEM        = 0x64EC;
-    const uint16_t LEAF_DARK   = 0x2C87;
-    const uint16_t LEAF_LIGHT  = 0x3D68;
-
-    // Soft drop shadow under the bloom.
-    lcd.fillCircle(cx + 1, cy + 4, 34, SHADOW);
-
-    // Outer petals.
-    for (int i = 0; i < 10; i++) {
-        float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
-        int px = cx + (int)(23.0f * cosf(a));
-        int py = cy + (int)(18.0f * sinf(a));
-        int pr = 11 + (i & 1);
-        lcd.fillCircle(px, py, pr, PETAL_OUTER);
-        lcd.fillCircle(px - 2, py - 2, pr - 4, PETAL_HILITE);
-        lcd.drawCircle(px, py, pr, PETAL_EDGE);
-    }
-
-    // Mid petals (offset ring for layered camellia look).
-    for (int i = 0; i < 8; i++) {
-        float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
-        int px = cx + (int)(13.0f * cosf(a));
-        int py = cy + (int)(10.0f * sinf(a));
-        lcd.fillCircle(px, py, 9, PETAL_MID);
-        lcd.fillCircle(px - 1, py - 1, 5, PETAL_HILITE);
-        lcd.drawCircle(px, py, 9, PETAL_EDGE);
-    }
-
-    // Inner petals.
-    for (int i = 0; i < 5; i++) {
-        float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
-        int px = cx + (int)(6.0f * cosf(a));
-        int py = cy + (int)(5.0f * sinf(a));
-        lcd.fillCircle(px, py, 6, PETAL_INNER);
-    }
-
-    // Stamen cluster.
-    lcd.fillCircle(cx, cy, 6, CENTER);
-    lcd.drawCircle(cx, cy, 6, 0xD4C0);
-    for (int i = 0; i < 10; i++) {
-        float a = (float)i * 2.0f * (float)M_PI / 10.0f;
-        int sx = cx + (int)(4.0f * cosf(a));
-        int sy = cy + (int)(4.0f * sinf(a));
-        lcd.fillCircle(sx, sy, 1, CENTER_DOT);
-    }
-
-    // Stem and leaves.
-    lcd.fillRoundRect(cx - 1, cy + 20, 3, 17, 1, STEM);
-    lcd.fillCircle(cx - 21, cy + 28, 8, LEAF_DARK);
-    lcd.fillCircle(cx - 14, cy + 30, 6, LEAF_LIGHT);
-    lcd.fillCircle(cx + 21, cy + 29, 8, LEAF_DARK);
-    lcd.fillCircle(cx + 14, cy + 31, 6, LEAF_LIGHT);
-}
-
 static void drawCamelliaMarkTiny(int cx, int cy) {
     const uint16_t PETAL_OUTER = COL_SPLASH_TITLE;
     const uint16_t PETAL_MID   = COL_SPLASH_SUB;
@@ -719,59 +879,24 @@ static void drawCamelliaMarkTiny(int cx, int cy) {
 }
 
 static void drawSplash() {
-    const uint16_t BG_TOP     = COL_SPLASH_TOP;
-    const uint16_t BG_BOTTOM  = COL_SPLASH_BOTTOM;
-    const uint16_t CARD_BG    = COL_SPLASH_CARD;
-    const uint16_t CARD_EDGE  = COL_SPLASH_EDGE;
-    const uint16_t TITLE      = COL_SPLASH_TITLE;
-    const uint16_t DIM        = COL_SPLASH_DIM;
+    const DisplayUiProfile &ui = displayUiProfile();
+    const DisplaySplashPalette palette = {
+        COL_SPLASH_TOP,
+        COL_SPLASH_BOTTOM,
+        COL_SPLASH_CARD,
+        COL_SPLASH_EDGE,
+        COL_SPLASH_EDGE_HI,
+        COL_SPLASH_TITLE,
+        COL_SPLASH_DIM,
+        COL_BG_MAIN,
+    };
+    const DisplaySplashData data = {
+        gCfg.nodeLong,
+        gCfg.nodeShort,
+        APP_VERSION,
+    };
 
-    for (int y = 0; y < LCD_H; y++) {
-        int r1 = (BG_TOP >> 11) & 0x1F, g1 = (BG_TOP >> 5) & 0x3F, b1 = BG_TOP & 0x1F;
-        int r2 = (BG_BOTTOM >> 11) & 0x1F, g2 = (BG_BOTTOM >> 5) & 0x3F, b2 = BG_BOTTOM & 0x1F;
-        int r = r1 + ((r2 - r1) * y) / (LCD_H - 1);
-        int g = g1 + ((g2 - g1) * y) / (LCD_H - 1);
-        int b = b1 + ((b2 - b1) * y) / (LCD_H - 1);
-        uint16_t c = (uint16_t)((r << 11) | (g << 5) | b);
-        lcd.drawFastHLine(0, y, LCD_W, c);
-    }
-
-    const int cardX = 16;
-    const int cardY = 26;
-    const int cardW = LCD_W - 32;
-    const int cardH = LCD_H - 52;
-    const int cardR = 8;
-
-    lcd.fillRoundRect(cardX, cardY, cardW, cardH, cardR, CARD_BG);
-    lcd.drawRoundRect(cardX, cardY, cardW, cardH, cardR, CARD_EDGE);
-    lcd.drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, cardR, COL_SPLASH_EDGE_HI);
-
-    lcd.setFont(&fonts::Orbitron_Light_32);
-    lcd.setTextSize(1);
-    lcd.setTextColor(TITLE, CARD_BG);
-    const char *appName = "CAMILLIA";
-    int tw = lcd.textWidth(appName);
-    lcd.drawString(appName, (LCD_W - tw) / 2, cardY + 12);
-
-    drawCamelliaMark(LCD_W / 2, cardY + cardH / 2 - 4);
-
-    lcd.setFont(&fonts::DejaVu9);
-
-    char idBuf[44];
-    snprintf(idBuf, sizeof(idBuf), "%s  (%s)", gCfg.nodeLong, gCfg.nodeShort);
-    lcd.setTextColor(TITLE, CARD_BG);
-    tw = lcd.textWidth(idBuf);
-    lcd.drawString(idBuf, (LCD_W - tw) / 2, cardY + cardH - 28);
-
-    const char *ver = APP_VERSION;
-    lcd.setTextColor(DIM, CARD_BG);
-    tw = lcd.textWidth(ver);
-    lcd.drawString(ver, (LCD_W - tw) / 2, cardY + cardH - 15);
-
-    lcd.setFont(&fonts::Font0);
-
-    delay(1500);
-    lcd.fillScreen(COL_BG_MAIN);
+    displayDrawSplash(lcd, ui, palette, data);
 }
 
 // ── Colour helpers ────────────────────────────────────────────
@@ -1018,11 +1143,14 @@ static void drawBattery() {
 
 // ── Draw: status bar ─────────────────────────────────────────
 static void drawStatus() {
+    const DisplayHeaderProfile &header = displayUiProfile().header;
+
     lcd.fillRect(0, 0, LCD_W, STATUS_H, COL_STATUS_BG);
     lcd.drawFastHLine(0, STATUS_H - 1, LCD_W, COL_DIVIDER);
 
-    lcd.setFont(&fonts::Orbitron_Light_24);
-    lcd.setTextSize(1);
+    if (header.useCompactStatusFont) lcd.setFont(&fonts::DejaVu9);
+    else                             lcd.setFont(&fonts::Orbitron_Light_24);
+    lcd.setTextSize(header.statusFontScale);
     lcd.setTextColor(COL_STATUS_TEXT, COL_STATUS_BG);
 
     const char *shortName = gCfg.nodeShort[0] ? gCfg.nodeShort : "----";
@@ -1037,15 +1165,15 @@ static void drawStatus() {
     }
 
     int infoY = max(0, (STATUS_H - lcd.fontHeight()) / 2);
-    int x = 2;
+    int x = header.statusTextX;
     lcd.drawString(shortName, x, infoY);
     int shortW = lcd.textWidth(shortName);
 
-    int flowerCx = x + shortW + 9;
+    int flowerCx = x + shortW + header.statusFlowerGap;
     drawCamelliaMarkTiny(flowerCx, STATUS_H / 2);
 
-    int timeX = flowerCx + 10;
-    drawClippedText(timeX, infoY, NODE_X - timeX - 4, timeBuf);
+    int timeX = flowerCx + header.statusTimeGap;
+    drawClippedText(timeX, infoY, NODE_X - timeX - header.statusTimeRightPad, timeBuf);
     drawBattery();
     lcd.setFont(&fonts::Font0);
     dirtyStatus = false;
@@ -1070,6 +1198,14 @@ static void drawModalMaskAndFrame(int mx, int my, int mw, int mh) {
 }
 
 static void drawPanelCloseButton(int x, int y, int w, int h) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    clearPanelCloseRect();
+    return;
+#endif
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
     drawSquirclePill(x, y, w, h, fill, COL_SELECT_ACCENT, false);
     lcd.setFont(&fonts::Font0);
@@ -1081,36 +1217,26 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
     setPanelCloseRect(x, y, w, h);
 }
 
-static void drawPanelClearButton(int x, int y, int w, int h) {
-    uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
-    drawSquirclePill(x, y, w, h, fill, COL_SELECT_ACCENT, false);
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextColor(COL_TEXT_MAIN, fill);
-    int tw = lcd.textWidth("Clear");
-    int tx = x + max(1, (w - tw) / 2);
-    int ty = y + max(0, (h - CHAR_H) / 2);
-    drawClippedText(tx, ty, w - (tx - x) - 1, "Clear");
-    setPanelClearRect(x, y, w, h);
-}
-
 // ── Draw: tab bar ─────────────────────────────────────────────
 static void drawTabs() {
+    const DisplayTabsProfile &tabsProfile = displayUiProfile().tabs;
+
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, COL_BG_MAIN);
     lcd.drawFastHLine(0, STATUS_H, LCD_W, COL_DIVIDER);
     lcd.drawFastHLine(0, STATUS_H + TAB_H - 1, LCD_W, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(1);
 
-    const int TAB_PAD_X = 5;
-    const int TAB_GAP   = 3;
-    const int PILL_H    = max(8, TAB_H - 4);
+    const int TAB_PAD_X = tabsProfile.tabPadX;
+    const int TAB_GAP   = tabsProfile.tabGap;
+    const int PILL_H    = max(tabsProfile.tabPillMinHeight, TAB_H - tabsProfile.tabPillInsetY * 2);
     const int PILL_Y    = STATUS_H + (TAB_H - PILL_H) / 2;
 
     // Build full tab list with absolute x positions
     struct TabEntry { int view; char label[16]; int x; int w; };
     TabEntry tabs[TOTAL_VIEWS];
     int tabCount = 0;
-    int xCursor  = 2;
+    int xCursor  = tabsProfile.tabEdgePad;
 
     for (int i = 0; i < TOTAL_VIEWS; i++) {
         if (!isTopTabView(i)) continue;
@@ -1127,7 +1253,7 @@ static void drawTabs() {
         xCursor += w + TAB_GAP;
     }
 
-    int totalTabW = max(0, xCursor - TAB_GAP + 2);
+    int totalTabW = max(0, xCursor - TAB_GAP + tabsProfile.tabEdgePad);
     int maxScroll = max(0, totalTabW - LCD_W);
 
     // Auto-scroll so the active tab is always fully visible
@@ -1135,8 +1261,8 @@ static void drawTabs() {
         if (tabs[t].view != activeView) continue;
         if (tabs[t].x < tabScrollX)
             tabScrollX = tabs[t].x;
-        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W - 2)
-            tabScrollX = tabs[t].x + tabs[t].w - (LCD_W - 2);
+        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W - tabsProfile.tabEdgePad)
+            tabScrollX = tabs[t].x + tabs[t].w - (LCD_W - tabsProfile.tabEdgePad);
         break;
     }
     tabScrollX = constrain(tabScrollX, 0, maxScroll);
@@ -1172,7 +1298,8 @@ static void drawTabs() {
 
         drawSquirclePill(sx, PILL_Y, tabs[t].w, PILL_H, fillCol, outlineCol, isActive);
         lcd.setTextColor(textCol, fillCol);
-        drawClippedText(sx + TAB_PAD_X, PILL_Y + 1, tabs[t].w - 2 * TAB_PAD_X, tabs[t].label);
+        drawClippedText(sx + TAB_PAD_X, PILL_Y + tabsProfile.tabLabelYOffset,
+                        tabs[t].w - 2 * TAB_PAD_X, tabs[t].label);
     }
     lcd.setFont(&fonts::Font0);
     dirtyTabs = false;
@@ -1464,15 +1591,24 @@ static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
 }
 
 static void drawLivePanel(bool fullRedraw) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+#else
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = CHAT_H - 8;
+#endif
+    const int mh = panelOverlayBottomY() - my + 1;
     const int titleH = 11;
     const int left = mx + 1;
     const int innerW = mw - 2;
     const int msgTop = my + titleH + 2;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsTop = reserveFooter
+        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (my + mh - 1);
     // Font0 is 7px tall; use 8px rows for a touch more breathing room.
     const int rowH = 8;
     const int rowsVisible = max(1, (controlsTop - msgTop) / rowH);
@@ -1486,6 +1622,9 @@ static void drawLivePanel(bool fullRedraw) {
     if (fullRedraw) {
         clearPanelCloseRect();
         drawModalMaskAndFrame(mx, my, mw, mh);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+#endif
         lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
         lcd.setFont(&fonts::Font0);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
@@ -1494,7 +1633,6 @@ static void drawLivePanel(bool fullRedraw) {
         const int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
         const int closeX = mx + 3;
         drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
-        drawPanelClearButton(closeX + TOUCH_BTN_W + 4, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
     }
 
     lcd.setFont(&fonts::Font0);
@@ -1659,6 +1797,15 @@ static bool mapEnsureTileFile(uint8_t z, int x, int y, bool allowDownload,
 
 static void drawMapPanel() {
     clearPanelCloseRect();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int mapNavBtnH = 0;
+    const int mapNavBottomPad = 0;
+    const int mapNavGap = 0;
+#else
     const int mx = 0;
     const int my = CHAT_Y;
     const int mw = LCD_W;
@@ -1668,6 +1815,7 @@ static void drawMapPanel() {
     const int mapNavBtnH = 22;
     const int mapNavBottomPad = 2;
     const int mapNavGap = 3;
+#endif
     const int titleH = 11;
     const int ix = mx + 3;
     const int iw = mw - 6;
@@ -1785,7 +1933,9 @@ static void drawMapPanel() {
 
     bool apMode = mapIsApMode();
     bool allowDownloads = mapCanDownloadTiles();
-    bool useTileBackdrop = !apMode && HAS_SD_CARD;
+    // Cached tiles remain useful even when the device is in AP mode.
+    // Only network downloads should depend on Wi-Fi connectivity.
+    bool useTileBackdrop = HAS_SD_CARD;
     bool downloadedAnyTile = false;
 
     if (useTileBackdrop) {
@@ -1929,6 +2079,7 @@ static void drawMapPanel() {
         }
     }
 
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
     const int closeW = 46;
     drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
@@ -1973,6 +2124,7 @@ static void drawMapPanel() {
         drawClippedText(tx, ty, btnW[i] - (tx - bx) - 1, labels[i]);
         setMapControlRect((MapControlAction)i, bx, btnY, btnW[i], mapNavBtnH);
     }
+#endif
 
     lcd.setFont(&fonts::Font0);
     mapLastDrawMs = millis();
@@ -2195,7 +2347,7 @@ static void drawDmList() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = CHAT_H - 8;
+    const int mh = panelOverlayBottomY() - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
@@ -2247,6 +2399,7 @@ static void drawDmList() {
     drawPanelCloseButton(closeX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
+    if (showPanelScrollButtons()) {
     const int dmBtnW = 46;
     const int dmBtnGap = 4;
     const int downX = ix + iw - dmBtnW;
@@ -2266,6 +2419,7 @@ static void drawDmList() {
     tx = downX + max(1, (dmBtnW - tw) / 2);
     drawClippedText(tx, ty, dmBtnW - (tx - downX) - 1, "Down");
     setDmControlRect(DM_CTL_DOWN, downX, closeY, dmBtnW, TOUCH_BTN_H);
+    }
 #endif
 
     lcd.setFont(&fonts::Font0);
@@ -2300,11 +2454,14 @@ static void drawDmPicker() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = CHAT_H - 8;
+    const int mh = panelOverlayBottomY() - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsTop = reserveFooter
+        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (my + mh - 1);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -2364,6 +2521,7 @@ static void drawDmPicker() {
                          TOUCH_BTN_W, TOUCH_BTN_H);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
+    if (showPanelScrollButtons()) {
     const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     const int dmBtnW = 52;
     const int dmBtnGap = 4;
@@ -2385,6 +2543,7 @@ static void drawDmPicker() {
     tx = downX + max(1, (dmBtnW - tw) / 2);
     drawClippedText(tx, ty, dmBtnW - (tx - downX) - 1, "Down");
     setDmControlRect(DM_CTL_DOWN, downX, closeY, dmBtnW, TOUCH_BTN_H);
+    }
 #endif
 
     lcd.setFont(&fonts::Font0);
@@ -2401,7 +2560,10 @@ static void drawDmConv() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsTop = reserveFooter
+        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (my + mh - 1);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -2446,6 +2608,7 @@ static void drawDmConv() {
                          TOUCH_BTN_W, TOUCH_BTN_H);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
+    if (showPanelScrollButtons()) {
     const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     const int dmBtnW = 52;
     const int dmBtnGap = 4;
@@ -2467,6 +2630,7 @@ static void drawDmConv() {
     tx = downX + max(1, (dmBtnW - tw) / 2);
     drawClippedText(tx, ty, dmBtnW - (tx - downX) - 1, "Down");
     setDmControlRect(DM_CTL_DOWN, downX, closeY, dmBtnW, TOUCH_BTN_H);
+    }
 #endif
 
     lcd.setFont(&fonts::Font0);
@@ -2480,10 +2644,13 @@ static void drawSettings() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = CHAT_H - 8;
+    const int mh = panelOverlayBottomY() - my + 1;
     const int ix = mx + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsTop = reserveFooter
+        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (my + mh - 1);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -2507,7 +2674,7 @@ static void drawSettings() {
         uint16_t fg  = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
         lcd.fillRect(ix, y, iw, SH, bg);
         lcd.setTextColor(fg, bg);
-#if defined(DEVICE_TDECK)
+#if HAS_SD_CARD
         if (i == SETTING_EXPORT)
             snprintf(buf, sizeof(buf), "Export Config");
         else if (i == SETTING_IMPORT)
@@ -2574,26 +2741,28 @@ static void drawSettings() {
     int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     drawPanelCloseButton(mx + 3, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
 
-    const int cfgBtnW = 52;
-    const int cfgBtnGap = 4;
-    const int downX = ix + iw - cfgBtnW;
-    const int upX   = downX - cfgBtnGap - cfgBtnW;
-    uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+    if (showPanelScrollButtons()) {
+        const int cfgBtnW = 52;
+        const int cfgBtnGap = 4;
+        const int downX = ix + iw - cfgBtnW;
+        const int upX   = downX - cfgBtnGap - cfgBtnW;
+        uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
 
-    drawSquirclePill(upX, closeY, cfgBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextColor(COL_TEXT_MAIN, fill);
-    int tw = lcd.textWidth("Up");
-    int tx = upX + max(1, (cfgBtnW - tw) / 2);
-    int ty = closeY + max(0, (TOUCH_BTN_H - CHAR_H) / 2);
-    drawClippedText(tx, ty, cfgBtnW - (tx - upX) - 1, "Up");
-    setSettingsControlRect(SETTINGS_CTL_UP, upX, closeY, cfgBtnW, TOUCH_BTN_H);
+        drawSquirclePill(upX, closeY, cfgBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
+        lcd.setFont(&fonts::Font0);
+        lcd.setTextColor(COL_TEXT_MAIN, fill);
+        int tw = lcd.textWidth("Up");
+        int tx = upX + max(1, (cfgBtnW - tw) / 2);
+        int ty = closeY + max(0, (TOUCH_BTN_H - CHAR_H) / 2);
+        drawClippedText(tx, ty, cfgBtnW - (tx - upX) - 1, "Up");
+        setSettingsControlRect(SETTINGS_CTL_UP, upX, closeY, cfgBtnW, TOUCH_BTN_H);
 
-    drawSquirclePill(downX, closeY, cfgBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
-    tw = lcd.textWidth("Down");
-    tx = downX + max(1, (cfgBtnW - tw) / 2);
-    drawClippedText(tx, ty, cfgBtnW - (tx - downX) - 1, "Down");
-    setSettingsControlRect(SETTINGS_CTL_DOWN, downX, closeY, cfgBtnW, TOUCH_BTN_H);
+        drawSquirclePill(downX, closeY, cfgBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
+        tw = lcd.textWidth("Down");
+        tx = downX + max(1, (cfgBtnW - tw) / 2);
+        drawClippedText(tx, ty, cfgBtnW - (tx - downX) - 1, "Down");
+        setSettingsControlRect(SETTINGS_CTL_DOWN, downX, closeY, cfgBtnW, TOUCH_BTN_H);
+    }
 
     lcd.setFont(&fonts::Font0);
     dirtyChat = false;
@@ -2687,11 +2856,28 @@ static void drawNodeDetail(const NodeEntry *n) {
 
 static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        return hwTypingLock || inputLen > 0;
+    }
+#endif
     return !((activeView == CHAN_ANN)
             || (activeView == CHAN_DM && !dmNeedsInput)
             || (activeView == VIEW_MAP)
             || (activeView == VIEW_GPS)
             || (activeView == VIEW_SETTINGS));
+}
+
+static bool panelCoversInputArea() {
+    return isPanelView(activeView) && !isTextInputView();
+}
+
+static int panelOverlayBottomY() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return LCD_H - 1;
+#else
+    return INPUT_Y + INPUT_H - 1;
+#endif
 }
 
 static void handleKey(char k);
@@ -2706,16 +2892,20 @@ struct NavButtonRect {
 static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
     const int PAD = 3;
     const int GAP = 4;
+    const int count = navButtonCount();
     const int rowH = TOUCH_BTN_H;
     const int rowBottomPad = (activeView == VIEW_MAP) ? 2 : 0;
     const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
     int bw = TOUCH_BTN_W;
-    int x = max(PAD, (LCD_W - (NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP)) / 2);
-    if (x + NAV_BTN_COUNT * bw + (NAV_BTN_COUNT - 1) * GAP > LCD_W - PAD) {
-        bw = (LCD_W - 2 * PAD - (NAV_BTN_COUNT - 1) * GAP) / NAV_BTN_COUNT;
+    int x = max(PAD, (LCD_W - (count * bw + (count - 1) * GAP)) / 2);
+    if (x + count * bw + (count - 1) * GAP > LCD_W - PAD) {
+        bw = (LCD_W - 2 * PAD - (count - 1) * GAP) / count;
         x = PAD;
     }
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
+        b[i] = { 0, rowY, 0, rowH };
+    }
+    for (int i = 0; i < count; i++) {
         b[i] = { x, rowY, bw, rowH };
         x += bw + GAP;
     }
@@ -2977,9 +3167,47 @@ static int mapVisibleNodeCount() {
 
 static NodeEntry *mapVisibleNodeByIndex(int idx) {
     if (idx < 0) return nullptr;
-    if (!mapNodeFreezeActive) return Nodes.getByRank(idx);
-    if (idx >= mapFrozenNodeCount) return nullptr;
-    return Nodes.find(mapFrozenNodeIds[idx]);
+    if (mapNodeFreezeActive) {
+        NodeEntry *self = nullptr;
+        int selfFrozenIndex = -1;
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (n && n->nodeId == myNodeId) {
+                self = n;
+                selfFrozenIndex = i;
+                break;
+            }
+        }
+
+        if (self) {
+            if (idx == 0) return self;
+            idx -= 1;
+        }
+
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            if (i == selfFrozenIndex) continue;
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (!n) continue;
+            if (idx == 0) return n;
+            idx -= 1;
+        }
+        return nullptr;
+    }
+
+    NodeEntry *self = Nodes.find(myNodeId);
+    if (self) {
+        if (idx == 0) return self;
+        idx -= 1;
+    }
+
+    int cnt = Nodes.count();
+    for (int rank = 0; rank < cnt; rank++) {
+        NodeEntry *n = Nodes.getByRank(rank);
+        if (!n || n->nodeId == myNodeId) continue;
+        if (idx == 0) return n;
+        idx -= 1;
+    }
+    return nullptr;
 }
 
 static bool mapSelectNodeById(uint32_t nodeId) {
@@ -3052,10 +3280,10 @@ static void mapApplyControl(MapControlAction action) {
     dirtyChat = true;
 }
 
-static void handleTouchTap(int x, int y) {
-    if (screenAsleep || nodeDetailOpen) return;
+static bool handleTouchTap(int x, int y) {
+    if (screenAsleep || nodeDetailOpen) return false;
 
-    if (softKeyboardHandleTap(x, y)) return;
+    if (softKeyboardHandleTap(x, y)) return true;
 
     if (dmNewVisible
         && pointInRect(x, y, dmNewRect.x, dmNewRect.y, dmNewRect.w, dmNewRect.h)
@@ -3065,26 +3293,20 @@ static void handleTouchTap(int x, int y) {
         dmPickerOpen = true;
         pickerSnapshot();
         dirtyChat = true;
-        return;
+    #if defined(DEVICE_TDECK)
+        Serial.printf("[tdeck-touch-hit] dm-new x=%d y=%d\n", x, y);
+    #endif
+        return true;
     }
 
     if (panelCloseVisible
         && pointInRect(x, y, panelCloseRect.x, panelCloseRect.y,
                        panelCloseRect.w, panelCloseRect.h)) {
+    #if defined(DEVICE_TDECK)
+        Serial.printf("[tdeck-touch-hit] panel-close x=%d y=%d\n", x, y);
+    #endif
         closePanelToChannel();
-        return;
-    }
-
-    if (panelClearVisible
-        && pointInRect(x, y, panelClearRect.x, panelClearRect.y,
-                       panelClearRect.w, panelClearRect.h)) {
-        if (activeView == CHAN_ANN) {
-            Channels.clearChannel(CHAN_ANN);
-            dirtyTabs = true;
-            dirtyChat = true;
-            dirtyLiveRows = false;
-        }
-        return;
+        return true;
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
@@ -3095,8 +3317,11 @@ static void handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_UP].y,
                            dmCtlRect[DM_CTL_UP].w,
                            dmCtlRect[DM_CTL_UP].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] dm-up x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_UP);
-            return;
+            return true;
         }
         if (dmCtlVisible[DM_CTL_DOWN]
             && pointInRect(x, y,
@@ -3104,8 +3329,11 @@ static void handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_DOWN].y,
                            dmCtlRect[DM_CTL_DOWN].w,
                            dmCtlRect[DM_CTL_DOWN].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] dm-down x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_DN);
-            return;
+            return true;
         }
     }
 #endif
@@ -3115,8 +3343,11 @@ static void handleTouchTap(int x, int y) {
             if (!mapCtlVisible[i]) continue;
             if (pointInRect(x, y, mapCtlRect[i].x, mapCtlRect[i].y,
                             mapCtlRect[i].w, mapCtlRect[i].h)) {
+#if defined(DEVICE_TDECK)
+                Serial.printf("[tdeck-touch-hit] map-ctl=%d x=%d y=%d\n", i, x, y);
+#endif
                 mapApplyControl((MapControlAction)i);
-                return;
+                return true;
             }
         }
     }
@@ -3128,8 +3359,11 @@ static void handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_UP].y,
                            settingsCtlRect[SETTINGS_CTL_UP].w,
                            settingsCtlRect[SETTINGS_CTL_UP].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] settings-up x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_UP);
-            return;
+            return true;
         }
         if (settingsCtlVisible[SETTINGS_CTL_DOWN]
             && pointInRect(x, y,
@@ -3137,8 +3371,11 @@ static void handleTouchTap(int x, int y) {
                            settingsCtlRect[SETTINGS_CTL_DOWN].y,
                            settingsCtlRect[SETTINGS_CTL_DOWN].w,
                            settingsCtlRect[SETTINGS_CTL_DOWN].h)) {
+#if defined(DEVICE_TDECK)
+            Serial.printf("[tdeck-touch-hit] settings-down x=%d y=%d\n", x, y);
+#endif
             handleKey(KEY_SCROLL_DN);
-            return;
+            return true;
         }
     }
 
@@ -3148,25 +3385,30 @@ static void handleTouchTap(int x, int y) {
         softKbShift = false;
         softKeyboardClearPressed();
         dirtyInput = true;
-        return;
+        return true;
     }
 #endif
 
     NavButtonRect b[NAV_BTN_COUNT];
     navButtonRects(b);
-    if (pointInRect(x, y, b[0].x, b[0].y, b[0].w, b[0].h)) {
-        goToView(prevView(activeView));
-    } else if (pointInRect(x, y, b[1].x, b[1].y, b[1].w, b[1].h)) {
-        if (activeView != CHAN_DM) goToView(CHAN_DM);
-    } else if (pointInRect(x, y, b[2].x, b[2].y, b[2].w, b[2].h)) {
-        if (activeView != VIEW_MAP) goToView(VIEW_MAP);
-    } else if (pointInRect(x, y, b[3].x, b[3].y, b[3].w, b[3].h)) {
-        if (activeView != CHAN_ANN) goToView(CHAN_ANN);
-    } else if (pointInRect(x, y, b[4].x, b[4].y, b[4].w, b[4].h)) {
-        if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
-    } else if (pointInRect(x, y, b[5].x, b[5].y, b[5].w, b[5].h)) {
-        goToView(nextView(activeView));
+    if (!panelCoversInputArea()) {
+        for (int i = 0; i < navButtonCount(); i++) {
+            if (pointInRect(x, y, b[i].x, b[i].y, b[i].w, b[i].h)) {
+#if defined(DEVICE_TDECK)
+                Serial.printf("[tdeck-touch-hit] nav=%d x=%d y=%d rx=%d ry=%d rw=%d rh=%d\n",
+                              i, x, y, b[i].x, b[i].y, b[i].w, b[i].h);
+#endif
+                activateNavButton(i);
+                return true;
+            }
+        }
     }
+
+#if defined(DEVICE_TDECK)
+    Serial.printf("[tdeck-touch-hit] miss x=%d y=%d view=%d covers=%d\n",
+                  x, y, activeView, panelCoversInputArea() ? 1 : 0);
+#endif
+    return false;
 }
 
 // ── Draw: input bar ───────────────────────────────────────────
@@ -3178,6 +3420,11 @@ static void drawInput() {
         softKbShift = false;
         softKeyboardClearPressed();
         dirtyChat = dirtyNodes = true;
+    }
+
+    if (panelCoversInputArea()) {
+        dirtyInput = false;
+        return;
     }
 
     NavButtonRect b[NAV_BTN_COUNT];
@@ -3203,16 +3450,25 @@ static void drawInput() {
     if (showTextInput) {
         int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
         int kbX = 0, kbY = 0, kbW = 0, kbH = 0;
+        const int composerH = lcd.fontHeight() + 6;
         if (softKeyboardBounds(kbX, kbY, kbW, kbH)) {
-            const int composerH = lcd.fontHeight() + 6;
             const int composerY = max(CHAT_Y + 1, kbY - composerH - 2);
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
             lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
             lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
         } else {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            const int composerBottom = max(CHAT_Y + composerH, b[0].y - 2);
+            const int composerY = max(CHAT_Y + 1, composerBottom - composerH);
+            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
+            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+            textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
+#else
             int midY = min(b[0].y - 1, textY + lcd.fontHeight() + 1);
             lcd.drawFastHLine(0, midY, LCD_W, COL_DIVIDER_HI);
+#endif
         }
 
         lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
@@ -3238,31 +3494,63 @@ static void drawInput() {
     }
 
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
-    for (int i = 0; i < NAV_BTN_COUNT; i++) {
+    for (int i = 0; i < navButtonCount(); i++) {
         drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
     }
 
-    // Bracket app buttons (DM / MAPS / LIVE / CFG) from outer nav buttons.
-    int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
-    int sepX2 = (b[4].x + b[4].w + b[5].x) / 2;
-    int sepY  = b[0].y + 1;
-    int sepH  = max(1, b[0].h - 2);
-    // Stronger divider between "Previous" and the app group.
-    lcd.fillRect(max(0, sepX1 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
-    lcd.drawFastVLine(sepX1 + 1, sepY, sepH, COL_DIVIDER_HI);
-    // Match right-side bracket style between "CFG" and "Next".
-    lcd.fillRect(max(0, sepX2 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
-    lcd.drawFastVLine(sepX2 + 1, sepY, sepH, COL_DIVIDER_HI);
+    if (navButtonCount() == NAV_BTN_COUNT) {
+        // Bracket app buttons (DM / MAPS / LIVE / CFG) from outer nav buttons.
+        int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
+        int sepX2 = (b[4].x + b[4].w + b[5].x) / 2;
+        int sepY  = b[0].y + 1;
+        int sepH  = max(1, b[0].h - 2);
+        // Stronger divider between "Previous" and the app group.
+        lcd.fillRect(max(0, sepX1 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
+        lcd.drawFastVLine(sepX1 + 1, sepY, sepH, COL_DIVIDER_HI);
+        // Match right-side bracket style between "CFG" and "Next".
+        lcd.fillRect(max(0, sepX2 - 1), sepY, 3, sepH, COL_SELECT_ACCENT);
+        lcd.drawFastVLine(sepX2 + 1, sepY, sepH, COL_DIVIDER_HI);
+    }
 
     lcd.setFont(&fonts::Font0);
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
-    const char *labels[NAV_BTN_COUNT] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
-    for (int i = 0; i < NAV_BTN_COUNT; i++) {
-        int tw = lcd.textWidth(labels[i]);
+    for (int i = 0; i < navButtonCount(); i++) {
+        const char *label = navButtonLabel(i);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (navButtonCount() == 4) {
+            char head[2] = { label[0], '\0' };
+            const char *tail = label + 1;
+
+            lcd.setFont(&fonts::DejaVu9);
+            int headW = lcd.textWidth(head);
+            int headH = lcd.fontHeight();
+            lcd.setFont(&fonts::Font0);
+            int tailW = lcd.textWidth(tail);
+            int totalW = headW + (tail[0] ? (1 + tailW) : 0);
+            int tx = b[i].x + max(1, (b[i].w - totalW) / 2);
+            int headY = b[i].y + max(0, (b[i].h - headH) / 2) - 1;
+            int tailY = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
+
+            lcd.setFont(&fonts::DejaVu9);
+            lcd.setTextColor(COL_TEAL, btnFill);
+            lcd.drawString(head, tx, headY);
+            lcd.drawString(head, tx + 1, headY);
+
+            if (tail[0]) {
+                lcd.setFont(&fonts::Font0);
+                lcd.setTextColor(COL_TEXT_MAIN, btnFill);
+                drawClippedText(tx + headW + 1, tailY,
+                                b[i].w - (tx + headW + 1 - b[i].x) - 2, tail);
+            }
+            lcd.setFont(&fonts::Font0);
+            continue;
+        }
+#endif
+        int tw = lcd.textWidth(label);
         int tx = b[i].x + max(1, (b[i].w - tw) / 2);
         int ty = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
-        if (tw <= b[i].w - 2) lcd.drawString(labels[i], tx, ty);
-        else                  drawClippedText(b[i].x + 1, ty, b[i].w - 2, labels[i]);
+        if (tw <= b[i].w - 2) lcd.drawString(label, tx, ty);
+        else                  drawClippedText(b[i].x + 1, ty, b[i].w - 2, label);
     }
 
     drawSoftKeyboardOverlay();
@@ -3678,7 +3966,8 @@ static void handleRx(MeshPacket pkt) {
 static void onWebCfgSaved();  // forward declaration
 
 static void activateSettingsSelection() {
-#if defined(DEVICE_TDECK)
+    Serial.printf("[cp-kb-main] cfg activate settingsSel=%d\n", settingsSel);
+#if HAS_SD_CARD
     if (settingsSel == SETTING_EXPORT) {
         bool ok = cfgExport(gCfg);
         snprintf(settingsStatus, sizeof(settingsStatus),
@@ -3705,7 +3994,7 @@ static void activateSettingsSelection() {
 #endif
 
     if (settingsSel == SETTING_THEME) {
-        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 6);
+        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 8);
         setUiThemePreset(p);
         applyUiTheme();
         persistUiTheme();
@@ -3753,6 +4042,64 @@ static void activateSettingsSelection() {
 static void handleKey(char k) {
     if (k == KEY_NONE) return;
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    uint8_t rawKey = (uint8_t)k;
+    if (rawKey == 0x28 || rawKey == 0x0D) k = KEY_ENTER;
+    if (rawKey == 0x29) k = KEY_ESCAPE;
+    if (rawKey == 0x2A || rawKey == 0x4C || rawKey == 0x08 || rawKey == 0x7F) k = KEY_BACKSPACE;
+    if (k == KEY_ENTER) {
+        Serial.printf("[cp-kb-main] handle ENTER activeView=%d settingsSel=%d nodeDetail=%d nodeFocused=%d dmPicker=%d dmConv=%d inputLen=%u\n",
+                      activeView, settingsSel,
+                      nodeDetailOpen ? 1 : 0,
+                      nodeListFocused ? 1 : 0,
+                      dmPickerOpen ? 1 : 0,
+                      dmConvOpen ? 1 : 0,
+                      (unsigned)inputLen);
+    }
+#endif
+
+    k = remapCardputerDirectionalKey(k);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
+        hwTypingLock = false;
+        inputLen = 0;
+        inputBuf[0] = '\0';
+        dirtyInput = true;
+        return;
+    }
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (cardputerPanelShortcutReady()) {
+        switch (k) {
+            case '`':
+            case '~':
+                if (isPanelView(activeView)) closePanelToChannel();
+                return;
+            case 'd':
+            case 'D':
+                if (activeView != CHAN_DM) goToView(CHAN_DM);
+                return;
+            case 'm':
+            case 'M':
+                if (activeView == VIEW_MAP) mapApplyControl(MAP_CTL_ME);
+                else goToView(VIEW_MAP);
+                return;
+            case 'l':
+            case 'L':
+                if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+                return;
+            case 'c':
+            case 'C':
+                if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+                return;
+            default:
+                break;
+        }
+    }
+#endif
+
     // ALT+E — toggle node list focus / close detail; close DM sub-views
     if (k == KEY_NODE_FOCUS) {
         if (activeView == CHAN_DM) {
@@ -3775,7 +4122,21 @@ static void handleKey(char k) {
     }
 
     if (k == KEY_ENTER) {
+        bool wasTyping = hwTypingLock || inputLen > 0;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
+            hwTypingLock = true;
+            dirtyInput = true;
+            return;
+        }
+#endif
         hwTypingLock = false;
+        if (activeView == VIEW_SETTINGS) {
+            Serial.printf("[cfg-enter] KEY_ENTER activeView=%d settingsSel=%d\n",
+                          activeView, settingsSel);
+            activateSettingsSelection();
+            return;
+        }
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
                 openDmWith(pickerNode(dmPickerSel));
@@ -3825,9 +4186,7 @@ static void handleKey(char k) {
             if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
             return;
         }
-        if (activeView == VIEW_SETTINGS) {
-            activateSettingsSelection();
-        } else if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
+        if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
                && activeView != VIEW_MAP && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
             inputBuf[inputLen] = '\0';
             int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
@@ -3849,9 +4208,22 @@ static void handleKey(char k) {
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen > 0 && textAllowed) {
             inputBuf[--inputLen] = '\0'; dirtyInput = true;
+            if (inputLen == 0) hwTypingLock = false;
         }
 
-    } else if (k == KEY_TAB || k == KEY_NEXT_CHAN || k == KEY_ROLLER) {
+    } else if (k == KEY_NEXT_CHAN) {
+        if (cardputerChannelNavReady()) {
+            goToView(nextMeshChannelView(activeView));
+            return;
+        }
+
+    } else if (k == KEY_PREV_CHAN) {
+        if (cardputerChannelNavReady()) {
+            goToView(prevMeshChannelView(activeView));
+            return;
+        }
+
+    } else if (k == KEY_TAB || k == KEY_ROLLER || k == KEY_NEXT_CHAN) {
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
                 if (k == KEY_ROLLER) {
@@ -4016,6 +4388,11 @@ static void handleKey(char k) {
                             && activeView != VIEW_MAP
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView >= 0 && activeView < MESH_CHANNELS && !(hwTypingLock || inputLen > 0)) {
+            return;
+        }
+#endif
         if (inputLen < MAX_INPUT_LEN && textAllowed) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
@@ -4348,6 +4725,11 @@ void setup() {
 #endif
     batteryInitAdc();
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer display support depends on board init performed by kb.begin().
+    kb.begin();
+#endif
+
     // Display
     lcd.init();
     lcd.setRotation(TFT_ROTATION_DEFAULT);
@@ -4359,8 +4741,11 @@ void setup() {
     // Splash
     drawSplash();
 
-    // Keyboard
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Match the known-good T-Deck/Heltec startup order: bring up display/touch
+    // first, then initialize the keyboard sidecar.
     kb.begin();
+#endif
 
     // Data modules
     Nodes.init();
@@ -4478,12 +4863,24 @@ static void pollInput() {
     // Touchscreen tap handling (for on-screen channel nav buttons)
 #if TOUCH_POLL_ENABLED
     static uint32_t lastTouchPollMs = 0;
+#if defined(DEVICE_TDECK)
+    static bool touchDiagActive = false;
+    static uint32_t lastTouchDiagMs = 0;
+    static bool touchHandledOnPress = false;
+#endif
     if (now - lastTouchPollMs >= 16) {
         lastTouchPollMs = now;
 
         int32_t tx = 0, ty = 0;
         bool t = lcd.getTouch(&tx, &ty);
         if (t) {
+#if defined(DEVICE_TDECK)
+            if (!touchDiagActive || (now - lastTouchDiagMs >= 250)) {
+                lastTouchDiagMs = now;
+                touchDiagActive = true;
+                Serial.printf("[tdeck-touch] down x=%ld y=%ld view=%d\n", (long)tx, (long)ty, activeView);
+            }
+#endif
             if (screenAsleep) { wakeScreen(); return; }
             lastActivityMs = now;
             if (!touchDown) {
@@ -4491,6 +4888,9 @@ static void pollInput() {
                 touchStartX = tx;
                 touchStartY = ty;
                 touchDownMs = now;
+#if defined(DEVICE_TDECK)
+                touchHandledOnPress = handleTouchTap((int)tx, (int)ty);
+#endif
             }
             touchLastX = tx;
             touchLastY = ty;
@@ -4502,11 +4902,26 @@ static void pollInput() {
             bool shortTap = (now - touchDownMs) <= tapHoldLimit;
             bool steady   = (abs(touchLastX - touchStartX) <= driftLimit)
                          && (abs(touchLastY - touchStartY) <= driftLimit);
+#if defined(DEVICE_TDECK)
+            if (touchDiagActive) {
+                touchDiagActive = false;
+                Serial.printf("[tdeck-touch] up x=%ld y=%ld short=%d steady=%d\n",
+                              (long)touchLastX, (long)touchLastY,
+                              shortTap ? 1 : 0, steady ? 1 : 0);
+            }
+#endif
+#if defined(DEVICE_TDECK)
+            if (!touchHandledOnPress && shortTap && steady) {
+#else
             if (shortTap && steady) {
+#endif
                 int tapX = (activeView == VIEW_MAP) ? touchLastX : (touchStartX + touchLastX) / 2;
                 int tapY = (activeView == VIEW_MAP) ? touchLastY : (touchStartY + touchLastY) / 2;
                 handleTouchTap(tapX, tapY);
             }
+#if defined(DEVICE_TDECK)
+            touchHandledOnPress = false;
+#endif
             touchDown = false;
         } else {
             softKeyboardClearPressed();
@@ -4521,6 +4936,13 @@ static void pollInput() {
     for (int ki = 0; ki < 24; ki++) {
         char k;
         if (!dequeueKey(k)) break;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (k == KEY_ENTER && activeView == VIEW_SETTINGS) {
+            Serial.printf("[cp-kb-main] poll fallback ENTER->CFG settingsSel=%d\n", settingsSel);
+            activateSettingsSelection();
+            continue;
+        }
+#endif
         handleKey(k);
     }
 }
@@ -4530,7 +4952,8 @@ void loop() {
     // Poll input first — keyboard MCU has tiny buffer
     pollInput();
 
-    // If we left a text-entry view, release any stale hardware typing lock.
+    // Clear typing lock only after leaving input-capable views; explicit compose
+    // mode now handles empty-buffer exit via Escape, send, or backspace-to-empty.
     if (hwTypingLock && !isTextInputView()) hwTypingLock = false;
 
     // 1. Poll radio

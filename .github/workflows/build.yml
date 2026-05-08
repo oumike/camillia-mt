@@ -29,6 +29,7 @@ jobs:
       - name: Build firmware
         run: |
           pio run -e tdeck
+          pio run -e cardputer-cap
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
 
@@ -43,6 +44,10 @@ jobs:
           cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-tdeck-${TAG}.elf
           cp .pio/build/tdeck/firmware.map  dist/camillia-mt-tdeck-${TAG}.map 2>/dev/null || true
 
+          cp .pio/build/cardputer-cap/firmware.bin  dist/camillia-mt-cardputer-cap-${TAG}.bin
+          cp .pio/build/cardputer-cap/firmware.elf  dist/camillia-mt-cardputer-cap-${TAG}.elf
+          cp .pio/build/cardputer-cap/firmware.map  dist/camillia-mt-cardputer-cap-${TAG}.map 2>/dev/null || true
+
           cp .pio/build/heltec-v4/firmware.bin  dist/camillia-mt-heltec-${TAG}.bin
           cp .pio/build/heltec-v4/firmware.elf  dist/camillia-mt-heltec-${TAG}.elf
           cp .pio/build/heltec-v4/firmware.map  dist/camillia-mt-heltec-${TAG}.map 2>/dev/null || true
@@ -51,7 +56,7 @@ jobs:
           cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
           cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
 
-      # ── Draft release with all three files attached ───────────
+      # ── Draft release with all firmware artifacts attached ────
       - name: Create draft release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2

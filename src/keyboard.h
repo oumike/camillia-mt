@@ -8,6 +8,7 @@
 #define KEY_BACKSPACE   0x08
 #define KEY_TAB         0x09
 #define KEY_ENTER       0x0A
+#define KEY_ESCAPE      0x1B
 // Synthetic navigation codes
 #define KEY_PREV_CHAN   0x80
 #define KEY_NEXT_CHAN   0x81
@@ -34,6 +35,19 @@ public:
 
 private:
     char mapKey(uint8_t raw);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    static constexpr uint8_t CARDPUTER_QUEUE_SIZE = 16;
+    char _cardputerQueue[CARDPUTER_QUEUE_SIZE] = {0};
+    uint8_t _cardputerHead = 0;
+    uint8_t _cardputerTail = 0;
+    uint8_t _cardputerCount = 0;
+    bool _cardputerEnterDown = false;
+
+    void enqueueCardputerKey(char key);
+    char dequeueCardputerKey();
+    void pumpCardputerKeys();
+#endif
 
     static void IRAM_ATTR _isrRight();
     static void IRAM_ATTR _isrLeft();

@@ -11,6 +11,11 @@ static const char *kPath = "/camillia/config.yaml";
 static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
 
+static bool ensureSdMounted() {
+    if (sdReady) return true;
+    return sdBegin();
+}
+
 // ── Role / rebroadcast name tables ───────────────────────────
 static const char *kRoleNames[] = {
     "CLIENT", "CLIENT_MUTE", "ROUTER", "ROUTER_CLIENT", "REPEATER",
@@ -137,8 +142,24 @@ bool sdBegin() {
     Serial.println("[sd] disabled");
     return sdReady;
 #else
+    // Cardputer Cap shares SPI between LoRa and the SD slot, so keep both
+    // chip selects deasserted before attempting to mount the card.
+    SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+#if (LORA_CS >= 0)
+    pinMode(LORA_CS, OUTPUT);
+    digitalWrite(LORA_CS, HIGH);
+#endif
+    delay(2);
+
     sdReady = SD.begin(SD_CS, SPI, 4000000);
-    Serial.printf("[sd] %s\n", sdReady ? "mounted" : "not found");
+    if (!sdReady) {
+        sdReady = SD.begin(SD_CS, SPI, 1000000);
+    }
+    Serial.printf("[sd] %s cs=%d sck=%d miso=%d mosi=%d\n",
+                  sdReady ? "mounted" : "not found",
+                  SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
     return sdReady;
 #endif
 }
@@ -465,7 +486,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
 
 // ── Export to SD ──────────────────────────────────────────────
 bool cfgExport(const RhinoConfig &cfg) {
-    if (!sdReady) return false;
+    if (!ensureSdMounted()) return false;
     SD.mkdir("/camillia");
     File f = SD.open(kPath, FILE_WRITE);
     if (!f) return false;
@@ -479,7 +500,7 @@ bool cfgExport(const RhinoConfig &cfg) {
 
 // ── Import from SD ────────────────────────────────────────────
 bool cfgImport(RhinoConfig &cfg) {
-    if (!sdReady) return false;
+    if (!ensureSdMounted()) return false;
     File f = SD.open(kPath, FILE_READ);
     if (!f) return false;
     String content = f.readString();
