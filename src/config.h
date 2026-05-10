@@ -181,7 +181,9 @@
 #define GPS_BAUD        115200
 
 #define BATT_ADC_PIN    10
-#define BATT_DIV        1.5f
+// Cardputer battery ADC calibration: 1.5x under-reports on-device by ~20%.
+// Use 1.8x so UI percentage/voltage align with observed pack state.
+#define BATT_DIV        1.8f
 #define BATT_SENSE_ENABLE_PIN    -1
 #define BATT_SENSE_ENABLE_LEVEL  LOW
 

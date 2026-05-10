@@ -55,6 +55,8 @@ static int  tabScrollX   = 0;             // horizontal scroll offset for tab ba
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
 static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG
 static int  settingsSel  = 0;         // highlighted settings row
+static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
+static int  settingsInfoScrollMax = 0;
 static int  mapsListSel = 0;          // highlighted node row in MAP panel
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
@@ -814,6 +816,10 @@ static void goToView(int v) {
         Channels.clearChannel(CHAN_ANN);
         dirtyLiveRows = false;
     }
+    if (v == VIEW_SETTINGS && prev != VIEW_SETTINGS) {
+        settingsInfoScroll = 0;
+        settingsInfoScrollMax = 0;
+    }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
     }
@@ -1310,6 +1316,7 @@ static void drawChat() {
 
     auto txStatusSymbol = [](const DisplayLine *dl) -> const char * {
         if (!dl || !dl->packetId) return nullptr;
+        if (dl->text[0] == ' ' && dl->text[1] == ' ') return nullptr;
         switch (dl->ack) {
             case DisplayLine::ACKED:
             case DisplayLine::ACKED_RELAY:
@@ -2693,6 +2700,23 @@ static void drawDmConv() {
     dirtyChat = false;
 }
 
+static const char *cfgDeviceRoleName(uint8_t role) {
+    switch (role) {
+        case 0:  return "CLIENT";
+        case 1:  return "CLIENT_MUTE";
+        case 2:  return "ROUTER";
+        case 3:  return "ROUTER_CLIENT";
+        case 4:  return "REPEATER";
+        case 5:  return "TRACKER";
+        case 6:  return "SENSOR";
+        case 7:  return "TAK";
+        case 8:  return "CLIENT_HIDDEN";
+        case 9:  return "LOST_AND_FOUND";
+        case 10: return "TAK_TRACKER";
+        default: return "UNKNOWN";
+    }
+}
+
 // ── Draw: settings page ───────────────────────────────────────
 static void drawSettings() {
     clearPanelCloseRect();
@@ -2722,12 +2746,63 @@ static void drawSettings() {
 
     y += SETTINGS_HDR_H;
 
-    // ── Action buttons ────────────────────────────────────────
-    for (int i = 0; i < NUM_SETTINGS; i++, y += SH) {
-        if (y + SH > controlsTop - 1) break;
-        bool     sel = (i == settingsSel);
-        uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        uint16_t fg  = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
+    // ── Read-only config info ─────────────────────────────────
+    const uint16_t DIM = COL_TEXT_DIM;
+    static constexpr int kCfgInfoMaxLines = 12;
+    char info[kCfgInfoMaxLines][LCD_W / CHAR_W + 2];
+    int infoCount = 0;
+
+    bool hasPubKey = false;
+    for (int i = 0; i < 32; i++) {
+        if (myPubKey[i] != 0) {
+            hasPubKey = true;
+            break;
+        }
+    }
+
+    snprintf(info[infoCount++], sizeof(info[0]), "Node ID: !%08x", (unsigned)myNodeId);
+    snprintf(info[infoCount++], sizeof(info[0]), "Role: %s", cfgDeviceRoleName(gCfg.deviceRole));
+    snprintf(info[infoCount++], sizeof(info[0]), "PKI key: %s", hasPubKey ? "present" : "missing");
+    snprintf(info[infoCount++], sizeof(info[0]), "Long Name:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
+    snprintf(info[infoCount++], sizeof(info[0]), "Short Name: %s", gCfg.nodeShort);
+    snprintf(info[infoCount++], sizeof(info[0]), "Frequency:  %.3f MHz", gCfg.loraFreq);
+    snprintf(info[infoCount++], sizeof(info[0]), "BW:%.0f  SF:%d  CR:4/%d",
+             gCfg.loraBw, gCfg.loraSf, gCfg.loraCr);
+    snprintf(info[infoCount++], sizeof(info[0]), "Pwr:%d dBm  Hops:%d",
+             gCfg.loraPower, gCfg.loraHopLimit);
+
+    const int contentTop = y;
+    const int contentRows = max(1, (controlsTop - contentTop) / SH);
+    const int statusRows = settingsStatus[0] ? 1 : 0;
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int minInfoRows = min(3, infoCount);
+#else
+    const int minInfoRows = min(2, infoCount);
+#endif
+
+    int actionRowsVisible = min(NUM_SETTINGS,
+                                max(1, contentRows - statusRows - minInfoRows));
+    int infoRowsVisible = max(0, contentRows - actionRowsVisible - statusRows);
+    if (infoCount > 0 && infoRowsVisible == 0 && actionRowsVisible > 1) {
+        actionRowsVisible--;
+        infoRowsVisible = max(0, contentRows - actionRowsVisible - statusRows);
+    }
+
+    int actionScrollMax = max(0, NUM_SETTINGS - actionRowsVisible);
+    int actionScroll = 0;
+    if (settingsSel >= actionRowsVisible) {
+        actionScroll = settingsSel - actionRowsVisible + 1;
+        if (actionScroll > actionScrollMax) actionScroll = actionScrollMax;
+    }
+
+    y = contentTop;
+    for (int row = 0; row < actionRowsVisible; row++) {
+        int i = actionScroll + row;
+        if (i >= NUM_SETTINGS) break;
+        bool sel = (i == settingsSel);
+        uint16_t bg = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        uint16_t fg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
         lcd.fillRect(ix, y, iw, SH, bg);
         lcd.setTextColor(fg, bg);
 #if HAS_SD_CARD
@@ -2750,49 +2825,45 @@ static void drawSettings() {
         else
             snprintf(buf, sizeof(buf), "Web Config: OFF");
         drawClippedText(ix + 4, y + 1, iw - 8, buf);
+        y += SH;
     }
 
-    // ── Status line (transient feedback) ─────────────────────
     if (settingsStatus[0] && y + SH <= controlsTop - 1) {
         lcd.fillRect(ix, y, iw, SH, COL_PANEL_BG);
         lcd.setTextColor(COL_TEAL, COL_PANEL_BG);
         drawClippedText(ix + 2, y, iw - 4, settingsStatus);
-    }
-    y += SH;  // always advance past status slot
-
-    // ── Separator ─────────────────────────────────────────────
-    if (y + SH <= controlsTop - 1)
-        lcd.drawFastHLine(ix + 2, y + SH / 2, iw - 4, COL_DIVIDER);
-    y += SH;
-
-    // ── Read-only config info ─────────────────────────────────
-    const uint16_t DIM = COL_TEXT_DIM;
-    int infoRow = 0;
-    auto pr = [&](const char *s) {
-        if (y + SH > controlsTop - 1) return;
-        uint16_t bg = ((infoRow++ & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
-        lcd.fillRect(ix, y, iw, SH, bg);
-        lcd.setTextColor(DIM, bg);
-        drawClippedText(ix + 2, y, iw - 4, s);
         y += SH;
-    };
+    }
 
-    snprintf(buf, sizeof(buf), "Long Name:  %.*s", (int)(LCD_W / CHAR_W) - 7, gCfg.nodeLong);
-    pr(buf);
+    settingsInfoScrollMax = max(0, infoCount - infoRowsVisible);
+    settingsInfoScroll = constrain(settingsInfoScroll, 0, settingsInfoScrollMax);
 
-    snprintf(buf, sizeof(buf), "Short Name: %s", gCfg.nodeShort);
-    pr(buf);
+    for (int row = 0; row < infoRowsVisible; row++) {
+        int idx = settingsInfoScroll + row;
+        int rowY = y + row * SH;
+        uint16_t bg = ((idx & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        lcd.fillRect(ix, rowY, iw, SH, bg);
+        if (idx >= infoCount) continue;
+        lcd.setTextColor(DIM, bg);
+        drawClippedText(ix + 2, rowY, iw - 4, info[idx]);
+    }
 
-    snprintf(buf, sizeof(buf), "Frequency:  %.3f MHz", gCfg.loraFreq);
-    pr(buf);
+    int usedBottom = y + infoRowsVisible * SH;
+    if (usedBottom < controlsTop) {
+        lcd.fillRect(ix, usedBottom, iw, controlsTop - usedBottom, COL_PANEL_BG);
+    }
 
-    snprintf(buf, sizeof(buf), "BW:%.0f  SF:%d  CR:4/%d",
-             gCfg.loraBw, gCfg.loraSf, gCfg.loraCr);
-    pr(buf);
-
-    snprintf(buf, sizeof(buf), "Pwr:%d dBm  Hops:%d",
-             gCfg.loraPower, gCfg.loraHopLimit);
-    pr(buf);
+    if (infoRowsVisible > 0 && settingsInfoScroll > 0) {
+        uint16_t topBg = ((settingsInfoScroll & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        lcd.setTextColor(COL_TEAL, topBg);
+        drawClippedText(ix + iw - 8, y, 6, "^");
+    }
+    if (infoRowsVisible > 0 && settingsInfoScroll < settingsInfoScrollMax) {
+        int bottomIdx = settingsInfoScroll + infoRowsVisible - 1;
+        uint16_t bottomBg = ((bottomIdx & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
+        lcd.setTextColor(COL_TEAL, bottomBg);
+        drawClippedText(ix + iw - 8, y + (infoRowsVisible - 1) * SH, 6, "v");
+    }
 
     int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
     drawPanelCloseButton(mx + 3, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
@@ -4412,7 +4483,9 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_PREV);
         } else if (activeView == VIEW_SETTINGS) {
-            settingsSel = max(0, settingsSel - 1);
+            if (settingsSel == NUM_SETTINGS - 1 && settingsInfoScroll > 0) settingsInfoScroll--;
+            else if (settingsSel > 0) settingsSel--;
+            else if (settingsInfoScroll > 0) settingsInfoScroll--;
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
@@ -4448,7 +4521,8 @@ static void handleKey(char k) {
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_NEXT);
         } else if (activeView == VIEW_SETTINGS) {
-            settingsSel = min(NUM_SETTINGS - 1, settingsSel + 1);
+            if (settingsSel < NUM_SETTINGS - 1) settingsSel++;
+            else if (settingsInfoScroll < settingsInfoScrollMax) settingsInfoScroll++;
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
