@@ -17,6 +17,7 @@
 #define KEY_PAGE_UP     0x84
 #define KEY_PAGE_DN     0x85
 #define KEY_ROLLER      0x86   // trackball click
+#define KEY_BACKSPACE_HOLD 0x87  // long-hold BACKSPACE (non-touch panel close)
 #define KEY_NODE_FOCUS  0x05   // ALT+E — focus/unfocus node list; verify with serial if wrong
 
 class TDeckKeyboard {

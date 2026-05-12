@@ -2,7 +2,7 @@
 #include "config.h"
 #include "display_splash_common.h"
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
 constexpr DisplayUiProfile kDisplayUiProfile = {
     {

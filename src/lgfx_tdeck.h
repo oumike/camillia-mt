@@ -18,6 +18,8 @@ protected:
     }
 };
 using DisplayPanel = Panel_HeltecV4Tft;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+using DisplayPanel = lgfx::Panel_ST7796;
 #else
 using DisplayPanel = lgfx::Panel_ST7789;
 #endif

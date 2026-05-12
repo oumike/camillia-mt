@@ -427,40 +427,56 @@ static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
 #define COL_SPLASH_SUB     gUi.splashSub
 #define COL_SPLASH_DIM     gUi.splashDim
 
+struct UiThemePreset {
+    uint8_t theme;
+    uint8_t mode;
+    uint16_t bgMain;
+    uint16_t panelBg;
+    uint16_t panelAlt;
+    uint16_t accent;
+    const char *name;
+};
+
+static constexpr uint8_t UI_THEME_PRESET_COUNT = 8;
+static const UiThemePreset kUiThemePresets[UI_THEME_PRESET_COUNT] = {
+    { UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark" },
+    { UI_THEME_CAMELLIA, UI_MODE_LIGHT, 0xFF5D, 0xFFDF, 0xFF1B, 0xB964, "Camillia Light" },
+    { UI_THEME_EVERGREEN, UI_MODE_DARK,  0x00A8, 0x11AA, 0x1A2C, 0x55B0, "Evergreen Dark" },
+    { UI_THEME_EVERGREEN, UI_MODE_LIGHT, 0xE73C, 0xF7DE, 0xE71B, 0x2D2A, "Evergreen Light" },
+    { UI_THEME_EARTHEN, UI_MODE_DARK,  0x1082, 0x2104, 0x2945, 0xD38B, "Earthy Dark" },
+    { UI_THEME_EARTHEN, UI_MODE_LIGHT, 0xF7DE, 0xFFDF, 0xF75C, 0xB40B, "Earthy Light" },
+    { UI_THEME_SOLARIZED, UI_MODE_DARK,
+        rgb565(0x00, 0x2b, 0x36), rgb565(0x07, 0x36, 0x42), rgb565(0x0c, 0x3c, 0x47), rgb565(0x2a, 0xa1, 0x98),
+        "Solarized Dark" },
+    { UI_THEME_SOLARIZED, UI_MODE_LIGHT,
+        rgb565(0xfd, 0xf6, 0xe3), rgb565(0xfd, 0xf6, 0xe3), rgb565(0xee, 0xe8, 0xd5), rgb565(0x2a, 0xa1, 0x98),
+        "Solarized Light" },
+};
+
+static uint8_t gActiveUiThemePreset = 0;
+
+static uint8_t uiThemePresetIndexFromCfg() {
+    for (uint8_t i = 0; i < UI_THEME_PRESET_COUNT; i++) {
+        if (kUiThemePresets[i].theme == gCfg.uiTheme
+            && kUiThemePresets[i].mode == gCfg.uiMode) {
+            return i;
+        }
+    }
+    return 0;
+}
+
 static uint8_t uiThemePresetIndex() {
-    if (gCfg.uiTheme == UI_THEME_SOLARIZED)
-        return (gCfg.uiMode == UI_MODE_LIGHT) ? 7 : 6;
-    if (gCfg.uiTheme == UI_THEME_EARTHEN)
-        return (gCfg.uiMode == UI_MODE_LIGHT) ? 5 : 4;
-    if (gCfg.uiTheme == UI_THEME_EVERGREEN)
-        return (gCfg.uiMode == UI_MODE_LIGHT) ? 3 : 2;
-    return (gCfg.uiMode == UI_MODE_LIGHT) ? 1 : 0;
+    return (uint8_t)(gActiveUiThemePreset % UI_THEME_PRESET_COUNT);
 }
 
 static const char *uiThemePresetName(uint8_t preset) {
-    switch (preset % 8) {
-        case 0: return "Camillia Dark";
-        case 1: return "Camillia Light";
-        case 2: return "Evergreen Dark";
-        case 3: return "Evergreen Light";
-        case 4: return "Earthy Dark";
-        case 5: return "Earthy Light";
-        case 6: return "Solarized Dark";
-        default: return "Solarized Light";
-    }
+    return kUiThemePresets[preset % UI_THEME_PRESET_COUNT].name;
 }
 
 static void setUiThemePreset(uint8_t preset) {
-    switch (preset % 8) {
-        case 0: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_DARK; break;
-        case 1: gCfg.uiTheme = UI_THEME_CAMELLIA; gCfg.uiMode = UI_MODE_LIGHT; break;
-        case 2: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_DARK; break;
-        case 3: gCfg.uiTheme = UI_THEME_EVERGREEN; gCfg.uiMode = UI_MODE_LIGHT; break;
-        case 4: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_DARK; break;
-        case 5: gCfg.uiTheme = UI_THEME_EARTHEN; gCfg.uiMode = UI_MODE_LIGHT; break;
-        case 6: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_DARK; break;
-        default: gCfg.uiTheme = UI_THEME_SOLARIZED; gCfg.uiMode = UI_MODE_LIGHT; break;
-    }
+    const UiThemePreset &p = kUiThemePresets[preset % UI_THEME_PRESET_COUNT];
+    gCfg.uiTheme = p.theme;
+    gCfg.uiMode = p.mode;
 }
 
 static void persistUiTheme() {
@@ -474,6 +490,7 @@ static void persistUiTheme() {
 static void applyUiTheme(bool markDirty = true) {
     gCfg.uiTheme = (uint8_t)constrain((int)gCfg.uiTheme, 0, UI_THEME_COUNT - 1);
     gCfg.uiMode  = (uint8_t)(gCfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+    gActiveUiThemePreset = uiThemePresetIndexFromCfg();
 
     if (gCfg.uiTheme == UI_THEME_EARTHEN) {
         if (gCfg.uiMode == UI_MODE_LIGHT) {
@@ -629,42 +646,48 @@ static int prevMeshChannelView(int from) {
     return from;
 }
 
-static int navButtonCount() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    return 4;
+static bool useCompactKeyboardUi() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+    return true;
 #else
-    return NAV_BTN_COUNT;
+    return false;
 #endif
 }
 
+static int navButtonCount() {
+    return useCompactKeyboardUi() ? 4 : NAV_BTN_COUNT;
+}
+
 static const char *navButtonLabel(int idx) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    static const char *labels[] = { "DM", "MAP", "LIVE", "CFG" };
-#else
+    if (useCompactKeyboardUi()) {
+        static const char *labels[] = { "DM", "MAP", "LIVE", "CFG" };
+        return labels[idx];
+    }
     static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
-#endif
     return labels[idx];
 }
 
 static void activateNavButton(int idx) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    switch (idx) {
-        case 0:
-            if (activeView != CHAN_DM) goToView(CHAN_DM);
-            break;
-        case 1:
-            if (activeView != VIEW_MAP) goToView(VIEW_MAP);
-            break;
-        case 2:
-            if (activeView != CHAN_ANN) goToView(CHAN_ANN);
-            break;
-        case 3:
-            if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
-            break;
-        default:
-            break;
+    if (useCompactKeyboardUi()) {
+        switch (idx) {
+            case 0:
+                if (activeView != CHAN_DM) goToView(CHAN_DM);
+                break;
+            case 1:
+                if (activeView != VIEW_MAP) goToView(VIEW_MAP);
+                break;
+            case 2:
+                if (activeView != CHAN_ANN) goToView(CHAN_ANN);
+                break;
+            case 3:
+                if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+                break;
+            default:
+                break;
+        }
+        return;
     }
-#else
+
     switch (idx) {
         case 0:
             goToView(prevView(activeView));
@@ -687,52 +710,40 @@ static void activateNavButton(int idx) {
         default:
             break;
     }
-#endif
 }
 
 static bool cardputerChannelNavReady() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (useCompactKeyboardUi()) {
     bool typing = softKbVisible || hwTypingLock || inputLen > 0;
     return !typing
         && !nodeDetailOpen
         && !nodeListFocused
         && activeView >= 0
         && activeView < MESH_CHANNELS;
-#else
+    }
     return false;
-#endif
 }
 
 static bool cardputerPanelShortcutReady() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (useCompactKeyboardUi()) {
     if (softKbVisible) return false;
     // Keep panel hotkeys active in non-text views (CFG/ANN/MAP/DM list),
     // even if the chat input buffer still contains stale text.
     if (isTextInputView() && (hwTypingLock || inputLen > 0)) return false;
     return true;
-#else
+    }
     return false;
-#endif
 }
 
 static bool showPanelScrollButtons() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    return false;
-#else
-    return true;
-#endif
+    return !useCompactKeyboardUi();
 }
 
 static bool showPanelCloseButtons() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    return false;
-#else
-    return true;
-#endif
+    return !useCompactKeyboardUi();
 }
 
 static char remapCardputerDirectionalKey(char k) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (!cardputerPanelShortcutReady()) return k;
 
     if (activeView == VIEW_MAP) {
@@ -749,7 +760,6 @@ static char remapCardputerDirectionalKey(char k) {
         if (k == ',') return KEY_PREV_CHAN;
         if (k == '/') return KEY_NEXT_CHAN;
     }
-#endif
     return k;
 }
 
@@ -786,7 +796,7 @@ static void goToView(int v) {
                 DMs.markRead(c->nodeId);
                 dmConvNodeId = c->nodeId;
                 dmConvOpen   = true;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                 if (inputLen == 0) hwTypingLock = true;
 #endif
                 break;
@@ -1197,6 +1207,14 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
     clearPanelCloseRect();
     return;
 #endif
+    if (useCompactKeyboardUi()) {
+        (void)x;
+        (void)y;
+        (void)w;
+        (void)h;
+        clearPanelCloseRect();
+        return;
+    }
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
     drawSquirclePill(x, y, w, h, fill, COL_SELECT_ACCENT, false);
     lcd.setFont(&fonts::Font0);
@@ -2073,7 +2091,7 @@ static void drawMapPanel() {
         }
     }
 
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TLORA_PAGER_TFT)
     const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
     const int closeW = 46;
     drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
@@ -2120,6 +2138,14 @@ static void drawMapPanel() {
         drawClippedText(tx, ty, btnW[i] - (tx - bx) - 1, labels[i]);
         setMapControlRect((MapControlAction)i, bx, btnY, btnW[i], mapNavBtnH);
     }
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setFont(&fonts::Font0);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    drawClippedText(mx + 4, legendY, mw - 8, "Wheel:Prev/Next  M:Me  I:+  O:-");
 #endif
 
     lcd.setFont(&fonts::Font0);
@@ -2333,7 +2359,7 @@ static void openDmWith(NodeEntry *n) {
     DMs.markRead(n->nodeId);
     dmConvNodeId = n->nodeId;
     dmConvOpen   = true;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     if (inputLen == 0) hwTypingLock = true;
 #endif
     dmPickerOpen = false;
@@ -2692,7 +2718,7 @@ static void drawDmConv() {
 #endif
 
     lcd.setFont(&fonts::Font0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     // DM conversation repaints can overwrite the prompt strip; request an
     // input-bar pass so the composer prompt remains visible.
     dirtyInput = true;
@@ -2983,7 +3009,7 @@ static void drawNodeDetail(const NodeEntry *n) {
 
 static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
     if (activeView >= 0 && activeView < MESH_CHANNELS) {
         return hwTypingLock || inputLen > 0;
     }
@@ -2996,19 +3022,17 @@ static bool isTextInputView() {
 }
 
 static bool panelCoversInputArea() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (useCompactKeyboardUi()) {
     return isPanelView(activeView) && !isTextInputView();
-#else
+    }
     return isPanelView(activeView);
-#endif
 }
 
 static int panelOverlayBottomY() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (useCompactKeyboardUi()) {
     return LCD_H - 1;
-#else
+    }
     return INPUT_Y + INPUT_H - 1;
-#endif
 }
 
 static void handleKey(char k);
@@ -3524,7 +3548,7 @@ static void drawInput() {
     }
 
     if (panelCoversInputArea()) {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     if (showTextInput && activeView == CHAN_DM && (inputLen > 0 || hwTypingLock)) {
             lcd.setFont(&fonts::DejaVu9);
             lcd.setTextSize(1);
@@ -3656,7 +3680,7 @@ static void drawInput() {
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
     for (int i = 0; i < navButtonCount(); i++) {
         const char *label = navButtonLabel(i);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         if (navButtonCount() == 4) {
             char head[2] = { label[0], '\0' };
             const char *tail = label + 1;
@@ -3903,7 +3927,7 @@ static void handleRx(MeshPacket pkt) {
                 DMs.markRead(pkt.hdr.from);
                 dmConvNodeId = pkt.hdr.from;
                 dmConvOpen   = true;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                 if (inputLen == 0) hwTypingLock = true;
 #endif
                 viewing      = true;
@@ -4136,11 +4160,11 @@ static void activateSettingsSelection() {
 #endif
 
     if (settingsSel == SETTING_THEME) {
-        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % 8);
+        uint8_t p = (uint8_t)((uiThemePresetIndex() + 1) % UI_THEME_PRESET_COUNT);
         setUiThemePreset(p);
         applyUiTheme();
         persistUiTheme();
-        snprintf(settingsStatus, sizeof(settingsStatus), "Theme: %s", uiThemePresetName(p));
+        snprintf(settingsStatus, sizeof(settingsStatus), "Theme: %s", uiThemePresetName(uiThemePresetIndex()));
     } else if (settingsSel == SETTING_ANNOUNCE) {
         webCfgQueueAnnounce();
         snprintf(settingsStatus, sizeof(settingsStatus), "NODEINFO broadcast queued.");
@@ -4196,7 +4220,45 @@ static void handleKey(char k) {
 
     k = remapCardputerDirectionalKey(k);
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (k == KEY_BACKSPACE_HOLD) {
+        if (isPanelView(activeView)) {
+            closePanelToChannel();
+            return;
+        }
+        return;
+    }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    bool tloraChannelView = (activeView >= 0 && activeView < MESH_CHANNELS);
+    bool tloraChannelIdle = tloraChannelView
+                         && !nodeDetailOpen
+                         && !nodeListFocused
+                         && !softKbVisible
+                         && !(hwTypingLock || inputLen > 0);
+
+    // On the pager wheel, rotate to move between channels when not in panel views.
+    if (tloraChannelIdle && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+        k = (k == KEY_SCROLL_UP) ? KEY_PREV_CHAN : KEY_NEXT_CHAN;
+    }
+
+    // Channel click enters compose mode instead of cycling tabs.
+    if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused) {
+        if (!(hwTypingLock || inputLen > 0)) {
+            hwTypingLock = true;
+            dirtyInput = true;
+        }
+        return;
+    }
+
+    // Pager preference: reverse wheel direction in CFG and MAP panels.
+    if (activeView == VIEW_SETTINGS || activeView == VIEW_MAP) {
+        if (k == KEY_SCROLL_UP) k = KEY_SCROLL_DN;
+        else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
+    }
+
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
     if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
         hwTypingLock = false;
         inputLen = 0;
@@ -4207,7 +4269,7 @@ static void handleKey(char k) {
     }
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
     if (cardputerPanelShortcutReady()) {
         switch (k) {
             case '`':
@@ -4223,6 +4285,20 @@ static void handleKey(char k) {
                 if (activeView == VIEW_MAP) mapApplyControl(MAP_CTL_ME);
                 else goToView(VIEW_MAP);
                 return;
+            case 'i':
+            case 'I':
+                if (activeView == VIEW_MAP) {
+                    mapApplyControl(MAP_CTL_ZOOM_IN);
+                    return;
+                }
+                break;
+            case 'o':
+            case 'O':
+                if (activeView == VIEW_MAP) {
+                    mapApplyControl(MAP_CTL_ZOOM_OUT);
+                    return;
+                }
+                break;
             case 'l':
             case 'L':
                 if (activeView != CHAN_ANN) goToView(CHAN_ANN);
@@ -4260,7 +4336,7 @@ static void handleKey(char k) {
 
     if (k == KEY_ENTER) {
         bool wasTyping = hwTypingLock || inputLen > 0;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
             hwTypingLock = true;
             dirtyInput = true;
@@ -4290,7 +4366,7 @@ static void handleKey(char k) {
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                         if (inputLen == 0) hwTypingLock = true;
 #endif
                         dirtyChat = dirtyInput = dirtyTabs = true;
@@ -4304,7 +4380,7 @@ static void handleKey(char k) {
                         // TX failed — add a local error line so the user knows
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
                     }
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                     hwTypingLock = true;
 #else
                     hwTypingLock = false;
@@ -4397,7 +4473,7 @@ static void handleKey(char k) {
                     if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
                     }
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                     hwTypingLock = true;
 #else
                     hwTypingLock = false;
@@ -4422,7 +4498,7 @@ static void handleKey(char k) {
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                         if (inputLen == 0) hwTypingLock = true;
 #endif
                         dirtyChat = dirtyInput = dirtyTabs = true;
@@ -4551,7 +4627,7 @@ static void handleKey(char k) {
         }
 
     } else if (k >= 0x20 && k < 0x7F) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         if (activeView >= 0 && activeView < MESH_CHANNELS
             && !dmPickerOpen
             && !(hwTypingLock || inputLen > 0)) {
@@ -5041,7 +5117,7 @@ static void pollInput() {
     // Touchscreen tap handling (for on-screen channel nav buttons)
 #if TOUCH_POLL_ENABLED
     static uint32_t lastTouchPollMs = 0;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     static bool touchHandledOnPress = false;
 #endif
     if (now - lastTouchPollMs >= 16) {
@@ -5057,7 +5133,7 @@ static void pollInput() {
                 touchStartX = tx;
                 touchStartY = ty;
                 touchDownMs = now;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                 touchHandledOnPress = handleTouchTap((int)tx, (int)ty);
 #endif
             }
@@ -5071,7 +5147,7 @@ static void pollInput() {
             bool shortTap = (now - touchDownMs) <= tapHoldLimit;
             bool steady   = (abs(touchLastX - touchStartX) <= driftLimit)
                          && (abs(touchLastY - touchStartY) <= driftLimit);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
             if (!touchHandledOnPress && shortTap && steady) {
 #else
             if (shortTap && steady) {
@@ -5080,7 +5156,7 @@ static void pollInput() {
                 int tapY = (activeView == VIEW_MAP) ? touchLastY : (touchStartY + touchLastY) / 2;
                 handleTouchTap(tapX, tapY);
             }
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
             touchHandledOnPress = false;
 #endif
             touchDown = false;

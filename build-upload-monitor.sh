@@ -10,6 +10,7 @@ DEBUG_ENV_NAME="tdeck-debug"
 CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
+TLORA_ENV_NAME="tlora-pager-tft"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 
@@ -29,6 +30,10 @@ prompt_for_device() {
 	if has_env "$CARDPUTER_ENV_NAME"; then
 		options+=("$CARDPUTER_ENV_NAME")
 		labels+=("M5Stack Cardputer + Cap LoRa/GPS")
+	fi
+	if has_env "$TLORA_ENV_NAME"; then
+		options+=("$TLORA_ENV_NAME")
+		labels+=("LilyGo T-Lora Pager TFT")
 	fi
 	if has_env "$HELTEC_ENV_NAME"; then
 		options+=("$HELTEC_ENV_NAME")
@@ -67,10 +72,11 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]"
+	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--tlora|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
+	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME)"
 	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
@@ -107,6 +113,15 @@ for arg in "$@"; do
 				ENV_EXPLICIT=true
 			else
 				echo "Environment '$CARDPUTER_ENV_NAME' not found in platformio.ini"
+				exit 1
+			fi
+			;;
+		--pager|-P)
+			if has_env "$TLORA_ENV_NAME"; then
+				ENV_NAME="$TLORA_ENV_NAME"
+				ENV_EXPLICIT=true
+			else
+				echo "Environment '$TLORA_ENV_NAME' not found in platformio.ini"
 				exit 1
 			fi
 			;;

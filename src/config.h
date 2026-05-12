@@ -2,7 +2,7 @@
 
 // Board, radio, UI, and default runtime configuration constants.
 
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
 #define DEVICE_TDECK 1
 #endif
 
@@ -103,6 +103,96 @@
 #define DEVICE_LCD_PORTRAIT_H   320
 #define DEVICE_LCD_LANDSCAPE_W  320
 #define DEVICE_LCD_LANDSCAPE_H  240
+
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+#define BOARD_POWERON   -1
+#define BOARD_BUZZER    -1
+#define BOARD_VEXT_ENABLE    -1
+#define BOARD_VEXT_ON_LEVEL  HIGH
+
+// Display SPI (LilyGo T-Lora Pager TFT, ST7796, landscape 480x222)
+#define TFT_SPI_HOST    SPI2_HOST
+#define TFT_SPI_SCK     35
+#define TFT_SPI_MISO    33
+#define TFT_SPI_MOSI    34
+#define TFT_SPI_3WIRE   false
+#define TFT_SPI_WRITE_HZ 40000000
+#define TFT_SPI_READ_HZ  16000000
+#define TFT_CS          38
+#define TFT_DC          37
+#define TFT_BL          42
+#define TFT_BL_INVERT   false
+#define TFT_BL_FREQ     12000
+#define TFT_BL_PWM_CH   7
+#define TFT_BRIGHTNESS_DEFAULT 130
+#define TFT_RST         -1
+#define TFT_PANEL_WIDTH 222
+#define TFT_PANEL_HEIGHT 480
+#define TFT_PANEL_OFFSET_X 49
+#define TFT_PANEL_OFFSET_Y 0
+#define TFT_INVERT      true
+#define TFT_RGB_ORDER   false
+
+// LoRa SX1262
+#define LORA_SPI_SCK    35
+#define LORA_SPI_MISO   33
+#define LORA_SPI_MOSI   34
+#define LORA_CS         36
+#define LORA_DIO1       14
+#define LORA_RST        47
+#define LORA_BUSY       48
+#define LORA_FEM_POWER_PIN   -1
+#define LORA_FEM_ENABLE_PIN  -1
+#define LORA_FEM_TX_MODE_PIN -1
+
+// microSD (shared SPI bus, dedicated CS)
+#define SD_CS           21
+#define HAS_SD_CARD     1
+
+// T-Lora pager keyboard (TCA8418)
+#define HAS_KEYBOARD    1
+#define KB_SDA          3
+#define KB_SCL          2
+#define KB_ADDR       0x34
+#define KB_INT          6
+#define KB_BL           46
+
+#define HAS_TOUCH        0
+#define TOUCH_SDA       -1
+#define TOUCH_SCL       -1
+#define TOUCH_ADDR      0x00
+#define TOUCH_INT       -1
+#define TOUCH_RST       -1
+#define TOUCH_I2C_PORT   0
+#define TOUCH_POLL_ENABLED 0
+
+// Roller wheel + click (mirror T-Deck trackball behavior)
+#define HAS_TRACKBALL    1
+#define TBALL_UP        40
+#define TBALL_DOWN      41
+#define TBALL_LEFT      -1
+#define TBALL_RIGHT     -1
+#define TBALL_CLICK      7
+
+#define USER_BUTTON_PIN   0
+#define USER_BUTTON_ACTIVE_LEVEL LOW
+
+#define HAS_GPS         1
+#define GPS_RX           4
+#define GPS_TX          12
+#define GPS_BAUD        38400
+
+#define BATT_ADC_PIN    -1
+#define BATT_DIV        2.0f
+#define BATT_SENSE_ENABLE_PIN    -1
+#define BATT_SENSE_ENABLE_LEVEL  LOW
+
+#define MESH_TCXO_V     3.0f
+#define HAS_PSRAM       1
+#define DEVICE_LCD_PORTRAIT_W   222
+#define DEVICE_LCD_PORTRAIT_H   480
+#define DEVICE_LCD_LANDSCAPE_W  480
+#define DEVICE_LCD_LANDSCAPE_H  222
 
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 #define BOARD_POWERON   -1
@@ -286,6 +376,8 @@
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
 #define TFT_ROTATION_DEFAULT 3
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+#define TFT_ROTATION_DEFAULT 3
 #elif DEVICE_UI_VERTICAL
 #define TFT_ROTATION_DEFAULT 0
 #else
@@ -408,6 +500,14 @@
 #define NODE_W           67
 #define DIVIDER_X       172
 #define INPUT_H          18
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+#define STATUS_H         26   // compact status chrome for 222px-tall display
+#define TAB_H            12   // tighter tabs to preserve chat height
+#define MSG_W           352   // use the wide panel for longer message rows
+#define NODE_X          353   // node pane left edge
+#define NODE_W          127   // wider node list/details pane on 480px display
+#define DIVIDER_X       352   // 1px vertical divider
+#define INPUT_H          30   // keeps DM composer visible while maximizing chat rows
 #else
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
@@ -433,8 +533,8 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 
 #define DM_LINE_H        11   // row stride in DM conversation view (8px char + 3px gap)
 #define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing
-#define MSG_CHARS       (MSG_W / CHAR_W)    // 38 chars per message line
-#define NODE_CHARS      (NODE_W / CHAR_W)   // 14 chars in node pane
+#define MSG_CHARS       (MSG_W / CHAR_W)    // derived chars per message line
+#define NODE_CHARS      (NODE_W / CHAR_W)   // derived chars in node pane
 
 // ── Message storage ───────────────────────────────────────────
 #define MESH_CHANNELS     8   // number of actual LoRa channels (0-7)

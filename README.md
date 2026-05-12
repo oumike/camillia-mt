@@ -5,6 +5,7 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 ## Hardware
 
 - [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
+- [LilyGo T-Lora Pager TFT](https://lilygo.cc/) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
 - Heltec WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 
 No additional hardware required.
@@ -12,12 +13,13 @@ No additional hardware required.
 ## Supported Devices
 
 - LilyGo T-Deck (`tdeck`): keyboard + trackball + touch input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
+- LilyGo T-Lora Pager TFT (`tlora-pager-tft`): keyboard + roller wheel input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
 - M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`): keyboard-driven input/navigation, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
 - Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config); microSD is not enabled in this profile.
 - Heltec WiFi LoRa 32 V4 + TFT expansion kit, vertical UI (`heltec-v4-vertical`): same functionality as `heltec-v4` with a vertical-oriented UI layout.
 
 Notes:
-- All keyboard-specific shortcuts apply to keyboard builds (`tdeck` and `cardputer-cap`).
+- All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tlora-pager-tft`, and `cardputer-cap`).
 - Environmental telemetry via BME280 is available on Heltec V4 expansion builds when a compatible sensor is present.
 
 ## Features
@@ -47,11 +49,18 @@ For vertical Heltec UI builds (separate env):
 pio run -e heltec-v4-vertical --target upload --upload-port /dev/<heltec-port>
 ```
 
+For T-Lora Pager TFT builds:
+
+```
+pio run -e tlora-pager-tft --target upload --upload-port /dev/<pager-port>
+```
+
 Using the helper script:
 
 ```
 ./build-upload-monitor.sh --heltec
 ./build-upload-monitor.sh --vertical
+./build-upload-monitor.sh --tlora
 ```
 
 Or, to build and monitor the serial output after flashing:
@@ -73,6 +82,8 @@ On first boot, connect to the `camillia-mt` Wi-Fi access point, then open `http:
 | Trackball left / right | Previous / next channel tab |
 | Trackball up / down | Scroll messages |
 | Trackball click | Confirm / send (context-dependent) |
+| Roller wheel up / down (`tlora-pager-tft`) | Scroll messages |
+| Roller click (`tlora-pager-tft`) | Confirm / send (context-dependent) |
 | Enter | Send message |
 | Backspace | Delete character |
 | Tab | Cycle focus between message pane and node list |

@@ -3,7 +3,7 @@
 ## Requirements
 
 - [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) (CLI or IDE extension)
-- USB-C cable connected to the T-Deck
+- USB-C cable connected to your target device
 
 Dependencies are fetched automatically by PlatformIO on first build.
 
@@ -24,6 +24,11 @@ Build for Heltec V4 (horizontal):
 ./build-upload-monitor.sh --heltec
 ```
 
+Build for T-Lora Pager TFT:
+```
+./build-upload-monitor.sh --tlora
+```
+
 Build for Cardputer + Cap LoRa/GPS:
 ```
 ./build-upload-monitor.sh --cardputer
@@ -42,6 +47,11 @@ pio run -e tdeck
 Build only (Cardputer + Cap LoRa/GPS):
 ```
 pio run -e cardputer-cap
+```
+
+Build only (T-Lora Pager TFT):
+```
+pio run -e tlora-pager-tft
 ```
 
 Build only (Heltec vertical env):
@@ -69,6 +79,7 @@ pio device monitor
 Download the image for your device and `flash.sh` from the [Releases](https://github.com/oumike/camillia-mt/releases) page, then:
 
 - `camillia-mt-tdeck-vX.Y.Z.bin`
+- `camillia-mt-tlora-pager-tft-vX.Y.Z.bin`
 - `camillia-mt-cardputer-cap-vX.Y.Z.bin`
 - `camillia-mt-heltec-vX.Y.Z.bin`
 - `camillia-mt-heltec-vertical-vX.Y.Z.bin`

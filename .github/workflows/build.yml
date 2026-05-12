@@ -29,6 +29,7 @@ jobs:
       - name: Build firmware
         run: |
           pio run -e tdeck
+          pio run -e tlora-pager-tft
           pio run -e cardputer-cap
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
@@ -43,6 +44,10 @@ jobs:
           cp .pio/build/tdeck/firmware.bin  dist/camillia-mt-tdeck-${TAG}.bin
           cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-tdeck-${TAG}.elf
           cp .pio/build/tdeck/firmware.map  dist/camillia-mt-tdeck-${TAG}.map 2>/dev/null || true
+
+          cp .pio/build/tlora-pager-tft/firmware.bin  dist/camillia-mt-tlora-pager-tft-${TAG}.bin
+          cp .pio/build/tlora-pager-tft/firmware.elf  dist/camillia-mt-tlora-pager-tft-${TAG}.elf
+          cp .pio/build/tlora-pager-tft/firmware.map  dist/camillia-mt-tlora-pager-tft-${TAG}.map 2>/dev/null || true
 
           cp .pio/build/cardputer-cap/firmware.bin  dist/camillia-mt-cardputer-cap-${TAG}.bin
           cp .pio/build/cardputer-cap/firmware.elf  dist/camillia-mt-cardputer-cap-${TAG}.elf

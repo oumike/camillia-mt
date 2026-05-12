@@ -86,8 +86,9 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
     Channel &ch = _chans[chanIdx];
     char line[MSG_CHARS + 1];
     static constexpr int MAX_WRAP_LINES = 64;
-    char wrapped[MAX_WRAP_LINES][MSG_CHARS + 1];
-    int wrappedCount = 0;
+    uint16_t segPos[MAX_WRAP_LINES];
+    uint16_t segLen[MAX_WRAP_LINES];
+    int segCount = 0;
     int  prefixLen = strlen(prefix);
     int  textLen   = strlen(text);
     int  pos       = 0;          // position in text
@@ -96,8 +97,13 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
 
     // Preserve existing behavior for empty message bodies.
     if (textLen == 0) {
-        if (prefixLen > 0) snprintf(line, sizeof(line), "%.*s", prefixLen, prefix);
-        else line[0] = '\0';
+        if (prefixLen > 0) {
+            int copy = min(prefixLen, MSG_CHARS);
+            memcpy(line, prefix, copy);
+            line[copy] = '\0';
+        } else {
+            line[0] = '\0';
+        }
         DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
         _pushLine(ch, line, color, packetId, ack);
         return;
@@ -119,16 +125,10 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             if (bp > 0) take = bp;
         }
 
-        if (firstLine) {
-            snprintf(line, sizeof(line), "%.*s%.*s", prefixLen, prefix, take, text + pos);
-        } else {
-            snprintf(line, sizeof(line), "%*s%.*s", CONT_INDENT, "", take, text + pos);
-        }
-
-        if (wrappedCount < MAX_WRAP_LINES) {
-            strncpy(wrapped[wrappedCount], line, MSG_CHARS);
-            wrapped[wrappedCount][MSG_CHARS] = '\0';
-            wrappedCount++;
+        if (segCount < MAX_WRAP_LINES) {
+            segPos[segCount] = (uint16_t)pos;
+            segLen[segCount] = (uint16_t)take;
+            segCount++;
         }
 
         pos += take;
@@ -138,12 +138,32 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
 
     // UI is newest-at-top; push wrapped lines in reverse so each long message
     // still reads top-down (first line first, continuation lines below).
-    for (int i = wrappedCount - 1; i >= 0; i--) {
+    for (int i = segCount - 1; i >= 0; i--) {
+        int w = 0;
+        if (i == 0) {
+            int pCopy = min(prefixLen, MSG_CHARS);
+            if (pCopy > 0) {
+                memcpy(line + w, prefix, pCopy);
+                w += pCopy;
+            }
+        } else {
+            int pad = min(CONT_INDENT, MSG_CHARS);
+            for (int s = 0; s < pad; s++) line[w++] = ' ';
+        }
+
+        int room = MSG_CHARS - w;
+        int copy = min((int)segLen[i], room);
+        if (copy > 0) {
+            memcpy(line + w, text + segPos[i], copy);
+            w += copy;
+        }
+        line[w] = '\0';
+
         bool logicalFirst = (i == 0);
         DisplayLine::AckState ack = (logicalFirst && packetId)
             ? DisplayLine::PENDING
             : DisplayLine::NONE;
-        _pushLine(ch, wrapped[i], color, packetId, ack);
+        _pushLine(ch, line, color, packetId, ack);
     }
 }
 

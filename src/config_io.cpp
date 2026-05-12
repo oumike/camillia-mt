@@ -2,6 +2,7 @@
 #include "base64_util.h"
 #include <SD.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,143 @@
 static const char *kPath = "/camillia/config.yaml";
 static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+namespace {
+constexpr uint8_t kXl9555RegOut0 = 0x02;
+constexpr uint8_t kXl9555RegOut1 = 0x03;
+constexpr uint8_t kXl9555RegCfg0 = 0x06;
+constexpr uint8_t kXl9555RegCfg1 = 0x07;
+
+constexpr uint8_t kExpDrvEn    = 0;
+constexpr uint8_t kExpAmpEn    = 1;
+constexpr uint8_t kExpLoraEn   = 3;
+constexpr uint8_t kExpGpsEn    = 4;
+constexpr uint8_t kExpKbEn     = 8;
+constexpr uint8_t kExpGpioEn   = 9;
+constexpr uint8_t kExpSdDet    = 10;
+constexpr uint8_t kExpSdPullen = 11;
+constexpr uint8_t kExpSdEn     = 12;
+
+uint8_t sPagerExpAddr = 0xFF;
+// Runtime-discovered working profile for this boot.
+int sPagerGoodProfile = -1;
+
+static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+static bool xl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)addr, 1) != 1) return false;
+    val = Wire.read();
+    return true;
+}
+
+static void xl9555SetOutput(uint8_t pin, bool level, bool invertDirSense,
+                            uint8_t &out0, uint8_t &out1,
+                            uint8_t &cfg0, uint8_t &cfg1) {
+    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
+    if (pin < 8) {
+        if (invertDirSense) cfg0 |= bit;
+        else                cfg0 &= (uint8_t)~bit;
+        if (level) out0 |= bit;
+        else       out0 &= (uint8_t)~bit;
+    } else {
+        if (invertDirSense) cfg1 |= bit;
+        else                cfg1 &= (uint8_t)~bit;
+        if (level) out1 |= bit;
+        else       out1 &= (uint8_t)~bit;
+    }
+}
+
+static void xl9555SetInput(uint8_t pin, bool invertDirSense,
+                           uint8_t &cfg0, uint8_t &cfg1) {
+    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
+    if (pin < 8) {
+        if (invertDirSense) cfg0 &= (uint8_t)~bit;
+        else                cfg0 |= bit;
+    } else {
+        if (invertDirSense) cfg1 &= (uint8_t)~bit;
+        else                cfg1 |= bit;
+    }
+}
+
+static bool pagerFindExpander() {
+    if (sPagerExpAddr != 0xFF) return true;
+    for (uint8_t a = 0x20; a <= 0x27; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) {
+            sPagerExpAddr = a;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool pagerApplyExpanderProfile(int profile) {
+    if (!pagerFindExpander()) {
+        Serial.println("[sd] pager expander not found (0x20-0x27)");
+        return false;
+    }
+
+    bool invertDirSense = false;
+    bool sdEnHigh = true;
+    enum SdPullenMode : uint8_t { PULLEN_INPUT = 0, PULLEN_LOW = 1, PULLEN_HIGH = 2 };
+    SdPullenMode pullenMode = PULLEN_INPUT;
+
+    switch (profile) {
+        case 0: invertDirSense = false; sdEnHigh = true;  pullenMode = PULLEN_INPUT; break;
+        case 1: invertDirSense = false; sdEnHigh = false; pullenMode = PULLEN_INPUT; break;
+        case 2: invertDirSense = false; sdEnHigh = true;  pullenMode = PULLEN_LOW;   break;
+        case 3: invertDirSense = true;  sdEnHigh = true;  pullenMode = PULLEN_INPUT; break;
+        case 4: invertDirSense = true;  sdEnHigh = false; pullenMode = PULLEN_INPUT; break;
+        default: return false;
+    }
+
+    uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
+    (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegOut0, out0);
+    (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegOut1, out1);
+    (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegCfg0, cfg0);
+    (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegCfg1, cfg1);
+
+    // Mirror Meshtastic tlora-pager bring-up so SD slot is electrically enabled.
+    xl9555SetOutput(kExpDrvEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpAmpEn, false, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpLoraEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpKbEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpSdEn, sdEnHigh, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpioEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetInput(kExpSdDet, invertDirSense, cfg0, cfg1);
+    if (pullenMode == PULLEN_INPUT) {
+        xl9555SetInput(kExpSdPullen, invertDirSense, cfg0, cfg1);
+    } else {
+        xl9555SetOutput(kExpSdPullen, pullenMode == PULLEN_HIGH, invertDirSense,
+                        out0, out1, cfg0, cfg1);
+    }
+
+    bool ok = xl9555WriteReg(sPagerExpAddr, kXl9555RegOut0, out0)
+           && xl9555WriteReg(sPagerExpAddr, kXl9555RegOut1, out1)
+           && xl9555WriteReg(sPagerExpAddr, kXl9555RegCfg0, cfg0)
+           && xl9555WriteReg(sPagerExpAddr, kXl9555RegCfg1, cfg1);
+    if (!ok) {
+        Serial.printf("[sd] pager expander write failed addr=0x%02X profile=%d\n",
+                      sPagerExpAddr, profile);
+        return false;
+    }
+
+    Serial.printf("[sd] pager expander ready addr=0x%02X profile=%d\n",
+                  sPagerExpAddr, profile);
+    return true;
+}
+} // namespace
+#endif
 
 static bool ensureSdMounted() {
     if (sdReady) return true;
@@ -151,12 +289,50 @@ bool sdBegin() {
     pinMode(LORA_CS, OUTPUT);
     digitalWrite(LORA_CS, HIGH);
 #endif
-    delay(2);
+#if (TFT_CS >= 0)
+    pinMode(TFT_CS, OUTPUT);
+    digitalWrite(TFT_CS, HIGH);
+#endif
+    delay(8);
 
-    sdReady = SD.begin(SD_CS, SPI, 4000000);
-    if (!sdReady) {
-        sdReady = SD.begin(SD_CS, SPI, 1000000);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Prefer profile 3 first (validated on this pager), then fall back.
+    static const int kProfiles[] = { 3, 2, 0, 1, 4 };
+    static const uint32_t kSpeeds[] = { 4000000UL, 1000000UL, 400000UL };
+
+    sdReady = false;
+
+    auto tryMountWithProfile = [&](int profile) -> bool {
+        if (!pagerApplyExpanderProfile(profile)) return false;
+        delay(12);
+        for (size_t si = 0; si < (sizeof(kSpeeds) / sizeof(kSpeeds[0])); si++) {
+            if (SD.begin(SD_CS, SPI, kSpeeds[si])) {
+                sdReady = true;
+                sPagerGoodProfile = profile;
+                Serial.printf("[sd] mounted using profile=%d speed=%lu\n",
+                              profile, (unsigned long)kSpeeds[si]);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // First pass: if we discovered a working profile earlier in this boot, try it first.
+    if (sPagerGoodProfile >= 0) {
+        (void)tryMountWithProfile(sPagerGoodProfile);
     }
+
+    // Fallback pass: try known profile order, skipping the already-tried one.
+    for (size_t pi = 0; pi < (sizeof(kProfiles) / sizeof(kProfiles[0])) && !sdReady; pi++) {
+        int profile = kProfiles[pi];
+        if (profile == sPagerGoodProfile) continue;
+        (void)tryMountWithProfile(profile);
+    }
+#else
+    sdReady = SD.begin(SD_CS, SPI, 4000000);
+    if (!sdReady) sdReady = SD.begin(SD_CS, SPI, 1000000);
+#endif
+
     Serial.printf("[sd] %s cs=%d sck=%d miso=%d mosi=%d\n",
                   sdReady ? "mounted" : "not found",
                   SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
