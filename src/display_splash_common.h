@@ -127,10 +127,19 @@ inline void drawSplashCommon(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
         lcd.drawFastHLine(0, y, screenW, c);
     }
 
+    #if defined(DEVICE_TLORA_PAGER_TFT)
+    const int cardOuterPadX = 6;
+    const int cardOuterPadY = 8;
+    const int cardX = cardOuterPadX;
+    const int cardY = cardOuterPadY;
+    const int cardW = screenW - cardOuterPadX * 2;
+    const int cardH = screenH - cardOuterPadY * 2;
+    #else
     const int cardX = splash.cardMarginX;
     const int cardY = splash.cardTopY;
     const int cardW = screenW - splash.cardMarginX * 2;
     const int cardH = screenH - splash.cardTopY - splash.cardBottomMargin;
+    #endif
 
     lcd.fillRoundRect(cardX, cardY, cardW, cardH, splash.cardRadius, palette.cardBg);
     lcd.drawRoundRect(cardX, cardY, cardW, cardH, splash.cardRadius, palette.cardEdge);
@@ -141,6 +150,76 @@ inline void drawSplashCommon(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
     lcd.setTextColor(palette.title, palette.cardBg);
     const char *appName = "CAMILLIA";
     int tw = lcd.textWidth(appName);
+    #if defined(DEVICE_TLORA_PAGER_TFT)
+    const int contentInset = max(10, splash.cardRadius + 2);
+    const int paneGap = 10;
+    const int contentW = cardW - (contentInset * 2) - paneGap;
+    const int leftX = cardX + contentInset;
+    const int leftW = (contentW * 46) / 100;
+    const int rightX = leftX + leftW + paneGap;
+    const int rightW = cardX + cardW - contentInset - rightX;
+
+    float titleScale = splash.titleFontScale * 1.35f;
+    if (titleScale < 1.2f) titleScale = 1.2f;
+    lcd.setTextSize(titleScale);
+    tw = lcd.textWidth(appName);
+    const int titleY = cardY + max(8, splash.titleTopInset - 2);
+    const int titleX = leftX + max(0, (leftW - tw) / 2);
+    lcd.drawString(appName, titleX, titleY);
+
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+    String verInline(data.version);
+    const int rightEdgeX = cardX + cardW - contentInset;
+    int verX = titleX + tw + 10;
+    int verMaxW = max(10, rightEdgeX - verX);
+    if (lcd.textWidth(verInline.c_str()) > verMaxW) {
+        while (verInline.length() > 3 && lcd.textWidth((verInline + "...").c_str()) > verMaxW) {
+            verInline.remove(verInline.length() - 1);
+        }
+        verInline += "...";
+    }
+    lcd.setTextColor(palette.dim, palette.cardBg);
+    lcd.drawString(verInline.c_str(), verX, titleY + 10);
+
+    lcd.setFont(&fonts::Orbitron_Light_32);
+    lcd.setTextSize(titleScale);
+    const int titleH = lcd.fontHeight();
+    const int flowerAreaTop = titleY + titleH + 8;
+    const int flowerAreaBottom = cardY + cardH - 12;
+    const int flowerHalfH = max(18, (flowerAreaBottom - flowerAreaTop) / 2);
+    const int flowerHalfW = max(18, (leftW / 2) - 12);
+    float flowerScale = min((float)flowerHalfH / 38.0f, (float)flowerHalfW / 35.0f);
+    if (flowerScale < 1.12f) flowerScale = 1.12f;
+    if (flowerScale > 1.70f) flowerScale = 1.70f;
+    const int flowerRadius = max(14, (int)lroundf(35.0f * flowerScale));
+    const int flowerCx = leftX + flowerRadius + 6 + splash.flowerOffsetX;
+
+    drawCamelliaMark(lcd,
+                     flowerCx,
+                     (flowerAreaTop + flowerAreaBottom) / 2 + splash.flowerOffsetY,
+                     flowerScale);
+
+    char idBuf[44];
+    snprintf(idBuf, sizeof(idBuf), "%s  (%s)", data.nodeLong, data.nodeShort);
+
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+    String idText(idBuf);
+    if (lcd.textWidth(idText.c_str()) > rightW) {
+        while (idText.length() > 3 && lcd.textWidth((String("...") + idText).c_str()) > rightW) {
+            idText.remove(0, 1);
+        }
+        idText = String("...") + idText;
+    }
+
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+    lcd.setTextColor(palette.title, palette.cardBg);
+    const int idW = lcd.textWidth(idText.c_str());
+    const int idX = rightEdgeX - idW;
+    lcd.drawString(idText.c_str(), idX, cardY + cardH - splash.idBottomOffset);
+    #else
     lcd.drawString(appName, (screenW - tw) / 2, cardY + splash.titleTopInset);
 
     drawCamelliaMark(lcd,
@@ -160,6 +239,7 @@ inline void drawSplashCommon(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
     lcd.setTextColor(palette.dim, palette.cardBg);
     tw = lcd.textWidth(data.version);
     lcd.drawString(data.version, (screenW - tw) / 2, cardY + cardH - splash.versionBottomOffset);
+    #endif
 
     lcd.setFont(UI_BODY_FONT);
     lcd.setTextSize(UI_BASE_TEXT_SCALE);

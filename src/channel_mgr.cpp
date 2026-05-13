@@ -5,6 +5,17 @@
 #include "debug_flags.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
+#include <SD.h>
+#include <stdlib.h>
+
+namespace {
+constexpr const char *kChanPersistDir = "/camillia/channels";
+constexpr int kPersistMaxLines = 100;
+
+static void channelPersistPath(int chanIdx, char *out, size_t outLen) {
+    snprintf(out, outLen, "%s/ch%d.log", kChanPersistDir, chanIdx);
+}
+}
 
 ChannelMgr Channels;
 
@@ -57,10 +68,33 @@ void ChannelMgr::clearChannel(int idx) {
     _chans[idx].unread = false;
 }
 
+void ChannelMgr::clearAllMessages(bool clearPersisted) {
+    memset(_pending, 0, sizeof(_pending));
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        clearChannel(i);
+    }
+
+#if HAS_SD_CARD
+    if (!clearPersisted) return;
+
+    for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
+        char path[48];
+        channelPersistPath(chanIdx, path, sizeof(path));
+        if (SD.exists(path)) SD.remove(path);
+    }
+    if (SD.exists(kChanPersistDir)) {
+        (void)SD.rmdir(kChanPersistDir);
+    }
+    _persistDirReady = false;
+#else
+    (void)clearPersisted;
+#endif
+}
+
 void ChannelMgr::nextChannel() { setActive((_active + 1) % MAX_CHANNELS); }
 void ChannelMgr::prevChannel() { setActive((_active + MAX_CHANNELS - 1) % MAX_CHANNELS); }
 
-void ChannelMgr::_pushLine(Channel &ch, const char *text, uint16_t color,
+void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                             uint32_t packetId, DisplayLine::AckState ack) {
     int idx = ch.count % MAX_MSG_LINES;
     DisplayLine &dl = ch.lines[idx];
@@ -70,6 +104,10 @@ void ChannelMgr::_pushLine(Channel &ch, const char *text, uint16_t color,
     dl.packetId = packetId;
     dl.ack      = ack;
     ch.count++;
+
+    if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
+        _persistChannel(chanIdx, ch);
+    }
 }
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
@@ -105,7 +143,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             line[0] = '\0';
         }
         DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
-        _pushLine(ch, line, color, packetId, ack);
+        _pushLine(chanIdx, ch, line, color, packetId, ack);
         return;
     }
 
@@ -163,8 +201,140 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         DisplayLine::AckState ack = (logicalFirst && packetId)
             ? DisplayLine::PENDING
             : DisplayLine::NONE;
-        _pushLine(ch, line, color, packetId, ack);
+        _pushLine(chanIdx, ch, line, color, packetId, ack);
     }
+}
+
+void ChannelMgr::beginPersistence() {
+#if HAS_SD_CARD
+    _persistReady = true;
+#else
+    _persistReady = false;
+#endif
+}
+
+void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
+#if HAS_SD_CARD
+    if (!_persistDirReady) {
+        (void)SD.mkdir("/camillia");
+        (void)SD.mkdir(kChanPersistDir);
+        _persistDirReady = true;
+    }
+
+    char path[48];
+    channelPersistPath(chanIdx, path, sizeof(path));
+
+    // Rewrite bounded snapshot to keep storage and restore behavior predictable.
+    SD.remove(path);
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) return;
+
+    int stored = min(ch.count, MAX_MSG_LINES);
+    if (stored <= 0) {
+        f.close();
+        return;
+    }
+    int keep = min(stored, kPersistMaxLines);
+    int oldest = ch.count - stored;
+    int first = ch.count - keep;
+    if (first < oldest) first = oldest;
+
+    for (int lineIdx = first; lineIdx < ch.count; lineIdx++) {
+        const DisplayLine &dl = ch.lines[lineIdx % MAX_MSG_LINES];
+        char text[MSG_CHARS + 1];
+        strncpy(text, dl.text, MSG_CHARS);
+        text[MSG_CHARS] = '\0';
+        for (int i = 0; text[i]; i++) {
+            if (text[i] == '\n' || text[i] == '\r') text[i] = ' ';
+        }
+
+        f.printf("%04X|%08lX|%u|%s\n",
+                 (unsigned)dl.color,
+                 (unsigned long)dl.packetId,
+                 (unsigned)dl.ack,
+                 text);
+    }
+    f.close();
+#else
+    (void)chanIdx;
+    (void)ch;
+#endif
+}
+
+void ChannelMgr::loadPersisted() {
+#if HAS_SD_CARD
+    if (!_persistReady) return;
+
+    _persistLoading = true;
+    for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
+        char path[48];
+        channelPersistPath(chanIdx, path, sizeof(path));
+        if (!SD.exists(path)) continue;
+
+        int totalLines = 0;
+        {
+            File countFile = SD.open(path, FILE_READ);
+            if (!countFile) continue;
+            while (countFile.available()) {
+                int c = countFile.read();
+                if (c == '\n') totalLines++;
+            }
+            countFile.close();
+        }
+        int skipLines = max(0, totalLines - kPersistMaxLines);
+
+        File f = SD.open(path, FILE_READ);
+        if (!f) continue;
+
+        char line[192];
+        int lineNo = 0;
+        while (f.available()) {
+            size_t n = f.readBytesUntil('\n', line, sizeof(line) - 1);
+            line[n] = '\0';
+            if (n == 0) continue;
+            lineNo++;
+            if (lineNo <= skipLines) continue;
+
+            while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n')) {
+                line[n - 1] = '\0';
+                n--;
+            }
+            if (n == 0) continue;
+
+            char *sep1 = strchr(line, '|');
+            if (!sep1) continue;
+            *sep1 = '\0';
+            uint16_t color = (uint16_t)strtoul(line, nullptr, 16);
+
+            char *rest = sep1 + 1;
+            char *sep2 = strchr(rest, '|');
+            if (!sep2) {
+                // Backward-compatible format: color|text
+                const char *text = rest;
+                if (!text[0]) continue;
+                _pushLine(chanIdx, _chans[chanIdx], text, color, 0, DisplayLine::NONE);
+                continue;
+            }
+
+            *sep2 = '\0';
+            char *sep3 = strchr(sep2 + 1, '|');
+            if (!sep3) continue;
+            *sep3 = '\0';
+
+            uint32_t packetId = (uint32_t)strtoul(rest, nullptr, 16);
+            uint8_t ackRaw = (uint8_t)strtoul(sep2 + 1, nullptr, 10);
+            if (ackRaw > DisplayLine::TX_FAILED) ackRaw = DisplayLine::NONE;
+            const char *text = sep3 + 1;
+            if (!text[0]) continue;
+
+            _pushLine(chanIdx, _chans[chanIdx], text, color,
+                      packetId, (DisplayLine::AckState)ackRaw);
+        }
+
+        f.close();
+    }
+    _persistLoading = false;
+#endif
 }
 
 const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {
@@ -189,10 +359,14 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
             // Update every wrapped line for this packet so ACK color/status
             // applies to the full message block, not just the first segment.
             Channel &ch = _chans[_pending[i].chanIdx];
+            int chanIdx = _pending[i].chanIdx;
             for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
                 if (ch.lines[j].packetId == packetId) {
                     ch.lines[j].ack = state;
                 }
+            }
+            if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
+                _persistChannel(chanIdx, ch);
             }
             return;
         }

@@ -71,15 +71,26 @@ public:
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
                       bool unusedCompat = false);
 
+    // Clear all channel messages in memory and optionally remove persisted logs.
+    void clearAllMessages(bool clearPersisted = true);
+
+    // SD-backed persistence for mesh chat channels (0..MESH_CHANNELS-1).
+    void beginPersistence();
+    void loadPersisted();
+
 private:
     Channel    _chans[MAX_CHANNELS];
     PendingAck _pending[MAX_PENDING_ACK];
     int        _active = 0;
+    bool       _persistReady = false;
+    bool       _persistLoading = false;
+    bool       _persistDirReady = false;
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId);
-    void _pushLine(Channel &ch, const char *text, uint16_t color,
+    void _pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                    uint32_t packetId, DisplayLine::AckState ack);
+    void _persistChannel(int chanIdx, const Channel &ch);
 };
 
 extern ChannelMgr Channels;

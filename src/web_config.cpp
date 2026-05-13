@@ -2,6 +2,7 @@
 #include "base64_util.h"
 #include "node_db.h"
 #include "channel_mgr.h"
+#include "dm_mgr.h"
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
@@ -503,6 +504,11 @@ static void sendConfigPage(const char *msg = "") {
         }
         html += "</select></label>";
     }
+    html += "<div class='row2'>";
+    html += "<label>NTP Server<input name='ntp_server' type='text' maxlength='47' value='";
+    html += gCfg->ntpServer;
+    html += "' placeholder='pool.ntp.org'></label>";
+    html += "</div>";
     html += "</details>";
     sendChunk(html);
 
@@ -899,6 +905,13 @@ static void sendConfigPage(const char *msg = "") {
 
     html +=
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
+        "<form method='POST' action='/clear-messages'"
+        " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
+        "<button type='submit' style='background:#c0392b'>"
+        "Clear Messages</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "Clears saved and in-memory chat/DM history without resetting device configuration.</p>"
         "<form method='POST' action='/clear-nodes'"
         " onsubmit=\"return confirm('This will clear all discovered nodes and reboot. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -1269,6 +1282,13 @@ static void handlePostSave() {
     gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
     gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());
     strncpy(gCfg->tzDef, server.arg("tzdef").c_str(), sizeof(gCfg->tzDef) - 1);
+    gCfg->tzDef[sizeof(gCfg->tzDef) - 1] = '\0';
+    strncpy(gCfg->ntpServer, server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer) - 1);
+    gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
+    if (!gCfg->ntpServer[0]) {
+        strncpy(gCfg->ntpServer, MY_NTP_SERVER, sizeof(gCfg->ntpServer) - 1);
+        gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
+    }
 
     // Position
     gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
@@ -1452,6 +1472,15 @@ static void handlePostAnnounce() {
     redirectHomeWithFlash("NODEINFO broadcast queued.");
 }
 
+// ── Clear Messages ───────────────────────────────────────────
+
+static void handlePostClearMessages() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    Channels.clearAllMessages(true);
+    DMs.clearAll(true);
+    redirectHomeWithFlash("All stored messages cleared.");
+}
+
 // ── Clear Nodes ───────────────────────────────────────────────
 
 static void handlePostClearNodes() {
@@ -1621,6 +1650,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
         server.on("/announce",HTTP_POST, handlePostAnnounce);
         server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+        server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
         server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
         server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
         server.begin();
@@ -1657,6 +1687,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
             server.on("/announce",HTTP_POST, handlePostAnnounce);
             server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+            server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
             server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
             server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
             server.begin();
@@ -1678,6 +1709,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/announce",HTTP_POST, handlePostAnnounce);
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
     server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
     server.begin();

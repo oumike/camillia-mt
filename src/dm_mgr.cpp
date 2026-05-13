@@ -9,7 +9,9 @@
 #include "config.h"
 #include <esp_heap_caps.h>
 #include <string.h>
+#if HAS_SD_CARD
 #include <SD.h>
+#endif
 
 DmMgr DMs;
 
@@ -91,11 +93,13 @@ bool DmMgr::deleteConversation(uint32_t nodeId) {
     if (idx < 0) return false;
 
     // Remove persisted transcript if present.
+#if HAS_SD_CARD
     char path[40];
     snprintf(path, sizeof(path), "%s/%08X.bin", "/camillia/dms", nodeId);
     if (SD.exists(path)) {
         SD.remove(path);
     }
+#endif
 
     if (_convs[idx].lines) {
         free(_convs[idx].lines);
@@ -117,6 +121,40 @@ bool DmMgr::deleteConversation(uint32_t nodeId) {
     }
 
     return true;
+}
+
+void DmMgr::clearAll(bool clearPersisted) {
+    for (int i = 0; i < _count; i++) {
+        if (_convs[i].lines) {
+            free(_convs[i].lines);
+            _convs[i].lines = nullptr;
+        }
+    }
+    memset(_convs, 0, sizeof(_convs));
+    _count = 0;
+    memset(_pendingTx, 0, sizeof(_pendingTx));
+
+#if HAS_SD_CARD
+    if (!clearPersisted) return;
+
+    static const char *kPersistDmDir = "/camillia/dms";
+    File dir = SD.open(kPersistDmDir);
+    if (dir && dir.isDirectory()) {
+        File f = dir.openNextFile();
+        while (f) {
+            String fp = String(kPersistDmDir) + "/" + f.name();
+            f.close();
+            SD.remove(fp.c_str());
+            f = dir.openNextFile();
+        }
+        dir.close();
+    }
+    if (SD.exists(kPersistDmDir)) {
+        (void)SD.rmdir(kPersistDmDir);
+    }
+#else
+    (void)clearPersisted;
+#endif
 }
 
 // ── _sort: insertion sort by lastMs descending ────────────────
@@ -503,6 +541,10 @@ static const char *kDmDir = "/camillia/dms";
 static const uint32_t DM_MAGIC = 0x434D444D;  // "CMDM"
 
 void DmMgr::saveConv(const DmConv *c) {
+#if !HAS_SD_CARD
+    (void)c;
+    return;
+#else
     if (!c || !c->lines || c->count == 0) return;
 
     SD.mkdir("/camillia");
@@ -542,9 +584,13 @@ void DmMgr::saveConv(const DmConv *c) {
     f.flush();
     f.close();
     debugLogMessages("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
+#endif
 }
 
 void DmMgr::loadAll() {
+#if !HAS_SD_CARD
+    return;
+#else
     // Ensure DM storage directories exist before opening to avoid noisy VFS errors.
     SD.mkdir("/camillia");
     if (!SD.exists(kDmDir)) {
@@ -622,4 +668,5 @@ void DmMgr::loadAll() {
 
     _sort();
     debugLogMessages("[dm] loadAll done: %d conversations\n", _count);
+#endif
 }

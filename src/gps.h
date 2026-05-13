@@ -32,7 +32,7 @@ int32_t gpsLatI();
 int32_t gpsLonI();
 int32_t gpsAltM();
 
-// Satellite count (0 until a real fix is confirmed).
+// Satellite count (prefers satellites used; falls back to satellites in view).
 uint8_t gpsSats();
 
 // Time since first fix was acquired (ms), or 0 if no fix yet.

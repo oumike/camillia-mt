@@ -30,16 +30,18 @@ static bool xl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
     return true;
 }
 
-static void xl9555SetOutput(uint8_t pin, bool level,
+static void xl9555SetOutput(uint8_t pin, bool level, bool invertDirSense,
                             uint8_t &out0, uint8_t &out1,
                             uint8_t &cfg0, uint8_t &cfg1) {
     uint8_t bit = (uint8_t)(1U << (pin & 0x07));
     if (pin < 8) {
-        cfg0 &= (uint8_t)~bit;
+        if (invertDirSense) cfg0 |= bit;
+        else                cfg0 &= (uint8_t)~bit;
         if (level) out0 |= bit;
         else       out0 &= (uint8_t)~bit;
     } else {
-        cfg1 &= (uint8_t)~bit;
+        if (invertDirSense) cfg1 |= bit;
+        else                cfg1 &= (uint8_t)~bit;
         if (level) out1 |= bit;
         else       out1 &= (uint8_t)~bit;
     }
@@ -53,12 +55,12 @@ static int pagerFindExpanderAddr() {
     return -1;
 }
 
-static void pagerPrimeGpsRails() {
+static bool pagerPrimeGpsRails(bool invertDirSense) {
     Wire.begin(KB_SDA, KB_SCL);
     int expAddr = pagerFindExpanderAddr();
     if (expAddr < 0) {
-        debugLogGps("[gps] pager expander not found (0x20-0x27)\n");
-        return;
+        Serial.println("[gps] pager expander not found (0x20-0x27)");
+        return false;
     }
 
     uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
@@ -66,27 +68,30 @@ static void pagerPrimeGpsRails() {
         || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut1, out1)
         || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
         || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
-        debugLogGps("[gps] pager expander read failed addr=0x%02X\n", expAddr);
-        return;
+        Serial.printf("[gps] pager expander read failed addr=0x%02X\n", expAddr);
+        return false;
     }
 
     // Ensure GPS rail is on, then pulse reset low->high to recover modules
     // that boot into a stale UART/output state.
-    xl9555SetOutput(kExpGpsEn, true, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpsRst, false, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpsRst, false, invertDirSense, out0, out1, cfg0, cfg1);
     if (!xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0)
         || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1)
         || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
         || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
-        debugLogGps("[gps] pager expander write failed addr=0x%02X\n", expAddr);
-        return;
+        Serial.printf("[gps] pager expander write failed addr=0x%02X invert=%d\n",
+                      expAddr, invertDirSense ? 1 : 0);
+        return false;
     }
 
     delay(20);
-    xl9555SetOutput(kExpGpsRst, true, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpsRst, true, invertDirSense, out0, out1, cfg0, cfg1);
     (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0);
     (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1);
-    debugLogGps("[gps] pager rails primed addr=0x%02X\n", expAddr);
+    Serial.printf("[gps] pager rails primed addr=0x%02X invert=%d\n",
+                  expAddr, invertDirSense ? 1 : 0);
+    return true;
 }
 } // namespace
 #endif
@@ -102,9 +107,15 @@ static const uint32_t GPS_BAUD_PROBE_START_MS = 3000;
 static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 2000;
 static const uint32_t GPS_CHECKSUM_STALE_REPROBE_MS = 8000;
 static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 2;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+static const uint32_t GPS_BAUD_PROBE_START_MS = 3000;
+static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 3500;
+static const uint32_t GPS_CHECKSUM_STALE_REPROBE_MS = 10000;
+static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 1;
 #else
 static const uint32_t GPS_BAUD_PROBE_START_MS = 9000;
 static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 7000;
+static const uint32_t GPS_CHECKSUM_STALE_REPROBE_MS = 10000;
 static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 1;
 #endif
 static const uint32_t GPS_STREAM_STALL_MS = 15000;
@@ -124,6 +135,13 @@ struct GpsProbePort {
 
 static const GpsProbePort GPS_PORT_PROBE_LIST[] = {
     { GPS_RX, GPS_TX },
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Some pager units expose RX reliably but may not have GPS TX routed.
+    { GPS_RX, -1 },
+    // Also try reversed labeling in case the module UART is swapped.
+    { GPS_TX, GPS_RX },
+    { GPS_TX, -1 },
+#endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     // Some Heltec revisions/modules are labeled opposite from effective UART wiring.
     { GPS_RX, -1 },
@@ -155,6 +173,10 @@ static uint8_t        _portProbeIdx  = 0;
 static uint32_t       _activeBaud    = GPS_BAUD;
 static int8_t         _activeRx      = GPS_RX;
 static int8_t         _activeTx      = GPS_TX;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static bool           _pagerRailInverted = false;
+static bool           _pagerRailRetried = false;
+#endif
 static uint32_t       _lastProbeMs   = 0;
 static uint32_t       _lastByteMs    = 0;
 static uint32_t       _lastChecksumMs = 0;
@@ -199,9 +221,19 @@ static TinyGPSCustom* _gpgsaSats[12] = {
     &_gpgsaSat09, &_gpgsaSat10, &_gpgsaSat11, &_gpgsaSat12
 };
 
+// GGA field 7 carries satellites used in current fix solution.
+static TinyGPSCustom _gnggaSatsUsed(_gps, "GNGGA", 7);
+static TinyGPSCustom _gpggaSatsUsed(_gps, "GPGGA", 7);
+
 // GSV field 3 carries satellites in view, useful before the first full fix.
 static TinyGPSCustom _gngsvSatsView(_gps, "GNGSV", 3);
 static TinyGPSCustom _gpgsvSatsView(_gps, "GPGSV", 3);
+static TinyGPSCustom _glgsvSatsView(_gps, "GLGSV", 3);
+static TinyGPSCustom _gagsvSatsView(_gps, "GAGSV", 3);
+static TinyGPSCustom _bdgsvSatsView(_gps, "BDGSV", 3);
+static TinyGPSCustom _gbgsvSatsView(_gps, "GBGSV", 3);
+static TinyGPSCustom _gqgsvSatsView(_gps, "GQGSV", 3);
+static TinyGPSCustom _qzgsvSatsView(_gps, "QZGSV", 3);
 
 static uint8_t gsaSatsUsed(TinyGPSCustom* const sats[12], bool &fresh) {
     fresh = false;
@@ -247,12 +279,17 @@ static bool gpsNextProbeConfig() {
 
         const GpsProbePort &p = GPS_PORT_PROBE_LIST[_portProbeIdx];
         uint32_t candidateBaud = GPS_BAUD_PROBE_LIST[_baudProbeIdx];
-        if (p.rx < 0 || p.tx < 0) continue;
+        if (p.rx < 0) continue;
         if (candidateBaud == _activeBaud && p.rx == _activeRx && p.tx == _activeTx) continue;
 
         gpsApplyPortAndBaud(p.rx, p.tx, candidateBaud);
+    #if defined(DEVICE_TLORA_PAGER_TFT)
+        Serial.printf("[gps] probing baud=%lu (rx=%d tx=%d)\n",
+                  (unsigned long)candidateBaud, (int)p.rx, (int)p.tx);
+    #else
         debugLogGps("[gps] probing baud=%lu (rx=%d tx=%d)\n",
                     (unsigned long)candidateBaud, (int)p.rx, (int)p.tx);
+    #endif
         return true;
     }
     return false;
@@ -260,7 +297,9 @@ static bool gpsNextProbeConfig() {
 
 void gpsBegin() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    pagerPrimeGpsRails();
+    _pagerRailInverted = false;
+    _pagerRailRetried = false;
+    (void)pagerPrimeGpsRails(_pagerRailInverted);
 #endif
     _baudProbeIdx  = 0;
     _portProbeIdx  = 0;
@@ -280,8 +319,13 @@ void gpsBegin() {
     _lastChecksumMs = _startMs;
     _lastPassedChecksum = _gps.passedChecksum();
     _nmeaSeen      = false;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    Serial.printf("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
+                  (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
+#else
     debugLogGps("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
                 (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
+#endif
 }
 
 void gpsEnd() {
@@ -314,30 +358,48 @@ void gpsLoop() {
 
     if (!_nmeaSeen && passed >= GPS_MIN_CHECKSUM_FOR_STREAM) {
         _nmeaSeen = true;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        Serial.printf("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
+#else
         debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
+#endif
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Heltec boards can occasionally latch onto a noisy UART config that yields
+    // Boards can occasionally latch onto a noisy UART config that yields
     // sporadic checksum passes once, then no real sentence progress. Re-probe.
     if (_nmeaSeen
         && !gpsHasFix()
         && passed > 0
         && (now - _lastChecksumMs) >= GPS_CHECKSUM_STALE_REPROBE_MS
         && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        Serial.printf("[gps] checksum stale (%lums) without fix on baud=%lu rx=%d tx=%d, probing next\n",
+                      (unsigned long)(now - _lastChecksumMs),
+                      (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
+#else
         debugLogGps("[gps] checksum stale (%lums) without fix on baud=%lu rx=%d tx=%d, probing next\n",
                     (unsigned long)(now - _lastChecksumMs),
                     (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
+#endif
         _nmeaSeen = false;
         _lastProbeMs = now;
         gpsNextProbeConfig();
     }
-#endif
 
     if (!_nmeaSeen
         && (now - _startMs) >= GPS_BAUD_PROBE_START_MS
         && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
         _lastProbeMs = now;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        if (!_pagerRailRetried) {
+            _pagerRailRetried = true;
+            _pagerRailInverted = true;
+            (void)pagerPrimeGpsRails(_pagerRailInverted);
+            gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+            Serial.println("[gps] no stream yet; retried pager rails with invert=1");
+            return;
+        }
+#endif
         gpsNextProbeConfig();
     }
 
@@ -434,7 +496,19 @@ uint8_t gpsSats() {
         sats = max(gngsaUsed, gpgsaUsed);
     }
 
-    // Fallback to GGA sats if it is fresh.
+    // Fallback to direct GGA satellites-used fields (GN/GP talkers).
+    if (!hasFresh) {
+        bool gnggaFresh = false;
+        bool gpggaFresh = false;
+        uint8_t gngga = parseCustomU8(_gnggaSatsUsed, gnggaFresh);
+        uint8_t gpgga = parseCustomU8(_gpggaSatsUsed, gpggaFresh);
+        if (gnggaFresh || gpggaFresh) {
+            hasFresh = true;
+            sats = max(gngga, gpgga);
+        }
+    }
+
+    // Legacy TinyGPS++ satellite value (typically from GPGGA).
     if (!hasFresh && _gps.satellites.isValid() && _gps.satellites.age() < GPS_SATS_MAX_AGE_MS) {
         hasFresh = true;
         sats = (uint8_t)_gps.satellites.value();
@@ -444,11 +518,31 @@ uint8_t gpsSats() {
     if (!hasFresh) {
         bool gngsvFresh = false;
         bool gpgsvFresh = false;
+        bool glgsvFresh = false;
+        bool gagsvFresh = false;
+        bool bdgsvFresh = false;
+        bool gbgsvFresh = false;
+        bool gqgsvFresh = false;
+        bool qzgsvFresh = false;
         uint8_t gngsv = parseCustomU8(_gngsvSatsView, gngsvFresh);
         uint8_t gpgsv = parseCustomU8(_gpgsvSatsView, gpgsvFresh);
-        if (gngsvFresh || gpgsvFresh) {
+        uint8_t glgsv = parseCustomU8(_glgsvSatsView, glgsvFresh);
+        uint8_t gagsv = parseCustomU8(_gagsvSatsView, gagsvFresh);
+        uint8_t bdgsv = parseCustomU8(_bdgsvSatsView, bdgsvFresh);
+        uint8_t gbgsv = parseCustomU8(_gbgsvSatsView, gbgsvFresh);
+        uint8_t gqgsv = parseCustomU8(_gqgsvSatsView, gqgsvFresh);
+        uint8_t qzgsv = parseCustomU8(_qzgsvSatsView, qzgsvFresh);
+        if (gngsvFresh || gpgsvFresh || glgsvFresh || gagsvFresh
+            || bdgsvFresh || gbgsvFresh || gqgsvFresh || qzgsvFresh) {
             hasFresh = true;
-            sats = max(gngsv, gpgsv);
+            sats = gngsv;
+            sats = max(sats, gpgsv);
+            sats = max(sats, glgsv);
+            sats = max(sats, gagsv);
+            sats = max(sats, bdgsv);
+            sats = max(sats, gbgsv);
+            sats = max(sats, gqgsv);
+            sats = max(sats, qzgsv);
         }
     }
 
@@ -459,7 +553,7 @@ uint8_t gpsSats() {
             return sats;
         }
         // A transient zero can appear between sentence updates; smooth it while fix is valid.
-        if (gpsHasFix() && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
+        if (_nmeaSeen && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
             return _lastSats;
         _lastSats = 0;
         _lastSatsMs = now;
@@ -467,7 +561,7 @@ uint8_t gpsSats() {
     }
 
     // No fresh sat sentence right now; keep the last valid count briefly.
-    if (gpsHasFix() && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
+    if (_nmeaSeen && _lastSats > 0 && (now - _lastSatsMs) < GPS_SATS_HOLD_MS)
         return _lastSats;
 
     _lastSats = 0;

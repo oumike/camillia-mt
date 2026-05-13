@@ -64,6 +64,9 @@ static int  activeView   = 0;              // 0..9 channels, 10 GPS, 11 MAP, 12 
 static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
 static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static bool pagerWheelChatScrollMode = false;
+#endif
 static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
 static int  settingsInfoScrollMax = 0;
@@ -351,15 +354,17 @@ static void sdRmDir(const char *path) {
 #define SETTING_IMPORT        2
 #define SETTING_THEME         3
 #define SETTING_ANNOUNCE      4
-#define SETTING_CLEAR_NODES   5
-#define SETTING_FACTORY_RESET 6
-#define NUM_SETTINGS          7
+#define SETTING_CLEAR_MSGS    5
+#define SETTING_CLEAR_NODES   6
+#define SETTING_FACTORY_RESET 7
+#define NUM_SETTINGS          8
 #else
 #define SETTING_THEME         1
 #define SETTING_ANNOUNCE      2
-#define SETTING_CLEAR_NODES   3
-#define SETTING_FACTORY_RESET 4
-#define NUM_SETTINGS          5
+#define SETTING_CLEAR_MSGS    3
+#define SETTING_CLEAR_NODES   4
+#define SETTING_FACTORY_RESET 5
+#define NUM_SETTINGS          6
 #endif
 
 static char settingsStatus[LCD_W / CHAR_W + 1] = "";
@@ -809,6 +814,9 @@ static void goToView(int v) {
     dmPickerSel     = 0;
     dmDeleteConfirm = false;
     dmDeleteConfirmNodeId = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    pagerWheelChatScrollMode = false;
+#endif
     softKbVisible   = false;
     softKbShift     = false;
     hwTypingLock    = false;
@@ -987,11 +995,47 @@ static uint8_t readBatteryPct() {
 }
 
 static uint8_t _battPct = 0;
+static bool gNtpConfigured = false;
+static char gNtpServerActive[48] = "";
+static uint32_t gNtpLastConfigureMs = 0;
 
 static void applyTimezoneFromConfig() {
     const char *tz = (gCfg.tzDef[0]) ? gCfg.tzDef : "UTC0";
     setenv("TZ", tz, 1);
     tzset();
+}
+
+static bool wifiHasInternetTimePath() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    wifi_mode_t mode = WiFi.getMode();
+    return mode != WIFI_AP;
+}
+
+static const char *configuredNtpServer() {
+    return gCfg.ntpServer[0] ? gCfg.ntpServer : MY_NTP_SERVER;
+}
+
+static void ensureNtpConfigured() {
+    if (!wifiHasInternetTimePath()) return;
+
+    const char *srv = configuredNtpServer();
+    if (gNtpConfigured && strcmp(gNtpServerActive, srv) == 0
+        && (millis() - gNtpLastConfigureMs) < 21600000UL) {
+        return;
+    }
+
+    configTime(0, 0, srv);
+    strncpy(gNtpServerActive, srv, sizeof(gNtpServerActive) - 1);
+    gNtpServerActive[sizeof(gNtpServerActive) - 1] = '\0';
+    gNtpConfigured = true;
+    gNtpLastConfigureMs = millis();
+    Serial.printf("[time] NTP configured: %s\n", gNtpServerActive);
+}
+
+static bool ntpSyncSystemClock() {
+    if (!wifiHasInternetTimePath()) return false;
+    ensureNtpConfigured();
+    return time(nullptr) >= 1700000000;
 }
 
 // Civil date -> Unix days since 1970-01-01 (UTC), valid for Gregorian dates.
@@ -1025,9 +1069,13 @@ static void drawBattery() {
     const uint16_t bg  = COL_STATUS_BG;
     uint16_t col = _battPct >= 60 ? COL_BATT_GOOD :
                    _battPct >= 25 ? COL_BATT_WARN : COL_BATT_BAD;
+    bool gpsEnabled = gpsIsEnabled();
+    bool gpsStream = gpsHasNmeaStream();
     bool gpsFix = gpsHasFix();
     uint8_t sats = gpsSats();
-    uint16_t gpsCol = gpsFix ? COL_BATT_GOOD : COL_BATT_BAD;
+    uint16_t gpsCol = gpsFix ? COL_BATT_GOOD
+                    : (gpsStream ? COL_TAB_UNREAD
+                                 : (gpsEnabled ? COL_BATT_BAD : COL_TAB_IDLE));
     wifi_mode_t wifiMode = WiFi.getMode();
     bool wifiApMode = (wifiMode == WIFI_AP);
 #ifdef WIFI_AP_STA
@@ -1067,9 +1115,17 @@ static void drawBattery() {
     int battW = barBodyW + NUB_W;
 
     char sbuf[4];
-    snprintf(sbuf, sizeof(sbuf), "%u", (unsigned)sats);
+    if (sats > 0) {
+        snprintf(sbuf, sizeof(sbuf), "%u", (unsigned)sats);
+    } else if (gpsStream && !gpsFix) {
+        // Streaming but not fixed yet: show active search marker.
+        strncpy(sbuf, "~", sizeof(sbuf) - 1);
+        sbuf[sizeof(sbuf) - 1] = '\0';
+    } else {
+        sbuf[0] = '\0';
+    }
     int satW = lcd.textWidth(sbuf);
-    bool showSats = (sats > 0);
+    bool showSats = (sbuf[0] != '\0');
     int gpsW = showSats ? (GPS_DOT_R * 2 + 2 + satW) : (GPS_DOT_R * 2 + 1);
     bool wifiShowApText = wifiApMode;
     int wifiW = wifiShowApText ? (lcd.textWidth("AP") + AP_PAD_X * 2) : WIFI_W;
@@ -1081,9 +1137,17 @@ static void drawBattery() {
 
     int total = calcTotal();
     if (total > NODE_W) {
-        showSats = false;
-        gpsW = GPS_DOT_R * 2 + 1;
-        total = calcTotal();
+        // Keep a one-char GPS marker when possible on narrow panes.
+        bool oneCharGps = showSats && sbuf[0] != '\0' && sbuf[1] == '\0';
+        if (oneCharGps) {
+            gap = ICON_GAP_TIGHT;
+            total = calcTotal();
+        }
+        if (total > NODE_W) {
+            showSats = false;
+            gpsW = GPS_DOT_R * 2 + 1;
+            total = calcTotal();
+        }
     }
     if (total > NODE_W) {
         gap = ICON_GAP_TIGHT;
@@ -1202,14 +1266,14 @@ static void drawStatus() {
     int flowerCx = x + shortW + header.statusFlowerGap;
     drawCamelliaMarkTiny(flowerCx, STATUS_H / 2);
 
-    int timeX = flowerCx + header.statusTimeGap;
-#if defined(DEVICE_TLORA_PAGER_TFT)
     int timeW = lcd.textWidth(timeBuf);
-    timeX = max(0, (LCD_W - timeW) / 2);
+    int timeX = max(0, (LCD_W - timeW) / 2);
+    int timeRight = timeX + timeW;
+    int statusRightLimit = NODE_X - header.statusTimeRightPad;
+    if (timeRight > statusRightLimit) {
+        timeX = max(0, statusRightLimit - timeW);
+    }
     lcd.drawString(timeBuf, timeX, infoY);
-#else
-    drawClippedText(timeX, infoY, NODE_X - timeX - header.statusTimeRightPad, timeBuf);
-#endif
     drawBattery();
     lcd.setFont(UI_BODY_FONT);
     dirtyStatus = false;
@@ -1429,6 +1493,10 @@ static void drawChat() {
         }
 
         // Improve readability by forcing neutral body text by theme.
+        // For restored history, keep explicit non-pending ACK/NAK colors.
+        if (!ackColorApplied && dl->packetId && dl->ack != DisplayLine::NONE && dl->ack != DisplayLine::PENDING) {
+            ackColorApplied = true;
+        }
         if (!ackColorApplied) {
             if (gCfg.uiMode == UI_MODE_LIGHT) col = TFT_BLACK;
             else                              col = TFT_WHITE;
@@ -1895,10 +1963,17 @@ static void drawMapPanel() {
     const int mapNavBottomPad = 2;
     const int mapNavGap = 3;
 #endif
+    const int mapLegendReserveH =
+    #if defined(DEVICE_TDECK)
+        (CHAR_H + 2);
+#else
+        0;
+#endif
     const int titleH = 11;
     const int ix = mx + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (mapNavBtnH + mapNavBottomPad);
+    const int controlsBottom = my + mh - mapLegendReserveH - mapNavBottomPad;
+    const int controlsTop = controlsBottom - mapNavBtnH;
     const int mapY = my + titleH + 2;
     const int mapH = max(64, controlsTop - mapY - 2);
     const int colGap = 4;
@@ -2159,7 +2234,7 @@ static void drawMapPanel() {
     }
 
 #if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TLORA_PAGER_TFT)
-    const int btnY = my + mh - mapNavBtnH - mapNavBottomPad;
+    const int btnY = controlsTop;
     const int closeW = 46;
     drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
 
@@ -2460,7 +2535,14 @@ static void drawDmList() {
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
-    const int controlsTop = my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD);
+        const int dmLegendReserveH =
+    #if defined(DEVICE_TDECK)
+        (CHAR_H + 2);
+    #else
+        0;
+    #endif
+        const int controlsBottom = my + mh - dmLegendReserveH - TOUCH_BTN_BOTTOM_PAD;
+        const int controlsTop = controlsBottom - TOUCH_BTN_H;
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
@@ -2500,7 +2582,7 @@ static void drawDmList() {
     }
 
     const int closeX = mx + 3;
-    const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+    const int closeY = controlsTop;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     const int newW = TOUCH_BTN_W;
     const int newH = TOUCH_BTN_H;
@@ -2964,6 +3046,8 @@ static void drawSettings() {
             snprintf(buf, sizeof(buf), "Theme: %s", uiThemePresetName(uiThemePresetIndex()));
         else if (i == SETTING_ANNOUNCE)
             snprintf(buf, sizeof(buf), "Send NODEINFO Broadcast");
+        else if (i == SETTING_CLEAR_MSGS)
+            snprintf(buf, sizeof(buf), "Clear Messages");
         else if (i == SETTING_CLEAR_NODES)
             snprintf(buf, sizeof(buf), "Clear Nodes");
         else if (i == SETTING_FACTORY_RESET)
@@ -4303,6 +4387,11 @@ static void activateSettingsSelection() {
     } else if (settingsSel == SETTING_ANNOUNCE) {
         webCfgQueueAnnounce();
         snprintf(settingsStatus, sizeof(settingsStatus), "NODEINFO broadcast queued.");
+    } else if (settingsSel == SETTING_CLEAR_MSGS) {
+        Channels.clearAllMessages(true);
+        DMs.clearAll(true);
+        snprintf(settingsStatus, sizeof(settingsStatus), "Messages cleared");
+        dirtyTabs = dirtyNodes = dirtyInput = true;
     } else if (settingsSel == SETTING_CLEAR_NODES) {
         Nodes.clearPersisted();
         snprintf(settingsStatus, sizeof(settingsStatus), "Node DB cleared - rebooting...");
@@ -4365,23 +4454,30 @@ static void handleKey(char k) {
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     bool tloraChannelView = (activeView >= 0 && activeView < MESH_CHANNELS);
+    bool tloraTyping = (hwTypingLock || inputLen > 0);
     bool tloraChannelIdle = tloraChannelView
                          && !nodeDetailOpen
                          && !nodeListFocused
                          && !softKbVisible
-                         && !(hwTypingLock || inputLen > 0);
+                         && !tloraTyping;
+
+    if (!tloraChannelIdle) {
+        pagerWheelChatScrollMode = false;
+    }
 
     // On the pager wheel, rotate to move between channels when not in panel views.
     // User preference: reverse channel list navigation direction.
-    if (tloraChannelIdle && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+    if (tloraChannelIdle
+        && !pagerWheelChatScrollMode
+        && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
         k = (k == KEY_SCROLL_UP) ? KEY_NEXT_CHAN : KEY_PREV_CHAN;
     }
 
-    // Channel click enters compose mode instead of cycling tabs.
+    // Wheel click on a channel toggles chat-history wheel scrolling.
+    // Enter remains the way to enter compose mode.
     if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused) {
-        if (!(hwTypingLock || inputLen > 0)) {
-            hwTypingLock = true;
-            dirtyInput = true;
+        if (!tloraTyping && !softKbVisible) {
+            pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
         }
         return;
     }
@@ -4396,6 +4492,9 @@ static void handleKey(char k) {
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
     if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        pagerWheelChatScrollMode = false;
+#endif
         hwTypingLock = false;
         inputLen = 0;
         inputBuf[0] = '\0';
@@ -4481,6 +4580,9 @@ static void handleKey(char k) {
         bool wasTyping = hwTypingLock || inputLen > 0;
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            pagerWheelChatScrollMode = false;
+#endif
             hwTypingLock = true;
             dirtyInput = true;
             return;
@@ -4955,6 +5057,7 @@ static void onWebCfgSaved() {
     p.putULong("posIntv",     gCfg.posIntervalS);
     p.putString("region",     gCfg.region);
     p.putString("tzDef",      gCfg.tzDef);
+    p.putString("ntpServer",  gCfg.ntpServer);
     p.putULong("screenOnSecs",gCfg.screenOnSecs);
     p.putUChar("dispUnits",   gCfg.displayUnits);
     p.putBool("compassNorth", gCfg.compassNorthTop);
@@ -5008,6 +5111,9 @@ static void onWebCfgSaved() {
     Serial.println("[cfg] nodes re-saved to NVS");
     debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
     applyTimezoneFromConfig();
+    gNtpConfigured = false;
+    gNtpServerActive[0] = '\0';
+    gNtpLastConfigureMs = 0;
     // Apply GPS enable/disable immediately
     gpsSetEnabled(gCfg.gpsEnabled);
     // Apply LoRa changes immediately
@@ -5150,6 +5256,7 @@ void setup() {
         ul = prefs.getULong("posIntv",      0); if (ul) gCfg.posIntervalS      = ul;
         String rgn = prefs.getString("region", ""); if (rgn.length()) strncpy(gCfg.region, rgn.c_str(), sizeof(gCfg.region)-1);
         String tz = prefs.getString("tzDef", ""); if (tz.length()) strncpy(gCfg.tzDef, tz.c_str(), sizeof(gCfg.tzDef)-1);
+        String ntp = prefs.getString("ntpServer", ""); if (ntp.length()) strncpy(gCfg.ntpServer, ntp.c_str(), sizeof(gCfg.ntpServer)-1);
         ul = prefs.getULong("screenOnSecs", 0);
         Serial.printf("[cfg] loaded screenOnSecs=%lu (isKey=%d)\n",
                       (unsigned long)ul, prefs.isKey("screenOnSecs") ? 1 : 0);
@@ -5175,6 +5282,7 @@ void setup() {
         gCfg.mqttUser[sizeof(gCfg.mqttUser) - 1] = '\0';
         gCfg.mqttPass[sizeof(gCfg.mqttPass) - 1] = '\0';
         gCfg.mqttRoot[sizeof(gCfg.mqttRoot) - 1] = '\0';
+        gCfg.ntpServer[sizeof(gCfg.ntpServer) - 1] = '\0';
         if (prefs.isKey("mqttEncrypt")) gCfg.mqttEncryption = prefs.getBool("mqttEncrypt");
         if (prefs.isKey("mqttMapRpt"))  gCfg.mqttMapReport  = prefs.getBool("mqttMapRpt");
         if (prefs.isKey("isPwrSaving")) gCfg.isPowerSaving  = prefs.getBool("isPwrSaving");
@@ -5310,6 +5418,8 @@ void setup() {
 
     // SD card needs SPI bus — init after Radio.init() calls SPI.begin()
     sdBegin();
+    Channels.beginPersistence();
+    Channels.loadPersisted();
     DMs.init();
 
     // Let radio settle before first TX
@@ -5503,14 +5613,30 @@ void loop() {
 
     uint32_t now = millis();
 
-    // Pull wall clock from GPS when available: fast retries before first sync,
-    // then occasional drift correction.
+    // Clock policy for all builds:
+    // 1) GPS is authoritative when available.
+    // 2) Internet NTP is bootstrap/fallback while GPS is unavailable.
     static bool clockEverSynced = false;
-    static uint32_t lastClockSyncAttemptMs = 0;
-    uint32_t syncPeriodMs = clockEverSynced ? 300000UL : 5000UL;
-    if (now - lastClockSyncAttemptMs >= syncPeriodMs) {
-        lastClockSyncAttemptMs = now;
+    static bool gpsEverSynced = false;
+    static uint32_t lastGpsClockSyncAttemptMs = 0;
+    static uint32_t lastNtpClockSyncAttemptMs = 0;
+
+    bool gpsClockUpdated = false;
+    uint32_t gpsSyncPeriodMs = gpsEverSynced ? 300000UL : 5000UL;
+    if (now - lastGpsClockSyncAttemptMs >= gpsSyncPeriodMs) {
+        lastGpsClockSyncAttemptMs = now;
         if (gpsSyncSystemClock()) {
+            clockEverSynced = true;
+            gpsEverSynced = true;
+            gpsClockUpdated = true;
+            dirtyStatus = true;
+        }
+    }
+
+    uint32_t ntpSyncPeriodMs = clockEverSynced ? 300000UL : 5000UL;
+    if (!gpsClockUpdated && now - lastNtpClockSyncAttemptMs >= ntpSyncPeriodMs) {
+        lastNtpClockSyncAttemptMs = now;
+        if (ntpSyncSystemClock()) {
             clockEverSynced = true;
             dirtyStatus = true;
         }

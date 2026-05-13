@@ -44,6 +44,7 @@ public:
     bool      hasUnread() const;
     void      markRead(uint32_t nodeId);
     bool      deleteConversation(uint32_t nodeId);
+    void      clearAll(bool clearPersisted = true);
 
     // Add a message (word-wrapped) to a conversation.
     // markUnread: set to false for outgoing or seed messages.
