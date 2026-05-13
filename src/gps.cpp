@@ -2,6 +2,94 @@
 #include "config.h"
 #include "debug_flags.h"
 #include <TinyGPSPlus.h>
+#include <Wire.h>
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+namespace {
+constexpr uint8_t kXl9555RegOut0 = 0x02;
+constexpr uint8_t kXl9555RegOut1 = 0x03;
+constexpr uint8_t kXl9555RegCfg0 = 0x06;
+constexpr uint8_t kXl9555RegCfg1 = 0x07;
+
+constexpr uint8_t kExpGpsEn  = 4;
+constexpr uint8_t kExpGpsRst = 7;
+
+static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+static bool xl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)addr, 1) != 1) return false;
+    val = Wire.read();
+    return true;
+}
+
+static void xl9555SetOutput(uint8_t pin, bool level,
+                            uint8_t &out0, uint8_t &out1,
+                            uint8_t &cfg0, uint8_t &cfg1) {
+    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
+    if (pin < 8) {
+        cfg0 &= (uint8_t)~bit;
+        if (level) out0 |= bit;
+        else       out0 &= (uint8_t)~bit;
+    } else {
+        cfg1 &= (uint8_t)~bit;
+        if (level) out1 |= bit;
+        else       out1 &= (uint8_t)~bit;
+    }
+}
+
+static int pagerFindExpanderAddr() {
+    for (uint8_t a = 0x20; a <= 0x27; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) return (int)a;
+    }
+    return -1;
+}
+
+static void pagerPrimeGpsRails() {
+    Wire.begin(KB_SDA, KB_SCL);
+    int expAddr = pagerFindExpanderAddr();
+    if (expAddr < 0) {
+        debugLogGps("[gps] pager expander not found (0x20-0x27)\n");
+        return;
+    }
+
+    uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
+    if (!xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut0, out0)
+        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut1, out1)
+        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
+        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
+        debugLogGps("[gps] pager expander read failed addr=0x%02X\n", expAddr);
+        return;
+    }
+
+    // Ensure GPS rail is on, then pulse reset low->high to recover modules
+    // that boot into a stale UART/output state.
+    xl9555SetOutput(kExpGpsEn, true, out0, out1, cfg0, cfg1);
+    xl9555SetOutput(kExpGpsRst, false, out0, out1, cfg0, cfg1);
+    if (!xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0)
+        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1)
+        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
+        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
+        debugLogGps("[gps] pager expander write failed addr=0x%02X\n", expAddr);
+        return;
+    }
+
+    delay(20);
+    xl9555SetOutput(kExpGpsRst, true, out0, out1, cfg0, cfg1);
+    (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0);
+    (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1);
+    debugLogGps("[gps] pager rails primed addr=0x%02X\n", expAddr);
+}
+} // namespace
+#endif
 
 // Minimum ms after GPS start before we trust fix data.
 // The L76K's hot-start cache emits stale GGA with quality=1 and
@@ -171,6 +259,9 @@ static bool gpsNextProbeConfig() {
 }
 
 void gpsBegin() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    pagerPrimeGpsRails();
+#endif
     _baudProbeIdx  = 0;
     _portProbeIdx  = 0;
     _activeRx      = GPS_PORT_PROBE_LIST[0].rx;

@@ -1268,19 +1268,34 @@ static void drawTabs() {
     lcd.fillRect(0, STATUS_H, LCD_W, TAB_H, COL_BG_MAIN);
     lcd.drawFastHLine(0, STATUS_H, LCD_W, COL_DIVIDER);
     lcd.drawFastHLine(0, STATUS_H + TAB_H - 1, LCD_W, COL_DIVIDER);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    static constexpr float kPagerTabsScale = 1.25f;
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+    const int TAB_PAD_X = max(1, (int)lroundf((float)tabsProfile.tabPadX * kPagerTabsScale));
+    const int TAB_GAP   = max(1, (int)lroundf((float)tabsProfile.tabGap * kPagerTabsScale));
+    const int TAB_EDGE_PAD = max(1, (int)lroundf((float)tabsProfile.tabEdgePad * kPagerTabsScale));
+    const int TAB_PILL_INSET_Y = max(1, (int)lroundf((float)tabsProfile.tabPillInsetY * kPagerTabsScale));
+    const int TAB_PILL_MIN_H = max(1, (int)lroundf((float)tabsProfile.tabPillMinHeight * kPagerTabsScale));
+    const int PILL_H    = max(TAB_PILL_MIN_H, TAB_H - TAB_PILL_INSET_Y * 2);
+    const int PILL_Y    = STATUS_H + (TAB_H - PILL_H) / 2;
+    const int TAB_LABEL_Y = PILL_Y + max(0, (PILL_H - lcd.fontHeight()) / 2);
+#else
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(UI_BASE_TEXT_SCALE);
-
     const int TAB_PAD_X = tabsProfile.tabPadX;
     const int TAB_GAP   = tabsProfile.tabGap;
+    const int TAB_EDGE_PAD = tabsProfile.tabEdgePad;
     const int PILL_H    = max(tabsProfile.tabPillMinHeight, TAB_H - tabsProfile.tabPillInsetY * 2);
     const int PILL_Y    = STATUS_H + (TAB_H - PILL_H) / 2;
+    const int TAB_LABEL_Y = PILL_Y + tabsProfile.tabLabelYOffset;
+#endif
 
     // Build full tab list with absolute x positions
     struct TabEntry { int view; char label[16]; int x; int w; };
     TabEntry tabs[TOTAL_VIEWS];
     int tabCount = 0;
-    int xCursor  = tabsProfile.tabEdgePad;
+    int xCursor  = TAB_EDGE_PAD;
 
     for (int i = 0; i < TOTAL_VIEWS; i++) {
         if (!isTopTabView(i)) continue;
@@ -1297,7 +1312,7 @@ static void drawTabs() {
         xCursor += w + TAB_GAP;
     }
 
-    int totalTabW = max(0, xCursor - TAB_GAP + tabsProfile.tabEdgePad);
+    int totalTabW = max(0, xCursor - TAB_GAP + TAB_EDGE_PAD);
     int maxScroll = max(0, totalTabW - LCD_W);
 
     // Auto-scroll so the active tab is always fully visible
@@ -1305,8 +1320,8 @@ static void drawTabs() {
         if (tabs[t].view != activeView) continue;
         if (tabs[t].x < tabScrollX)
             tabScrollX = tabs[t].x;
-        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W - tabsProfile.tabEdgePad)
-            tabScrollX = tabs[t].x + tabs[t].w - (LCD_W - tabsProfile.tabEdgePad);
+        else if (tabs[t].x + tabs[t].w > tabScrollX + LCD_W - TAB_EDGE_PAD)
+            tabScrollX = tabs[t].x + tabs[t].w - (LCD_W - TAB_EDGE_PAD);
         break;
     }
     tabScrollX = constrain(tabScrollX, 0, maxScroll);
@@ -1342,7 +1357,7 @@ static void drawTabs() {
 
         drawSquirclePill(sx, PILL_Y, tabs[t].w, PILL_H, fillCol, outlineCol, isActive);
         lcd.setTextColor(textCol, fillCol);
-        drawClippedText(sx + TAB_PAD_X, PILL_Y + tabsProfile.tabLabelYOffset,
+        drawClippedText(sx + TAB_PAD_X, TAB_LABEL_Y,
                         tabs[t].w - 2 * TAB_PAD_X, tabs[t].label);
     }
     lcd.setFont(UI_BODY_FONT);

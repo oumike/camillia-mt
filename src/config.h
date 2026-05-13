@@ -506,7 +506,7 @@
 #define INPUT_H          18
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #define STATUS_H         30   // taller header to avoid overlap with tab row
-#define TAB_H            12   // tighter tabs to preserve chat height
+#define TAB_H            15   // 1.25x larger channel list tabs for pager readability
 #define MSG_W           385   // give more room to channel content
 #define NODE_X          386   // node pane left edge
 #define NODE_W           94   // slimmer side node pane on 480px display
