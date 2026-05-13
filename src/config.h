@@ -144,6 +144,10 @@
 #define LORA_FEM_POWER_PIN   -1
 #define LORA_FEM_ENABLE_PIN  -1
 #define LORA_FEM_TX_MODE_PIN -1
+// US T-Pager units typically use SX1262. Set to 1 for LR1121 hardware.
+#ifndef PAGER_LORA_USE_LR1121
+#define PAGER_LORA_USE_LR1121 0
+#endif
 
 // microSD (shared SPI bus, dedicated CS)
 #define SD_CS           21
@@ -501,12 +505,12 @@
 #define DIVIDER_X       172
 #define INPUT_H          18
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-#define STATUS_H         26   // compact status chrome for 222px-tall display
+#define STATUS_H         30   // taller header to avoid overlap with tab row
 #define TAB_H            12   // tighter tabs to preserve chat height
-#define MSG_W           352   // use the wide panel for longer message rows
-#define NODE_X          353   // node pane left edge
-#define NODE_W          127   // wider node list/details pane on 480px display
-#define DIVIDER_X       352   // 1px vertical divider
+#define MSG_W           385   // give more room to channel content
+#define NODE_X          386   // node pane left edge
+#define NODE_W           94   // slimmer side node pane on 480px display
+#define DIVIDER_X       385   // 1px vertical divider
 #define INPUT_H          30   // keeps DM composer visible while maximizing chat rows
 #else
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
@@ -523,17 +527,31 @@
 #define CHAT_H         (LCD_H - CHAT_Y - INPUT_H) // height of chat area
 #define INPUT_Y        (LCD_H - INPUT_H)          // top of input area
 
-// Font0: 6×8 px monospace (glyph is 7px tall; 8th row is blank inter-line gap)
+// Base text scaling is pager-only for readability experiments.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#define UI_BASE_TEXT_SCALE 1.0f
+#define UI_BODY_FONT       (&fonts::Font0)
 #define CHAR_W            6
-#define CHAR_H            8   // actual font cell height (used for cursor / input bar)
+#define CHAR_H            8
+#define DM_LINE_H         14
+#else
+#define UI_BASE_TEXT_SCALE 1.0f
+#define UI_BODY_FONT       (&fonts::Font0)
+#define CHAR_W            6
+#define CHAR_H            8
+#define DM_LINE_H         11
+#endif
+// CHAR_H is the actual font cell height used for cursor/input positioning.
 // LINE_H and VISIBLE_LINES are runtime globals set at startup from chatSpacing config.
 // Declared in main.cpp, extern here so all modules can reference them.
 extern int LINE_H;          // row stride in channel/node/settings panels
 extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
-
-#define DM_LINE_H        11   // row stride in DM conversation view (8px char + 3px gap)
 #define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#define MSG_CHARS       42                  // tuned for DejaVu12 channel chat rendering
+#else
 #define MSG_CHARS       (MSG_W / CHAR_W)    // derived chars per message line
+#endif
 #define NODE_CHARS      (NODE_W / CHAR_W)   // derived chars in node pane
 
 // ── Message storage ───────────────────────────────────────────

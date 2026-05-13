@@ -32,9 +32,10 @@ void NodeDB::init() {
     _count = 0;
 
     // Load persisted nodes directly into the array (bypasses save to avoid
-    // triggering NVS writes during boot).
+    // triggering NVS writes during boot). Open read-write so first boot can
+    // create the namespace without logging a noisy NOT_FOUND error.
     Preferences p;
-    p.begin("nodes", true);  // read-only
+    p.begin("nodes", false);
     uint32_t ids[MAX_NODES] = {};
     int n = (int)(p.getBytes("ids", ids, sizeof(ids)) / sizeof(uint32_t));
     for (int i = 0; i < n && _count < MAX_NODES; i++) {

@@ -1,6 +1,7 @@
 #include "config_io.h"
 #include "base64_util.h"
 #include <SD.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <stdio.h>
@@ -32,6 +33,8 @@ constexpr uint8_t kExpSdEn     = 12;
 uint8_t sPagerExpAddr = 0xFF;
 // Runtime-discovered working profile for this boot.
 int sPagerGoodProfile = -1;
+int sPagerGoodSpeedIdx = -1;
+bool sPagerPrefsLoaded = false;
 
 static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
     Wire.beginTransmission(addr);
@@ -116,14 +119,9 @@ static bool pagerApplyExpanderProfile(int profile) {
     (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegCfg0, cfg0);
     (void)xl9555ReadReg(sPagerExpAddr, kXl9555RegCfg1, cfg1);
 
-    // Mirror Meshtastic tlora-pager bring-up so SD slot is electrically enabled.
-    xl9555SetOutput(kExpDrvEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpAmpEn, false, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpLoraEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpKbEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    // SD probing must only touch SD-specific lines. Reprogramming shared rails
+    // here can blank the display after radio bring-up on some pager units.
     xl9555SetOutput(kExpSdEn, sdEnHigh, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpioEn, true, invertDirSense, out0, out1, cfg0, cfg1);
     xl9555SetInput(kExpSdDet, invertDirSense, cfg0, cfg1);
     if (pullenMode == PULLEN_INPUT) {
         xl9555SetInput(kExpSdPullen, invertDirSense, cfg0, cfg1);
@@ -299,34 +297,79 @@ bool sdBegin() {
     // Prefer profile 3 first (validated on this pager), then fall back.
     static const int kProfiles[] = { 3, 2, 0, 1, 4 };
     static const uint32_t kSpeeds[] = { 4000000UL, 1000000UL, 400000UL };
+    const int kSpeedCount = (int)(sizeof(kSpeeds) / sizeof(kSpeeds[0]));
 
     sdReady = false;
 
-    auto tryMountWithProfile = [&](int profile) -> bool {
+    auto loadPagerPrefs = [&]() {
+        if (sPagerPrefsLoaded) return;
+        sPagerPrefsLoaded = true;
+        Preferences p;
+        if (!p.begin("camillia", true)) return;
+        int storedProfile = (int)p.getChar("sdProfile", -1);
+        int storedSpeedIdx = (int)p.getUChar("sdSpeedIdx", 0xFF);
+        p.end();
+
+        if (storedProfile >= 0 && storedProfile <= 4) sPagerGoodProfile = storedProfile;
+        if (storedSpeedIdx >= 0 && storedSpeedIdx < kSpeedCount) sPagerGoodSpeedIdx = storedSpeedIdx;
+    };
+
+    auto savePagerPrefs = [&](int profile, int speedIdx) {
+        Preferences p;
+        if (!p.begin("camillia", false)) return;
+        p.putChar("sdProfile", (int8_t)profile);
+        p.putUChar("sdSpeedIdx", (uint8_t)speedIdx);
+        p.end();
+    };
+
+    auto tryMountWithProfile = [&](int profile, int preferredSpeedIdx) -> bool {
         if (!pagerApplyExpanderProfile(profile)) return false;
         delay(12);
-        for (size_t si = 0; si < (sizeof(kSpeeds) / sizeof(kSpeeds[0])); si++) {
+
+        auto trySpeedIdx = [&](int si) -> bool {
+            if (si < 0 || si >= kSpeedCount) return false;
             if (SD.begin(SD_CS, SPI, kSpeeds[si])) {
                 sdReady = true;
                 sPagerGoodProfile = profile;
+                sPagerGoodSpeedIdx = si;
+                savePagerPrefs(profile, si);
                 Serial.printf("[sd] mounted using profile=%d speed=%lu\n",
                               profile, (unsigned long)kSpeeds[si]);
                 return true;
             }
+            return false;
+        };
+
+        if (trySpeedIdx(preferredSpeedIdx)) return true;
+        for (int si = 0; si < kSpeedCount; si++) {
+            if (si == preferredSpeedIdx) continue;
+            if (trySpeedIdx(si)) return true;
         }
         return false;
     };
 
-    // First pass: if we discovered a working profile earlier in this boot, try it first.
+    loadPagerPrefs();
+
+    bool triedProfile[5] = {false, false, false, false, false};
+    auto markTried = [&](int profile) {
+        if (profile >= 0 && profile <= 4) triedProfile[profile] = true;
+    };
+    auto wasTried = [&](int profile) -> bool {
+        return (profile >= 0 && profile <= 4) ? triedProfile[profile] : false;
+    };
+
+    // First pass: try last known-good profile/speed from NVS (or in-memory cache).
     if (sPagerGoodProfile >= 0) {
-        (void)tryMountWithProfile(sPagerGoodProfile);
+        (void)tryMountWithProfile(sPagerGoodProfile, sPagerGoodSpeedIdx);
+        if (sdReady) markTried(sPagerGoodProfile);
     }
 
     // Fallback pass: try known profile order, skipping the already-tried one.
     for (size_t pi = 0; pi < (sizeof(kProfiles) / sizeof(kProfiles[0])) && !sdReady; pi++) {
         int profile = kProfiles[pi];
-        if (profile == sPagerGoodProfile) continue;
-        (void)tryMountWithProfile(profile);
+        if (wasTried(profile)) continue;
+        markTried(profile);
+        (void)tryMountWithProfile(profile, -1);
     }
 #else
     sdReady = SD.begin(SD_CS, SPI, 4000000);

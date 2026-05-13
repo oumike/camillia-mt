@@ -4,6 +4,10 @@
 #include <RadioLib.h>
 #include "mesh_proto.h"
 
+#ifndef PAGER_LORA_USE_LR1121
+#define PAGER_LORA_USE_LR1121 0
+#endif
+
 class MeshRadio {
 public:
     bool init();
@@ -19,7 +23,11 @@ public:
 
 private:
     bool    _ready = false;
+#if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
+    LR1121  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
+#else
     SX1262  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
+#endif
 
     static void IRAM_ATTR _onDio1();
     static volatile bool  _rxFlag;

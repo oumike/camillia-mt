@@ -26,10 +26,20 @@
 #include "mbedtls/ecdh.h"
 
 // ── Chat spacing (runtime, set once at startup from gCfg.chatSpacing) ─
+#if defined(DEVICE_TLORA_PAGER_TFT)
+int LINE_H        = 13;     // default Normal
+static const int kSpacingPx[] = { 10, 13, 16 };  // Tight, Normal, Loose
+#else
 int LINE_H        = 10;     // default Normal
-int VISIBLE_LINES = (CHAT_H - 2) / 10;
+static const int kSpacingPx[] = { 8, 10, 12 };   // Tight, Normal, Loose
+#endif
+int VISIBLE_LINES = (CHAT_H - 2) / LINE_H;
 
-static const int kSpacingPx[] = { 8, 10, 12 };  // Tight, Normal, Loose
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr float CHAT_WINDOW_TEXT_SCALE = 1.25f;
+#else
+static constexpr float CHAT_WINDOW_TEXT_SCALE = UI_BASE_TEXT_SCALE;
+#endif
 
 // ── Globals ───────────────────────────────────────────────────
 static LGFX_TDeck   lcd;
@@ -58,8 +68,13 @@ static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
 static int  settingsInfoScrollMax = 0;
 static int  mapsListSel = 0;          // highlighted node row in MAP panel
+#if defined(DEVICE_TLORA_PAGER_TFT)
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
+#else
+static const int SETTINGS_ROW_H = 10;
+static const int SETTINGS_HDR_H = 16;
+#endif
 static const int TOUCH_BTN_W = 58;
 static const int TOUCH_BTN_H = 24;
 static const int TOUCH_BTN_BOTTOM_PAD = 5;
@@ -191,9 +206,11 @@ static void handleKey(char k);
 // ── DM sub-state ──────────────────────────────────────────────
 static bool     dmConvOpen   = false;  // true = showing conversation
 static bool     dmPickerOpen = false;  // true = showing node picker ("New DM")
-static int      dmListSel    = 0;      // 0 = "New DM" button, 1+ = conversation index
+static int      dmListSel    = 0;      // selected conversation index in DM list
 static int      dmPickerSel  = 0;      // selected row in node picker
 static uint32_t dmConvNodeId = 0;      // node ID of open conversation
+static bool     dmDeleteConfirm = false;
+static uint32_t dmDeleteConfirmNodeId = 0;
 
 // ── Dirty flags ───────────────────────────────────────────────
 static bool dirtyStatus   = true;
@@ -732,6 +749,11 @@ static bool cardputerPanelShortcutReady() {
     if (isTextInputView() && (hwTypingLock || inputLen > 0)) return false;
     return true;
     }
+#if defined(DEVICE_TDECK)
+    if (softKbVisible) return false;
+    if (isTextInputView() && (hwTypingLock || inputLen > 0)) return false;
+    return true;
+#endif
     return false;
 }
 
@@ -785,6 +807,8 @@ static void goToView(int v) {
     dmPickerOpen    = false;
     dmListSel       = 0;
     dmPickerSel     = 0;
+    dmDeleteConfirm = false;
+    dmDeleteConfirmNodeId = 0;
     softKbVisible   = false;
     softKbShift     = false;
     hwTypingLock    = false;
@@ -802,9 +826,14 @@ static void goToView(int v) {
                 break;
             }
         }
-        // Even if no unread, pre-select the most recent conversation (not "New DM")
-        if (!dmConvOpen && DMs.count() > 0)
+        // Even if no unread, pre-select the most recent row.
+        if (!dmConvOpen && DMs.count() > 0) {
+    #if defined(DEVICE_TLORA_PAGER_TFT)
+            dmListSel = 0;
+    #else
             dmListSel = 1;
+    #endif
+        }
     }
     if (v == VIEW_MAP) {
         if (prev != VIEW_MAP) {
@@ -1026,8 +1055,8 @@ static void drawBattery() {
     const int AP_PAD_X = 4;
     const int AP_H = 12;
 
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextSize(1);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
     const int byText = max(0, (STATUS_H - lcd.fontHeight()) / 2);
     const int byBatt = max(1, (STATUS_H - BAR_H) / 2);
 
@@ -1135,7 +1164,7 @@ static void drawBattery() {
     lcd.fillRect(BX + 1, byBatt + 1, barBodyW - 2, BAR_H - 2, bg);
     if (fillW > 0) lcd.fillRect(BX + 1, byBatt + 1, fillW, BAR_H - 2, col);
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(lightUi ? COL_TEXT_MAIN : COL_TEXT_ON_ACCENT);
     int battTx = BX + (barBodyW - battTxtW) / 2;
     int battTy = byBatt + max(0, (BAR_H - CHAR_H) / 2);
@@ -1174,9 +1203,15 @@ static void drawStatus() {
     drawCamelliaMarkTiny(flowerCx, STATUS_H / 2);
 
     int timeX = flowerCx + header.statusTimeGap;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    int timeW = lcd.textWidth(timeBuf);
+    timeX = max(0, (LCD_W - timeW) / 2);
+    lcd.drawString(timeBuf, timeX, infoY);
+#else
     drawClippedText(timeX, infoY, NODE_X - timeX - header.statusTimeRightPad, timeBuf);
+#endif
     drawBattery();
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyStatus = false;
 }
 
@@ -1217,7 +1252,7 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
     }
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
     drawSquirclePill(x, y, w, h, fill, COL_SELECT_ACCENT, false);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_MAIN, fill);
     int tw = lcd.textWidth("Close");
     int tx = x + max(1, (w - tw) / 2);
@@ -1234,7 +1269,7 @@ static void drawTabs() {
     lcd.drawFastHLine(0, STATUS_H, LCD_W, COL_DIVIDER);
     lcd.drawFastHLine(0, STATUS_H + TAB_H - 1, LCD_W, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     const int TAB_PAD_X = tabsProfile.tabPadX;
     const int TAB_GAP   = tabsProfile.tabGap;
@@ -1310,7 +1345,7 @@ static void drawTabs() {
         drawClippedText(sx + TAB_PAD_X, PILL_Y + tabsProfile.tabLabelYOffset,
                         tabs[t].w - 2 * TAB_PAD_X, tabs[t].label);
     }
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyTabs = false;
 }
 
@@ -1327,8 +1362,13 @@ static void drawChat() {
     int chatW = MSG_W;
     const int chatInnerY = CHAT_Y + 1;
     drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+#else
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(CHAT_WINDOW_TEXT_SCALE);
+#endif
 
     int active = Channels.activeIdx();
 
@@ -1357,16 +1397,26 @@ static void drawChat() {
         if (!dl) continue;
 
         uint16_t col = dl->color;
+        bool ackColorApplied = false;
 
         // Override color for sent messages based on ACK state
         if (dl->packetId) {
             switch (dl->ack) {
-                case DisplayLine::ACKED:       col = TFT_GREEN;  break;
-                case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; break;
-                case DisplayLine::NAKED:       col = TFT_RED;    break;
-                case DisplayLine::TX_FAILED:   col = TFT_RED;    break;
+                case DisplayLine::ACKED:
+                    col = (gCfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
+                    ackColorApplied = true;
+                    break;
+                case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; ackColorApplied = true; break;
+                case DisplayLine::NAKED:       col = TFT_RED;    ackColorApplied = true; break;
+                case DisplayLine::TX_FAILED:   col = TFT_RED;    ackColorApplied = true; break;
                 default: break;  // NONE / PENDING keep original color
             }
+        }
+
+        // Improve readability by forcing neutral body text by theme.
+        if (!ackColorApplied) {
+            if (gCfg.uiMode == UI_MODE_LIGHT) col = TFT_BLACK;
+            else                              col = TFT_WHITE;
         }
 
         lcd.setTextColor(col, rowBg);
@@ -1388,7 +1438,7 @@ static void drawChat() {
         drawClippedText(chatX + chatW - 34, chatInnerY + 1, 32, "more");
     }
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -1634,7 +1684,7 @@ static void drawLivePanel(bool fullRedraw) {
         drawModalMaskAndFrame(mx, my, mw, mh);
         drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
         lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
         drawClippedText(mx + 5, my + 2, mw - 10, "Live RX/TX");
         lcd.fillRect(mx + 1, controlsTop, mw - 2, my + mh - controlsTop - 1, COL_PANEL_BG);
@@ -1643,7 +1693,7 @@ static void drawLivePanel(bool fullRedraw) {
         drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
     }
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     for (int row = 0; row < rowsVisible; row++) {
         int y = msgTop + row * rowH;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
@@ -1656,7 +1706,9 @@ static void drawLivePanel(bool fullRedraw) {
         uint16_t col = liveLineTrafficColor(dl);
         if (dl.packetId) {
             switch (dl.ack) {
-                case DisplayLine::ACKED:       col = TFT_GREEN;  break;
+                case DisplayLine::ACKED:
+                    col = (gCfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
+                    break;
                 case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; break;
                 case DisplayLine::NAKED:       col = TFT_RED;    break;
                 case DisplayLine::TX_FAILED:   col = TFT_RED;    break;
@@ -1680,7 +1732,7 @@ static void drawLivePanel(bool fullRedraw) {
         drawClippedText(left + innerW - 30, msgTop + 1, 28, "more");
     }
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyLiveRows = false;
     if (fullRedraw) dirtyChat = false;
 }
@@ -1851,7 +1903,7 @@ static void drawMapPanel() {
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     int positionedCount = 0;
     float minLat = 90.0f, maxLat = -90.0f;
@@ -2051,7 +2103,7 @@ static void drawMapPanel() {
         }
     }
     if (positionedCount == 0) {
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_STRONG);
         drawClippedText(mapX + 6, mapY + mapH / 2 - 4, mapW - 12, "No positioned nodes yet");
         lcd.setFont(&fonts::DejaVu9);
@@ -2130,7 +2182,7 @@ static void drawMapPanel() {
         int bx = btnX[i];
         uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
         drawSquirclePill(bx, btnY, btnW[i], mapNavBtnH, fill, COL_SELECT_ACCENT, false);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(COL_TEXT_MAIN, fill);
         int tw = lcd.textWidth(labels[i]);
         int tx = bx + max(1, (btnW[i] - tw) / 2);
@@ -2140,15 +2192,15 @@ static void drawMapPanel() {
     }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     const int legendY = my + mh - CHAR_H - 1;
     lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    drawClippedText(mx + 4, legendY, mw - 8, "Wheel:Prev/Next  M:Me  I:+  O:-");
+    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  M:Me  I:+  O:-");
 #endif
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     mapLastDrawMs = millis();
     dirtyNodes = false;
     dirtyChat = downloadedAnyTile;
@@ -2158,7 +2210,7 @@ static void drawMapPanel() {
 static void drawNodes() {
     drawPanelFrame(NODE_X, CHAT_Y, NODE_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     const int MAX_VISIBLE = CHAT_H / LINE_H;  // 29
     uint32_t now = millis();
@@ -2190,7 +2242,7 @@ static void drawNodes() {
         lcd.setTextColor(col, bg);
         drawClippedText(NODE_X + 2, y + 1, NODE_W - 4, r);
     }
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyNodes = false;
 }
 
@@ -2211,7 +2263,7 @@ static void drawCompassRose(int cx, int cy, int cr, float heading) {
     }
 
     // Cardinal labels
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
     lcd.setTextColor(TFT_RED, COL_PANEL_BG);
     lcd.setCursor(cx - 3, cy - cr + 1);  lcd.print("N");
     lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
@@ -2238,7 +2290,7 @@ static void drawCompassRose(int cx, int cy, int cr, float heading) {
 static void drawGps() {
     drawPanelFrame(0, CHAT_Y, LCD_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     const bool    stream  = gpsHasNmeaStream();
     const bool    fix     = gpsHasFix();
@@ -2345,7 +2397,7 @@ static void drawGps() {
     lcd.setTextColor(fix ? COL_TEXT_MAIN : (uint16_t)COL_TAB_IDLE, COL_PANEL_BG);
     lcd.drawString(buf, CX - tw / 2, CY + CR + 4);
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -2363,7 +2415,24 @@ static void openDmWith(NodeEntry *n) {
     if (inputLen == 0) hwTypingLock = true;
 #endif
     dmPickerOpen = false;
+    dmDeleteConfirm = false;
+    dmDeleteConfirmNodeId = 0;
     dirtyChat = dirtyInput = true;
+}
+
+static DmConv *selectedDmListConv() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (dmListSel < 0 || dmListSel >= DMs.count()) return nullptr;
+    return DMs.getByRank(dmListSel);
+#else
+    if (dmListSel <= 0 || dmListSel > DMs.count()) return nullptr;
+    return DMs.getByRank(dmListSel - 1);
+#endif
+}
+
+static void clearDmDeleteConfirm() {
+    dmDeleteConfirm = false;
+    dmDeleteConfirmNodeId = 0;
 }
 
 // ── Draw: DM contact list ─────────────────────────────────────
@@ -2381,18 +2450,27 @@ static void drawDmList() {
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+#else
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(CHAT_WINDOW_TEXT_SCALE);
+#endif
     dirtyNodes = false;
 
-    // Rows: conversations (dmListSel 1..count), with dmListSel 0 reserved for NEW DM button.
+    // Rows: conversations.
     const int rows = min(DMs.count(), rowsVisible);
     for (int i = 0; i < rows; i++) {
         DmConv *c = DMs.getByRank(i);
         if (!c) break;
 
         int      y   = iy + i * DM_LINE_H;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        bool     sel = (dmListSel == i);
+#else
         bool     sel = (dmListSel == i + 1);
+#endif
         uint16_t bg  = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
         uint16_t col = sel ? COL_TEXT_ON_ACCENT
                    : c->unread ? COL_TAB_UNREAD : COL_DM_MUTED;
@@ -2408,6 +2486,7 @@ static void drawDmList() {
 
     const int closeX = mx + 3;
     const int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+#if !defined(DEVICE_TLORA_PAGER_TFT)
     const int newW = TOUCH_BTN_W;
     const int newH = TOUCH_BTN_H;
     const int newX = closeX + newW + 4;
@@ -2415,11 +2494,12 @@ static void drawDmList() {
     bool newSel = (dmListSel == 0);
     uint16_t newFill = newSel ? COL_SELECT_BG : lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
     drawSquirclePill(newX, newY, newW, newH, newFill, COL_SELECT_ACCENT, newSel);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(newSel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN, newFill);
     int ntw = lcd.textWidth("NEW DM");
     drawClippedText(newX + max(1, (newW - ntw) / 2), newY + max(0, (newH - CHAR_H) / 2), newW - 2, "NEW DM");
     setDmNewRect(newX, newY, newW, newH);
+#endif
 
     drawPanelCloseButton(closeX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
 
@@ -2447,7 +2527,23 @@ static void drawDmList() {
     }
 #endif
 
-    lcd.setFont(&fonts::Font0);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    char legend[96];
+    if (dmDeleteConfirm) {
+        DmConv *c = selectedDmListConv();
+        const char *sn = (c && c->shortName[0]) ? c->shortName : "????";
+        snprintf(legend, sizeof(legend), "Delete [%s]? Bksp:Yes  Esc:No", sn);
+    } else {
+        snprintf(legend, sizeof(legend), "N:New  Enter:Open  Bksp:Delete");
+    }
+    drawClippedText(mx + 4, legendY, mw - 8, legend);
+#endif
+
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -2539,8 +2635,13 @@ static void drawDmPicker() {
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+#else
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(CHAT_WINDOW_TEXT_SCALE);
+#endif
     dirtyNodes = false;
 
     // Header bar
@@ -2566,7 +2667,7 @@ static void drawDmPicker() {
         drawPanelCloseButton(mx + 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         dirtyChat = false;
         return;
     }
@@ -2614,7 +2715,7 @@ static void drawDmPicker() {
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
 
     drawSquirclePill(upX, closeY, dmBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_MAIN, fill);
     int tw = lcd.textWidth("Up");
     int tx = upX + max(1, (dmBtnW - tw) / 2);
@@ -2630,7 +2731,7 @@ static void drawDmPicker() {
     }
 #endif
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -2653,7 +2754,7 @@ static void drawDmConv() {
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(CHAT_WINDOW_TEXT_SCALE);
     dirtyNodes = false;
 
     DmConv *c = DMs.find(dmConvNodeId);
@@ -2663,7 +2764,7 @@ static void drawDmConv() {
         drawPanelCloseButton(mx + 3,
                      my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD,
                      TOUCH_BTN_W, TOUCH_BTN_H);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         dirtyChat = false;
         return;
     }
@@ -2683,7 +2784,10 @@ static void drawDmConv() {
         lcd.fillRect(ix, y, iw, DM_LINE_H, rowBg);
         const DmLine *dl = DMs.getLine(c, row, MSG_ROWS);
         if (!dl) continue;
-        lcd.setTextColor(dl->color, rowBg);
+        uint16_t col = dl->color;
+        if (gCfg.uiMode == UI_MODE_LIGHT) col = TFT_BLACK;
+        else                              col = TFT_WHITE;
+        lcd.setTextColor(col, rowBg);
         drawClippedText(ix + 4, y + 1, iw - 8, dl->text);
     }
 
@@ -2701,7 +2805,7 @@ static void drawDmConv() {
     uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
 
     drawSquirclePill(upX, closeY, dmBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_MAIN, fill);
     int tw = lcd.textWidth("Up");
     int tx = upX + max(1, (dmBtnW - tw) / 2);
@@ -2717,7 +2821,7 @@ static void drawDmConv() {
     }
 #endif
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     // DM conversation repaints can overwrite the prompt strip; request an
     // input-bar pass so the composer prompt remains visible.
@@ -2761,7 +2865,7 @@ static void drawSettings() {
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     char buf[LCD_W / CHAR_W + 2];
     int y = my + 1;
@@ -2829,6 +2933,9 @@ static void drawSettings() {
         bool sel = (i == settingsSel);
         uint16_t bg = sel ? COL_SELECT_BG : ((i & 1) ? COL_PANEL_BG : COL_PANEL_ALT);
         uint16_t fg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_DIM;
+        if (sel && gCfg.uiTheme == UI_THEME_SOLARIZED && gCfg.uiMode == UI_MODE_LIGHT) {
+            fg = COL_TEXT_MAIN;
+        }
         lcd.fillRect(ix, y, iw, SH, bg);
         lcd.setTextColor(fg, bg);
 #if HAS_SD_CARD
@@ -2902,7 +3009,7 @@ static void drawSettings() {
         uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
 
         drawSquirclePill(upX, closeY, cfgBtnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(COL_TEXT_MAIN, fill);
         int tw = lcd.textWidth("Up");
         int tx = upX + max(1, (cfgBtnW - tw) / 2);
@@ -2917,7 +3024,7 @@ static void drawSettings() {
         setSettingsControlRect(SETTINGS_CTL_DOWN, downX, closeY, cfgBtnW, TOUCH_BTN_H);
     }
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -2925,7 +3032,7 @@ static void drawSettings() {
 static void drawNodeDetail(const NodeEntry *n) {
     drawPanelFrame(0, CHAT_Y, LCD_W, LCD_H - CHAT_Y, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     const int X = 6;
     int row = 0;
@@ -3003,7 +3110,7 @@ static void drawNodeDetail(const NodeEntry *n) {
     }
 
     pr(COL_TAB_IDLE, "[ESC / Enter] close");
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
 }
 
@@ -3224,7 +3331,7 @@ static void drawSoftKeyboardOverlay() {
         int dh = h + lift;
 
         drawSquirclePill(x, dy, w, dh, fill, edge, emph);
-        lcd.setFont(&fonts::Font0);
+        lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(emph ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN, fill);
         int tw = lcd.textWidth(label);
         int tx = x + max(1, (w - tw) / 2);
@@ -3440,6 +3547,7 @@ static bool handleTouchTap(int x, int y) {
 
     if (softKeyboardHandleTap(x, y)) return true;
 
+    #if !defined(DEVICE_TLORA_PAGER_TFT)
     if (dmNewVisible
         && pointInRect(x, y, dmNewRect.x, dmNewRect.y, dmNewRect.w, dmNewRect.h)
         && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
@@ -3450,6 +3558,7 @@ static bool handleTouchTap(int x, int y) {
         dirtyChat = true;
         return true;
     }
+    #endif
 
     if (panelCloseVisible
         && pointInRect(x, y, panelCloseRect.x, panelCloseRect.y,
@@ -3550,8 +3659,13 @@ static void drawInput() {
     if (panelCoversInputArea()) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
     if (showTextInput && activeView == CHAN_DM && (inputLen > 0 || hwTypingLock)) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            lcd.setFont(&fonts::DejaVu12);
+            lcd.setTextSize(1.0f);
+#else
             lcd.setFont(&fonts::DejaVu9);
-            lcd.setTextSize(1);
+            lcd.setTextSize(UI_BASE_TEXT_SCALE);
+#endif
             const int composerH = lcd.fontHeight() + 6;
             const int composerY = INPUT_Y + 1;
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
@@ -3577,7 +3691,7 @@ static void drawInput() {
                 lcd.fillRect(cx, textY, 2, ch, COL_CURSOR);
             }
 
-            lcd.setFont(&fonts::Font0);
+            lcd.setFont(UI_BODY_FONT);
         }
 #endif
 #if !HAS_KEYBOARD
@@ -3608,8 +3722,13 @@ static void drawInput() {
         lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
         lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
     }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+#else
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+#endif
 
     if (showTextInput) {
         int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
@@ -3622,7 +3741,7 @@ static void drawInput() {
             lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
         } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
             const int composerBottom = max(CHAT_Y + composerH, b[0].y - 2);
             const int composerY = max(CHAT_Y + 1, composerBottom - composerH);
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
@@ -3676,7 +3795,7 @@ static void drawInput() {
         lcd.drawFastVLine(sepX2 + 1, sepY, sepH, COL_DIVIDER_HI);
     }
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
     for (int i = 0; i < navButtonCount(); i++) {
         const char *label = navButtonLabel(i);
@@ -3688,7 +3807,7 @@ static void drawInput() {
             lcd.setFont(&fonts::DejaVu9);
             int headW = lcd.textWidth(head);
             int headH = lcd.fontHeight();
-            lcd.setFont(&fonts::Font0);
+            lcd.setFont(UI_BODY_FONT);
             int tailW = lcd.textWidth(tail);
             int totalW = headW + (tail[0] ? (1 + tailW) : 0);
             int tx = b[i].x + max(1, (b[i].w - totalW) / 2);
@@ -3701,12 +3820,12 @@ static void drawInput() {
             lcd.drawString(head, tx + 1, headY);
 
             if (tail[0]) {
-                lcd.setFont(&fonts::Font0);
+                lcd.setFont(UI_BODY_FONT);
                 lcd.setTextColor(COL_TEXT_MAIN, btnFill);
                 drawClippedText(tx + headW + 1, tailY,
                                 b[i].w - (tx + headW + 1 - b[i].x) - 2, tail);
             }
-            lcd.setFont(&fonts::Font0);
+            lcd.setFont(UI_BODY_FONT);
             continue;
         }
 #endif
@@ -3719,7 +3838,7 @@ static void drawInput() {
 
     drawSoftKeyboardOverlay();
 
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(UI_BODY_FONT);
     dirtyInput = false;
 }
 
@@ -3913,6 +4032,7 @@ static void handleRx(MeshPacket pkt) {
         // Sender display: use short name (real or hex fallback set by node DB)
         NodeEntry *n = Nodes.find(pkt.hdr.from);
         const char *sender = (n && n->shortName[0]) ? n->shortName : "????";
+        uint16_t incomingNodeColor = (gCfg.uiMode == UI_MODE_LIGHT) ? TFT_DARKGREY : TFT_LIGHTGREY;
 
         snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
 
@@ -3920,7 +4040,7 @@ static void handleRx(MeshPacket pkt) {
             // Unicast DM addressed to us
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
-            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, COL_TEAL,
+            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, incomingNodeColor,
                            /*markUnread=*/!viewing, pkt.chanIdx);
             // If we're on the DM list (not inside a conv), jump straight into this one
             if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
@@ -3936,7 +4056,7 @@ static void handleRx(MeshPacket pkt) {
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
-            Channels.addMessage(pkt.chanIdx, prefix, tm.text, COL_TEAL);
+            Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor);
             if (!dmPickerOpen) dirtyChat = true;
             dirtyTabs = true;
         }
@@ -4237,8 +4357,9 @@ static void handleKey(char k) {
                          && !(hwTypingLock || inputLen > 0);
 
     // On the pager wheel, rotate to move between channels when not in panel views.
+    // User preference: reverse channel list navigation direction.
     if (tloraChannelIdle && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
-        k = (k == KEY_SCROLL_UP) ? KEY_PREV_CHAN : KEY_NEXT_CHAN;
+        k = (k == KEY_SCROLL_UP) ? KEY_NEXT_CHAN : KEY_PREV_CHAN;
     }
 
     // Channel click enters compose mode instead of cycling tabs.
@@ -4250,8 +4371,8 @@ static void handleKey(char k) {
         return;
     }
 
-    // Pager preference: reverse wheel direction in CFG and MAP panels.
-    if (activeView == VIEW_SETTINGS || activeView == VIEW_MAP) {
+    // Pager preference: reverse wheel direction in CFG, MAP, and DM panels.
+    if (activeView == VIEW_SETTINGS || activeView == VIEW_MAP || activeView == CHAN_DM) {
         if (k == KEY_SCROLL_UP) k = KEY_SCROLL_DN;
         else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
     }
@@ -4269,7 +4390,13 @@ static void handleKey(char k) {
     }
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+    if (k == KEY_ESCAPE && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen && dmDeleteConfirm) {
+        clearDmDeleteConfirm();
+        dirtyChat = true;
+        return;
+    }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     if (cardputerPanelShortcutReady()) {
         switch (k) {
             case '`':
@@ -4316,6 +4443,7 @@ static void handleKey(char k) {
     // ALT+E — toggle node list focus / close detail; close DM sub-views
     if (k == KEY_NODE_FOCUS) {
         if (activeView == CHAN_DM) {
+            clearDmDeleteConfirm();
             if (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; }
             else if (dmConvOpen) { dmConvOpen = false; dirtyChat = dirtyInput = true; }
             return;
@@ -4352,17 +4480,25 @@ static void handleKey(char k) {
         }
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
+                clearDmDeleteConfirm();
                 openDmWith(pickerNode(dmPickerSel));
             } else if (!dmConvOpen) {
-                if (dmListSel == 0) {
-                    // "New DM" button
+                if (dmDeleteConfirm) {
+                    clearDmDeleteConfirm();
+                    dirtyChat = true;
+                    return;
+                }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                if (DMs.count() <= 0) {
                     dmPickerSel  = 0;
                     dmPickerOpen = true;
                     pickerSnapshot();
+                    clearDmDeleteConfirm();
                     dirtyChat = true;
                 } else {
-                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    DmConv *c = DMs.getByRank(dmListSel);
                     if (c) {
+                        clearDmDeleteConfirm();
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
@@ -4372,6 +4508,28 @@ static void handleKey(char k) {
                         dirtyChat = dirtyInput = dirtyTabs = true;
                     }
                 }
+#else
+                if (dmListSel == 0) {
+                    // "New DM" button
+                    dmPickerSel  = 0;
+                    dmPickerOpen = true;
+                    pickerSnapshot();
+                    clearDmDeleteConfirm();
+                    dirtyChat = true;
+                } else {
+                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    if (c) {
+                        clearDmDeleteConfirm();
+                        DMs.markRead(c->nodeId);
+                        dmConvNodeId = c->nodeId;
+                        dmConvOpen   = true;
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+                        if (inputLen == 0) hwTypingLock = true;
+#endif
+                        dirtyChat = dirtyInput = dirtyTabs = true;
+                    }
+                }
+#endif
             } else {
                 // Conv view: ENTER sends the message
                 if (inputLen > 0) {
@@ -4411,7 +4569,17 @@ static void handleKey(char k) {
             inputBuf[inputLen] = '\0';
             int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
                          ? activeView : Channels.activeIdx();
-            if (!Channels.sendText(myNodeId, inputBuf, gCfg.okToMqtt, txChan)) {
+            const char *txText = inputBuf;
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+            if (strcmp(inputBuf, "test") == 0) {
+                // Temporary multiline ACK-color validation payload.
+                txText = "DEBUG TEST STREAM: ax nebula juxtaposition quark micro "
+                         "hyperdimensional antidisestablish ion zephyr transubstantiate "
+                         "pebble xylophone umbra chlorofluoro gargantuan pseudohypopara "
+                         "counterrevolution electroencephalo titan nano q.";
+            }
+#endif
+            if (!Channels.sendText(myNodeId, txText, gCfg.okToMqtt, txChan)) {
                 Channels.addMessage(txChan, "",
                     "! TX failed", TFT_RED, 0);
                 dirtyChat = true;
@@ -4422,6 +4590,31 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_BACKSPACE) {
+        if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
+            DmConv *selected = selectedDmListConv();
+            if (!selected) {
+                clearDmDeleteConfirm();
+                dirtyChat = true;
+                return;
+            }
+            if (dmDeleteConfirm && dmDeleteConfirmNodeId == selected->nodeId) {
+                if (DMs.deleteConversation(selected->nodeId)) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                    int cap = max(0, DMs.count() - 1);
+#else
+                    int cap = DMs.count();
+#endif
+                    dmListSel = min(dmListSel, cap);
+                }
+                clearDmDeleteConfirm();
+                dirtyChat = dirtyTabs = true;
+                return;
+            }
+            dmDeleteConfirm = true;
+            dmDeleteConfirmNodeId = selected->nodeId;
+            dirtyChat = true;
+            return;
+        }
         if (activeView == CHAN_DM && dmPickerOpen) {
             if (dmPickerFilterLen > 0) {
                 dmPickerFilter[--dmPickerFilterLen] = '\0';
@@ -4460,9 +4653,11 @@ static void handleKey(char k) {
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
                 if (k == KEY_ROLLER) {
+                    clearDmDeleteConfirm();
                     openDmWith(pickerNode(dmPickerSel));
                 } else {
                     // Tab/right closes picker, back to list
+                    clearDmDeleteConfirm();
                     dmPickerOpen = false;
                     dirtyChat = true;
                 }
@@ -4482,19 +4677,23 @@ static void handleKey(char k) {
                     dirtyInput = dirtyChat = true;
                 } else {
                     // Tab/right/roller (empty) → back to contact list
+                    clearDmDeleteConfirm();
                     dmConvOpen = false;
                     dirtyChat = dirtyInput = true;
                 }
             } else if (k == KEY_ROLLER) {
-                // Roller on list item: "New DM" or open conv
-                if (dmListSel == 0) {
+                // Roller on list item.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                if (DMs.count() <= 0) {
                     dmPickerSel  = 0;
                     dmPickerOpen = true;
                     pickerSnapshot();
+                    clearDmDeleteConfirm();
                     dirtyChat = true;
                 } else {
-                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    DmConv *c = DMs.getByRank(dmListSel);
                     if (c) {
+                        clearDmDeleteConfirm();
                         DMs.markRead(c->nodeId);
                         dmConvNodeId = c->nodeId;
                         dmConvOpen   = true;
@@ -4504,8 +4703,30 @@ static void handleKey(char k) {
                         dirtyChat = dirtyInput = dirtyTabs = true;
                     }
                 }
+#else
+                if (dmListSel == 0) {
+                    dmPickerSel  = 0;
+                    dmPickerOpen = true;
+                    pickerSnapshot();
+                    clearDmDeleteConfirm();
+                    dirtyChat = true;
+                } else {
+                    DmConv *c = DMs.getByRank(dmListSel - 1);
+                    if (c) {
+                        clearDmDeleteConfirm();
+                        DMs.markRead(c->nodeId);
+                        dmConvNodeId = c->nodeId;
+                        dmConvOpen   = true;
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+                        if (inputLen == 0) hwTypingLock = true;
+#endif
+                        dirtyChat = dirtyInput = dirtyTabs = true;
+                    }
+                }
+#endif
             } else {
                 // Tab/right from list → cycle forward
+                clearDmDeleteConfirm();
                 goToView(nextView(activeView));
             }
             return;
@@ -4524,8 +4745,8 @@ static void handleKey(char k) {
 
     } else if (k == KEY_PREV_CHAN) {
         if (activeView == CHAN_DM) {
-            if      (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; return; }
-            else if (dmConvOpen)   { dmConvOpen = false; dirtyChat = dirtyInput = true; return; }
+            if      (dmPickerOpen) { clearDmDeleteConfirm(); dmPickerOpen = false; dirtyChat = true; return; }
+            else if (dmConvOpen)   { clearDmDeleteConfirm(); dmConvOpen = false; dirtyChat = dirtyInput = true; return; }
             // else: fall through to tab cycle
         }
         if (activeView != VIEW_SETTINGS || settingsSel == 0)
@@ -4545,7 +4766,8 @@ static void handleKey(char k) {
                     dirtyChat = true;
                 }
             } else {
-                // List: 0 = "New DM" button, 1..count = convs
+                // List rows
+                clearDmDeleteConfirm();
                 dmListSel = max(0, dmListSel - 1);
                 dirtyChat = true;
             }
@@ -4581,8 +4803,12 @@ static void handleKey(char k) {
                 DmConv *c = DMs.find(dmConvNodeId);
                 if (c) { c->scrollOff = max(0, c->scrollOff - 3); dirtyChat = true; }
             } else {
-                // List: max is DMs.count() (last conv), 0 is the button
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                int cap = max(0, DMs.count() - 1);
+#else
                 int cap = DMs.count();
+#endif
+                clearDmDeleteConfirm();
                 dmListSel = min(cap, dmListSel + 1);
                 dirtyChat = true;
             }
@@ -4631,6 +4857,17 @@ static void handleKey(char k) {
         if (activeView >= 0 && activeView < MESH_CHANNELS
             && !dmPickerOpen
             && !(hwTypingLock || inputLen > 0)) {
+            return;
+        }
+#endif
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+        if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen
+            && (k == 'n' || k == 'N')) {
+            clearDmDeleteConfirm();
+            dmPickerSel  = 0;
+            dmPickerOpen = true;
+            pickerSnapshot();
+            dirtyChat = true;
             return;
         }
 #endif
@@ -4712,6 +4949,13 @@ static void onWebCfgSaved() {
     p.putBool("btEnabled",    gCfg.btEnabled);
     p.putUChar("btMode",      gCfg.btMode);
     p.putULong("btFixedPin",  gCfg.btFixedPin);
+    p.putBool("mqttEnabled",  gCfg.mqttEnabled);
+    p.putString("mqttServer", gCfg.mqttServer);
+    p.putString("mqttUser",   gCfg.mqttUser);
+    p.putString("mqttPass",   gCfg.mqttPass);
+    p.putString("mqttRoot",   gCfg.mqttRoot);
+    p.putBool("mqttEncrypt",  gCfg.mqttEncryption);
+    p.putBool("mqttMapRpt",   gCfg.mqttMapReport);
     p.putBool("isPwrSaving",  gCfg.isPowerSaving);
     p.putULong("lsSecs",      gCfg.lsSecs);
     p.putULong("minWakeSecs", gCfg.minWakeSecs);
@@ -4903,7 +5147,21 @@ void setup() {
         if (prefs.isKey("btEnabled"))    gCfg.btEnabled       = prefs.getBool("btEnabled");
         ro = prefs.getUChar("btMode", 0xFF); if (ro != 0xFF) gCfg.btMode = ro;
         ul = prefs.getULong("btFixedPin", 0); if (ul) gCfg.btFixedPin = ul;
-        // MQTT/NTP keys removed — no longer loaded
+        if (prefs.isKey("mqttEnabled")) gCfg.mqttEnabled = prefs.getBool("mqttEnabled");
+        String mqttServer = prefs.getString("mqttServer", "");
+        if (mqttServer.length()) strncpy(gCfg.mqttServer, mqttServer.c_str(), sizeof(gCfg.mqttServer) - 1);
+        String mqttUser = prefs.getString("mqttUser", "");
+        if (mqttUser.length()) strncpy(gCfg.mqttUser, mqttUser.c_str(), sizeof(gCfg.mqttUser) - 1);
+        String mqttPass = prefs.getString("mqttPass", "");
+        if (mqttPass.length()) strncpy(gCfg.mqttPass, mqttPass.c_str(), sizeof(gCfg.mqttPass) - 1);
+        String mqttRoot = prefs.getString("mqttRoot", "");
+        if (mqttRoot.length()) strncpy(gCfg.mqttRoot, mqttRoot.c_str(), sizeof(gCfg.mqttRoot) - 1);
+        gCfg.mqttServer[sizeof(gCfg.mqttServer) - 1] = '\0';
+        gCfg.mqttUser[sizeof(gCfg.mqttUser) - 1] = '\0';
+        gCfg.mqttPass[sizeof(gCfg.mqttPass) - 1] = '\0';
+        gCfg.mqttRoot[sizeof(gCfg.mqttRoot) - 1] = '\0';
+        if (prefs.isKey("mqttEncrypt")) gCfg.mqttEncryption = prefs.getBool("mqttEncrypt");
+        if (prefs.isKey("mqttMapRpt"))  gCfg.mqttMapReport  = prefs.getBool("mqttMapRpt");
         if (prefs.isKey("isPwrSaving")) gCfg.isPowerSaving  = prefs.getBool("isPwrSaving");
         ul = prefs.getULong("lsSecs",       0); if (ul) gCfg.lsSecs       = ul;
         ul = prefs.getULong("minWakeSecs",  0); if (ul) gCfg.minWakeSecs  = ul;
@@ -4989,7 +5247,7 @@ void setup() {
     lcd.setRotation(TFT_ROTATION_DEFAULT);
     lcd.setBrightness(TFT_BRIGHTNESS_DEFAULT);
     lcd.fillScreen(COL_BG_MAIN);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
     lastActivityMs = millis();
 
     // Splash

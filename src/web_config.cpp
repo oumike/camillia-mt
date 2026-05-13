@@ -702,7 +702,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
     sendChunk(html);
 
-    // Network section removed (MQTT not used; strictly LoRa)
+    // Network section moved under Modules (MQTT options).
 
     // ── Display ───────────────────────────────────────────────
     html += "<details><summary>Display</summary>";
@@ -810,6 +810,34 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Messages (pipe-separated, e.g. Hi|Bye|Yes|No)"
             "<input name='canned_msgs' type='text' maxlength='199' value='";
     html += gCfg->cannedMessages; html += "'></label>";
+        // MQTT
+        html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>MQTT</h3>";
+        html += "<label>Enabled<select name='mqtt_en'>"
+            "<option value='1'"; if ( gCfg->mqttEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->mqttEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
+        html += "<label>Server (host[:port])<input name='mqtt_server' type='text' maxlength='63' value='";
+        html += gCfg->mqttServer;
+        html += "'></label>";
+        html += "<div class='row2'>";
+        html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
+        html += gCfg->mqttUser;
+        html += "'></label>";
+        html += "<label>Password<input name='mqtt_pass' type='password' maxlength='47' value='";
+        html += gCfg->mqttPass;
+        html += "'></label>";
+        html += "</div>";
+        html += "<label>Root Topic<input name='mqtt_root' type='text' maxlength='47' value='";
+        html += gCfg->mqttRoot;
+        html += "'></label>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_encrypt' value='1'";
+        if (gCfg->mqttEncryption) html += " checked";
+        html += "> Encryption Enabled</label>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_map_report' value='1'";
+        if (gCfg->mqttMapReport) html += " checked";
+        html += "> Map Reporting Enabled</label>";
     html += "</details>";
     sendChunk(html);
 
@@ -1299,10 +1327,18 @@ static void handlePostSave() {
     gCfg->btMode     = (uint8_t)constrain(server.arg("bt_mode").toInt(), 0, 2);
     gCfg->btFixedPin = (uint32_t)server.arg("bt_pin").toInt();
 
-    // Network
-    // NTP server removed from UI; preserve existing value
-    // strncpy(gCfg->ntpServer, server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer) - 1);
-    // MQTT removed; preserve existing values in config struct
+    // Network / MQTT
+    gCfg->mqttEnabled = server.arg("mqtt_en").toInt() != 0;
+    strncpy(gCfg->mqttServer, server.arg("mqtt_server").c_str(), sizeof(gCfg->mqttServer) - 1);
+    gCfg->mqttServer[sizeof(gCfg->mqttServer) - 1] = '\0';
+    strncpy(gCfg->mqttUser, server.arg("mqtt_user").c_str(), sizeof(gCfg->mqttUser) - 1);
+    gCfg->mqttUser[sizeof(gCfg->mqttUser) - 1] = '\0';
+    strncpy(gCfg->mqttPass, server.arg("mqtt_pass").c_str(), sizeof(gCfg->mqttPass) - 1);
+    gCfg->mqttPass[sizeof(gCfg->mqttPass) - 1] = '\0';
+    strncpy(gCfg->mqttRoot, server.arg("mqtt_root").c_str(), sizeof(gCfg->mqttRoot) - 1);
+    gCfg->mqttRoot[sizeof(gCfg->mqttRoot) - 1] = '\0';
+    gCfg->mqttEncryption = (server.arg("mqtt_encrypt") == "1");
+    gCfg->mqttMapReport  = (server.arg("mqtt_map_report") == "1");
 
     // Display
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();

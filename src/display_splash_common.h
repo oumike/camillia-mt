@@ -149,7 +149,7 @@ inline void drawSplashCommon(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
                      splash.flowerScale);
 
     lcd.setFont(&fonts::DejaVu9);
-    lcd.setTextSize(1);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     char idBuf[44];
     snprintf(idBuf, sizeof(idBuf), "%s  (%s)", data.nodeLong, data.nodeShort);
@@ -161,8 +161,8 @@ inline void drawSplashCommon(LGFX_TDeck &lcd, const DisplayUiProfile &profile,
     tw = lcd.textWidth(data.version);
     lcd.drawString(data.version, (screenW - tw) / 2, cardY + cardH - splash.versionBottomOffset);
 
-    lcd.setFont(&fonts::Font0);
-    lcd.setTextSize(1);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     if (splash.holdOnScreen) {
         while (true) delay(1000);

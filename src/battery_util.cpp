@@ -1,5 +1,58 @@
 #include "battery_util.h"
 #include "config.h"
+#include <Wire.h>
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+namespace {
+constexpr uint8_t kBq25896Addr = 0x6B;
+constexpr uint8_t kBqRegAdcControl = 0x02;
+constexpr uint8_t kBqRegBattVoltage = 0x0E;
+constexpr uint16_t kBqVbatBaseMv = 2304;
+constexpr uint16_t kBqVbatStepMv = 20;
+
+static bool bqReadReg(uint8_t reg, uint8_t &val) {
+    Wire.beginTransmission(kBq25896Addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)kBq25896Addr, 1) != 1) return false;
+    val = Wire.read();
+    return true;
+}
+
+static bool bqWriteReg(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(kBq25896Addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+static bool bqEnableBatteryAdc() {
+    uint8_t adc = 0;
+    if (!bqReadReg(kBqRegAdcControl, adc)) return false;
+    adc |= 0x80; // ADC conversion enable
+    adc |= 0x40; // Continuous conversion mode
+    return bqWriteReg(kBqRegAdcControl, adc);
+}
+
+static float batteryReadPagerBqVolts() {
+    static bool bqConfigured = false;
+    Wire.begin(KB_SDA, KB_SCL);
+
+    if (!bqConfigured) {
+        bqConfigured = bqEnableBatteryAdc();
+        if (!bqConfigured) return 0.0f;
+    }
+
+    uint8_t reg = 0;
+    if (!bqReadReg(kBqRegBattVoltage, reg)) return 0.0f;
+    uint8_t raw = reg & 0x7F;
+    if (raw == 0) return 0.0f;
+
+    uint16_t mv = (uint16_t)(kBqVbatBaseMv + (raw * kBqVbatStepMv));
+    return mv / 1000.0f;
+}
+} // namespace
+#endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && (BATT_SENSE_ENABLE_PIN >= 0)
 static int  sHeltecSenseLevel = BATT_SENSE_ENABLE_LEVEL;
@@ -92,11 +145,18 @@ void batteryInitAdc() {
     sHeltecSenseLevel = (BATT_SENSE_ENABLE_LEVEL == LOW) ? LOW : HIGH;
     sHeltecSenseLocked = false;
 #endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    (void)bqEnableBatteryAdc();
+#endif
 }
 
 float batteryReadVoltage() {
 #if (BATT_ADC_PIN < 0)
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    return batteryReadPagerBqVolts();
+#else
     return 0.0f;
+#endif
 #else
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     float vadc =

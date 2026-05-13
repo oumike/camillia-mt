@@ -9,7 +9,11 @@
 #else
 #define MAX_DM_LINES   200
 #endif
-#define DM_LINE_LEN     53   // LCD_W / CHAR_W = 320/6
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#define DM_LINE_LEN     53   // pager 1.5x experiment (approx 480 / 9 chars)
+#else
+#define DM_LINE_LEN     53   // LCD_W / CHAR_W = 320/6 baseline
+#endif
 #define MAX_DM_PENDING_TX 12
 
 struct DmLine {
@@ -39,6 +43,7 @@ public:
     int       count() const { return _count; }
     bool      hasUnread() const;
     void      markRead(uint32_t nodeId);
+    bool      deleteConversation(uint32_t nodeId);
 
     // Add a message (word-wrapped) to a conversation.
     // markUnread: set to false for outgoing or seed messages.
