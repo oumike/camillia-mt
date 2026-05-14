@@ -32,6 +32,7 @@ struct RhinoConfig {
     bool     ignoreMqtt;          // drop received packets with via_mqtt flag set
     uint32_t nodeInfoIntervalS;   // NodeInfo broadcast period (s), default 900
     uint32_t posIntervalS;        // Position broadcast period (s), default 1800
+    uint32_t gpsPollIntervalS;    // GPS polling period (s), 0 = every loop
     char     region[12];          // Meshtastic region string, e.g. "US"
 
     // Device (additional)

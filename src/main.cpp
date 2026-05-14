@@ -22,6 +22,7 @@
 #include <math.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_sleep.h>
 #include "mbedtls/ecp.h"
 #include "mbedtls/ecdh.h"
 
@@ -59,11 +60,12 @@ uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config 
 #define VIEW_GPS      MAX_CHANNELS
 #define VIEW_MAP      (MAX_CHANNELS + 1)
 #define VIEW_SETTINGS (MAX_CHANNELS + 2)
-#define TOTAL_VIEWS   (MAX_CHANNELS + 3)
-static int  activeView   = 0;              // 0..9 channels, 10 GPS, 11 MAP, 12 settings
+#define VIEW_NODES    (MAX_CHANNELS + 3)
+#define TOTAL_VIEWS   (MAX_CHANNELS + 4)
+static int  activeView   = 0;              // 0..9 channels, 10 GPS, 11 MAP, 12 settings, 13 nodes
 static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
-static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG
+static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG/NODES
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static bool pagerWheelChatScrollMode = false;
 #endif
@@ -71,6 +73,7 @@ static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
 static int  settingsInfoScrollMax = 0;
 static int  mapsListSel = 0;          // highlighted node row in MAP panel
+static int  nodesListSel = 0;         // highlighted node row in NODES panel
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static const int SETTINGS_ROW_H = 10;
 static const int SETTINGS_HDR_H = 16;
@@ -81,7 +84,7 @@ static const int SETTINGS_HDR_H = 16;
 static const int TOUCH_BTN_W = 58;
 static const int TOUCH_BTN_H = 24;
 static const int TOUCH_BTN_BOTTOM_PAD = 5;
-static const int NAV_BTN_COUNT = 6;
+static const int NAV_BTN_COUNT = 7;
 
 struct PanelHitRect {
     int x;
@@ -115,12 +118,20 @@ enum DmControlAction {
     DM_CTL_COUNT,
 };
 
+enum NodesControlAction {
+    NODES_CTL_UP = 0,
+    NODES_CTL_DOWN,
+    NODES_CTL_COUNT,
+};
+
 static bool mapCtlVisible[MAP_CTL_COUNT] = {};
 static PanelHitRect mapCtlRect[MAP_CTL_COUNT] = {};
 static bool settingsCtlVisible[SETTINGS_CTL_COUNT] = {};
 static PanelHitRect settingsCtlRect[SETTINGS_CTL_COUNT] = {};
 static bool dmCtlVisible[DM_CTL_COUNT] = {};
 static PanelHitRect dmCtlRect[DM_CTL_COUNT] = {};
+static bool nodesCtlVisible[NODES_CTL_COUNT] = {};
+static PanelHitRect nodesCtlRect[NODES_CTL_COUNT] = {};
 
 static bool  mapViewManual = false;
 static float mapViewCenterLat = 0.0f;
@@ -138,6 +149,14 @@ static uint32_t mapLastDrawMs = 0;
 static bool mapNodeFreezeActive = false;
 static uint32_t mapFrozenNodeIds[MAX_NODES];
 static int mapFrozenNodeCount = 0;
+static bool nodesNodeFreezeActive = false;
+static uint32_t nodesFrozenNodeIds[MAX_NODES];
+static int nodesFrozenNodeCount = 0;
+static bool nodesWifiSessionActive = false;
+static bool nodesWifiStateChanged = false;
+static wifi_mode_t nodesWifiPrevMode = WIFI_OFF;
+static bool nodesWifiPrevConnected = false;
+static char nodesWifiPrevSsid[33] = {0};
 
 
 static void setPanelCloseRect(int x, int y, int w, int h) {
@@ -161,6 +180,10 @@ static void clearPanelCloseRect() {
     for (int i = 0; i < DM_CTL_COUNT; i++) {
         dmCtlVisible[i] = false;
         dmCtlRect[i] = {0, 0, 0, 0};
+    }
+    for (int i = 0; i < NODES_CTL_COUNT; i++) {
+        nodesCtlVisible[i] = false;
+        nodesCtlRect[i] = {0, 0, 0, 0};
     }
 }
 
@@ -190,8 +213,15 @@ static void setDmControlRect(DmControlAction action, int x, int y, int w, int h)
     dmCtlRect[ai] = { x, y, w, h };
 }
 
+static void setNodesControlRect(NodesControlAction action, int x, int y, int w, int h) {
+    int ai = (int)action;
+    if (ai < 0 || ai >= NODES_CTL_COUNT) return;
+    nodesCtlVisible[ai] = true;
+    nodesCtlRect[ai] = { x, y, w, h };
+}
+
 static bool isPanelView(int v) {
-    return (v == CHAN_DM || v == CHAN_ANN || v == VIEW_MAP || v == VIEW_SETTINGS);
+    return (v == CHAN_DM || v == CHAN_ANN || v == VIEW_MAP || v == VIEW_SETTINGS || v == VIEW_NODES);
 }
 
 static bool isTopTabView(int v) {
@@ -202,6 +232,11 @@ static void closePanelToChannel();
 static void mapClampViewport();
 static int mapVisibleNodeCount();
 static NodeEntry *mapVisibleNodeByIndex(int idx);
+static int nodesVisibleNodeCount();
+static NodeEntry *nodesVisibleNodeByIndex(int idx);
+static bool nodesPanelCanDownloadTiles();
+static void nodesPanelWifiEnter();
+static void nodesPanelWifiRestore();
 static int panelOverlayBottomY();
 static bool isTextInputView();
 static void handleKey(char k);
@@ -228,8 +263,28 @@ static bool dirtyDivider  = false;
 static bool     screenAsleep   = false;
 static uint32_t lastActivityMs = 0;
 
+static void setPagerKeyboardBacklight(bool on) {
+#if defined(DEVICE_TLORA_PAGER_TFT) && defined(KB_BL) && (KB_BL >= 0)
+    digitalWrite(KB_BL, on ? HIGH : LOW);
+#else
+    (void)on;
+#endif
+}
+
+static void sleepScreen(const char *reason) {
+    lcd.setBrightness(0);
+    setPagerKeyboardBacklight(false);
+    screenAsleep = true;
+    if (reason && reason[0]) {
+        Serial.printf("[screen] sleeping (%s)\n", reason);
+    } else {
+        Serial.printf("[screen] sleeping\n");
+    }
+}
+
 static void wakeScreen() {
     lcd.setBrightness(128);
+    setPagerKeyboardBacklight(true);
     screenAsleep   = false;
     lastActivityMs = millis();
     // Force full redraw so nothing stale is visible after the backlight returns
@@ -677,15 +732,15 @@ static bool useCompactKeyboardUi() {
 }
 
 static int navButtonCount() {
-    return useCompactKeyboardUi() ? 4 : NAV_BTN_COUNT;
+    return useCompactKeyboardUi() ? 5 : NAV_BTN_COUNT;
 }
 
 static const char *navButtonLabel(int idx) {
     if (useCompactKeyboardUi()) {
-        static const char *labels[] = { "DM", "MAP", "LIVE", "CFG" };
+        static const char *labels[] = { "DM", "MAP", "LIVE", "CFG", "NODES" };
         return labels[idx];
     }
-    static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "CFG", "Next" };
+    static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "CFG", "NODES", "Next" };
     return labels[idx];
 }
 
@@ -703,6 +758,9 @@ static void activateNavButton(int idx) {
                 break;
             case 3:
                 if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+                break;
+            case 4:
+                if (activeView != VIEW_NODES) goToView(VIEW_NODES);
                 break;
             default:
                 break;
@@ -727,6 +785,9 @@ static void activateNavButton(int idx) {
             if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
             break;
         case 5:
+            if (activeView != VIEW_NODES) goToView(VIEW_NODES);
+            break;
+        case 6:
             goToView(nextView(activeView));
             break;
         default:
@@ -803,6 +864,7 @@ static void goToView(int v) {
     }
 
     bool wasFullWidth = (activeView == VIEW_SETTINGS || activeView == VIEW_GPS || activeView == VIEW_MAP
+                         || activeView == VIEW_NODES
                          || activeView == CHAN_DM);
     activeView = v;
     clearPanelCloseRect();
@@ -866,6 +928,27 @@ static void goToView(int v) {
     if (v == VIEW_SETTINGS && prev != VIEW_SETTINGS) {
         settingsInfoScroll = 0;
         settingsInfoScrollMax = 0;
+    }
+    if (v == VIEW_NODES) {
+        if (prev != VIEW_NODES) {
+            nodesPanelWifiEnter();
+            nodesFrozenNodeCount = 0;
+            int cnt = Nodes.count();
+            for (int i = 0; i < cnt && nodesFrozenNodeCount < MAX_NODES; i++) {
+                NodeEntry *n = Nodes.getByRank(i);
+                if (!n) continue;
+                nodesFrozenNodeIds[nodesFrozenNodeCount++] = n->nodeId;
+            }
+            nodesNodeFreezeActive = true;
+        }
+        nodesListSel = constrain(nodesListSel, 0,
+                                 max(0, nodesNodeFreezeActive
+                                       ? (nodesFrozenNodeCount - 1)
+                                       : (Nodes.count() - 1)));
+    } else if (prev == VIEW_NODES) {
+        nodesPanelWifiRestore();
+        nodesNodeFreezeActive = false;
+        nodesFrozenNodeCount = 0;
     }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
@@ -1011,6 +1094,91 @@ static bool wifiHasInternetTimePath() {
     return mode != WIFI_AP;
 }
 
+static bool nodesPanelCanDownloadTiles() {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+static void nodesPanelWifiEnter() {
+    if (nodesWifiSessionActive) return;
+
+    nodesWifiSessionActive = true;
+    nodesWifiStateChanged = false;
+    nodesWifiPrevMode = WiFi.getMode();
+    nodesWifiPrevConnected = (WiFi.status() == WL_CONNECTED);
+    nodesWifiPrevSsid[0] = '\0';
+    if (nodesWifiPrevConnected) {
+        String ssid = WiFi.SSID();
+        ssid.toCharArray(nodesWifiPrevSsid, sizeof(nodesWifiPrevSsid));
+    }
+
+    if (nodesWifiPrevConnected) return;
+    if (!gCfg.wifiSsid[0]) return;
+
+    switch (nodesWifiPrevMode) {
+        case WIFI_OFF:
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(gCfg.wifiSsid, gCfg.wifiPass);
+            nodesWifiStateChanged = true;
+            break;
+        case WIFI_STA:
+            WiFi.begin(gCfg.wifiSsid, gCfg.wifiPass);
+            nodesWifiStateChanged = true;
+            break;
+#ifdef WIFI_AP_STA
+        case WIFI_AP:
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.begin(gCfg.wifiSsid, gCfg.wifiPass);
+            nodesWifiStateChanged = true;
+            break;
+#endif
+        case WIFI_AP_STA:
+            WiFi.begin(gCfg.wifiSsid, gCfg.wifiPass);
+            nodesWifiStateChanged = true;
+            break;
+        default:
+            break;
+    }
+}
+
+static void nodesPanelWifiRestore() {
+    if (!nodesWifiSessionActive) return;
+
+    if (nodesWifiStateChanged) {
+        switch (nodesWifiPrevMode) {
+            case WIFI_OFF:
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+                break;
+            case WIFI_STA:
+                WiFi.mode(WIFI_STA);
+                if (!nodesWifiPrevConnected) {
+                    WiFi.disconnect(false);
+                }
+                break;
+            case WIFI_AP:
+                WiFi.disconnect(false);
+                WiFi.mode(WIFI_AP);
+                break;
+#ifdef WIFI_AP_STA
+            case WIFI_AP_STA:
+                WiFi.mode(WIFI_AP_STA);
+                if (!nodesWifiPrevConnected) {
+                    WiFi.disconnect(false);
+                }
+                break;
+#endif
+            default:
+                break;
+        }
+    }
+
+    nodesWifiSessionActive = false;
+    nodesWifiStateChanged = false;
+    nodesWifiPrevMode = WIFI_OFF;
+    nodesWifiPrevConnected = false;
+    nodesWifiPrevSsid[0] = '\0';
+}
+
 static const char *configuredNtpServer() {
     return gCfg.ntpServer[0] ? gCfg.ntpServer : MY_NTP_SERVER;
 }
@@ -1025,6 +1193,8 @@ static void ensureNtpConfigured() {
     }
 
     configTime(0, 0, srv);
+    // configTime can leave TZ handling in UTC; re-apply configured timezone.
+    applyTimezoneFromConfig();
     strncpy(gNtpServerActive, srv, sizeof(gNtpServerActive) - 1);
     gNtpServerActive[sizeof(gNtpServerActive) - 1] = '\0';
     gNtpConfigured = true;
@@ -1892,7 +2062,7 @@ static bool mapEnsureTileDirs(uint8_t z, int x) {
 }
 
 static bool mapDownloadTile(uint8_t z, int x, int y, const char *path) {
-    if (!mapCanDownloadTiles()) return false;
+    if (WiFi.status() != WL_CONNECTED) return false;
     if (!mapEnsureTileDirs(z, x)) return false;
 
     String url = "https://tile.openstreetmap.org/";
@@ -2293,6 +2463,398 @@ static void drawMapPanel() {
     lcd.setFont(UI_BODY_FONT);
     mapLastDrawMs = millis();
     dirtyNodes = false;
+    dirtyChat = downloadedAnyTile;
+}
+
+static void drawNodesPanel() {
+    clearPanelCloseRect();
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int titleH = 11;
+        const bool nodesScrollButtons =
+    #if defined(DEVICE_TDECK)
+        false;
+    #else
+        showPanelScrollButtons();
+    #endif
+    const int ix = mx + 3;
+    const int iw = mw - 6;
+    const int controlsBottom = my + mh - TOUCH_BTN_BOTTOM_PAD;
+        const int controlsTop = nodesScrollButtons
+                          ? (controlsBottom - TOUCH_BTN_H)
+                          : (my + mh - 1);
+        const int contentBottom = nodesScrollButtons ? (controlsTop - 2) : (my + mh - 2);
+    const int contentY = my + titleH + 2;
+    const int contentH = max(60, contentBottom - contentY + 1);
+    const int colGap = 4;
+    const int listChars = 5;
+    const int listW = min(58, max(44, listChars * CHAR_W + 12));
+    const int detailX = ix;
+    const int listX = ix + iw - listW;
+    const int detailW = max(90, listX - detailX - colGap);
+    const int listY = contentY;
+    const int listHeaderH = 10;
+    const int rowH = 9;
+    const int rowsVisible = max(1, (contentH - listHeaderH - 1) / rowH);
+
+    const int totalNodes = nodesVisibleNodeCount();
+    nodesListSel = constrain(nodesListSel, 0, max(0, totalNodes - 1));
+    NodeEntry *selected = (totalNodes > 0) ? nodesVisibleNodeByIndex(nodesListSel) : nullptr;
+
+    drawModalMaskAndFrame(mx, my, mw, mh);
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+
+    char hdr[44];
+    if (selected) {
+        const char *sn = selected->shortName[0] ? selected->shortName : "----";
+        snprintf(hdr, sizeof(hdr), "Nodes %d  [%s]", totalNodes, sn);
+    } else {
+        snprintf(hdr, sizeof(hdr), "Nodes %d", totalNodes);
+    }
+    lcd.fillRect(mx + 1, my + 1, mw - 2, titleH, COL_SELECT_BG);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
+    drawClippedText(mx + 5, my + 2, mw - 10, hdr);
+
+    drawPanelFrame(detailX, contentY, detailW, contentH, COL_PANEL_STRONG, COL_DIVIDER);
+    drawPanelFrame(listX, listY, listW, contentH, COL_PANEL_BG, COL_DIVIDER);
+    lcd.fillRect(listX + 1, listY + 1, listW - 2, listHeaderH, COL_PANEL_ALT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    drawClippedText(listX + 3, listY + 2, listW - 6, "Nodes");
+
+    const int innerX = detailX + 2;
+    const int innerY = contentY + 2;
+    const int innerW = detailW - 4;
+    const int innerH = contentH - 4;
+    const int splitGap = 4;
+    int mapW = max(56, (innerW * 35) / 100);
+    int infoW = innerW - mapW - splitGap;
+    if (infoW < 72) {
+        infoW = 72;
+        mapW = max(48, innerW - infoW - splitGap);
+    }
+    if (mapW < 48) {
+        mapW = 48;
+        infoW = max(56, innerW - mapW - splitGap);
+    }
+    if (infoW + mapW + splitGap > innerW) {
+        infoW = max(56, innerW - mapW - splitGap);
+    }
+    const int infoX = innerX;
+    const int infoY = innerY;
+    const int infoH = innerH;
+    const int mapX = infoX + infoW + splitGap;
+    const int mapY = innerY;
+    const int mapH = innerH;
+    const int infoBottom = infoY + infoH;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.25f);
+#else
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+#endif
+    const int infoLineH = max(9, lcd.fontHeight() + 2);
+    int infoRow = 0;
+
+    auto infoLine = [&](uint16_t col, const char *s) {
+        int y = infoY + infoRow * infoLineH;
+        if (y + infoLineH > infoBottom) return;
+        uint16_t bg = (infoRow & 1) ? COL_PANEL_STRONG : COL_PANEL_ALT;
+        lcd.fillRect(infoX, y, infoW, infoLineH, bg);
+        lcd.setTextColor(col, bg);
+        drawClippedText(infoX + 2, y + 1, infoW - 4, s);
+        infoRow++;
+    };
+
+    if (!selected) {
+        infoLine(TFT_RED, "No nodes");
+    } else {
+        char buf[96];
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        snprintf(buf, sizeof(buf), "ID !%08x", selected->nodeId);
+        infoLine(COL_TEAL, buf);
+
+        snprintf(buf, sizeof(buf), "Name: %s",
+                 selected->longName[0] ? selected->longName : "(unknown)");
+        infoLine(COL_TEXT_MAIN, buf);
+
+        uint32_t ageSec = (selected->lastHeardMs == 0) ? 0 : ((millis() - selected->lastHeardMs) / 1000UL);
+        if (selected->lastHeardMs == 0) {
+            snprintf(buf, sizeof(buf), "Heard: --");
+        } else if (ageSec < 60UL) {
+            snprintf(buf, sizeof(buf), "Heard: %lus", (unsigned long)ageSec);
+        } else if (ageSec < 3600UL) {
+            snprintf(buf, sizeof(buf), "Heard: %lum", (unsigned long)(ageSec / 60UL));
+        } else {
+            snprintf(buf, sizeof(buf), "Heard: %luh%lum",
+                     (unsigned long)(ageSec / 3600UL),
+                     (unsigned long)((ageSec % 3600UL) / 60UL));
+        }
+        infoLine(COL_TEXT_MAIN, buf);
+
+        const char *chanName = (selected->chanIdx >= 0 && selected->chanIdx < MAX_CHANNELS)
+                             ? CHANNEL_KEYS[selected->chanIdx].name : "?";
+        snprintf(buf, sizeof(buf), "Ch:%s  H:%d", chanName, selected->hops);
+        infoLine(COL_TEXT_MAIN, buf);
+        snprintf(buf, sizeof(buf), "SNR:%+.1f", selected->snr);
+        infoLine(COL_TEXT_MAIN, buf);
+
+        float posLat = 0.0f;
+        float posLon = 0.0f;
+        if (mapExtractNodeCoords(selected, posLat, posLon)) {
+            snprintf(buf, sizeof(buf), "Lat: %.3f", posLat);
+            infoLine(COL_TEXT_MAIN, buf);
+            snprintf(buf, sizeof(buf), "Lon: %.3f", posLon);
+            infoLine(COL_TEXT_MAIN, buf);
+            snprintf(buf, sizeof(buf), "Alt: %d m", (int)selected->alt);
+            infoLine(COL_TEXT_MAIN, buf);
+        }
+
+        if (selected->hasTelemetry) {
+            snprintf(buf, sizeof(buf), "Bat: %.0f%% %.2fV", selected->battPct, selected->voltage);
+            infoLine(COL_TEXT_MAIN, buf);
+        }
+#else
+        snprintf(buf, sizeof(buf), "ID: !%08x", selected->nodeId);
+        infoLine(COL_TEAL, buf);
+        snprintf(buf, sizeof(buf), "Long: %s",
+                 selected->longName[0] ? selected->longName : "(unknown)");
+        infoLine(COL_TEXT_MAIN, buf);
+        snprintf(buf, sizeof(buf), "Short: %s",
+                 selected->shortName[0] ? selected->shortName : "----");
+        infoLine(COL_TEXT_MAIN, buf);
+
+        uint32_t ageSec = (selected->lastHeardMs == 0) ? 0 : ((millis() - selected->lastHeardMs) / 1000UL);
+        if (selected->lastHeardMs == 0) {
+            snprintf(buf, sizeof(buf), "Heard: unknown");
+        } else if (ageSec < 60UL) {
+            snprintf(buf, sizeof(buf), "Heard: %lus ago", (unsigned long)ageSec);
+        } else if (ageSec < 3600UL) {
+            snprintf(buf, sizeof(buf), "Heard: %lum %lus ago",
+                     (unsigned long)(ageSec / 60UL), (unsigned long)(ageSec % 60UL));
+        } else {
+            snprintf(buf, sizeof(buf), "Heard: %luh %lum ago",
+                     (unsigned long)(ageSec / 3600UL),
+                     (unsigned long)((ageSec % 3600UL) / 60UL));
+        }
+        infoLine(COL_TEXT_MAIN, buf);
+
+        const char *chanName = (selected->chanIdx >= 0 && selected->chanIdx < MAX_CHANNELS)
+                             ? CHANNEL_KEYS[selected->chanIdx].name : "?";
+        snprintf(buf, sizeof(buf), "Chan: %s  Hops:%d  SNR:%+.1f", chanName, selected->hops, selected->snr);
+        infoLine(COL_TEXT_MAIN, buf);
+
+        float posLat = 0.0f;
+        float posLon = 0.0f;
+        if (mapExtractNodeCoords(selected, posLat, posLon)) {
+            snprintf(buf, sizeof(buf), "Lat: %.5f  Lon: %.5f", posLat, posLon);
+            infoLine(COL_TEXT_MAIN, buf);
+            snprintf(buf, sizeof(buf), "Alt: %d m", (int)selected->alt);
+            infoLine(COL_TEXT_MAIN, buf);
+        }
+
+        if (selected->hasTelemetry) {
+            snprintf(buf, sizeof(buf), "Batt: %.0f%%  %.2fV", selected->battPct, selected->voltage);
+            infoLine(COL_TEXT_MAIN, buf);
+        }
+#endif
+    }
+
+    // Keep map/list labels compact even when pager info text is enlarged.
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
+
+    drawPanelFrame(mapX, mapY, mapW, mapH, COL_PANEL_BG, COL_DIVIDER);
+    lcd.fillRect(mapX + 1, mapY + 1, mapW - 2, 9, COL_PANEL_ALT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    drawClippedText(mapX + 3, mapY + 1, mapW - 6, "Mini map (state-scale)");
+    bool downloadedAnyTile = false;
+
+    float selLat = 0.0f;
+    float selLon = 0.0f;
+    bool selHasPos = mapExtractNodeCoords(selected, selLat, selLon);
+    if (!selHasPos) {
+        lcd.fillRect(mapX + 1, mapY + 11, mapW - 2, mapH - 12, COL_PANEL_STRONG);
+        lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_STRONG);
+        drawClippedText(mapX + 6, mapY + mapH / 2 - 4, mapW - 12, "No position for selected node");
+    } else {
+        // Keep this intentionally zoomed out and low detail for quick context.
+        float latSpan = 4.8f;
+        float lonSpan = 6.8f;
+        float halfLat = latSpan * 0.5f;
+        float halfLon = lonSpan * 0.5f;
+        float centerLat = selLat;
+        float centerLon = selLon;
+        centerLat = max(-90.0f + halfLat, min(90.0f - halfLat, centerLat));
+        centerLon = max(-180.0f + halfLon, min(180.0f - halfLon, centerLon));
+        float minLat = centerLat - halfLat;
+        float maxLat = centerLat + halfLat;
+        float minLon = centerLon - halfLon;
+        float maxLon = centerLon + halfLon;
+
+        const int mapInnerX = mapX + 1;
+        const int mapInnerY = mapY + 11;
+        const int mapInnerW = max(8, mapW - 2);
+        const int mapInnerH = max(8, mapH - 12);
+
+        bool allowDownloads = nodesPanelCanDownloadTiles();
+        bool useTileBackdrop = HAS_SD_CARD;
+
+        if (useTileBackdrop) {
+            double lonSpanForZoom = max((double)MAP_MIN_LON_SPAN, (double)(maxLon - minLon));
+            double zoomRaw = log2(((double)mapInnerW * 360.0) / (256.0 * lonSpanForZoom));
+            int z = constrain((int)floor(zoomRaw), 0, MAP_MAX_TILE_ZOOM);
+            int tileCount = 1 << z;
+
+            auto lonToWorldX = [&](double lonDeg) -> double {
+                return ((lonDeg + 180.0) / 360.0) * (256.0 * tileCount);
+            };
+            auto latToWorldY = [&](double latDeg) -> double {
+                double clamped = max(-85.05112878, min(85.05112878, latDeg));
+                double rad = clamped * M_PI / 180.0;
+                double merc = log(tan(rad) + 1.0 / cos(rad));
+                return (1.0 - merc / M_PI) * 0.5 * (256.0 * tileCount);
+            };
+
+            double centerWX = lonToWorldX(centerLon);
+            double centerWY = latToWorldY(centerLat);
+            double leftWX = centerWX - (double)mapInnerW * 0.5;
+            double topWY = centerWY - (double)mapInnerH * 0.5;
+
+            int tx0 = (int)floor(leftWX / 256.0);
+            int ty0 = (int)floor(topWY / 256.0);
+            int tx1 = (int)floor((leftWX + mapInnerW - 1) / 256.0);
+            int ty1 = (int)floor((topWY + mapInnerH - 1) / 256.0);
+            int fetchBudget = allowDownloads ? 1 : 0;
+
+            lcd.setClipRect(mapInnerX, mapInnerY, mapInnerW, mapInnerH);
+            lcd.fillRect(mapInnerX, mapInnerY, mapInnerW, mapInnerH, COL_PANEL_STRONG);
+            for (int ty = ty0; ty <= ty1; ty++) {
+                if (ty < 0 || ty >= tileCount) continue;
+                for (int tx = tx0; tx <= tx1; tx++) {
+                    int wrappedX = tx % tileCount;
+                    if (wrappedX < 0) wrappedX += tileCount;
+
+                    int drawX = mapInnerX + (int)(tx * 256.0 - leftWX);
+                    int drawY = mapInnerY + (int)(ty * 256.0 - topWY);
+
+                    String tilePath;
+                    bool downloaded = false;
+                    bool hasTile = mapEnsureTileFile((uint8_t)z, wrappedX, ty,
+                                                    fetchBudget > 0, tilePath, downloaded);
+                    if (downloaded && fetchBudget > 0) {
+                        fetchBudget--;
+                        downloadedAnyTile = true;
+                    }
+
+                    if (hasTile) {
+                        lcd.drawPngFile(SD, tilePath.c_str(), drawX, drawY);
+                    } else {
+                        uint16_t fb = (((wrappedX + ty) & 1) ? COL_PANEL_STRONG : COL_PANEL_ALT);
+                        lcd.fillRect(drawX, drawY, 256, 256, fb);
+                        lcd.drawRect(drawX, drawY, 256, 256, COL_DIVIDER);
+                    }
+                }
+            }
+            lcd.clearClipRect();
+        } else {
+            lcd.fillRect(mapX + 1, mapY + 11, mapW - 2, mapH - 12, COL_PANEL_STRONG);
+            for (int g = 1; g < 4; g++) {
+                int gx = mapX + 1 + (g * (mapW - 2)) / 4;
+                int gy = mapY + 11 + (g * (mapH - 12)) / 4;
+                lcd.drawFastVLine(gx, mapY + 11, mapH - 12, COL_DIVIDER_HI);
+                lcd.drawFastHLine(mapX + 1, gy, mapW - 2, COL_DIVIDER_HI);
+            }
+        }
+
+        auto lonToX = [&](float lon) -> int {
+            float t = (lon - minLon) / max(0.001f, maxLon - minLon);
+            t = max(0.0f, min(1.0f, t));
+            return mapX + 2 + (int)(t * (float)(mapW - 5));
+        };
+        auto latToY = [&](float lat) -> int {
+            float t = (maxLat - lat) / max(0.001f, maxLat - minLat);
+            t = max(0.0f, min(1.0f, t));
+            return mapY + 12 + (int)(t * (float)(mapH - 15));
+        };
+
+        // NODES panel mini-map intentionally shows only the selected node.
+        int px = lonToX(selLon);
+        int py = latToY(selLat);
+        const int markerR = 5;
+        lcd.fillCircle(px, py, markerR, COL_SELECT_ACCENT);
+        lcd.drawCircle(px, py, markerR + 2, COL_TEXT_ON_ACCENT);
+        lcd.drawCircle(px, py, markerR + 4, COL_TEAL);
+    }
+
+    const int listRowsTop = listY + listHeaderH + 1;
+    if (totalNodes == 0) {
+        lcd.fillRect(listX + 1, listRowsTop, listW - 2, rowH, COL_PANEL_BG);
+        lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
+        drawClippedText(listX + 2, listRowsTop + 1, listW - 4, "None");
+    } else {
+        int firstVisible = max(0, nodesListSel - (rowsVisible - 1));
+        int maxFirst = max(0, totalNodes - rowsVisible);
+        if (firstVisible > maxFirst) firstVisible = maxFirst;
+
+        for (int row = 0; row < rowsVisible; row++) {
+            int idx = firstVisible + row;
+            int y = listRowsTop + row * rowH;
+            uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
+            lcd.fillRect(listX + 1, y, listW - 2, rowH, rowBg);
+            if (idx >= totalNodes) continue;
+
+            NodeEntry *n = nodesVisibleNodeByIndex(idx);
+            if (!n) continue;
+
+            bool sel = (idx == nodesListSel);
+            uint16_t bg = sel ? COL_SELECT_BG : rowBg;
+            if (sel) lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+
+            bool hasLocation = false;
+            float lat = 0.0f, lon = 0.0f;
+            hasLocation = mapExtractNodeCoords(n, lat, lon);
+            const char *sn = n->shortName[0] ? n->shortName : "----";
+            uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
+            lcd.setTextColor(fg, bg);
+            drawClippedText(listX + 3, y + 1, listW - 6, sn);
+        }
+    }
+
+    if (showPanelCloseButtons()) {
+        int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+        drawPanelCloseButton(mx + 3, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
+    }
+
+    if (nodesScrollButtons) {
+        int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+        const int btnW = 52;
+        const int btnGap = 4;
+        const int downX = ix + iw - btnW;
+        const int upX = downX - btnGap - btnW;
+        uint16_t fill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+
+        drawSquirclePill(upX, btnY, btnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
+        lcd.setFont(UI_BODY_FONT);
+        lcd.setTextColor(COL_TEXT_MAIN, fill);
+        int tw = lcd.textWidth("Up");
+        int tx = upX + max(1, (btnW - tw) / 2);
+        int ty = btnY + max(0, (TOUCH_BTN_H - CHAR_H) / 2);
+        drawClippedText(tx, ty, btnW - (tx - upX) - 1, "Up");
+        setNodesControlRect(NODES_CTL_UP, upX, btnY, btnW, TOUCH_BTN_H);
+
+        drawSquirclePill(downX, btnY, btnW, TOUCH_BTN_H, fill, COL_SELECT_ACCENT, false);
+        tw = lcd.textWidth("Down");
+        tx = downX + max(1, (btnW - tw) / 2);
+        drawClippedText(tx, ty, btnW - (tx - downX) - 1, "Down");
+        setNodesControlRect(NODES_CTL_DOWN, downX, btnY, btnW, TOUCH_BTN_H);
+    }
+
+    lcd.setFont(UI_BODY_FONT);
     dirtyChat = downloadedAnyTile;
 }
 
@@ -3223,6 +3785,7 @@ static bool isTextInputView() {
     return !((activeView == CHAN_ANN)
             || (activeView == CHAN_DM && !dmNeedsInput)
             || (activeView == VIEW_MAP)
+            || (activeView == VIEW_NODES)
             || (activeView == VIEW_GPS)
             || (activeView == VIEW_SETTINGS));
 }
@@ -3571,6 +4134,56 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
     return nullptr;
 }
 
+static int nodesVisibleNodeCount() {
+    if (nodesNodeFreezeActive) return nodesFrozenNodeCount;
+    return Nodes.count();
+}
+
+static NodeEntry *nodesVisibleNodeByIndex(int idx) {
+    if (idx < 0) return nullptr;
+    if (nodesNodeFreezeActive) {
+        NodeEntry *self = nullptr;
+        int selfFrozenIndex = -1;
+        for (int i = 0; i < nodesFrozenNodeCount; i++) {
+            NodeEntry *n = Nodes.find(nodesFrozenNodeIds[i]);
+            if (n && n->nodeId == myNodeId) {
+                self = n;
+                selfFrozenIndex = i;
+                break;
+            }
+        }
+
+        if (self) {
+            if (idx == 0) return self;
+            idx -= 1;
+        }
+
+        for (int i = 0; i < nodesFrozenNodeCount; i++) {
+            if (i == selfFrozenIndex) continue;
+            NodeEntry *n = Nodes.find(nodesFrozenNodeIds[i]);
+            if (!n) continue;
+            if (idx == 0) return n;
+            idx -= 1;
+        }
+        return nullptr;
+    }
+
+    NodeEntry *self = Nodes.find(myNodeId);
+    if (self) {
+        if (idx == 0) return self;
+        idx -= 1;
+    }
+
+    int cnt = Nodes.count();
+    for (int rank = 0; rank < cnt; rank++) {
+        NodeEntry *n = Nodes.getByRank(rank);
+        if (!n || n->nodeId == myNodeId) continue;
+        if (idx == 0) return n;
+        idx -= 1;
+    }
+    return nullptr;
+}
+
 static bool mapSelectNodeById(uint32_t nodeId) {
     int cnt = mapVisibleNodeCount();
     for (int i = 0; i < cnt; i++) {
@@ -3683,6 +4296,27 @@ static bool handleTouchTap(int x, int y) {
                            dmCtlRect[DM_CTL_DOWN].y,
                            dmCtlRect[DM_CTL_DOWN].w,
                            dmCtlRect[DM_CTL_DOWN].h)) {
+            handleKey(KEY_SCROLL_DN);
+            return true;
+        }
+    }
+
+    if (activeView == VIEW_NODES) {
+        if (nodesCtlVisible[NODES_CTL_UP]
+            && pointInRect(x, y,
+                           nodesCtlRect[NODES_CTL_UP].x,
+                           nodesCtlRect[NODES_CTL_UP].y,
+                           nodesCtlRect[NODES_CTL_UP].w,
+                           nodesCtlRect[NODES_CTL_UP].h)) {
+            handleKey(KEY_SCROLL_UP);
+            return true;
+        }
+        if (nodesCtlVisible[NODES_CTL_DOWN]
+            && pointInRect(x, y,
+                           nodesCtlRect[NODES_CTL_DOWN].x,
+                           nodesCtlRect[NODES_CTL_DOWN].y,
+                           nodesCtlRect[NODES_CTL_DOWN].w,
+                           nodesCtlRect[NODES_CTL_DOWN].h)) {
             handleKey(KEY_SCROLL_DN);
             return true;
         }
@@ -3881,9 +4515,9 @@ static void drawInput() {
     }
 
     if (navButtonCount() == NAV_BTN_COUNT) {
-        // Bracket app buttons (DM / MAPS / LIVE / CFG) from outer nav buttons.
+        // Bracket app buttons (DM / MAP / LIVE / CFG / NODES) from outer nav buttons.
         int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
-        int sepX2 = (b[4].x + b[4].w + b[5].x) / 2;
+        int sepX2 = (b[5].x + b[5].w + b[6].x) / 2;
         int sepY  = b[0].y + 1;
         int sepH  = max(1, b[0].h - 2);
         // Stronger divider between "Previous" and the app group.
@@ -3899,7 +4533,7 @@ static void drawInput() {
     for (int i = 0; i < navButtonCount(); i++) {
         const char *label = navButtonLabel(i);
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
-        if (navButtonCount() == 4) {
+    if (navButtonCount() == 5) {
             char head[2] = { label[0], '\0' };
             const char *tail = label + 1;
 
@@ -4399,6 +5033,7 @@ static void activateSettingsSelection() {
         drawSettings();
         delay(1000);
         ESP.restart();
+        return;
     } else if (settingsSel == SETTING_WEBCFG) {
         if (webCfgRunning()) {
             webCfgEnd();
@@ -4477,13 +5112,20 @@ static void handleKey(char k) {
     // Enter remains the way to enter compose mode.
     if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused) {
         if (!tloraTyping && !softKbVisible) {
-            pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
+            static uint32_t lastWheelModeToggleMs = 0;
+            uint32_t nowMs = millis();
+            if ((nowMs - kb._lastScrollMs) >= 90
+                && (nowMs - lastWheelModeToggleMs) >= 320) {
+                pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
+                lastWheelModeToggleMs = nowMs;
+            }
         }
         return;
     }
 
-    // Pager preference: reverse wheel direction in CFG, MAP, and DM panels.
-    if (activeView == VIEW_SETTINGS || activeView == VIEW_MAP || activeView == CHAN_DM) {
+    // Pager preference: reverse wheel direction in panel views.
+    if (activeView == VIEW_SETTINGS || activeView == VIEW_MAP
+        || activeView == VIEW_NODES || activeView == CHAN_DM) {
         if (k == KEY_SCROLL_UP) k = KEY_SCROLL_DN;
         else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
     }
@@ -4540,6 +5182,11 @@ static void handleKey(char k) {
                     return;
                 }
                 break;
+            case 'n':
+            case 'N':
+                if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) break;
+                if (activeView != VIEW_NODES) goToView(VIEW_NODES);
+                return;
             case 'l':
             case 'L':
                 if (activeView != CHAN_ANN) goToView(CHAN_ANN);
@@ -4681,8 +5328,13 @@ static void handleKey(char k) {
             if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
             return;
         }
+        if (activeView == VIEW_NODES) {
+            dirtyChat = true;
+            return;
+        }
         if (inputLen > 0 && activeView != CHAN_ANN && activeView != CHAN_DM
-               && activeView != VIEW_MAP && activeView != VIEW_GPS && activeView != VIEW_SETTINGS) {
+               && activeView != VIEW_MAP && activeView != VIEW_GPS
+               && activeView != VIEW_SETTINGS && activeView != VIEW_NODES) {
             inputBuf[inputLen] = '\0';
             int txChan = (activeView >= 0 && activeView < MESH_CHANNELS)
                          ? activeView : Channels.activeIdx();
@@ -4742,6 +5394,7 @@ static void handleKey(char k) {
         }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
                             && activeView != VIEW_MAP
+                            && activeView != VIEW_NODES
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen > 0 && textAllowed) {
@@ -4897,6 +5550,9 @@ static void handleKey(char k) {
             dirtyNodes = true;
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_PREV);
+        } else if (activeView == VIEW_NODES) {
+            nodesListSel = max(0, nodesListSel - 1);
+            dirtyChat = true;
         } else if (activeView == VIEW_SETTINGS) {
             if (settingsSel == NUM_SETTINGS - 1 && settingsInfoScroll > 0) settingsInfoScroll--;
             else if (settingsSel > 0) settingsSel--;
@@ -4939,6 +5595,10 @@ static void handleKey(char k) {
             dirtyNodes = true;
         } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_LIST_NEXT);
+        } else if (activeView == VIEW_NODES) {
+            int cap = max(0, nodesVisibleNodeCount() - 1);
+            nodesListSel = min(cap, nodesListSel + 1);
+            dirtyChat = true;
         } else if (activeView == VIEW_SETTINGS) {
             if (settingsSel < NUM_SETTINGS - 1) settingsSel++;
             else if (settingsInfoScroll < settingsInfoScrollMax) settingsInfoScroll++;
@@ -4999,6 +5659,7 @@ static void handleKey(char k) {
         }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
                             && activeView != VIEW_MAP
+                            && activeView != VIEW_NODES
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen < MAX_INPUT_LEN && textAllowed) {
@@ -5055,6 +5716,7 @@ static void onWebCfgSaved() {
     p.putBool("ignoreMqtt",  gCfg.ignoreMqtt);
     p.putULong("nodeInfoIntv",gCfg.nodeInfoIntervalS);
     p.putULong("posIntv",     gCfg.posIntervalS);
+    p.putULong("gpsPollS",    gCfg.gpsPollIntervalS);
     p.putString("region",     gCfg.region);
     p.putString("tzDef",      gCfg.tzDef);
     p.putString("ntpServer",  gCfg.ntpServer);
@@ -5254,6 +5916,13 @@ void setup() {
         uint32_t ul;
         ul = prefs.getULong("nodeInfoIntv", 0); if (ul) gCfg.nodeInfoIntervalS = ul;
         ul = prefs.getULong("posIntv",      0); if (ul) gCfg.posIntervalS      = ul;
+        if (prefs.isKey("gpsPollS")) {
+            ul = prefs.getULong("gpsPollS", 0);
+            gCfg.gpsPollIntervalS = (uint32_t)constrain((long)ul, (long)0, (long)3600);
+        } else if (prefs.isKey("gpsPollMs")) {
+            ul = prefs.getULong("gpsPollMs", 0);
+            gCfg.gpsPollIntervalS = (ul == 0) ? 0 : (uint32_t)constrain((long)((ul + 999UL) / 1000UL), (long)0, (long)3600);
+        }
         String rgn = prefs.getString("region", ""); if (rgn.length()) strncpy(gCfg.region, rgn.c_str(), sizeof(gCfg.region)-1);
         String tz = prefs.getString("tzDef", ""); if (tz.length()) strncpy(gCfg.tzDef, tz.c_str(), sizeof(gCfg.tzDef)-1);
         String ntp = prefs.getString("ntpServer", ""); if (ntp.length()) strncpy(gCfg.ntpServer, ntp.c_str(), sizeof(gCfg.ntpServer)-1);
@@ -5443,13 +6112,27 @@ void setup() {
         Channels.addMessage(CHAN_ANN, "", "* GPS started", TFT_DARKGREY);
     }
 
-    // Auto-start web config (TODO: gate on a setting or button before production)
+    // Boot-time one-shot Wi-Fi/NTP sync, then shut web server/Wi-Fi back down.
+    bool bootTimeSynced = false;
     if (webCfgBegin(&gCfg, onWebCfgSaved)) {
-        if (webCfgIsOnboarding())
-            snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
-        else
-            snprintf(settingsStatus, sizeof(settingsStatus), "Web: %s", webCfgIP());
-        Channels.addMessage(CHAN_ANN, "", settingsStatus, TFT_DARKGREY);
+        if (wifiHasInternetTimePath()) {
+            uint32_t syncStartMs = millis();
+            while ((millis() - syncStartMs) < 10000UL) {
+                webCfgLoop();
+                if (ntpSyncSystemClock()) {
+                    bootTimeSynced = true;
+                    break;
+                }
+                delay(200);
+            }
+        }
+        webCfgEnd();
+    }
+    if (bootTimeSynced) {
+        snprintf(settingsStatus, sizeof(settingsStatus), "Boot time sync OK");
+        Channels.addMessage(CHAN_ANN, "", "* Boot time sync OK", TFT_DARKGREY);
+    } else {
+        snprintf(settingsStatus, sizeof(settingsStatus), "Web server: stopped");
     }
 
     // Initial full draw
@@ -5474,12 +6157,21 @@ static void pollInput() {
     if ((now - userBtnDebounceMs) >= 30 && userPressed != userBtnStable) {
         userBtnStable = userPressed;
         if (userBtnStable) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            if (screenAsleep) {
+                wakeScreen();
+                return;
+            }
+            sleepScreen("BOOT button");
+            return;
+#else
             if (screenAsleep) {
                 wakeScreen();
                 return;
             }
             lastActivityMs = now;
             handleKey(KEY_ENTER);
+#endif
         }
     }
 #endif
@@ -5576,7 +6268,9 @@ void loop() {
     if (hwTypingLock && !isTextInputView()) hwTypingLock = false;
 
     // 1. Poll radio
-    bool pauseRxForTyping = softKbVisible || (hwTypingLock && isTextInputView());
+    bool pauseRxForTyping = softKbVisible
+                         || (hwTypingLock && isTextInputView())
+                         || (activeView == VIEW_NODES);
     if (!pauseRxForTyping) {
         MeshPacket pkt;
         if (Radio.pollRx(pkt)) {
@@ -5608,10 +6302,19 @@ void loop() {
         debugLogMessages("[announce] manual NODEINFO + position broadcast\n");
     }
 
-    // 1c. Poll GPS
-    gpsLoop();
-
     uint32_t now = millis();
+
+    // 1c. Poll GPS (configurable; 0 = every loop)
+    static uint32_t lastGpsPollMs = 0;
+    uint32_t gpsPollPeriodMs = (gCfg.gpsPollIntervalS == 0) ? 0 : (gCfg.gpsPollIntervalS * 1000UL);
+    if (gpsPollPeriodMs == 0
+        || lastGpsPollMs == 0
+        || (now - lastGpsPollMs) >= gpsPollPeriodMs) {
+        lastGpsPollMs = now;
+        gpsLoop();
+    }
+
+    now = millis();
 
     // Clock policy for all builds:
     // 1) GPS is authoritative when available.
@@ -5699,7 +6402,7 @@ void loop() {
         dirtyTabs = true;
         if (activeView == CHAN_ANN) dirtyLiveRows = true;
     }
-    if (activeView == VIEW_MAP && !nodeDetailOpen) {
+    if ((activeView == VIEW_MAP || activeView == VIEW_NODES) && !nodeDetailOpen) {
         // Keep map nodes visually frozen while map is focused.
         dirtyNodes = false;
     }
@@ -5716,8 +6419,22 @@ void loop() {
         now - lastActivityMs > (uint32_t)gCfg.screenOnSecs * 1000UL) {
         Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
                       (now - lastActivityMs) / 1000UL, gCfg.screenOnSecs);
-        lcd.setBrightness(0);
-        screenAsleep = true;
+        sleepScreen("timeout");
+    }
+
+    // 6e. CPU light sleep while screen is off (power-save mode)
+    if (screenAsleep && gCfg.isPowerSaving && !webCfgRunning() && gCfg.lsSecs > 0) {
+        uint32_t idleMs = now - lastActivityMs;
+        uint32_t sleepAfterMs = (uint32_t)gCfg.lsSecs * 1000UL;
+        uint32_t minWakeMs = (uint32_t)gCfg.minWakeSecs * 1000UL;
+        uint32_t thresholdMs = max(sleepAfterMs, minWakeMs);
+        if (idleMs >= thresholdMs) {
+            // Keep sleep slices short so polling-driven subsystems remain responsive.
+            constexpr uint64_t kLightSleepSliceUs = 20000ULL; // 20 ms
+            esp_sleep_enable_timer_wakeup(kLightSleepSliceUs);
+            esp_light_sleep_start();
+            now = millis();
+        }
     }
 
     // 7. Redraw dirty zones (skip while screen is off)
@@ -5743,6 +6460,7 @@ void loop() {
             if      (activeView == VIEW_SETTINGS)                      drawSettings();
             else if (activeView == VIEW_GPS)                           drawGps();
             else if (activeView == VIEW_MAP)                           drawMapPanel();
+            else if (activeView == VIEW_NODES)                         drawNodesPanel();
             else if (activeView == CHAN_ANN)                           drawLivePanel(true);
             else if (activeView == CHAN_DM && dmPickerOpen)            drawDmPicker();
             else if (activeView == CHAN_DM && dmConvOpen)              drawDmConv();

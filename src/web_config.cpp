@@ -485,7 +485,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
     html += tmp; html += "'></label>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
-    html += "<label>Position Interval (s)<input name='pos_intv' type='number' min='60' value='";
+    html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
     // Timezone dropdown
     {
@@ -520,6 +520,10 @@ static void sendConfigPage(const char *msg = "") {
     html += "> GPS Enabled (L76K hardware GPS)</label>";
     html += "<p class='gps-hint'>When GPS is enabled, position is sourced from the GPS module. "
             "The manual coordinates below are used as fallback until a fix is acquired.</p>";
+        snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->gpsPollIntervalS);
+        html += "<label>GPS Poll Interval (s)<input name='gps_poll_s' type='number' min='0' max='3600' step='1' value='";
+        html += tmp; html += "'></label>";
+        html += "<p class='gps-hint'>Set to 0 to poll every loop. Higher values reduce GPS polling frequency.</p>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->latI * 1e-7);
     html += "<label>Latitude&deg; (fallback)<input name='lat' type='number' step='0.0000001' value='";
@@ -1281,6 +1285,14 @@ static void handlePostSave() {
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
     gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
     gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());
+    if (server.hasArg("gps_poll_s")) {
+        gCfg->gpsPollIntervalS = (uint32_t)constrain(server.arg("gps_poll_s").toInt(), 0, 3600);
+    } else if (server.hasArg("gps_poll_ms")) {
+        long oldMsSigned = server.arg("gps_poll_ms").toInt();
+        if (oldMsSigned < 0) oldMsSigned = 0;
+        uint32_t oldMs = (uint32_t)oldMsSigned;
+        gCfg->gpsPollIntervalS = (oldMs == 0) ? 0 : (uint32_t)constrain((long)((oldMs + 999UL) / 1000UL), (long)0, (long)3600);
+    }
     strncpy(gCfg->tzDef, server.arg("tzdef").c_str(), sizeof(gCfg->tzDef) - 1);
     gCfg->tzDef[sizeof(gCfg->tzDef) - 1] = '\0';
     strncpy(gCfg->ntpServer, server.arg("ntp_server").c_str(), sizeof(gCfg->ntpServer) - 1);
@@ -1486,7 +1498,7 @@ static void handlePostClearMessages() {
 static void handlePostClearNodes() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     Nodes.clearPersisted();
-    scheduleReboot(900);
+    scheduleReboot(200);
     redirectHomeWithFlash("Node database cleared. Rebooting now...");
 }
 

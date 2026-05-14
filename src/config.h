@@ -427,6 +427,7 @@
 #define MY_REBROADCAST      0      // ALL
 #define MY_NODEINFO_INTV  900      // 15 min (seconds)
 #define MY_POS_INTV      1800      // 30 min (seconds)
+#define MY_GPS_POLL_S       0      // 0 = poll every loop
 #define MY_REGION        "US"
 #define MY_TZ_DEF        "EST5EDT,M3.2.0,M11.1.0"   // Eastern (Detroit)
 

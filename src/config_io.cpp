@@ -225,6 +225,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.ignoreMqtt        = false;  // process all packets regardless of via_mqtt flag
     cfg.nodeInfoIntervalS = MY_NODEINFO_INTV;
     cfg.posIntervalS      = MY_POS_INTV;
+    cfg.gpsPollIntervalS  = MY_GPS_POLL_S;
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
     cfg.region[sizeof(cfg.region) - 1] = '\0';
     strncpy(cfg.tzDef, MY_TZ_DEF, sizeof(cfg.tzDef) - 1);
@@ -444,6 +445,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    fixedPosition: %s\n", cfg.gpsEnabled ? "false" : "true"); out += tmp;
     out += "    gpsMode: "; out += (cfg.gpsEnabled ? "ENABLED" : "DISABLED"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    positionBroadcastSecs: %lu\n", (unsigned long)cfg.posIntervalS); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    gpsPollIntervalSecs: %lu\n", (unsigned long)cfg.gpsPollIntervalS); out += tmp;
     // power
     out += "  power:\n";
     snprintf(tmp, sizeof(tmp), "    isPowerSaving: %s\n", cfg.isPowerSaving ? "true" : "false"); out += tmp;
@@ -603,6 +605,11 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     if      (!strcmp(key, "lat")) cfg.latI = (int32_t)atol(val);
                     else if (!strcmp(key, "lon")) cfg.lonI = (int32_t)atol(val);
                     else if (!strcmp(key, "alt")) cfg.alt  = (int32_t)atol(val);
+                    else if (!strcmp(key, "gpsPollIntervalSecs")) cfg.gpsPollIntervalS = (uint32_t)atol(val);
+                    else if (!strcmp(key, "gpsPollIntervalMs")) {
+                        uint32_t ms = (uint32_t)atol(val);
+                        cfg.gpsPollIntervalS = (ms == 0) ? 0 : ((ms + 999UL) / 1000UL);
+                    }
                 } else if (!strcmp(section, "lora")) {
                     // Legacy format
                     if      (!strcmp(key, "freq"))      cfg.loraFreq     = atof(val);
@@ -650,6 +657,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "positionBroadcastSecs"))
                     cfg.posIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "gpsPollIntervalSecs"))
+                    cfg.gpsPollIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "gpsPollIntervalMs")) {
+                    uint32_t ms = (uint32_t)atol(val);
+                    cfg.gpsPollIntervalS = (ms == 0) ? 0 : ((ms + 999UL) / 1000UL);
+                }
                 else if (!strcmp(key, "gpsMode"))
                     cfg.gpsEnabled = (!strcmp(val,"ENABLED"));
             } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {

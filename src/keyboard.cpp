@@ -287,13 +287,22 @@ char TDeckKeyboard::readTrackball() {
     static uint8_t prevAB = 0xFF;
     static int8_t accum = 0;
     static unsigned long lastMoveEmitMs = 0;
-    const unsigned long moveDebounceMs = 12;
+    static bool pendingClick = false;
+    static unsigned long pendingClickMs = 0;
+    const unsigned long moveDebounceMs = 20;
+    const unsigned long clickQuietMs = 70;
+    const unsigned long clickExpireMs = 800;
 
     bool clk = false;
     noInterrupts();
     clk = _click;
     _click = false;
     interrupts();
+
+    if (clk) {
+        pendingClick = true;
+        pendingClickMs = now;
+    }
 
     uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
     uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
@@ -310,6 +319,13 @@ char TDeckKeyboard::readTrackball() {
         }
     }
 
+    // Prioritize click delivery once wheel motion settles so entering/exiting
+    // channel-scroll mode doesn't lose the first notch to channel navigation.
+    if (pendingClick && (now - _lastScrollMs >= clickQuietMs)) {
+        pendingClick = false;
+        return KEY_ROLLER;
+    }
+
     if (now - lastMoveEmitMs >= moveDebounceMs) {
         // One notch is four state transitions on typical rotary encoders.
         if (accum >= 4) {
@@ -324,11 +340,15 @@ char TDeckKeyboard::readTrackball() {
         }
     }
 
-    // Ignore click very near wheel motion to prevent accidental enters.
-    if (clk && (now - _lastScrollMs >= 160)) return KEY_ROLLER;
+    // Expire stale pending clicks to avoid ghost toggles.
+    if (pendingClick && (now - pendingClickMs > clickExpireMs)) {
+        pendingClick = false;
+    }
     return KEY_NONE;
 #else
     static unsigned long lastMoveEmitMs = 0;
+    static bool pendingClick = false;
+    static unsigned long pendingClickMs = 0;
     const unsigned long moveDebounceMs = 45;
 
     // Drain trackball ISR state
@@ -343,8 +363,19 @@ char TDeckKeyboard::readTrackball() {
     // Track the last time scroll motion was seen
     if (dx != 0 || dy != 0) _lastScrollMs = now;
 
-    // Suppress accidental clicks that fire during or just after rolling
-    if (clk && (now - _lastScrollMs >= 200)) return KEY_ROLLER;
+    if (clk) {
+        pendingClick = true;
+        pendingClickMs = now;
+    }
+
+    // Suppress accidental clicks during motion, but defer rather than drop.
+    if (pendingClick && (now - _lastScrollMs >= 160)) {
+        pendingClick = false;
+        return KEY_ROLLER;
+    }
+    if (pendingClick && (now - pendingClickMs > 500)) {
+        pendingClick = false;
+    }
 
     // Ignore overly-frequent movement pulses (trackball bounce/noise).
     if ((dy != 0 || dx != 0) && (now - lastMoveEmitMs < moveDebounceMs)) return KEY_NONE;
