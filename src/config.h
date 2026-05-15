@@ -491,6 +491,7 @@
 #else
 #define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
 #endif
+#define MY_SPLASH_MELODY_ENABLED 1
 #define MY_DBG_ACKS         0
 #define MY_DBG_MESSAGES     0
 #define MY_DBG_GPS          0

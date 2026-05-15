@@ -733,6 +733,10 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->flipScreen) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->flipScreen) html += " selected"; html += ">No</option>"
             "</select></label></div>";
+        html += "<label>Splash Melody<select name='splash_melody'>"
+            "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
     html += "<label>Chat Line Spacing (reboot required)<select name='chat_space'>"
             "<option value='0'"; if (gCfg->chatSpacing == 0) html += " selected"; html += ">Tight</option>"
             "<option value='1'"; if (gCfg->chatSpacing == 1) html += " selected"; html += ">Normal</option>"
@@ -1386,6 +1390,7 @@ static void handlePostSave() {
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
+    gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     if (server.hasArg("ui_theme_preset")) {
         uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 7);

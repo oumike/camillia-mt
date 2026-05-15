@@ -251,6 +251,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
+    cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
     cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
     cfg.uiTheme            = MY_UI_THEME;
     cfg.uiMode             = MY_UI_MODE;
@@ -415,6 +416,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "message_alert_sound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
+    snprintf(tmp, sizeof(tmp), "splash_melody_enabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false");
+    out += tmp;
     out += "config:\n";
     // bluetooth
     out += "  bluetooth:\n";
@@ -439,6 +442,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    splashMelodyEnabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -605,6 +609,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.msgAlertSound = parseBoolValue(val)
                         ? MSG_ALERT_SOUND_DEFAULT
                         : MSG_ALERT_SOUND_OFF;
+                } else if (!strcmp(key, "splash_melody_enabled")) {
+                    cfg.splashMelodyEnabled = parseBoolValue(val);
                 }
             }
         } else if (indent == 2) {
@@ -702,6 +708,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
+                else if (!strcmp(key, "splashMelodyEnabled")) cfg.splashMelodyEnabled = (!strcmp(val,"true"));
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)

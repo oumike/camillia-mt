@@ -423,30 +423,34 @@ static void sdRmDir(const char *path) {
 #define SETTING_ANNOUNCE      4
 #if CFG_MSG_ALERT_TOGGLE
 #define SETTING_MSG_ALERT     5
+#define SETTING_SPLASH_MELODY 6
+#define SETTING_CLEAR_MSGS    7
+#define SETTING_CLEAR_NODES   8
+#define SETTING_FACTORY_RESET 9
+#define NUM_SETTINGS          10
+#else
+#define SETTING_SPLASH_MELODY 5
 #define SETTING_CLEAR_MSGS    6
 #define SETTING_CLEAR_NODES   7
 #define SETTING_FACTORY_RESET 8
 #define NUM_SETTINGS          9
-#else
-#define SETTING_CLEAR_MSGS    5
-#define SETTING_CLEAR_NODES   6
-#define SETTING_FACTORY_RESET 7
-#define NUM_SETTINGS          8
 #endif
 #else
 #define SETTING_THEME         1
 #define SETTING_ANNOUNCE      2
 #if CFG_MSG_ALERT_TOGGLE
 #define SETTING_MSG_ALERT     3
+#define SETTING_SPLASH_MELODY 4
+#define SETTING_CLEAR_MSGS    5
+#define SETTING_CLEAR_NODES   6
+#define SETTING_FACTORY_RESET 7
+#define NUM_SETTINGS          8
+#else
+#define SETTING_SPLASH_MELODY 3
 #define SETTING_CLEAR_MSGS    4
 #define SETTING_CLEAR_NODES   5
 #define SETTING_FACTORY_RESET 6
 #define NUM_SETTINGS          7
-#else
-#define SETTING_CLEAR_MSGS    3
-#define SETTING_CLEAR_NODES   4
-#define SETTING_FACTORY_RESET 5
-#define NUM_SETTINGS          6
 #endif
 #endif
 
@@ -604,6 +608,13 @@ static void persistMessageAlertSetting() {
     Preferences p;
     p.begin("camillia", false);
     p.putUChar("msgAlertSound", gCfg.msgAlertSound);
+    p.end();
+}
+
+static void persistSplashMelodySetting() {
+    Preferences p;
+    p.begin("camillia", false);
+    p.putBool("splashMelody", gCfg.splashMelodyEnabled);
     p.end();
 }
 
@@ -3714,6 +3725,8 @@ static void drawSettings() {
         else if (i == SETTING_MSG_ALERT)
             snprintf(buf, sizeof(buf), "Notification Sound: %s", msgAlertSoundName(gCfg.msgAlertSound));
 #endif
+        else if (i == SETTING_SPLASH_MELODY)
+            snprintf(buf, sizeof(buf), "Splash Melody: %s", gCfg.splashMelodyEnabled ? "On" : "Off");
         else if (i == SETTING_CLEAR_MSGS)
             snprintf(buf, sizeof(buf), "Clear Messages");
         else if (i == SETTING_CLEAR_NODES)
@@ -4767,8 +4780,13 @@ static bool pagerAudioInitI2S() {
 }
 
 static bool pagerAudioEnsureReady() {
-    if (sPagerAudioInitTried) return sPagerAudioReady;
-    sPagerAudioInitTried = true;
+    if (sPagerAudioReady) return true;
+    if (!sPagerAudioInitTried) {
+        sPagerAudioInitTried = true;
+    } else {
+        // Splash playback can run before keyboard/I2C init on pager; keep retrying.
+        Serial.println("[audio] pager init retry");
+    }
 
     sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, Wire);
     sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
@@ -5195,6 +5213,44 @@ static void triggerMessageAlert(bool bypassRateLimit = false) {
 #elif (BOARD_BUZZER >= 0)
     if (gCfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
     tone(BOARD_BUZZER, 1760, 60);
+#endif
+}
+
+static void playSplashStartupRiff() {
+    if (!gCfg.splashMelodyEnabled) return;
+
+    // Middle-octave riff: E, F, F#, F, E, D#, E
+    static const uint16_t kNotesHz[] = {330, 349, 370, 349, 330, 311, 330};
+    static const uint16_t kQuarterMs = 220;
+    static const uint16_t kPause16thMs = 55;
+    static const uint16_t kDurMs[] = {
+        kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs
+    };
+    static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    for (size_t i = 0; i < kCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kCount) delay(kPause16thMs);
+    }
+    pagerAudioStopPlayback();
+#elif defined(DEVICE_TDECK)
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    for (size_t i = 0; i < kCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kCount) delay(kPause16thMs);
+    }
+    tdeckAudioStopPlayback();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    cardputerPlayTonePattern(kNotesHz, kDurMs, kCount, kPause16thMs);
+#elif (BOARD_BUZZER >= 0)
+    for (size_t i = 0; i < kCount; i++) {
+        tone(BOARD_BUZZER, kNotesHz[i], kDurMs[i]);
+        delay((uint32_t)kDurMs[i] + (i + 1 < kCount ? kPause16thMs : 0));
+    }
 #endif
 }
 
@@ -5633,6 +5689,11 @@ static void activateSettingsSelection() {
     triggerMessageAlert(true);  // Preview the newly selected sound profile.
     snprintf(settingsStatus, sizeof(settingsStatus), "Notification sound: %s", msgAlertSoundName(gCfg.msgAlertSound));
 #endif
+    } else if (settingsSel == SETTING_SPLASH_MELODY) {
+        gCfg.splashMelodyEnabled = !gCfg.splashMelodyEnabled;
+        persistSplashMelodySetting();
+        snprintf(settingsStatus, sizeof(settingsStatus), "Splash melody: %s",
+                 gCfg.splashMelodyEnabled ? "On" : "Off");
     } else if (settingsSel == SETTING_CLEAR_MSGS) {
         Channels.clearAllMessages(true);
         DMs.clearAll(true);
@@ -6362,6 +6423,7 @@ static void onWebCfgSaved() {
     p.putUChar("dispUnits",   gCfg.displayUnits);
     p.putBool("compassNorth", gCfg.compassNorthTop);
     p.putBool("flipScreen",   gCfg.flipScreen);
+    p.putBool("splashMelody", gCfg.splashMelodyEnabled);
     p.putUChar("msgAlertSound", gCfg.msgAlertSound);
     p.putUChar("uiTheme",     gCfg.uiTheme);
     p.putUChar("uiMode",      gCfg.uiMode);
@@ -6572,6 +6634,7 @@ void setup() {
         ro = prefs.getUChar("dispUnits", 0xFF); if (ro != 0xFF) gCfg.displayUnits = ro;
         if (prefs.isKey("compassNorth")) gCfg.compassNorthTop = prefs.getBool("compassNorth");
         if (prefs.isKey("flipScreen"))   gCfg.flipScreen      = prefs.getBool("flipScreen");
+        if (prefs.isKey("splashMelody")) gCfg.splashMelodyEnabled = prefs.getBool("splashMelody");
         if (prefs.isKey("msgAlertSound")) {
             gCfg.msgAlertSound = (uint8_t)constrain((int)prefs.getUChar("msgAlertSound"), 0, 3);
         } else if (prefs.isKey("msgAlertBeep")) {
@@ -6697,6 +6760,8 @@ void setup() {
     // first, then initialize the keyboard sidecar.
     kb.begin();
 #endif
+
+    playSplashStartupRiff();
 
     // Data modules
     Nodes.init();
