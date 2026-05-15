@@ -4719,9 +4719,18 @@ namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
 static constexpr i2s_port_t kPagerI2SPort = I2S_NUM_0;
+static constexpr uint8_t kPagerAudioVolActive = 52;
+static constexpr uint8_t kPagerAudioVolIdle = 10;
+static uint8_t sPagerAudioVolume = 0xFF;
 static audio_driver::DriverPins sPagerAudioPins;
 static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
                                                  sPagerAudioPins);
+
+static inline void pagerAudioApplyVolume(uint8_t volume) {
+    if (sPagerAudioVolume == volume) return;
+    sPagerAudioBoard.setVolume(volume);
+    sPagerAudioVolume = volume;
+}
 
 static bool pagerAudioInitI2S() {
     i2s_config_t cfg = {};
@@ -4813,7 +4822,8 @@ static bool pagerAudioEnsureReady() {
         return false;
     }
 
-    sPagerAudioBoard.setVolume(58);
+    sPagerAudioVolume = 0xFF;
+    pagerAudioApplyVolume(kPagerAudioVolIdle);
     sPagerAudioBoard.setMute(false);
 
     if (!pagerAudioInitI2S()) {
@@ -4827,15 +4837,42 @@ static bool pagerAudioEnsureReady() {
 }
 
 static inline void pagerAudioStartPlayback() {
+    pagerAudioApplyVolume(kPagerAudioVolActive);
+    delay(2);
     i2s_zero_dma_buffer(kPagerI2SPort);
 }
 
 static inline void pagerAudioStopPlayback() {
     // Push a short silence tail before ending to reduce stop pops.
-    int16_t tail[128] = {0};
+    int16_t tail[256] = {0};
     size_t tailWritten = 0;
     (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
     i2s_zero_dma_buffer(kPagerI2SPort);
+    pagerAudioApplyVolume(kPagerAudioVolIdle);
+}
+
+static void pagerAudioWriteSilence(uint16_t durationMs) {
+    if (!pagerAudioEnsureReady() || durationMs == 0) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t zeroPcm[kChunkFrames * 2] = {0};
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        size_t written = 0;
+        esp_err_t err = i2s_write(kPagerI2SPort, zeroPcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] i2s silence write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
 }
 
 static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
@@ -4849,7 +4886,7 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     if (framesRemaining == 0) return;
     const uint32_t totalFrames = framesRemaining;
     uint32_t frameIndex = 0;
-    uint32_t rampFrames = kSampleRate / 400; // ~2.5ms ramp to reduce pops
+    uint32_t rampFrames = kSampleRate / 200; // ~5ms ramp to reduce pops
     if (rampFrames < 12) rampFrames = 12;
 
     const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
@@ -4900,7 +4937,7 @@ static void pagerAudioPlayAlertPattern() {
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(12);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(12);
     }
     pagerAudioStopPlayback();
 }
@@ -4913,7 +4950,7 @@ static void pagerAudioPlayChirpyPattern() {
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(8);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(8);
     }
     pagerAudioStopPlayback();
 }
@@ -4926,7 +4963,7 @@ static void pagerAudioPlayBassPattern() {
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(14);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(14);
     }
     pagerAudioStopPlayback();
 }
@@ -5233,7 +5270,7 @@ static void playSplashStartupRiff() {
     pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kCount) delay(kPause16thMs);
+        if (i + 1 < kCount) pagerAudioWriteSilence(kPause16thMs);
     }
     pagerAudioStopPlayback();
 #elif defined(DEVICE_TDECK)
