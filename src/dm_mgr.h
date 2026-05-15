@@ -19,6 +19,8 @@
 struct DmLine {
     char     text[DM_LINE_LEN + 1];
     uint16_t color;
+    uint32_t packetId;  // 0 = not a locally-sent DM line
+    enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
 };
 
 struct DmConv {
@@ -49,9 +51,11 @@ public:
     // Add a message (word-wrapped) to a conversation.
     // markUnread: set to false for outgoing or seed messages.
     // chanIdx: channel index the message was received on (-1 for outgoing/unknown).
+    // packetId: set for locally-sent DM lines so routing ACK/NAK can recolor them.
     void addMessage(uint32_t nodeId, const char *shortName,
                     const char *prefix, const char *text, uint16_t color,
-                    bool markUnread = false, int chanIdx = -1);
+                    bool markUnread = false, int chanIdx = -1,
+                    uint32_t packetId = 0);
 
     // Build and transmit a unicast DM. Adds outgoing message to conversation.
     bool sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text);
@@ -82,7 +86,9 @@ private:
     PendingTx _pendingTx[MAX_DM_PENDING_TX];
 
     void _sort();
-    void _pushLine(DmConv &c, const char *text, uint16_t color);
+    void _pushLine(DmConv &c, const char *text, uint16_t color,
+                   uint32_t packetId, DmLine::AckState ack);
+    void _setAckState(uint32_t packetId, DmLine::AckState state);
 };
 
 extern DmMgr DMs;

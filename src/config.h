@@ -13,9 +13,14 @@
 // ── Power & Peripherals ──────────────────────────────────────
 #if defined(DEVICE_TDECK)
 #define BOARD_POWERON   10
-#define BOARD_BUZZER     4
+#define BOARD_BUZZER    -1
 #define BOARD_VEXT_ENABLE    -1
 #define BOARD_VEXT_ON_LEVEL  HIGH
+
+// T-Deck native audio output (I2S speaker path)
+#define TDECK_DAC_I2S_WS       5
+#define TDECK_DAC_I2S_BCK      7
+#define TDECK_DAC_I2S_DOUT     6
 
 // Display SPI (ST7789, landscape 320x240)
 #define TFT_SPI_HOST    SPI2_HOST
@@ -185,6 +190,14 @@
 #define GPS_RX           4
 #define GPS_TX          12
 #define GPS_BAUD        38400
+
+// Pager audio codec (ES8311) over I2S
+#define PAGER_AUDIO_CODEC_ADDR 0x18
+#define PAGER_DAC_I2S_BCK      11
+#define PAGER_DAC_I2S_WS       18
+#define PAGER_DAC_I2S_DOUT     45
+#define PAGER_DAC_I2S_DIN      17
+#define PAGER_DAC_I2S_MCLK     10
 
 #define BATT_ADC_PIN    -1
 #define BATT_DIV        2.0f
@@ -467,6 +480,17 @@
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
+
+#define MSG_ALERT_SOUND_DEFAULT 0
+#define MSG_ALERT_SOUND_CHIRPY  1
+#define MSG_ALERT_SOUND_BASS    2
+#define MSG_ALERT_SOUND_OFF     3
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
+#else
+#define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
+#endif
 #define MY_DBG_ACKS         0
 #define MY_DBG_MESSAGES     0
 #define MY_DBG_GPS          0

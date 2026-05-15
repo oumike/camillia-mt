@@ -134,6 +134,10 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
                 const uint8_t *plain, size_t plainLen,
                 uint8_t *out);
 
+// Monotonic per-boot packet ID source to avoid duplicate from:id collisions.
+// Returns non-zero IDs suitable for MeshHdr.id and Data.request_id.
+uint32_t nextMeshPacketId();
+
 // PKI-decrypt a received packet (hdr.channel == 0).
 // cipher: raw payload bytes (ciphertext + tag(8) + extraNonce(4))
 // cipherLen must be > 12; plain must be at least cipherLen-12 bytes.

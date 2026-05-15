@@ -820,6 +820,15 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Messages (pipe-separated, e.g. Hi|Bye|Yes|No)"
             "<input name='canned_msgs' type='text' maxlength='199' value='";
     html += gCfg->cannedMessages; html += "'></label>";
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Alerts</h3>";
+    html += "<label>Notification Sound<select name='msg_alert_sound'>"
+            "<option value='0'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_DEFAULT) html += " selected"; html += ">Default</option>"
+            "<option value='1'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_CHIRPY) html += " selected"; html += ">Chirpy</option>"
+            "<option value='2'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_BASS) html += " selected"; html += ">Bass</option>"
+            "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
+            "</select></label>";
+#endif
         // MQTT
         html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>MQTT</h3>";
         html += "<label>Enabled<select name='mqtt_en'>"
@@ -1406,6 +1415,9 @@ static void handlePostSave() {
     gCfg->telEnvIntervalS    = (uint32_t)max((long)60, server.arg("tel_env_intv").toInt());
     gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
     strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    gCfg->msgAlertSound      = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
+#endif
     gCfg->debugAcks          = (server.arg("dbg_acks") == "1");
     gCfg->debugMessages      = (server.arg("dbg_msgs") == "1");
     gCfg->debugGps           = (server.arg("dbg_gps") == "1");

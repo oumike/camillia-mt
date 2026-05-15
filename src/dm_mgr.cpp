@@ -171,19 +171,22 @@ void DmMgr::_sort() {
 }
 
 // ── _pushLine: append one rendered line ───────────────────────
-void DmMgr::_pushLine(DmConv &c, const char *text, uint16_t color) {
+void DmMgr::_pushLine(DmConv &c, const char *text, uint16_t color,
+                      uint32_t packetId, DmLine::AckState ack) {
     if (!c.lines) return;
     int idx = c.count % MAX_DM_LINES;
     strncpy(c.lines[idx].text, text, DM_LINE_LEN);
     c.lines[idx].text[DM_LINE_LEN] = '\0';
     c.lines[idx].color = color;
+    c.lines[idx].packetId = packetId;
+    c.lines[idx].ack = ack;
     c.count++;
 }
 
 // ── addMessage ────────────────────────────────────────────────
 void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
                         const char *prefix, const char *text, uint16_t color,
-                        bool markUnread, int chanIdx) {
+                        bool markUnread, int chanIdx, uint32_t packetId) {
     DmConv *c = findOrCreate(nodeId, shortName);
     if (!c) return;
 
@@ -210,7 +213,8 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     };
 
     if (len == 0) {
-        _pushLine(*c, "", color);
+        _pushLine(*c, "", color, packetId,
+                  packetId ? DmLine::PENDING : DmLine::NONE);
         c->scrollOff = 0;
         _sort();
         return;
@@ -252,7 +256,8 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
             wrappedCount++;
         } else if (!wrapped) {
             // Low-memory fallback: keep chat usable even if wrapping cache can't be allocated.
-            _pushLine(*c, lineBuf, color);
+            _pushLine(*c, lineBuf, color, packetId,
+                      packetId ? DmLine::PENDING : DmLine::NONE);
         }
 
         pos += take;
@@ -263,7 +268,9 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     // Conversation view is newest-at-top; reverse insertion keeps wrapped
     // messages readable from top to bottom.
     for (int i = wrappedCount - 1; i >= 0; i--) {
-        _pushLine(*c, wrappedLine(i), color);
+        bool logicalFirst = (i == 0);
+        _pushLine(*c, wrappedLine(i), color, packetId,
+                  (packetId && logicalFirst) ? DmLine::PENDING : DmLine::NONE);
     }
 
     if (wrapped) free(wrapped);
@@ -283,7 +290,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         return false;
     }
 
-    uint32_t packetId = esp_random() ^ millis();
+    uint32_t packetId = nextMeshPacketId();
     uint8_t  proto[256];
     uint8_t  cipher[280]; // 256 proto + 12 PKI overhead + margin
 
@@ -465,9 +472,24 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         liveBuildPrefix(timePrefix, sizeof(timePrefix));
         char prefix[24];
         snprintf(prefix, sizeof(prefix), "%s<me> ", timePrefix);
-        addMessage(toNodeId, conv->shortName, prefix, text, TFT_WHITE, false);
+        addMessage(toNodeId, conv->shortName, prefix, text, TFT_WHITE,
+                   false, -1, packetId);
     }
     return true;
+}
+
+void DmMgr::_setAckState(uint32_t packetId, DmLine::AckState state) {
+    if (!packetId) return;
+    for (int ci = 0; ci < _count; ci++) {
+        DmConv &c = _convs[ci];
+        if (!c.lines) continue;
+        int stored = min(c.count, MAX_DM_LINES);
+        for (int i = 0; i < stored; i++) {
+            if (c.lines[i].packetId == packetId) {
+                c.lines[i].ack = state;
+            }
+        }
+    }
 }
 
 bool DmMgr::handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_t errorReason) {
@@ -497,6 +519,12 @@ bool DmMgr::handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_
 
     const bool usedPki = _pendingTx[match].usedPki;
     _pendingTx[match].active = false;
+
+    if (errorReason == 0) {
+        _setAckState(requestId, DmLine::ACKED);
+    } else {
+        _setAckState(requestId, DmLine::NAKED);
+    }
 
     NodeEntry *n = Nodes.find(fromNodeId);
     if (!n) return true;
@@ -539,6 +567,10 @@ const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows
 
 static const char *kDmDir = "/camillia/dms";
 static const uint32_t DM_MAGIC = 0x434D444D;  // "CMDM"
+struct PersistDmLine {
+    char     text[DM_LINE_LEN + 1];
+    uint16_t color;
+};
 
 void DmMgr::saveConv(const DmConv *c) {
 #if !HAS_SD_CARD
@@ -578,7 +610,11 @@ void DmMgr::saveConv(const DmConv *c) {
     size_t written = 0;
     for (int i = 0; i < nLines; i++) {
         int idx = (startIdx + i) % MAX_DM_LINES;
-        written += f.write((const uint8_t *)&c->lines[idx], sizeof(DmLine));
+        PersistDmLine pl = {};
+        strncpy(pl.text, c->lines[idx].text, DM_LINE_LEN);
+        pl.text[DM_LINE_LEN] = '\0';
+        pl.color = c->lines[idx].color;
+        written += f.write((const uint8_t *)&pl, sizeof(PersistDmLine));
     }
 
     f.flush();
@@ -645,8 +681,14 @@ void DmMgr::loadAll() {
 
         // Read lines directly into the circular buffer
         for (int i = 0; i < numLines; i++) {
-            DmLine line;
-            if (f.read((uint8_t *)&line, sizeof(DmLine)) != sizeof(DmLine)) break;
+            PersistDmLine pl = {};
+            if (f.read((uint8_t *)&pl, sizeof(PersistDmLine)) != sizeof(PersistDmLine)) break;
+            DmLine line = {};
+            strncpy(line.text, pl.text, DM_LINE_LEN);
+            line.text[DM_LINE_LEN] = '\0';
+            line.color = pl.color;
+            line.packetId = 0;
+            line.ack = DmLine::NONE;
             int idx = i % MAX_DM_LINES;
             c->lines[idx] = line;
         }

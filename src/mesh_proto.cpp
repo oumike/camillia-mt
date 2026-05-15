@@ -345,6 +345,20 @@ bool encryptPki(uint32_t packetId, uint32_t fromNode,
     return ok;
 }
 
+uint32_t nextMeshPacketId() {
+    static uint32_t sNextId = 0;
+    if (sNextId == 0) {
+        uint32_t seed = 0;
+        esp_fill_random(&seed, sizeof(seed));
+        if (seed == 0) seed = 1;
+        sNextId = seed;
+    }
+
+    sNextId++;
+    if (sNextId == 0) sNextId = 1;
+    return sNextId;
+}
+
 // ── PKI decrypt ───────────────────────────────────────────────
 // Wire format: [ciphertext(N)] [CCM-tag(8)] [extraNonce(4)]
 // Nonce (13 bytes): [packetId_LE32(4)] [extraNonce_LE32(4)] [fromNode_LE32(4)] [0x00]

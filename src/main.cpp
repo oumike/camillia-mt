@@ -25,6 +25,12 @@
 #include <esp_sleep.h>
 #include "mbedtls/ecp.h"
 #include "mbedtls/ecdh.h"
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#include <AudioBoard.h>
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#include <driver/i2s.h>
+#endif
 
 // ── Chat spacing (runtime, set once at startup from gCfg.chatSpacing) ─
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -404,22 +410,44 @@ static void sdRmDir(const char *path) {
 
 // ── Settings ──────────────────────────────────────────────────
 #define SETTING_WEBCFG        0
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#define CFG_MSG_ALERT_TOGGLE  1
+#else
+#define CFG_MSG_ALERT_TOGGLE  0
+#endif
+
 #if HAS_SD_CARD
 #define SETTING_EXPORT        1
 #define SETTING_IMPORT        2
 #define SETTING_THEME         3
 #define SETTING_ANNOUNCE      4
+#if CFG_MSG_ALERT_TOGGLE
+#define SETTING_MSG_ALERT     5
+#define SETTING_CLEAR_MSGS    6
+#define SETTING_CLEAR_NODES   7
+#define SETTING_FACTORY_RESET 8
+#define NUM_SETTINGS          9
+#else
 #define SETTING_CLEAR_MSGS    5
 #define SETTING_CLEAR_NODES   6
 #define SETTING_FACTORY_RESET 7
 #define NUM_SETTINGS          8
+#endif
 #else
 #define SETTING_THEME         1
 #define SETTING_ANNOUNCE      2
+#if CFG_MSG_ALERT_TOGGLE
+#define SETTING_MSG_ALERT     3
+#define SETTING_CLEAR_MSGS    4
+#define SETTING_CLEAR_NODES   5
+#define SETTING_FACTORY_RESET 6
+#define NUM_SETTINGS          7
+#else
 #define SETTING_CLEAR_MSGS    3
 #define SETTING_CLEAR_NODES   4
 #define SETTING_FACTORY_RESET 5
 #define NUM_SETTINGS          6
+#endif
 #endif
 
 static char settingsStatus[LCD_W / CHAR_W + 1] = "";
@@ -466,6 +494,14 @@ static UiPalette gUi = {};
 
 static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
     return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
+}
+
+static inline uint16_t gpsFixColorForUiMode() {
+    // Keep GPS fix distinctly green on every theme.
+    // Light themes use a darker shade for better contrast on pale backgrounds.
+    return (gCfg.uiMode == UI_MODE_LIGHT)
+        ? rgb565(0x1f, 0x7a, 0x2f)
+        : rgb565(0x3a, 0xe0, 0x58);
 }
 
 #define COL_BG_MAIN        gUi.bgMain
@@ -562,6 +598,23 @@ static void persistUiTheme() {
     p.putUChar("uiTheme", gCfg.uiTheme);
     p.putUChar("uiMode", gCfg.uiMode);
     p.end();
+}
+
+static void persistMessageAlertSetting() {
+    Preferences p;
+    p.begin("camillia", false);
+    p.putUChar("msgAlertSound", gCfg.msgAlertSound);
+    p.end();
+}
+
+static const char *msgAlertSoundName(uint8_t mode) {
+    switch (mode) {
+        case MSG_ALERT_SOUND_CHIRPY: return "Chirpy";
+        case MSG_ALERT_SOUND_BASS:   return "Bass";
+        case MSG_ALERT_SOUND_OFF:    return "Off";
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:                     return "Default";
+    }
 }
 
 static void applyUiTheme(bool markDirty = true) {
@@ -1243,7 +1296,7 @@ static void drawBattery() {
     bool gpsStream = gpsHasNmeaStream();
     bool gpsFix = gpsHasFix();
     uint8_t sats = gpsSats();
-    uint16_t gpsCol = gpsFix ? COL_BATT_GOOD
+    uint16_t gpsCol = gpsFix ? gpsFixColorForUiMode()
                     : (gpsStream ? COL_TAB_UNREAD
                                  : (gpsEnabled ? COL_BATT_BAD : COL_TAB_IDLE));
     wifi_mode_t wifiMode = WiFi.getMode();
@@ -1258,7 +1311,7 @@ static void drawBattery() {
     uint16_t iconStroke = lightUi ? COL_TEXT_MAIN : COL_DIVIDER_HI;
     if (lightUi) {
         // Darken accent colours slightly against light status backgrounds.
-        gpsCol  = lerp565(gpsCol,  COL_TEXT_MAIN, 72);
+        if (!gpsFix) gpsCol = lerp565(gpsCol, COL_TEXT_MAIN, 72);
         wifiCol = lerp565(wifiCol, COL_TEXT_MAIN, 72);
         col     = lerp565(col,     COL_TEXT_MAIN, 72);
     }
@@ -1572,7 +1625,7 @@ static void drawTabs() {
             stateCol = isActive ? COL_TEXT_ON_ACCENT : COL_TAB_IDLE;
         } else if (tabs[t].view == VIEW_GPS) {
             if      (isActive)       stateCol = COL_TEXT_ON_ACCENT;
-            else if (gpsHasFix())    stateCol = COL_BATT_GOOD;
+            else if (gpsHasFix())    stateCol = gpsFixColorForUiMode();
             else if (gpsIsEnabled() && !gpsHasNmeaStream()) stateCol = COL_BATT_BAD;
             else if (gpsIsEnabled()) stateCol = COL_TAB_UNREAD;
             else                     stateCol = COL_TAB_IDLE;
@@ -1610,7 +1663,13 @@ static void drawChat() {
     int chatX = 0;
     int chatW = MSG_W;
     const int chatInnerY = CHAT_Y + 1;
-    drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    uint16_t chatEdge = COL_DIVIDER;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (pagerWheelChatScrollMode && activeView >= 0 && activeView < MESH_CHANNELS) {
+        chatEdge = COL_SELECT_ACCENT;
+    }
+#endif
+    drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, chatEdge);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lcd.setFont(&fonts::DejaVu12);
     lcd.setTextSize(1.0f);
@@ -1693,6 +1752,19 @@ static void drawChat() {
 
     lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
+}
+
+static int dmConvMessageRowsVisible() {
+    const int my = CHAT_Y + 4;
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int iy = my + 3;
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsTop = reserveFooter
+        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (my + mh - 1);
+    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+    // Header row + spacer row before message lines.
+    return max(1, rowsVisible - 2);
 }
 
 static bool isDigitChar(char c) {
@@ -3408,7 +3480,7 @@ static void drawDmConv() {
     const int controlsTop = reserveFooter
         ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
         : (my + mh - 1);
-    const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
+    const int msgRowsVisible = dmConvMessageRowsVisible();
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -3429,23 +3501,53 @@ static void drawDmConv() {
     }
 
     // Header bar
+    NodeEntry *node = Nodes.find(c->nodeId);
+    const char *longName = (node && node->longName[0]) ? node->longName : "Unknown node";
+    const char *shortName = (node && node->shortName[0])
+                            ? node->shortName
+                            : (c->shortName[0] ? c->shortName : "????");
     char hdr[DM_LINE_LEN + 1];
-    snprintf(hdr, sizeof(hdr), "DM with %s (!%08x)", c->shortName, (unsigned)c->nodeId);
+    snprintf(hdr, sizeof(hdr), "%s (%s)", longName, shortName);
     lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     drawClippedText(ix + 4, iy + 1, iw - 8, hdr);
 
-    // Messages (DM_VISIBLE - 1 rows below the header)
-    const int MSG_ROWS = rowsVisible - 1;
-    for (int row = 0; row < MSG_ROWS; row++) {
-        int y = iy + (row + 1) * DM_LINE_H;
+    // Spacer line between header and conversation body.
+    lcd.fillRect(ix, iy + DM_LINE_H, iw, DM_LINE_H, COL_PANEL_BG);
+
+    // Message rows begin after header + spacer.
+    for (int row = 0; row < msgRowsVisible; row++) {
+        int y = iy + (row + 2) * DM_LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
         lcd.fillRect(ix, y, iw, DM_LINE_H, rowBg);
-        const DmLine *dl = DMs.getLine(c, row, MSG_ROWS);
+        const DmLine *dl = DMs.getLine(c, row, msgRowsVisible);
         if (!dl) continue;
+
         uint16_t col = dl->color;
-        if (gCfg.uiMode == UI_MODE_LIGHT) col = TFT_BLACK;
-        else                              col = TFT_WHITE;
+        bool ackColorApplied = false;
+        if (dl->packetId) {
+            switch (dl->ack) {
+                case DmLine::ACKED:
+                    col = (gCfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
+                    ackColorApplied = true;
+                    break;
+                case DmLine::ACKED_RELAY:
+                    col = TFT_YELLOW;
+                    ackColorApplied = true;
+                    break;
+                case DmLine::NAKED:
+                case DmLine::TX_FAILED:
+                    col = TFT_RED;
+                    ackColorApplied = true;
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (!ackColorApplied) {
+            if (gCfg.uiMode == UI_MODE_LIGHT) col = TFT_BLACK;
+            else                              col = TFT_WHITE;
+        }
         lcd.setTextColor(col, rowBg);
         drawClippedText(ix + 4, y + 1, iw - 8, dl->text);
     }
@@ -3608,6 +3710,10 @@ static void drawSettings() {
             snprintf(buf, sizeof(buf), "Theme: %s", uiThemePresetName(uiThemePresetIndex()));
         else if (i == SETTING_ANNOUNCE)
             snprintf(buf, sizeof(buf), "Send NODEINFO Broadcast");
+#if CFG_MSG_ALERT_TOGGLE
+        else if (i == SETTING_MSG_ALERT)
+            snprintf(buf, sizeof(buf), "Notification Sound: %s", msgAlertSoundName(gCfg.msgAlertSound));
+#endif
         else if (i == SETTING_CLEAR_MSGS)
             snprintf(buf, sizeof(buf), "Clear Messages");
         else if (i == SETTING_CLEAR_NODES)
@@ -4595,6 +4701,503 @@ static void addLiveLine(const char *text, uint16_t color = TFT_DARKGREY) {
     if (activeView == CHAN_ANN) dirtyLiveRows = true;
 }
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+namespace {
+static bool sPagerAudioInitTried = false;
+static bool sPagerAudioReady = false;
+static constexpr i2s_port_t kPagerI2SPort = I2S_NUM_0;
+static audio_driver::DriverPins sPagerAudioPins;
+static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
+                                                 sPagerAudioPins);
+
+static bool pagerAudioInitI2S() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate = 44100;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+#endif
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 6;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = true;
+    cfg.fixed_mclk = 0;
+
+    esp_err_t err = i2s_driver_install(kPagerI2SPort, &cfg, 0, nullptr);
+    if (err == ESP_ERR_INVALID_STATE) {
+        i2s_driver_uninstall(kPagerI2SPort);
+        err = i2s_driver_install(kPagerI2SPort, &cfg, 0, nullptr);
+    }
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s install failed err=%d\n", (int)err);
+        return false;
+    }
+
+    i2s_pin_config_t pinCfg = {};
+    pinCfg.bck_io_num = PAGER_DAC_I2S_BCK;
+    pinCfg.ws_io_num = PAGER_DAC_I2S_WS;
+    pinCfg.data_out_num = PAGER_DAC_I2S_DOUT;
+    pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+    pinCfg.mck_io_num = PAGER_DAC_I2S_MCLK;
+#endif
+
+    err = i2s_set_pin(kPagerI2SPort, &pinCfg);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s set pin failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kPagerI2SPort);
+        return false;
+    }
+
+    err = i2s_set_clk(kPagerI2SPort, 44100, I2S_BITS_PER_SAMPLE_16BIT,
+                      I2S_CHANNEL_STEREO);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s set clk failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kPagerI2SPort);
+        return false;
+    }
+
+    i2s_zero_dma_buffer(kPagerI2SPort);
+    return true;
+}
+
+static bool pagerAudioEnsureReady() {
+    if (sPagerAudioInitTried) return sPagerAudioReady;
+    sPagerAudioInitTried = true;
+
+    sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, Wire);
+    sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
+                           PAGER_DAC_I2S_MCLK,
+                           PAGER_DAC_I2S_BCK,
+                           PAGER_DAC_I2S_WS,
+                           PAGER_DAC_I2S_DOUT,
+                           PAGER_DAC_I2S_DIN);
+
+    (void)sPagerAudioBoard.driver().setI2CAddress(PAGER_AUDIO_CODEC_ADDR);
+
+    audio_driver::CodecConfig cfg;
+    cfg.input_device = audio_driver::ADC_INPUT_NONE;
+    cfg.output_device = audio_driver::DAC_OUTPUT_ALL;
+    cfg.i2s.bits = audio_driver::BIT_LENGTH_16BITS;
+    cfg.i2s.rate = audio_driver::RATE_44K;
+    cfg.i2s.channels = audio_driver::CHANNELS2;
+    cfg.i2s.fmt = audio_driver::I2S_NORMAL;
+    cfg.i2s.mode = audio_driver::MODE_SLAVE;
+
+    if (!sPagerAudioBoard.begin(cfg)) {
+        Serial.println("[audio] codec init failed");
+        sPagerAudioReady = false;
+        return false;
+    }
+
+    sPagerAudioBoard.setVolume(58);
+    sPagerAudioBoard.setMute(false);
+
+    if (!pagerAudioInitI2S()) {
+        sPagerAudioReady = false;
+        return false;
+    }
+
+    sPagerAudioReady = true;
+    Serial.println("[audio] pager codec/i2s ready");
+    return true;
+}
+
+static inline void pagerAudioStartPlayback() {
+    i2s_zero_dma_buffer(kPagerI2SPort);
+}
+
+static inline void pagerAudioStopPlayback() {
+    // Push a short silence tail before ending to reduce stop pops.
+    int16_t tail[128] = {0};
+    size_t tailWritten = 0;
+    (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    i2s_zero_dma_buffer(kPagerI2SPort);
+}
+
+static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
+    if (!pagerAudioEnsureReady()) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t pcm[kChunkFrames * 2];
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    if (framesRemaining == 0) return;
+    const uint32_t totalFrames = framesRemaining;
+    uint32_t frameIndex = 0;
+    uint32_t rampFrames = kSampleRate / 400; // ~2.5ms ramp to reduce pops
+    if (rampFrames < 12) rampFrames = 12;
+
+    const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
+    float phase = 0.0f;
+
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        for (int i = 0; i < framesNow; i++) {
+            float s = sinf(phase);
+            phase += phaseStep;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+
+            float env = 1.0f;
+            if (frameIndex < rampFrames) {
+                env = (float)frameIndex / (float)rampFrames;
+            }
+            uint32_t framesToEnd = totalFrames - frameIndex;
+            if (framesToEnd < rampFrames) {
+                float tail = (float)framesToEnd / (float)rampFrames;
+                if (tail < env) env = tail;
+            }
+
+            int16_t v = (int16_t)(s * 2200.0f * env);
+            pcm[(i * 2)] = v;
+            pcm[(i * 2) + 1] = v;
+            frameIndex++;
+        }
+
+        size_t written = 0;
+        esp_err_t err = i2s_write(kPagerI2SPort, pcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] i2s write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+static void pagerAudioPlayAlertPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {880, 740, 660};
+    static const uint16_t kDurMs[] = {42, 42, 70};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(12);
+    }
+    pagerAudioStopPlayback();
+}
+
+static void pagerAudioPlayChirpyPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {1047, 1319, 1568, 1319};
+    static const uint16_t kDurMs[] = {24, 24, 26, 42};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(8);
+    }
+    pagerAudioStopPlayback();
+}
+
+static void pagerAudioPlayBassPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {392, 330, 262};
+    static const uint16_t kDurMs[] = {65, 60, 90};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(14);
+    }
+    pagerAudioStopPlayback();
+}
+} // namespace
+#endif
+
+#if defined(DEVICE_TDECK)
+namespace {
+static bool sTdeckAudioInitTried = false;
+static bool sTdeckAudioReady = false;
+static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
+
+static bool tdeckAudioInitI2S() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate = 44100;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+#endif
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 6;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = true;
+    cfg.fixed_mclk = 0;
+
+    esp_err_t err = i2s_driver_install(kTdeckI2SPort, &cfg, 0, nullptr);
+    if (err == ESP_ERR_INVALID_STATE) {
+        i2s_driver_uninstall(kTdeckI2SPort);
+        err = i2s_driver_install(kTdeckI2SPort, &cfg, 0, nullptr);
+    }
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s install failed err=%d\n", (int)err);
+        return false;
+    }
+
+    i2s_pin_config_t pinCfg = {};
+    pinCfg.bck_io_num = TDECK_DAC_I2S_BCK;
+    pinCfg.ws_io_num = TDECK_DAC_I2S_WS;
+    pinCfg.data_out_num = TDECK_DAC_I2S_DOUT;
+    pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+    pinCfg.mck_io_num = I2S_PIN_NO_CHANGE;
+#endif
+
+    err = i2s_set_pin(kTdeckI2SPort, &pinCfg);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s set pin failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kTdeckI2SPort);
+        return false;
+    }
+
+    err = i2s_set_clk(kTdeckI2SPort, 44100, I2S_BITS_PER_SAMPLE_16BIT,
+                      I2S_CHANNEL_STEREO);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s set clk failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kTdeckI2SPort);
+        return false;
+    }
+
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+    return true;
+}
+
+static bool tdeckAudioEnsureReady() {
+    if (sTdeckAudioInitTried) return sTdeckAudioReady;
+    sTdeckAudioInitTried = true;
+    sTdeckAudioReady = tdeckAudioInitI2S();
+    if (sTdeckAudioReady) {
+        Serial.println("[audio] tdeck i2s speaker ready");
+    }
+    return sTdeckAudioReady;
+}
+
+static inline void tdeckAudioStartPlayback() {
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+}
+
+static inline void tdeckAudioStopPlayback() {
+    int16_t tail[128] = {0};
+    size_t tailWritten = 0;
+    (void)i2s_write(kTdeckI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+}
+
+static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
+    if (!tdeckAudioEnsureReady()) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t pcm[kChunkFrames * 2];
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    if (framesRemaining == 0) return;
+    const uint32_t totalFrames = framesRemaining;
+    uint32_t frameIndex = 0;
+    uint32_t rampFrames = kSampleRate / 400;
+    if (rampFrames < 12) rampFrames = 12;
+
+    const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
+    float phase = 0.0f;
+
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        for (int i = 0; i < framesNow; i++) {
+            float s = sinf(phase);
+            phase += phaseStep;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+
+            float env = 1.0f;
+            if (frameIndex < rampFrames) {
+                env = (float)frameIndex / (float)rampFrames;
+            }
+            uint32_t framesToEnd = totalFrames - frameIndex;
+            if (framesToEnd < rampFrames) {
+                float tail = (float)framesToEnd / (float)rampFrames;
+                if (tail < env) env = tail;
+            }
+
+            int16_t v = (int16_t)(s * 2800.0f * env);
+            pcm[(i * 2)] = v;
+            pcm[(i * 2) + 1] = v;
+            frameIndex++;
+        }
+
+        size_t written = 0;
+        esp_err_t err = i2s_write(kTdeckI2SPort, pcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] tdeck i2s write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+static void tdeckPlayAlertPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {1760, 1480, 1320};
+    static const uint16_t kDurMs[] = {34, 34, 56};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(10);
+    }
+    tdeckAudioStopPlayback();
+}
+
+static void tdeckPlayChirpyPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {2093, 2637, 3136, 2637};
+    static const uint16_t kDurMs[] = {20, 20, 22, 34};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(6);
+    }
+    tdeckAudioStopPlayback();
+}
+
+static void tdeckPlayBassPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {784, 659, 523};
+    static const uint16_t kDurMs[] = {54, 50, 74};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(12);
+    }
+    tdeckAudioStopPlayback();
+}
+} // namespace
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+namespace {
+static bool sCardputerAudioReady = false;
+
+static inline void cardputerAudioEnsureReady() {
+    if (sCardputerAudioReady) return;
+    cardputerSpeakerSetVolume(180);
+    sCardputerAudioReady = true;
+}
+
+static void cardputerPlayTonePattern(const uint16_t *notesHz,
+                                     const uint16_t *durMs,
+                                     size_t noteCount,
+                                     uint16_t gapMs) {
+    cardputerAudioEnsureReady();
+    for (size_t i = 0; i < noteCount; i++) {
+        (void)cardputerSpeakerTone((float)notesHz[i], durMs[i], 0, true);
+        delay((uint32_t)durMs[i]);
+        if (i + 1 < noteCount && gapMs) delay(gapMs);
+    }
+}
+
+static void cardputerPlayAlertPattern() {
+    static const uint16_t kNotesHz[] = {1568, 1319, 1175};
+    static const uint16_t kDurMs[] = {34, 34, 56};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 10);
+}
+
+static void cardputerPlayChirpyPattern() {
+    static const uint16_t kNotesHz[] = {1976, 2489, 2960, 2489};
+    static const uint16_t kDurMs[] = {20, 20, 22, 34};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 6);
+}
+
+static void cardputerPlayBassPattern() {
+    static const uint16_t kNotesHz[] = {659, 554, 440};
+    static const uint16_t kDurMs[] = {54, 50, 74};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 12);
+}
+} // namespace
+#endif
+
+static void triggerMessageAlert(bool bypassRateLimit = false) {
+    static uint32_t lastAlertMs = 0;
+    uint32_t nowMs = millis();
+    if (!bypassRateLimit && nowMs - lastAlertMs < 120) return;
+    lastAlertMs = nowMs;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (gCfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (gCfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            pagerAudioPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            pagerAudioPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            pagerAudioPlayAlertPattern();
+            break;
+    }
+#elif defined(DEVICE_TDECK)
+    if (gCfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (gCfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            tdeckPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            tdeckPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            tdeckPlayAlertPattern();
+            break;
+    }
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (gCfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (gCfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            cardputerPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            cardputerPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            cardputerPlayAlertPattern();
+            break;
+    }
+#elif (BOARD_BUZZER >= 0)
+    if (gCfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+    tone(BOARD_BUZZER, 1760, 60);
+#endif
+}
+
 static void sendRoutingAck(const MeshPacket &pkt) {
     if (pkt.chanIdx < 0 || pkt.chanIdx >= MAX_CHANNELS) return;
 
@@ -4603,7 +5206,7 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     if (protoLen == 0) return;
 
     const ChannelKey &ck = CHANNEL_KEYS[pkt.chanIdx];
-    uint32_t ackId = esp_random() ^ millis();
+    uint32_t ackId = nextMeshPacketId();
     if (!encryptPayload(ackId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
 
     // Calculate hop limit matching Plai/Meshtastic convention:
@@ -4775,6 +5378,7 @@ static void handleRx(MeshPacket pkt) {
                             && dmConvNodeId == pkt.hdr.from);
             DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, incomingNodeColor,
                            /*markUnread=*/!viewing, pkt.chanIdx);
+            triggerMessageAlert();
             // If we're on the DM list (not inside a conv), jump straight into this one
             if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
                 DMs.markRead(pkt.hdr.from);
@@ -4790,6 +5394,7 @@ static void handleRx(MeshPacket pkt) {
         } else {
             // Broadcast / relay message — goes to channel
             Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor);
+            triggerMessageAlert();
             if (!dmPickerOpen) dirtyChat = true;
             dirtyTabs = true;
         }
@@ -5021,6 +5626,13 @@ static void activateSettingsSelection() {
     } else if (settingsSel == SETTING_ANNOUNCE) {
         webCfgQueueAnnounce();
         snprintf(settingsStatus, sizeof(settingsStatus), "NODEINFO broadcast queued.");
+#if CFG_MSG_ALERT_TOGGLE
+    } else if (settingsSel == SETTING_MSG_ALERT) {
+    gCfg.msgAlertSound = (uint8_t)((gCfg.msgAlertSound + 1) % 4);
+        persistMessageAlertSetting();
+    triggerMessageAlert(true);  // Preview the newly selected sound profile.
+    snprintf(settingsStatus, sizeof(settingsStatus), "Notification sound: %s", msgAlertSoundName(gCfg.msgAlertSound));
+#endif
     } else if (settingsSel == SETTING_CLEAR_MSGS) {
         Channels.clearAllMessages(true);
         DMs.clearAll(true);
@@ -5080,6 +5692,16 @@ static void handleKey(char k) {
     k = remapCardputerDirectionalKey(k);
 
     if (k == KEY_BACKSPACE_HOLD) {
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && (softKbVisible || hwTypingLock || inputLen > 0)) {
+            softKbVisible = false;
+            hwTypingLock = false;
+            inputLen = 0;
+            inputBuf[0] = '\0';
+            dirtyChat = true;
+            dirtyInput = true;
+            return;
+        }
         if (isPanelView(activeView)) {
             closePanelToChannel();
             return;
@@ -5096,10 +5718,6 @@ static void handleKey(char k) {
                          && !softKbVisible
                          && !tloraTyping;
 
-    if (!tloraChannelIdle) {
-        pagerWheelChatScrollMode = false;
-    }
-
     // On the pager wheel, rotate to move between channels when not in panel views.
     // User preference: reverse channel list navigation direction.
     if (tloraChannelIdle
@@ -5109,15 +5727,18 @@ static void handleKey(char k) {
     }
 
     // Wheel click on a channel toggles chat-history wheel scrolling.
-    // Enter remains the way to enter compose mode.
+    // One click locks into chat-history scrolling; second click restores
+    // wheel channel-tab navigation.
     if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused) {
         if (!tloraTyping && !softKbVisible) {
             static uint32_t lastWheelModeToggleMs = 0;
             uint32_t nowMs = millis();
-            if ((nowMs - kb._lastScrollMs) >= 90
-                && (nowMs - lastWheelModeToggleMs) >= 320) {
+            // readTrackball() already delays click delivery until wheel motion settles.
+            // Avoid re-gating on _lastScrollMs here or we drop legitimate clicks.
+            if ((nowMs - lastWheelModeToggleMs) >= 180) {
                 pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
                 lastWheelModeToggleMs = nowMs;
+                dirtyChat = true;
             }
         }
         return;
@@ -5225,11 +5846,8 @@ static void handleKey(char k) {
 
     if (k == KEY_ENTER) {
         bool wasTyping = hwTypingLock || inputLen > 0;
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
         if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
-#if defined(DEVICE_TLORA_PAGER_TFT)
-            pagerWheelChatScrollMode = false;
-#endif
             hwTypingLock = true;
             dirtyInput = true;
             return;
@@ -5298,9 +5916,13 @@ static void handleKey(char k) {
                 // Conv view: ENTER sends the message
                 if (inputLen > 0) {
                     inputBuf[inputLen] = '\0';
-                    if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
+                    bool sentOk = DMs.sendDm(myNodeId, dmConvNodeId, inputBuf);
+                    if (!sentOk) {
                         // TX failed — add a local error line so the user knows
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
+                        hwTypingLock = true;
+                        dirtyInput = dirtyChat = true;
+                        return;
                     }
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                     hwTypingLock = true;
@@ -5348,10 +5970,14 @@ static void handleKey(char k) {
                          "counterrevolution electroencephalo titan nano q.";
             }
 #endif
-            if (!Channels.sendText(myNodeId, txText, gCfg.okToMqtt, txChan)) {
+            bool sentOk = Channels.sendText(myNodeId, txText, gCfg.okToMqtt, txChan);
+            if (!sentOk) {
                 Channels.addMessage(txChan, "",
                     "! TX failed", TFT_RED, 0);
+                hwTypingLock = true;
                 dirtyChat = true;
+                dirtyInput = true;
+                return;
             }
             hwTypingLock = false;
             inputLen = 0; inputBuf[0] = '\0';
@@ -5408,12 +6034,20 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_NEXT_CHAN) {
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && (softKbVisible || hwTypingLock || inputLen > 0)) {
+            return;
+        }
         if (cardputerChannelNavReady()) {
             goToView(nextMeshChannelView(activeView));
             return;
         }
 
     } else if (k == KEY_PREV_CHAN) {
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && (softKbVisible || hwTypingLock || inputLen > 0)) {
+            return;
+        }
         if (cardputerChannelNavReady()) {
             goToView(prevMeshChannelView(activeView));
             return;
@@ -5435,8 +6069,12 @@ static void handleKey(char k) {
                 if (k == KEY_ROLLER && inputLen > 0) {
                     // Trackball click with text typed → send (same as Enter)
                     inputBuf[inputLen] = '\0';
-                    if (!DMs.sendDm(myNodeId, dmConvNodeId, inputBuf)) {
+                    bool sentOk = DMs.sendDm(myNodeId, dmConvNodeId, inputBuf);
+                    if (!sentOk) {
                         DMs.addMessage(dmConvNodeId, nullptr, "", "! TX failed", TFT_RED);
+                        hwTypingLock = true;
+                        dirtyInput = dirtyChat = true;
+                        return;
                     }
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
                     hwTypingLock = true;
@@ -5531,7 +6169,7 @@ static void handleKey(char k) {
                 DmConv *c = DMs.find(dmConvNodeId);
                 if (c) {
                     int total = (c->count < MAX_DM_LINES) ? c->count : MAX_DM_LINES;
-                    int maxOff = total - (DM_VISIBLE - 1);
+                    int maxOff = total - dmConvMessageRowsVisible();
                     c->scrollOff = min(c->scrollOff + 3, maxOff > 0 ? maxOff : 0);
                     dirtyChat = true;
                 }
@@ -5724,6 +6362,7 @@ static void onWebCfgSaved() {
     p.putUChar("dispUnits",   gCfg.displayUnits);
     p.putBool("compassNorth", gCfg.compassNorthTop);
     p.putBool("flipScreen",   gCfg.flipScreen);
+    p.putUChar("msgAlertSound", gCfg.msgAlertSound);
     p.putUChar("uiTheme",     gCfg.uiTheme);
     p.putUChar("uiMode",      gCfg.uiMode);
     p.putBool("btEnabled",    gCfg.btEnabled);
@@ -5933,6 +6572,14 @@ void setup() {
         ro = prefs.getUChar("dispUnits", 0xFF); if (ro != 0xFF) gCfg.displayUnits = ro;
         if (prefs.isKey("compassNorth")) gCfg.compassNorthTop = prefs.getBool("compassNorth");
         if (prefs.isKey("flipScreen"))   gCfg.flipScreen      = prefs.getBool("flipScreen");
+        if (prefs.isKey("msgAlertSound")) {
+            gCfg.msgAlertSound = (uint8_t)constrain((int)prefs.getUChar("msgAlertSound"), 0, 3);
+        } else if (prefs.isKey("msgAlertBeep")) {
+            // Backward-compatible migration from legacy bool toggle.
+            gCfg.msgAlertSound = prefs.getBool("msgAlertBeep")
+                ? MSG_ALERT_SOUND_DEFAULT
+                : MSG_ALERT_SOUND_OFF;
+        }
         ro = prefs.getUChar("uiTheme", 0xFF); if (ro != 0xFF && ro < UI_THEME_COUNT) gCfg.uiTheme = ro;
         ro = prefs.getUChar("uiMode", 0xFF);  if (ro != 0xFF && ro <= UI_MODE_LIGHT) gCfg.uiMode = ro;
         if (prefs.isKey("btEnabled"))    gCfg.btEnabled       = prefs.getBool("btEnabled");
@@ -6268,8 +6915,16 @@ void loop() {
     if (hwTypingLock && !isTextInputView()) hwTypingLock = false;
 
     // 1. Poll radio
+#if defined(DEVICE_TDECK)
+    // T-Deck keyboard can lag under heavy RX handling; pause RX whenever
+    // we're actively composing text in an input-capable view.
+    bool tdeckTypingCompose = isTextInputView() && (hwTypingLock || inputLen > 0);
+#else
+    bool tdeckTypingCompose = false;
+#endif
     bool pauseRxForTyping = softKbVisible
                          || (hwTypingLock && isTextInputView())
+                         || tdeckTypingCompose
                          || (activeView == VIEW_NODES);
     if (!pauseRxForTyping) {
         MeshPacket pkt;

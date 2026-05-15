@@ -48,6 +48,7 @@ struct RhinoConfig {
     uint8_t  displayUnits;       // 0=METRIC, 1=IMPERIAL
     bool     compassNorthTop;
     bool     flipScreen;
+    uint8_t  msgAlertSound;      // 0=DEFAULT, 1=CHIRPY, 2=BASS, 3=OFF
     uint8_t  uiTheme;            // UiThemeFamily
     uint8_t  uiMode;             // UiThemeMode
 

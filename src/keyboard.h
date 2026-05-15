@@ -56,3 +56,8 @@ private:
     static void IRAM_ATTR _isrDown();
     static void IRAM_ATTR _isrClick();
 };
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+void cardputerSpeakerSetVolume(uint8_t volume);
+bool cardputerSpeakerTone(float frequency, uint32_t duration, int channel = 0, bool stopCurrent = true);
+#endif

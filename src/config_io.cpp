@@ -174,10 +174,23 @@ static const char *kThemeModeNames[] = {
 };
 static const int kNumThemeModes = 2;
 
+static const char *kMsgAlertSoundNames[] = {
+    "DEFAULT", "CHIRPY", "BASS", "OFF"
+};
+static const int kNumMsgAlertSounds = 4;
+
 static uint8_t findName(const char *val, const char **table, int n) {
     for (int i = 0; i < n; i++)
         if (!strcmp(val, table[i])) return (uint8_t)i;
     return 0;
+}
+
+static uint8_t parseMsgAlertSound(const char *val) {
+    if (!val || !val[0]) return MSG_ALERT_SOUND_DEFAULT;
+    if (isdigit((unsigned char)val[0])) {
+        return (uint8_t)constrain(atoi(val), 0, kNumMsgAlertSounds - 1);
+    }
+    return findName(val, kMsgAlertSoundNames, kNumMsgAlertSounds);
 }
 
 static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
@@ -238,6 +251,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
+    cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
     cfg.uiTheme            = MY_UI_THEME;
     cfg.uiMode             = MY_UI_MODE;
     cfg.btEnabled          = MY_BT_ENABLED;
@@ -398,6 +412,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "debug_acks: %s\n", cfg.debugAcks ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "debug_messages: %s\n", cfg.debugMessages ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "debug_gps: %s\n", cfg.debugGps ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "message_alert_sound: %s\n",
+             kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
+    out += tmp;
     out += "config:\n";
     // bluetooth
     out += "  bluetooth:\n";
@@ -422,6 +439,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
+             kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
+    out += tmp;
     out += "    theme: ";
     out += (cfg.uiTheme < kNumThemes) ? kThemeNames[cfg.uiTheme] : kThemeNames[0];
     out += "\n";
@@ -578,6 +598,14 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.debugMessages = parseBoolValue(val);
                 else if (!strcmp(key, "debug_gps"))
                     cfg.debugGps = parseBoolValue(val);
+                else if (!strcmp(key, "message_alert_sound"))
+                    cfg.msgAlertSound = parseMsgAlertSound(val);
+                else if (!strcmp(key, "message_alert_beep")) {
+                    // Backward-compatible legacy bool key.
+                    cfg.msgAlertSound = parseBoolValue(val)
+                        ? MSG_ALERT_SOUND_DEFAULT
+                        : MSG_ALERT_SOUND_OFF;
+                }
             }
         } else if (indent == 2) {
             if (!hasVal) {
@@ -674,6 +702,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
+                else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
+                else if (!strcmp(key, "messageAlertBeep")) {
+                    cfg.msgAlertSound = parseBoolValue(val)
+                        ? MSG_ALERT_SOUND_DEFAULT
+                        : MSG_ALERT_SOUND_OFF;
+                }
                 else if (!strcmp(key, "theme")) {
                     if (isdigit((unsigned char)val[0]))
                         cfg.uiTheme = (uint8_t)constrain(atoi(val), 0, UI_THEME_COUNT - 1);
@@ -713,6 +747,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             }
         }
     }
+
+    cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
     return true;
 }
 

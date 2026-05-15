@@ -17,6 +17,14 @@ static char normalizeCardputerKey(char key) {
         || raw == 0x08 || raw == 0x7F) return KEY_BACKSPACE;
     return key;
 }
+
+void cardputerSpeakerSetVolume(uint8_t volume) {
+    M5Cardputer.Speaker.setVolume(volume);
+}
+
+bool cardputerSpeakerTone(float frequency, uint32_t duration, int channel, bool stopCurrent) {
+    return M5Cardputer.Speaker.tone(frequency, duration, channel, stopCurrent);
+}
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)

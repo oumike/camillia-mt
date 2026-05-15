@@ -10,6 +10,7 @@
 volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
+static uint32_t sLastRxDoneMs = 0;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
@@ -304,6 +305,7 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         pkt.payloadLen = 0;
     }
 
+    sLastRxDoneMs = millis();
     _radio.startReceive();
     return true;
 }
@@ -316,8 +318,52 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
         Serial.println();
     }
 
-    _rxFlag = false;    // clear any stale DIO1 flag before TX
-    int state = _radio.transmit(const_cast<uint8_t*>(buf), len);
+    // If RX IRQ is still pending (common during burst traffic), drain and re-arm
+    // before attempting TX so the radio is not left in a stale RX_DONE state.
+    if (_rxFlag) {
+        size_t pendingLen = _radio.getPacketLength();
+        if (pendingLen >= sizeof(MeshHdr) && pendingLen <= 256) {
+            uint8_t dump[256];
+            (void)_radio.readData(dump, pendingLen);
+        }
+        _rxFlag = false;
+        _radio.startReceive();
+        delay(2);
+    }
+
+    // Small settle window after RX improves turn-around reliability for quick replies.
+    uint32_t nowMs = millis();
+    uint32_t sinceRxMs = nowMs - sLastRxDoneMs;
+    if (sinceRxMs < 90) {
+        delay(90 - sinceRxMs);
+    }
+
+    static constexpr uint8_t kTxAttempts =
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        6;
+#else
+        4;
+#endif
+    int state = RADIOLIB_ERR_UNKNOWN;
+    for (uint8_t attempt = 0; attempt < kTxAttempts; attempt++) {
+        _rxFlag = false;    // clear any stale DIO1 flag before TX
+        (void)_radio.standby();
+        state = _radio.transmit(const_cast<uint8_t*>(buf), len);
+        if (state == RADIOLIB_ERR_NONE) break;
+
+        if (attempt + 1 < kTxAttempts) {
+            Serial.printf("[radio] TX retry %u state=%d\n", (unsigned)(attempt + 1), state);
+            _radio.startReceive();
+            uint16_t backoffMs =
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                (uint16_t)(24 + (attempt * 28));
+#else
+                (uint16_t)(16 + (attempt * 20));
+#endif
+            delay(backoffMs);
+        }
+    }
+
     if (kVerboseRadioIo || state != RADIOLIB_ERR_NONE) {
         Serial.printf("[radio] TX state=%d (%s)\n", state,
                       state == RADIOLIB_ERR_NONE ? "OK" : "FAIL");

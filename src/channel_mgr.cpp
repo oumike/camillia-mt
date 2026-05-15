@@ -376,9 +376,12 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
 void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
-            bool isDirect = (_pending[i].destNodeId == 0xFFFFFFFF) ||
-                            (_pending[i].destNodeId == fromNodeId);
-            setAckState(packetId, isDirect ? DisplayLine::ACKED : DisplayLine::ACKED_RELAY);
+            if (_pending[i].destNodeId == 0xFFFFFFFF) {
+                setAckState(packetId, DisplayLine::ACKED_RELAY);
+            } else {
+                bool isDirect = (_pending[i].destNodeId == fromNodeId);
+                setAckState(packetId, isDirect ? DisplayLine::ACKED : DisplayLine::ACKED_RELAY);
+            }
             return;
         }
     }
@@ -393,9 +396,10 @@ bool ChannelMgr::expireAcks() {
         uint32_t ageMs = now - _pending[i].sentMs;
         if (_pending[i].destNodeId == 0xFFFFFFFF) {
             // Channel text is broadcast; many peers do not return explicit routing ACKs.
-            // After a short settle window, treat successful RF TX as confirmed for UI status.
+            // After a short settle window, move to a softer relay-style status.
+            // Avoid showing hard-delivered green when no explicit routing ACK exists.
             if (ageMs > kBroadcastConfirmMs) {
-                setAckState(_pending[i].packetId, DisplayLine::ACKED);
+                setAckState(_pending[i].packetId, DisplayLine::ACKED_RELAY);
                 changed = true;
             }
         } else {
@@ -419,7 +423,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     if (txChan < 0 || txChan >= MESH_CHANNELS) return false;
     if (_active != txChan) setActive(txChan);
 
-    uint32_t packetId = esp_random() ^ millis();
+    uint32_t packetId = nextMeshPacketId();
     uint8_t  proto[256], cipher[256];
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
@@ -466,6 +470,15 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
         return false;
     }
 
+    // Reliability nudge for broadcast text: send one additional copy with the
+    // same from:id shortly after the first TX. Receivers dedupe by from:id, so
+    // this boosts delivery when the first frame is lost without duplicating chat.
+    {
+        const uint16_t retryDelayMs = (uint16_t)(18 + (packetId & 0x0F));
+        delay(retryDelayMs);
+        (void)Radio.transmit(frame, frameLen);
+    }
+
     {
         char live[56];
         snprintf(live, sizeof(live), "T TXT B c%d %08X",
@@ -497,7 +510,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // always LongFast
-    uint32_t packetId = esp_random() ^ millis();
+    uint32_t packetId = nextMeshPacketId();
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;
 
@@ -555,7 +568,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
     const ChannelKey &ck = CHANNEL_KEYS[0];
-    uint32_t packetId = esp_random() ^ millis();
+    uint32_t packetId = nextMeshPacketId();
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;
 
