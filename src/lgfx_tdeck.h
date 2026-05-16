@@ -1,6 +1,11 @@
 #pragma once
 // LovyanGFX display + touch profile for LilyGO T-Deck hardware.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5GFX.h>
+#include <lgfx/v1/panel/Panel_ST7789.hpp>
+#else
 #include <LovyanGFX.hpp>
+#endif
 #include "config.h"
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
