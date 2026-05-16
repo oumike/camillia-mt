@@ -508,6 +508,20 @@ static inline uint16_t gpsFixColorForUiMode() {
         : rgb565(0x3a, 0xe0, 0x58);
 }
 
+static inline uint16_t wifiOkColorForUiMode() {
+    // Wi-Fi connected/AP accent color: bright on dark themes, deeper on light themes.
+    return (gCfg.uiMode == UI_MODE_LIGHT)
+        ? rgb565(0x1f, 0x7a, 0x2f)
+        : rgb565(0x4a, 0xf2, 0x7a);
+}
+
+static inline uint16_t wifiOffColorForUiMode() {
+    // Wi-Fi disabled/off accent color: bright red on dark themes, deeper red on light themes.
+    return (gCfg.uiMode == UI_MODE_LIGHT)
+        ? rgb565(0x8f, 0x22, 0x22)
+        : rgb565(0xff, 0x5c, 0x5c);
+}
+
 #define COL_BG_MAIN        gUi.bgMain
 #define COL_STATUS_TOP     gUi.statusTop
 #define COL_STATUS_BG      gUi.statusBg
@@ -1301,8 +1315,8 @@ static bool gpsSyncSystemClock() {
 // Drawn in status bar over the node pane column (x=NODE_X..LCD_W-1, y=0..STATUS_H-1)
 static void drawBattery() {
     const uint16_t bg  = COL_STATUS_BG;
-    uint16_t col = _battPct >= 60 ? COL_BATT_GOOD :
-                   _battPct >= 25 ? COL_BATT_WARN : COL_BATT_BAD;
+    uint16_t col = _battPct >= 60 ? wifiOkColorForUiMode() :
+                   _battPct >= 25 ? COL_BATT_WARN : wifiOffColorForUiMode();
     bool gpsEnabled = gpsIsEnabled();
     bool gpsStream = gpsHasNmeaStream();
     bool gpsFix = gpsHasFix();
@@ -1316,15 +1330,14 @@ static void drawBattery() {
     wifiApMode = wifiApMode || (wifiMode == WIFI_AP_STA);
 #endif
     bool wifiConnected = (!wifiApMode && WiFi.status() == WL_CONNECTED);
-    uint16_t wifiCol = wifiConnected ? COL_BATT_GOOD :
-                      (wifiApMode ? COL_BATT_WARN : COL_BATT_BAD);
+    uint16_t wifiCol = (wifiConnected || wifiApMode)
+                     ? wifiOkColorForUiMode()
+                     : wifiOffColorForUiMode();
     bool lightUi = (gCfg.uiMode == UI_MODE_LIGHT);
     uint16_t iconStroke = lightUi ? COL_TEXT_MAIN : COL_DIVIDER_HI;
     if (lightUi) {
         // Darken accent colours slightly against light status backgrounds.
         if (!gpsFix) gpsCol = lerp565(gpsCol, COL_TEXT_MAIN, 72);
-        wifiCol = lerp565(wifiCol, COL_TEXT_MAIN, 72);
-        col     = lerp565(col,     COL_TEXT_MAIN, 72);
     }
 
     const int BAR_H = 14;
@@ -1463,7 +1476,7 @@ static void drawBattery() {
     if (fillW > 0) lcd.fillRect(BX + 1, byBatt + 1, fillW, BAR_H - 2, col);
 
     lcd.setFont(UI_BODY_FONT);
-    lcd.setTextColor(lightUi ? COL_TEXT_MAIN : COL_TEXT_ON_ACCENT);
+    lcd.setTextColor(lightUi ? TFT_WHITE : TFT_BLACK);
     int battTx = BX + (barBodyW - battTxtW) / 2;
     int battTy = byBatt + max(0, (BAR_H - CHAR_H) / 2);
     lcd.drawString(tbuf, battTx, battTy);
@@ -3933,12 +3946,22 @@ struct NavButtonRect {
 };
 
 static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const int PAD = 2;
+    const int GAP = 5;
+    const int count = navButtonCount();
+    const int rowTopPad = 1;
+    const int rowBottomPad = 1;
+    const int rowH = max(TOUCH_BTN_H, INPUT_H - rowTopPad - rowBottomPad);
+    const int rowY = INPUT_Y + rowTopPad;
+#else
     const int PAD = 3;
     const int GAP = 4;
     const int count = navButtonCount();
     const int rowH = TOUCH_BTN_H;
     const int rowBottomPad = (activeView == VIEW_MAP) ? 2 : 0;
     const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
+#endif
     int bw = TOUCH_BTN_W;
     int x = max(PAD, (LCD_W - (count * bw + (count - 1) * GAP)) / 2);
     if (x + count * bw + (count - 1) * GAP > LCD_W - PAD) {
@@ -4651,8 +4674,32 @@ static void drawInput() {
     lcd.setTextColor(COL_TEXT_MAIN, btnFill);
     for (int i = 0; i < navButtonCount(); i++) {
         const char *label = navButtonLabel(i);
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
-    if (navButtonCount() == 5) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        if (navButtonCount() == 5) {
+            char head[2] = { label[0], '\0' };
+            const char *tail = label + 1;
+
+            lcd.setFont(&fonts::DejaVu12);
+            int headW = lcd.textWidth(head);
+            int headH = lcd.fontHeight();
+            int tailW = tail[0] ? lcd.textWidth(tail) : 0;
+            int totalW = headW + tailW;
+            int tx = b[i].x + max(1, (b[i].w - totalW) / 2);
+            int ty = b[i].y + max(0, (b[i].h - headH) / 2);
+
+            lcd.setTextColor(COL_TEAL, btnFill);
+            lcd.drawString(head, tx, ty);
+
+            if (tail[0]) {
+                lcd.setTextColor(COL_TEXT_MAIN, btnFill);
+                drawClippedText(tx + headW, ty,
+                                b[i].w - (tx + headW - b[i].x) - 2, tail);
+            }
+            lcd.setFont(UI_BODY_FONT);
+            continue;
+        }
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (navButtonCount() == 5) {
             char head[2] = { label[0], '\0' };
             const char *tail = label + 1;
 

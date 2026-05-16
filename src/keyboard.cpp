@@ -201,6 +201,14 @@ char tloraReadMappedKey() {
                     sTloraBackspaceHoldSent = false;
                     sTloraBackspaceDownMs = now;
                 }
+
+                // Pager shortcut: Symbol + Backspace closes compose/panels
+                // using the same path as long-hold backspace, but instantly.
+                if (sTloraModifier & TLORA_MOD_SYM) {
+                    sTloraModifier = 0;
+                    sTloraBackspaceHoldSent = true;
+                    return KEY_BACKSPACE_HOLD;
+                }
             } else {
                 sTloraBackspaceDown = false;
                 sTloraBackspaceHoldSent = false;
