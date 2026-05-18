@@ -9,6 +9,30 @@ constexpr uint8_t kBqRegAdcControl = 0x02;
 constexpr uint8_t kBqRegBattVoltage = 0x0E;
 constexpr uint16_t kBqVbatBaseMv = 2304;
 constexpr uint16_t kBqVbatStepMv = 20;
+constexpr uint32_t kBqRetryBackoffMs = 15000UL;
+
+static bool sBqWireStarted = false;
+static bool sBqPresent = false;
+static bool sBqConfigured = false;
+static uint32_t sBqNextProbeMs = 0;
+
+static void bqEnsureWire() {
+    if (sBqWireStarted) return;
+    Wire.begin(KB_SDA, KB_SCL);
+    sBqWireStarted = true;
+}
+
+static bool bqProbePresent() {
+    bqEnsureWire();
+    Wire.beginTransmission(kBq25896Addr);
+    return Wire.endTransmission() == 0;
+}
+
+static void bqMarkUnavailable(uint32_t nowMs) {
+    sBqPresent = false;
+    sBqConfigured = false;
+    sBqNextProbeMs = nowMs + kBqRetryBackoffMs;
+}
 
 static bool bqReadReg(uint8_t reg, uint8_t &val) {
     Wire.beginTransmission(kBq25896Addr);
@@ -35,16 +59,34 @@ static bool bqEnableBatteryAdc() {
 }
 
 static float batteryReadPagerBqVolts() {
-    static bool bqConfigured = false;
-    Wire.begin(KB_SDA, KB_SCL);
+    bqEnsureWire();
+    uint32_t nowMs = millis();
 
-    if (!bqConfigured) {
-        bqConfigured = bqEnableBatteryAdc();
-        if (!bqConfigured) return 0.0f;
+    if (!sBqPresent) {
+        if (sBqNextProbeMs != 0 && (int32_t)(nowMs - sBqNextProbeMs) < 0) {
+            return 0.0f;
+        }
+        if (!bqProbePresent()) {
+            bqMarkUnavailable(nowMs);
+            return 0.0f;
+        }
+        sBqPresent = true;
+        sBqConfigured = false;
+    }
+
+    if (!sBqConfigured) {
+        sBqConfigured = bqEnableBatteryAdc();
+        if (!sBqConfigured) {
+            bqMarkUnavailable(nowMs);
+            return 0.0f;
+        }
     }
 
     uint8_t reg = 0;
-    if (!bqReadReg(kBqRegBattVoltage, reg)) return 0.0f;
+    if (!bqReadReg(kBqRegBattVoltage, reg)) {
+        bqMarkUnavailable(nowMs);
+        return 0.0f;
+    }
     uint8_t raw = reg & 0x7F;
     if (raw == 0) return 0.0f;
 
@@ -146,7 +188,14 @@ void batteryInitAdc() {
     sHeltecSenseLocked = false;
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    (void)bqEnableBatteryAdc();
+    bqEnsureWire();
+    if (bqProbePresent() && bqEnableBatteryAdc()) {
+        sBqPresent = true;
+        sBqConfigured = true;
+        sBqNextProbeMs = 0;
+    } else {
+        bqMarkUnavailable(millis());
+    }
 #endif
 }
 

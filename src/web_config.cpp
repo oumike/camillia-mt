@@ -256,6 +256,7 @@ static void sendConfigPage(const char *msg = "") {
     char tmp[96];
     String html = kHead;
     uint8_t themePreset =
+        (gCfg->uiTheme == UI_THEME_CRIMSON)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 9 : 8) :
         (gCfg->uiTheme == UI_THEME_SOLARIZED) ? (gCfg->uiMode == UI_MODE_LIGHT ? 7 : 6) :
         (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
         (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
@@ -751,6 +752,8 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='5'"; if (themePreset == 5) html += " selected"; html += ">Earthy Light</option>"
             "<option value='6'"; if (themePreset == 6) html += " selected"; html += ">Solarized Dark</option>"
             "<option value='7'"; if (themePreset == 7) html += " selected"; html += ">Solarized Light</option>"
+            "<option value='8'"; if (themePreset == 8) html += " selected"; html += ">Crimson Blue Dark</option>"
+            "<option value='9'"; if (themePreset == 9) html += " selected"; html += ">Crimson Blue Light</option>"
             "</select></label>";
         html += "<script>"
             "(function(){"
@@ -762,7 +765,9 @@ static void sendConfigPage(const char *msg = "") {
                             "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
                             "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'},"
                             "'6':{bg:'#002b36',panel:'#073642',panel2:'#0b4552',line:'#586e75',text:'#eee8d5',dim:'#93a1a1',accent:'#2aa198',ink:'#002b36'},"
-                            "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'}"
+                            "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'},"
+                            "'8':{bg:'#060f24',panel:'#12244c',panel2:'#1b3363',line:'#3b578f',text:'#f4f8ff',dim:'#b9c9e9',accent:'#ff4a58',ink:'#ffffff'},"
+                            "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'}"
             "};"
             "function apply(){"
               "var k=document.getElementById('sel-theme-preset').value;"
@@ -1393,7 +1398,7 @@ static void handlePostSave() {
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 7);
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 9);
         if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
@@ -1401,7 +1406,9 @@ static void handlePostSave() {
         else if (preset == 4) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 5) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 6) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_DARK; }
-        else                  { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 7) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 8) { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_DARK; }
+        else                  { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_LIGHT; }
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);

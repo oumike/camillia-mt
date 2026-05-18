@@ -9,7 +9,8 @@ enum UiThemeFamily : uint8_t {
     UI_THEME_EVERGREEN = 1,
     UI_THEME_EARTHEN = 2,
     UI_THEME_SOLARIZED = 3,
-    UI_THEME_COUNT = 4
+    UI_THEME_CRIMSON = 4,
+    UI_THEME_COUNT = 5
 };
 
 enum UiThemeMode : uint8_t {

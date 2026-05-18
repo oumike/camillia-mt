@@ -568,7 +568,7 @@ struct UiThemePreset {
     const char *name;
 };
 
-static constexpr uint8_t UI_THEME_PRESET_COUNT = 8;
+static constexpr uint8_t UI_THEME_PRESET_COUNT = 10;
 static const UiThemePreset kUiThemePresets[UI_THEME_PRESET_COUNT] = {
     { UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark" },
     { UI_THEME_CAMELLIA, UI_MODE_LIGHT, 0xFF5D, 0xFFDF, 0xFF1B, 0xB964, "Camillia Light" },
@@ -582,6 +582,12 @@ static const UiThemePreset kUiThemePresets[UI_THEME_PRESET_COUNT] = {
     { UI_THEME_SOLARIZED, UI_MODE_LIGHT,
         rgb565(0xfd, 0xf6, 0xe3), rgb565(0xfd, 0xf6, 0xe3), rgb565(0xee, 0xe8, 0xd5), rgb565(0x2a, 0xa1, 0x98),
         "Solarized Light" },
+    { UI_THEME_CRIMSON, UI_MODE_DARK,
+        rgb565(0x06, 0x0f, 0x24), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0xff, 0x4a, 0x58),
+        "Crimson Blue Dark" },
+    { UI_THEME_CRIMSON, UI_MODE_LIGHT,
+        rgb565(0xf3, 0xf7, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xc6, 0x28, 0x39),
+        "Crimson Blue Light" },
 };
 
 static uint8_t gActiveUiThemePreset = 0;
@@ -722,6 +728,26 @@ static void applyUiTheme(bool markDirty = true) {
                 rgb565(0x0e, 0x46, 0x55), cyan, blue, yellow, violet,
                 green, yellow, red,
                 base03, base02, rgb565(0x0b, 0x40, 0x4b), base01, base00, base3, cyan, base0
+            };
+        }
+    } else if (gCfg.uiTheme == UI_THEME_CRIMSON) {
+        if (gCfg.uiMode == UI_MODE_LIGHT) {
+            gUi = {
+                rgb565(0xf3, 0xf7, 0xff), rgb565(0xdc, 0xe8, 0xff), rgb565(0xcf, 0xdf, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xd6, 0xe3, 0xff),
+                rgb565(0x1e, 0x5f, 0xd1), rgb565(0xc6, 0x28, 0x39), rgb565(0x5f, 0x73, 0xa0), rgb565(0xb0, 0xc1, 0xe4), rgb565(0x92, 0xaa, 0xd7), rgb565(0xf1, 0xf6, 0xff), rgb565(0xe2, 0xed, 0xff),
+                rgb565(0xc6, 0x28, 0x39), rgb565(0x2c, 0x74, 0xea), rgb565(0x1b, 0x24, 0x3d), rgb565(0x5c, 0x6c, 0x8f), rgb565(0xff, 0xff, 0xff), rgb565(0x1b, 0x2d, 0x52),
+                rgb565(0xda, 0xe8, 0xff), rgb565(0x2f, 0x78, 0xf0), rgb565(0xb4, 0x21, 0x33), rgb565(0x1f, 0x5c, 0xc3), rgb565(0x8d, 0x9d, 0xbe),
+                rgb565(0x1b, 0x8f, 0x42), rgb565(0xb0, 0x7a, 0x00), rgb565(0x9f, 0x1f, 0x2f),
+                rgb565(0xde, 0xe9, 0xff), rgb565(0xf5, 0xe0, 0xe7), rgb565(0xf7, 0xfb, 0xff), rgb565(0xa5, 0xbb, 0xe7), rgb565(0xdb, 0x4b, 0x5a), rgb565(0x1f, 0x2d, 0x4d), rgb565(0x5d, 0x6e, 0x95), rgb565(0x7d, 0x8e, 0xb2)
+            };
+        } else {
+            gUi = {
+                rgb565(0x06, 0x0f, 0x24), rgb565(0x0e, 0x1b, 0x3a), rgb565(0x11, 0x23, 0x48), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0x23, 0x43, 0x7d),
+                rgb565(0x42, 0x8f, 0xff), rgb565(0xff, 0x4a, 0x58), rgb565(0x8d, 0xa6, 0xd6), rgb565(0x35, 0x4a, 0x75), rgb565(0x4d, 0x66, 0x98), rgb565(0x10, 0x20, 0x44), rgb565(0x17, 0x2c, 0x5a),
+                rgb565(0xff, 0x4a, 0x58), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0xff, 0xff), rgb565(0xb9, 0xc8, 0xe7), rgb565(0xff, 0xff, 0xff), rgb565(0xe9, 0xf1, 0xff),
+                rgb565(0x1a, 0x36, 0x68), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0x6a, 0x74), rgb565(0x57, 0xa7, 0xff), rgb565(0x7f, 0x91, 0xb9),
+                rgb565(0x39, 0xc9, 0x69), rgb565(0xff, 0xbf, 0x3d), rgb565(0xff, 0x58, 0x58),
+                rgb565(0x07, 0x16, 0x36), rgb565(0x2e, 0x0d, 0x24), rgb565(0x15, 0x27, 0x54), rgb565(0x3b, 0x57, 0x8f), rgb565(0xff, 0x63, 0x70), rgb565(0xf4, 0xf8, 0xff), rgb565(0xb9, 0xc9, 0xe9), rgb565(0x8a, 0x9c, 0xc4)
             };
         }
     } else {
@@ -3947,8 +3973,6 @@ struct NavButtonRect {
 
 static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    const int PAD = 2;
-    const int GAP = 5;
     const int count = navButtonCount();
     const int rowTopPad = 1;
     const int rowBottomPad = 1;
@@ -3963,17 +3987,58 @@ static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
     const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
 #endif
     int bw = TOUCH_BTN_W;
-    int x = max(PAD, (LCD_W - (count * bw + (count - 1) * GAP)) / 2);
-    if (x + count * bw + (count - 1) * GAP > LCD_W - PAD) {
-        bw = (LCD_W - 2 * PAD - (count - 1) * GAP) / count;
+    int x = 0;
+    int gapBase = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    int widthExtra = 0;
+    const int usableW = LCD_W;
+    if (count <= 1) {
+        const int gapMin = 4;
+        bw = min(bw, max(14, usableW - 2 * gapMin));
+        gapBase = max(gapMin, (usableW - bw) / 2);
+        bw = max(14, usableW - 2 * gapBase);
+        x = gapBase;
+    } else {
+        const int gapMin = 4;
+        gapBase = max(gapMin, (usableW - count * bw) / (count + 1));
+
+        if (count * bw + (count + 1) * gapBase > usableW) {
+            bw = max(14, (usableW - (count + 1) * gapBase) / count);
+        }
+
+        int used = count * bw + (count + 1) * gapBase;
+        if (used > usableW) {
+            bw = max(14, (usableW - (count + 1) * gapBase) / count);
+            used = count * bw + (count + 1) * gapBase;
+        }
+
+        widthExtra = max(0, usableW - used);
+        x = gapBase;
+    }
+#else
+    gapBase = GAP;
+    x = max(PAD, (LCD_W - (count * bw + (count - 1) * gapBase)) / 2);
+    if (x + count * bw + (count - 1) * gapBase > LCD_W - PAD) {
+        bw = (LCD_W - 2 * PAD - (count - 1) * gapBase) / count;
         x = PAD;
     }
+#endif
     for (int i = 0; i < NAV_BTN_COUNT; i++) {
         b[i] = { 0, rowY, 0, rowH };
     }
     for (int i = 0; i < count; i++) {
-        b[i] = { x, rowY, bw, rowH };
-        x += bw + GAP;
+        int w = bw;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        if (widthExtra > 0) {
+            w++;
+            widthExtra--;
+        }
+#endif
+        b[i] = { x, rowY, w, rowH };
+        x += w;
+        if (i + 1 < count) {
+            x += gapBase;
+        }
     }
 }
 
@@ -4766,8 +4831,9 @@ namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
 static constexpr i2s_port_t kPagerI2SPort = I2S_NUM_0;
-static constexpr uint8_t kPagerAudioVolActive = 52;
+static constexpr uint8_t kPagerAudioVolActive = 50;
 static constexpr uint8_t kPagerAudioVolIdle = 10;
+static constexpr float kPagerToneAmplitude = 7800.0f;
 static uint8_t sPagerAudioVolume = 0xFF;
 static audio_driver::DriverPins sPagerAudioPins;
 static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
@@ -4884,14 +4950,20 @@ static bool pagerAudioEnsureReady() {
 }
 
 static inline void pagerAudioStartPlayback() {
+    sPagerAudioBoard.setMute(false);
     pagerAudioApplyVolume(kPagerAudioVolActive);
     delay(2);
     i2s_zero_dma_buffer(kPagerI2SPort);
+    // Prime codec/I2S with a short silent pre-roll so the first note isn't clipped.
+    int16_t preRoll[256] = {0};
+    size_t preRollWritten = 0;
+    (void)i2s_write(kPagerI2SPort, preRoll, sizeof(preRoll),
+                    &preRollWritten, 10 / portTICK_PERIOD_MS);
 }
 
 static inline void pagerAudioStopPlayback() {
     // Push a short silence tail before ending to reduce stop pops.
-    int16_t tail[256] = {0};
+    int16_t tail[1024] = {0};
     size_t tailWritten = 0;
     (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
     i2s_zero_dma_buffer(kPagerI2SPort);
@@ -4933,8 +5005,14 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     if (framesRemaining == 0) return;
     const uint32_t totalFrames = framesRemaining;
     uint32_t frameIndex = 0;
-    uint32_t rampFrames = kSampleRate / 200; // ~5ms ramp to reduce pops
-    if (rampFrames < 12) rampFrames = 12;
+    uint32_t attackFrames = kSampleRate / 500;  // ~2ms attack
+    uint32_t releaseFrames = kSampleRate / 400; // ~2.5ms release
+    if (attackFrames < 8) attackFrames = 8;
+    if (releaseFrames < 8) releaseFrames = 8;
+    uint32_t maxRamp = totalFrames / 5;         // keep at least 60% sustain
+    if (maxRamp < 8) maxRamp = 8;
+    if (attackFrames > maxRamp) attackFrames = maxRamp;
+    if (releaseFrames > maxRamp) releaseFrames = maxRamp;
 
     const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
     float phase = 0.0f;
@@ -4949,16 +5027,16 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
             if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
 
             float env = 1.0f;
-            if (frameIndex < rampFrames) {
-                env = (float)frameIndex / (float)rampFrames;
+            if (frameIndex < attackFrames) {
+                env = (float)frameIndex / (float)attackFrames;
             }
             uint32_t framesToEnd = totalFrames - frameIndex;
-            if (framesToEnd < rampFrames) {
-                float tail = (float)framesToEnd / (float)rampFrames;
+            if (framesToEnd < releaseFrames) {
+                float tail = (float)framesToEnd / (float)releaseFrames;
                 if (tail < env) env = tail;
             }
 
-            int16_t v = (int16_t)(s * 2200.0f * env);
+            int16_t v = (int16_t)(s * kPagerToneAmplitude * env);
             pcm[(i * 2)] = v;
             pcm[(i * 2) + 1] = v;
             frameIndex++;
@@ -4980,20 +5058,7 @@ static void pagerAudioPlayAlertPattern() {
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     static const uint16_t kNotesHz[] = {880, 740, 660};
-    static const uint16_t kDurMs[] = {42, 42, 70};
-    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
-    for (size_t i = 0; i < kNoteCount; i++) {
-        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) pagerAudioWriteSilence(12);
-    }
-    pagerAudioStopPlayback();
-}
-
-static void pagerAudioPlayChirpyPattern() {
-    if (!pagerAudioEnsureReady()) return;
-    pagerAudioStartPlayback();
-    static const uint16_t kNotesHz[] = {1047, 1319, 1568, 1319};
-    static const uint16_t kDurMs[] = {24, 24, 26, 42};
+    static const uint16_t kDurMs[] = {68, 68, 112};
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
@@ -5002,15 +5067,28 @@ static void pagerAudioPlayChirpyPattern() {
     pagerAudioStopPlayback();
 }
 
+static void pagerAudioPlayChirpyPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {1047, 1319, 1568, 1319};
+    static const uint16_t kDurMs[] = {36, 36, 40, 70};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(6);
+    }
+    pagerAudioStopPlayback();
+}
+
 static void pagerAudioPlayBassPattern() {
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     static const uint16_t kNotesHz[] = {392, 330, 262};
-    static const uint16_t kDurMs[] = {65, 60, 90};
+    static const uint16_t kDurMs[] = {92, 86, 130};
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
         pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) pagerAudioWriteSilence(14);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(10);
     }
     pagerAudioStopPlayback();
 }
@@ -6169,13 +6247,15 @@ static void handleKey(char k) {
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
         if (inputLen > 0 && textAllowed) {
-            inputBuf[--inputLen] = '\0'; dirtyInput = true;
-            if (inputLen == 0) hwTypingLock = false;
+            inputBuf[--inputLen] = '\0';
+            dirtyInput = true;
+#if defined(DEVICE_TLORA_PAGER_TFT)
         } else if (textAllowed && inputLen == 0 && hwTypingLock) {
             // Backspace on an empty active prompt exits compose mode.
             hwTypingLock = false;
             dirtyInput = true;
             if (isPanelView(activeView)) dirtyChat = true;
+#endif
         }
 
     } else if (k == KEY_NEXT_CHAN) {
