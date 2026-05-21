@@ -62,6 +62,52 @@ uint8_t myPubKey[32] = {};
 uint8_t myPrivKey[32] = {};
 uint8_t myDeviceRole  = 0;   // 0=CLIENT; set from gCfg.deviceRole after config load
 
+static void reverseBytes32(const uint8_t in[32], uint8_t out[32]) {
+    for (int i = 0; i < 32; i++) out[i] = in[31 - i];
+}
+
+static bool isZeroBytes32(const uint8_t in[32]) {
+    for (int i = 0; i < 32; i++) {
+        if (in[i] != 0) return false;
+    }
+    return true;
+}
+
+// Validate that a stored LE private key produces the stored LE public key.
+static bool pkiKeypairMatchesLe(const uint8_t privLe[32], const uint8_t pubLe[32]) {
+    uint8_t privBe[32];
+    uint8_t pubBe[32];
+    uint8_t derivedPubLe[32];
+    reverseBytes32(privLe, privBe);
+
+    bool ok = false;
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point Q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&Q);
+
+    auto rng = [](void *, uint8_t *buf, size_t len) -> int {
+        esp_fill_random(buf, len);
+        return 0;
+    };
+
+    do {
+        if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) break;
+        if (mbedtls_mpi_read_binary(&d, privBe, 32) != 0) break;
+        if (mbedtls_ecp_mul(&grp, &Q, &d, &grp.G, rng, nullptr) != 0) break;
+        if (mbedtls_mpi_write_binary(&Q.X, pubBe, 32) != 0) break;
+        reverseBytes32(pubBe, derivedPubLe);
+        ok = (memcmp(derivedPubLe, pubLe, 32) == 0);
+    } while (false);
+
+    mbedtls_ecp_point_free(&Q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    return ok;
+}
+
 // ── View state ────────────────────────────────────────────────
 #define VIEW_GPS      MAX_CHANNELS
 #define VIEW_MAP      (MAX_CHANNELS + 1)
@@ -253,6 +299,7 @@ static bool     dmPickerOpen = false;  // true = showing node picker ("New DM")
 static int      dmListSel    = 0;      // selected conversation index in DM list
 static int      dmPickerSel  = 0;      // selected row in node picker
 static uint32_t dmConvNodeId = 0;      // node ID of open conversation
+static uint32_t dmListLastScrollMs = 0;
 static bool     dmDeleteConfirm = false;
 static uint32_t dmDeleteConfirmNodeId = 0;
 
@@ -374,13 +421,17 @@ static uint32_t pktCount = 0;
 
 // ── Packet deduplication (circular buffer of seen IDs) ────────
 #define DEDUP_SIZE 32
-static uint32_t seenIds[DEDUP_SIZE] = {0};
+struct SeenPkt {
+    uint32_t from;
+    uint32_t id;
+};
+static SeenPkt seenPkts[DEDUP_SIZE] = {};
 static int      seenHead = 0;
 
-static bool isDuplicate(uint32_t id) {
+static bool isDuplicate(uint32_t from, uint32_t id) {
     for (int i = 0; i < DEDUP_SIZE; i++)
-        if (seenIds[i] == id) return true;
-    seenIds[seenHead] = id;
+        if (seenPkts[i].from == from && seenPkts[i].id == id) return true;
+    seenPkts[seenHead] = { from, id };
     seenHead = (seenHead + 1) % DEDUP_SIZE;
     return false;
 }
@@ -506,6 +557,20 @@ static inline uint16_t gpsFixColorForUiMode() {
     return (gCfg.uiMode == UI_MODE_LIGHT)
         ? rgb565(0x1f, 0x7a, 0x2f)
         : rgb565(0x3a, 0xe0, 0x58);
+}
+
+static inline uint16_t gpsSearchingColorForUiMode() {
+    // Explicit yellow so "data but no lock" is consistent across themes.
+    return (gCfg.uiMode == UI_MODE_LIGHT)
+        ? rgb565(0x8f, 0x6a, 0x00)
+        : rgb565(0xff, 0xcc, 0x33);
+}
+
+static inline uint16_t gpsNoDataColorForUiMode() {
+    // Explicit red so "no data timeout" is clearly distinct from searching.
+    return (gCfg.uiMode == UI_MODE_LIGHT)
+        ? rgb565(0x8f, 0x22, 0x22)
+        : rgb565(0xff, 0x4d, 0x4d);
 }
 
 static inline uint16_t wifiOkColorForUiMode() {
@@ -986,6 +1051,17 @@ static void goToView(int v) {
     softKbVisible   = false;
     softKbShift     = false;
     hwTypingLock    = false;
+
+    // Map and Nodes panels share a temporary Wi-Fi session: entering either
+    // panel reconnects when needed, and leaving both restores prior state.
+    bool prevPanelNeedsWifi = (prev == VIEW_MAP || prev == VIEW_NODES);
+    bool nextPanelNeedsWifi = (v == VIEW_MAP || v == VIEW_NODES);
+    if (!prevPanelNeedsWifi && nextPanelNeedsWifi) {
+        nodesPanelWifiEnter();
+    } else if (prevPanelNeedsWifi && !nextPanelNeedsWifi) {
+        nodesPanelWifiRestore();
+    }
+
     // If navigating to DM tab and there's an unread conversation, open it immediately
     if (v == CHAN_DM) {
         for (int i = 0; i < DMs.count(); i++) {
@@ -1035,7 +1111,6 @@ static void goToView(int v) {
     }
     if (v == VIEW_NODES) {
         if (prev != VIEW_NODES) {
-            nodesPanelWifiEnter();
             nodesFrozenNodeCount = 0;
             int cnt = Nodes.count();
             for (int i = 0; i < cnt && nodesFrozenNodeCount < MAX_NODES; i++) {
@@ -1050,7 +1125,6 @@ static void goToView(int v) {
                                        ? (nodesFrozenNodeCount - 1)
                                        : (Nodes.count() - 1)));
     } else if (prev == VIEW_NODES) {
-        nodesPanelWifiRestore();
         nodesNodeFreezeActive = false;
         nodesFrozenNodeCount = 0;
     }
@@ -1343,13 +1417,15 @@ static void drawBattery() {
     const uint16_t bg  = COL_STATUS_BG;
     uint16_t col = _battPct >= 60 ? wifiOkColorForUiMode() :
                    _battPct >= 25 ? COL_BATT_WARN : wifiOffColorForUiMode();
+    const uint32_t GPS_NO_DATA_TIMEOUT_MS = 5UL * 60UL * 1000UL;
     bool gpsEnabled = gpsIsEnabled();
-    bool gpsStream = gpsHasNmeaStream();
     bool gpsFix = gpsHasFix();
     uint8_t sats = gpsSats();
+    uint32_t gpsDataAge = gpsDataAgeMs();
+    bool gpsDataFresh = gpsEnabled && gpsDataAge < GPS_NO_DATA_TIMEOUT_MS;
     uint16_t gpsCol = gpsFix ? gpsFixColorForUiMode()
-                    : (gpsStream ? COL_TAB_UNREAD
-                                 : (gpsEnabled ? COL_BATT_BAD : COL_TAB_IDLE));
+                    : (gpsDataFresh ? gpsSearchingColorForUiMode()
+                                 : (gpsEnabled ? gpsNoDataColorForUiMode() : COL_TAB_IDLE));
     wifi_mode_t wifiMode = WiFi.getMode();
     bool wifiApMode = (wifiMode == WIFI_AP);
 #ifdef WIFI_AP_STA
@@ -1370,7 +1446,7 @@ static void drawBattery() {
     const int NUB_W = 3, NUB_H = 6;
     const int ICON_GAP_WIDE = 6;
     const int ICON_GAP_TIGHT = 4;
-    const int GPS_DOT_R = 5;
+    const int GPS_DOT_R = 7;
     const int WIFI_W = 15;
     const int WIFI_H = 12;
     const int AP_PAD_X = 4;
@@ -1387,19 +1463,7 @@ static void drawBattery() {
     int barBodyW = max(30, battTxtW + 4);
     int battW = barBodyW + NUB_W;
 
-    char sbuf[4];
-    if (sats > 0) {
-        snprintf(sbuf, sizeof(sbuf), "%u", (unsigned)sats);
-    } else if (gpsStream && !gpsFix) {
-        // Streaming but not fixed yet: show active search marker.
-        strncpy(sbuf, "~", sizeof(sbuf) - 1);
-        sbuf[sizeof(sbuf) - 1] = '\0';
-    } else {
-        sbuf[0] = '\0';
-    }
-    int satW = lcd.textWidth(sbuf);
-    bool showSats = (sbuf[0] != '\0');
-    int gpsW = showSats ? (GPS_DOT_R * 2 + 2 + satW) : (GPS_DOT_R * 2 + 1);
+    int gpsW = GPS_DOT_R * 2 + 1;
     bool wifiShowApText = wifiApMode;
     int wifiW = wifiShowApText ? (lcd.textWidth("AP") + AP_PAD_X * 2) : WIFI_W;
     int gap = ICON_GAP_WIDE;
@@ -1410,17 +1474,8 @@ static void drawBattery() {
 
     int total = calcTotal();
     if (total > NODE_W) {
-        // Keep a one-char GPS marker when possible on narrow panes.
-        bool oneCharGps = showSats && sbuf[0] != '\0' && sbuf[1] == '\0';
-        if (oneCharGps) {
-            gap = ICON_GAP_TIGHT;
-            total = calcTotal();
-        }
-        if (total > NODE_W) {
-            showSats = false;
-            gpsW = GPS_DOT_R * 2 + 1;
-            total = calcTotal();
-        }
+        gap = ICON_GAP_TIGHT;
+        total = calcTotal();
     }
     if (total > NODE_W) {
         gap = ICON_GAP_TIGHT;
@@ -1437,11 +1492,19 @@ static void drawBattery() {
     int dotY = STATUS_H / 2;
     lcd.fillCircle(dotX, dotY, GPS_DOT_R, gpsCol);
     lcd.drawCircle(dotX, dotY, GPS_DOT_R, iconStroke);
-    lcd.drawPixel(dotX, dotY, iconStroke);
-    if (showSats) {
-        lcd.setTextColor(gpsCol);
-        int satY = max(0, (STATUS_H - CHAR_H) / 2);
-        lcd.drawString(sbuf, GX + GPS_DOT_R * 2 + 2, satY);
+    if (gpsFix) {
+        char satIn[3];
+        uint8_t satDraw = sats > 99 ? 99 : sats;
+        snprintf(satIn, sizeof(satIn), "%u", (unsigned)satDraw);
+        lcd.setTextSize(1);
+        int satW = lcd.textWidth(satIn);
+        int satH = lcd.fontHeight();
+        int satX = dotX - (satW / 2);
+        int satY = dotY - (satH / 2);
+        uint16_t satCol = lightUi ? TFT_WHITE : TFT_BLACK;
+        lcd.setTextColor(satCol, gpsCol);
+        lcd.drawString(satIn, satX, satY);
+        lcd.setTextSize(UI_BASE_TEXT_SCALE);
     }
 
     if (wifiShowApText) {
@@ -1537,6 +1600,9 @@ static void drawStatus() {
     int shortW = lcd.textWidth(shortName);
 
     int flowerCx = x + shortW + header.statusFlowerGap;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    flowerCx += 2; // extra breathing room between shortname and flower mark
+#endif
     drawCamelliaMarkTiny(flowerCx, STATUS_H / 2);
 
     int timeW = lcd.textWidth(timeBuf);
@@ -1674,10 +1740,12 @@ static void drawTabs() {
         if (tabs[t].view == VIEW_SETTINGS) {
             stateCol = isActive ? COL_TEXT_ON_ACCENT : COL_TAB_IDLE;
         } else if (tabs[t].view == VIEW_GPS) {
+            const uint32_t GPS_NO_DATA_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+            bool gpsDataFresh = gpsIsEnabled() && gpsDataAgeMs() < GPS_NO_DATA_TIMEOUT_MS;
             if      (isActive)       stateCol = COL_TEXT_ON_ACCENT;
             else if (gpsHasFix())    stateCol = gpsFixColorForUiMode();
-            else if (gpsIsEnabled() && !gpsHasNmeaStream()) stateCol = COL_BATT_BAD;
-            else if (gpsIsEnabled()) stateCol = COL_TAB_UNREAD;
+            else if (gpsDataFresh)   stateCol = gpsSearchingColorForUiMode();
+            else if (gpsIsEnabled()) stateCol = gpsNoDataColorForUiMode();
             else                     stateCol = COL_TAB_IDLE;
         } else if (tabs[t].view == CHAN_ANN) {
             Channel &ch = Channels.get(tabs[t].view);
@@ -1813,8 +1881,8 @@ static int dmConvMessageRowsVisible() {
         ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
         : (my + mh - 1);
     const int rowsVisible = max(1, (controlsTop - iy - 1) / DM_LINE_H);
-    // Header row + spacer row before message lines.
-    return max(1, rowsVisible - 2);
+    // Header row before message lines.
+    return max(1, rowsVisible - 1);
 }
 
 static bool isDigitChar(char c) {
@@ -3550,24 +3618,31 @@ static void drawDmConv() {
         return;
     }
 
-    // Header bar
+    // Header bar: draw node name in an accent color distinct from message text.
     NodeEntry *node = Nodes.find(c->nodeId);
     const char *longName = (node && node->longName[0]) ? node->longName : "Unknown node";
     const char *shortName = (node && node->shortName[0])
                             ? node->shortName
                             : (c->shortName[0] ? c->shortName : "????");
-    char hdr[DM_LINE_LEN + 1];
-    snprintf(hdr, sizeof(hdr), "%s (%s)", longName, shortName);
+    char hdrNode[DM_LINE_LEN + 1];
+    snprintf(hdrNode, sizeof(hdrNode), "%s (%s)", longName, shortName);
     lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
-    drawClippedText(ix + 4, iy + 1, iw - 8, hdr);
+    const char *hdrLabel = "DM: ";
+    int hdrLabelX = ix + 4;
+    int hdrLabelW = lcd.textWidth(hdrLabel);
+    drawClippedText(hdrLabelX, iy + 1, iw - 8, hdrLabel);
+    uint16_t nodeAccent = (gCfg.uiMode == UI_MODE_LIGHT)
+                        ? rgb565(0x00, 0x5a, 0x88)
+                        : rgb565(0x5e, 0xde, 0xff);
+    lcd.setTextColor(nodeAccent, COL_SELECT_BG);
+    int hdrNodeX = hdrLabelX + hdrLabelW;
+    int hdrNodeW = max(0, iw - 8 - hdrLabelW);
+    drawClippedText(hdrNodeX, iy + 1, hdrNodeW, hdrNode);
 
-    // Spacer line between header and conversation body.
-    lcd.fillRect(ix, iy + DM_LINE_H, iw, DM_LINE_H, COL_PANEL_BG);
-
-    // Message rows begin after header + spacer.
+    // Message rows begin directly after header.
     for (int row = 0; row < msgRowsVisible; row++) {
-        int y = iy + (row + 2) * DM_LINE_H;
+        int y = iy + (row + 1) * DM_LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
         lcd.fillRect(ix, y, iw, DM_LINE_H, rowBg);
         const DmLine *dl = DMs.getLine(c, row, msgRowsVisible);
@@ -4606,18 +4681,26 @@ static void drawInput() {
             lcd.setFont(&fonts::DejaVu9);
             lcd.setTextSize(UI_BASE_TEXT_SCALE);
 #endif
+            const int panelX = 8 + 3;
+            const int panelW = LCD_W - 22;
             const int composerH = lcd.fontHeight() + 6;
-            const int composerY = INPUT_Y + 1;
-            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
-            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
-            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+            int composerY;
+            if (showPanelCloseButtons()) {
+                int closeY = panelOverlayBottomY() + 1 - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+                composerY = max(CHAT_Y + 2, closeY - composerH - 2);
+            } else {
+                composerY = max(CHAT_Y + 2, INPUT_Y + 1);
+            }
+            lcd.fillRect(panelX, composerY, panelW, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(panelX, composerY, panelW, COL_DIVIDER);
+            lcd.drawFastHLine(panelX, composerY + composerH - 1, panelW, COL_DIVIDER_HI);
 
             const int textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
             lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-            lcd.drawString(">>", 2, textY);
+            lcd.drawString(">>", panelX + 2, textY);
 
-            int textX = 2 + lcd.textWidth(">>") + 3;
-            int availW = LCD_W - textX - 4;
+            int textX = panelX + 2 + lcd.textWidth(">>") + 3;
+            int availW = panelW - (textX - panelX) - 4;
             String visible(inputBuf);
             while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
                 visible.remove(0, 1);
@@ -4717,8 +4800,17 @@ static void drawInput() {
     }
 
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
+    int dmNavIdx = useCompactKeyboardUi() ? 0 : 1;
+    int dmUnread = (activeView != CHAN_DM) ? DMs.unreadMessageCount() : 0;
+    if (dmUnread > 999) dmUnread = 999;
     for (int i = 0; i < navButtonCount(); i++) {
-        drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, btnFill, COL_TEAL, false);
+        uint16_t fill = btnFill;
+        uint16_t edge = COL_TEAL;
+        if (i == dmNavIdx && dmUnread > 0) {
+            fill = lerp565(btnFill, COL_TAB_UNREAD, 120);
+            edge = COL_TAB_UNREAD;
+        }
+        drawSquirclePill(b[i].x, b[i].y, b[i].w, b[i].h, fill, edge, false);
     }
 
     if (navButtonCount() == NAV_BTN_COUNT) {
@@ -4736,9 +4828,11 @@ static void drawInput() {
     }
 
     lcd.setFont(UI_BODY_FONT);
-    lcd.setTextColor(COL_TEXT_MAIN, btnFill);
     for (int i = 0; i < navButtonCount(); i++) {
         const char *label = navButtonLabel(i);
+        uint16_t labelCol = (i == dmNavIdx && dmUnread > 0)
+                ? ((gCfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : COL_TEXT_MAIN)
+                : COL_TEXT_MAIN;
 #if defined(DEVICE_TLORA_PAGER_TFT)
         if (navButtonCount() == 5) {
             char head[2] = { label[0], '\0' };
@@ -4752,11 +4846,12 @@ static void drawInput() {
             int tx = b[i].x + max(1, (b[i].w - totalW) / 2);
             int ty = b[i].y + max(0, (b[i].h - headH) / 2);
 
-            lcd.setTextColor(COL_TEAL, btnFill);
+            uint16_t headCol = (i == dmNavIdx && dmUnread > 0) ? labelCol : COL_TEAL;
+            lcd.setTextColor(headCol, btnFill);
             lcd.drawString(head, tx, ty);
 
             if (tail[0]) {
-                lcd.setTextColor(COL_TEXT_MAIN, btnFill);
+                lcd.setTextColor(labelCol, btnFill);
                 drawClippedText(tx + headW, ty,
                                 b[i].w - (tx + headW - b[i].x) - 2, tail);
             }
@@ -4779,13 +4874,14 @@ static void drawInput() {
             int tailY = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
 
             lcd.setFont(&fonts::DejaVu9);
-            lcd.setTextColor(COL_TEAL, btnFill);
+            uint16_t headCol = (i == dmNavIdx && dmUnread > 0) ? labelCol : COL_TEAL;
+            lcd.setTextColor(headCol, btnFill);
             lcd.drawString(head, tx, headY);
             lcd.drawString(head, tx + 1, headY);
 
             if (tail[0]) {
                 lcd.setFont(UI_BODY_FONT);
-                lcd.setTextColor(COL_TEXT_MAIN, btnFill);
+                lcd.setTextColor(labelCol, btnFill);
                 drawClippedText(tx + headW + 1, tailY,
                                 b[i].w - (tx + headW + 1 - b[i].x) - 2, tail);
             }
@@ -4793,11 +4889,33 @@ static void drawInput() {
             continue;
         }
 #endif
+        lcd.setTextColor(labelCol, btnFill);
         int tw = lcd.textWidth(label);
         int tx = b[i].x + max(1, (b[i].w - tw) / 2);
         int ty = b[i].y + max(0, (b[i].h - CHAR_H) / 2);
         if (tw <= b[i].w - 2) lcd.drawString(label, tx, ty);
         else                  drawClippedText(b[i].x + 1, ty, b[i].w - 2, label);
+    }
+
+    if (dmUnread > 0 && dmNavIdx >= 0 && dmNavIdx < navButtonCount()) {
+        char badge[5];
+        snprintf(badge, sizeof(badge), "%d", dmUnread);
+        int tw = lcd.textWidth(badge);
+        int bh = max(12, CHAR_H + 2);
+        int bw = max(14, tw + 8);
+        int bx = b[dmNavIdx].x + b[dmNavIdx].w - bw - 1;
+        int by = b[dmNavIdx].y - 3;
+        if (by < INPUT_Y + 1) by = INPUT_Y + 1;
+        if (bx < 0) bx = 0;
+
+        uint16_t badgeFill = COL_TAB_UNREAD;
+        uint16_t badgeText = (gCfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : COL_TEXT_MAIN;
+        lcd.fillRoundRect(bx, by, bw, bh, bh / 2, badgeFill);
+        lcd.drawRoundRect(bx, by, bw, bh, bh / 2, COL_SELECT_ACCENT);
+        lcd.setTextColor(badgeText, badgeFill);
+        int tx = bx + max(1, (bw - tw) / 2);
+        int ty = by + max(0, (bh - CHAR_H) / 2);
+        drawClippedText(tx, ty, bw - (tx - bx) - 1, badge);
     }
 
     drawSoftKeyboardOverlay();
@@ -5457,6 +5575,44 @@ static void sendRoutingAck(const MeshPacket &pkt) {
     addLiveLine(live, txOk ? TFT_DARKGREY : TFT_RED);
 }
 
+static void sendRoutingNak(const MeshPacket &pkt, uint32_t errorReason) {
+    int ackChanIdx = pkt.chanIdx;
+    // PKI packets use channel hash 0; route ACK/NAK on primary channel.
+    if ((ackChanIdx < 0 || ackChanIdx >= MAX_CHANNELS) && pkt.hdr.channel == 0) {
+        ackChanIdx = 0;
+    }
+    if (ackChanIdx < 0 || ackChanIdx >= MAX_CHANNELS) return;
+
+    uint8_t proto[48], cipher[48];
+    size_t protoLen = encodeRouting(pkt.hdr.id, myNodeId, errorReason, proto, sizeof(proto));
+    if (protoLen == 0) return;
+
+    const ChannelKey &ck = CHANNEL_KEYS[ackChanIdx];
+    uint32_t nakId = nextMeshPacketId();
+    if (!encryptPayload(nakId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) return;
+
+    uint8_t frame[sizeof(MeshHdr) + 48];
+    MeshHdr hdr = {};
+    hdr.to      = pkt.hdr.from;
+    hdr.from    = myNodeId;
+    hdr.id      = nakId;
+    hdr.channel = ck.hash;
+    hdr.flags   = (MESH_HOP_LIMIT & 0x07) | ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool txOk = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    debugLogAcks("[nak] routing NAK -> !%08X for pkt 0x%08X err=%lu\n",
+                 pkt.hdr.from, pkt.hdr.id, (unsigned long)errorReason);
+    char who[16];
+    liveNodeLabel(pkt.hdr.from, who, sizeof(who));
+    char live[64];
+    snprintf(live, sizeof(live), "T NAK %s e%lu %s",
+             who, (unsigned long)errorReason, txOk ? "OK" : "ER");
+    addLiveLine(live, txOk ? TFT_DARKGREY : TFT_RED);
+}
+
 // ── Handle received packet ────────────────────────────────────
 // Deferred NODEINFO sends — processed in loop() with pollInput() between each
 static const int MAX_DEFERRED = 4;
@@ -5471,7 +5627,7 @@ static void handleRx(MeshPacket pkt) {
     // Keep draining the keyboard even while packet handling is busy.
     pumpKeyboardRaw(12, millis());
 
-    if (isDuplicate(pkt.hdr.id)) return;
+    if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
     if (gCfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return;  // bit 4 = via_mqtt
 
@@ -5539,6 +5695,23 @@ static void handleRx(MeshPacket pkt) {
     }
 
     if (!pkt.decrypted) {
+        // If a unicast PKI packet to us can't be decrypted, tell sender we need
+        // a fresh public key exchange and request NODEINFO refresh.
+        if (pkt.hdr.to == myNodeId && pkt.hdr.channel == 0) {
+            if (pkt.hdr.flags & 0x08) {
+                sendRoutingNak(pkt, 35); // PKI_UNKNOWN_PUBKEY
+            }
+            NodeEntry *snd = Nodes.find(pkt.hdr.from);
+            uint32_t now = millis();
+            bool shouldRequestInfo = (!snd || (now - snd->lastSentInfoMs > 5000));
+            if (shouldRequestInfo) {
+                if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
+                                          pkt.hdr.from, true)) {
+                    if (snd) snd->lastSentInfoMs = now;
+                }
+            }
+        }
+
         char who[16];
         liveNodeLabel(pkt.hdr.from, who, sizeof(who));
         char live[56];
@@ -5730,12 +5903,6 @@ static void handleRx(MeshPacket pkt) {
                 if (errorReason == 6) {
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) {
-                        // For non-DM NO_CHANNEL events, flip PKI suppression when we have
-                        // a pubkey to avoid getting stuck on one mode forever.
-                        if (!dmRoutingMatched && n->hasPubKey) {
-                            n->pkiNoChannel = !n->pkiNoChannel;
-                        }
-
                         // Request peer NODEINFO (unicast + want_response) so pubkey state
                         // refreshes quickly for PKI fallback.
                         uint32_t now = millis();
@@ -5997,7 +6164,16 @@ static void handleKey(char k) {
     }
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    if (cardputerPanelShortcutReady()) {
+    bool dmPickerTypingFilter = (activeView == CHAN_DM && dmPickerOpen
+                                 && k >= 0x20 && k < 0x7F);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // On Cardputer, backtick/tilde should keep acting as panel-close shortcuts
+    // even while the DM picker filter is active.
+    if (activeView == CHAN_DM && dmPickerOpen && (k == '`' || k == '~')) {
+        dmPickerTypingFilter = false;
+    }
+#endif
+    if (cardputerPanelShortcutReady() && !dmPickerTypingFilter) {
         switch (k) {
             case '`':
             case '~':
@@ -6317,6 +6493,13 @@ static void handleKey(char k) {
             } else if (k == KEY_ROLLER) {
                 // Roller on list item.
 #if defined(DEVICE_TLORA_PAGER_TFT)
+                // Require a brief post-scroll settle window before opening the
+                // selected chat to reduce accidental opens while browsing.
+                if (millis() - dmListLastScrollMs < 180) {
+                    return;
+                }
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
                 if (DMs.count() <= 0) {
                     dmPickerSel  = 0;
                     dmPickerOpen = true;
@@ -6402,6 +6585,7 @@ static void handleKey(char k) {
                 // List rows
                 clearDmDeleteConfirm();
                 dmListSel = max(0, dmListSel - 1);
+                dmListLastScrollMs = millis();
                 dirtyChat = true;
             }
             return;
@@ -6446,6 +6630,7 @@ static void handleKey(char k) {
 #endif
                 clearDmDeleteConfirm();
                 dmListSel = min(cap, dmListSel + 1);
+                dmListLastScrollMs = millis();
                 dirtyChat = true;
             }
             return;
@@ -6703,6 +6888,32 @@ void setup() {
         bool haveKeys = (prefs.getInt("pkiVer", 0) == 2) &&
                         (prefs.getBytes("privKey", myPrivKey, 32) == 32) &&
                         (prefs.getBytes("pubKey",  myPubKey,  32) == 32);
+
+        if (haveKeys) {
+            bool invalidOrMismatched = isZeroBytes32(myPrivKey)
+                                    || isZeroBytes32(myPubKey)
+                                    || !pkiKeypairMatchesLe(myPrivKey, myPubKey);
+            if (invalidOrMismatched) {
+                // Legacy builds stored keys in BE; auto-convert when that pair validates.
+                uint8_t lePriv[32];
+                uint8_t lePub[32];
+                reverseBytes32(myPrivKey, lePriv);
+                reverseBytes32(myPubKey, lePub);
+                if (!isZeroBytes32(lePriv) && !isZeroBytes32(lePub)
+                        && pkiKeypairMatchesLe(lePriv, lePub)) {
+                    memcpy(myPrivKey, lePriv, 32);
+                    memcpy(myPubKey,  lePub,  32);
+                    prefs.putBytes("privKey", myPrivKey, 32);
+                    prefs.putBytes("pubKey",  myPubKey,  32);
+                    prefs.putInt("pkiVer", 2);
+                    Serial.printf("[pki] converted stored keypair BE->LE\n");
+                } else {
+                    Serial.printf("[pki] stored keypair failed sanity; regenerating\n");
+                    haveKeys = false;
+                }
+            }
+        }
+
         if (!haveKeys) {
             prefs.remove("privKey");
             prefs.remove("pubKey");
@@ -7120,7 +7331,11 @@ static void pollInput() {
 #endif
 
     // Pull fresh keyboard bytes, then consume queued keys.
+#if defined(DEVICE_TDECK)
+    pumpKeyboardRaw(48, now);
+#else
     pumpKeyboardRaw(24, now);
+#endif
     for (int ki = 0; ki < 24; ki++) {
         char k;
         if (!dequeueKey(k)) break;
@@ -7145,16 +7360,12 @@ void loop() {
 
     // 1. Poll radio
 #if defined(DEVICE_TDECK)
-    // T-Deck keyboard can lag under heavy RX handling; pause RX whenever
-    // we're actively composing text in an input-capable view.
-    bool tdeckTypingCompose = isTextInputView() && (hwTypingLock || inputLen > 0);
+    // Keep RX always active on T-Deck so incoming DMs/messages are not blocked
+    // while composing in other views.
+    bool pauseRxForTyping = false;
 #else
-    bool tdeckTypingCompose = false;
+    bool pauseRxForTyping = false;
 #endif
-    bool pauseRxForTyping = softKbVisible
-                         || (hwTypingLock && isTextInputView())
-                         || tdeckTypingCompose
-                         || (activeView == VIEW_NODES);
     if (!pauseRxForTyping) {
         MeshPacket pkt;
         if (Radio.pollRx(pkt)) {
@@ -7191,6 +7402,11 @@ void loop() {
     // 1c. Poll GPS (configurable; 0 = every loop)
     static uint32_t lastGpsPollMs = 0;
     uint32_t gpsPollPeriodMs = (gCfg.gpsPollIntervalS == 0) ? 0 : (gCfg.gpsPollIntervalS * 1000UL);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Keep UART parsing responsive on pager even if config interval is large.
+    // Long poll intervals can overflow/drain GPS input too slowly and hold sats at 0.
+    if (gpsPollPeriodMs > 250UL) gpsPollPeriodMs = 250UL;
+#endif
     if (gpsPollPeriodMs == 0
         || lastGpsPollMs == 0
         || (now - lastGpsPollMs) >= gpsPollPeriodMs) {

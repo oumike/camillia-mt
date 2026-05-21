@@ -27,6 +27,11 @@ bool gpsHasFix();
 // True once valid NMEA sentences are seen from the GPS UART stream.
 bool gpsHasNmeaStream();
 
+// Milliseconds since the last received GPS UART byte.
+// If no byte has ever arrived since gpsBegin(), returns search time since start.
+// Returns UINT32_MAX when GPS is disabled.
+uint32_t gpsDataAgeMs();
+
 // Position as scaled integers (degrees × 1e7). Valid only when gpsHasFix().
 int32_t gpsLatI();
 int32_t gpsLonI();

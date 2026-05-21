@@ -13,6 +13,7 @@ constexpr uint8_t kXl9555RegCfg1 = 0x07;
 
 constexpr uint8_t kExpGpsEn  = 4;
 constexpr uint8_t kExpGpsRst = 7;
+constexpr uint8_t kExpGpioEn = 9;
 
 static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
     Wire.beginTransmission(addr);
@@ -75,6 +76,8 @@ static bool pagerPrimeGpsRails(bool invertDirSense) {
     // Ensure GPS rail is on, then pulse reset low->high to recover modules
     // that boot into a stale UART/output state.
     xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
+    // Keep shared expander GPIO rail enabled like LilyGo reference bring-up.
+    xl9555SetOutput(kExpGpioEn, true, invertDirSense, out0, out1, cfg0, cfg1);
     xl9555SetOutput(kExpGpsRst, false, invertDirSense, out0, out1, cfg0, cfg1);
     if (!xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0)
         || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1)
@@ -112,6 +115,8 @@ static const uint32_t GPS_BAUD_PROBE_START_MS = 3000;
 static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 3500;
 static const uint32_t GPS_CHECKSUM_STALE_REPROBE_MS = 10000;
 static const uint32_t GPS_MIN_CHECKSUM_FOR_STREAM = 1;
+static const uint32_t GPS_PAGER_RAIL_RECOVERY_MS = 20000;
+static const uint32_t GPS_PAGER_NO_SATS_RECOVERY_MS = 120000;
 #else
 static const uint32_t GPS_BAUD_PROBE_START_MS = 9000;
 static const uint32_t GPS_BAUD_PROBE_INTERVAL_MS = 7000;
@@ -176,12 +181,20 @@ static int8_t         _activeTx      = GPS_TX;
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static bool           _pagerRailInverted = false;
 static bool           _pagerRailRetried = false;
+static uint32_t       _pagerLastRailPrimeMs = 0;
 #endif
 static uint32_t       _lastProbeMs   = 0;
 static uint32_t       _lastByteMs    = 0;
+static uint32_t       _lastDataMs    = 0;
 static uint32_t       _lastChecksumMs = 0;
 static uint32_t       _lastPassedChecksum = 0;
+static uint32_t       _probeStartPassedChecksum = 0;
+static uint32_t       _probeStartBytes = 0;
+static uint32_t       _lastSatSeenMs = 0;
+static uint32_t       _lastNoSatRecoveryMs = 0;
 static bool           _nmeaSeen      = false;
+static bool           _streamConfigLocked = false;
+static bool           _everValidStreamSeen = false;
 
 // Some firmwares update GSA regularly while GGA satellite fields can remain stale.
 // Track both GN and GP talkers and prefer fresh GSA "satellites used" counts.
@@ -225,6 +238,11 @@ static TinyGPSCustom* _gpgsaSats[12] = {
 static TinyGPSCustom _gnggaSatsUsed(_gps, "GNGGA", 7);
 static TinyGPSCustom _gpggaSatsUsed(_gps, "GPGGA", 7);
 
+// Some modules emit GNS (not GGA) as their primary fix sentence.
+// GNS field 7 also carries satellites used in fix.
+static TinyGPSCustom _gngnsSatsUsed(_gps, "GNGNS", 7);
+static TinyGPSCustom _gpgnsSatsUsed(_gps, "GPGNS", 7);
+
 // GSV field 3 carries satellites in view, useful before the first full fix.
 static TinyGPSCustom _gngsvSatsView(_gps, "GNGSV", 3);
 static TinyGPSCustom _gpgsvSatsView(_gps, "GPGSV", 3);
@@ -265,6 +283,15 @@ static void gpsApplyPortAndBaud(int8_t rx, int8_t tx, uint32_t baud) {
     _activeRx = rx;
     _activeTx = tx;
     _activeBaud = baud;
+
+    // passedChecksum() is cumulative over runtime; mark a new baseline on each
+    // UART config so stream-detection checks only fresh checksums/bytes.
+    _probeStartPassedChecksum = _gps.passedChecksum();
+    _probeStartBytes = _totalBytes;
+    _lastPassedChecksum = _probeStartPassedChecksum;
+    uint32_t now = millis();
+    _lastChecksumMs = now;
+    _lastByteMs = now;
 }
 
 static bool gpsNextProbeConfig() {
@@ -283,13 +310,8 @@ static bool gpsNextProbeConfig() {
         if (candidateBaud == _activeBaud && p.rx == _activeRx && p.tx == _activeTx) continue;
 
         gpsApplyPortAndBaud(p.rx, p.tx, candidateBaud);
-    #if defined(DEVICE_TLORA_PAGER_TFT)
-        Serial.printf("[gps] probing baud=%lu (rx=%d tx=%d)\n",
-                  (unsigned long)candidateBaud, (int)p.rx, (int)p.tx);
-    #else
         debugLogGps("[gps] probing baud=%lu (rx=%d tx=%d)\n",
                     (unsigned long)candidateBaud, (int)p.rx, (int)p.tx);
-    #endif
         return true;
     }
     return false;
@@ -316,16 +338,19 @@ void gpsBegin() {
     _lastSatsMs    = 0;
     _lastProbeMs   = _startMs;
     _lastByteMs    = _startMs;
+    _lastDataMs    = 0;
     _lastChecksumMs = _startMs;
     _lastPassedChecksum = _gps.passedChecksum();
+    _lastSatSeenMs = _startMs;
+    _lastNoSatRecoveryMs = _startMs;
     _nmeaSeen      = false;
+    _streamConfigLocked = false;
+    _everValidStreamSeen = false;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    Serial.printf("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
-                  (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
-#else
+    _pagerLastRailPrimeMs = _startMs;
+#endif
     debugLogGps("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
                 (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
-#endif
 }
 
 void gpsEnd() {
@@ -348,6 +373,7 @@ void gpsLoop() {
     }
     if (sawBytes) {
         _lastByteMs = now;
+        _lastDataMs = now;
     }
 
     uint32_t passed = _gps.passedChecksum();
@@ -356,34 +382,40 @@ void gpsLoop() {
         _lastChecksumMs = now;
     }
 
-    if (!_nmeaSeen && passed >= GPS_MIN_CHECKSUM_FOR_STREAM) {
+        const bool hasFreshChecksums = (passed >= (_probeStartPassedChecksum + GPS_MIN_CHECKSUM_FOR_STREAM));
+        const bool hasFreshBytes = (_totalBytes >= (_probeStartBytes + 24));
+        if (!_nmeaSeen && hasFreshChecksums && hasFreshBytes) {
         _nmeaSeen = true;
-#if defined(DEVICE_TLORA_PAGER_TFT)
-        Serial.printf("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
-#else
+            _streamConfigLocked = true;
+            _everValidStreamSeen = true;
         debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
-#endif
     }
 
     // Boards can occasionally latch onto a noisy UART config that yields
     // sporadic checksum passes once, then no real sentence progress. Re-probe.
     if (_nmeaSeen
-        && !gpsHasFix()
-        && passed > 0
+        && hasFreshChecksums
         && (now - _lastChecksumMs) >= GPS_CHECKSUM_STALE_REPROBE_MS
         && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
-#if defined(DEVICE_TLORA_PAGER_TFT)
-        Serial.printf("[gps] checksum stale (%lums) without fix on baud=%lu rx=%d tx=%d, probing next\n",
-                      (unsigned long)(now - _lastChecksumMs),
-                      (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
-#else
-        debugLogGps("[gps] checksum stale (%lums) without fix on baud=%lu rx=%d tx=%d, probing next\n",
+    debugLogGps("[gps] checksum stale (%lums) on baud=%lu rx=%d tx=%d, %s\n",
                     (unsigned long)(now - _lastChecksumMs),
-                    (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
-#endif
+                    (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx,
+                    _streamConfigLocked ? "restarting current UART" : "probing next");
         _nmeaSeen = false;
         _lastProbeMs = now;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (_streamConfigLocked || _everValidStreamSeen) {
+            gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+            return;
+        }
+#endif
         gpsNextProbeConfig();
+    }
+
+    uint8_t satsNow = 0;
+    if (_nmeaSeen) {
+        satsNow = gpsSats();
+        if (satsNow > 0) _lastSatSeenMs = now;
     }
 
     if (!_nmeaSeen
@@ -391,17 +423,51 @@ void gpsLoop() {
         && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
         _lastProbeMs = now;
 #if defined(DEVICE_TLORA_PAGER_TFT)
+    if (_streamConfigLocked || _everValidStreamSeen) {
+            gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+            return;
+        }
+        if ((now - _pagerLastRailPrimeMs) >= GPS_PAGER_RAIL_RECOVERY_MS) {
+            _pagerRailInverted = !_pagerRailInverted;
+            (void)pagerPrimeGpsRails(_pagerRailInverted);
+            _pagerLastRailPrimeMs = now;
+            gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+            debugLogGps("[gps] no stream yet; periodic rail recovery invert=%d\n",
+                        _pagerRailInverted ? 1 : 0);
+            return;
+        }
         if (!_pagerRailRetried) {
             _pagerRailRetried = true;
             _pagerRailInverted = true;
             (void)pagerPrimeGpsRails(_pagerRailInverted);
+            _pagerLastRailPrimeMs = now;
             gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
-            Serial.println("[gps] no stream yet; retried pager rails with invert=1");
+            debugLogGps("[gps] no stream yet; retried pager rails with invert=1\n");
             return;
         }
 #endif
         gpsNextProbeConfig();
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (_nmeaSeen
+        && !_streamConfigLocked
+        && !_everValidStreamSeen
+        && satsNow == 0
+        && (now - _startMs) >= GPS_WARMUP_MS
+        && (now - _lastSatSeenMs) >= GPS_PAGER_NO_SATS_RECOVERY_MS
+        && (now - _lastNoSatRecoveryMs) >= GPS_PAGER_NO_SATS_RECOVERY_MS
+        && (now - _lastProbeMs) >= GPS_BAUD_PROBE_INTERVAL_MS) {
+        _lastProbeMs = now;
+        _lastNoSatRecoveryMs = now;
+        // Keep GPS powered so it can continue sky search; just probe next UART config.
+        _nmeaSeen = false;
+        debugLogGps("[gps] no sats for %lums; probing UART without rail reset\n",
+                    (unsigned long)(now - _lastSatSeenMs));
+        gpsNextProbeConfig();
+        return;
+    }
+#endif
 
     if (_nmeaSeen && (now - _lastByteMs) >= GPS_STREAM_STALL_MS) {
         debugLogGps("[gps] stream stalled for %lums, restarting UART1 at baud=%lu\n",
@@ -416,9 +482,10 @@ void gpsLoop() {
         && _gps.location.isValid()
         && _gps.location.age() < 5000) {
         _firstFixMs = now;
-        debugLogGps("[gps] first fix after %lums sats=%d\n",
+        debugLogGps("[gps] first fix after %lums sats=%d lat=%.6f lon=%.6f\n",
                     (unsigned long)(_firstFixMs - _startMs),
-                    _gps.satellites.isValid() ? (int)_gps.satellites.value() : 0);
+                    _gps.satellites.isValid() ? (int)_gps.satellites.value() : 0,
+                    _gps.location.lat(), _gps.location.lng());
     }
 
     if (debugGpsEnabled() && (now - _lastDbg >= 5000)) {
@@ -436,6 +503,7 @@ void gpsLoop() {
                     (unsigned long)_totalBytes);
         _prevSentences = sf;
     }
+
 }
 
 void gpsSetEnabled(bool en) {
@@ -460,6 +528,13 @@ bool gpsHasFix() {
 
 bool gpsHasNmeaStream() {
     return _enabled && _nmeaSeen;
+}
+
+uint32_t gpsDataAgeMs() {
+    if (!_enabled) return UINT32_MAX;
+    uint32_t now = millis();
+    if (_lastDataMs == 0) return now - _startMs;
+    return now - _lastDataMs;
 }
 
 int32_t gpsLatI() {
@@ -505,6 +580,18 @@ uint8_t gpsSats() {
         if (gnggaFresh || gpggaFresh) {
             hasFresh = true;
             sats = max(gngga, gpgga);
+        }
+    }
+
+    // Additional fallback for modules that output GNS instead of GGA.
+    if (!hasFresh) {
+        bool gngnsFresh = false;
+        bool gpgnsFresh = false;
+        uint8_t gngns = parseCustomU8(_gngnsSatsUsed, gngnsFresh);
+        uint8_t gpgns = parseCustomU8(_gpgnsSatsUsed, gpgnsFresh);
+        if (gngnsFresh || gpgnsFresh) {
+            hasFresh = true;
+            sats = max(gngns, gpgns);
         }
     }
 

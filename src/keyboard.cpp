@@ -431,8 +431,15 @@ char TDeckKeyboard::readKey() {
     static uint32_t lastIdleProbeMs = 0;
     uint32_t now = millis();
     bool irqActive = (digitalRead(KB_INT) == LOW);
+    // T-Deck can miss very short taps if we only probe every 250ms when the
+    // IRQ line is not asserted; keep a faster fallback cadence there.
+#if defined(DEVICE_TDECK)
+    static constexpr uint32_t kIdleProbeMs = 20;
+#else
+    static constexpr uint32_t kIdleProbeMs = 250;
+#endif
     if (!irqActive) {
-        if (now - lastIdleProbeMs < 250) return KEY_NONE;
+        if (now - lastIdleProbeMs < kIdleProbeMs) return KEY_NONE;
         lastIdleProbeMs = now;
     }
 #endif

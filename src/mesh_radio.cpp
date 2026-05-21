@@ -275,6 +275,13 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     pkt.snr   = _radio.getSNR();
     pkt.rxMs  = millis();
     memcpy(&pkt.hdr, buf, sizeof(MeshHdr));
+    pkt.portnum = 0;
+    pkt.requestId = 0;
+    pkt.wantResponse = false;
+    pkt.payloadLen = 0;
+    pkt.decrypted = false;
+    pkt.chanIdx = -1;
+    pkt.rawLen = 0;
 
     // Decrypt and decode
     size_t payloadLen = len - sizeof(MeshHdr);
@@ -285,24 +292,22 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         pkt.rawLen = (payloadLen <= sizeof(pkt.rawCipher)) ? payloadLen : 0;
         if (pkt.rawLen) memcpy(pkt.rawCipher, cipher, payloadLen);
 
-        uint8_t plain[256];
-        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, payloadLen);
-        pkt.decrypted = (pkt.chanIdx >= 0);
+        // Channel hash 0 is reserved for PKI packets; let handleRx perform PKI
+        // decrypt to avoid channel-key false positives on random ciphertext.
+        if (pkt.hdr.channel != 0) {
+            uint8_t plain[256];
+            pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, payloadLen);
+            pkt.decrypted = (pkt.chanIdx >= 0);
 
-        if (pkt.decrypted) {
-            const uint8_t *payPtr; size_t payLen;
-            decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen, pkt.requestId, pkt.wantResponse);
-            if (payPtr && payLen <= sizeof(pkt.payload)) {
-                memcpy(pkt.payload, payPtr, payLen);
-                pkt.payloadLen = payLen;
-            } else {
-                pkt.payloadLen = 0;
+            if (pkt.decrypted) {
+                const uint8_t *payPtr; size_t payLen;
+                decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen, pkt.requestId, pkt.wantResponse);
+                if (payPtr && payLen <= sizeof(pkt.payload)) {
+                    memcpy(pkt.payload, payPtr, payLen);
+                    pkt.payloadLen = payLen;
+                }
             }
         }
-    } else {
-        pkt.decrypted = false;
-        pkt.chanIdx   = -1;
-        pkt.payloadLen = 0;
     }
 
     sLastRxDoneMs = millis();

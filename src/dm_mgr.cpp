@@ -57,6 +57,7 @@ DmConv *DmMgr::findOrCreate(uint32_t nodeId, const char *shortName) {
     c->rxChanIdx = -1;
     strncpy(c->shortName, shortName ? shortName : "????", sizeof(c->shortName) - 1);
     c->unread = false;
+    c->unreadCount = 0;
 
     c->lines = (DmLine *)allocDmStorage(MAX_DM_LINES * sizeof(DmLine));
     if (c->lines)
@@ -77,9 +78,20 @@ bool DmMgr::hasUnread() const {
     return false;
 }
 
+int DmMgr::unreadMessageCount() const {
+    int total = 0;
+    for (int i = 0; i < _count; i++) {
+        total += (int)_convs[i].unreadCount;
+    }
+    return total;
+}
+
 void DmMgr::markRead(uint32_t nodeId) {
     DmConv *c = find(nodeId);
-    if (c) c->unread = false;
+    if (c) {
+        c->unread = false;
+        c->unreadCount = 0;
+    }
 }
 
 bool DmMgr::deleteConversation(uint32_t nodeId) {
@@ -196,7 +208,10 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     strncpy(c->lastText, text, DM_LINE_LEN);
     c->lastText[DM_LINE_LEN] = '\0';
     c->lastMs = millis();
-    if (markUnread) c->unread = true;
+    if (markUnread) {
+        c->unread = true;
+        if (c->unreadCount < 0xFFFF) c->unreadCount++;
+    }
     if (chanIdx >= 0 && chanIdx < MESH_CHANNELS) c->rxChanIdx = chanIdx;
 
     // Combine prefix + text then word-wrap at DM_LINE_LEN
@@ -298,8 +313,8 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     // node with the same short name, send to that node ID instead.
     uint32_t resolvedToNodeId = toNodeId;
     DmConv *convHint = find(toNodeId);
-    NodeEntry *node = Nodes.find(toNodeId);
-    uint32_t bestHeardMs = node ? node->lastHeardMs : 0;
+    NodeEntry *initialNode = Nodes.find(toNodeId);
+    uint32_t bestHeardMs = initialNode ? initialNode->lastHeardMs : 0;
     if (convHint && convHint->shortName[0]) {
         for (int i = 0; i < Nodes.count(); i++) {
             NodeEntry *cand = Nodes.getByRank(i);
@@ -308,7 +323,6 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
                 continue;
             if (cand->lastHeardMs > bestHeardMs) {
                 resolvedToNodeId = cand->nodeId;
-                node = cand;
                 bestHeardMs = cand->lastHeardMs;
             }
         }
@@ -317,6 +331,9 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
         debugLogMessages("[dm] remap destination by shortName '%s': !%08X -> !%08X\n",
                          convHint ? convHint->shortName : "????", toNodeId, resolvedToNodeId);
     }
+
+    // Nodes.getByRank() sorts in place; reacquire a stable pointer after remap.
+    NodeEntry *node = Nodes.find(resolvedToNodeId);
 
     size_t protoLen = encodeTextMessageUnicast(text, myNodeId, resolvedToNodeId, proto, sizeof(proto));
     debugLogMessages("[dm] protoLen=%u\n", (unsigned)protoLen);

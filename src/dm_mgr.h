@@ -32,6 +32,7 @@ struct DmConv {
     char     lastText[DM_LINE_LEN + 1];  // most recent message (list preview)
     uint32_t lastMs;
     bool     unread;          // true if there are messages not yet viewed
+    uint16_t unreadCount;     // unread message count for this conversation
     int      rxChanIdx;       // channel index last message was received on (-1 = unknown)
 };
 
@@ -44,6 +45,7 @@ public:
     DmConv   *getByRank(int idx);     // 0 = most recently messaged
     int       count() const { return _count; }
     bool      hasUnread() const;
+    int       unreadMessageCount() const;
     void      markRead(uint32_t nodeId);
     bool      deleteConversation(uint32_t nodeId);
     void      clearAll(bool clearPersisted = true);
