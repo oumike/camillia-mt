@@ -148,13 +148,16 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
 // ── Protobuf encoder ──────────────────────────────────────────
 // Encode a TEXT_MESSAGE_APP Data message. Returns encoded length.
 // bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
-size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
+// replyId: optional Data.reply_id value (message ID being replied to).
+size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
+                         uint32_t bitfield = 0, uint32_t replyId = 0);
 
 // Encode a unicast TEXT_MESSAGE_APP Data message with explicit Data.dest/source.
 // Use for DM interoperability with peers that validate decoded destination fields.
 size_t encodeTextMessageUnicast(const char *text,
                                 uint32_t fromNode, uint32_t toNode,
-                                uint8_t *buf, size_t bufLen);
+                                uint8_t *buf, size_t bufLen,
+                                uint32_t replyId = 0);
 
 // Encode a NODEINFO_APP Data message (User proto). Returns encoded length.
 // wantResponse=true asks the receiver to reply with their own NODEINFO (use for broadcasts).

@@ -305,9 +305,13 @@ char TDeckKeyboard::readTrackball() {
     static unsigned long lastMoveEmitMs = 0;
     static bool pendingClick = false;
     static unsigned long pendingClickMs = 0;
+    static unsigned long lastClickSeenMs = 0;
+    static unsigned long lastClickEmitMs = 0;
     const unsigned long moveDebounceMs = 20;
     const unsigned long clickQuietMs = 70;
     const unsigned long clickExpireMs = 800;
+    const unsigned long clickEdgeDebounceMs = 80;
+    const unsigned long clickEmitMinIntervalMs = 280;
 
     bool clk = false;
     noInterrupts();
@@ -315,9 +319,10 @@ char TDeckKeyboard::readTrackball() {
     _click = false;
     interrupts();
 
-    if (clk) {
+    if (clk && (now - lastClickSeenMs >= clickEdgeDebounceMs)) {
         pendingClick = true;
         pendingClickMs = now;
+        lastClickSeenMs = now;
     }
 
     uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
@@ -339,6 +344,10 @@ char TDeckKeyboard::readTrackball() {
     // channel-scroll mode doesn't lose the first notch to channel navigation.
     if (pendingClick && (now - _lastScrollMs >= clickQuietMs)) {
         pendingClick = false;
+        if (now - lastClickEmitMs < clickEmitMinIntervalMs) {
+            return KEY_NONE;
+        }
+        lastClickEmitMs = now;
         return KEY_ROLLER;
     }
 
@@ -398,6 +407,12 @@ char TDeckKeyboard::readTrackball() {
 
     if (dy < 0) { lastMoveEmitMs = now; return KEY_SCROLL_UP; }
     if (dy > 0) { lastMoveEmitMs = now; return KEY_SCROLL_DN; }
+
+#if defined(DEVICE_TDECK)
+    // T-Deck horizontal trackball motion selects previous/next channel.
+    if (dx < 0) { lastMoveEmitMs = now; return KEY_PREV_CHAN; }
+    if (dx > 0) { lastMoveEmitMs = now; return KEY_NEXT_CHAN; }
+#endif
 
     if (dx != 0) lastMoveEmitMs = now;
 

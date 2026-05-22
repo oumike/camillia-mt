@@ -504,10 +504,10 @@
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #define STATUS_H         20
 #define TAB_H            12
-#define MSG_W            92
-#define NODE_X           93
-#define NODE_W           42
-#define DIVIDER_X        92
+#define MSG_W           104
+#define NODE_X          105
+#define NODE_W           30
+#define DIVIDER_X       104
 #define INPUT_H          18
 #else
 #define STATUS_H         28   // top status bar
@@ -525,11 +525,19 @@
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #define STATUS_H         18
 #define TAB_H            12
-#define MSG_W           172
-#define NODE_X          173
-#define NODE_W           67
-#define DIVIDER_X       172
+#define MSG_W           201
+#define NODE_X          202
+#define NODE_W           38
+#define DIVIDER_X       201
 #define INPUT_H          18
+#elif defined(DEVICE_TDECK)
+#define STATUS_H         32   // top status bar (slightly taller for richer status icons)
+#define TAB_H            14   // channel tab bar (taller for labeled pills)
+#define MSG_W           245   // reclaim space from side node pane
+#define NODE_X          246   // node pane left edge
+#define NODE_W           74   // trimmed node pane for T-Deck channel view
+#define DIVIDER_X       245   // 1px vertical divider
+#define INPUT_H          37   // input area (typed text + touch nav buttons)
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #define STATUS_H         30   // taller header to avoid overlap with tab row
 #define TAB_H            15   // 1.25x larger channel list tabs for pager readability

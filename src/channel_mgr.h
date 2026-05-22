@@ -44,7 +44,8 @@ public:
     // prefix: e.g. "14:32 [ABCD] " — prepended to first line only
     // Returns the line index of the first added line.
     int addMessage(int chanIdx, const char *prefix, const char *text,
-                   uint16_t color, uint32_t packetId = 0);
+                   uint16_t color, uint32_t packetId = 0,
+                   bool trackAck = false);
 
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
     // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
@@ -58,7 +59,7 @@ public:
     // Build and transmit a text message on a mesh channel.
     // chanIdx: 0..MESH_CHANNELS-1, or -1 to use current active channel.
     bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false,
-                  int chanIdx = -1);
+                  int chanIdx = -1, uint32_t replyId = 0);
 
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).
@@ -87,7 +88,7 @@ private:
     bool       _persistDirReady = false;
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
-                   uint16_t color, uint32_t packetId);
+                   uint16_t color, uint32_t packetId, bool trackAck);
     void _pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                    uint32_t packetId, DisplayLine::AckState ack);
     void _persistChannel(int chanIdx, const Channel &ch);

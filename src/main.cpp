@@ -118,8 +118,12 @@ static int  activeView   = 0;              // 0..9 channels, 10 GPS, 11 MAP, 12 
 static int  tabScrollX   = 0;             // horizontal scroll offset for tab bar (px)
 static int  lastChannelView = 0;          // most recent real mesh channel (0..MESH_CHANNELS-1)
 static int  panelReturnChannel = 0;       // channel to return to when closing DM/MAP/LIVE/CFG/NODES
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
 static bool pagerWheelChatScrollMode = false;
+static int  pagerChatCursorRow = 0;
+static bool pagerReplyRefActive = false;
+static char pagerReplyRefText[MSG_CHARS + 1] = {0};
+static uint32_t pagerReplyRefPacketId = 0;
 #endif
 static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
@@ -1045,8 +1049,12 @@ static void goToView(int v) {
     dmPickerSel     = 0;
     dmDeleteConfirm = false;
     dmDeleteConfirmNodeId = 0;
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
     pagerWheelChatScrollMode = false;
+    pagerChatCursorRow = 0;
+    pagerReplyRefActive = false;
+    pagerReplyRefText[0] = '\0';
+    pagerReplyRefPacketId = 0;
 #endif
     softKbVisible   = false;
     softKbShift     = false;
@@ -1782,7 +1790,7 @@ static void drawChat() {
     int chatW = MSG_W;
     const int chatInnerY = CHAT_Y + 1;
     uint16_t chatEdge = COL_DIVIDER;
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
     if (pagerWheelChatScrollMode && activeView >= 0 && activeView < MESH_CHANNELS) {
         chatEdge = COL_SELECT_ACCENT;
     }
@@ -1819,7 +1827,24 @@ static void drawChat() {
         const DisplayLine *dl = Channels.getLine(active, row);
         int y = chatInnerY + row * LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+        bool pagerRowCursor = (pagerWheelChatScrollMode
+                            && activeView >= 0 && activeView < MESH_CHANNELS
+                            && row == pagerChatCursorRow
+                            && dl != nullptr);
+        if (pagerRowCursor) {
+            rowBg = lerp565(rowBg, COL_SELECT_BG, 120);
+        }
+#endif
         lcd.fillRect(chatX + 1, y, chatW - 2, LINE_H, rowBg);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+        int textX = chatX + (pagerRowCursor ? 5 : 2);
+        if (pagerRowCursor) {
+            lcd.fillRect(chatX + 1, y, 3, LINE_H, COL_CURSOR);
+        }
+#else
+        int textX = chatX + 2;
+#endif
         if (!dl) continue;
 
         uint16_t col = dl->color;
@@ -1854,9 +1879,9 @@ static void drawChat() {
         if (sym) {
             char rendered[MSG_CHARS + 8];
             snprintf(rendered, sizeof(rendered), "%-3s %s", sym, dl->text);
-            drawClippedText(chatX + 2, y + 1, chatW - 6, rendered);
+            drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, rendered);
         } else {
-            drawClippedText(chatX + 2, y + 1, chatW - 6, dl->text);
+            drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, dl->text);
         }
     }
 
@@ -3074,12 +3099,16 @@ static void drawNodes() {
         if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, bg);
 
         char r[32];
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        snprintf(r, sizeof(r), "%s", n->shortName[0] ? n->shortName : "----");
+    #else
         if (n->hasTelemetry && n->battPct > 0)
             snprintf(r, sizeof(r), "%s %d %+.0f %d%%",
                      n->shortName, n->hops, n->snr, (int)n->battPct);
         else
             snprintf(r, sizeof(r), "%s %d %+.0f",
                      n->shortName, n->hops, n->snr);
+    #endif
 
         lcd.setTextColor(col, bg);
         drawClippedText(NODE_X + 2, y + 1, NODE_W - 4, r);
@@ -4757,16 +4786,17 @@ static void drawInput() {
         int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
         int kbX = 0, kbY = 0, kbW = 0, kbH = 0;
         const int composerH = lcd.fontHeight() + 6;
+        int composerY = -1;
         if (softKeyboardBounds(kbX, kbY, kbW, kbH)) {
-            const int composerY = max(CHAT_Y + 1, kbY - composerH - 2);
+            composerY = max(CHAT_Y + 1, kbY - composerH - 2);
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
             lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
             lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
         } else {
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
             const int composerBottom = max(CHAT_Y + composerH, b[0].y - 2);
-            const int composerY = max(CHAT_Y + 1, composerBottom - composerH);
+            composerY = max(CHAT_Y + 1, composerBottom - composerH);
             lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
             lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
             lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
@@ -4776,6 +4806,26 @@ static void drawInput() {
             lcd.drawFastHLine(0, midY, LCD_W, COL_DIVIDER_HI);
 #endif
         }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+        if (activeView >= 0 && activeView < MESH_CHANNELS && composerY >= 0) {
+            const int refH = lcd.fontHeight() + 4;
+            const int refY = max(CHAT_Y + 1, composerY - refH);
+            lcd.fillRect(0, refY, LCD_W, refH, COL_INPUT_BG);
+            lcd.drawFastHLine(0, refY, LCD_W, COL_DIVIDER);
+            lcd.drawFastHLine(0, refY + refH - 1, LCD_W, COL_DIVIDER_HI);
+            if (pagerReplyRefActive && pagerReplyRefText[0] && pagerReplyRefPacketId) {
+                lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
+                lcd.drawString("RE:", 2, refY + max(0, (refH - lcd.fontHeight()) / 2));
+                lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
+                int refTextX = 2 + lcd.textWidth("RE:") + 3;
+                drawClippedText(refTextX,
+                                refY + max(0, (refH - lcd.fontHeight()) / 2),
+                                LCD_W - refTextX - 2,
+                                pagerReplyRefText);
+            }
+        }
+#endif
 
         lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
         lcd.drawString(">>", 2, textY);
@@ -5784,7 +5834,8 @@ static void handleRx(MeshPacket pkt) {
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
-            Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor);
+            Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor,
+                                pkt.hdr.id, false);
             triggerMessageAlert();
             if (!dmPickerOpen) dirtyChat = true;
             dirtyTabs = true;
@@ -6125,8 +6176,11 @@ static void handleKey(char k) {
             uint32_t nowMs = millis();
             // readTrackball() already delays click delivery until wheel motion settles.
             // Avoid re-gating on _lastScrollMs here or we drop legitimate clicks.
-            if ((nowMs - lastWheelModeToggleMs) >= 180) {
+            if ((nowMs - lastWheelModeToggleMs) >= 320) {
                 pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
+                if (pagerWheelChatScrollMode) {
+                    pagerChatCursorRow = 0;
+                }
                 lastWheelModeToggleMs = nowMs;
                 dirtyChat = true;
             }
@@ -6143,10 +6197,65 @@ static void handleKey(char k) {
 
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TDECK)
+    bool tdeckChannelView = (activeView >= 0 && activeView < MESH_CHANNELS);
+    bool tdeckTyping = (hwTypingLock || inputLen > 0);
+
+    // T-Deck preference: reverse channel up/down scroll direction.
+    if (tdeckChannelView && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+        k = (k == KEY_SCROLL_UP) ? KEY_SCROLL_DN : KEY_SCROLL_UP;
+    }
+
+    // T-Deck roller click in channel view toggles row-cursor mode (pager-like).
+    if (k == KEY_ROLLER && tdeckChannelView && !nodeDetailOpen && !nodeListFocused) {
+        if (!tdeckTyping && !softKbVisible) {
+            static uint32_t lastWheelModeToggleMs = 0;
+            uint32_t nowMs = millis();
+            if ((nowMs - lastWheelModeToggleMs) >= 220) {
+                pagerWheelChatScrollMode = !pagerWheelChatScrollMode;
+                if (pagerWheelChatScrollMode) {
+                    pagerChatCursorRow = 0;
+                }
+                lastWheelModeToggleMs = nowMs;
+                dirtyChat = true;
+            }
+        }
+        return;
+    }
+
+    // In row-cursor mode, ignore flaky horizontal wheel events.
+    if (tdeckChannelView && pagerWheelChatScrollMode
+        && (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN)) {
+        return;
+    }
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer: DOWN in channel view enters the row-cursor mode used on pager.
+    if (cardputerChannelNavReady()
+        && !pagerWheelChatScrollMode
+        && k == KEY_SCROLL_DN) {
+        pagerWheelChatScrollMode = true;
+        pagerChatCursorRow = 0;
+        dirtyChat = true;
+        return;
+    }
+
+    // Cardputer preference: invert up/down while browsing message rows.
+    if (cardputerChannelNavReady()
+        && pagerWheelChatScrollMode
+        && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+        k = (k == KEY_SCROLL_UP) ? KEY_SCROLL_DN : KEY_SCROLL_UP;
+    }
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
         pagerWheelChatScrollMode = false;
+        pagerReplyRefActive = false;
+        pagerReplyRefText[0] = '\0';
+        pagerReplyRefPacketId = 0;
 #endif
         hwTypingLock = false;
         inputLen = 0;
@@ -6246,7 +6355,46 @@ static void handleKey(char k) {
     if (k == KEY_ENTER) {
         bool wasTyping = hwTypingLock || inputLen > 0;
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-        if (activeView >= 0 && activeView < MESH_CHANNELS && !wasTyping) {
+        bool canStartChannelCompose = (!wasTyping)
+                        || (pagerWheelChatScrollMode && inputLen == 0);
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && inputLen == 0
+            && canStartChannelCompose) {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerWheelChatScrollMode) {
+                const DisplayLine *sel = Channels.getLine(activeView, pagerChatCursorRow);
+                uint32_t replyPacketId = sel ? sel->packetId : 0;
+
+                // Wrapped continuation rows may lack a packetId in older persisted
+                // history snapshots. Walk upward to find the leading row's packetId.
+                if (sel && replyPacketId == 0 && sel->text[0] == ' ' && sel->text[1] == ' ') {
+                    for (int r = pagerChatCursorRow - 1; r >= 0; --r) {
+                        const DisplayLine *prev = Channels.getLine(activeView, r);
+                        if (!prev) break;
+                        if (prev->packetId) {
+                            replyPacketId = prev->packetId;
+                            break;
+                        }
+                        if (!(prev->text[0] == ' ' && prev->text[1] == ' ')) break;
+                    }
+                }
+
+                if (sel && sel->text[0] && replyPacketId) {
+                    strncpy(pagerReplyRefText, sel->text, MSG_CHARS);
+                    pagerReplyRefText[MSG_CHARS] = '\0';
+                    pagerReplyRefActive = true;
+                    pagerReplyRefPacketId = replyPacketId;
+                } else {
+                    pagerReplyRefActive = false;
+                    pagerReplyRefText[0] = '\0';
+                    pagerReplyRefPacketId = 0;
+                }
+            } else {
+                pagerReplyRefActive = false;
+                pagerReplyRefText[0] = '\0';
+                pagerReplyRefPacketId = 0;
+            }
+#endif
             hwTypingLock = true;
             dirtyInput = true;
             return;
@@ -6369,7 +6517,13 @@ static void handleKey(char k) {
                          "counterrevolution electroencephalo titan nano q.";
             }
 #endif
-            bool sentOk = Channels.sendText(myNodeId, txText, gCfg.okToMqtt, txChan);
+            uint32_t txReplyId = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerReplyRefActive && pagerReplyRefPacketId) {
+                txReplyId = pagerReplyRefPacketId;
+            }
+#endif
+            bool sentOk = Channels.sendText(myNodeId, txText, gCfg.okToMqtt, txChan, txReplyId);
             if (!sentOk) {
                 Channels.addMessage(txChan, "",
                     "! TX failed", TFT_RED, 0);
@@ -6380,6 +6534,15 @@ static void handleKey(char k) {
             }
             hwTypingLock = false;
             inputLen = 0; inputBuf[0] = '\0';
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (txReplyId) {
+                pagerWheelChatScrollMode = false;
+                pagerChatCursorRow = 0;
+            }
+            pagerReplyRefActive = false;
+            pagerReplyRefText[0] = '\0';
+            pagerReplyRefPacketId = 0;
+#endif
             dirtyInput = dirtyChat = true;
         }
 
@@ -6425,10 +6588,15 @@ static void handleKey(char k) {
         if (inputLen > 0 && textAllowed) {
             inputBuf[--inputLen] = '\0';
             dirtyInput = true;
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
         } else if (textAllowed && inputLen == 0 && hwTypingLock) {
             // Backspace on an empty active prompt exits compose mode.
             hwTypingLock = false;
+            if (activeView >= 0 && activeView < MESH_CHANNELS) {
+                pagerReplyRefActive = false;
+                pagerReplyRefText[0] = '\0';
+                pagerReplyRefPacketId = 0;
+            }
             dirtyInput = true;
             if (isPanelView(activeView)) dirtyChat = true;
 #endif
@@ -6439,6 +6607,12 @@ static void handleKey(char k) {
             && (softKbVisible || hwTypingLock || inputLen > 0)) {
             return;
         }
+#if defined(DEVICE_TDECK)
+        if (activeView >= 0 && activeView < MESH_CHANNELS) {
+            goToView(nextMeshChannelView(activeView));
+            return;
+        }
+#endif
         if (cardputerChannelNavReady()) {
             goToView(nextMeshChannelView(activeView));
             return;
@@ -6449,6 +6623,12 @@ static void handleKey(char k) {
             && (softKbVisible || hwTypingLock || inputLen > 0)) {
             return;
         }
+#if defined(DEVICE_TDECK)
+        if (activeView >= 0 && activeView < MESH_CHANNELS) {
+            goToView(prevMeshChannelView(activeView));
+            return;
+        }
+#endif
         if (cardputerChannelNavReady()) {
             goToView(prevMeshChannelView(activeView));
             return;
@@ -6609,7 +6789,26 @@ static void handleKey(char k) {
             Channel &ch = Channels.get(activeView);
             int stored = min(ch.count, MAX_MSG_LINES);
             int maxOff = max(0, stored - VISIBLE_LINES);
-            ch.scrollOff = min(ch.scrollOff + 3, maxOff);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerWheelChatScrollMode) {
+                int visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
+                int bottomRow = max(0, visibleRows - 1);
+                if (pagerChatCursorRow < bottomRow) {
+                    pagerChatCursorRow++;
+                } else {
+                    ch.scrollOff = min(ch.scrollOff + 1, maxOff);
+                }
+                visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
+                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, visibleRows - 1));
+                dirtyChat = true;
+                return;
+            }
+#endif
+            int step = 3;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerWheelChatScrollMode) step = 1;
+#endif
+            ch.scrollOff = min(ch.scrollOff + step, maxOff);
             dirtyChat = true;
         }
 
@@ -6653,7 +6852,25 @@ static void handleKey(char k) {
             dirtyChat = true;
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
-            ch.scrollOff = max(0, ch.scrollOff - 3);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerWheelChatScrollMode) {
+                int stored = min(ch.count, MAX_MSG_LINES);
+                if (pagerChatCursorRow > 0) {
+                    pagerChatCursorRow--;
+                } else {
+                    ch.scrollOff = max(0, ch.scrollOff - 1);
+                }
+                int visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
+                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, visibleRows - 1));
+                dirtyChat = true;
+                return;
+            }
+#endif
+            int step = 3;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+            if (pagerWheelChatScrollMode) step = 1;
+#endif
+            ch.scrollOff = max(0, ch.scrollOff - step);
             dirtyChat = true;
         }
 

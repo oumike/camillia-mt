@@ -412,7 +412,8 @@ static size_t pbWriteVarint(uint8_t *buf, uint64_t val) {
     return n;
 }
 
-size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t bitfield) {
+size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
+                         uint32_t bitfield, uint32_t replyId) {
     size_t n = 0;
     size_t textLen = strlen(text);
     // field 1 (portnum = TEXT_MESSAGE_APP = 1), varint
@@ -424,6 +425,13 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t
     if (n + textLen > bufLen) return 0;
     memcpy(buf + n, text, textLen);
     n += textLen;
+    // field 7 (reply_id), fixed32
+    if (replyId) {
+        if (n + 5 > bufLen) return 0;
+        buf[n++] = (7 << 3) | 5;
+        memcpy(buf + n, &replyId, 4);
+        n += 4;
+    }
     // field 9 (bitfield), varint — only written when non-zero (e.g. OK_TO_MQTT bit)
     if (bitfield) {
         n += pbWriteVarint(buf + n, (9 << 3) | 0);
@@ -434,8 +442,9 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen, uint32_t
 
 size_t encodeTextMessageUnicast(const char *text,
                                 uint32_t fromNode, uint32_t toNode,
-                                uint8_t *buf, size_t bufLen) {
-    size_t n = encodeTextMessage(text, buf, bufLen, 0);
+                                uint8_t *buf, size_t bufLen,
+                                uint32_t replyId) {
+    size_t n = encodeTextMessage(text, buf, bufLen, 0, replyId);
     if (n == 0) return 0;
     if (n + 10 > bufLen) return 0;
 

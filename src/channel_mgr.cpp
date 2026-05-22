@@ -111,16 +111,16 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 }
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
-                            uint16_t color, uint32_t packetId) {
+                            uint16_t color, uint32_t packetId, bool trackAck) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     int firstLine = _chans[chanIdx].count;
-    _wordWrap(chanIdx, prefix, text, color, packetId);
+    _wordWrap(chanIdx, prefix, text, color, packetId, trackAck);
     if (chanIdx != _active) _chans[chanIdx].unread = true;
     return firstLine;
 }
 
 void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
-                             uint16_t color, uint32_t packetId) {
+                             uint16_t color, uint32_t packetId, bool trackAck) {
     Channel &ch = _chans[chanIdx];
     char line[MSG_CHARS + 1];
     static constexpr int MAX_WRAP_LINES = 64;
@@ -142,7 +142,9 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         } else {
             line[0] = '\0';
         }
-        DisplayLine::AckState ack = packetId ? DisplayLine::PENDING : DisplayLine::NONE;
+        DisplayLine::AckState ack = (packetId && trackAck)
+            ? DisplayLine::PENDING
+            : DisplayLine::NONE;
         _pushLine(chanIdx, ch, line, color, packetId, ack);
         return;
     }
@@ -198,7 +200,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         line[w] = '\0';
 
         bool logicalFirst = (i == 0);
-        DisplayLine::AckState ack = (logicalFirst && packetId)
+        DisplayLine::AckState ack = (logicalFirst && packetId && trackAck)
             ? DisplayLine::PENDING
             : DisplayLine::NONE;
         _pushLine(chanIdx, ch, line, color, packetId, ack);
@@ -413,7 +415,7 @@ bool ChannelMgr::expireAcks() {
 }
 
 bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
-                          int chanIdx) {
+                          int chanIdx, uint32_t replyId) {
     if (!Radio.isReady()) {
         addLiveTxLine("T TXT B NR", TFT_RED);
         return false;
@@ -427,7 +429,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     uint8_t  proto[256], cipher[256];
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
-    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield);
+    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield, replyId);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[txChan];
@@ -487,7 +489,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     }
 
     // Add to display first so ACK updates always have a visible line to target.
-    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId);
+    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true);
 
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
