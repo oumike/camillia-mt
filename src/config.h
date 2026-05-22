@@ -509,6 +509,14 @@
 #define NODE_W           30
 #define DIVIDER_X       104
 #define INPUT_H          18
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#define STATUS_H         28   // top status bar
+#define TAB_H            14   // channel tab bar
+#define MSG_W           205   // reclaim more width from shortname-only node pane
+#define NODE_X          206   // node pane left edge
+#define NODE_W           34   // minimal node pane for shortname-only rows
+#define DIVIDER_X       205   // 1px vertical divider
+#define INPUT_H          42   // touch controls fit better in portrait
 #else
 #define STATUS_H         28   // top status bar
 #define TAB_H            14   // channel tab bar
@@ -533,19 +541,27 @@
 #elif defined(DEVICE_TDECK)
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
-#define MSG_W           245   // reclaim space from side node pane
-#define NODE_X          246   // node pane left edge
-#define NODE_W           74   // trimmed node pane for T-Deck channel view
-#define DIVIDER_X       245   // 1px vertical divider
+#define MSG_W           283   // reclaim most side whitespace from node pane
+#define NODE_X          284   // node pane left edge
+#define NODE_W           36   // compact node pane for shortname-only rows
+#define DIVIDER_X       283   // 1px vertical divider
 #define INPUT_H          37   // input area (typed text + touch nav buttons)
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #define STATUS_H         30   // taller header to avoid overlap with tab row
 #define TAB_H            15   // 1.25x larger channel list tabs for pager readability
-#define MSG_W           385   // give more room to channel content
-#define NODE_X          386   // node pane left edge
-#define NODE_W           94   // slimmer side node pane on 480px display
-#define DIVIDER_X       385   // 1px vertical divider
+#define MSG_W           443   // reclaim most side whitespace from node pane
+#define NODE_X          444   // node pane left edge
+#define NODE_W           36   // compact side node pane for shortname-only rows
+#define DIVIDER_X       443   // 1px vertical divider
 #define INPUT_H          30   // keeps DM composer visible while maximizing chat rows
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#define STATUS_H         32   // top status bar (slightly taller for richer status icons)
+#define TAB_H            14   // channel tab bar (taller for labeled pills)
+#define MSG_W           283   // reclaim most side whitespace from node pane
+#define NODE_X          284   // node pane left edge
+#define NODE_W           36   // compact node pane for shortname-only rows
+#define DIVIDER_X       283   // 1px vertical divider
+#define INPUT_H          37   // input area (typed text + touch nav buttons)
 #else
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)

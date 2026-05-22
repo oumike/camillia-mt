@@ -852,6 +852,16 @@ static bool     nodeListFocused = false;
 static int      nodeListSel     = 0;
 static bool     nodeDetailOpen  = false;
 static uint32_t nodeDetailId    = 0;
+static bool     nodeActionMenuOpen = false;
+static uint32_t nodeActionNodeId = 0;
+static int      nodeActionMenuSel = 0;
+static const char *kNodeActionItems[] = {
+    "Message",
+    "Map",
+    "Traceroute",
+};
+static constexpr int kNodeActionCount =
+    (int)(sizeof(kNodeActionItems) / sizeof(kNodeActionItems[0]));
 
 // ── View navigation helpers ───────────────────────────────────
 static bool isViewNavigable(int v) {
@@ -1043,6 +1053,9 @@ static void goToView(int v) {
     clearPanelCloseRect();
     nodeListFocused = false;
     nodeDetailOpen  = false;
+    nodeActionMenuOpen = false;
+    nodeActionNodeId = 0;
+    nodeActionMenuSel = 0;
     dmConvOpen      = false;   // reset DM sub-state on any navigation
     dmPickerOpen    = false;
     dmListSel       = 0;
@@ -1490,7 +1503,19 @@ static void drawBattery() {
         total = calcTotal();
     }
 
-    int GX = NODE_X + (NODE_W - total) / 2;
+    int laneX = NODE_X;
+    int laneW = NODE_W;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Keep pager status icons in their legacy right-edge lane so narrowing the
+    // channel node pane does not push glyphs off-screen.
+    static constexpr int kPagerStatusIconLaneW = 58;
+    static constexpr int kPagerStatusRightPad = 3;
+    laneW = min(kPagerStatusIconLaneW, LCD_W);
+    laneX = max(0, LCD_W - laneW - kPagerStatusRightPad);
+#endif
+
+    int GX = laneX + (laneW - total) / 2;
+    if (GX < 0) GX = 0;
     int WX = GX + gpsW + gap;
     int BX = WX + wifiW + gap;
     int NX = BX + barBodyW;
@@ -1616,7 +1641,13 @@ static void drawStatus() {
     int timeW = lcd.textWidth(timeBuf);
     int timeX = max(0, (LCD_W - timeW) / 2);
     int timeRight = timeX + timeW;
-    int statusRightLimit = NODE_X - header.statusTimeRightPad;
+    int statusIconLaneX = NODE_X;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    static constexpr int kPagerStatusIconLaneW = 58;
+    static constexpr int kPagerStatusRightPad = 3;
+    statusIconLaneX = max(0, LCD_W - min(kPagerStatusIconLaneW, LCD_W) - kPagerStatusRightPad);
+#endif
+    int statusRightLimit = statusIconLaneX - header.statusTimeRightPad;
     if (timeRight > statusRightLimit) {
         timeX = max(0, statusRightLimit - timeW);
     }
@@ -1806,23 +1837,6 @@ static void drawChat() {
 
     int active = Channels.activeIdx();
 
-    auto txStatusSymbol = [](const DisplayLine *dl) -> const char * {
-        if (!dl || !dl->packetId) return nullptr;
-        if (dl->text[0] == ' ' && dl->text[1] == ' ') return nullptr;
-        switch (dl->ack) {
-            case DisplayLine::ACKED:
-            case DisplayLine::ACKED_RELAY:
-                return "o";
-            case DisplayLine::TX_FAILED:
-                return "-";
-            case DisplayLine::PENDING:
-            case DisplayLine::NAKED:
-            case DisplayLine::NONE:
-            default:
-                return "...";
-        }
-    };
-
     for (int row = 0; row < VISIBLE_LINES; row++) {
         const DisplayLine *dl = Channels.getLine(active, row);
         int y = chatInnerY + row * LINE_H;
@@ -1875,14 +1889,7 @@ static void drawChat() {
         }
 
         lcd.setTextColor(col, rowBg);
-        const char *sym = txStatusSymbol(dl);
-        if (sym) {
-            char rendered[MSG_CHARS + 8];
-            snprintf(rendered, sizeof(rendered), "%-3s %s", sym, dl->text);
-            drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, rendered);
-        } else {
-            drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, dl->text);
-        }
+        drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, dl->text);
     }
 
     // Scroll indicator: show when newer lines exist above the visible window.
@@ -3028,7 +3035,12 @@ static void drawNodesPanel() {
 
             bool sel = (idx == nodesListSel);
             uint16_t bg = sel ? COL_SELECT_BG : rowBg;
-            if (sel) lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+            if (sel) {
+                lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+                lcd.drawRect(listX + 1, y, listW - 2, rowH, COL_TEXT_ON_ACCENT);
+                int midY = y + rowH / 2;
+                lcd.fillTriangle(listX + 3, midY, listX + 7, y + 2, listX + 7, y + rowH - 3, COL_TEXT_ON_ACCENT);
+            }
 
             bool hasLocation = false;
             float lat = 0.0f, lon = 0.0f;
@@ -3036,7 +3048,7 @@ static void drawNodesPanel() {
             const char *sn = n->shortName[0] ? n->shortName : "----";
             uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
             lcd.setTextColor(fg, bg);
-            drawClippedText(listX + 3, y + 1, listW - 6, sn);
+            drawClippedText(listX + (sel ? 9 : 3), y + 1, listW - (sel ? 12 : 6), sn);
         }
     }
 
@@ -3069,6 +3081,44 @@ static void drawNodesPanel() {
         setNodesControlRect(NODES_CTL_DOWN, downX, btnY, btnW, TOUCH_BTN_H);
     }
 
+    if (nodeActionMenuOpen) {
+        int popW = min(160, max(104, detailW - 8));
+        int popH = 28 + kNodeActionCount * LINE_H;
+        int popX = detailX + max(2, (detailW - popW) / 2);
+        int popY = contentY + max(2, (contentH - popH) / 2);
+
+        drawPanelFrame(popX, popY, popW, popH, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+
+        NodeEntry *menuNode = Nodes.find(nodeActionNodeId);
+        const char *menuName = (menuNode && menuNode->longName[0]) ? menuNode->longName
+                       : (menuNode && menuNode->shortName[0]) ? menuNode->shortName
+                       : "----";
+        char title[96];
+        snprintf(title, sizeof(title), "%s - Actions", menuName);
+
+        lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+        drawClippedText(popX + 4, popY + 2, popW - 8, title);
+
+        int itemY = popY + 14;
+        for (int i = 0; i < kNodeActionCount; i++) {
+            bool sel = (i == nodeActionMenuSel);
+            uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
+            uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
+            int iy = itemY + i * LINE_H;
+            lcd.fillRect(popX + 2, iy, popW - 4, LINE_H, itemBg);
+            if (sel) {
+                lcd.drawRect(popX + 2, iy, popW - 4, LINE_H, COL_TEXT_ON_ACCENT);
+                int midY = iy + LINE_H / 2;
+                lcd.fillTriangle(popX + 4, midY,
+                                 popX + 8, iy + 2,
+                                 popX + 8, iy + LINE_H - 3,
+                                 COL_TEXT_ON_ACCENT);
+            }
+            lcd.setTextColor(itemFg, itemBg);
+            drawClippedText(popX + (sel ? 10 : 5), iy + 1, popW - (sel ? 15 : 10), kNodeActionItems[i]);
+        }
+    }
+
     lcd.setFont(UI_BODY_FONT);
     dirtyChat = downloadedAnyTile;
 }
@@ -3099,7 +3149,7 @@ static void drawNodes() {
         if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, bg);
 
         char r[32];
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
         snprintf(r, sizeof(r), "%s", n->shortName[0] ? n->shortName : "----");
     #else
         if (n->hasTelemetry && n->battPct > 0)
@@ -3113,6 +3163,45 @@ static void drawNodes() {
         lcd.setTextColor(col, bg);
         drawClippedText(NODE_X + 2, y + 1, NODE_W - 4, r);
     }
+
+    if (nodeActionMenuOpen) {
+        int mw = min(150, max(96, MSG_W - 12));
+        int mh = 28 + kNodeActionCount * LINE_H;
+        int mx = max(4, DIVIDER_X - mw - 6);
+        int my = CHAT_Y + max(2, (CHAT_H - mh) / 2);
+
+        drawPanelFrame(mx, my, mw, mh, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+
+        NodeEntry *menuNode = Nodes.find(nodeActionNodeId);
+        const char *menuName = (menuNode && menuNode->longName[0]) ? menuNode->longName
+                       : (menuNode && menuNode->shortName[0]) ? menuNode->shortName
+                       : "----";
+        char title[96];
+        snprintf(title, sizeof(title), "%s - Actions", menuName);
+
+        lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+        drawClippedText(mx + 4, my + 2, mw - 8, title);
+
+        int itemY = my + 14;
+        for (int i = 0; i < kNodeActionCount; i++) {
+            bool sel = (i == nodeActionMenuSel);
+            uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
+            uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
+            int iy = itemY + i * LINE_H;
+            lcd.fillRect(mx + 2, iy, mw - 4, LINE_H, itemBg);
+            if (sel) {
+                lcd.drawRect(mx + 2, iy, mw - 4, LINE_H, COL_TEXT_ON_ACCENT);
+                int midY = iy + LINE_H / 2;
+                lcd.fillTriangle(mx + 4, midY,
+                                 mx + 8, iy + 2,
+                                 mx + 8, iy + LINE_H - 3,
+                                 COL_TEXT_ON_ACCENT);
+            }
+            lcd.setTextColor(itemFg, itemBg);
+            drawClippedText(mx + (sel ? 10 : 5), iy + 1, mw - (sel ? 15 : 10), kNodeActionItems[i]);
+        }
+    }
+
     lcd.setFont(UI_BODY_FONT);
     dirtyNodes = false;
 }
@@ -4808,22 +4897,24 @@ static void drawInput() {
         }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-        if (activeView >= 0 && activeView < MESH_CHANNELS && composerY >= 0) {
+        if (activeView >= 0 && activeView < MESH_CHANNELS
+            && composerY >= 0
+            && pagerReplyRefActive
+            && pagerReplyRefText[0]
+            && pagerReplyRefPacketId) {
             const int refH = lcd.fontHeight() + 4;
             const int refY = max(CHAT_Y + 1, composerY - refH);
             lcd.fillRect(0, refY, LCD_W, refH, COL_INPUT_BG);
             lcd.drawFastHLine(0, refY, LCD_W, COL_DIVIDER);
             lcd.drawFastHLine(0, refY + refH - 1, LCD_W, COL_DIVIDER_HI);
-            if (pagerReplyRefActive && pagerReplyRefText[0] && pagerReplyRefPacketId) {
-                lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-                lcd.drawString("RE:", 2, refY + max(0, (refH - lcd.fontHeight()) / 2));
-                lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
-                int refTextX = 2 + lcd.textWidth("RE:") + 3;
-                drawClippedText(refTextX,
-                                refY + max(0, (refH - lcd.fontHeight()) / 2),
-                                LCD_W - refTextX - 2,
-                                pagerReplyRefText);
-            }
+            lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
+            lcd.drawString("RE:", 2, refY + max(0, (refH - lcd.fontHeight()) / 2));
+            lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
+            int refTextX = 2 + lcd.textWidth("RE:") + 3;
+            drawClippedText(refTextX,
+                            refY + max(0, (refH - lcd.fontHeight()) / 2),
+                            LCD_W - refTextX - 2,
+                            pagerReplyRefText);
         }
 #endif
 
@@ -5802,6 +5893,9 @@ static void handleRx(MeshPacket pkt) {
         strncpy(tm.text, (const char *)pkt.payload,
                 min(pkt.payloadLen, sizeof(tm.text) - 1));
         tm.text[min(pkt.payloadLen, sizeof(tm.text) - 1)] = '\0';
+        for (size_t i = 0; tm.text[i]; ++i) {
+            if (tm.text[i] == '\n' || tm.text[i] == '\r') tm.text[i] = ' ';
+        }
         if (debugMessagesEnabled()) {
             Serial.printf("[rx] text: \"%s\"\n", tm.text);
         }
@@ -6266,6 +6360,35 @@ static void handleKey(char k) {
     }
 #endif
 
+    if (nodeActionMenuOpen) {
+        if (k == KEY_ESCAPE || k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD || k == KEY_NODE_FOCUS) {
+            nodeActionMenuOpen = false;
+            nodeActionNodeId = 0;
+            nodeActionMenuSel = 0;
+            dirtyChat = dirtyNodes = dirtyInput = true;
+            return;
+        }
+        if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+            if (kNodeActionCount > 1) {
+                int step = (k == KEY_SCROLL_UP) ? -1 : 1;
+                nodeActionMenuSel = (nodeActionMenuSel + step + kNodeActionCount) % kNodeActionCount;
+                dirtyChat = dirtyNodes = true;
+            }
+            return;
+        }
+        if (k == KEY_ENTER || k == KEY_ROLLER) {
+            // Preview-only action menu: selecting Traceroute currently just closes.
+            nodeActionMenuOpen = false;
+            nodeActionNodeId = 0;
+            nodeActionMenuSel = 0;
+            dirtyChat = dirtyNodes = dirtyInput = true;
+            return;
+        }
+        if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN || k == KEY_TAB) {
+            return;
+        }
+    }
+
     if (k == KEY_ESCAPE && activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen && dmDeleteConfirm) {
         clearDmDeleteConfirm();
         dirtyChat = true;
@@ -6336,6 +6459,13 @@ static void handleKey(char k) {
             clearDmDeleteConfirm();
             if (dmPickerOpen) { dmPickerOpen = false; dirtyChat = true; }
             else if (dmConvOpen) { dmConvOpen = false; dirtyChat = dirtyInput = true; }
+            return;
+        }
+        if (nodeActionMenuOpen) {
+            nodeActionMenuOpen = false;
+            nodeActionNodeId = 0;
+            nodeActionMenuSel = 0;
+            dirtyNodes = true;
             return;
         }
         if (nodeDetailOpen) {
@@ -6489,7 +6619,12 @@ static void handleKey(char k) {
         }
         if (nodeListFocused) {
             NodeEntry *n = Nodes.getByRank(nodeListSel);
-            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+            if (n) {
+                nodeActionNodeId = n->nodeId;
+                nodeActionMenuOpen = true;
+                nodeActionMenuSel = 0;
+                dirtyChat = dirtyNodes = dirtyInput = true;
+            }
             return;
         }
         if (activeView == VIEW_MAP) {
@@ -6498,6 +6633,12 @@ static void handleKey(char k) {
             return;
         }
         if (activeView == VIEW_NODES) {
+            NodeEntry *n = nodesVisibleNodeByIndex(nodesListSel);
+            if (n) {
+                nodeActionNodeId = n->nodeId;
+                nodeActionMenuOpen = true;
+                nodeActionMenuSel = 0;
+            }
             dirtyChat = true;
             return;
         }
@@ -6732,7 +6873,20 @@ static void handleKey(char k) {
             dirtyChat = dirtyNodes = dirtyInput = true;
         } else if (nodeListFocused && k == KEY_ROLLER) {
             NodeEntry *n = Nodes.getByRank(nodeListSel);
-            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+            if (n) {
+                nodeActionNodeId = n->nodeId;
+                nodeActionMenuOpen = true;
+                nodeActionMenuSel = 0;
+                dirtyChat = dirtyNodes = dirtyInput = true;
+            }
+        } else if (activeView == VIEW_NODES && k == KEY_ROLLER) {
+            NodeEntry *n = nodesVisibleNodeByIndex(nodesListSel);
+            if (n) {
+                nodeActionNodeId = n->nodeId;
+                nodeActionMenuOpen = true;
+                nodeActionMenuSel = 0;
+            }
+            dirtyChat = true;
         } else if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
             activateSettingsSelection();
         } else if (activeView != VIEW_SETTINGS || settingsSel == 0) {
@@ -7758,6 +7912,7 @@ void loop() {
     if (screenAsleep) return;
 
     if (softKbVisible && (dirtyChat || dirtyNodes)) dirtyInput = true;
+    if (nodeActionMenuOpen) dirtyNodes = true;
 
     if (dirtyStatus)  drawStatus();
     if (dirtyTabs)    drawTabs();
