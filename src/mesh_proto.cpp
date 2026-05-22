@@ -598,6 +598,28 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
     return n;
 }
 
+size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
+    // Empty RouteDiscovery payload is valid for a traceroute request.
+    const size_t routePayloadLen = 0;
+    size_t n = 0;
+
+    // Data.portnum = TRACEROUTE_APP
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, TRACEROUTE_APP);
+
+    // Data.payload = empty RouteDiscovery
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, routePayloadLen);
+
+    if (wantResponse) {
+        n += pbWriteVarint(buf + n, (3 << 3) | 0);
+        n += pbWriteVarint(buf + n, 1);
+    }
+
+    if (n > bufLen) return 0;
+    return n;
+}
+
 const char *portnumName(uint32_t p) {
     switch (p) {
         case TEXT_MESSAGE_APP:  return "TEXT";
@@ -605,6 +627,7 @@ const char *portnumName(uint32_t p) {
         case NODEINFO_APP:      return "NODEINFO";
         case ROUTING_APP:       return "ROUTING";
         case TELEMETRY_APP:     return "TELEMETRY";
+        case TRACEROUTE_APP:    return "TRACEROUTE";
         case NEIGHBORINFO_APP:  return "NEIGHBORINFO";
         default:                return "UNKNOWN";
     }

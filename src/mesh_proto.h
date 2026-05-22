@@ -179,5 +179,9 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
                      uint8_t *buf, size_t bufLen);
 
+// Encode a TRACEROUTE_APP Data message containing an empty RouteDiscovery
+// payload. wantResponse should stay true for request packets.
+size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = true);
+
 // ── Port name helper ──────────────────────────────────────────
 const char *portnumName(uint32_t p);

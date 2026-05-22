@@ -152,6 +152,8 @@ static bool panelCloseVisible = false;
 static PanelHitRect panelCloseRect = {0, 0, 0, 0};
 static bool dmNewVisible = false;
 static PanelHitRect dmNewRect = {0, 0, 0, 0};
+static bool tracerouteCloseVisible = false;
+static PanelHitRect tracerouteCloseRect = {0, 0, 0, 0};
 
 enum MapControlAction {
     MAP_CTL_ZOOM_IN = 0,
@@ -225,6 +227,8 @@ static void clearPanelCloseRect() {
     panelCloseRect = {0, 0, 0, 0};
     dmNewVisible = false;
     dmNewRect = {0, 0, 0, 0};
+    tracerouteCloseVisible = false;
+    tracerouteCloseRect = {0, 0, 0, 0};
     for (int i = 0; i < MAP_CTL_COUNT; i++) {
         mapCtlVisible[i] = false;
         mapCtlRect[i] = {0, 0, 0, 0};
@@ -288,6 +292,18 @@ static void closePanelToChannel();
 static void mapClampViewport();
 static int mapVisibleNodeCount();
 static NodeEntry *mapVisibleNodeByIndex(int idx);
+static bool mapEnsureFrozenContainsNode(uint32_t nodeId);
+static bool mapSelectNodeById(uint32_t nodeId);
+static bool mapCenterOnSelectedNode();
+static int nodeActionVisibleCount(uint32_t nodeId);
+static int nodeActionVisibleToActionIndex(uint32_t nodeId, int visibleIdx);
+static const char *nodeActionLabel(int actionIdx);
+static void addLiveLine(const char *text, uint16_t color);
+static bool tracerouteStart(uint32_t nodeId);
+static void tracerouteClose();
+static void traceroutePollTimeout(uint32_t nowMs);
+static bool tracerouteHandleResponse(const MeshPacket &pkt);
+static void drawTraceroutePopup();
 static int nodesVisibleNodeCount();
 static NodeEntry *nodesVisibleNodeByIndex(int idx);
 static bool nodesPanelCanDownloadTiles();
@@ -860,8 +876,25 @@ static const char *kNodeActionItems[] = {
     "Map",
     "Traceroute",
 };
+static constexpr int kNodeActionMessageIndex = 0;
+static constexpr int kNodeActionMapIndex = 1;
+static constexpr int kNodeActionTracerouteIndex = 2;
 static constexpr int kNodeActionCount =
     (int)(sizeof(kNodeActionItems) / sizeof(kNodeActionItems[0]));
+
+enum TracerouteUiState {
+    TRACEROUTE_UI_IDLE = 0,
+    TRACEROUTE_UI_RUNNING,
+    TRACEROUTE_UI_RESULT,
+};
+
+static TracerouteUiState tracerouteUiState = TRACEROUTE_UI_IDLE;
+static uint32_t tracerouteTargetNodeId = 0;
+static uint32_t tracerouteRequestId = 0;
+static uint32_t tracerouteStartedMs = 0;
+static char tracerouteTargetName[40] = {0};
+static char tracerouteResultText[512] = {0};
+static const uint32_t TRACEROUTE_TIMEOUT_MS = 30000UL;
 
 // ── View navigation helpers ───────────────────────────────────
 static bool isViewNavigable(int v) {
@@ -1107,17 +1140,10 @@ static void goToView(int v) {
         }
     }
     if (v == VIEW_MAP) {
-        if (prev != VIEW_MAP) {
-            mapFrozenNodeCount = 0;
-            int cnt = Nodes.count();
-            for (int i = 0; i < cnt && mapFrozenNodeCount < MAX_NODES; i++) {
-                NodeEntry *n = Nodes.getByRank(i);
-                if (!n) continue;
-                mapFrozenNodeIds[mapFrozenNodeCount++] = n->nodeId;
-            }
-            mapNodeFreezeActive = true;
-        }
-        mapsListSel = constrain(mapsListSel, 0, max(0, mapNodeFreezeActive ? (mapFrozenNodeCount - 1) : (Nodes.count() - 1)));
+        // Keep map list live so newly-heard nodes/positions appear immediately.
+        mapNodeFreezeActive = false;
+        mapFrozenNodeCount = 0;
+        mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
     } else if (prev == VIEW_MAP) {
         mapNodeFreezeActive = false;
         mapFrozenNodeCount = 0;
@@ -2241,6 +2267,285 @@ static bool mapExtractNodeCoords(const NodeEntry *n, float &lat, float &lon) {
     return true;
 }
 
+static bool nodeActionCanMap(uint32_t nodeId) {
+    NodeEntry *n = Nodes.find(nodeId);
+    if (!n) return false;
+    float lat = 0.0f;
+    float lon = 0.0f;
+    return mapExtractNodeCoords(n, lat, lon);
+}
+
+static int nodeActionVisibleCount(uint32_t nodeId) {
+    int cnt = 0;
+    for (int actionIdx = 0; actionIdx < kNodeActionCount; actionIdx++) {
+        if (actionIdx == kNodeActionMapIndex && !nodeActionCanMap(nodeId)) continue;
+        cnt++;
+    }
+    return cnt;
+}
+
+static int nodeActionVisibleToActionIndex(uint32_t nodeId, int visibleIdx) {
+    if (visibleIdx < 0) return -1;
+    int vis = 0;
+    for (int actionIdx = 0; actionIdx < kNodeActionCount; actionIdx++) {
+        if (actionIdx == kNodeActionMapIndex && !nodeActionCanMap(nodeId)) continue;
+        if (vis == visibleIdx) return actionIdx;
+        vis++;
+    }
+    return -1;
+}
+
+static const char *nodeActionLabel(int actionIdx) {
+    if (actionIdx < 0 || actionIdx >= kNodeActionCount) return "";
+    return kNodeActionItems[actionIdx];
+}
+
+static const char *tracerouteNodeName(uint32_t nodeId, char *buf, size_t bufLen) {
+    if (!buf || bufLen == 0) return "";
+    if (nodeId == 0xFFFFFFFF) {
+        snprintf(buf, bufLen, "?");
+        return buf;
+    }
+
+    if (nodeId == myNodeId) {
+        if (gCfg.nodeLong[0]) return gCfg.nodeLong;
+        if (gCfg.nodeShort[0]) return gCfg.nodeShort;
+    }
+
+    NodeEntry *n = Nodes.find(nodeId);
+    if (n) {
+        if (n->longName[0]) return n->longName;
+        if (n->shortName[0]) return n->shortName;
+    }
+
+    snprintf(buf, bufLen, "!%08X", nodeId);
+    return buf;
+}
+
+static size_t traceroutePbSkip(const uint8_t *buf, size_t len, size_t i, int wtype) {
+    if (wtype == 0) {
+        uint64_t v;
+        return pbReadVarint(buf, len, i, v);
+    }
+    if (wtype == 1) return (i + 8 <= len) ? (i + 8) : 0;
+    if (wtype == 5) return (i + 4 <= len) ? (i + 4) : 0;
+    if (wtype == 2) {
+        uint64_t sz;
+        size_t j = pbReadVarint(buf, len, i, sz);
+        if (!j || j + sz > len) return 0;
+        return j + sz;
+    }
+    return 0;
+}
+
+struct TracerouteDecoded {
+    uint32_t route[16];
+    int routeCount;
+    int32_t snrTowards[16];
+    int snrTowardsCount;
+    uint32_t routeBack[16];
+    int routeBackCount;
+    int32_t snrBack[16];
+    int snrBackCount;
+};
+
+static bool decodeTraceroutePayload(const uint8_t *buf, size_t len, TracerouteDecoded &out) {
+    out.routeCount = 0;
+    out.snrTowardsCount = 0;
+    out.routeBackCount = 0;
+    out.snrBackCount = 0;
+
+    size_t i = 0;
+    while (i < len) {
+        uint64_t tag;
+        i = pbReadVarint(buf, len, i, tag);
+        if (!i) return false;
+
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint32_t wt = (uint32_t)(tag & 7);
+
+        if ((field == 1 || field == 3) && wt == 5) {
+            if (i + 4 > len) return false;
+            uint32_t v = 0;
+            memcpy(&v, buf + i, 4);
+            i += 4;
+            if (field == 1) {
+                if (out.routeCount < (int)(sizeof(out.route) / sizeof(out.route[0]))) {
+                    out.route[out.routeCount++] = v;
+                }
+            } else {
+                if (out.routeBackCount < (int)(sizeof(out.routeBack) / sizeof(out.routeBack[0]))) {
+                    out.routeBack[out.routeBackCount++] = v;
+                }
+            }
+            continue;
+        }
+
+        if ((field == 2 || field == 4) && wt == 0) {
+            uint64_t vv = 0;
+            i = pbReadVarint(buf, len, i, vv);
+            if (!i) return false;
+            int32_t sval = (int32_t)(uint32_t)vv;
+            if (field == 2) {
+                if (out.snrTowardsCount < (int)(sizeof(out.snrTowards) / sizeof(out.snrTowards[0]))) {
+                    out.snrTowards[out.snrTowardsCount++] = sval;
+                }
+            } else {
+                if (out.snrBackCount < (int)(sizeof(out.snrBack) / sizeof(out.snrBack[0]))) {
+                    out.snrBack[out.snrBackCount++] = sval;
+                }
+            }
+            continue;
+        }
+
+        i = traceroutePbSkip(buf, len, i, wt);
+        if (!i) return false;
+    }
+
+    return true;
+}
+
+static void tracerouteSetResultText(const String &result) {
+    strncpy(tracerouteResultText, result.c_str(), sizeof(tracerouteResultText) - 1);
+    tracerouteResultText[sizeof(tracerouteResultText) - 1] = '\0';
+    tracerouteUiState = TRACEROUTE_UI_RESULT;
+    tracerouteRequestId = 0;
+    dirtyChat = dirtyNodes = dirtyInput = true;
+}
+
+static void tracerouteClose() {
+    tracerouteUiState = TRACEROUTE_UI_IDLE;
+    tracerouteTargetNodeId = 0;
+    tracerouteRequestId = 0;
+    tracerouteStartedMs = 0;
+    tracerouteTargetName[0] = '\0';
+    tracerouteResultText[0] = '\0';
+    dirtyChat = dirtyNodes = dirtyInput = true;
+}
+
+static bool tracerouteStart(uint32_t nodeId) {
+    if (nodeId == 0 || nodeId == 0xFFFFFFFF) return false;
+    if (tracerouteUiState == TRACEROUTE_UI_RUNNING) return false;
+
+    uint8_t proto[48] = {0};
+    uint8_t cipher[64] = {0};
+    size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true);
+    if (protoLen == 0) {
+        tracerouteSetResultText("No results");
+        return false;
+    }
+
+    const ChannelKey &ck = CHANNEL_KEYS[0];
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+        tracerouteSetResultText("No results");
+        return false;
+    }
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)] = {0};
+    MeshHdr hdr = {};
+    hdr.to = nodeId;
+    hdr.from = myNodeId;
+    hdr.id = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags = (1 << 3) |
+                (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                ((uint8_t)(MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    {
+        char dst[16];
+        liveNodeLabel(nodeId, dst, sizeof(dst));
+        char live[64];
+        snprintf(live, sizeof(live), "T TRC U %s %s", dst, ok ? "OK" : "ER");
+        addLiveLine(live, ok ? TFT_WHITE : TFT_RED);
+    }
+
+    if (!ok) {
+        tracerouteSetResultText("No results");
+        return false;
+    }
+
+    char nameBuf[24];
+    const char *targetName = tracerouteNodeName(nodeId, nameBuf, sizeof(nameBuf));
+    strncpy(tracerouteTargetName, targetName, sizeof(tracerouteTargetName) - 1);
+    tracerouteTargetName[sizeof(tracerouteTargetName) - 1] = '\0';
+    tracerouteTargetNodeId = nodeId;
+    tracerouteRequestId = packetId;
+    tracerouteStartedMs = millis();
+    tracerouteUiState = TRACEROUTE_UI_RUNNING;
+    tracerouteResultText[0] = '\0';
+    dirtyChat = dirtyNodes = dirtyInput = true;
+    return true;
+}
+
+static void traceroutePollTimeout(uint32_t nowMs) {
+    if (tracerouteUiState != TRACEROUTE_UI_RUNNING) return;
+    if ((nowMs - tracerouteStartedMs) < TRACEROUTE_TIMEOUT_MS) return;
+    tracerouteSetResultText("No results");
+}
+
+static bool tracerouteHandleResponse(const MeshPacket &pkt) {
+    if (tracerouteUiState != TRACEROUTE_UI_RUNNING) return false;
+    if (pkt.portnum != TRACEROUTE_APP) return false;
+    if (!tracerouteRequestId || pkt.requestId != tracerouteRequestId) return false;
+    if (tracerouteTargetNodeId && pkt.hdr.from != tracerouteTargetNodeId) return false;
+
+    TracerouteDecoded tr = {};
+    if (!decodeTraceroutePayload(pkt.payload, pkt.payloadLen, tr)) {
+        tracerouteSetResultText("No results");
+        return true;
+    }
+
+    String result;
+    result.reserve(480);
+    char nameBuf[48];
+
+    result += "Forward: ";
+    result += tracerouteNodeName(myNodeId, nameBuf, sizeof(nameBuf));
+    for (int i = 0; i < tr.routeCount; i++) {
+        result += " > ";
+        result += tracerouteNodeName(tr.route[i], nameBuf, sizeof(nameBuf));
+    }
+    result += " > ";
+    result += tracerouteNodeName(tracerouteTargetNodeId, nameBuf, sizeof(nameBuf));
+
+    result += "\nBack: ";
+    result += tracerouteNodeName(tracerouteTargetNodeId, nameBuf, sizeof(nameBuf));
+    for (int i = tr.routeBackCount - 1; i >= 0; i--) {
+        result += " > ";
+        result += tracerouteNodeName(tr.routeBack[i], nameBuf, sizeof(nameBuf));
+    }
+    result += " > ";
+    result += tracerouteNodeName(myNodeId, nameBuf, sizeof(nameBuf));
+
+    if (tr.snrTowardsCount > 0) {
+        result += "\nSNR>: ";
+        for (int i = 0; i < tr.snrTowardsCount; i++) {
+            if (i) result += ", ";
+            float db = tr.snrTowards[i] / 4.0f;
+            result += String(db, 1);
+            result += "dB";
+        }
+    }
+
+    if (tr.snrBackCount > 0) {
+        result += "\nSNR<: ";
+        for (int i = 0; i < tr.snrBackCount; i++) {
+            if (i) result += ", ";
+            float db = tr.snrBack[i] / 4.0f;
+            result += String(db, 1);
+            result += "dB";
+        }
+    }
+
+    tracerouteSetResultText(result);
+    return true;
+}
+
 static bool mapIsApMode() {
     wifi_mode_t mode = WiFi.getMode();
     bool ap = (mode == WIFI_AP);
@@ -2613,7 +2918,15 @@ static void drawMapPanel() {
 
             bool sel = (idx == mapsListSel);
             uint16_t bg = sel ? COL_SELECT_BG : rowBg;
-            if (sel) lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+            if (sel) {
+                lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+                lcd.drawRect(listX + 1, y, listW - 2, rowH, COL_TEXT_ON_ACCENT);
+                int midY = y + rowH / 2;
+                lcd.fillTriangle(listX + 3, midY,
+                                 listX + 7, y + 2,
+                                 listX + 7, y + rowH - 3,
+                                 COL_TEXT_ON_ACCENT);
+            }
 
             bool hasLocation = false;
             float lat = 0.0f, lon = 0.0f;
@@ -2621,7 +2934,7 @@ static void drawMapPanel() {
             const char *sn = n->shortName[0] ? n->shortName : "----";
             uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
             lcd.setTextColor(fg, bg);
-            drawClippedText(listX + 3, y + 1, listW - 6, sn);
+            drawClippedText(listX + (sel ? 9 : 3), y + 1, listW - (sel ? 12 : 6), sn);
         }
     }
 
@@ -3083,7 +3396,9 @@ static void drawNodesPanel() {
 
     if (nodeActionMenuOpen) {
         int popW = min(160, max(104, detailW - 8));
-        int popH = 28 + kNodeActionCount * LINE_H;
+        int visibleCount = max(1, nodeActionVisibleCount(nodeActionNodeId));
+        int selVisibleIdx = constrain(nodeActionMenuSel, 0, visibleCount - 1);
+        int popH = 28 + visibleCount * LINE_H;
         int popX = detailX + max(2, (detailW - popW) / 2);
         int popY = contentY + max(2, (contentH - popH) / 2);
 
@@ -3100,8 +3415,9 @@ static void drawNodesPanel() {
         drawClippedText(popX + 4, popY + 2, popW - 8, title);
 
         int itemY = popY + 14;
-        for (int i = 0; i < kNodeActionCount; i++) {
-            bool sel = (i == nodeActionMenuSel);
+        for (int i = 0; i < visibleCount; i++) {
+            int actionIdx = nodeActionVisibleToActionIndex(nodeActionNodeId, i);
+            bool sel = (i == selVisibleIdx);
             uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
             uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
             int iy = itemY + i * LINE_H;
@@ -3115,7 +3431,7 @@ static void drawNodesPanel() {
                                  COL_TEXT_ON_ACCENT);
             }
             lcd.setTextColor(itemFg, itemBg);
-            drawClippedText(popX + (sel ? 10 : 5), iy + 1, popW - (sel ? 15 : 10), kNodeActionItems[i]);
+            drawClippedText(popX + (sel ? 10 : 5), iy + 1, popW - (sel ? 15 : 10), nodeActionLabel(actionIdx));
         }
     }
 
@@ -3166,7 +3482,9 @@ static void drawNodes() {
 
     if (nodeActionMenuOpen) {
         int mw = min(150, max(96, MSG_W - 12));
-        int mh = 28 + kNodeActionCount * LINE_H;
+        int visibleCount = max(1, nodeActionVisibleCount(nodeActionNodeId));
+        int selVisibleIdx = constrain(nodeActionMenuSel, 0, visibleCount - 1);
+        int mh = 28 + visibleCount * LINE_H;
         int mx = max(4, DIVIDER_X - mw - 6);
         int my = CHAT_Y + max(2, (CHAT_H - mh) / 2);
 
@@ -3183,8 +3501,9 @@ static void drawNodes() {
         drawClippedText(mx + 4, my + 2, mw - 8, title);
 
         int itemY = my + 14;
-        for (int i = 0; i < kNodeActionCount; i++) {
-            bool sel = (i == nodeActionMenuSel);
+        for (int i = 0; i < visibleCount; i++) {
+            int actionIdx = nodeActionVisibleToActionIndex(nodeActionNodeId, i);
+            bool sel = (i == selVisibleIdx);
             uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
             uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
             int iy = itemY + i * LINE_H;
@@ -3198,7 +3517,7 @@ static void drawNodes() {
                                  COL_TEXT_ON_ACCENT);
             }
             lcd.setTextColor(itemFg, itemBg);
-            drawClippedText(mx + (sel ? 10 : 5), iy + 1, mw - (sel ? 15 : 10), kNodeActionItems[i]);
+            drawClippedText(mx + (sel ? 10 : 5), iy + 1, mw - (sel ? 15 : 10), nodeActionLabel(actionIdx));
         }
     }
 
@@ -4126,6 +4445,76 @@ static void drawNodeDetail(const NodeEntry *n) {
     dirtyChat = false;
 }
 
+static void drawTraceroutePopup() {
+    if (tracerouteUiState == TRACEROUTE_UI_IDLE) return;
+
+    const int mw = min(LCD_W - 14, 300);
+    const int mx = (LCD_W - mw) / 2;
+    const int panelH = max(0, LCD_H - CHAT_Y);
+    const int mh = min(max(56, panelH - 8), 132);
+    const int my = CHAT_Y + max(0, (panelH - mh) / 2);
+    const int innerX = mx + 4;
+    const int innerW = mw - 8;
+    tracerouteCloseVisible = false;
+    tracerouteCloseRect = {0, 0, 0, 0};
+
+#if defined(DEVICE_TDECK)
+    const int footerReserve = TOUCH_BTN_H + 6;
+#else
+    const int footerReserve = CHAR_H + 2;
+#endif
+
+    drawPanelFrame(mx, my, mw, mh, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+
+    lcd.fillRect(mx + 1, my + 1, mw - 2, 12, COL_SELECT_BG);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
+    drawClippedText(mx + 4, my + 2, mw - 8, "Traceroute");
+
+    lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+    if (tracerouteUiState == TRACEROUTE_UI_RUNNING) {
+        char line[96];
+        snprintf(line, sizeof(line), "Tracing %s...", tracerouteTargetName[0] ? tracerouteTargetName : "node");
+        drawClippedText(innerX, my + 22, innerW, line);
+    } else {
+        int y = my + 16;
+        char tmp[sizeof(tracerouteResultText)];
+        strncpy(tmp, tracerouteResultText, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        char *save = nullptr;
+        for (char *line = strtok_r(tmp, "\n", &save);
+               line && (y + CHAR_H) < (my + mh - footerReserve - 3);
+             line = strtok_r(nullptr, "\n", &save)) {
+            drawClippedText(innerX, y, innerW, line);
+            y += CHAR_H + 1;
+        }
+        if (!tracerouteResultText[0]) {
+            drawClippedText(innerX, y, innerW, "No results");
+        }
+    }
+
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_STRONG);
+#if defined(DEVICE_TDECK)
+    const int closeW = TOUCH_BTN_W;
+    const int closeH = TOUCH_BTN_H;
+    const int closeX = mx + 3;
+    const int closeY = my + mh - closeH - 3;
+    uint16_t closeFill = lerp565(COL_PANEL_BG, COL_PANEL_ALT, 120);
+    drawSquirclePill(closeX, closeY, closeW, closeH, closeFill, COL_SELECT_ACCENT, false);
+    lcd.setTextColor(COL_TEXT_MAIN, closeFill);
+    int ctw = lcd.textWidth("Close");
+    int ctx = closeX + max(1, (closeW - ctw) / 2);
+    int cty = closeY + max(0, (closeH - CHAR_H) / 2);
+    drawClippedText(ctx, cty, closeW - (ctx - closeX) - 1, "Close");
+    tracerouteCloseVisible = true;
+    tracerouteCloseRect = {closeX, closeY, closeW, closeH};
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    drawClippedText(innerX, my + mh - CHAR_H - 2, innerW, "Esc: Close");
+#else
+    drawClippedText(innerX, my + mh - CHAR_H - 2, innerW, "Sym+Del: Close");
+#endif
+}
+
 static bool isTextInputView() {
     bool dmNeedsInput = (activeView == CHAN_DM && dmConvOpen && !dmPickerOpen);
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
@@ -4534,6 +4923,26 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
     return nullptr;
 }
 
+static bool mapEnsureFrozenContainsNode(uint32_t nodeId) {
+    if (!nodeId) return false;
+    NodeEntry *n = Nodes.find(nodeId);
+    if (!n) return false;
+
+    if (!mapNodeFreezeActive) return true;
+
+    for (int i = 0; i < mapFrozenNodeCount; i++) {
+        if (mapFrozenNodeIds[i] == nodeId) return true;
+    }
+
+    if (mapFrozenNodeCount < MAX_NODES) {
+        mapFrozenNodeIds[mapFrozenNodeCount++] = nodeId;
+    } else if (MAX_NODES > 0) {
+        // Preserve deterministic size while ensuring the chosen node is visible.
+        mapFrozenNodeIds[MAX_NODES - 1] = nodeId;
+    }
+    return true;
+}
+
 static int nodesVisibleNodeCount() {
     if (nodesNodeFreezeActive) return nodesFrozenNodeCount;
     return Nodes.count();
@@ -4657,6 +5066,18 @@ static void mapApplyControl(MapControlAction action) {
 static bool handleTouchTap(int x, int y) {
     if (screenAsleep || nodeDetailOpen) return false;
 
+    if (tracerouteUiState != TRACEROUTE_UI_IDLE) {
+        if (tracerouteCloseVisible
+            && pointInRect(x, y,
+                           tracerouteCloseRect.x,
+                           tracerouteCloseRect.y,
+                           tracerouteCloseRect.w,
+                           tracerouteCloseRect.h)) {
+            tracerouteClose();
+        }
+        return true;
+    }
+
     if (softKeyboardHandleTap(x, y)) return true;
 
     #if !defined(DEVICE_TLORA_PAGER_TFT)
@@ -4730,6 +5151,57 @@ static bool handleTouchTap(int x, int y) {
                             mapCtlRect[i].w, mapCtlRect[i].h)) {
                 mapApplyControl((MapControlAction)i);
                 return true;
+            }
+        }
+
+        const int mx = 0;
+        const int my = CHAT_Y;
+        const int mw = LCD_W;
+        const int mh = panelOverlayBottomY() - my + 1;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        const int mapNavBtnH = 0;
+        const int mapNavBottomPad = 0;
+#else
+        const int mapNavBtnH = 22;
+        const int mapNavBottomPad = 2;
+#endif
+#if defined(DEVICE_TDECK)
+        const int mapLegendReserveH = (CHAR_H + 2);
+#else
+        const int mapLegendReserveH = 0;
+#endif
+        const int titleH = 11;
+        const int ix = mx + 3;
+        const int iw = mw - 6;
+        const int controlsBottom = my + mh - mapLegendReserveH - mapNavBottomPad;
+        const int controlsTop = controlsBottom - mapNavBtnH;
+        const int mapY = my + titleH + 2;
+        const int mapH = max(64, controlsTop - mapY - 2);
+        const int listChars = 5;
+        const int listW = min(58, max(44, listChars * CHAR_W + 12));
+        const int listX = ix + iw - listW;
+        const int listY = mapY;
+        const int listHeaderH = 10;
+        const int rowH = 9;
+        const int rowsVisible = max(1, (mapH - listHeaderH - 1) / rowH);
+        const int listRowsTop = listY + listHeaderH + 1;
+
+        if (x >= (listX + 1) && x < (listX + listW - 1)
+            && y >= listRowsTop && y < (listRowsTop + rowsVisible * rowH)) {
+            int totalNodes = mapVisibleNodeCount();
+            if (totalNodes > 0) {
+                int firstVisible = max(0, mapsListSel - (rowsVisible - 1));
+                int maxFirst = max(0, totalNodes - rowsVisible);
+                if (firstVisible > maxFirst) firstVisible = maxFirst;
+
+                int row = (y - listRowsTop) / rowH;
+                int idx = firstVisible + row;
+                if (idx >= 0 && idx < totalNodes) {
+                    mapsListSel = idx;
+                    mapCenterOnSelectedNode();
+                    dirtyChat = true;
+                    return true;
+                }
             }
         }
     }
@@ -5987,6 +6459,18 @@ static void handleRx(MeshPacket pkt) {
         break;
     }
 
+    case TRACEROUTE_APP: {
+        bool matched = tracerouteHandleResponse(pkt);
+        char who[16];
+        liveNodeLabel(pkt.hdr.from, who, sizeof(who));
+        char live[72];
+        snprintf(live, sizeof(live), "R TRC %s %s",
+                 who, matched ? "OK" : "IGN");
+        addLiveLine(live, matched ? TFT_GREEN : TFT_DARKGREY);
+        if (matched && !dmPickerOpen) dirtyChat = true;
+        break;
+    }
+
     case ROUTING_APP: {
         if (pkt.requestId) {
             // Decode inner Routing proto to check error_reason (field 3, varint)
@@ -6226,6 +6710,19 @@ static void handleKey(char k) {
 
     k = remapCardputerDirectionalKey(k);
 
+    if (tracerouteUiState != TRACEROUTE_UI_IDLE) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (k == KEY_ESCAPE || k == '`' || k == '~') {
+            tracerouteClose();
+        }
+#else
+        if (k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD || k == KEY_ESCAPE) {
+            tracerouteClose();
+        }
+#endif
+        return;
+    }
+
     if (k == KEY_BACKSPACE_HOLD) {
         if (activeView >= 0 && activeView < MESH_CHANNELS
             && (softKbVisible || hwTypingLock || inputLen > 0)) {
@@ -6361,6 +6858,7 @@ static void handleKey(char k) {
 #endif
 
     if (nodeActionMenuOpen) {
+        int visibleCount = max(1, nodeActionVisibleCount(nodeActionNodeId));
         if (k == KEY_ESCAPE || k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD || k == KEY_NODE_FOCUS) {
             nodeActionMenuOpen = false;
             nodeActionNodeId = 0;
@@ -6368,23 +6866,87 @@ static void handleKey(char k) {
             dirtyChat = dirtyNodes = dirtyInput = true;
             return;
         }
+
+#if defined(DEVICE_TDECK)
+        bool nodesMenuContext = (activeView == VIEW_NODES) || nodeListFocused;
+        if (nodesMenuContext && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+            int step = (k == KEY_SCROLL_UP) ? -1 : 1;
+            if (activeView == VIEW_NODES) {
+                int cap = max(0, nodesVisibleNodeCount() - 1);
+                nodesListSel = constrain(nodesListSel + step, 0, cap);
+                NodeEntry *n = nodesVisibleNodeByIndex(nodesListSel);
+                if (n) nodeActionNodeId = n->nodeId;
+                dirtyChat = true;
+            } else if (nodeListFocused) {
+                int cap = max(0, Nodes.count() - 1);
+                nodeListSel = constrain(nodeListSel + step, 0, cap);
+                NodeEntry *n = Nodes.getByRank(nodeListSel);
+                if (n) nodeActionNodeId = n->nodeId;
+            }
+            dirtyNodes = true;
+            return;
+        }
+#endif
+
         if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-            if (kNodeActionCount > 1) {
+            if (visibleCount > 1) {
                 int step = (k == KEY_SCROLL_UP) ? -1 : 1;
-                nodeActionMenuSel = (nodeActionMenuSel + step + kNodeActionCount) % kNodeActionCount;
+                nodeActionMenuSel = (nodeActionMenuSel + step + visibleCount) % visibleCount;
+                dirtyChat = dirtyNodes = true;
+            }
+            return;
+        }
+        if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+            if (visibleCount > 1) {
+                int step = (k == KEY_PREV_CHAN) ? -1 : 1;
+                nodeActionMenuSel = (nodeActionMenuSel + step + visibleCount) % visibleCount;
                 dirtyChat = dirtyNodes = true;
             }
             return;
         }
         if (k == KEY_ENTER || k == KEY_ROLLER) {
-            // Preview-only action menu: selecting Traceroute currently just closes.
+            uint32_t targetNodeId = nodeActionNodeId;
+            int targetVisibleCount = max(1, nodeActionVisibleCount(targetNodeId));
+            int selectedVisibleIdx = constrain(nodeActionMenuSel, 0, targetVisibleCount - 1);
+            int actionIdx = nodeActionVisibleToActionIndex(targetNodeId, selectedVisibleIdx);
             nodeActionMenuOpen = false;
             nodeActionNodeId = 0;
             nodeActionMenuSel = 0;
+
+            if (actionIdx == kNodeActionMessageIndex && targetNodeId) {
+                // Selecting "Message" opens DM panel and jumps directly into
+                // an existing or newly created conversation for this node.
+                goToView(CHAN_DM);
+                NodeEntry *n = Nodes.find(targetNodeId);
+                if (n) openDmWith(n);
+                dirtyChat = dirtyNodes = dirtyInput = true;
+                return;
+            }
+
+            if (actionIdx == kNodeActionMapIndex && targetNodeId) {
+                // Selecting "Map" from node actions jumps directly to map panel
+                // and preserves node selection context.
+                goToView(VIEW_MAP);
+                mapEnsureFrozenContainsNode(targetNodeId);
+                if (mapSelectNodeById(targetNodeId)) {
+                    mapCenterOnSelectedNode();
+                }
+                dirtyChat = dirtyNodes = dirtyInput = true;
+                return;
+            }
+
+            if (actionIdx == kNodeActionTracerouteIndex && targetNodeId) {
+                // Traceroute opens a modal status/result popup and blocks
+                // underlying navigation until dismissed.
+                (void)tracerouteStart(targetNodeId);
+                dirtyChat = dirtyNodes = dirtyInput = true;
+                return;
+            }
+
             dirtyChat = dirtyNodes = dirtyInput = true;
             return;
         }
-        if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN || k == KEY_TAB) {
+        if (k == KEY_TAB) {
             return;
         }
     }
@@ -6628,8 +7190,8 @@ static void handleKey(char k) {
             return;
         }
         if (activeView == VIEW_MAP) {
-            NodeEntry *n = mapVisibleNodeByIndex(mapsListSel);
-            if (n) { nodeDetailId = n->nodeId; nodeDetailOpen = true; dirtyChat = true; }
+            mapCenterOnSelectedNode();
+            dirtyChat = true;
             return;
         }
         if (activeView == VIEW_NODES) {
@@ -6886,6 +7448,9 @@ static void handleKey(char k) {
                 nodeActionMenuOpen = true;
                 nodeActionMenuSel = 0;
             }
+            dirtyChat = true;
+        } else if (activeView == VIEW_MAP && k == KEY_ROLLER) {
+            mapCenterOnSelectedNode();
             dirtyChat = true;
         } else if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
             activateSettingsSelection();
@@ -7908,8 +8473,13 @@ void loop() {
         }
     }
 
+    traceroutePollTimeout(now);
+
     // 7. Redraw dirty zones (skip while screen is off)
     if (screenAsleep) return;
+
+    bool frameNeedsUpdate = dirtyStatus || dirtyTabs || dirtyDivider
+                         || dirtyChat || dirtyNodes || dirtyInput;
 
     if (softKbVisible && (dirtyChat || dirtyNodes)) dirtyInput = true;
     if (nodeActionMenuOpen) dirtyNodes = true;
@@ -7945,5 +8515,9 @@ void loop() {
             if (dirtyNodes) drawNodes();
         }
         if (dirtyInput) drawInput();
+    }
+
+    if (tracerouteUiState != TRACEROUTE_UI_IDLE && frameNeedsUpdate) {
+        drawTraceroutePopup();
     }
 }
