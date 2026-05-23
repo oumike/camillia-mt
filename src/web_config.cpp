@@ -10,6 +10,7 @@
 #include <SD.h>
 #include <math.h>
 #include <ctype.h>
+#include <time.h>
 #include "debug_flags.h"
 #include "gps.h"
 #include "battery_util.h"
@@ -26,6 +27,7 @@ static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
 static WebCfgSaveCb   gOnSave          = nullptr;
+static WebCfgScreenshotPngCb gOnScreenshotPng = nullptr;
 static volatile bool  gAnnounceReq     = false;
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
@@ -47,8 +49,30 @@ static bool isLoggedIn() {
     return cookie.indexOf(needle) >= 0;
 }
 
+static void buildDateTimeStamp(char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+
+    time_t now = time(nullptr);
+    struct tm tmv;
+    if (now > 0 && localtime_r(&now, &tmv)) {
+        snprintf(out, outLen,
+                 "%04d%02d%02d_%02d%02d%02d",
+                 tmv.tm_year + 1900,
+                 tmv.tm_mon + 1,
+                 tmv.tm_mday,
+                 tmv.tm_hour,
+                 tmv.tm_min,
+                 tmv.tm_sec);
+        return;
+    }
+
+    strncpy(out, "19700101_000000", outLen - 1);
+    out[outLen - 1] = '\0';
+}
+
 static void buildExportFileName(const char *shortName, char *out, size_t outLen) {
     char clean[24] = {};
+    char stamp[20] = {};
     size_t j = 0;
     if (shortName) {
         for (size_t i = 0; shortName[i] && j < sizeof(clean) - 1; i++) {
@@ -58,7 +82,24 @@ static void buildExportFileName(const char *shortName, char *out, size_t outLen)
         }
     }
     if (j == 0) strncpy(clean, "node", sizeof(clean) - 1);
-    snprintf(out, outLen, "%s_config.yaml", clean);
+    buildDateTimeStamp(stamp, sizeof(stamp));
+    snprintf(out, outLen, "%s_config_%s.yaml", clean, stamp);
+}
+
+static void buildScreenshotFileName(const char *shortName, char *out, size_t outLen) {
+    char clean[24] = {};
+    char stamp[20] = {};
+    size_t j = 0;
+    if (shortName) {
+        for (size_t i = 0; shortName[i] && j < sizeof(clean) - 1; i++) {
+            unsigned char c = (unsigned char)shortName[i];
+            if (isalnum(c) || c == '_' || c == '-') clean[j++] = (char)c;
+            else if (c == ' ' || c == '.')          clean[j++] = '_';
+        }
+    }
+    if (j == 0) strncpy(clean, "node", sizeof(clean) - 1);
+    buildDateTimeStamp(stamp, sizeof(stamp));
+    snprintf(out, outLen, "%s_screen_%s.png", clean, stamp);
 }
 
 static void redirect(const char *path) {
@@ -419,7 +460,7 @@ static void sendConfigPage(const char *msg = "") {
             "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
             "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Map</button>"
             "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
@@ -924,6 +965,15 @@ static void sendConfigPage(const char *msg = "") {
         " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>";
+
+    html +=
+        "<h3 style='margin-top:1.1em'>Display Capture</h3>"
+        "<p><a href='/screenshot'"
+        " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+        "&#128247; Capture &amp; Download PNG</a></p>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Captures the current on-device screen and downloads it as a PNG file.</p>";
 
     html +=
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
@@ -1508,6 +1558,35 @@ static void handlePostAnnounce() {
     redirectHomeWithFlash("NODEINFO broadcast queued.");
 }
 
+static void handleGetScreenshot() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!gOnScreenshotPng) {
+        server.send(503, "text/plain", "Screenshot capture is unavailable.");
+        return;
+    }
+
+    static const char *kTmpScreenshotPath = "/camillia/web_screenshot.png";
+    if (!gOnScreenshotPng(kTmpScreenshotPath)) {
+        server.send(500, "text/plain", "Screenshot capture failed.");
+        return;
+    }
+
+    File f = SD.open(kTmpScreenshotPath, FILE_READ);
+    if (!f) {
+        server.send(500, "text/plain", "Screenshot file unavailable.");
+        return;
+    }
+
+    char fileName[64];
+    buildScreenshotFileName(gCfg ? gCfg->nodeShort : nullptr, fileName, sizeof(fileName));
+    char cd[128];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("Content-Disposition", cd);
+    server.streamFile(f, "image/png");
+    f.close();
+}
+
 // ── Clear Messages ───────────────────────────────────────────
 
 static void handlePostClearMessages() {
@@ -1564,8 +1643,8 @@ static void handleGetExport() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
     String yaml;
-    char fileName[48];
-    char cd[80];
+    char fileName[64];
+    char cd[128];
     buildExportFileName(gCfg->nodeShort, fileName, sizeof(fileName));
     snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
     cfgToYaml(*gCfg, yaml);
@@ -1635,11 +1714,13 @@ static void handleGetLogout() {
 
 // ── Public API ────────────────────────────────────────────────
 
-bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
+bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
+                 WebCfgScreenshotPngCb onScreenshotPng) {
     if (running) return true;
 
     gCfg    = cfg;
     gOnSave = onSave;
+    gOnScreenshotPng = onScreenshotPng;
     gFlashMsg[0] = '\0';
     gRebootPending = false;
     gRebootAtMs = 0;
@@ -1684,6 +1765,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
         server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
+        server.on("/screenshot", HTTP_GET, handleGetScreenshot);
         server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
         server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
@@ -1721,6 +1803,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
             server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
+            server.on("/screenshot", HTTP_GET, handleGetScreenshot);
             server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
             server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
@@ -1743,6 +1826,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave) {
     server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
+    server.on("/screenshot", HTTP_GET, handleGetScreenshot);
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
     server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
@@ -1766,6 +1850,7 @@ void webCfgEnd() {
     ipBuf[0]    = '\0';
     gCfg        = nullptr;
     gOnSave     = nullptr;
+    gOnScreenshotPng = nullptr;
     running     = false;
     gOnboarding = false;
     Serial.println("[web] stopped");

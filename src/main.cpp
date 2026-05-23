@@ -478,6 +478,277 @@ static void sdRmDir(const char *path) {
     SD.rmdir(path);
 }
 
+static bool sdEnsureParentDirs(const char *path) {
+    if (!path || path[0] != '/') return false;
+    String p(path);
+    int idx = 1;
+    while (idx >= 0) {
+        int slash = p.indexOf('/', idx);
+        if (slash <= 0) break;
+        String dir = p.substring(0, slash);
+        if (dir.length() > 0 && !SD.exists(dir.c_str()) && !SD.mkdir(dir.c_str())) {
+            return false;
+        }
+        idx = slash + 1;
+    }
+    return true;
+}
+
+static bool writeFileBytes(File &f, const uint8_t *data, size_t len) {
+    if (!data && len > 0) return false;
+    return f.write(data, len) == len;
+}
+
+static bool writeBe32(File &f, uint32_t v) {
+    uint8_t b[4] = {
+        (uint8_t)((v >> 24) & 0xFF),
+        (uint8_t)((v >> 16) & 0xFF),
+        (uint8_t)((v >> 8) & 0xFF),
+        (uint8_t)(v & 0xFF),
+    };
+    return writeFileBytes(f, b, sizeof(b));
+}
+
+static uint32_t pngCrc32Update(uint32_t crc, const uint8_t *data, size_t len) {
+    static constexpr uint32_t kPoly = 0xEDB88320u;
+    while (len--) {
+        crc ^= (uint32_t)(*data++);
+        for (uint8_t i = 0; i < 8; i++) {
+            crc = (crc & 1u) ? ((crc >> 1) ^ kPoly) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+
+static void pngAdler32Update(uint32_t &s1, uint32_t &s2, const uint8_t *data, size_t len) {
+    static constexpr uint32_t kMod = 65521u;
+    while (len--) {
+        s1 += (uint32_t)(*data++);
+        if (s1 >= kMod) s1 -= kMod;
+        s2 += s1;
+        if (s2 >= kMod) s2 -= kMod;
+    }
+}
+
+static bool writePngChunk(File &f, const char type[4], const uint8_t *data, uint32_t len) {
+    if (!writeBe32(f, len)) return false;
+    if (!writeFileBytes(f, (const uint8_t *)type, 4)) return false;
+
+    uint32_t crc = 0xFFFFFFFFu;
+    crc = pngCrc32Update(crc, (const uint8_t *)type, 4);
+
+    if (len > 0) {
+        if (!writeFileBytes(f, data, len)) return false;
+        crc = pngCrc32Update(crc, data, len);
+    }
+
+    return writeBe32(f, crc ^ 0xFFFFFFFFu);
+}
+
+static bool captureScreenshotPng(const char *outPath) {
+#if !HAS_SD_CARD
+    (void)outPath;
+    return false;
+#else
+    if (!outPath || !outPath[0]) return false;
+    if (!sdEnsureParentDirs(outPath)) return false;
+
+    SD.remove(outPath);
+    File f = SD.open(outPath, FILE_WRITE);
+    if (!f) return false;
+
+    const int width = lcd.width();
+    const int height = lcd.height();
+    if (width <= 0 || height <= 0 || width > LCD_W || height > LCD_H) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    static uint8_t rowRgb[(LCD_W * 3) + 1];
+    const uint32_t rowBytes = (uint32_t)(1 + width * 3);
+    const uint32_t rawBytes = rowBytes * (uint32_t)height;
+    const uint32_t blockCount = (rawBytes + 65534u) / 65535u;
+    const uint32_t idatLen = 2u + (blockCount * 5u) + rawBytes + 4u;
+
+    static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    if (!writeFileBytes(f, kPngSig, sizeof(kPngSig))) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    uint8_t ihdr[13] = {
+        (uint8_t)((width >> 24) & 0xFF),
+        (uint8_t)((width >> 16) & 0xFF),
+        (uint8_t)((width >> 8) & 0xFF),
+        (uint8_t)(width & 0xFF),
+        (uint8_t)((height >> 24) & 0xFF),
+        (uint8_t)((height >> 16) & 0xFF),
+        (uint8_t)((height >> 8) & 0xFF),
+        (uint8_t)(height & 0xFF),
+        8,  // bit depth
+        2,  // color type: RGB
+        0,  // compression
+        0,  // filter
+        0,  // interlace
+    };
+    if (!writePngChunk(f, "IHDR", ihdr, sizeof(ihdr))) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    if (!writeBe32(f, idatLen) || !writeFileBytes(f, (const uint8_t *)"IDAT", 4)) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    uint32_t idatCrc = 0xFFFFFFFFu;
+    idatCrc = pngCrc32Update(idatCrc, (const uint8_t *)"IDAT", 4);
+
+    const uint8_t zlibHeader[2] = {0x78, 0x01};  // Deflate, no compression
+    if (!writeFileBytes(f, zlibHeader, sizeof(zlibHeader))) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+    idatCrc = pngCrc32Update(idatCrc, zlibHeader, sizeof(zlibHeader));
+
+    uint32_t adlerS1 = 1;
+    uint32_t adlerS2 = 0;
+    uint32_t rawRemaining = rawBytes;
+    uint16_t blockRemaining = 0;
+
+    auto startStoredBlock = [&](void) -> bool {
+        if (rawRemaining == 0) return true;
+        uint16_t blockLen = (uint16_t)min<uint32_t>(rawRemaining, 65535u);
+        uint16_t nlen = (uint16_t)~blockLen;
+        uint8_t hdr[5] = {
+            (uint8_t)((rawRemaining <= 65535u) ? 0x01u : 0x00u),
+            (uint8_t)(blockLen & 0xFF),
+            (uint8_t)((blockLen >> 8) & 0xFF),
+            (uint8_t)(nlen & 0xFF),
+            (uint8_t)((nlen >> 8) & 0xFF),
+        };
+        if (!writeFileBytes(f, hdr, sizeof(hdr))) return false;
+        idatCrc = pngCrc32Update(idatCrc, hdr, sizeof(hdr));
+        blockRemaining = blockLen;
+        return true;
+    };
+
+    if (!startStoredBlock()) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    bool ok = true;
+    for (int y = 0; y < height && ok; y++) {
+        rowRgb[0] = 0;  // PNG filter: None
+        // Use LovyanGFX RGB read conversion so controller byte/order quirks
+        // do not skew screenshot colors.
+        lcd.readRectRGB(0, y, width, 1, rowRgb + 1);
+
+        pngAdler32Update(adlerS1, adlerS2, rowRgb, rowBytes);
+
+        const uint8_t *ptr = rowRgb;
+        uint32_t remain = rowBytes;
+        while (remain > 0) {
+            if (blockRemaining == 0 && !startStoredBlock()) {
+                ok = false;
+                break;
+            }
+            uint16_t n = (uint16_t)min<uint32_t>(remain, blockRemaining);
+            if (!writeFileBytes(f, ptr, n)) {
+                ok = false;
+                break;
+            }
+            idatCrc = pngCrc32Update(idatCrc, ptr, n);
+            ptr += n;
+            remain -= n;
+            blockRemaining -= n;
+            rawRemaining -= n;
+        }
+    }
+    if (!ok || rawRemaining != 0) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    uint32_t adler = ((adlerS2 & 0xFFFFu) << 16) | (adlerS1 & 0xFFFFu);
+    uint8_t adlerBytes[4] = {
+        (uint8_t)((adler >> 24) & 0xFF),
+        (uint8_t)((adler >> 16) & 0xFF),
+        (uint8_t)((adler >> 8) & 0xFF),
+        (uint8_t)(adler & 0xFF),
+    };
+    if (!writeFileBytes(f, adlerBytes, sizeof(adlerBytes))) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+    idatCrc = pngCrc32Update(idatCrc, adlerBytes, sizeof(adlerBytes));
+
+    if (!writeBe32(f, idatCrc ^ 0xFFFFFFFFu)) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    if (!writePngChunk(f, "IEND", nullptr, 0)) {
+        f.close();
+        SD.remove(outPath);
+        return false;
+    }
+
+    f.flush();
+    f.close();
+    return true;
+#endif
+}
+
+static void getBestPositionSource(int32_t &latI, int32_t &lonI, int32_t &altM) {
+    latI = gCfg.latI;
+    lonI = gCfg.lonI;
+    altM = gCfg.alt;
+    if (gpsHasFix()) {
+        latI = gpsLatI();
+        lonI = gpsLonI();
+        altM = gpsAltM();
+    }
+}
+
+static bool syncSelfNodePosition(uint32_t nowMs) {
+    NodeEntry *me = Nodes.find(myNodeId);
+    if (!me) me = Nodes.upsert(myNodeId);
+    if (!me) return false;
+
+    int32_t latI = 0;
+    int32_t lonI = 0;
+    int32_t altM = 0;
+    getBestPositionSource(latI, lonI, altM);
+
+    bool hasPosition = (latI != 0 || lonI != 0);
+    bool changed = (me->latI != latI)
+                || (me->lonI != lonI)
+                || (me->alt != altM)
+                || (me->hasPosition != hasPosition);
+
+    me->latI = latI;
+    me->lonI = lonI;
+    me->alt = altM;
+    me->hasPosition = hasPosition;
+    if (!hasPosition) {
+        me->lastPosMs = 0;
+    } else if (changed || me->lastPosMs == 0) {
+        me->lastPosMs = nowMs;
+    }
+    return changed;
+}
+
 // ── Settings ──────────────────────────────────────────────────
 #define SETTING_WEBCFG        0
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -1053,7 +1324,9 @@ static char remapCardputerDirectionalKey(char k) {
 
     if (activeView == VIEW_MAP) {
         if (k == ';') return KEY_SCROLL_UP;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
         if (k == '.') return KEY_SCROLL_DN;
+#endif
         if (k == ',') return KEY_PAGE_DN;
         if (k == '/') return KEY_PAGE_UP;
         return k;
@@ -1464,6 +1737,7 @@ static bool gpsSyncSystemClock() {
 // ── Draw: battery widget ──────────────────────────────────────
 // Drawn in status bar over the node pane column (x=NODE_X..LCD_W-1, y=0..STATUS_H-1)
 static void drawBattery() {
+    const DisplayHeaderProfile &header = displayUiProfile().header;
     const uint16_t bg  = COL_STATUS_BG;
     uint16_t col = _battPct >= 60 ? wifiOkColorForUiMode() :
                    _battPct >= 25 ? COL_BATT_WARN : wifiOffColorForUiMode();
@@ -1535,15 +1809,19 @@ static void drawBattery() {
     int laneX = NODE_X;
     int laneW = NODE_W;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    // Keep pager status icons in their legacy right-edge lane so narrowing the
-    // channel node pane does not push glyphs off-screen.
+    // Keep pager status icons in their legacy right-edge lane width, but align
+    // the right edge using the same padding as the shortname at the left.
     static constexpr int kPagerStatusIconLaneW = 58;
-    static constexpr int kPagerStatusRightPad = 3;
+    int kPagerStatusRightPad = max(0, header.statusTextX);
     laneW = min(kPagerStatusIconLaneW, LCD_W);
     laneX = max(0, LCD_W - laneW - kPagerStatusRightPad);
 #endif
 
     int GX = laneX + (laneW - total) / 2;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Right-align the icon block so it visually mirrors shortname padding.
+    GX = LCD_W - max(0, header.statusTextX) - total;
+#endif
     if (GX < 0) GX = 0;
     int WX = GX + gpsW + gap;
     int BX = WX + wifiW + gap;
@@ -1673,7 +1951,7 @@ static void drawStatus() {
     int statusIconLaneX = NODE_X;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     static constexpr int kPagerStatusIconLaneW = 58;
-    static constexpr int kPagerStatusRightPad = 3;
+    int kPagerStatusRightPad = max(0, header.statusTextX);
     statusIconLaneX = max(0, LCD_W - min(kPagerStatusIconLaneW, LCD_W) - kPagerStatusRightPad);
 #endif
     int statusRightLimit = statusIconLaneX - header.statusTimeRightPad;
@@ -2986,7 +3264,7 @@ static void drawMapPanel() {
     lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
     lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  Type:Filter  Bksp:Edit");
+    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  Sym+I/O:Zoom  Sym+M:ME");
 #endif
 
     lcd.setFont(UI_BODY_FONT);
@@ -6688,7 +6966,7 @@ static void activateSettingsSelection() {
             webCfgEnd();
             snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
         } else {
-            bool ok = webCfgBegin(&gCfg, onWebCfgSaved);
+            bool ok = webCfgBegin(&gCfg, onWebCfgSaved, captureScreenshotPng);
             if (ok) {
                 if (webCfgIsOnboarding())
                     snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
@@ -6968,6 +7246,15 @@ static void handleKey(char k) {
                                  && k >= 0x20 && k < 0x7F);
     bool mapPanelTypingFilter = (activeView == VIEW_MAP
                                  && k >= 0x20 && k < 0x7F);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    // On pager/tdeck compact keyboards, Symbol+I/O are emitted as '8'/'9'
+    // and Symbol+M as '.'.
+    // Let them bypass map filter typing so they can be consumed as zoom
+    // shortcuts.
+    if (activeView == VIEW_MAP && (k == '8' || k == '9' || k == '.')) {
+        mapPanelTypingFilter = false;
+    }
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // On Cardputer, backtick/tilde should keep acting as panel-close shortcuts
     // even while the DM picker filter is active.
@@ -6987,23 +7274,55 @@ static void handleKey(char k) {
                 return;
             case 'm':
             case 'M':
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+                if (activeView == VIEW_MAP) break;
+#else
                 if (activeView == VIEW_MAP) mapApplyControl(MAP_CTL_ME);
+#endif
                 else goToView(VIEW_MAP);
                 return;
             case 'i':
             case 'I':
                 if (activeView == VIEW_MAP) {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+                    break;
+#else
                     mapApplyControl(MAP_CTL_ZOOM_IN);
                     return;
+#endif
                 }
                 break;
             case 'o':
             case 'O':
                 if (activeView == VIEW_MAP) {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+                    break;
+#else
+                    mapApplyControl(MAP_CTL_ZOOM_OUT);
+                    return;
+#endif
+                }
+                break;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+            case '8':
+                if (activeView == VIEW_MAP) {
+                    mapApplyControl(MAP_CTL_ZOOM_IN);
+                    return;
+                }
+                break;
+            case '9':
+                if (activeView == VIEW_MAP) {
                     mapApplyControl(MAP_CTL_ZOOM_OUT);
                     return;
                 }
                 break;
+            case '.':
+                if (activeView == VIEW_MAP) {
+                    mapApplyControl(MAP_CTL_ME);
+                    return;
+                }
+                break;
+#endif
             case 'n':
             case 'N':
                 if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) break;
@@ -7802,6 +8121,7 @@ static void onWebCfgSaved() {
     NodeEntry *me = Nodes.upsert(myNodeId);
     strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
     strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
+    (void)syncSelfNodePosition(millis());
     Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
     dirtyStatus = dirtyNodes = true;
 }
@@ -8109,10 +8429,15 @@ void setup() {
         NodeEntry *me = Nodes.upsert(myNodeId);
         strncpy(me->longName,  gCfg.nodeLong,  sizeof(me->longName)  - 1);
         strncpy(me->shortName, gCfg.nodeShort, sizeof(me->shortName) - 1);
-        me->latI        = MY_LAT_I;
-        me->lonI        = MY_LON_I;
-        me->alt         = MY_ALT;
-        me->hasPosition = true;
+        int32_t latI = 0;
+        int32_t lonI = 0;
+        int32_t altM = 0;
+        getBestPositionSource(latI, lonI, altM);
+        me->latI        = latI;
+        me->lonI        = lonI;
+        me->alt         = altM;
+        me->hasPosition = (latI != 0 || lonI != 0);
+        me->lastPosMs   = millis();
         me->hops        = 0;
         me->lastHeardMs = millis();
     }
@@ -8146,7 +8471,11 @@ void setup() {
     Channels.addMessage(CHAN_ANN, "", niOk ? "* Announced (NODEINFO)" : "! NODEINFO failed",
                         niOk ? TFT_DARKGREY : TFT_RED);
 
-    bool posOk = Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
+    int32_t bootPosLat = 0;
+    int32_t bootPosLon = 0;
+    int32_t bootPosAlt = 0;
+    getBestPositionSource(bootPosLat, bootPosLon, bootPosAlt);
+    bool posOk = Channels.sendPosition(myNodeId, bootPosLat, bootPosLon, bootPosAlt);
     debugLogMessages("[camillia-mt] POSITION broadcast %s\n", posOk ? "sent" : "FAILED");
     Channels.addMessage(CHAN_ANN, "", posOk ? "* Position broadcast" : "! POSITION failed",
                         posOk ? TFT_DARKGREY : TFT_RED);
@@ -8162,7 +8491,7 @@ void setup() {
 
     // Boot-time one-shot Wi-Fi/NTP sync, then shut web server/Wi-Fi back down.
     bool bootTimeSynced = false;
-    if (webCfgBegin(&gCfg, onWebCfgSaved)) {
+    if (webCfgBegin(&gCfg, onWebCfgSaved, captureScreenshotPng)) {
         if (wifiHasInternetTimePath()) {
             uint32_t syncStartMs = millis();
             while ((millis() - syncStartMs) < 10000UL) {
@@ -8353,8 +8682,12 @@ void loop() {
     // 1b. Service web config server if running
     webCfgLoop();
     if (webCfgAnnounceRequested()) {
+        int32_t posLat = 0;
+        int32_t posLon = 0;
+        int32_t posAlt = 0;
+        getBestPositionSource(posLat, posLon, posAlt);
         Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort);
-        Channels.sendPosition(myNodeId, gCfg.latI, gCfg.lonI, gCfg.alt);
+        Channels.sendPosition(myNodeId, posLat, posLon, posAlt);
         debugLogMessages("[announce] manual NODEINFO + position broadcast\n");
     }
 
@@ -8373,6 +8706,13 @@ void loop() {
         || (now - lastGpsPollMs) >= gpsPollPeriodMs) {
         lastGpsPollMs = now;
         gpsLoop();
+    }
+
+    if (syncSelfNodePosition(now)) {
+        dirtyNodes = true;
+        if (activeView == VIEW_MAP || activeView == VIEW_NODES || activeView == VIEW_GPS) {
+            dirtyChat = true;
+        }
     }
 
     now = millis();
@@ -8432,9 +8772,10 @@ void loop() {
     // 6. Periodic position broadcast
     if (now - lastPosition > (uint32_t)gCfg.posIntervalS * 1000UL) {
         lastPosition = now;
-        // Prefer live GPS fix; fall back to manual/last-known config position
-        int32_t posLat = gCfg.latI, posLon = gCfg.lonI, posAlt = gCfg.alt;
-        if (gpsHasFix()) { posLat = gpsLatI(); posLon = gpsLonI(); posAlt = gpsAltM(); }
+        int32_t posLat = 0;
+        int32_t posLon = 0;
+        int32_t posAlt = 0;
+        getBestPositionSource(posLat, posLon, posAlt);
         Channels.sendPosition(myNodeId, posLat, posLon, posAlt);
     }
 

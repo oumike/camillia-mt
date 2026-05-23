@@ -6,7 +6,8 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
 - [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
 - [LilyGo T-Lora Pager TFT](https://lilygo.cc/) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
-- Heltec WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
+- [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS module
+- [Heltec](https://heltec.org/) WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 
 No additional hardware required.
 
@@ -58,9 +59,11 @@ pio run -e tlora-pager-tft --target upload --upload-port /dev/<pager-port>
 Using the helper script:
 
 ```
+./build-upload-monitor.sh --tdeck
+./build-upload-monitor.sh --cardputer
+./build-upload-monitor.sh --pager
 ./build-upload-monitor.sh --heltec
 ./build-upload-monitor.sh --vertical
-./build-upload-monitor.sh --tlora
 ```
 
 Or, to build and monitor the serial output after flashing:
@@ -75,19 +78,86 @@ After flashing, the device boots directly into the firmware. No build tools requ
 
 On first boot, connect to the `camillia-mt` Wi-Fi access point, then open `http://192.168.4.1` in a browser. Set your node name, region, and channel keys. All settings are saved to the device and persist across reboots.
 
+Usage guide with screenshots: [docs/use.md](docs/use.md)
+
 ## Controls
 
-| Input | Action |
-|---|---|
-| Trackball left / right | Previous / next channel tab |
-| Trackball up / down | Scroll messages |
-| Trackball click | Confirm / send (context-dependent) |
-| Roller wheel up / down (`tlora-pager-tft`) | Scroll messages |
-| Roller click (`tlora-pager-tft`) | Confirm / send (context-dependent) |
-| Enter | Send message |
-| Backspace | Delete character |
-| Tab | Cycle focus between message pane and node list |
-| Alt + E | Toggle node list focus |
+### LilyGo T-Deck (`tdeck`)
+
+Keyboard and hardware controls:
+- Trackball left and right: previous and next channel or tab.
+- Trackball up and down: scroll messages or panel lists.
+- Trackball click: confirm selection.
+- Enter: start compose or send, depending on context.
+- Backspace: delete one character.
+- Tab: cycle focus between message pane and node list.
+- Alt + E: toggle node list focus.
+- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+
+Map keyboard shortcuts:
+- Symbol + I: zoom in.
+- Symbol + O: zoom out.
+- Symbol + M: center on your node.
+
+On-screen controls:
+- Bottom buttons: Prev, DM, MAP, LIVE, CFG, NODES, Next.
+- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
+
+### LilyGo T-Lora Pager TFT (`tlora-pager-tft`)
+
+Keyboard and wheel controls:
+- Roller up and down: switch channel or tab in channel view.
+- Roller click: toggle row-cursor mode in channel view.
+- In row-cursor mode, roller up and down: move through message rows.
+- Enter: start compose or send, depending on context.
+- Backspace: delete one character.
+- Tab: cycle focus between message pane and node list.
+- Alt + E: toggle node list focus.
+- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+
+Map keyboard shortcuts:
+- Symbol + I: zoom in.
+- Symbol + O: zoom out.
+- Symbol + M: center on your node.
+
+On-screen controls:
+- Bottom buttons: DM, MAP, LIVE, CFG, NODES.
+- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
+
+### M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`)
+
+Keyboard controls:
+- Enter: start compose or send, depending on context.
+- Backspace: delete one character.
+- Tab: cycle focus between message pane and node list.
+- Alt + E: toggle node list focus.
+- Fn + `;`: scroll up.
+- Fn + `.`: scroll down.
+- Fn + `,`: previous channel.
+- Fn + `/`: next channel.
+- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+
+Map keyboard shortcuts:
+- `;`: previous node.
+- `.`: next node.
+- `,`: zoom out.
+- `/`: zoom in.
+
+On-screen controls:
+- No touch controls in this build profile.
+
+### Heltec WiFi LoRa 32 V4 + TFT expansion (`heltec-v4`, `heltec-v4-vertical`)
+
+Touch controls:
+- Bottom buttons: Prev, DM, MAP, LIVE, CFG, NODES, Next.
+- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
+- DM panel: on-screen Up and Down buttons.
+- NODES panel: on-screen Up and Down buttons.
+- CFG panel: on-screen Up and Down buttons.
+- Tap the input area in message views to open the on-screen keyboard.
+
+Keyboard controls:
+- No physical keyboard controls in this build profile.
 
 ## Configuration
 

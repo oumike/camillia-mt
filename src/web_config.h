@@ -4,12 +4,17 @@
 
 // Called by the web server after it writes new values into *cfg.
 typedef void (*WebCfgSaveCb)();
+// Called by the web server to capture the current device screen as PNG.
+// outPath points to a writable file path that should be replaced with fresh PNG data.
+// Returns true on success.
+typedef bool (*WebCfgScreenshotPngCb)(const char *outPath);
 
 // Connect to the configured WiFi network and start the HTTP config server.
 // cfg    — live config struct; the server reads and writes nodeLong/nodeShort.
 // onSave — called on the main thread after a successful /save POST.
 // Returns true on success; false if the network is unreachable (timeout ~10 s).
-bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave);
+bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
+				 WebCfgScreenshotPngCb onScreenshotPng = nullptr);
 
 // Stop HTTP server and bring down WiFi.
 void webCfgEnd();
