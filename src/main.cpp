@@ -292,7 +292,6 @@ static void closePanelToChannel();
 static void mapClampViewport();
 static int mapVisibleNodeCount();
 static NodeEntry *mapVisibleNodeByIndex(int idx);
-static bool mapEnsureFrozenContainsNode(uint32_t nodeId);
 static bool mapSelectNodeById(uint32_t nodeId);
 static bool mapCenterOnSelectedNode();
 static int nodeActionVisibleCount(uint32_t nodeId);
@@ -873,14 +872,16 @@ static uint32_t nodeActionNodeId = 0;
 static int      nodeActionMenuSel = 0;
 static const char *kNodeActionItems[] = {
     "Message",
-    "Map",
     "Traceroute",
 };
 static constexpr int kNodeActionMessageIndex = 0;
-static constexpr int kNodeActionMapIndex = 1;
-static constexpr int kNodeActionTracerouteIndex = 2;
+static constexpr int kNodeActionTracerouteIndex = 1;
 static constexpr int kNodeActionCount =
     (int)(sizeof(kNodeActionItems) / sizeof(kNodeActionItems[0]));
+
+static constexpr int MAP_PANEL_FILTER_MAX = 24;
+static char mapPanelFilter[MAP_PANEL_FILTER_MAX + 1] = {0};
+static int  mapPanelFilterLen = 0;
 
 enum TracerouteUiState {
     TRACEROUTE_UI_IDLE = 0,
@@ -1143,6 +1144,8 @@ static void goToView(int v) {
         // Keep map list live so newly-heard nodes/positions appear immediately.
         mapNodeFreezeActive = false;
         mapFrozenNodeCount = 0;
+        mapPanelFilterLen = 0;
+        mapPanelFilter[0] = '\0';
         mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
     } else if (prev == VIEW_MAP) {
         mapNodeFreezeActive = false;
@@ -2267,32 +2270,16 @@ static bool mapExtractNodeCoords(const NodeEntry *n, float &lat, float &lon) {
     return true;
 }
 
-static bool nodeActionCanMap(uint32_t nodeId) {
-    NodeEntry *n = Nodes.find(nodeId);
-    if (!n) return false;
-    float lat = 0.0f;
-    float lon = 0.0f;
-    return mapExtractNodeCoords(n, lat, lon);
-}
-
 static int nodeActionVisibleCount(uint32_t nodeId) {
-    int cnt = 0;
-    for (int actionIdx = 0; actionIdx < kNodeActionCount; actionIdx++) {
-        if (actionIdx == kNodeActionMapIndex && !nodeActionCanMap(nodeId)) continue;
-        cnt++;
-    }
-    return cnt;
+    (void)nodeId;
+    return kNodeActionCount;
 }
 
 static int nodeActionVisibleToActionIndex(uint32_t nodeId, int visibleIdx) {
+    (void)nodeId;
     if (visibleIdx < 0) return -1;
-    int vis = 0;
-    for (int actionIdx = 0; actionIdx < kNodeActionCount; actionIdx++) {
-        if (actionIdx == kNodeActionMapIndex && !nodeActionCanMap(nodeId)) continue;
-        if (vis == visibleIdx) return actionIdx;
-        vis++;
-    }
-    return -1;
+    if (visibleIdx >= kNodeActionCount) return -1;
+    return visibleIdx;
 }
 
 static const char *nodeActionLabel(int actionIdx) {
@@ -2762,7 +2749,13 @@ static void drawMapPanel() {
     drawPanelFrame(listX, listY, listW, mapH, COL_PANEL_BG, COL_DIVIDER);
     lcd.fillRect(listX + 1, listY + 1, listW - 2, listHeaderH, COL_PANEL_ALT);
     lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    drawClippedText(listX + 3, listY + 2, listW - 6, "Nodes");
+    char listHeader[MAP_PANEL_FILTER_MAX + 10];
+    if (mapPanelFilterLen > 0) {
+        snprintf(listHeader, sizeof(listHeader), "[%s]", mapPanelFilter);
+    } else {
+        snprintf(listHeader, sizeof(listHeader), "Nodes");
+    }
+    drawClippedText(listX + 3, listY + 2, listW - 6, listHeader);
 
     float latRange = viewMaxLat - viewMinLat;
     float lonRange = viewMaxLon - viewMinLon;
@@ -2900,7 +2893,8 @@ static void drawMapPanel() {
     if (totalNodes == 0) {
         lcd.fillRect(listX + 1, listRowsTop, listW - 2, rowH, COL_PANEL_BG);
         lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
-        drawClippedText(listX + 2, listRowsTop + 1, listW - 4, "None");
+        drawClippedText(listX + 2, listRowsTop + 1, listW - 4,
+                        (mapPanelFilterLen > 0) ? "No match" : "None");
     } else {
         int firstVisible = max(0, mapsListSel - (rowsVisible - 1));
         int maxFirst = max(0, totalNodes - rowsVisible);
@@ -2992,7 +2986,7 @@ static void drawMapPanel() {
     lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
     lcd.setFont(UI_BODY_FONT);
     lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  M:Me  I:+  O:-");
+    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  Type:Filter  Bksp:Edit");
 #endif
 
     lcd.setFont(UI_BODY_FONT);
@@ -4873,9 +4867,52 @@ static void mapStartManualView() {
     mapClampViewport();
 }
 
+static bool mapNodeMatchesFilter(const NodeEntry *n) {
+    if (!n) return false;
+    if (mapPanelFilterLen == 0) return true;
+    if (containsNoCase(n->shortName, mapPanelFilter)) return true;
+    if (containsNoCase(n->longName, mapPanelFilter)) return true;
+    return false;
+}
+
 static int mapVisibleNodeCount() {
-    if (mapNodeFreezeActive) return mapFrozenNodeCount;
-    return Nodes.count();
+    int count = 0;
+    if (mapNodeFreezeActive) {
+        NodeEntry *self = nullptr;
+        int selfFrozenIndex = -1;
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (n && n->nodeId == myNodeId) {
+                self = n;
+                selfFrozenIndex = i;
+                break;
+            }
+        }
+
+        if (self && mapNodeMatchesFilter(self)) {
+            count++;
+        }
+
+        for (int i = 0; i < mapFrozenNodeCount; i++) {
+            if (i == selfFrozenIndex) continue;
+            NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
+            if (!n || !mapNodeMatchesFilter(n)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    NodeEntry *self = Nodes.find(myNodeId);
+    if (self && mapNodeMatchesFilter(self)) count++;
+
+    int cnt = Nodes.count();
+    for (int rank = 0; rank < cnt; rank++) {
+        NodeEntry *n = Nodes.getByRank(rank);
+        if (!n || n->nodeId == myNodeId) continue;
+        if (!mapNodeMatchesFilter(n)) continue;
+        count++;
+    }
+    return count;
 }
 
 static NodeEntry *mapVisibleNodeByIndex(int idx) {
@@ -4892,7 +4929,7 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
             }
         }
 
-        if (self) {
+        if (self && mapNodeMatchesFilter(self)) {
             if (idx == 0) return self;
             idx -= 1;
         }
@@ -4900,7 +4937,7 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
         for (int i = 0; i < mapFrozenNodeCount; i++) {
             if (i == selfFrozenIndex) continue;
             NodeEntry *n = Nodes.find(mapFrozenNodeIds[i]);
-            if (!n) continue;
+            if (!n || !mapNodeMatchesFilter(n)) continue;
             if (idx == 0) return n;
             idx -= 1;
         }
@@ -4908,7 +4945,7 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
     }
 
     NodeEntry *self = Nodes.find(myNodeId);
-    if (self) {
+    if (self && mapNodeMatchesFilter(self)) {
         if (idx == 0) return self;
         idx -= 1;
     }
@@ -4917,30 +4954,11 @@ static NodeEntry *mapVisibleNodeByIndex(int idx) {
     for (int rank = 0; rank < cnt; rank++) {
         NodeEntry *n = Nodes.getByRank(rank);
         if (!n || n->nodeId == myNodeId) continue;
+        if (!mapNodeMatchesFilter(n)) continue;
         if (idx == 0) return n;
         idx -= 1;
     }
     return nullptr;
-}
-
-static bool mapEnsureFrozenContainsNode(uint32_t nodeId) {
-    if (!nodeId) return false;
-    NodeEntry *n = Nodes.find(nodeId);
-    if (!n) return false;
-
-    if (!mapNodeFreezeActive) return true;
-
-    for (int i = 0; i < mapFrozenNodeCount; i++) {
-        if (mapFrozenNodeIds[i] == nodeId) return true;
-    }
-
-    if (mapFrozenNodeCount < MAX_NODES) {
-        mapFrozenNodeIds[mapFrozenNodeCount++] = nodeId;
-    } else if (MAX_NODES > 0) {
-        // Preserve deterministic size while ensuring the chosen node is visible.
-        mapFrozenNodeIds[MAX_NODES - 1] = nodeId;
-    }
-    return true;
 }
 
 static int nodesVisibleNodeCount() {
@@ -6923,18 +6941,6 @@ static void handleKey(char k) {
                 return;
             }
 
-            if (actionIdx == kNodeActionMapIndex && targetNodeId) {
-                // Selecting "Map" from node actions jumps directly to map panel
-                // and preserves node selection context.
-                goToView(VIEW_MAP);
-                mapEnsureFrozenContainsNode(targetNodeId);
-                if (mapSelectNodeById(targetNodeId)) {
-                    mapCenterOnSelectedNode();
-                }
-                dirtyChat = dirtyNodes = dirtyInput = true;
-                return;
-            }
-
             if (actionIdx == kNodeActionTracerouteIndex && targetNodeId) {
                 // Traceroute opens a modal status/result popup and blocks
                 // underlying navigation until dismissed.
@@ -6960,6 +6966,8 @@ static void handleKey(char k) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     bool dmPickerTypingFilter = (activeView == CHAN_DM && dmPickerOpen
                                  && k >= 0x20 && k < 0x7F);
+    bool mapPanelTypingFilter = (activeView == VIEW_MAP
+                                 && k >= 0x20 && k < 0x7F);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // On Cardputer, backtick/tilde should keep acting as panel-close shortcuts
     // even while the DM picker filter is active.
@@ -6967,7 +6975,7 @@ static void handleKey(char k) {
         dmPickerTypingFilter = false;
     }
 #endif
-    if (cardputerPanelShortcutReady() && !dmPickerTypingFilter) {
+    if (cardputerPanelShortcutReady() && !dmPickerTypingFilter && !mapPanelTypingFilter) {
         switch (k) {
             case '`':
             case '~':
@@ -7279,6 +7287,14 @@ static void handleKey(char k) {
             if (dmPickerFilterLen > 0) {
                 dmPickerFilter[--dmPickerFilterLen] = '\0';
                 pickerApplyFilter();
+                dirtyChat = true;
+            }
+            return;
+        }
+        if (activeView == VIEW_MAP) {
+            if (mapPanelFilterLen > 0) {
+                mapPanelFilter[--mapPanelFilterLen] = '\0';
+                mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
                 dirtyChat = true;
             }
             return;
@@ -7637,6 +7653,15 @@ static void handleKey(char k) {
                 dmPickerFilter[dmPickerFilterLen++] = k;
                 dmPickerFilter[dmPickerFilterLen] = '\0';
                 pickerApplyFilter();
+                dirtyChat = true;
+            }
+            return;
+        }
+        if (activeView == VIEW_MAP) {
+            if (mapPanelFilterLen < MAP_PANEL_FILTER_MAX) {
+                mapPanelFilter[mapPanelFilterLen++] = k;
+                mapPanelFilter[mapPanelFilterLen] = '\0';
+                mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
                 dirtyChat = true;
             }
             return;
