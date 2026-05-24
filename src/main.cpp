@@ -7711,7 +7711,7 @@ static void handleKey(char k) {
             || k == KEY_SCROLL_DN || k == KEY_NEXT_CHAN) {
             int step = (k == KEY_SCROLL_UP || k == KEY_PREV_CHAN) ? -1 : 1;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-            if (pagerTapbackMenuOpen) {
+            if (pagerTapbackMenuOpen || pagerMessageActionsOpen) {
                 step = -step;
             }
 #endif
