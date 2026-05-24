@@ -15,6 +15,22 @@ constexpr int kPersistMaxLines = 100;
 static void channelPersistPath(int chanIdx, char *out, size_t outLen) {
     snprintf(out, outLen, "%s/ch%d.log", kChanPersistDir, chanIdx);
 }
+
+static inline bool isUtf8Continuation(uint8_t b) {
+    return (b & 0xC0u) == 0x80u;
+}
+
+// Returns a byte count <= maxBytes that does not split a UTF-8 sequence.
+static int utf8TakeNoSplit(const char *text, int pos, int textLen, int maxBytes) {
+    if (!text || maxBytes <= 0 || pos >= textLen) return 0;
+    int take = min(textLen - pos, maxBytes);
+    while (take > 0 && (pos + take) < textLen
+           && isUtf8Continuation((uint8_t)text[pos + take])) {
+        take--;
+    }
+    if (take <= 0) take = min(1, textLen - pos);  // fallback for malformed input
+    return take;
+}
 }
 
 ChannelMgr Channels;
@@ -155,14 +171,14 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         if (avail <= 0) avail = 1;
 
         int remaining = textLen - pos;
-        int take = (remaining <= avail) ? remaining : avail;
+        int take = utf8TakeNoSplit(text, pos, textLen, avail);
 
         // Don't break in the middle of a word if possible
         if (take < remaining && take > 0) {
             int bp = take;
             while (bp > 0 && text[pos + bp] != ' ' && text[pos + bp - 1] != ' ')
                 bp--;
-            if (bp > 0) take = bp;
+            if (bp > 0) take = utf8TakeNoSplit(text, pos, textLen, bp);
         }
 
         if (segCount < MAX_WRAP_LINES) {

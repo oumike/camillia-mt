@@ -129,10 +129,17 @@ bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out) {
         uint32_t field = tag >> 3, wtype = tag & 7;
         if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
-            if (field == 2 && sz < sizeof(out.longName)) {
-                memcpy(out.longName,  buf + i, sz); out.longName[sz]  = '\0';
-            } else if (field == 3 && sz < sizeof(out.shortName)) {
-                memcpy(out.shortName, buf + i, sz); out.shortName[sz] = '\0';
+            if (i + sz > len) break;
+            if (field == 2 && sz > 0) {
+                size_t copy = min((size_t)sz, sizeof(out.longName) - 1);
+                while (copy > 0 && ((buf[i + copy] & 0xC0u) == 0x80u)) copy--;
+                memcpy(out.longName, buf + i, copy);
+                out.longName[copy] = '\0';
+            } else if (field == 3 && sz > 0) {
+                size_t copy = min((size_t)sz, sizeof(out.shortName) - 1);
+                while (copy > 0 && ((buf[i + copy] & 0xC0u) == 0x80u)) copy--;
+                memcpy(out.shortName, buf + i, copy);
+                out.shortName[copy] = '\0';
             } else if (field == 8 && sz == 32) {
                 memcpy(out.pubKey, buf + i, 32);
                 out.hasPubKey = true;

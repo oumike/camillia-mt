@@ -124,6 +124,27 @@ static int  pagerChatCursorRow = 0;
 static bool pagerReplyRefActive = false;
 static char pagerReplyRefText[MSG_CHARS + 1] = {0};
 static uint32_t pagerReplyRefPacketId = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+static bool pagerMessageActionsOpen = false;
+static int  pagerMessageActionsSel = 0;
+static bool pagerTapbackMenuOpen = false;
+static int  pagerTapbackSel = 0;
+static char pagerMsgActionReplyText[MSG_CHARS + 1] = {0};
+static uint32_t pagerMsgActionReplyPacketId = 0;
+
+static const char *kPagerTapbackOptions[] = {
+    "\xF0\x9F\x98\x80", // 😀
+    "\xF0\x9F\x98\xA2", // 😢
+    "\xE2\x9D\xA4\xEF\xB8\x8F", // ❤️
+    "\xF0\x9F\x91\x8D", // 👍
+    "\xF0\x9F\x91\x8E", // 👎
+    "\xF0\x9F\x98\x82", // 😂
+    "\xF0\x9F\x98\xAE", // 😮
+    "\xF0\x9F\x98\xA1", // 😡
+};
+static constexpr int kPagerTapbackOptionCount =
+    (int)(sizeof(kPagerTapbackOptions) / sizeof(kPagerTapbackOptions[0]));
+#endif
 #endif
 static int  settingsSel  = 0;         // highlighted settings row
 static int  settingsInfoScroll = 0;   // first visible read-only info row in CFG panel
@@ -287,6 +308,69 @@ static bool isPanelView(int v) {
 static bool isTopTabView(int v) {
     return !isPanelView(v) && v != VIEW_GPS;
 }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+static void pagerClearMessageActionState() {
+    pagerMessageActionsOpen = false;
+    pagerMessageActionsSel = 0;
+    pagerTapbackMenuOpen = false;
+    pagerTapbackSel = 0;
+    pagerMsgActionReplyText[0] = '\0';
+    pagerMsgActionReplyPacketId = 0;
+}
+
+static bool pagerResolveReplySelectionFromCursor(char *textOut,
+                                                 size_t textOutLen,
+                                                 uint32_t &replyPacketIdOut) {
+    if (!(activeView >= 0 && activeView < MESH_CHANNELS)) return false;
+
+    const DisplayLine *sel = Channels.getLine(activeView, pagerChatCursorRow);
+    if (!sel || !sel->text[0]) return false;
+
+    uint32_t replyPacketId = sel->packetId;
+
+    // Wrapped continuation rows can lack packetId in older persisted history.
+    if (replyPacketId == 0 && sel->text[0] == ' ' && sel->text[1] == ' ') {
+        for (int r = pagerChatCursorRow - 1; r >= 0; --r) {
+            const DisplayLine *prev = Channels.getLine(activeView, r);
+            if (!prev) break;
+            if (prev->packetId) {
+                replyPacketId = prev->packetId;
+                break;
+            }
+            if (!(prev->text[0] == ' ' && prev->text[1] == ' ')) break;
+        }
+    }
+
+    if (!replyPacketId) return false;
+
+    if (textOut && textOutLen > 0) {
+        strncpy(textOut, sel->text, textOutLen - 1);
+        textOut[textOutLen - 1] = '\0';
+    }
+    replyPacketIdOut = replyPacketId;
+    return true;
+}
+
+static bool pagerOpenMessageActionsFromCursor() {
+    uint32_t replyPacketId = 0;
+    char replyText[MSG_CHARS + 1];
+    if (!pagerResolveReplySelectionFromCursor(replyText, sizeof(replyText), replyPacketId)) {
+        return false;
+    }
+
+    pagerMessageActionsOpen = true;
+    pagerMessageActionsSel = 0;
+    pagerTapbackMenuOpen = false;
+    pagerTapbackSel = 0;
+    strncpy(pagerMsgActionReplyText, replyText, MSG_CHARS);
+    pagerMsgActionReplyText[MSG_CHARS] = '\0';
+    pagerMsgActionReplyPacketId = replyPacketId;
+    return true;
+}
+
+static void drawPagerMessageOverlay();
+#endif
 
 static void closePanelToChannel();
 static void mapClampViewport();
@@ -1375,6 +1459,9 @@ static void goToView(int v) {
     pagerReplyRefActive = false;
     pagerReplyRefText[0] = '\0';
     pagerReplyRefPacketId = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+    pagerClearMessageActionState();
+#endif
 #endif
     softKbVisible   = false;
     softKbShift     = false;
@@ -1545,20 +1632,345 @@ static void drawPanelFrame(int x, int y, int w, int h, uint16_t bg, uint16_t edg
     lcd.drawRect(x, y, w, h, edge);
 }
 
+static inline bool isUtf8ContinuationByte(uint8_t b) {
+    return (b & 0xC0u) == 0x80u;
+}
+
+static void utf8PopBack(String &s) {
+    int len = s.length();
+    if (len <= 0) return;
+    const char *p = s.c_str();
+    int cut = len - 1;
+    while (cut > 0 && isUtf8ContinuationByte((uint8_t)p[cut])) cut--;
+    s.remove(cut);
+}
+
+static void utf8PopFront(String &s) {
+    int len = s.length();
+    if (len <= 0) return;
+    const char *p = s.c_str();
+    int cut = 1;
+    while (cut < len && isUtf8ContinuationByte((uint8_t)p[cut])) cut++;
+    s.remove(0, cut);
+}
+
+static int32_t emojiFallbackDraw(lgfx::LGFXBase *gfx, int32_t x, int32_t y,
+                                 uint32_t code, int32_t fontHeight);
+
+static int utf8DecodeAt(const char *s, uint32_t &code) {
+    if (!s || !s[0]) {
+        code = 0;
+        return 0;
+    }
+    uint8_t b0 = (uint8_t)s[0];
+    if (b0 < 0x80) {
+        code = b0;
+        return 1;
+    }
+    if ((b0 & 0xE0) == 0xC0) {
+        uint8_t b1 = (uint8_t)s[1];
+        if ((b1 & 0xC0) != 0x80) {
+            code = b0;
+            return 1;
+        }
+        code = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
+        return 2;
+    }
+    if ((b0 & 0xF0) == 0xE0) {
+        uint8_t b1 = (uint8_t)s[1];
+        uint8_t b2 = (uint8_t)s[2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) {
+            code = b0;
+            return 1;
+        }
+        code = ((uint32_t)(b0 & 0x0F) << 12)
+             | ((uint32_t)(b1 & 0x3F) << 6)
+             | (uint32_t)(b2 & 0x3F);
+        return 3;
+    }
+    if ((b0 & 0xF8) == 0xF0) {
+        uint8_t b1 = (uint8_t)s[1];
+        uint8_t b2 = (uint8_t)s[2];
+        uint8_t b3 = (uint8_t)s[3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) {
+            code = b0;
+            return 1;
+        }
+        code = ((uint32_t)(b0 & 0x07) << 18)
+             | ((uint32_t)(b1 & 0x3F) << 12)
+             | ((uint32_t)(b2 & 0x3F) << 6)
+             | (uint32_t)(b3 & 0x3F);
+        return 4;
+    }
+    code = b0;
+    return 1;
+}
+
+static inline bool isEmojiCodepoint(uint32_t code) {
+    return ((code >= 0x1F000 && code <= 0x1FAFF)
+         || (code >= 0x2600 && code <= 0x27BF)
+         || (code >= 0x1F1E6 && code <= 0x1F1FF));
+}
+
+static inline bool hasUtf8Bytes(const char *text) {
+    if (!text) return false;
+    for (const uint8_t *p = (const uint8_t *)text; *p; ++p) {
+        if (*p & 0x80u) return true;
+    }
+    return false;
+}
+
+static int textWidthEmojiAware(const char *text) {
+    if (!text || !text[0]) return 0;
+    int width = 0;
+    const char *p = text;
+    char glyph[8];
+    while (*p) {
+        uint32_t code = 0;
+        int used = utf8DecodeAt(p, code);
+        if (used <= 0) break;
+
+        if (code == 0x200D || (code >= 0xFE00 && code <= 0xFE0F)
+            || (code >= 0x1F3FB && code <= 0x1F3FF)) {
+            p += used;
+            continue;
+        }
+
+        if (isEmojiCodepoint(code)) {
+            int emW = max((int32_t)8, (int32_t)((lcd.fontHeight() * 9) / 10));
+            width += emW;
+            p += used;
+            continue;
+        }
+
+        int copy = min(used, (int)sizeof(glyph) - 1);
+        memcpy(glyph, p, copy);
+        glyph[copy] = '\0';
+        int w = lcd.textWidth(glyph);
+        if (w <= 0) w = lcd.textWidth("?");
+        width += w;
+        p += used;
+    }
+    return width;
+}
+
+static void drawTextEmojiAware(int x, int y, const char *text) {
+    if (!text || !text[0]) return;
+    int cx = x;
+    const char *p = text;
+    char glyph[8];
+    while (*p) {
+        uint32_t code = 0;
+        int used = utf8DecodeAt(p, code);
+        if (used <= 0) break;
+
+        if (code == 0x200D || (code >= 0xFE00 && code <= 0xFE0F)
+            || (code >= 0x1F3FB && code <= 0x1F3FF)) {
+            p += used;
+            continue;
+        }
+
+        if (isEmojiCodepoint(code)) {
+            int32_t ew = emojiFallbackDraw(&lcd, cx, y, code, lcd.fontHeight());
+            if (ew <= 0) ew = max((int32_t)8, (int32_t)((lcd.fontHeight() * 9) / 10));
+            cx += ew;
+            p += used;
+            continue;
+        }
+
+        int copy = min(used, (int)sizeof(glyph) - 1);
+        memcpy(glyph, p, copy);
+        glyph[copy] = '\0';
+        int w = lcd.textWidth(glyph);
+        lcd.drawString(glyph, cx, y);
+        if (w <= 0) w = lcd.textWidth("?");
+        cx += w;
+        p += used;
+    }
+}
+
+static int32_t emojiFallbackDraw(lgfx::LGFXBase *gfx, int32_t x, int32_t y,
+                                 uint32_t code, int32_t fontHeight) {
+    if (!gfx) return 0;
+
+    if (code == 0x200D || (code >= 0xFE00 && code <= 0xFE0F)
+        || (code >= 0x1F3FB && code <= 0x1F3FF)) {
+        return 0;
+    }
+
+    const lgfx::TextStyle &style = gfx->getTextStyle();
+    uint16_t fg = lgfx::color565((style.fore_rgb888 >> 16) & 0xFF,
+                                 (style.fore_rgb888 >> 8) & 0xFF,
+                                 (style.fore_rgb888 >> 0) & 0xFF);
+    uint16_t bg = lgfx::color565((style.back_rgb888 >> 16) & 0xFF,
+                                 (style.back_rgb888 >> 8) & 0xFF,
+                                 (style.back_rgb888 >> 0) & 0xFF);
+
+    int32_t h = max((int32_t)8, fontHeight);
+    int32_t w = max((int32_t)8, (h * 9) / 10);
+    int32_t top = y + max((int32_t)0, (fontHeight - h) / 2);
+    int32_t cx = x + (w / 2);
+    int32_t cy = top + (h / 2);
+    int32_t r = max((int32_t)3, (min(w, h) / 2) - 1);
+
+    bool heart = (code == 0x2764
+                  || (code >= 0x1F493 && code <= 0x1F49F)
+                  || code == 0x1FA77);
+    bool fire = (code == 0x1F525);
+    bool clap = (code == 0x1F44F);
+    bool pray = (code == 0x1F64F);
+    bool eyes = (code == 0x1F440);
+    bool hundred = (code == 0x1F4AF);
+    bool thumbs = (code == 0x1F44D || code == 0x1F44E);
+    bool laugh = (code == 0x1F602 || code == 0x1F606 || code == 0x1F923);
+    bool wow = (code == 0x1F62E || code == 0x1F62F || code == 0x1F632);
+    bool sad = (code == 0x1F61E || code == 0x1F622 || code == 0x1F625
+                || code == 0x1F62D || code == 0x1F641);
+    bool cry = (code == 0x1F622 || code == 0x1F62D || code == 0x1F625);
+
+    if (heart) {
+        int32_t hr = max((int32_t)2, r / 2);
+        gfx->fillCircle(cx - hr, cy - hr / 2, hr, fg);
+        gfx->fillCircle(cx + hr, cy - hr / 2, hr, fg);
+        int32_t y0 = cy - hr / 2;
+        int32_t y1 = top + h - 1;
+        gfx->fillTriangle(cx - (hr * 2), y0, cx + (hr * 2), y0, cx, y1, fg);
+        return w;
+    }
+
+    if (fire) {
+        int32_t baseY = top + h - 2;
+        int32_t tipY = top + 1;
+        int32_t half = max((int32_t)3, w / 3);
+        gfx->fillTriangle(cx, tipY, cx - half, baseY, cx + half, baseY, fg);
+        gfx->fillTriangle(cx, top + h / 3, cx - max((int32_t)1, half / 2), baseY - 1,
+                          cx + max((int32_t)1, half / 2), baseY - 1, bg);
+        return w;
+    }
+
+    if (hundred) {
+        int32_t baseY = top + h - 2;
+        int32_t left = x + 1;
+        int32_t oneX = left + 1;
+        int32_t z1X = oneX + max((int32_t)3, w / 4);
+        int32_t z2X = z1X + max((int32_t)3, w / 4);
+        int32_t zh = max((int32_t)4, h - 4);
+        int32_t zw = max((int32_t)2, w / 5);
+        gfx->drawLine(oneX, top + 2, oneX, baseY, fg);
+        gfx->drawRect(z1X, top + 2, zw, zh, fg);
+        gfx->drawRect(z2X, top + 2, zw, zh, fg);
+        return w;
+    }
+
+    if (eyes) {
+        int32_t erx = max((int32_t)2, w / 5);
+        int32_t ery = max((int32_t)2, h / 4);
+        int32_t dx = max((int32_t)3, w / 4);
+        gfx->drawCircle(cx - dx, cy, erx, fg);
+        gfx->drawCircle(cx + dx, cy, erx, fg);
+        gfx->fillCircle(cx - dx, cy, max((int32_t)1, erx / 2), fg);
+        gfx->fillCircle(cx + dx, cy, max((int32_t)1, erx / 2), fg);
+        return w;
+    }
+
+    if (thumbs) {
+        int32_t palmW = max((int32_t)4, (w * 5) / 9);
+        int32_t palmH = max((int32_t)4, (h * 2) / 3);
+        int32_t palmX = x + (w - palmW) / 2;
+        int32_t palmY = top + (h - palmH) / 2;
+        gfx->drawRoundRect(palmX, palmY, palmW, palmH, 2, fg);
+        int32_t thumbW = max((int32_t)2, palmW / 3);
+        int32_t thumbH = max((int32_t)2, palmH / 3);
+        if (code == 0x1F44D) {
+            gfx->fillRect(palmX + palmW - 1, palmY + 1, thumbW, thumbH, fg);
+        } else {
+            gfx->fillRect(palmX - thumbW + 1, palmY + palmH - thumbH - 1, thumbW, thumbH, fg);
+        }
+        return w;
+    }
+
+    if (clap) {
+        int32_t py = top + h / 2;
+        int32_t hw = max((int32_t)3, w / 3);
+        int32_t hh = max((int32_t)3, h / 3);
+        gfx->drawTriangle(cx - hw, py, cx - 1, py - hh, cx - 1, py + hh, fg);
+        gfx->drawTriangle(cx + hw, py, cx + 1, py - hh, cx + 1, py + hh, fg);
+        return w;
+    }
+
+    if (pray) {
+        int32_t py = top + h - 2;
+        int32_t tipY = top + 2;
+        int32_t hw = max((int32_t)3, w / 3);
+        gfx->drawLine(cx, tipY, cx - hw, py, fg);
+        gfx->drawLine(cx, tipY, cx + hw, py, fg);
+        gfx->drawLine(cx - hw, py, cx + hw, py, fg);
+        return w;
+    }
+
+    gfx->fillCircle(cx, cy, r, bg);
+    gfx->drawCircle(cx, cy, r, fg);
+
+    int32_t eyeR = max((int32_t)1, r / 6);
+    int32_t eyeDx = max((int32_t)2, r / 2);
+    int32_t eyeY = cy - max((int32_t)1, r / 3);
+    if (laugh) {
+        gfx->drawLine(cx - eyeDx - eyeR, eyeY, cx - eyeDx + eyeR, eyeY + 1, fg);
+        gfx->drawLine(cx + eyeDx - eyeR, eyeY + 1, cx + eyeDx + eyeR, eyeY, fg);
+    } else {
+        gfx->fillCircle(cx - eyeDx, eyeY, eyeR, fg);
+        gfx->fillCircle(cx + eyeDx, eyeY, eyeR, fg);
+    }
+
+    int32_t mouthY = cy + max((int32_t)1, r / 3);
+    int32_t mouthDx = max((int32_t)2, r / 2);
+    if (wow) {
+        gfx->drawCircle(cx, mouthY, max((int32_t)1, mouthDx / 2), fg);
+    } else if (sad) {
+        gfx->drawLine(cx - mouthDx, mouthY, cx + mouthDx, mouthY - 1, fg);
+        if (cry) {
+            gfx->drawLine(cx + eyeDx + 1, eyeY + eyeR, cx + eyeDx + 1, eyeY + eyeR + 3, fg);
+        }
+    } else {
+        gfx->drawLine(cx - mouthDx, mouthY - 1, cx + mouthDx, mouthY, fg);
+    }
+
+    return w;
+}
+
 static void drawClippedText(int x, int y, int maxW, const char *text) {
     if (!text || maxW <= 0) return;
-    if (lcd.textWidth(text) <= maxW) {
-        lcd.drawString(text, x, y);
+
+    // Fast path for ASCII text to keep redraw cost low on stable screens.
+    if (!hasUtf8Bytes(text)) {
+        if (lcd.textWidth(text) <= maxW) {
+            lcd.drawString(text, x, y);
+            return;
+        }
+
+        String s(text);
+        const char *tail = "...";
+        int tailW = lcd.textWidth(tail);
+        while (s.length() > 0 && lcd.textWidth(s.c_str()) + tailW > maxW) {
+            s.remove(s.length() - 1);
+        }
+        s += tail;
+        lcd.drawString(s.c_str(), x, y);
+        return;
+    }
+
+    if (textWidthEmojiAware(text) <= maxW) {
+        drawTextEmojiAware(x, y, text);
         return;
     }
     String s(text);
     const char *tail = "...";
-    int tailW = lcd.textWidth(tail);
-    while (s.length() > 0 && lcd.textWidth(s.c_str()) + tailW > maxW) {
-        s.remove(s.length() - 1);
+    int tailW = textWidthEmojiAware(tail);
+    while (s.length() > 0 && textWidthEmojiAware(s.c_str()) + tailW > maxW) {
+        utf8PopBack(s);
     }
     s += tail;
-    lcd.drawString(s.c_str(), x, y);
+    drawTextEmojiAware(x, y, s.c_str());
 }
 
 static void drawSquirclePill(int x, int y, int w, int h,
@@ -2010,6 +2422,97 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
     setPanelCloseRect(x, y, w, h);
 }
 
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+static void drawPagerMessageOverlay() {
+    const bool showTapback = pagerTapbackMenuOpen;
+    const int itemCount = showTapback ? kPagerTapbackOptionCount : 2;
+    if (itemCount <= 0) return;
+
+    const int titleH = 14;
+
+    int popW = 0;
+    int popH = 0;
+    int rowH = max(lcd.fontHeight() + 2, max(9, LINE_H - 2));
+    int listTopY = titleH;
+
+    static constexpr int kTapCols = 5;
+    int tapRows = (itemCount + kTapCols - 1) / kTapCols;
+    int cellH = max(lcd.fontHeight() + 4, rowH + 1);
+    int cellW = max(cellH + 2, 18);
+
+    if (showTapback) {
+        popW = min(MSG_W - 8, max(126, 6 + kTapCols * cellW));
+        popH = min(CHAT_H - 6, titleH + 4 + tapRows * cellH + 2);
+        listTopY = titleH + 2;
+    } else {
+        popW = min(MSG_W - 8, 156);
+        popH = min(CHAT_H - 6, titleH + 4 + itemCount * rowH);
+        listTopY = titleH;
+    }
+
+    int popX = max(2, (MSG_W - popW) / 2);
+    int popY = CHAT_Y + max(2, (CHAT_H - popH) / 2);
+
+    drawModalMaskAndFrame(popX, popY, popW, popH);
+    drawPanelFrame(popX, popY, popW, popH, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+
+    lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+    drawClippedText(popX + 4, popY + 2, popW - 8,
+                    showTapback ? "Tapback" : "Message Actions");
+
+    if (showTapback) {
+        int selected = constrain(pagerTapbackSel, 0, kPagerTapbackOptionCount - 1);
+        int gridX = popX + 3;
+        int gridY = popY + listTopY;
+        for (int i = 0; i < itemCount; i++) {
+            int row = i / kTapCols;
+            int col = i % kTapCols;
+            int ix = gridX + col * cellW;
+            int iy = gridY + row * cellH;
+            bool sel = (i == selected);
+            uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
+            uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
+
+            lcd.fillRect(ix, iy, cellW - 1, cellH - 1, itemBg);
+            if (sel) {
+                lcd.drawRect(ix, iy, cellW - 1, cellH - 1, COL_TEXT_ON_ACCENT);
+            }
+
+            const char *label = kPagerTapbackOptions[i];
+            int tw = textWidthEmojiAware(label);
+            int tx = ix + max(1, (cellW - tw) / 2);
+            int ty = iy + max(0, (cellH - lcd.fontHeight()) / 2);
+            lcd.setTextColor(itemFg, itemBg);
+            drawTextEmojiAware(tx, ty, label);
+        }
+    } else {
+        int itemY = popY + listTopY;
+        for (int i = 0; i < itemCount; i++) {
+            int idx = constrain(pagerMessageActionsSel, 0, 1);
+            bool sel = (i == idx);
+
+            uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
+            uint16_t itemFg = sel ? COL_TEXT_ON_ACCENT : COL_TEXT_MAIN;
+            int iy = itemY + i * rowH;
+            lcd.fillRect(popX + 2, iy, popW - 4, rowH, itemBg);
+            if (sel) {
+                lcd.drawRect(popX + 2, iy, popW - 4, rowH, COL_TEXT_ON_ACCENT);
+                int midY = iy + rowH / 2;
+                lcd.fillTriangle(popX + 4, midY,
+                                 popX + 8, iy + 2,
+                                 popX + 8, iy + rowH - 3,
+                                 COL_TEXT_ON_ACCENT);
+            }
+
+            const char *label = (i == 0 ? "Reply" : "Tapback");
+            lcd.setTextColor(itemFg, itemBg);
+            drawClippedText(popX + (sel ? 12 : 6), iy + 1,
+                            popW - (sel ? 16 : 10), label);
+        }
+    }
+}
+#endif
+
 // ── Draw: tab bar ─────────────────────────────────────────────
 static void drawTabs() {
     const DisplayTabsProfile &tabsProfile = displayUiProfile().tabs;
@@ -2175,10 +2678,10 @@ static void drawChat() {
         if (dl->packetId) {
             switch (dl->ack) {
                 case DisplayLine::ACKED:
+                case DisplayLine::ACKED_RELAY:
                     col = (gCfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
                     ackColorApplied = true;
                     break;
-                case DisplayLine::ACKED_RELAY: col = TFT_YELLOW; ackColorApplied = true; break;
                 case DisplayLine::NAKED:       col = TFT_RED;    ackColorApplied = true; break;
                 case DisplayLine::TX_FAILED:   col = TFT_RED;    ackColorApplied = true; break;
                 default: break;  // NONE / PENDING keep original color
@@ -2206,6 +2709,12 @@ static void drawChat() {
         lcd.setTextColor(COL_TEAL, moreBg);
         drawClippedText(chatX + chatW - 34, chatInnerY + 1, 32, "more");
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+    if (pagerMessageActionsOpen || pagerTapbackMenuOpen) {
+        drawPagerMessageOverlay();
+    }
+#endif
 
     lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
@@ -5589,7 +6098,7 @@ static void drawInput() {
             int availW = panelW - (textX - panelX) - 4;
             String visible(inputBuf);
             while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
-                visible.remove(0, 1);
+                utf8PopFront(visible);
             }
             lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
             lcd.drawString(visible.c_str(), textX, textY);
@@ -5694,7 +6203,7 @@ static void drawInput() {
         int availW = LCD_W - textX - 4;
         String visible(inputBuf);
         while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
-            visible.remove(0, 1);
+            utf8PopFront(visible);
         }
         lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
         lcd.drawString(visible.c_str(), textX, textY);
@@ -7020,6 +7529,13 @@ static void handleKey(char k) {
     }
 
     if (k == KEY_BACKSPACE_HOLD) {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+        if (pagerMessageActionsOpen || pagerTapbackMenuOpen) {
+            pagerClearMessageActionState();
+            dirtyChat = true;
+            return;
+        }
+#endif
         if (activeView >= 0 && activeView < MESH_CHANNELS
             && (softKbVisible || hwTypingLock || inputLen > 0)) {
             softKbVisible = false;
@@ -7057,8 +7573,21 @@ static void handleKey(char k) {
     // Wheel click on a channel toggles chat-history wheel scrolling.
     // One click locks into chat-history scrolling; second click restores
     // wheel channel-tab navigation.
-    if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused) {
+    if (k == KEY_ROLLER && tloraChannelView && !nodeDetailOpen && !nodeListFocused
+        && !pagerMessageActionsOpen && !pagerTapbackMenuOpen) {
         if (!tloraTyping && !softKbVisible) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            if (pagerWheelChatScrollMode) {
+                if (pagerOpenMessageActionsFromCursor()) {
+                    dirtyChat = true;
+                    dirtyInput = true;
+                    return;
+                }
+                pagerWheelChatScrollMode = false;
+                dirtyChat = true;
+                return;
+            }
+#endif
             static uint32_t lastWheelModeToggleMs = 0;
             uint32_t nowMs = millis();
             // readTrackball() already delays click delivery until wheel motion settles.
@@ -7094,8 +7623,19 @@ static void handleKey(char k) {
     }
 
     // T-Deck roller click in channel view toggles row-cursor mode (pager-like).
-    if (k == KEY_ROLLER && tdeckChannelView && !nodeDetailOpen && !nodeListFocused) {
+    if (k == KEY_ROLLER && tdeckChannelView && !nodeDetailOpen && !nodeListFocused
+        && !pagerMessageActionsOpen && !pagerTapbackMenuOpen) {
         if (!tdeckTyping && !softKbVisible) {
+            if (pagerWheelChatScrollMode) {
+                if (pagerOpenMessageActionsFromCursor()) {
+                    dirtyChat = true;
+                    dirtyInput = true;
+                    return;
+                }
+                pagerWheelChatScrollMode = false;
+                dirtyChat = true;
+                return;
+            }
             static uint32_t lastWheelModeToggleMs = 0;
             uint32_t nowMs = millis();
             if ((nowMs - lastWheelModeToggleMs) >= 220) {
@@ -7139,16 +7679,102 @@ static void handleKey(char k) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     if (k == KEY_ESCAPE && activeView >= 0 && activeView < MESH_CHANNELS) {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+        if (pagerMessageActionsOpen || pagerTapbackMenuOpen) {
+            pagerClearMessageActionState();
+            dirtyChat = true;
+            return;
+        }
         pagerWheelChatScrollMode = false;
         pagerReplyRefActive = false;
         pagerReplyRefText[0] = '\0';
         pagerReplyRefPacketId = 0;
+    pagerClearMessageActionState();
 #endif
         hwTypingLock = false;
         inputLen = 0;
         inputBuf[0] = '\0';
         dirtyChat = true;
         dirtyInput = true;
+        return;
+    }
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+    if (pagerMessageActionsOpen || pagerTapbackMenuOpen) {
+        if (k == KEY_ESCAPE || k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD || k == KEY_NODE_FOCUS) {
+            pagerClearMessageActionState();
+            dirtyChat = true;
+            return;
+        }
+
+        if (k == KEY_SCROLL_UP || k == KEY_PREV_CHAN
+            || k == KEY_SCROLL_DN || k == KEY_NEXT_CHAN) {
+            int step = (k == KEY_SCROLL_UP || k == KEY_PREV_CHAN) ? -1 : 1;
+            if (pagerTapbackMenuOpen) {
+                pagerTapbackSel = (pagerTapbackSel + step + kPagerTapbackOptionCount)
+                                  % kPagerTapbackOptionCount;
+            } else {
+                pagerMessageActionsSel = (pagerMessageActionsSel + step + 2) % 2;
+            }
+            dirtyChat = true;
+            return;
+        }
+
+        if (k == KEY_ENTER || k == KEY_ROLLER) {
+            if (pagerMessageActionsOpen) {
+                if (pagerMessageActionsSel == 0) {
+                    if (pagerMsgActionReplyPacketId && pagerMsgActionReplyText[0]) {
+                        strncpy(pagerReplyRefText, pagerMsgActionReplyText, MSG_CHARS);
+                        pagerReplyRefText[MSG_CHARS] = '\0';
+                        pagerReplyRefActive = true;
+                        pagerReplyRefPacketId = pagerMsgActionReplyPacketId;
+                    } else {
+                        pagerReplyRefActive = false;
+                        pagerReplyRefText[0] = '\0';
+                        pagerReplyRefPacketId = 0;
+                    }
+                    pagerClearMessageActionState();
+                    hwTypingLock = true;
+                    dirtyChat = true;
+                    dirtyInput = true;
+                    return;
+                }
+
+                pagerMessageActionsOpen = false;
+                pagerTapbackMenuOpen = true;
+                pagerTapbackSel = 0;
+                dirtyChat = true;
+                return;
+            }
+
+            if (pagerTapbackMenuOpen) {
+                int idx = constrain(pagerTapbackSel, 0, kPagerTapbackOptionCount - 1);
+                const char *emoji = kPagerTapbackOptions[idx];
+                uint32_t txReplyId = pagerMsgActionReplyPacketId;
+                bool sentOk = false;
+                if (emoji && emoji[0]) {
+                    sentOk = Channels.sendText(myNodeId, emoji, gCfg.okToMqtt, activeView, txReplyId);
+                }
+                if (!sentOk) {
+                    Channels.addMessage(activeView, "", "! TX failed", TFT_RED, 0);
+                } else if (txReplyId) {
+                    pagerWheelChatScrollMode = false;
+                    pagerChatCursorRow = 0;
+                }
+
+                pagerReplyRefActive = false;
+                pagerReplyRefText[0] = '\0';
+                pagerReplyRefPacketId = 0;
+                inputLen = 0;
+                inputBuf[0] = '\0';
+                hwTypingLock = false;
+                pagerClearMessageActionState();
+                dirtyChat = true;
+                dirtyInput = true;
+                return;
+            }
+        }
+
         return;
     }
 #endif
@@ -7381,33 +8007,14 @@ static void handleKey(char k) {
             && canStartChannelCompose) {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
             if (pagerWheelChatScrollMode) {
-                const DisplayLine *sel = Channels.getLine(activeView, pagerChatCursorRow);
-                uint32_t replyPacketId = sel ? sel->packetId : 0;
-
-                // Wrapped continuation rows may lack a packetId in older persisted
-                // history snapshots. Walk upward to find the leading row's packetId.
-                if (sel && replyPacketId == 0 && sel->text[0] == ' ' && sel->text[1] == ' ') {
-                    for (int r = pagerChatCursorRow - 1; r >= 0; --r) {
-                        const DisplayLine *prev = Channels.getLine(activeView, r);
-                        if (!prev) break;
-                        if (prev->packetId) {
-                            replyPacketId = prev->packetId;
-                            break;
-                        }
-                        if (!(prev->text[0] == ' ' && prev->text[1] == ' ')) break;
-                    }
+                if (pagerOpenMessageActionsFromCursor()) {
+                    dirtyChat = true;
+                    dirtyInput = true;
+                    return;
                 }
-
-                if (sel && sel->text[0] && replyPacketId) {
-                    strncpy(pagerReplyRefText, sel->text, MSG_CHARS);
-                    pagerReplyRefText[MSG_CHARS] = '\0';
-                    pagerReplyRefActive = true;
-                    pagerReplyRefPacketId = replyPacketId;
-                } else {
-                    pagerReplyRefActive = false;
-                    pagerReplyRefText[0] = '\0';
-                    pagerReplyRefPacketId = 0;
-                }
+                pagerReplyRefActive = false;
+                pagerReplyRefText[0] = '\0';
+                pagerReplyRefPacketId = 0;
             } else {
                 pagerReplyRefActive = false;
                 pagerReplyRefText[0] = '\0';
@@ -8404,6 +9011,7 @@ void setup() {
     lcd.init();
     lcd.setRotation(TFT_ROTATION_DEFAULT);
     lcd.setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    lcd.setEmojiCallback(emojiFallbackDraw);
     lcd.fillScreen(COL_BG_MAIN);
     lcd.setTextSize(UI_BASE_TEXT_SCALE);
     lastActivityMs = millis();
@@ -8754,11 +9362,14 @@ void loop() {
 
     // 4. Cursor blink
     if (now - lastBlink > CURSOR_BLINK_MS) {
-        if (softKbVisible) {
-            cursorOn = true;
-        } else {
+        bool canShowCursor = isTextInputView();
+        if (canShowCursor && !softKbVisible) {
             cursorOn = !cursorOn;
             dirtyInput = true;
+        } else if (cursorOn == false) {
+            // Keep cursor steady when not actively blinking (hidden views / soft keyboard).
+            cursorOn = true;
+            if (canShowCursor) dirtyInput = true;
         }
         lastBlink = now;
     }
@@ -8809,9 +9420,9 @@ void loop() {
         dirtyNodes = false;
     }
 
-    // Keep wall clock display responsive even if other status elements are static.
+    // Status bar shows HH:MM, so a minute cadence avoids unnecessary redraw churn.
     static uint32_t lastClockDrawTickMs = 0;
-    if (now - lastClockDrawTickMs >= 1000) {
+    if (now - lastClockDrawTickMs >= 60000) {
         lastClockDrawTickMs = now;
         dirtyStatus = true;
     }
@@ -8848,7 +9459,6 @@ void loop() {
                          || dirtyChat || dirtyNodes || dirtyInput;
 
     if (softKbVisible && (dirtyChat || dirtyNodes)) dirtyInput = true;
-    if (nodeActionMenuOpen) dirtyNodes = true;
 
     if (dirtyStatus)  drawStatus();
     if (dirtyTabs)    drawTabs();

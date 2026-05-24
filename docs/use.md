@@ -6,8 +6,9 @@ This guide shows the main screens and basic actions.
 
 Use this screen to read channel messages and send quick replies.
 
+- Top is a list of configured channels
 - The bottom tabs switch between major views.
-- The chat list is in the center.
+- The chat is in the center.
 - The input line is near the bottom.
 
 ![Chat screen](screenshots/RiJa_screen_20260523_144152.png)
@@ -51,14 +52,6 @@ Use this screen to inspect one node in detail.
 - The mini map shows the selected node position.
 
 ![Node details screen](screenshots/RiJa_screen_20260523_144406.png)
-
-## Quick flow
-
-1. Start in Chat.
-2. Open Map to check positions.
-3. Open Live to confirm traffic.
-4. Open Config for setup values.
-5. Open Nodes for per-node details.
 
 ## Controls
 

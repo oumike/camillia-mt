@@ -31,6 +31,22 @@ static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
     Channels.addMessage(CHAN_ANN, prefix, text, color);
 }
 
+static inline bool isUtf8Continuation(uint8_t b) {
+    return (b & 0xC0u) == 0x80u;
+}
+
+// Returns a byte count <= maxBytes that does not split a UTF-8 sequence.
+static int utf8TakeNoSplit(const char *text, int pos, int textLen, int maxBytes) {
+    if (!text || maxBytes <= 0 || pos >= textLen) return 0;
+    int take = min(textLen - pos, maxBytes);
+    while (take > 0 && (pos + take) < textLen
+           && isUtf8Continuation((uint8_t)text[pos + take])) {
+        take--;
+    }
+    if (take <= 0) take = min(1, textLen - pos);  // fallback for malformed input
+    return take;
+}
+
 // ── init ──────────────────────────────────────────────────────
 void DmMgr::init() {
     memset(_convs, 0, sizeof(_convs));
@@ -239,13 +255,13 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     bool firstLine = true;
     while (pos < len) {
         int remain = len - pos;
-        int take   = (remain <= DM_LINE_LEN) ? remain : DM_LINE_LEN;
+        int take   = utf8TakeNoSplit(full, pos, len, DM_LINE_LEN);
 
         // Try to break at a word boundary
         if (take < remain && full[pos + take] != ' ' && full[pos + take - 1] != ' ') {
             int bp = take - 1;
             while (bp > 0 && full[pos + bp] != ' ') bp--;
-            if (bp > 0) take = bp + 1;
+            if (bp > 0) take = utf8TakeNoSplit(full, pos, len, bp + 1);
         }
 
         char lineBuf[DM_LINE_LEN + 1];
