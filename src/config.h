@@ -29,7 +29,7 @@
 #define TFT_SPI_MOSI    41
 #define TFT_SPI_3WIRE   false
 #define TFT_SPI_WRITE_HZ 40000000
-#define TFT_SPI_READ_HZ  16000000
+#define TFT_SPI_READ_HZ   1000000
 #define TFT_CS          12
 #define TFT_DC          11
 #define TFT_BL          42
@@ -224,7 +224,7 @@
 #define TFT_SPI_MOSI    35
 #define TFT_SPI_3WIRE   true
 #define TFT_SPI_WRITE_HZ 40000000
-#define TFT_SPI_READ_HZ  4000000
+#define TFT_SPI_READ_HZ  1000000
 #define TFT_CS          37
 #define TFT_DC          34
 #define TFT_BL          38

@@ -129,6 +129,20 @@ public:
             cfg.offset_y     = TFT_PANEL_OFFSET_Y;
             cfg.invert       = TFT_INVERT;
             cfg.rgb_order    = TFT_RGB_ORDER;
+            // Screenshot capture depends on panel readback.
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+            cfg.readable = true;
+        #if defined(DEVICE_TDECK)
+            // T-Deck ST7789 readback aligns with panel default phase.
+            cfg.dummy_read_pixel = 16;
+            cfg.end_read_delay_us = 8;
+    #else
+                        // Cardputer ST7789V2 readback is cleaner with default 16 dummy bits.
+                        cfg.dummy_read_pixel = 16;
+    #endif
+#else
+            cfg.readable = (TFT_SPI_MISO >= 0) && !TFT_SPI_3WIRE;
+#endif
             _panel.config(cfg);
         }
         {

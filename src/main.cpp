@@ -129,8 +129,17 @@ static bool pagerMessageActionsOpen = false;
 static int  pagerMessageActionsSel = 0;
 static bool pagerTapbackMenuOpen = false;
 static int  pagerTapbackSel = 0;
+static bool pagerMessageOverlayDirty = false;
+static bool pagerMessageOverlayFullRedraw = false;
 static char pagerMsgActionReplyText[MSG_CHARS + 1] = {0};
 static uint32_t pagerMsgActionReplyPacketId = 0;
+static const char *kPagerMessageActionOptions[] = {
+    "Reply",
+    "Tapback",
+    "Cancel",
+};
+static constexpr int kPagerMessageActionCount =
+    (int)(sizeof(kPagerMessageActionOptions) / sizeof(kPagerMessageActionOptions[0]));
 
 static const char *kPagerTapbackOptions[] = {
     "\xF0\x9F\x98\x80", // 😀
@@ -315,6 +324,8 @@ static void pagerClearMessageActionState() {
     pagerMessageActionsSel = 0;
     pagerTapbackMenuOpen = false;
     pagerTapbackSel = 0;
+    pagerMessageOverlayDirty = false;
+    pagerMessageOverlayFullRedraw = false;
     pagerMsgActionReplyText[0] = '\0';
     pagerMsgActionReplyPacketId = 0;
 }
@@ -363,13 +374,15 @@ static bool pagerOpenMessageActionsFromCursor() {
     pagerMessageActionsSel = 0;
     pagerTapbackMenuOpen = false;
     pagerTapbackSel = 0;
+    pagerMessageOverlayDirty = true;
+    pagerMessageOverlayFullRedraw = true;
     strncpy(pagerMsgActionReplyText, replyText, MSG_CHARS);
     pagerMsgActionReplyText[MSG_CHARS] = '\0';
     pagerMsgActionReplyPacketId = replyPacketId;
     return true;
 }
 
-static void drawPagerMessageOverlay();
+static void drawPagerMessageOverlay(bool fullRedraw);
 #endif
 
 static void closePanelToChannel();
@@ -637,26 +650,104 @@ static bool captureScreenshotPng(const char *outPath) {
     if (!outPath || !outPath[0]) return false;
     if (!sdEnsureParentDirs(outPath)) return false;
 
-    SD.remove(outPath);
-    File f = SD.open(outPath, FILE_WRITE);
-    if (!f) return false;
-
     const int width = lcd.width();
     const int height = lcd.height();
     if (width <= 0 || height <= 0 || width > LCD_W || height > LCD_H) {
-        f.close();
-        SD.remove(outPath);
         return false;
     }
 
-    static uint8_t rowRgb[(LCD_W * 3) + 1];
     const uint32_t rowBytes = (uint32_t)(1 + width * 3);
     const uint32_t rawBytes = rowBytes * (uint32_t)height;
     const uint32_t blockCount = (rawBytes + 65534u) / 65535u;
     const uint32_t idatLen = 2u + (blockCount * 5u) + rawBytes + 4u;
 
+    uint8_t *rawImage = (uint8_t *)malloc((size_t)rawBytes);
+    if (!rawImage) return false;
+
+    // Capture first, then write to SD. This prevents display-read/SD-write
+    // contention on shared SPI buses (notably T-Deck/Cardputer).
+    bool radioWasReady = Radio.isReady();
+    if (radioWasReady) Radio.setRxPaused(true);
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = rawImage + ((size_t)y * (size_t)rowBytes);
+        row[0] = 0;  // PNG filter: None
+        lcd.readRectRGB(0, y, width, 1, row + 1);
+    }
+
+#if defined(DEVICE_TDECK)
+    // Detect persistent dark columns and replace them from neighbors.
+    // This targets the dotted vertical readback artifacts seen on some T-Deck units.
+    static uint32_t colSum[LCD_W];
+    static bool badCol[LCD_W];
+    for (int x = 0; x < width; x++) {
+        colSum[x] = 0;
+        badCol[x] = false;
+    }
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = rawImage + ((size_t)y * (size_t)rowBytes);
+        for (int x = 0; x < width; x++) {
+            int idx = 1 + x * 3;
+            colSum[x] += (uint32_t)row[idx + 0] + (uint32_t)row[idx + 1] + (uint32_t)row[idx + 2];
+        }
+    }
+
+    const uint32_t kPerPixelDeficit = 30u * 3u;
+    const uint32_t kDeficitThresh = (uint32_t)height * kPerPixelDeficit;
+    for (int x = 1; x < width - 1; x++) {
+        uint32_t neigh = (colSum[x - 1] + colSum[x + 1]) / 2u;
+        if (colSum[x] + kDeficitThresh < neigh) {
+            badCol[x] = true;
+        }
+    }
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = rawImage + ((size_t)y * (size_t)rowBytes);
+        for (int x = 1; x < width - 1; x++) {
+            if (!badCol[x]) continue;
+            int idx = 1 + x * 3;
+            int idxL = idx - 3;
+            int idxR = idx + 3;
+            row[idx + 0] = (uint8_t)(((int)row[idxL + 0] + (int)row[idxR + 0]) / 2);
+            row[idx + 1] = (uint8_t)(((int)row[idxL + 1] + (int)row[idxR + 1]) / 2);
+            row[idx + 2] = (uint8_t)(((int)row[idxL + 2] + (int)row[idxR + 2]) / 2);
+        }
+    }
+
+    // Remove remaining dotted vertical artifacts by replacing isolated
+    // per-pixel outliers with their left/right average when neighbors agree.
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = rawImage + ((size_t)y * (size_t)rowBytes);
+        for (int x = 1; x < width - 1; x++) {
+            int idx = 1 + x * 3;
+            int idxL = idx - 3;
+            int idxR = idx + 3;
+            for (int c = 0; c < 3; c++) {
+                int l = row[idxL + c];
+                int r = row[idxR + c];
+                int cur = row[idx + c];
+                int avg = (l + r) / 2;
+                int neighDiff = (l > r) ? (l - r) : (r - l);
+                int outlier = (cur > avg) ? (cur - avg) : (avg - cur);
+                if (neighDiff <= 20 && outlier >= 24) {
+                    row[idx + c] = (uint8_t)avg;
+                }
+            }
+        }
+    }
+#endif
+    if (radioWasReady) Radio.setRxPaused(false);
+
+    SD.remove(outPath);
+    File f = SD.open(outPath, FILE_WRITE);
+    if (!f) {
+        free(rawImage);
+        return false;
+    }
+
     static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
     if (!writeFileBytes(f, kPngSig, sizeof(kPngSig))) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -678,12 +769,14 @@ static bool captureScreenshotPng(const char *outPath) {
         0,  // interlace
     };
     if (!writePngChunk(f, "IHDR", ihdr, sizeof(ihdr))) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
     }
 
     if (!writeBe32(f, idatLen) || !writeFileBytes(f, (const uint8_t *)"IDAT", 4)) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -694,6 +787,7 @@ static bool captureScreenshotPng(const char *outPath) {
 
     const uint8_t zlibHeader[2] = {0x78, 0x01};  // Deflate, no compression
     if (!writeFileBytes(f, zlibHeader, sizeof(zlibHeader))) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -723,6 +817,7 @@ static bool captureScreenshotPng(const char *outPath) {
     };
 
     if (!startStoredBlock()) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -730,14 +825,10 @@ static bool captureScreenshotPng(const char *outPath) {
 
     bool ok = true;
     for (int y = 0; y < height && ok; y++) {
-        rowRgb[0] = 0;  // PNG filter: None
-        // Use LovyanGFX RGB read conversion so controller byte/order quirks
-        // do not skew screenshot colors.
-        lcd.readRectRGB(0, y, width, 1, rowRgb + 1);
+        const uint8_t *rowPtr = rawImage + ((size_t)y * (size_t)rowBytes);
+        pngAdler32Update(adlerS1, adlerS2, rowPtr, rowBytes);
 
-        pngAdler32Update(adlerS1, adlerS2, rowRgb, rowBytes);
-
-        const uint8_t *ptr = rowRgb;
+        const uint8_t *ptr = rowPtr;
         uint32_t remain = rowBytes;
         while (remain > 0) {
             if (blockRemaining == 0 && !startStoredBlock()) {
@@ -757,6 +848,7 @@ static bool captureScreenshotPng(const char *outPath) {
         }
     }
     if (!ok || rawRemaining != 0) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -770,6 +862,7 @@ static bool captureScreenshotPng(const char *outPath) {
         (uint8_t)(adler & 0xFF),
     };
     if (!writeFileBytes(f, adlerBytes, sizeof(adlerBytes))) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -777,12 +870,14 @@ static bool captureScreenshotPng(const char *outPath) {
     idatCrc = pngCrc32Update(idatCrc, adlerBytes, sizeof(adlerBytes));
 
     if (!writeBe32(f, idatCrc ^ 0xFFFFFFFFu)) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
     }
 
     if (!writePngChunk(f, "IEND", nullptr, 0)) {
+        free(rawImage);
         f.close();
         SD.remove(outPath);
         return false;
@@ -790,6 +885,7 @@ static bool captureScreenshotPng(const char *outPath) {
 
     f.flush();
     f.close();
+    free(rawImage);
     return true;
 #endif
 }
@@ -2230,7 +2326,7 @@ static void drawBattery() {
 #endif
 
     int GX = laneX + (laneW - total) / 2;
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     // Right-align the icon block so it visually mirrors shortname padding.
     GX = LCD_W - max(0, header.statusTextX) - total;
 #endif
@@ -2423,9 +2519,17 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
 }
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
-static void drawPagerMessageOverlay() {
+static void drawPagerMessageOverlay(bool fullRedraw) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lcd.setFont(&fonts::DejaVu12);
+    lcd.setTextSize(1.0f);
+#else
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextSize(CHAT_WINDOW_TEXT_SCALE);
+#endif
+
     const bool showTapback = pagerTapbackMenuOpen;
-    const int itemCount = showTapback ? kPagerTapbackOptionCount : 2;
+    const int itemCount = showTapback ? kPagerTapbackOptionCount : kPagerMessageActionCount;
     if (itemCount <= 0) return;
 
     const int titleH = 14;
@@ -2453,12 +2557,14 @@ static void drawPagerMessageOverlay() {
     int popX = max(2, (MSG_W - popW) / 2);
     int popY = CHAT_Y + max(2, (CHAT_H - popH) / 2);
 
-    drawModalMaskAndFrame(popX, popY, popW, popH);
-    drawPanelFrame(popX, popY, popW, popH, COL_PANEL_STRONG, COL_SELECT_ACCENT);
+    if (fullRedraw) {
+        drawModalMaskAndFrame(popX, popY, popW, popH);
+        drawPanelFrame(popX, popY, popW, popH, COL_PANEL_STRONG, COL_SELECT_ACCENT);
 
-    lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
-    drawClippedText(popX + 4, popY + 2, popW - 8,
-                    showTapback ? "Tapback" : "Message Actions");
+        lcd.setTextColor(COL_TEXT_MAIN, COL_PANEL_STRONG);
+        drawClippedText(popX + 4, popY + 2, popW - 8,
+                        showTapback ? "Tapback" : "Message Actions");
+    }
 
     if (showTapback) {
         int selected = constrain(pagerTapbackSel, 0, kPagerTapbackOptionCount - 1);
@@ -2488,7 +2594,7 @@ static void drawPagerMessageOverlay() {
     } else {
         int itemY = popY + listTopY;
         for (int i = 0; i < itemCount; i++) {
-            int idx = constrain(pagerMessageActionsSel, 0, 1);
+            int idx = constrain(pagerMessageActionsSel, 0, kPagerMessageActionCount - 1);
             bool sel = (i == idx);
 
             uint16_t itemBg = sel ? COL_SELECT_BG : COL_PANEL_ALT;
@@ -2504,12 +2610,17 @@ static void drawPagerMessageOverlay() {
                                  COL_TEXT_ON_ACCENT);
             }
 
-            const char *label = (i == 0 ? "Reply" : "Tapback");
+            const char *label = kPagerMessageActionOptions[i];
             lcd.setTextColor(itemFg, itemBg);
             drawClippedText(popX + (sel ? 12 : 6), iy + 1,
                             popW - (sel ? 16 : 10), label);
         }
     }
+
+    pagerMessageOverlayDirty = false;
+    pagerMessageOverlayFullRedraw = false;
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextSize(UI_BASE_TEXT_SCALE);
 }
 #endif
 
@@ -2712,7 +2823,7 @@ static void drawChat() {
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
     if (pagerMessageActionsOpen || pagerTapbackMenuOpen) {
-        drawPagerMessageOverlay();
+        drawPagerMessageOverlay(true);
     }
 #endif
 
@@ -7409,6 +7520,14 @@ static void handleRx(MeshPacket pkt) {
 
 static void onWebCfgSaved();  // forward declaration
 
+static WebCfgScreenshotPngCb activeScreenshotCallback() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    return captureScreenshotPng;
+#else
+    return nullptr;
+#endif
+}
+
 static void activateSettingsSelection() {
 #if HAS_SD_CARD
     if (settingsSel == SETTING_EXPORT) {
@@ -7475,7 +7594,7 @@ static void activateSettingsSelection() {
             webCfgEnd();
             snprintf(settingsStatus, sizeof(settingsStatus), "Web server stopped");
         } else {
-            bool ok = webCfgBegin(&gCfg, onWebCfgSaved, captureScreenshotPng);
+            bool ok = webCfgBegin(&gCfg, onWebCfgSaved, activeScreenshotCallback());
             if (ok) {
                 if (webCfgIsOnboarding())
                     snprintf(settingsStatus, sizeof(settingsStatus), "Setup: %s", webCfgIP());
@@ -7719,15 +7838,18 @@ static void handleKey(char k) {
                 pagerTapbackSel = (pagerTapbackSel + step + kPagerTapbackOptionCount)
                                   % kPagerTapbackOptionCount;
             } else {
-                pagerMessageActionsSel = (pagerMessageActionsSel + step + 2) % 2;
+                pagerMessageActionsSel = (pagerMessageActionsSel + step + kPagerMessageActionCount)
+                                         % kPagerMessageActionCount;
             }
-            dirtyChat = true;
+            pagerMessageOverlayDirty = true;
+            pagerMessageOverlayFullRedraw = false;
             return;
         }
 
         if (k == KEY_ENTER || k == KEY_ROLLER) {
             if (pagerMessageActionsOpen) {
-                if (pagerMessageActionsSel == 0) {
+                int action = constrain(pagerMessageActionsSel, 0, kPagerMessageActionCount - 1);
+                if (action == 0) {
                     if (pagerMsgActionReplyPacketId && pagerMsgActionReplyText[0]) {
                         strncpy(pagerReplyRefText, pagerMsgActionReplyText, MSG_CHARS);
                         pagerReplyRefText[MSG_CHARS] = '\0';
@@ -7745,10 +7867,20 @@ static void handleKey(char k) {
                     return;
                 }
 
-                pagerMessageActionsOpen = false;
-                pagerTapbackMenuOpen = true;
-                pagerTapbackSel = 0;
+                if (action == 1) {
+                    pagerMessageActionsOpen = false;
+                    pagerTapbackMenuOpen = true;
+                    pagerTapbackSel = 0;
+                    pagerMessageOverlayDirty = true;
+                    pagerMessageOverlayFullRedraw = true;
+                    return;
+                }
+
+                pagerClearMessageActionState();
+                pagerWheelChatScrollMode = false;
+                pagerChatCursorRow = 0;
                 dirtyChat = true;
+                dirtyInput = true;
                 return;
             }
 
@@ -9104,7 +9236,7 @@ void setup() {
 
     // Boot-time one-shot Wi-Fi/NTP sync, then shut web server/Wi-Fi back down.
     bool bootTimeSynced = false;
-    if (webCfgBegin(&gCfg, onWebCfgSaved, captureScreenshotPng)) {
+    if (webCfgBegin(&gCfg, onWebCfgSaved, activeScreenshotCallback())) {
         if (wifiHasInternetTimePath()) {
             uint32_t syncStartMs = millis();
             while ((millis() - syncStartMs) < 10000UL) {
@@ -9462,6 +9594,9 @@ void loop() {
 
     bool frameNeedsUpdate = dirtyStatus || dirtyTabs || dirtyDivider
                          || dirtyChat || dirtyNodes || dirtyInput;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+    frameNeedsUpdate = frameNeedsUpdate || pagerMessageOverlayDirty;
+#endif
 
     if (softKbVisible && (dirtyChat || dirtyNodes)) dirtyInput = true;
 
@@ -9491,6 +9626,12 @@ void loop() {
             else                                                       drawChat();
         } else if (activeView == CHAN_ANN && dirtyLiveRows) {
             drawLivePanel(false);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
+        } else if (pagerMessageOverlayDirty
+                   && (pagerMessageActionsOpen || pagerTapbackMenuOpen)
+                   && activeView >= 0 && activeView < MESH_CHANNELS) {
+        drawPagerMessageOverlay(pagerMessageOverlayFullRedraw);
+#endif
         }
         if (activeView < MESH_CHANNELS) {
             if (dirtyNodes) drawNodes();

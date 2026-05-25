@@ -377,3 +377,13 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
     _radio.startReceive();
     return state == RADIOLIB_ERR_NONE;
 }
+
+void MeshRadio::setRxPaused(bool paused) {
+    if (!_ready) return;
+    _rxFlag = false;
+    if (paused) {
+        (void)_radio.standby();
+    } else {
+        (void)_radio.startReceive();
+    }
+}

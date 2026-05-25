@@ -19,6 +19,10 @@ public:
     // Blocking transmit. Re-arms receive after. Returns false on error.
     bool transmit(const uint8_t *buf, size_t len);
 
+    // Temporarily pause/resume receive mode (used by screenshot capture on
+    // shared-SPI builds to avoid bus contention).
+    void setRxPaused(bool paused);
+
     bool isReady() const { return _ready; }
 
 private:

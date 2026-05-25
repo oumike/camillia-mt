@@ -966,14 +966,16 @@ static void sendConfigPage(const char *msg = "") {
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>";
 
-    html +=
-        "<h3 style='margin-top:1.1em'>Display Capture</h3>"
-        "<p><a href='/screenshot'"
-        " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
-        "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
-        "&#128247; Capture &amp; Download PNG</a></p>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
-        "Captures the current on-device screen and downloads it as a PNG file.</p>";
+    if (gOnScreenshotPng) {
+        html +=
+            "<h3 style='margin-top:1.1em'>Display Capture</h3>"
+            "<p><a href='/screenshot'"
+            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            "&#128247; Capture &amp; Download PNG</a></p>"
+            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "Captures the current on-device screen and downloads it as a PNG file.</p>";
+    }
 
     html +=
         "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
@@ -1765,7 +1767,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
-        server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+        if (gOnScreenshotPng) {
+            server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+        }
         server.on("/export",  HTTP_GET,  handleGetExport);
         server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
         server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
@@ -1803,7 +1807,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
-            server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+            if (gOnScreenshotPng) {
+                server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+            }
             server.on("/export",  HTTP_GET,  handleGetExport);
             server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
             server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
@@ -1826,7 +1832,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
-    server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+    if (gOnScreenshotPng) {
+        server.on("/screenshot", HTTP_GET, handleGetScreenshot);
+    }
     server.on("/export",  HTTP_GET,  handleGetExport);
     server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
     server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
