@@ -2734,8 +2734,13 @@ static void drawTabs() {
 
 // ── Draw: vertical divider ────────────────────────────────────
 static void drawDivider() {
-    lcd.fillRect(DIVIDER_X, CHAT_Y, 1, CHAT_H, COL_DIVIDER);
-    lcd.drawFastVLine(DIVIDER_X + 1, CHAT_Y, CHAT_H, COL_DIVIDER_HI);
+    int dividerBottom = CHAT_Y + CHAT_H - 1;
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        dividerBottom = max(dividerBottom, channelPanelBottomY());
+    }
+    const int dividerH = max(1, dividerBottom - CHAT_Y + 1);
+    lcd.fillRect(DIVIDER_X, CHAT_Y, 1, dividerH, COL_DIVIDER);
+    lcd.drawFastVLine(DIVIDER_X + 1, CHAT_Y, dividerH, COL_DIVIDER_HI);
 }
 
 // ── Draw: message area ────────────────────────────────────────
@@ -4353,10 +4358,7 @@ static void drawNodesPanel() {
 
 // ── Draw: node list ───────────────────────────────────────────
 static void drawNodes() {
-    int nodeBottom = CHAT_Y + CHAT_H - 1;
-    if (useCompactKeyboardUi() && activeView >= 0 && activeView < MESH_CHANNELS) {
-        nodeBottom = max(nodeBottom, compactNavRowTopY() - 1);
-    }
+    int nodeBottom = channelPanelBottomY();
     const int nodePanelH = max(1, nodeBottom - CHAT_Y + 1);
 
     drawPanelFrame(NODE_X, CHAT_Y, NODE_W, nodePanelH, COL_PANEL_BG, COL_DIVIDER);
@@ -5505,12 +5507,24 @@ static int compactNavRowTopY() {
     return INPUT_Y + INPUT_H - compactRowH - compactRowBottomPad;
 }
 
+static int channelTypingPromptBottomY() {
+    const int rowH = useCompactKeyboardUi() ? max(12, CHAR_H + 6) : TOUCH_BTN_H;
+    const int rowBottomPad = useCompactKeyboardUi() ? 2 : ((activeView == VIEW_MAP) ? 2 : 0);
+    const int navRowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
+    return max(CHAT_Y, navRowY - 3);
+}
+
 static int channelPanelBottomY() {
     int bottom = CHAT_Y + CHAT_H - 1;
-    if (useCompactKeyboardUi()
-        && activeView >= 0 && activeView < MESH_CHANNELS
-        && !isTextInputView()) {
-        bottom = max(bottom, compactNavRowTopY() - 1);
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        if (useCompactKeyboardUi() && !isTextInputView()) {
+            bottom = max(bottom, compactNavRowTopY() - 1);
+        }
+#if defined(DEVICE_TDECK)
+        if (isTextInputView()) {
+            bottom = max(bottom, channelTypingPromptBottomY());
+        }
+#endif
     }
     return bottom;
 }
@@ -6408,6 +6422,23 @@ static void drawInput() {
         fillVerticalGradient(0, navTop, LCD_W, INPUT_Y + INPUT_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
         lcd.drawFastHLine(0, navTop, LCD_W, COL_DIVIDER);
         lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    } else if (
+#if defined(DEVICE_TDECK)
+               showTextInput
+#else
+               false
+#endif
+    ) {
+        int bandW = LCD_W;
+        if (activeView >= 0 && activeView < MESH_CHANNELS) {
+            bandW = MSG_W;
+        }
+        int navTop = max(INPUT_Y, b[0].y);
+        int h = navTop - INPUT_Y;
+        if (h > 0) {
+            fillVerticalGradient(0, INPUT_Y, bandW, h, COL_INPUT_TOP, COL_INPUT_BG);
+        }
+        lcd.drawFastHLine(0, INPUT_Y, bandW, COL_DIVIDER);
     } else if (showTextInput) {
         fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
         lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
@@ -6429,6 +6460,9 @@ static void drawInput() {
     #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         int composerX = 0;
         int composerW = MSG_W;
+    #elif defined(DEVICE_TDECK)
+        int composerX = (activeView >= 0 && activeView < MESH_CHANNELS) ? 1 : 0;
+        int composerW = (activeView >= 0 && activeView < MESH_CHANNELS) ? max(1, MSG_W - 2) : LCD_W;
     #else
         int composerX = 0;
         int composerW = LCD_W;
