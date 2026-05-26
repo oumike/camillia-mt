@@ -405,6 +405,9 @@ static NodeEntry *nodesVisibleNodeByIndex(int idx);
 static bool nodesPanelCanDownloadTiles();
 static void nodesPanelWifiEnter();
 static void nodesPanelWifiRestore();
+static int compactNavRowTopY();
+static int channelPanelBottomY();
+static int channelVisibleRows();
 static int panelOverlayBottomY();
 static bool isTextInputView();
 static void handleKey(char k);
@@ -1405,10 +1408,10 @@ static int navButtonCount() {
 
 static const char *navButtonLabel(int idx) {
     if (useCompactKeyboardUi()) {
-        static const char *labels[] = { "DM", "MAP", "LIVE", "CFG", "NODES" };
+        static const char *labels[] = { "DM", "MAP", "LIVE", "NODES", "CFG" };
         return labels[idx];
     }
-    static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "CFG", "NODES", "Next" };
+    static const char *labels[] = { "Prev", "DM", "MAP", "LIVE", "NODES", "CFG", "Next" };
     return labels[idx];
 }
 
@@ -1425,10 +1428,10 @@ static void activateNavButton(int idx) {
                 if (activeView != CHAN_ANN) goToView(CHAN_ANN);
                 break;
             case 3:
-                if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+                if (activeView != VIEW_NODES) goToView(VIEW_NODES);
                 break;
             case 4:
-                if (activeView != VIEW_NODES) goToView(VIEW_NODES);
+                if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
                 break;
             default:
                 break;
@@ -1450,10 +1453,10 @@ static void activateNavButton(int idx) {
             if (activeView != CHAN_ANN) goToView(CHAN_ANN);
             break;
         case 4:
-            if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
+            if (activeView != VIEW_NODES) goToView(VIEW_NODES);
             break;
         case 5:
-            if (activeView != VIEW_NODES) goToView(VIEW_NODES);
+            if (activeView != VIEW_SETTINGS) goToView(VIEW_SETTINGS);
             break;
         case 6:
             goToView(nextView(activeView));
@@ -2740,14 +2743,17 @@ static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
     int chatW = MSG_W;
+    int chatBottom = channelPanelBottomY();
+    const int chatH = max(1, chatBottom - CHAT_Y + 1);
     const int chatInnerY = CHAT_Y + 1;
+    const int visibleRows = channelVisibleRows();
     uint16_t chatEdge = COL_DIVIDER;
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
     if (pagerWheelChatScrollMode && activeView >= 0 && activeView < MESH_CHANNELS) {
         chatEdge = COL_SELECT_ACCENT;
     }
 #endif
-    drawPanelFrame(chatX, CHAT_Y, chatW, CHAT_H, COL_PANEL_BG, chatEdge);
+    drawPanelFrame(chatX, CHAT_Y, chatW, chatH, COL_PANEL_BG, chatEdge);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lcd.setFont(&fonts::DejaVu12);
     lcd.setTextSize(1.0f);
@@ -2758,7 +2764,7 @@ static void drawChat() {
 
     int active = Channels.activeIdx();
 
-    for (int row = 0; row < VISIBLE_LINES; row++) {
+    for (int row = 0; row < visibleRows; row++) {
         const DisplayLine *dl = Channels.getLine(active, row);
         int y = chatInnerY + row * LINE_H;
         uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
@@ -2811,6 +2817,11 @@ static void drawChat() {
 
         lcd.setTextColor(col, rowBg);
         drawClippedText(textX, y + 1, chatW - (textX - chatX) - 4, dl->text);
+    }
+
+    int rowsBottomY = chatInnerY + visibleRows * LINE_H;
+    if (rowsBottomY <= chatBottom) {
+        lcd.fillRect(chatX + 1, rowsBottomY, chatW - 2, chatBottom - rowsBottomY + 1, COL_PANEL_BG);
     }
 
     // Scroll indicator: show when newer lines exist above the visible window.
@@ -4333,18 +4344,23 @@ static void drawNodesPanel() {
 
 // ── Draw: node list ───────────────────────────────────────────
 static void drawNodes() {
-    drawPanelFrame(NODE_X, CHAT_Y, NODE_W, CHAT_H, COL_PANEL_BG, COL_DIVIDER);
+    int nodeBottom = channelPanelBottomY();
+    const int nodePanelH = max(1, nodeBottom - CHAT_Y + 1);
+
+    drawPanelFrame(NODE_X, CHAT_Y, NODE_W, nodePanelH, COL_PANEL_BG, COL_DIVIDER);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
-    const int MAX_VISIBLE = CHAT_H / LINE_H;  // 29
+    const int MAX_VISIBLE = max(1, nodePanelH / LINE_H);
     uint32_t now = millis();
 
     for (int i = 0; i < MAX_VISIBLE; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         int      y   = CHAT_Y + i * LINE_H;
+        if (y > nodeBottom) break;
+        int rowH = min(LINE_H, nodeBottom - y + 1);
         uint16_t rowBg = (i & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
-        lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, rowBg);
+        lcd.fillRect(NODE_X + 1, y, NODE_W - 2, rowH, rowBg);
         if (!n) continue;
 
         bool     sel = nodeListFocused && (i == nodeListSel);
@@ -4354,7 +4370,7 @@ static void drawNodes() {
                    (age < 60000UL)   ? COL_NODE_HOT       :
                    (age < 3600000UL) ? COL_NODE_WARM      : COL_TAB_IDLE;
 
-        if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, LINE_H, bg);
+            if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, rowH, bg);
 
         char r[32];
     #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -4378,7 +4394,7 @@ static void drawNodes() {
         int selVisibleIdx = constrain(nodeActionMenuSel, 0, visibleCount - 1);
         int mh = 28 + visibleCount * LINE_H;
         int mx = max(4, DIVIDER_X - mw - 6);
-        int my = CHAT_Y + max(2, (CHAT_H - mh) / 2);
+        int my = CHAT_Y + max(2, (nodePanelH - mh) / 2);
 
         drawPanelFrame(mx, my, mw, mh, COL_PANEL_STRONG, COL_SELECT_ACCENT);
 
@@ -5422,6 +5438,25 @@ static bool isTextInputView() {
             || (activeView == VIEW_SETTINGS));
 }
 
+static int compactNavRowTopY() {
+    const int compactRowH = max(12, CHAR_H + 6);
+    const int compactRowBottomPad = 2;
+    return INPUT_Y + INPUT_H - compactRowH - compactRowBottomPad;
+}
+
+static int channelPanelBottomY() {
+    int bottom = CHAT_Y + CHAT_H - 1;
+    if (useCompactKeyboardUi() && activeView >= 0 && activeView < MESH_CHANNELS) {
+        bottom = max(bottom, compactNavRowTopY() - 1);
+    }
+    return bottom;
+}
+
+static int channelVisibleRows() {
+    const int chatH = max(1, channelPanelBottomY() - CHAT_Y + 1);
+    return max(1, (chatH - 2) / LINE_H);
+}
+
 static bool panelCoversInputArea() {
     if (useCompactKeyboardUi()) {
     return isPanelView(activeView) && !isTextInputView();
@@ -5448,6 +5483,56 @@ struct NavButtonRect {
 static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const int count = navButtonCount();
+    if (useCompactKeyboardUi()) {
+        const int rowBottomPad = 2;
+        const int rowH = max(12, CHAR_H + 6);
+        const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
+        int bw = TOUCH_BTN_W;
+        int x = 0;
+        int gapBase = 0;
+        int widthExtra = 0;
+        const int usableW = LCD_W;
+        if (count <= 1) {
+            const int gapMin = 4;
+            bw = min(bw, max(14, usableW - 2 * gapMin));
+            gapBase = max(gapMin, (usableW - bw) / 2);
+            bw = max(14, usableW - 2 * gapBase);
+            x = gapBase;
+        } else {
+            const int gapMin = 4;
+            gapBase = max(gapMin, (usableW - count * bw) / (count + 1));
+
+            if (count * bw + (count + 1) * gapBase > usableW) {
+                bw = max(14, (usableW - (count + 1) * gapBase) / count);
+            }
+
+            int used = count * bw + (count + 1) * gapBase;
+            if (used > usableW) {
+                bw = max(14, (usableW - (count + 1) * gapBase) / count);
+                used = count * bw + (count + 1) * gapBase;
+            }
+
+            widthExtra = max(0, usableW - used);
+            x = gapBase;
+        }
+
+        for (int i = 0; i < NAV_BTN_COUNT; i++) {
+            b[i] = { 0, rowY, 0, rowH };
+        }
+        for (int i = 0; i < count; i++) {
+            int w = bw;
+            if (widthExtra > 0) {
+                w++;
+                widthExtra--;
+            }
+            b[i] = { x, rowY, w, rowH };
+            x += w;
+            if (i + 1 < count) {
+                x += gapBase;
+            }
+        }
+        return;
+    }
     const int rowTopPad = 1;
     const int rowBottomPad = 1;
     const int rowH = max(TOUCH_BTN_H, INPUT_H - rowTopPad - rowBottomPad);
@@ -5456,8 +5541,8 @@ static void navButtonRects(NavButtonRect b[NAV_BTN_COUNT]) {
     const int PAD = 3;
     const int GAP = 4;
     const int count = navButtonCount();
-    const int rowH = TOUCH_BTN_H;
-    const int rowBottomPad = (activeView == VIEW_MAP) ? 2 : 0;
+    const int rowH = useCompactKeyboardUi() ? max(12, CHAR_H + 6) : TOUCH_BTN_H;
+    const int rowBottomPad = useCompactKeyboardUi() ? 2 : ((activeView == VIEW_MAP) ? 2 : 0);
     const int rowY = INPUT_Y + INPUT_H - rowH - rowBottomPad;
 #endif
     int bw = TOUCH_BTN_W;
@@ -6242,6 +6327,11 @@ static void drawInput() {
         fillVerticalGradient(0, navTop, LCD_W, LCD_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
         lcd.drawFastHLine(0, navTop, LCD_W, COL_DIVIDER);
         lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    } else if (useCompactKeyboardUi() && !showTextInput) {
+        int navTop = max(INPUT_Y, b[0].y);
+        fillVerticalGradient(0, navTop, LCD_W, INPUT_Y + INPUT_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
+        lcd.drawFastHLine(0, navTop, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
     } else if (showTextInput) {
         fillVerticalGradient(0, INPUT_Y, LCD_W, INPUT_H, COL_INPUT_TOP, COL_INPUT_BG);
         lcd.drawFastHLine(0, INPUT_Y, LCD_W, COL_DIVIDER);
@@ -6328,10 +6418,108 @@ static void drawInput() {
         // Non-text views keep the top row visually clean.
     }
 
-    uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
     int dmNavIdx = useCompactKeyboardUi() ? 0 : 1;
     int dmUnread = (activeView != CHAN_DM) ? DMs.unreadMessageCount() : 0;
     if (dmUnread > 999) dmUnread = 999;
+
+    if (useCompactKeyboardUi()) {
+        int activeLegendIdx = -1;
+        if (activeView == CHAN_DM) activeLegendIdx = 0;
+        else if (activeView == VIEW_MAP) activeLegendIdx = 1;
+        else if (activeView == CHAN_ANN) activeLegendIdx = 2;
+        else if (activeView == VIEW_NODES) activeLegendIdx = 3;
+        else if (activeView == VIEW_SETTINGS) activeLegendIdx = 4;
+
+        int legendY = b[0].y;
+        int legendH = max(CHAR_H + 4, b[0].h);
+        uint16_t legendBg = COL_PANEL_ALT;
+        lcd.fillRect(0, legendY, LCD_W, legendH, legendBg);
+        lcd.drawFastHLine(0, legendY, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, legendY + legendH - 1, LCD_W, COL_DIVIDER_HI);
+        lcd.setFont(UI_BODY_FONT);
+        lcd.setTextSize(UI_BASE_TEXT_SCALE);
+        int ty = legendY + max(0, (legendH - CHAR_H) / 2);
+
+        static const char shortcuts[5] = { 'D', 'M', 'L', 'N', 'C' };
+        static const char *panelNames[5] = { "DM", "MAP", "LIVE", "NODES", "CFG" };
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        static const char *panelSuffix[5] = { "M", "ap", "ive", "odes", "fg" };
+    #endif
+        const int count = 5;
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        const int slotGap = 2;
+    #else
+        const int slotGap = 4;
+    #endif
+        const int outerPad = 4;
+        const int contentW = max(0, LCD_W - 2 * outerPad);
+        int slotW = (contentW - slotGap * (count - 1)) / count;
+        if (slotW < 1) slotW = 1;
+        const int extraPx = max(0, contentW - (slotW * count + slotGap * (count - 1)));
+        int slotX = (LCD_W - (slotW * count + slotGap * (count - 1) + extraPx)) / 2;
+
+        for (int i = 0; i < count; i++) {
+            int drawW = slotW + ((i < extraPx) ? 1 : 0);
+            char shortcutText[2] = { shortcuts[i], '\0' };
+            char nameText[20];
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            snprintf(nameText, sizeof(nameText), ")%s", panelSuffix[i]);
+            const int openW = lcd.textWidth("(");
+#else
+            snprintf(nameText, sizeof(nameText), " - %s", panelNames[i]);
+#endif
+
+            uint16_t labelCol = COL_TEXT_DIM;
+            if (i == 0 && dmUnread > 0 && activeView != CHAN_DM) labelCol = COL_TAB_UNREAD;
+            if (i == activeLegendIdx) labelCol = COL_TEXT_MAIN;
+
+            int shortcutW = lcd.textWidth(shortcutText);
+            int nameW = lcd.textWidth(nameText);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            int entryW = openW + shortcutW + nameW;
+#else
+            int entryW = shortcutW + nameW;
+#endif
+            int tx = slotX + max(0, (drawW - entryW) / 2);
+
+            uint16_t shortcutCol = COL_TEAL;
+            if (i == activeLegendIdx) shortcutCol = COL_SELECT_ACCENT;
+            else if (i == 0 && dmUnread > 0 && activeView != CHAN_DM) {
+                shortcutCol = lerp565(COL_TAB_UNREAD, COL_SELECT_ACCENT, 64);
+            }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            lcd.setTextColor(labelCol, legendBg);
+            drawClippedText(tx, ty, max(1, drawW - (tx - slotX)), "(");
+
+            lcd.setTextColor(shortcutCol, legendBg);
+            drawClippedText(tx + openW, ty,
+                            max(1, drawW - (tx + openW - slotX)),
+                            shortcutText);
+
+            lcd.setTextColor(labelCol, legendBg);
+            drawClippedText(tx + openW + shortcutW, ty,
+                            max(1, drawW - (tx + openW + shortcutW - slotX)),
+                            nameText);
+#else
+            lcd.setTextColor(shortcutCol, legendBg);
+            drawClippedText(tx, ty, max(1, drawW - (tx - slotX)), shortcutText);
+            lcd.setTextColor(labelCol, legendBg);
+            drawClippedText(tx + shortcutW, ty,
+                            max(1, drawW - (tx + shortcutW - slotX)),
+                            nameText);
+#endif
+            slotX += drawW + slotGap;
+        }
+
+        drawSoftKeyboardOverlay();
+
+        lcd.setFont(UI_BODY_FONT);
+        dirtyInput = false;
+        return;
+    }
+
+    uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
     for (int i = 0; i < navButtonCount(); i++) {
         uint16_t fill = btnFill;
         uint16_t edge = COL_TEAL;
@@ -6343,7 +6531,7 @@ static void drawInput() {
     }
 
     if (navButtonCount() == NAV_BTN_COUNT) {
-        // Bracket app buttons (DM / MAP / LIVE / CFG / NODES) from outer nav buttons.
+        // Bracket app buttons (DM / MAP / LIVE / NODES / CFG) from outer nav buttons.
         int sepX1 = (b[0].x + b[0].w + b[1].x) / 2;
         int sepX2 = (b[5].x + b[5].w + b[6].x) / 2;
         int sepY  = b[0].y + 1;
@@ -8586,18 +8774,19 @@ static void handleKey(char k) {
         } else if (activeView < MAX_CHANNELS && activeView != CHAN_DM) {
             Channel &ch = Channels.get(activeView);
             int stored = min(ch.count, MAX_MSG_LINES);
-            int maxOff = max(0, stored - VISIBLE_LINES);
+            int visibleRows = channelVisibleRows();
+            int maxOff = max(0, stored - visibleRows);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
             if (pagerWheelChatScrollMode) {
-                int visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
-                int bottomRow = max(0, visibleRows - 1);
+                int clampedRows = min(visibleRows, max(0, stored - ch.scrollOff));
+                int bottomRow = max(0, clampedRows - 1);
                 if (pagerChatCursorRow < bottomRow) {
                     pagerChatCursorRow++;
                 } else {
                     ch.scrollOff = min(ch.scrollOff + 1, maxOff);
                 }
-                visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
-                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, visibleRows - 1));
+                clampedRows = min(visibleRows, max(0, stored - ch.scrollOff));
+                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, clampedRows - 1));
                 dirtyChat = true;
                 return;
             }
@@ -8653,13 +8842,14 @@ static void handleKey(char k) {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
             if (pagerWheelChatScrollMode) {
                 int stored = min(ch.count, MAX_MSG_LINES);
+                int visibleRows = channelVisibleRows();
                 if (pagerChatCursorRow > 0) {
                     pagerChatCursorRow--;
                 } else {
                     ch.scrollOff = max(0, ch.scrollOff - 1);
                 }
-                int visibleRows = min(VISIBLE_LINES, max(0, stored - ch.scrollOff));
-                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, visibleRows - 1));
+                int clampedRows = min(visibleRows, max(0, stored - ch.scrollOff));
+                pagerChatCursorRow = constrain(pagerChatCursorRow, 0, max(0, clampedRows - 1));
                 dirtyChat = true;
                 return;
             }
@@ -8678,8 +8868,9 @@ static void handleKey(char k) {
         } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
             int stored = min(ch.count, MAX_MSG_LINES);
-            int maxOff = max(0, stored - VISIBLE_LINES);
-            ch.scrollOff = min(ch.scrollOff + VISIBLE_LINES, maxOff);
+            int visibleRows = channelVisibleRows();
+            int maxOff = max(0, stored - visibleRows);
+            ch.scrollOff = min(ch.scrollOff + visibleRows, maxOff);
             dirtyChat = true;
         }
 
@@ -9536,12 +9727,19 @@ void loop() {
         }
     }
 
-    // 6c. Battery refresh every 5 s
+    // 6c. Battery refresh cadence (pager can use a slower cadence)
     static uint32_t lastBattMs = 0;
-    if (now - lastBattMs >= 5000) {
+    uint32_t battRefreshMs = 5000;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    battRefreshMs = 15000;
+#endif
+    if (now - lastBattMs >= battRefreshMs) {
         lastBattMs   = now;
-        _battPct     = readBatteryPct();
-        dirtyStatus  = true;
+        uint8_t newBatt = readBatteryPct();
+        if (newBatt != _battPct) {
+            _battPct = newBatt;
+            dirtyStatus = true;
+        }
     }
 
     // Detect appended LIVE lines even when they originate outside main.cpp.
