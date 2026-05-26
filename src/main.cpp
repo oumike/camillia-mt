@@ -2842,9 +2842,18 @@ static void drawChat() {
     dirtyChat = false;
 }
 
+static int dmPanelBottomY() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    return max(CHAT_Y + 8, panelOverlayBottomY() - 4);
+#else
+    return panelOverlayBottomY();
+#endif
+}
+
 static int dmConvMessageRowsVisible() {
     const int my = CHAT_Y + 4;
-    const int mh = panelOverlayBottomY() - my + 1;
+    const int panelBottom = dmPanelBottomY();
+    const int mh = panelBottom - my + 1;
     const int iy = my + 3;
     const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
     const int controlsTop = reserveFooter
@@ -4344,7 +4353,10 @@ static void drawNodesPanel() {
 
 // ── Draw: node list ───────────────────────────────────────────
 static void drawNodes() {
-    int nodeBottom = channelPanelBottomY();
+    int nodeBottom = CHAT_Y + CHAT_H - 1;
+    if (useCompactKeyboardUi() && activeView >= 0 && activeView < MESH_CHANNELS) {
+        nodeBottom = max(nodeBottom, compactNavRowTopY() - 1);
+    }
     const int nodePanelH = max(1, nodeBottom - CHAT_Y + 1);
 
     drawPanelFrame(NODE_X, CHAT_Y, NODE_W, nodePanelH, COL_PANEL_BG, COL_DIVIDER);
@@ -4622,13 +4634,44 @@ static void clearDmDeleteConfirm() {
     dmDeleteConfirmNodeId = 0;
 }
 
+static bool dmHandleDeleteShortcutInList() {
+    if (!(activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen)) return false;
+
+    DmConv *selected = selectedDmListConv();
+    if (!selected) {
+        clearDmDeleteConfirm();
+        dirtyChat = true;
+        return true;
+    }
+
+    if (dmDeleteConfirm && dmDeleteConfirmNodeId == selected->nodeId) {
+        if (DMs.deleteConversation(selected->nodeId)) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            int cap = max(0, DMs.count() - 1);
+#else
+            int cap = DMs.count();
+#endif
+            dmListSel = min(dmListSel, cap);
+        }
+        clearDmDeleteConfirm();
+        dirtyChat = dirtyTabs = true;
+        return true;
+    }
+
+    dmDeleteConfirm = true;
+    dmDeleteConfirmNodeId = selected->nodeId;
+    dirtyChat = true;
+    return true;
+}
+
 // ── Draw: DM contact list ─────────────────────────────────────
 static void drawDmList() {
     clearPanelCloseRect();
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = panelOverlayBottomY() - my + 1;
+        const int panelBottom = dmPanelBottomY();
+    const int mh = panelBottom - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
@@ -4681,6 +4724,7 @@ static void drawDmList() {
     const int closeX = mx + 3;
     const int closeY = controlsTop;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     const int newW = TOUCH_BTN_W;
     const int newH = TOUCH_BTN_H;
     const int newX = closeX + newW + 4;
@@ -4693,6 +4737,7 @@ static void drawDmList() {
     int ntw = lcd.textWidth("NEW DM");
     drawClippedText(newX + max(1, (newW - ntw) / 2), newY + max(0, (newH - CHAR_H) / 2), newW - 2, "NEW DM");
     setDmNewRect(newX, newY, newW, newH);
+#endif
 #endif
 
     drawPanelCloseButton(closeX, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
@@ -4721,7 +4766,21 @@ static void drawDmList() {
     }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+    char legend[112];
+    if (dmDeleteConfirm) {
+        DmConv *c = selectedDmListConv();
+        const char *sn = (c && c->shortName[0]) ? c->shortName : "????";
+        snprintf(legend, sizeof(legend), "Delete [%s]? (D)elete  Esc:No", sn);
+    } else {
+        snprintf(legend, sizeof(legend), "(N)ew DM  (D)elete Conversation");
+    }
+    drawClippedText(mx + 4, legendY, mw - 8, legend);
+#elif defined(DEVICE_TDECK)
     const int legendY = my + mh - CHAR_H - 1;
     lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
     lcd.setFont(UI_BODY_FONT);
@@ -4817,7 +4876,8 @@ static void drawDmPicker() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = panelOverlayBottomY() - my + 1;
+        const int panelBottom = dmPanelBottomY();
+    const int mh = panelBottom - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
@@ -4935,7 +4995,8 @@ static void drawDmConv() {
     const int mx = 8;
     const int my = CHAT_Y + 4;
     const int mw = LCD_W - 16;
-    const int mh = panelOverlayBottomY() - my + 1;
+        const int panelBottom = dmPanelBottomY();
+    const int mh = panelBottom - my + 1;
     const int ix = mx + 3;
     const int iy = my + 3;
     const int iw = mw - 6;
@@ -5446,7 +5507,9 @@ static int compactNavRowTopY() {
 
 static int channelPanelBottomY() {
     int bottom = CHAT_Y + CHAT_H - 1;
-    if (useCompactKeyboardUi() && activeView >= 0 && activeView < MESH_CHANNELS) {
+    if (useCompactKeyboardUi()
+        && activeView >= 0 && activeView < MESH_CHANNELS
+        && !isTextInputView()) {
         bottom = max(bottom, compactNavRowTopY() - 1);
     }
     return bottom;
@@ -6327,6 +6390,19 @@ static void drawInput() {
         fillVerticalGradient(0, navTop, LCD_W, LCD_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
         lcd.drawFastHLine(0, navTop, LCD_W, COL_DIVIDER);
         lcd.drawFastHLine(0, INPUT_Y + INPUT_H - 1, LCD_W, COL_DIVIDER);
+    } else if (useCompactKeyboardUi() && showTextInput) {
+        if (activeView != CHAN_DM) {
+            int bandW = LCD_W;
+            if (activeView >= 0 && activeView < MESH_CHANNELS) {
+                bandW = MSG_W;
+            }
+            int navTop = max(INPUT_Y, b[0].y);
+            int h = navTop - INPUT_Y;
+            if (h > 0) {
+                fillVerticalGradient(0, INPUT_Y, bandW, h, COL_INPUT_TOP, COL_INPUT_BG);
+            }
+            lcd.drawFastHLine(0, INPUT_Y, bandW, COL_DIVIDER);
+        }
     } else if (useCompactKeyboardUi() && !showTextInput) {
         int navTop = max(INPUT_Y, b[0].y);
         fillVerticalGradient(0, navTop, LCD_W, INPUT_Y + INPUT_H - navTop, COL_INPUT_TOP, COL_INPUT_BG);
@@ -6350,23 +6426,56 @@ static void drawInput() {
 #endif
 
     if (showTextInput) {
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+        int composerX = 0;
+        int composerW = MSG_W;
+    #else
+        int composerX = 0;
+        int composerW = LCD_W;
+    #endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        if (activeView == CHAN_DM) {
+            const int dmPanelX = 8;
+            const int dmPanelW = LCD_W - 16;
+            composerX = dmPanelX + 1;
+            composerW = max(1, dmPanelW - 2);
+        }
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+        if (activeView == CHAN_DM) {
+            const int dmPanelX = 8;
+            const int dmPanelW = LCD_W - 16;
+            composerX = dmPanelX + 1;
+            composerW = max(1, dmPanelW - 2);
+        }
+#endif
         int textY = max(INPUT_Y + 2, b[0].y - lcd.fontHeight() - 2);
         int kbX = 0, kbY = 0, kbW = 0, kbH = 0;
         const int composerH = lcd.fontHeight() + 6;
         int composerY = -1;
-        if (softKeyboardBounds(kbX, kbY, kbW, kbH)) {
+        if (
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            activeView == CHAN_DM &&
+#endif
+            useCompactKeyboardUi()) {
+            const int dmBottom = dmPanelBottomY();
+            composerY = max(CHAT_Y + 1, dmBottom - composerH + 1);
+            lcd.fillRect(composerX, composerY, composerW, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(composerX, composerY, composerW, COL_DIVIDER);
+            lcd.drawFastHLine(composerX, composerY + composerH - 1, composerW, COL_DIVIDER_HI);
+            textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
+        } else if (softKeyboardBounds(kbX, kbY, kbW, kbH)) {
             composerY = max(CHAT_Y + 1, kbY - composerH - 2);
-            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
-            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
-            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+            lcd.fillRect(composerX, composerY, composerW, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(composerX, composerY, composerW, COL_DIVIDER);
+            lcd.drawFastHLine(composerX, composerY + composerH - 1, composerW, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
         } else {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
             const int composerBottom = max(CHAT_Y + composerH, b[0].y - 2);
             composerY = max(CHAT_Y + 1, composerBottom - composerH);
-            lcd.fillRect(0, composerY, LCD_W, composerH, COL_INPUT_BG);
-            lcd.drawFastHLine(0, composerY, LCD_W, COL_DIVIDER);
-            lcd.drawFastHLine(0, composerY + composerH - 1, LCD_W, COL_DIVIDER_HI);
+            lcd.fillRect(composerX, composerY, composerW, composerH, COL_INPUT_BG);
+            lcd.drawFastHLine(composerX, composerY, composerW, COL_DIVIDER);
+            lcd.drawFastHLine(composerX, composerY + composerH - 1, composerW, COL_DIVIDER_HI);
             textY = composerY + max(0, (composerH - lcd.fontHeight()) / 2);
 #else
             int midY = min(b[0].y - 1, textY + lcd.fontHeight() + 1);
@@ -6382,26 +6491,26 @@ static void drawInput() {
             && pagerReplyRefPacketId) {
             const int refH = lcd.fontHeight() + 4;
             const int refY = max(CHAT_Y + 1, composerY - refH);
-            lcd.fillRect(0, refY, LCD_W, refH, COL_INPUT_BG);
-            lcd.drawFastHLine(0, refY, LCD_W, COL_DIVIDER);
-            lcd.drawFastHLine(0, refY + refH - 1, LCD_W, COL_DIVIDER_HI);
+        lcd.fillRect(composerX, refY, composerW, refH, COL_INPUT_BG);
+        lcd.drawFastHLine(composerX, refY, composerW, COL_DIVIDER);
+        lcd.drawFastHLine(composerX, refY + refH - 1, composerW, COL_DIVIDER_HI);
             lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-            lcd.drawString("RE:", 2, refY + max(0, (refH - lcd.fontHeight()) / 2));
+        lcd.drawString("RE:", composerX + 2, refY + max(0, (refH - lcd.fontHeight()) / 2));
             lcd.setTextColor(COL_TEXT_MAIN, COL_INPUT_BG);
-            int refTextX = 2 + lcd.textWidth("RE:") + 3;
+        int refTextX = composerX + 2 + lcd.textWidth("RE:") + 3;
             drawClippedText(refTextX,
                             refY + max(0, (refH - lcd.fontHeight()) / 2),
-                            LCD_W - refTextX - 2,
+                composerX + composerW - refTextX - 2,
                             pagerReplyRefText);
         }
 #endif
 
         lcd.setTextColor(COL_TEAL, COL_INPUT_BG);
-        lcd.drawString(">>", 2, textY);
+    lcd.drawString(">>", composerX + 2, textY);
 
         // Show trailing input segment that fits in available pixel width.
-        int textX = 2 + lcd.textWidth(">>") + 3;
-        int availW = LCD_W - textX - 4;
+    int textX = composerX + 2 + lcd.textWidth(">>") + 3;
+    int availW = composerX + composerW - textX - 4;
         String visible(inputBuf);
         while (visible.length() > 0 && lcd.textWidth(visible.c_str()) > availW) {
             utf8PopFront(visible);
@@ -6423,6 +6532,14 @@ static void drawInput() {
     if (dmUnread > 999) dmUnread = 999;
 
     if (useCompactKeyboardUi()) {
+        if (showTextInput) {
+            drawSoftKeyboardOverlay();
+
+            lcd.setFont(UI_BODY_FONT);
+            dirtyInput = false;
+            return;
+        }
+
         int activeLegendIdx = -1;
         if (activeView == CHAN_DM) activeLegendIdx = 0;
         else if (activeView == VIEW_MAP) activeLegendIdx = 1;
@@ -8221,6 +8338,9 @@ static void handleKey(char k) {
                 return;
             case 'd':
             case 'D':
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+                if (dmHandleDeleteShortcutInList()) return;
+#endif
                 if (activeView != CHAN_DM) goToView(CHAN_DM);
                 return;
             case 'm':
@@ -8510,29 +8630,11 @@ static void handleKey(char k) {
 
     } else if (k == KEY_BACKSPACE) {
         if (activeView == CHAN_DM && !dmConvOpen && !dmPickerOpen) {
-            DmConv *selected = selectedDmListConv();
-            if (!selected) {
-                clearDmDeleteConfirm();
-                dirtyChat = true;
-                return;
-            }
-            if (dmDeleteConfirm && dmDeleteConfirmNodeId == selected->nodeId) {
-                if (DMs.deleteConversation(selected->nodeId)) {
-#if defined(DEVICE_TLORA_PAGER_TFT)
-                    int cap = max(0, DMs.count() - 1);
-#else
-                    int cap = DMs.count();
-#endif
-                    dmListSel = min(dmListSel, cap);
-                }
-                clearDmDeleteConfirm();
-                dirtyChat = dirtyTabs = true;
-                return;
-            }
-            dmDeleteConfirm = true;
-            dmDeleteConfirmNodeId = selected->nodeId;
-            dirtyChat = true;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
             return;
+#else
+            if (dmHandleDeleteShortcutInList()) return;
+#endif
         }
         if (activeView == CHAN_DM && dmPickerOpen) {
             if (dmPickerFilterLen > 0) {
