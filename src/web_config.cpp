@@ -5,6 +5,8 @@
 #include "dm_mgr.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <Preferences.h>
 #include <nvs_flash.h>
 #include <SD.h>
@@ -16,9 +18,15 @@
 #include "battery_util.h"
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
+static const uint32_t kReleaseCheckTimeoutMs = 7000;
+static const char    *kLatestReleaseApiUrl = "https://api.github.com/repos/oumike/camillia-mt/releases/latest";
 
 static const char    *kUser            = "admin";
 static const char    *kDefaultWebPass  = "admin";
+
+#ifndef APP_VERSION
+#define APP_VERSION "unknown"
+#endif
 
 static WebServer      server(80);
 static bool           running          = false;
@@ -146,6 +154,129 @@ static void appendJsonEscaped(String &out, const char *s) {
             out += (char)c;
         }
     }
+}
+
+static bool extractJsonStringField(const String &json, const char *key, String &value) {
+    value = "";
+    if (!key || !key[0]) return false;
+
+    String needle = "\"";
+    needle += key;
+    needle += "\"";
+
+    int keyPos = json.indexOf(needle);
+    if (keyPos < 0) return false;
+
+    int colonPos = json.indexOf(':', keyPos + needle.length());
+    if (colonPos < 0) return false;
+
+    int quotePos = json.indexOf('"', colonPos + 1);
+    if (quotePos < 0) return false;
+
+    bool escaped = false;
+    for (int i = quotePos + 1; i < json.length(); i++) {
+        char c = json.charAt(i);
+        if (escaped) {
+            if (c == 'n') value += '\n';
+            else if (c == 'r') value += '\r';
+            else if (c == 't') value += '\t';
+            else value += c;
+            escaped = false;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') return true;
+        value += c;
+    }
+
+    return false;
+}
+
+static int compareVersionTags(const char *a, const char *b) {
+    if (!a) a = "";
+    if (!b) b = "";
+
+    const char *pa = a;
+    const char *pb = b;
+
+    for (int seg = 0; seg < 8; seg++) {
+        while (*pa && !isdigit((unsigned char)*pa)) pa++;
+        while (*pb && !isdigit((unsigned char)*pb)) pb++;
+
+        long va = 0;
+        long vb = 0;
+        bool hasA = false;
+        bool hasB = false;
+
+        while (isdigit((unsigned char)*pa)) {
+            hasA = true;
+            va = (va * 10L) + (*pa - '0');
+            pa++;
+        }
+        while (isdigit((unsigned char)*pb)) {
+            hasB = true;
+            vb = (vb * 10L) + (*pb - '0');
+            pb++;
+        }
+
+        if (!hasA && !hasB) return 0;
+        if (!hasA) va = 0;
+        if (!hasB) vb = 0;
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+    }
+
+    return 0;
+}
+
+static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut) {
+    tagOut = "";
+    urlOut = "";
+    errOut = "";
+
+    if (WiFi.status() != WL_CONNECTED) {
+        errOut = "WiFi not connected";
+        return false;
+    }
+
+    WiFiClientSecure client;
+    client.setInsecure();
+
+    HTTPClient http;
+    if (!http.begin(client, kLatestReleaseApiUrl)) {
+        errOut = "Failed to start HTTPS request";
+        return false;
+    }
+
+    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+    http.addHeader("User-Agent", "camillia-mt-webcfg");
+    http.addHeader("Accept", "application/vnd.github+json");
+
+    int code = http.GET();
+    if (code <= 0) {
+        errOut = "Network error";
+        http.end();
+        return false;
+    }
+    if (code != 200) {
+        errOut = String("Release API HTTP ") + String(code);
+        http.end();
+        return false;
+    }
+
+    String body = http.getString();
+    http.end();
+
+    if (!extractJsonStringField(body, "tag_name", tagOut) || tagOut.length() == 0) {
+        errOut = "Release tag not found";
+        return false;
+    }
+
+    (void)extractJsonStringField(body, "html_url", urlOut);
+    return true;
 }
 
 // ── HTML helpers ──────────────────────────────────────────────
@@ -953,6 +1084,17 @@ static void sendConfigPage(const char *msg = "") {
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
 
     html +=
+        "<h3 style='margin-top:.8em'>Software Update</h3>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 .45em'>Current firmware: <b>";
+    html += APP_VERSION;
+    html +=
+        "</b></p>"
+        "<button type='button' id='check-release-btn'"
+        " style='background:#1f7a8c;margin-top:.1em'"
+        " onclick='checkLatestRelease()'>Check for New Release</button>"
+        "<p id='release-check-result' style='font-size:.82em;color:#888;margin:.45em 0 1em'></p>";
+
+    html +=
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
@@ -1072,6 +1214,44 @@ static void sendConfigPage(const char *msg = "") {
                         "function clearLiveFeed(){"
                             "var box=document.getElementById('live-feed');"
                             "if(box)box.innerHTML='';"
+                        "}"
+                        "function setReleaseCheckResult(msg,col){"
+                            "var el=document.getElementById('release-check-result');"
+                            "if(!el)return null;"
+                            "el.style.color=col||'#888';"
+                            "el.textContent=msg||'';"
+                            "return el;"
+                        "}"
+                        "function checkLatestRelease(){"
+                            "var btn=document.getElementById('check-release-btn');"
+                            "if(btn)btn.disabled=true;"
+                            "var done=function(){if(btn)btn.disabled=false;};"
+                            "setReleaseCheckResult('Checking latest release...','#b0b8c8');"
+                            "fetch('/release-check',{cache:'no-store'})"
+                                ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})"
+                                ".then(function(d){"
+                                    "var cur=(d&&d.current)?d.current:'unknown';"
+                                    "if(d&&d.error){setReleaseCheckResult('Update check failed: '+d.error,'#ff9f9f');done();return;}"
+                                    "var latest=(d&&d.latest)?d.latest:'';"
+                                    "if(d&&d.updateAvailable){"
+                                        "var el=setReleaseCheckResult('New release available: '+latest+' (current '+cur+').','#8ef2b8');"
+                                        "if(el&&d.url){"
+                                            "var a=document.createElement('a');"
+                                            "a.href=d.url;"
+                                            "a.target='_blank';"
+                                            "a.rel='noopener';"
+                                            "a.style.marginLeft='0.45em';"
+                                            "a.textContent='View release';"
+                                            "el.appendChild(a);"
+                                        "}"
+                                    "}else if(latest){"
+                                        "setReleaseCheckResult('You are up to date ('+cur+'). Latest: '+latest+'.','#8ef2b8');"
+                                    "}else{"
+                                        "setReleaseCheckResult('No release information returned.','#ffd181');"
+                                    "}"
+                                    "done();"
+                                "})"
+                                ".catch(function(err){setReleaseCheckResult('Update check failed: '+(err&&err.message?err.message:'network error'),'#ff9f9f');done();});"
                         "}"
                         "function liveBodyText(t){"
                             "var s=(t||'').trimStart();"
@@ -1552,6 +1732,46 @@ static void handleGetLiveData() {
     server.send(200, "application/json", out);
 }
 
+static void handleGetReleaseCheck() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    String current = APP_VERSION;
+    String latest;
+    String url;
+    String err;
+    bool ok = fetchLatestReleaseInfo(latest, url, err);
+    bool updateAvailable = false;
+    if (ok) {
+        updateAvailable = compareVersionTags(current.c_str(), latest.c_str()) < 0;
+    }
+
+    String out = "{";
+    out += "\"current\":\"";
+    appendJsonEscaped(out, current.c_str());
+    out += "\"";
+    if (ok) {
+        out += ",\"latest\":\"";
+        appendJsonEscaped(out, latest.c_str());
+        out += "\"";
+        out += ",\"updateAvailable\":";
+        out += updateAvailable ? "true" : "false";
+        out += ",\"url\":\"";
+        appendJsonEscaped(out, url.c_str());
+        out += "\"";
+    } else {
+        out += ",\"error\":\"";
+        appendJsonEscaped(out, err.c_str());
+        out += "\"";
+    }
+    out += "}";
+
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", out);
+}
+
 // ── Announce ─────────────────────────────────────────────────
 
 static void handlePostAnnounce() {
@@ -1765,6 +1985,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         server.on("/login",   HTTP_POST, handlePostLogin);
         server.on("/save",    HTTP_POST, handlePostSave);
         server.on("/live-data", HTTP_GET, handleGetLiveData);
+        server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
         if (gOnScreenshotPng) {
@@ -1805,6 +2026,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             server.on("/login",   HTTP_POST, handlePostLogin);
             server.on("/save",    HTTP_POST, handlePostSave);
             server.on("/live-data", HTTP_GET, handleGetLiveData);
+            server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
             if (gOnScreenshotPng) {
@@ -1830,6 +2052,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     server.on("/login",   HTTP_POST, handlePostLogin);
     server.on("/save",    HTTP_POST, handlePostSave);
     server.on("/live-data", HTTP_GET, handleGetLiveData);
+    server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
     if (gOnScreenshotPng) {
