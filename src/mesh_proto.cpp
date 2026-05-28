@@ -423,6 +423,7 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
                          uint32_t bitfield, uint32_t replyId) {
     size_t n = 0;
     size_t textLen = strlen(text);
+    if (textLen > MESH_TEXT_MAX_LEN) return 0;
     // field 1 (portnum = TEXT_MESSAGE_APP = 1), varint
     n += pbWriteVarint(buf + n, (1 << 3) | 0);
     n += pbWriteVarint(buf + n, TEXT_MESSAGE_APP);

@@ -62,7 +62,7 @@ struct MeshPacket {
 
 // ── Decoded app-layer payloads ────────────────────────────────
 struct TextMsg {
-    char     text[201];
+    char     text[MESH_TEXT_MAX_LEN + 1];
     uint32_t replyId;
 };
 

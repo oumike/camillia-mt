@@ -614,7 +614,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #else
 #define MAX_MSG_LINES   400   // display lines per channel
 #endif
-#define MAX_INPUT_LEN   200
+#define MESH_TEXT_MAX_LEN 200
 #define MAX_NODES        64
 #define MAX_PENDING_ACK   8
 

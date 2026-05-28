@@ -430,6 +430,8 @@ static bool dirtyLiveRows = false;
 static bool dirtyNodes    = true;
 static bool dirtyInput    = true;
 static bool dirtyDivider  = false;
+static bool dirtyMapFull  = true;
+static bool dirtyMapPanel = true;
 
 // ── Screen sleep state ────────────────────────────────────────
 static bool     screenAsleep   = false;
@@ -461,11 +463,13 @@ static void wakeScreen() {
     lastActivityMs = millis();
     // Force full redraw so nothing stale is visible after the backlight returns
     dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
+    dirtyMapFull = true;
+    dirtyMapPanel = true;
     Serial.printf("[screen] woke\n");
 }
 
 // ── Input state ───────────────────────────────────────────────
-static char   inputBuf[MAX_INPUT_LEN + 1] = {0};
+static char   inputBuf[MESH_TEXT_MAX_LEN + 1] = {0};
 static int    inputLen  = 0;
 static bool   cursorOn  = true;
 static uint32_t lastBlink      = 0;
@@ -1333,10 +1337,6 @@ static constexpr int kNodeActionTracerouteIndex = 1;
 static constexpr int kNodeActionCount =
     (int)(sizeof(kNodeActionItems) / sizeof(kNodeActionItems[0]));
 
-static constexpr int MAP_PANEL_FILTER_MAX = 24;
-static char mapPanelFilter[MAP_PANEL_FILTER_MAX + 1] = {0};
-static int  mapPanelFilterLen = 0;
-
 enum TracerouteUiState {
     TRACEROUTE_UI_IDLE = 0,
     TRACEROUTE_UI_RUNNING,
@@ -1600,11 +1600,18 @@ static void goToView(int v) {
         }
     }
     if (v == VIEW_MAP) {
-        // Keep map list live so newly-heard nodes/positions appear immediately.
-        mapNodeFreezeActive = false;
-        mapFrozenNodeCount = 0;
-        mapPanelFilterLen = 0;
-        mapPanelFilter[0] = '\0';
+        dirtyMapFull = true;
+        dirtyMapPanel = true;
+        if (prev != VIEW_MAP) {
+            mapFrozenNodeCount = 0;
+            int cnt = Nodes.count();
+            for (int i = 0; i < cnt && mapFrozenNodeCount < MAX_NODES; i++) {
+                NodeEntry *n = Nodes.getByRank(i);
+                if (!n) continue;
+                mapFrozenNodeIds[mapFrozenNodeCount++] = n->nodeId;
+            }
+            mapNodeFreezeActive = true;
+        }
         mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
     } else if (prev == VIEW_MAP) {
         mapNodeFreezeActive = false;
@@ -3077,6 +3084,47 @@ static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
     return (dl.color == TFT_DARKGREY) ? TFT_WHITE : dl.color;
 }
 
+static int livePanelRowsVisible() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+#else
+    const int mx = 8;
+    const int my = CHAT_Y + 4;
+    const int mw = LCD_W - 16;
+#endif
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int titleH = 11;
+    const int msgTop = my + titleH + 2;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int liveLegendReserveH = CHAR_H + 2;
+#else
+    const int liveLegendReserveH = 0;
+#endif
+    const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsBottom = my + mh - liveLegendReserveH;
+    const int controlsTop = reserveFooter
+        ? (controlsBottom - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (controlsBottom - 1);
+    const int rowH = 8;
+    return max(1, (controlsTop - msgTop) / rowH);
+}
+
+static void liveScrollBy(int deltaRows) {
+    Channel &ch = Channels.get(CHAN_ANN);
+    int stored = min(ch.count, MAX_MSG_LINES);
+    int rowsVisible = livePanelRowsVisible();
+    int maxOff = max(0, stored - rowsVisible);
+
+    if (deltaRows > 0) {
+        ch.scrollOff = min(maxOff, ch.scrollOff + deltaRows);
+    } else if (deltaRows < 0) {
+        ch.scrollOff = max(0, ch.scrollOff + deltaRows);
+    }
+    dirtyLiveRows = true;
+}
+
 static void drawLivePanel(bool fullRedraw) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const int mx = 0;
@@ -3092,10 +3140,16 @@ static void drawLivePanel(bool fullRedraw) {
     const int left = mx + 1;
     const int innerW = mw - 2;
     const int msgTop = my + titleH + 2;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int liveLegendReserveH = CHAR_H + 2;
+#else
+    const int liveLegendReserveH = 0;
+#endif
     const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsBottom = my + mh - liveLegendReserveH;
     const int controlsTop = reserveFooter
-        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
-        : (my + mh - 1);
+        ? (controlsBottom - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (controlsBottom - 1);
     // Font0 is 7px tall; use 8px rows for a touch more breathing room.
     const int rowH = 8;
     const int rowsVisible = max(1, (controlsTop - msgTop) / rowH);
@@ -3114,8 +3168,8 @@ static void drawLivePanel(bool fullRedraw) {
         lcd.setFont(UI_BODY_FONT);
         lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
         drawClippedText(mx + 5, my + 2, mw - 10, "Live RX/TX");
-        lcd.fillRect(mx + 1, controlsTop, mw - 2, my + mh - controlsTop - 1, COL_PANEL_BG);
-        const int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+        lcd.fillRect(mx + 1, controlsTop, mw - 2, controlsBottom - controlsTop, COL_PANEL_BG);
+        const int btnY = controlsTop;
         const int closeX = mx + 3;
         drawPanelCloseButton(closeX, btnY, TOUCH_BTN_W, TOUCH_BTN_H);
     }
@@ -3158,6 +3212,17 @@ static void drawLivePanel(bool fullRedraw) {
         lcd.setTextColor(COL_TEAL, COL_PANEL_ALT);
         drawClippedText(left + innerW - 30, msgTop + 1, 28, "more");
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    drawClippedText(mx + 4, legendY, mw - 8, "Esc:Close");
+#else
+    drawClippedText(mx + 4, legendY, mw - 8, "Sym+Del:Close");
+#endif
+#endif
 
     lcd.setFont(UI_BODY_FONT);
     dirtyLiveRows = false;
@@ -3551,9 +3616,23 @@ static bool mapEnsureTileFile(uint8_t z, int x, int y, bool allowDownload,
     return true;
 }
 
-static void drawMapPanel() {
-    clearPanelCloseRect();
+static void drawMapPanel(bool fullRedraw) {
+    static int  mapListLastSel = -1;
+    static int  mapListLastTotal = -1;
+    static int  mapListLastRowsVisible = -1;
+
+    if (fullRedraw) {
+        clearPanelCloseRect();
+    }
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int mx = 0;
+    const int my = CHAT_Y;
+    const int mw = LCD_W;
+    const int mh = panelOverlayBottomY() - my + 1;
+    const int mapNavBtnH = 0;
+    const int mapNavBottomPad = 0;
+    const int mapNavGap = 0;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
     const int mx = 0;
     const int my = CHAT_Y;
     const int mw = LCD_W;
@@ -3571,7 +3650,7 @@ static void drawMapPanel() {
     const int mapNavGap = 3;
 #endif
     const int mapLegendReserveH =
-    #if defined(DEVICE_TDECK)
+        #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
         (CHAR_H + 2);
 #else
         0;
@@ -3596,9 +3675,17 @@ static void drawMapPanel() {
     const int rowsVisible = max(1, (mapH - listHeaderH - 1) / rowH);
     const int totalNodes = mapVisibleNodeCount();
     mapsListSel = constrain(mapsListSel, 0, max(0, totalNodes - 1));
+    bool redrawList = fullRedraw || dirtyNodes;
+    if (!redrawList) {
+        redrawList = (mapsListSel != mapListLastSel)
+                  || (totalNodes != mapListLastTotal)
+                  || (rowsVisible != mapListLastRowsVisible);
+    }
 
-    drawModalMaskAndFrame(mx, my, mw, mh);
-    drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+    if (fullRedraw) {
+        drawModalMaskAndFrame(mx, my, mw, mh);
+        drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
+    }
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
@@ -3668,17 +3755,15 @@ static void drawMapPanel() {
 
     lcd.fillRect(mapX + 1, mapY + 1, mapW - 2, mapH - 2, COL_PANEL_STRONG);
     drawPanelFrame(mapX, mapY, mapW, mapH, COL_PANEL_STRONG, COL_DIVIDER);
-    lcd.fillRect(listX + 1, listY + 1, listW - 2, mapH - 2, COL_PANEL_BG);
-    drawPanelFrame(listX, listY, listW, mapH, COL_PANEL_BG, COL_DIVIDER);
-    lcd.fillRect(listX + 1, listY + 1, listW - 2, listHeaderH, COL_PANEL_ALT);
-    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    char listHeader[MAP_PANEL_FILTER_MAX + 10];
-    if (mapPanelFilterLen > 0) {
-        snprintf(listHeader, sizeof(listHeader), "[%s]", mapPanelFilter);
-    } else {
+    if (redrawList) {
+        lcd.fillRect(listX + 1, listY + 1, listW - 2, mapH - 2, COL_PANEL_BG);
+        drawPanelFrame(listX, listY, listW, mapH, COL_PANEL_BG, COL_DIVIDER);
+        lcd.fillRect(listX + 1, listY + 1, listW - 2, listHeaderH, COL_PANEL_ALT);
+        lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+        char listHeader[16];
         snprintf(listHeader, sizeof(listHeader), "Nodes");
+        drawClippedText(listX + 3, listY + 2, listW - 6, listHeader);
     }
-    drawClippedText(listX + 3, listY + 2, listW - 6, listHeader);
 
     float latRange = viewMaxLat - viewMinLat;
     float lonRange = viewMaxLon - viewMinLon;
@@ -3813,49 +3898,55 @@ static void drawMapPanel() {
     }
 
     const int listRowsTop = listY + listHeaderH + 1;
-    if (totalNodes == 0) {
-        lcd.fillRect(listX + 1, listRowsTop, listW - 2, rowH, COL_PANEL_BG);
-        lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
-        drawClippedText(listX + 2, listRowsTop + 1, listW - 4,
-                        (mapPanelFilterLen > 0) ? "No match" : "None");
-    } else {
-        int firstVisible = max(0, mapsListSel - (rowsVisible - 1));
-        int maxFirst = max(0, totalNodes - rowsVisible);
-        if (firstVisible > maxFirst) firstVisible = maxFirst;
+    if (redrawList) {
+        if (totalNodes == 0) {
+            lcd.fillRect(listX + 1, listRowsTop, listW - 2, rowH, COL_PANEL_BG);
+            lcd.setTextColor(COL_TAB_IDLE, COL_PANEL_BG);
+            drawClippedText(listX + 2, listRowsTop + 1, listW - 4, "None");
+        } else {
+            int firstVisible = max(0, mapsListSel - (rowsVisible - 1));
+            int maxFirst = max(0, totalNodes - rowsVisible);
+            if (firstVisible > maxFirst) firstVisible = maxFirst;
 
-        for (int row = 0; row < rowsVisible; row++) {
-            int idx = firstVisible + row;
-            int y = listRowsTop + row * rowH;
-            uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
-            lcd.fillRect(listX + 1, y, listW - 2, rowH, rowBg);
-            if (idx >= totalNodes) continue;
+            for (int row = 0; row < rowsVisible; row++) {
+                int idx = firstVisible + row;
+                int y = listRowsTop + row * rowH;
+                uint16_t rowBg = (row & 1) ? COL_PANEL_BG : COL_PANEL_ALT;
+                lcd.fillRect(listX + 1, y, listW - 2, rowH, rowBg);
+                if (idx >= totalNodes) continue;
 
-            NodeEntry *n = mapVisibleNodeByIndex(idx);
-            if (!n) continue;
+                NodeEntry *n = mapVisibleNodeByIndex(idx);
+                if (!n) continue;
 
-            bool sel = (idx == mapsListSel);
-            uint16_t bg = sel ? COL_SELECT_BG : rowBg;
-            if (sel) {
-                lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
-                lcd.drawRect(listX + 1, y, listW - 2, rowH, COL_TEXT_ON_ACCENT);
-                int midY = y + rowH / 2;
-                lcd.fillTriangle(listX + 3, midY,
-                                 listX + 7, y + 2,
-                                 listX + 7, y + rowH - 3,
-                                 COL_TEXT_ON_ACCENT);
+                bool sel = (idx == mapsListSel);
+                uint16_t bg = sel ? COL_SELECT_BG : rowBg;
+                if (sel) {
+                    lcd.fillRect(listX + 1, y, listW - 2, rowH, bg);
+                    lcd.drawRect(listX + 1, y, listW - 2, rowH, COL_TEXT_ON_ACCENT);
+                    int midY = y + rowH / 2;
+                    lcd.fillTriangle(listX + 3, midY,
+                                     listX + 7, y + 2,
+                                     listX + 7, y + rowH - 3,
+                                     COL_TEXT_ON_ACCENT);
+                }
+
+                bool hasLocation = false;
+                float lat = 0.0f, lon = 0.0f;
+                hasLocation = mapExtractNodeCoords(n, lat, lon);
+                const char *sn = n->shortName[0] ? n->shortName : "----";
+                uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
+                lcd.setTextColor(fg, bg);
+                drawClippedText(listX + (sel ? 9 : 3), y + 1, listW - (sel ? 12 : 6), sn);
             }
-
-            bool hasLocation = false;
-            float lat = 0.0f, lon = 0.0f;
-            hasLocation = mapExtractNodeCoords(n, lat, lon);
-            const char *sn = n->shortName[0] ? n->shortName : "----";
-            uint16_t fg = sel ? COL_TEXT_ON_ACCENT : (hasLocation ? COL_TEXT_MAIN : COL_TAB_IDLE);
-            lcd.setTextColor(fg, bg);
-            drawClippedText(listX + (sel ? 9 : 3), y + 1, listW - (sel ? 12 : 6), sn);
         }
+
+        mapListLastSel = mapsListSel;
+        mapListLastTotal = totalNodes;
+        mapListLastRowsVisible = rowsVisible;
     }
 
 #if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TLORA_PAGER_TFT)
+    if (fullRedraw) {
     const int btnY = controlsTop;
     const int closeW = 46;
     drawPanelCloseButton(mx + 3, btnY, closeW, mapNavBtnH);
@@ -3902,19 +3993,30 @@ static void drawMapPanel() {
         drawClippedText(tx, ty, btnW[i] - (tx - bx) - 1, labels[i]);
         setMapControlRect((MapControlAction)i, bx, btnY, btnW[i], mapNavBtnH);
     }
+    }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    const int legendY = my + mh - CHAR_H - 1;
-    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
-    lcd.setFont(UI_BODY_FONT);
-    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
-    drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  Sym+I/O:Zoom  Sym+M:ME");
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (fullRedraw) {
+        const int legendY = my + mh - CHAR_H - 1;
+        lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+        lcd.setFont(UI_BODY_FONT);
+        lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        drawClippedText(mx + 4, legendY, mw - 8,
+                        "Scroll:Node Sym+I/O:Zoom Sym+M:ME Sym+Del:Close");
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    drawClippedText(mx + 4, legendY, mw - 8, "I/O:Zoom  Esc:Close");
+#else
+        drawClippedText(mx + 4, legendY, mw - 8, "Scroll:Prev/Next  Sym+I/O:Zoom  Sym+M:ME");
+#endif
+    }
 #endif
 
     lcd.setFont(UI_BODY_FONT);
     mapLastDrawMs = millis();
     dirtyNodes = false;
+    dirtyMapPanel = downloadedAnyTile;
     dirtyChat = downloadedAnyTile;
 }
 
@@ -3931,13 +4033,20 @@ static void drawNodesPanel() {
     #else
         showPanelScrollButtons();
     #endif
+    const bool nodesCloseButton = showPanelCloseButtons();
+    const bool nodesReserveControls = nodesScrollButtons || nodesCloseButton;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int nodesLegendReserveH = CHAR_H + 2;
+#else
+    const int nodesLegendReserveH = 0;
+#endif
     const int ix = mx + 3;
     const int iw = mw - 6;
-    const int controlsBottom = my + mh - TOUCH_BTN_BOTTOM_PAD;
-        const int controlsTop = nodesScrollButtons
+    const int controlsBottom = my + mh - nodesLegendReserveH - TOUCH_BTN_BOTTOM_PAD;
+        const int controlsTop = nodesReserveControls
                           ? (controlsBottom - TOUCH_BTN_H)
-                          : (my + mh - 1);
-        const int contentBottom = nodesScrollButtons ? (controlsTop - 2) : (my + mh - 2);
+                          : controlsBottom;
+        const int contentBottom = nodesReserveControls ? (controlsTop - 2) : (controlsTop - 1);
     const int contentY = my + titleH + 2;
     const int contentH = max(60, contentBottom - contentY + 1);
     const int colGap = 4;
@@ -4282,13 +4391,13 @@ static void drawNodesPanel() {
         }
     }
 
-    if (showPanelCloseButtons()) {
-        int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+    if (nodesCloseButton) {
+        int closeY = controlsTop;
         drawPanelCloseButton(mx + 3, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
     }
 
     if (nodesScrollButtons) {
-        int btnY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+        int btnY = controlsTop;
         const int btnW = 52;
         const int btnGap = 4;
         const int downX = ix + iw - btnW;
@@ -4351,6 +4460,19 @@ static void drawNodesPanel() {
             drawClippedText(popX + (sel ? 10 : 5), iy + 1, popW - (sel ? 15 : 10), nodeActionLabel(actionIdx));
         }
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    drawClippedText(mx + 4, legendY, mw - 8, "Ent/Roll:Act Esc:Close");
+#else
+    drawClippedText(mx + 4, legendY, mw - 8,
+                    "U/D:Sel Ent/Roll:Act Sym+Del:Close");
+#endif
+#endif
 
     lcd.setFont(UI_BODY_FONT);
     dirtyChat = downloadedAnyTile;
@@ -4777,9 +4899,17 @@ static void drawDmList() {
     if (dmDeleteConfirm) {
         DmConv *c = selectedDmListConv();
         const char *sn = (c && c->shortName[0]) ? c->shortName : "????";
-        snprintf(legend, sizeof(legend), "Delete [%s]? (D)elete  Esc:No", sn);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        snprintf(legend, sizeof(legend), "Del[%s]? D:Yes Esc:No Sym+Del:Close", sn);
+#else
+    snprintf(legend, sizeof(legend), "Delete [%s]? D:Yes Esc:No/Close", sn);
+#endif
     } else {
-        snprintf(legend, sizeof(legend), "(N)ew DM  (D)elete Conversation");
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        snprintf(legend, sizeof(legend), "N:New D:Delete Sym+Del:Close");
+#else
+    snprintf(legend, sizeof(legend), "N:New D:Delete Esc:Close");
+#endif
     }
     drawClippedText(mx + 4, legendY, mw - 8, legend);
 #elif defined(DEVICE_TDECK)
@@ -5151,10 +5281,16 @@ static void drawSettings() {
     const int mh = panelOverlayBottomY() - my + 1;
     const int ix = mx + 3;
     const int iw = mw - 6;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int settingsLegendReserveH = CHAR_H + 2;
+#else
+    const int settingsLegendReserveH = 0;
+#endif
     const bool reserveFooter = showPanelCloseButtons() || showPanelScrollButtons();
+    const int controlsBottom = my + mh - settingsLegendReserveH;
     const int controlsTop = reserveFooter
-        ? (my + mh - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
-        : (my + mh - 1);
+        ? (controlsBottom - (TOUCH_BTN_H + TOUCH_BTN_BOTTOM_PAD))
+        : (controlsBottom - 1);
 
     drawModalMaskAndFrame(mx, my, mw, mh);
     drawPanelFrame(mx, my, mw, mh, COL_PANEL_BG, COL_SELECT_ACCENT);
@@ -5300,7 +5436,7 @@ static void drawSettings() {
         drawClippedText(ix + iw - 8, y + (infoRowsVisible - 1) * SH, 6, "v");
     }
 
-    int closeY = my + mh - TOUCH_BTN_H - TOUCH_BTN_BOTTOM_PAD;
+    int closeY = controlsTop;
     drawPanelCloseButton(mx + 3, closeY, TOUCH_BTN_W, TOUCH_BTN_H);
 
     if (showPanelScrollButtons()) {
@@ -5325,6 +5461,19 @@ static void drawSettings() {
         drawClippedText(tx, ty, cfgBtnW - (tx - downX) - 1, "Down");
         setSettingsControlRect(SETTINGS_CTL_DOWN, downX, closeY, cfgBtnW, TOUCH_BTN_H);
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int legendY = my + mh - CHAR_H - 1;
+    lcd.fillRect(mx + 1, legendY - 1, mw - 2, CHAR_H + 2, COL_PANEL_ALT);
+    lcd.setFont(UI_BODY_FONT);
+    lcd.setTextColor(COL_TEXT_DIM, COL_PANEL_ALT);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    drawClippedText(mx + 4, legendY, mw - 8, "Ent/Roll:Apply Esc:Close");
+#else
+    drawClippedText(mx + 4, legendY, mw - 8,
+                    "U/D:Sel Ent/Roll:Apply D/M/L/N/C Sym+Del:Close");
+#endif
+#endif
 
     lcd.setFont(UI_BODY_FONT);
     dirtyChat = false;
@@ -5928,11 +6077,7 @@ static void mapStartManualView() {
 }
 
 static bool mapNodeMatchesFilter(const NodeEntry *n) {
-    if (!n) return false;
-    if (mapPanelFilterLen == 0) return true;
-    if (containsNoCase(n->shortName, mapPanelFilter)) return true;
-    if (containsNoCase(n->longName, mapPanelFilter)) return true;
-    return false;
+    return (n != nullptr);
 }
 
 static int mapVisibleNodeCount() {
@@ -6102,6 +6247,7 @@ static void mapApplyControl(MapControlAction action) {
     if (action == MAP_CTL_LIST_PREV) {
         mapsListSel = max(0, mapsListSel - 1);
         mapCenterOnSelectedNode();
+        dirtyMapPanel = true;
         dirtyChat = true;
         return;
     }
@@ -6110,6 +6256,7 @@ static void mapApplyControl(MapControlAction action) {
         int cap = max(0, mapVisibleNodeCount() - 1);
         mapsListSel = min(cap, mapsListSel + 1);
         mapCenterOnSelectedNode();
+        dirtyMapPanel = true;
         dirtyChat = true;
         return;
     }
@@ -6117,6 +6264,7 @@ static void mapApplyControl(MapControlAction action) {
     if (action == MAP_CTL_ME) {
         if (mapSelectNodeById(myNodeId)) {
             mapCenterOnSelectedNode();
+            dirtyMapPanel = true;
             dirtyChat = true;
         }
         return;
@@ -6138,6 +6286,7 @@ static void mapApplyControl(MapControlAction action) {
     }
 
     mapClampViewport();
+    dirtyMapPanel = true;
     dirtyChat = true;
 }
 
@@ -6277,6 +6426,7 @@ static bool handleTouchTap(int x, int y) {
                 if (idx >= 0 && idx < totalNodes) {
                     mapsListSel = idx;
                     mapCenterOnSelectedNode();
+                    dirtyMapPanel = true;
                     dirtyChat = true;
                     return true;
                 }
@@ -6669,6 +6819,18 @@ static void drawInput() {
         dirtyInput = false;
         return;
     }
+
+#if defined(DEVICE_TDECK)
+    // Keep a flat underlay beneath touch nav buttons to avoid ghosting artifacts
+    // between rounded pills when chat content changes above.
+    if (navButtonCount() > 0) {
+        int navY = b[0].y;
+        int navH = b[0].h;
+        lcd.fillRect(0, navY, LCD_W, navH, COL_INPUT_BG);
+        lcd.drawFastHLine(0, navY, LCD_W, COL_DIVIDER);
+        lcd.drawFastHLine(0, navY + navH - 1, LCD_W, COL_DIVIDER_HI);
+    }
+#endif
 
     uint16_t btnFill = lerp565(COL_INPUT_BG, COL_PANEL_ALT, 80);
     for (int i = 0; i < navButtonCount(); i++) {
@@ -7611,7 +7773,7 @@ static void handleRx(MeshPacket pkt) {
     // Build time prefix
     char timePrefix[12];
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
-    char prefix[24];
+    char prefix[96];
 
     switch (pkt.portnum) {
 
@@ -7627,18 +7789,20 @@ static void handleRx(MeshPacket pkt) {
             Serial.printf("[rx] text: \"%s\"\n", tm.text);
         }
 
-        // Sender display: use short name (real or hex fallback set by node DB)
+        // Sender display for DMs remains short name; channel view uses long name.
         NodeEntry *n = Nodes.find(pkt.hdr.from);
-        const char *sender = (n && n->shortName[0]) ? n->shortName : "????";
+        const char *senderShort = (n && n->shortName[0]) ? n->shortName : "????";
+        const char *senderLong = (n && n->longName[0]) ? n->longName : senderShort;
+        const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+        const char *transportTag = viaMqtt ? "[M]" : "[R]";
         uint16_t incomingNodeColor = (gCfg.uiMode == UI_MODE_LIGHT) ? TFT_DARKGREY : TFT_LIGHTGREY;
-
-        snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
 
         if (pkt.hdr.to == myNodeId) {
             // Unicast DM addressed to us
+            snprintf(prefix, sizeof(prefix), "%s%s [%s] ", timePrefix, transportTag, senderShort);
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
-            DMs.addMessage(pkt.hdr.from, sender, prefix, tm.text, incomingNodeColor,
+            DMs.addMessage(pkt.hdr.from, senderShort, prefix, tm.text, incomingNodeColor,
                            /*markUnread=*/!viewing, pkt.chanIdx);
             triggerMessageAlert();
             // If we're on the DM list (not inside a conv), jump straight into this one
@@ -7655,10 +7819,11 @@ static void handleRx(MeshPacket pkt) {
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
+            snprintf(prefix, sizeof(prefix), "%s%s %s: ", timePrefix, transportTag, senderLong);
             Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor,
                                 pkt.hdr.id, false);
             triggerMessageAlert();
-            if (!dmPickerOpen) dirtyChat = true;
+            if (activeView == pkt.chanIdx && !dmPickerOpen) dirtyChat = true;
             dirtyTabs = true;
         }
         break;
@@ -7681,7 +7846,7 @@ static void handleRx(MeshPacket pkt) {
              u.longName, u.shortName,
              u.hasPubKey ? " [PK]" : " [noPK]");
         Channels.addMessage(CHAN_ANN, prefix, info, 0xFD20 /* orange */);
-        if (!dmPickerOpen) dirtyChat = true;
+           if (activeView == CHAN_ANN && !dmPickerOpen) dirtyLiveRows = true;
         dirtyNodes = dirtyTabs = true;
 
         // Defer our NODEINFO response so it doesn't block keyboard polling
@@ -7722,7 +7887,6 @@ static void handleRx(MeshPacket pkt) {
         snprintf(live, sizeof(live), "R TRC %s %s",
                  who, matched ? "OK" : "IGN");
         addLiveLine(live, matched ? TFT_GREEN : TFT_DARKGREY);
-        if (matched && !dmPickerOpen) dirtyChat = true;
         break;
     }
 
@@ -7817,7 +7981,11 @@ static void handleRx(MeshPacket pkt) {
                                    false, -1);
                 }
             }
-            if (!dmPickerOpen) dirtyChat = true;
+            if (activeView == CHAN_ANN) {
+                dirtyLiveRows = true;
+            } else if (activeView < MAX_CHANNELS && !dmPickerOpen) {
+                dirtyChat = true;
+            }
         }
         break;
     }
@@ -8008,6 +8176,27 @@ static void handleKey(char k) {
             closePanelToChannel();
             return;
         }
+        return;
+    }
+
+    if (k == KEY_ESCAPE && activeView == CHAN_ANN) {
+        closePanelToChannel();
+        return;
+    }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (k == KEY_ESCAPE
+        && (activeView == VIEW_MAP || activeView == VIEW_NODES
+            || activeView == VIEW_SETTINGS || activeView == CHAN_ANN)) {
+        closePanelToChannel();
+        return;
+    }
+#endif
+
+    if (activeView == CHAN_ANN
+        && (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN
+            || k == KEY_TAB || k == KEY_ROLLER)) {
+        // LIVE panel keeps only close + scroll interactions.
         return;
     }
 
@@ -8346,25 +8535,25 @@ static void handleKey(char k) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     bool dmPickerTypingFilter = (activeView == CHAN_DM && dmPickerOpen
                                  && k >= 0x20 && k < 0x7F);
-    bool mapPanelTypingFilter = (activeView == VIEW_MAP
-                                 && k >= 0x20 && k < 0x7F);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     // On pager/tdeck compact keyboards, Symbol+I/O are emitted as '8'/'9'
     // and Symbol+M as '.'.
-    // Let them bypass map filter typing so they can be consumed as zoom
-    // shortcuts.
-    if (activeView == VIEW_MAP && (k == '8' || k == '9' || k == '.')) {
-        mapPanelTypingFilter = false;
-    }
 #endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // On Cardputer, backtick/tilde should keep acting as panel-close shortcuts
-    // even while the DM picker filter is active.
+    // even while panel filters are active.
     if (activeView == CHAN_DM && dmPickerOpen && (k == '`' || k == '~')) {
         dmPickerTypingFilter = false;
     }
 #endif
-    if (cardputerPanelShortcutReady() && !dmPickerTypingFilter && !mapPanelTypingFilter) {
+    if (cardputerPanelShortcutReady() && !dmPickerTypingFilter) {
+        if (activeView == CHAN_ANN) {
+            if (k == '`' || k == '~') {
+                closePanelToChannel();
+            }
+            // LIVE panel keeps only close + scroll interactions.
+            return;
+        }
         switch (k) {
             case '`':
             case '~':
@@ -8604,6 +8793,7 @@ static void handleKey(char k) {
         }
         if (activeView == VIEW_MAP) {
             mapCenterOnSelectedNode();
+            dirtyMapPanel = true;
             dirtyChat = true;
             return;
         }
@@ -8679,11 +8869,7 @@ static void handleKey(char k) {
             return;
         }
         if (activeView == VIEW_MAP) {
-            if (mapPanelFilterLen > 0) {
-                mapPanelFilter[--mapPanelFilterLen] = '\0';
-                mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
-                dirtyChat = true;
-            }
+            // Map panel intentionally ignores text editing/backspace.
             return;
         }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
@@ -8741,6 +8927,10 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_TAB || k == KEY_ROLLER || k == KEY_NEXT_CHAN) {
+        if (activeView == CHAN_ANN) {
+            // LIVE panel keeps only close + scroll interactions.
+            return;
+        }
         if (activeView == CHAN_DM) {
             if (dmPickerOpen) {
                 if (k == KEY_ROLLER) {
@@ -8854,6 +9044,7 @@ static void handleKey(char k) {
             dirtyChat = true;
         } else if (activeView == VIEW_MAP && k == KEY_ROLLER) {
             mapCenterOnSelectedNode();
+            dirtyMapPanel = true;
             dirtyChat = true;
         } else if (activeView == VIEW_SETTINGS && k == KEY_ROLLER) {
             activateSettingsSelection();
@@ -8890,6 +9081,10 @@ static void handleKey(char k) {
                 dmListLastScrollMs = millis();
                 dirtyChat = true;
             }
+            return;
+        }
+        if (activeView == CHAN_ANN) {
+            liveScrollBy(1);
             return;
         }
         if (nodeDetailOpen) {
@@ -8957,6 +9152,10 @@ static void handleKey(char k) {
             }
             return;
         }
+        if (activeView == CHAN_ANN) {
+            liveScrollBy(-1);
+            return;
+        }
         if (nodeDetailOpen) {
             /* no scroll in detail view */
         } else if (nodeListFocused) {
@@ -8999,7 +9198,12 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_PAGE_UP) {
-        if (activeView == VIEW_MAP) {
+        if (isPanelView(activeView)) {
+            return;
+        }
+        if (activeView == CHAN_ANN) {
+            liveScrollBy(livePanelRowsVisible());
+        } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_ZOOM_IN);
         } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
@@ -9011,7 +9215,13 @@ static void handleKey(char k) {
         }
 
     } else if (k == KEY_PAGE_DN) {
-        if (activeView == VIEW_MAP) {
+        if (isPanelView(activeView)) {
+            return;
+        }
+        if (activeView == CHAN_ANN) {
+            Channels.get(CHAN_ANN).scrollOff = 0;
+            dirtyLiveRows = true;
+        } else if (activeView == VIEW_MAP) {
             mapApplyControl(MAP_CTL_ZOOM_OUT);
         } else if (activeView < MAX_CHANNELS) {
             Channel &ch = Channels.get(activeView);
@@ -9048,12 +9258,7 @@ static void handleKey(char k) {
             return;
         }
         if (activeView == VIEW_MAP) {
-            if (mapPanelFilterLen < MAP_PANEL_FILTER_MAX) {
-                mapPanelFilter[mapPanelFilterLen++] = k;
-                mapPanelFilter[mapPanelFilterLen] = '\0';
-                mapsListSel = constrain(mapsListSel, 0, max(0, mapVisibleNodeCount() - 1));
-                dirtyChat = true;
-            }
+            // Map panel intentionally ignores printable typing so shortcuts keep priority.
             return;
         }
         bool textAllowed = (activeView != CHAN_ANN && activeView != VIEW_SETTINGS
@@ -9061,7 +9266,7 @@ static void handleKey(char k) {
                             && activeView != VIEW_NODES
                             && activeView != VIEW_GPS
                             && !(activeView == CHAN_DM && (!dmConvOpen || dmPickerOpen)));
-        if (inputLen < MAX_INPUT_LEN && textAllowed) {
+        if (inputLen < MESH_TEXT_MAX_LEN && textAllowed) {
             inputBuf[inputLen++] = k;
             inputBuf[inputLen]   = '\0';
             if (!softKbVisible) hwTypingLock = true;
@@ -9782,7 +9987,7 @@ void loop() {
 
     if (syncSelfNodePosition(now)) {
         dirtyNodes = true;
-        if (activeView == VIEW_MAP || activeView == VIEW_NODES || activeView == VIEW_GPS) {
+        if (activeView == VIEW_MAP || activeView == VIEW_GPS) {
             dirtyChat = true;
         }
     }
@@ -9820,8 +10025,11 @@ void loop() {
 
     // 3. ACK expiry
     if (Channels.expireAcks()) {
-        dirtyChat = true;
-        if (activeView == CHAN_ANN) dirtyLiveRows = true;
+        if (activeView == CHAN_ANN) {
+            dirtyLiveRows = true;
+        } else if (activeView < MAX_CHANNELS) {
+            dirtyChat = true;
+        }
     }
 
     // 4. Cursor blink
@@ -9951,7 +10159,16 @@ void loop() {
         if (dirtyChat) {
             if      (activeView == VIEW_SETTINGS)                      drawSettings();
             else if (activeView == VIEW_GPS)                           drawGps();
-            else if (activeView == VIEW_MAP)                           drawMapPanel();
+            else if (activeView == VIEW_MAP) {
+                if (dirtyMapFull || dirtyMapPanel) {
+                    drawMapPanel(dirtyMapFull);
+                    dirtyMapFull = false;
+                    dirtyMapPanel = false;
+                } else {
+                    // Ignore unrelated dirty events while map panel is intentionally static.
+                    dirtyChat = false;
+                }
+            }
             else if (activeView == VIEW_NODES)                         drawNodesPanel();
             else if (activeView == CHAN_ANN)                           drawLivePanel(true);
             else if (activeView == CHAN_DM && dmPickerOpen)            drawDmPicker();
