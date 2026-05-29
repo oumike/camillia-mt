@@ -2537,6 +2537,14 @@ static void drawPanelCloseButton(int x, int y, int w, int h) {
     setPanelCloseRect(x, y, w, h);
 }
 
+static void drawScreenBorder() {
+    // Draw border last so it remains visible and prevents edge overlap artifacts.
+    lcd.drawRect(0, 0, LCD_W, LCD_H, COL_SELECT_ACCENT);
+    if (LCD_W > 2 && LCD_H > 2) {
+        lcd.drawRect(1, 1, LCD_W - 2, LCD_H - 2, COL_DIVIDER_HI);
+    }
+}
+
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDECK)
 static void drawPagerMessageOverlay(bool fullRedraw) {
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -2550,6 +2558,7 @@ static void drawPagerMessageOverlay(bool fullRedraw) {
     const bool showTapback = pagerTapbackMenuOpen;
     const int itemCount = showTapback ? kPagerTapbackOptionCount : kPagerMessageActionCount;
     if (itemCount <= 0) return;
+    const int paneW = (activeView >= 0 && activeView < MESH_CHANNELS) ? LCD_W : MSG_W;
 
     const int titleH = 14;
 
@@ -2564,16 +2573,16 @@ static void drawPagerMessageOverlay(bool fullRedraw) {
     int cellW = max(cellH + 2, 18);
 
     if (showTapback) {
-        popW = min(MSG_W - 8, max(126, 6 + kTapCols * cellW));
+        popW = min(paneW - 8, max(126, 6 + kTapCols * cellW));
         popH = min(CHAT_H - 6, titleH + 4 + tapRows * cellH + 2);
         listTopY = titleH + 2;
     } else {
-        popW = min(MSG_W - 8, 156);
+        popW = min(paneW - 8, 156);
         popH = min(CHAT_H - 6, titleH + 4 + itemCount * rowH);
         listTopY = titleH;
     }
 
-    int popX = max(2, (MSG_W - popW) / 2);
+    int popX = max(2, (paneW - popW) / 2);
     int popY = CHAT_Y + max(2, (CHAT_H - popH) / 2);
 
     if (fullRedraw) {
@@ -2750,6 +2759,9 @@ static void drawTabs() {
 
 // ── Draw: vertical divider ────────────────────────────────────
 static void drawDivider() {
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        return; // Channel windows are now full-width chat.
+    }
     int dividerBottom = CHAT_Y + CHAT_H - 1;
     if (activeView >= 0 && activeView < MESH_CHANNELS) {
         dividerBottom = max(dividerBottom, channelPanelBottomY());
@@ -2763,7 +2775,7 @@ static void drawDivider() {
 static void drawChat() {
     clearPanelCloseRect();
     int chatX = 0;
-    int chatW = MSG_W;
+    int chatW = (activeView >= 0 && activeView < MESH_CHANNELS) ? LCD_W : MSG_W;
     int chatBottom = channelPanelBottomY();
     const int chatH = max(1, chatBottom - CHAT_Y + 1);
     const int chatInnerY = CHAT_Y + 1;
@@ -4497,8 +4509,6 @@ static void drawNodes() {
     lcd.setTextSize(UI_BASE_TEXT_SCALE);
 
     const int MAX_VISIBLE = max(1, nodePanelH / LINE_H);
-    uint32_t now = millis();
-
     for (int i = 0; i < MAX_VISIBLE; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         int      y   = CHAT_Y + i * LINE_H;
@@ -6569,7 +6579,7 @@ static void drawInput() {
         if (activeView != CHAN_DM) {
             int bandW = LCD_W;
             if (activeView >= 0 && activeView < MESH_CHANNELS) {
-                bandW = MSG_W;
+                bandW = LCD_W;
             }
             int navTop = max(INPUT_Y, b[0].y);
             int h = navTop - INPUT_Y;
@@ -6592,7 +6602,7 @@ static void drawInput() {
     ) {
         int bandW = LCD_W;
         if (activeView >= 0 && activeView < MESH_CHANNELS) {
-            bandW = MSG_W;
+            bandW = LCD_W;
         }
         int navTop = max(INPUT_Y, b[0].y);
         int h = navTop - INPUT_Y;
@@ -6620,10 +6630,10 @@ static void drawInput() {
     if (showTextInput) {
     #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
         int composerX = 0;
-        int composerW = MSG_W;
+        int composerW = (activeView >= 0 && activeView < MESH_CHANNELS) ? LCD_W : MSG_W;
     #elif defined(DEVICE_TDECK)
-        int composerX = (activeView >= 0 && activeView < MESH_CHANNELS) ? 1 : 0;
-        int composerW = (activeView >= 0 && activeView < MESH_CHANNELS) ? max(1, MSG_W - 2) : LCD_W;
+        int composerX = 0;
+        int composerW = LCD_W;
     #else
         int composerX = 0;
         int composerW = LCD_W;
@@ -7666,7 +7676,11 @@ static void queueGreet(uint32_t nodeId) {
 
 static void handleRx(MeshPacket pkt) {
     // Keep draining the keyboard even while packet handling is busy.
+#if defined(DEVICE_TDECK)
+    pumpKeyboardRaw(18, millis());
+#else
     pumpKeyboardRaw(12, millis());
+#endif
 
     if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) return;
     if (pkt.hdr.from == myNodeId) return;  // ignore our own relayed/reflected packets
@@ -7703,7 +7717,11 @@ static void handleRx(MeshPacket pkt) {
     // Update node DB from every received packet (before portnum switch so hasName is current)
     Nodes.updateFromPacket(pkt);
     dirtyNodes = true;
+#if defined(DEVICE_TDECK)
+    pumpKeyboardRaw(12, millis());
+#else
     pumpKeyboardRaw(8, millis());
+#endif
 
     // For unicast PKI DMs (channel=0) that failed channel-key decryption, try PKI decrypt.
     // This requires having previously received a NODEINFO with the sender's public key.
@@ -9910,11 +9928,13 @@ static void pollInput() {
 
     // Pull fresh keyboard bytes, then consume queued keys.
 #if defined(DEVICE_TDECK)
-    pumpKeyboardRaw(48, now);
+    pumpKeyboardRaw(64, now);
+    const int keyDrainBudget = 64;
 #else
     pumpKeyboardRaw(24, now);
+    const int keyDrainBudget = 24;
 #endif
-    for (int ki = 0; ki < 24; ki++) {
+    for (int ki = 0; ki < keyDrainBudget; ki++) {
         char k;
         if (!dequeueKey(k)) break;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -10205,13 +10225,24 @@ void loop() {
         drawPagerMessageOverlay(pagerMessageOverlayFullRedraw);
 #endif
         }
+    #if defined(DEVICE_TDECK)
+        // Keep keyboard servicing snappy even when redraw work is heavy.
+        pollInput();
+    #endif
         if (activeView < MESH_CHANNELS) {
-            if (dirtyNodes) drawNodes();
+            if (dirtyNodes) {
+                // Channel windows intentionally hide the side node list.
+                dirtyNodes = false;
+            }
         }
         if (dirtyInput) drawInput();
     }
 
     if (tracerouteUiState != TRACEROUTE_UI_IDLE && frameNeedsUpdate) {
         drawTraceroutePopup();
+    }
+
+    if (frameNeedsUpdate) {
+        drawScreenBorder();
     }
 }
