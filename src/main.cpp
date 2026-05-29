@@ -432,6 +432,9 @@ static bool dirtyInput    = true;
 static bool dirtyDivider  = false;
 static bool dirtyMapFull  = true;
 static bool dirtyMapPanel = true;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+static bool compactChannelNodeListNeedsPrime = true;
+#endif
 
 // ── Screen sleep state ────────────────────────────────────────
 static bool     screenAsleep   = false;
@@ -465,6 +468,9 @@ static void wakeScreen() {
     dirtyStatus = dirtyTabs = dirtyChat = dirtyNodes = dirtyInput = true;
     dirtyMapFull = true;
     dirtyMapPanel = true;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    compactChannelNodeListNeedsPrime = true;
+#endif
     Serial.printf("[screen] woke\n");
 }
 
@@ -1646,6 +1652,9 @@ static void goToView(int v) {
     }
     if (v >= 0 && v < MESH_CHANNELS) {
         lastChannelView = v;
+    #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+        if (v != prev) compactChannelNodeListNeedsPrime = true;
+#endif
     }
     if (v < MESH_CHANNELS || v == CHAN_ANN) {
         Channels.setActive(v);
@@ -4501,10 +4510,7 @@ static void drawNodes() {
 
         bool     sel = nodeListFocused && (i == nodeListSel);
         uint16_t bg  = sel ? COL_SELECT_BG : rowBg;
-        uint32_t age = now - n->lastHeardMs;
-        uint16_t col = sel               ? COL_TEXT_ON_ACCENT :
-                   (age < 60000UL)   ? COL_NODE_HOT       :
-                   (age < 3600000UL) ? COL_NODE_WARM      : COL_TAB_IDLE;
+        uint16_t col = sel ? COL_TEXT_ON_ACCENT : COL_TEAL;
 
             if (sel) lcd.fillRect(NODE_X + 1, y, NODE_W - 2, rowH, bg);
 
@@ -4566,6 +4572,11 @@ static void drawNodes() {
     }
 
     lcd.setFont(UI_BODY_FONT);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    if (activeView >= 0 && activeView < MESH_CHANNELS) {
+        compactChannelNodeListNeedsPrime = false;
+    }
+#endif
     dirtyNodes = false;
 }
 
@@ -10098,6 +10109,16 @@ void loop() {
         // Keep map nodes visually frozen while map is focused.
         dirtyNodes = false;
     }
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    if (activeView >= 0 && activeView < MESH_CHANNELS
+        && !nodeDetailOpen
+        && !nodeListFocused
+        && !nodeActionMenuOpen
+        && !compactChannelNodeListNeedsPrime) {
+        // Compact channel views keep the side node list static to avoid pulse/flicker.
+        dirtyNodes = false;
+    }
+#endif
 
     // Status bar shows HH:MM, so a minute cadence avoids unnecessary redraw churn.
     static uint32_t lastClockDrawTickMs = 0;
