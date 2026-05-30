@@ -7398,6 +7398,9 @@ static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
             break;
         }
         framesRemaining -= (uint32_t)framesNow;
+
+        // Keep keyboard reads flowing while alert tones are playing.
+        pumpKeyboardRaw(6, millis());
     }
 }
 
@@ -7408,8 +7411,12 @@ static void tdeckPlayAlertPattern() {
     static const uint16_t kDurMs[] = {34, 34, 56};
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
+        pumpKeyboardRaw(8, millis());
         tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(10);
+        if (i + 1 < kNoteCount) {
+            delay(10);
+            pumpKeyboardRaw(6, millis());
+        }
     }
     tdeckAudioStopPlayback();
 }
@@ -7421,8 +7428,12 @@ static void tdeckPlayChirpyPattern() {
     static const uint16_t kDurMs[] = {20, 20, 22, 34};
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
+        pumpKeyboardRaw(8, millis());
         tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(6);
+        if (i + 1 < kNoteCount) {
+            delay(6);
+            pumpKeyboardRaw(6, millis());
+        }
     }
     tdeckAudioStopPlayback();
 }
@@ -7434,8 +7445,12 @@ static void tdeckPlayBassPattern() {
     static const uint16_t kDurMs[] = {54, 50, 74};
     static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
     for (size_t i = 0; i < kNoteCount; i++) {
+        pumpKeyboardRaw(8, millis());
         tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
-        if (i + 1 < kNoteCount) delay(12);
+        if (i + 1 < kNoteCount) {
+            delay(12);
+            pumpKeyboardRaw(6, millis());
+        }
     }
     tdeckAudioStopPlayback();
 }
@@ -7693,7 +7708,13 @@ static void handleRx(MeshPacket pkt) {
     // another node" on the sender's app instead of "Delivered").
     bool isAckOrNakEarly = (pkt.portnum == ROUTING_APP && pkt.requestId != 0);
     if (!isBcast && pkt.hdr.to == myNodeId && (pkt.hdr.flags & 0x08) && pkt.decrypted && !isAckOrNakEarly) {
+    #if defined(DEVICE_TDECK)
+        pumpKeyboardRaw(16, millis());
+    #endif
         sendRoutingAck(pkt);
+    #if defined(DEVICE_TDECK)
+        pumpKeyboardRaw(20, millis());
+    #endif
     }
 
     pktCount++;
@@ -7744,8 +7765,15 @@ static void handleRx(MeshPacket pkt) {
                     pkt.payloadLen = 0;
                 }
                 // Send routing ACK (the early-ACK path at top missed this since it wasn't decrypted yet)
-                if ((pkt.hdr.flags & 0x08) && pkt.portnum != ROUTING_APP)
+                if ((pkt.hdr.flags & 0x08) && pkt.portnum != ROUTING_APP) {
+#if defined(DEVICE_TDECK)
+                    pumpKeyboardRaw(14, millis());
+#endif
                     sendRoutingAck(pkt);
+#if defined(DEVICE_TDECK)
+                    pumpKeyboardRaw(18, millis());
+#endif
+                }
                 if (debugMessagesEnabled()) {
                     Serial.printf("[rx] pki decrypt OK portnum=%lu\n", (unsigned long)pkt.portnum);
                 }
@@ -7758,16 +7786,28 @@ static void handleRx(MeshPacket pkt) {
         // a fresh public key exchange and request NODEINFO refresh.
         if (pkt.hdr.to == myNodeId && pkt.hdr.channel == 0) {
             if (pkt.hdr.flags & 0x08) {
+#if defined(DEVICE_TDECK)
+                pumpKeyboardRaw(14, millis());
+#endif
                 sendRoutingNak(pkt, 35); // PKI_UNKNOWN_PUBKEY
+#if defined(DEVICE_TDECK)
+                pumpKeyboardRaw(18, millis());
+#endif
             }
             NodeEntry *snd = Nodes.find(pkt.hdr.from);
             uint32_t now = millis();
             bool shouldRequestInfo = (!snd || (now - snd->lastSentInfoMs > 5000));
             if (shouldRequestInfo) {
+#if defined(DEVICE_TDECK)
+                pumpKeyboardRaw(12, millis());
+#endif
                 if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
                                           pkt.hdr.from, true)) {
                     if (snd) snd->lastSentInfoMs = now;
                 }
+#if defined(DEVICE_TDECK)
+                pumpKeyboardRaw(16, millis());
+#endif
             }
         }
 
@@ -7970,9 +8010,15 @@ static void handleRx(MeshPacket pkt) {
                 // Respond with a unicast NODEINFO so they can retry with PKI.
                 if (errorReason == 35) {
                     debugLogAcks("[nak] PKI_UNKNOWN_PUBKEY - sending NODEINFO to !%08X\n", pkt.hdr.from);
+#if defined(DEVICE_TDECK)
+                    pumpKeyboardRaw(12, millis());
+#endif
                     Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort, pkt.hdr.from, true);
                     NodeEntry *n = Nodes.find(pkt.hdr.from);
                     if (n) n->lastSentInfoMs = millis();
+#if defined(DEVICE_TDECK)
+                    pumpKeyboardRaw(16, millis());
+#endif
                 }
 
                 // NO_CHANNEL means our last DM channel guess was wrong.
@@ -7984,10 +8030,16 @@ static void handleRx(MeshPacket pkt) {
                         // refreshes quickly for PKI fallback.
                         uint32_t now = millis();
                         if (now - n->lastSentInfoMs > 5000) {
+#if defined(DEVICE_TDECK)
+                            pumpKeyboardRaw(10, millis());
+#endif
                             if (Channels.sendNodeInfo(myNodeId, gCfg.nodeLong, gCfg.nodeShort,
                                                       pkt.hdr.from, true)) {
                                 n->lastSentInfoMs = now;
                             }
+#if defined(DEVICE_TDECK)
+                            pumpKeyboardRaw(14, millis());
+#endif
                         }
                         // Routing NAKs can arrive on fallback paths; do not learn
                         // channel identity from them. Only clear sticky channel index.
