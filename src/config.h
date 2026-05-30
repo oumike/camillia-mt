@@ -598,7 +598,11 @@ extern int LINE_H;          // row stride in channel/node/settings panels
 extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing
 // Channel windows now use full-width chat, so wrapping should use display width.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#define MSG_CHARS       53   // Pager uses wider chat glyphs; keep wraps within visible row width.
+#else
 #define MSG_CHARS       (LCD_W / CHAR_W)
+#endif
 #define NODE_CHARS      (NODE_W / CHAR_W)   // derived chars in node pane
 
 // ── Message storage ───────────────────────────────────────────

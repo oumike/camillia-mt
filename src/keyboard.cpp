@@ -444,24 +444,37 @@ char TDeckKeyboard::readKey() {
     // A local gate here prevents draining buffered bursts and drops keys.
 #if (KB_INT >= 0)
     static uint32_t lastIdleProbeMs = 0;
+    static uint32_t lastKeyHitMs = 0;
     uint32_t now = millis();
     bool irqActive = (digitalRead(KB_INT) == LOW);
     // T-Deck can miss very short taps if we only probe every 250ms when the
     // IRQ line is not asserted; keep a faster fallback cadence there.
 #if defined(DEVICE_TDECK)
-    static constexpr uint32_t kIdleProbeMs = 20;
+    static constexpr uint32_t kIdleProbeMs = 12;
+    static constexpr uint32_t kBurstWindowMs = 28;
 #else
     static constexpr uint32_t kIdleProbeMs = 250;
 #endif
     if (!irqActive) {
+#if defined(DEVICE_TDECK)
+        bool inBurstDrain = (now - lastKeyHitMs) < kBurstWindowMs;
+        if (!inBurstDrain) {
+            if (now - lastIdleProbeMs < kIdleProbeMs) return KEY_NONE;
+            lastIdleProbeMs = now;
+        }
+#else
         if (now - lastIdleProbeMs < kIdleProbeMs) return KEY_NONE;
         lastIdleProbeMs = now;
+#endif
     }
 #endif
     uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
     if (!Wire.available()) return KEY_NONE;
     uint8_t raw = Wire.read();
     if (raw == 0x00 || raw == 0xFF) return KEY_NONE;
+#if defined(DEVICE_TDECK)
+    lastKeyHitMs = now;
+#endif
     return mapKey(raw);
 #endif
 }
