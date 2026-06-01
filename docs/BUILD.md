@@ -45,9 +45,9 @@ pio run -e tlora-pager-tft
 pio run -e cardputer-cap
 pio run -e heltec-v4
 pio run -e heltec-v4-vertical
-pio run -e tdeck-lvgl-poc
-pio run -e tlora-pager-tft-lvgl-poc
-pio run -e cardputer-cap-lvgl-poc
+pio run -e tdeck-lvgl
+pio run -e tlora-pager-tft-lvgl
+pio run -e cardputer-cap-lvgl
 ```
 
 Open serial monitor without rebuilding:
@@ -66,9 +66,9 @@ Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--p
   --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft)
   --heltec, -H  Use Heltec V4 expansion environment (heltec-v4)
   --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical)
-  --tdeck-lvgl       Use LVGL POC on T-Deck (tdeck-lvgl-poc)
-  --pager-lvgl       Use LVGL POC on T-Lora Pager TFT (tlora-pager-tft-lvgl-poc)
-  --cardputer-lvgl   Use LVGL POC on Cardputer + Cap LoRa/GPS (cardputer-cap-lvgl-poc)
+  --tdeck-lvgl       Use LVGL build on T-Deck (tdeck-lvgl)
+  --pager-lvgl       Use LVGL build on T-Lora Pager TFT (tlora-pager-tft-lvgl)
+  --cardputer-lvgl   Use LVGL build on Cardputer + Cap LoRa/GPS (cardputer-cap-lvgl)
                 If neither is provided, you'll be prompted to choose a device.
   --erase, -E   Erase flash before clean build/upload
 ```

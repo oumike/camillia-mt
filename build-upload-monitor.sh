@@ -7,19 +7,43 @@ cd "$SCRIPT_DIR"
 
 ENV_NAME="tdeck"
 DEBUG_ENV_NAME="tdeck-debug"
+TDECK_V2_IMPL_ENV_NAME="tdeck-lvgl"
 CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 TLORA_ENV_NAME="tlora-pager-tft"
-TDECK_LVGL_ENV_NAME="tdeck-lvgl-poc"
-TLORA_LVGL_ENV_NAME="tlora-pager-tft-lvgl-poc"
-CARDPUTER_LVGL_ENV_NAME="cardputer-cap-lvgl-poc"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 
 has_env() {
 	local env_name="$1"
 	grep -q "^\[env:${env_name}\]" platformio.ini
+}
+
+select_env_or_exit() {
+	local env_name="$1"
+	local not_found_msg="$2"
+	local extra_msg="${3:-}"
+
+	if has_env "$env_name"; then
+		ENV_NAME="$env_name"
+		ENV_EXPLICIT=true
+		return
+	fi
+
+	echo "$not_found_msg"
+	if [ -n "$extra_msg" ]; then
+		echo "$extra_msg"
+	fi
+	exit 1
+}
+
+resolve_effective_env() {
+	# Keep v1-style target names in the script while 2.0 tdeck builds move to LVGL.
+	if [ "$ENV_NAME" = "tdeck" ] && [ "$TDECK_V2_IMPL_ENV_NAME" != "tdeck" ] && has_env "$TDECK_V2_IMPL_ENV_NAME"; then
+		echo "[PIO] Remapping tdeck -> $TDECK_V2_IMPL_ENV_NAME"
+		ENV_NAME="$TDECK_V2_IMPL_ENV_NAME"
+	fi
 }
 
 prompt_for_device() {
@@ -45,18 +69,6 @@ prompt_for_device() {
 	if has_env "$HELTEC_VERTICAL_ENV_NAME"; then
 		options+=("$HELTEC_VERTICAL_ENV_NAME")
 		labels+=("Heltec V4 Expansion Kit (Vertical UI)")
-	fi
-	if has_env "$TDECK_LVGL_ENV_NAME"; then
-		options+=("$TDECK_LVGL_ENV_NAME")
-		labels+=("LilyGo T-Deck (LVGL POC)")
-	fi
-	if has_env "$TLORA_LVGL_ENV_NAME"; then
-		options+=("$TLORA_LVGL_ENV_NAME")
-		labels+=("LilyGo T-Lora Pager TFT (LVGL POC)")
-	fi
-	if has_env "$CARDPUTER_LVGL_ENV_NAME"; then
-		options+=("$CARDPUTER_LVGL_ENV_NAME")
-		labels+=("M5Stack Cardputer + Cap LoRa/GPS (LVGL POC)")
 	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
@@ -87,106 +99,51 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--tdeck-lvgl] [--pager-lvgl] [--cardputer-lvgl] [--erase|-E]"
+	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME)"
 	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
-	echo "  --tdeck-lvgl       Use LVGL POC on T-Deck ($TDECK_LVGL_ENV_NAME)"
-	echo "  --pager-lvgl       Use LVGL POC on T-Lora Pager TFT ($TLORA_LVGL_ENV_NAME)"
-	echo "  --cardputer-lvgl   Use LVGL POC on Cardputer + Cap LoRa/GPS ($CARDPUTER_LVGL_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 }
 
+run_pio_target() {
+	local target="$1"
+	local label="$2"
+	echo "[PIO] $label ($ENV_NAME)..."
+	pio run -e "$ENV_NAME" -t "$target"
+}
+
+if ! command -v pio >/dev/null 2>&1; then
+	echo "PlatformIO CLI not found: install it or run from an environment that provides 'pio'."
+	exit 1
+fi
+
 for arg in "$@"; do
 	case "$arg" in
 		--tdeck|-t)
-			if has_env "tdeck"; then
-				ENV_NAME="tdeck"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment 'tdeck' not found in platformio.ini"
-				exit 1
-			fi
+			select_env_or_exit "tdeck" "Environment 'tdeck' not found in platformio.ini"
 			;;
 		--debug|-d)
-			if has_env "$DEBUG_ENV_NAME"; then
-				ENV_NAME="$DEBUG_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Debug environment '$DEBUG_ENV_NAME' not found in platformio.ini"
-				echo "Tip: add [env:$DEBUG_ENV_NAME] or run without --debug."
-				exit 1
-			fi
+			select_env_or_exit "$DEBUG_ENV_NAME" "Debug environment '$DEBUG_ENV_NAME' not found in platformio.ini" "Tip: add [env:$DEBUG_ENV_NAME] or run without --debug."
 			;;
 		--erase|-E)
 			ERASE_FIRST=true
 			;;
 		--cardputer|-C)
-			if has_env "$CARDPUTER_ENV_NAME"; then
-				ENV_NAME="$CARDPUTER_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$CARDPUTER_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
+			select_env_or_exit "$CARDPUTER_ENV_NAME" "Environment '$CARDPUTER_ENV_NAME' not found in platformio.ini"
 			;;
 		--pager|-P)
-			if has_env "$TLORA_ENV_NAME"; then
-				ENV_NAME="$TLORA_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$TLORA_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
-			;;
-		--tdeck-lvgl)
-			if has_env "$TDECK_LVGL_ENV_NAME"; then
-				ENV_NAME="$TDECK_LVGL_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$TDECK_LVGL_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
-			;;
-		--pager-lvgl)
-			if has_env "$TLORA_LVGL_ENV_NAME"; then
-				ENV_NAME="$TLORA_LVGL_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$TLORA_LVGL_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
-			;;
-		--cardputer-lvgl)
-			if has_env "$CARDPUTER_LVGL_ENV_NAME"; then
-				ENV_NAME="$CARDPUTER_LVGL_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$CARDPUTER_LVGL_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
+			select_env_or_exit "$TLORA_ENV_NAME" "Environment '$TLORA_ENV_NAME' not found in platformio.ini"
 			;;
 		--heltec|-H)
-			if has_env "$HELTEC_ENV_NAME"; then
-				ENV_NAME="$HELTEC_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$HELTEC_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
+			select_env_or_exit "$HELTEC_ENV_NAME" "Environment '$HELTEC_ENV_NAME' not found in platformio.ini"
 			;;
 		--heltec-vertical|--vertical|-V)
-			if has_env "$HELTEC_VERTICAL_ENV_NAME"; then
-				ENV_NAME="$HELTEC_VERTICAL_ENV_NAME"
-				ENV_EXPLICIT=true
-			else
-				echo "Environment '$HELTEC_VERTICAL_ENV_NAME' not found in platformio.ini"
-				exit 1
-			fi
+			select_env_or_exit "$HELTEC_VERTICAL_ENV_NAME" "Environment '$HELTEC_VERTICAL_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage
@@ -204,16 +161,12 @@ if [ "$ENV_EXPLICIT" = false ]; then
 	prompt_for_device
 fi
 
+resolve_effective_env
+
 if [ "$ERASE_FIRST" = true ]; then
-	echo "[PIO] Erasing device flash..."
-	pio run -e "$ENV_NAME" -t erase
+	run_pio_target "erase" "Erasing device flash"
 fi
 
-echo "[PIO] Full clean ($ENV_NAME)..."
-pio run -e "$ENV_NAME" -t fullclean
-
-echo "[PIO] Upload ($ENV_NAME)..."
-pio run -e "$ENV_NAME" -t upload
-
-echo "[PIO] Monitor ($ENV_NAME)..."
-pio run -e "$ENV_NAME" -t monitor
+run_pio_target "fullclean" "Full clean"
+run_pio_target "upload" "Upload"
+run_pio_target "monitor" "Monitor"
