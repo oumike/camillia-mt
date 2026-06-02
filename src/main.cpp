@@ -588,6 +588,27 @@ static void sdRmDir(const char *path) {
     SD.rmdir(path);
 }
 
+static void clearNodeDbOnSd() {
+    if (!sdBegin()) return;
+
+    const char *nodeFiles[] = {
+        "/camillia/nodes.db",
+        "/camillia/nodes.bin",
+        "/camillia/nodes.json",
+        "/camillia/node_db.bin",
+        "/camillia/node_db.json",
+    };
+    for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
+        if (SD.exists(nodeFiles[i])) {
+            SD.remove(nodeFiles[i]);
+        }
+    }
+
+    if (SD.exists("/camillia/nodes")) {
+        sdRmDir("/camillia/nodes");
+    }
+}
+
 static bool sdEnsureParentDirs(const char *path) {
     if (!path || path[0] != '/') return false;
     String p(path);
@@ -8167,10 +8188,16 @@ static void activateSettingsSelection() {
     } else if (settingsSel == SETTING_CLEAR_MSGS) {
         Channels.clearAllMessages(true);
         DMs.clearAll(true);
-        snprintf(settingsStatus, sizeof(settingsStatus), "Messages cleared");
+        snprintf(settingsStatus, sizeof(settingsStatus), "Messages cleared - rebooting...");
         dirtyTabs = dirtyNodes = dirtyInput = true;
+        dirtyChat = true;
+        drawSettings();
+        delay(1000);
+        ESP.restart();
+        return;
     } else if (settingsSel == SETTING_CLEAR_NODES) {
         Nodes.clearPersisted();
+        clearNodeDbOnSd();
         snprintf(settingsStatus, sizeof(settingsStatus), "Node DB cleared - rebooting...");
         dirtyChat = true;
         drawSettings();

@@ -66,7 +66,6 @@ void ChannelMgr::init() {
         if (!_chans[i].lines)
             Serial.printf("[chanmgr] alloc failed for ch%d\n", i);
     }
-    addMessage(CHAN_ANN, "", "Live channel ready", TFT_DARKGREY, 0);
     setActive(0);
 }
 

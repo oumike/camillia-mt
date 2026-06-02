@@ -294,6 +294,8 @@ bool sdBegin() {
     Serial.println("[sd] disabled");
     return sdReady;
 #else
+    if (sdReady) return true;
+
     // Cardputer Cap shares SPI between LoRa and the SD slot, so keep both
     // chip selects deasserted before attempting to mount the card.
     SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
