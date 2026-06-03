@@ -4,9 +4,9 @@ set -e
 RELEASE_ENVS=(
     tdeck
     tlora-pager-tft
-    cardputer-cap
-    heltec-v4
-    heltec-v4-vertical
+    # cardputer-cap
+    # heltec-v4
+    # heltec-v4-vertical
 )
 
 has_env() {

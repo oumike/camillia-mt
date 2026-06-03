@@ -63,6 +63,8 @@ static lv_disp_draw_buf_t s_drawBuf;
 static lv_obj_t *s_channelBtns[MESH_CHANNELS] = {};
 static lv_obj_t *s_channelLabels[MESH_CHANNELS] = {};
 static bool s_channelNeedsAttention[MESH_CHANNELS] = {};
+static lv_obj_t *s_channelStrip = nullptr;
+static lv_obj_t *s_channelList = nullptr;
 static lv_obj_t *s_chatHeaderBar = nullptr;
 static lv_obj_t *s_chatHeaderTime = nullptr;
 static lv_obj_t *s_chatHeaderGps = nullptr;
@@ -322,6 +324,7 @@ static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
 static const char *channelName(int idx);
+static void sizeChannelButtonToLabel(int idx);
 static void drawBootSplash();
 static bool pollUserButton(uint32_t nowMs);
 static void wakeScreen();
@@ -5411,18 +5414,28 @@ static void pumpKeyboardInput() {
 
                 if (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-                    if (k == KEY_NEXT_CHAN) {
-                        s_cardputerMainChatPanelFocused = true;
-                    } else {
-                        if (s_pagerChatCursorMode) {
-                            pagerExitChatCursorMode(true);
-                            refreshChatView(true);
-                        }
-                        s_cardputerMainChatPanelFocused = false;
+                    if (!s_cardputerMainChatPanelFocused) {
+                        int nextChannel = s_activeChannel + ((k == KEY_NEXT_CHAN) ? 1 : -1);
+                        if (nextChannel < 0) nextChannel = MESH_CHANNELS - 1;
+                        if (nextChannel >= MESH_CHANNELS) nextChannel = 0;
+                        setActiveChannel(nextChannel);
                     }
 #endif
                     continue;
                 }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                if (k == KEY_ESCAPE) {
+                    if (s_pagerChatCursorMode) {
+                        pagerExitChatCursorMode(true);
+                        refreshChatView(true);
+                    }
+                    if (s_cardputerMainChatPanelFocused) {
+                        s_cardputerMainChatPanelFocused = false;
+                    }
+                    continue;
+                }
+#endif
 
                 if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
                     if (s_pagerChatCursorMode) {
@@ -5443,11 +5456,17 @@ static void pumpKeyboardInput() {
 
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-                    const int navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
-#else
-                    const int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
-#endif
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    if (!s_cardputerMainChatPanelFocused) {
+                        if (k == KEY_SCROLL_DN) {
+                            s_cardputerMainChatPanelFocused = true;
+                            s_pagerChatCursorMode = true;
+                            if (!pagerSelectChatCursorIndex(-1)) {
+                                s_pagerChatCursorMode = false;
+                            }
+                        }
+                        continue;
+                    }
+
                     if (s_cardputerMainChatPanelFocused) {
                         if (!s_pagerChatCursorMode) {
                             s_pagerChatCursorMode = true;
@@ -5455,19 +5474,24 @@ static void pumpKeyboardInput() {
                                 s_pagerChatCursorMode = false;
                             }
                         } else {
-                            pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
+                            int delta = (k == KEY_SCROLL_UP) ? -1 : 1;
+                            pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + delta);
                         }
                         continue;
                     }
-#endif
+
+#else
                     if (s_pagerChatCursorMode) {
+                        int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                         pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
                     } else if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+                        int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                         int nextChannel = s_activeChannel + navDelta;
                         if (nextChannel < 0) nextChannel = MESH_CHANNELS - 1;
                         if (nextChannel >= MESH_CHANNELS) nextChannel = 0;
                         setActiveChannel(nextChannel);
                     }
+#endif
                     continue;
                 }
 
@@ -5504,7 +5528,7 @@ static void pumpKeyboardInput() {
             } else if (k == KEY_ENTER && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                 if (!s_cardputerMainChatPanelFocused) {
-                    s_cardputerMainChatPanelFocused = true;
+                    openComposePrompt(0, nullptr);
                 } else if (s_pagerChatCursorMode && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
@@ -5927,6 +5951,9 @@ static void refreshChannelGlow(bool force) {
                 snprintf(text, sizeof(text), "%s", name);
             }
             lv_label_set_text(lbl, text);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            sizeChannelButtonToLabel(i);
+#endif
             lv_obj_set_style_text_color(
                 lbl,
                 active
@@ -5997,6 +6024,11 @@ static void setActiveChannel(int channelIdx) {
     Channels.setActive(channelIdx);
     applyChannelButtonTheme();
     refreshChannelGlow(true);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (s_channelList && s_channelBtns[channelIdx]) {
+        lv_obj_scroll_to_view(s_channelBtns[channelIdx], LV_ANIM_OFF);
+    }
+#endif
     refreshChatView(true);
 }
 
@@ -6010,6 +6042,27 @@ static const char *channelName(int idx) {
     const ChannelKey &ck = CHANNEL_KEYS[idx];
     if (ck.name_buf[0]) return ck.name_buf;
     return ck.name ? ck.name : "";
+}
+
+static void sizeChannelButtonToLabel(int idx) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (idx < 0 || idx >= MESH_CHANNELS) return;
+    lv_obj_t *btn = s_channelBtns[idx];
+    lv_obj_t *lbl = s_channelLabels[idx];
+    if (!btn || !lbl) return;
+
+    lv_obj_set_width(lbl, LV_SIZE_CONTENT);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    lv_obj_update_layout(lbl);
+
+    lv_coord_t targetW = lv_obj_get_width(lbl) + 14;
+    if (targetW < 34) targetW = 34;
+    lv_obj_set_width(btn, targetW);
+    lv_obj_set_height(btn, kMainScreenChannelBtnHeight);
+    lv_obj_center(lbl);
+#else
+    LV_UNUSED(idx);
+#endif
 }
 
 static void loadConfigFromSd() {
@@ -6462,26 +6515,25 @@ static void buildUi() {
 
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const int panelMargin = 2;
-    #else
-    const int panelMargin = 6;
-    #endif
-    #if defined(DEVICE_TLORA_PAGER_TFT)
-    const int panelW = 89;
-    #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    const int panelW = 64;
-    #else
-    const int panelW = 89;
-    #endif
-    const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const int chatGap = 3;
     const int chatHeaderH = 16;
     const int chatLegendH = 12;
+    const int channelStripH = kMainScreenChannelBtnHeight + 6;
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    const int chatX = panelMargin;
+    const int chatW = screenW - panelMargin * 2;
+    const int stripY = panelMargin + chatHeaderH + 2;
+    const int chatY = stripY + channelStripH + chatGap;
+    const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
+    lv_obj_t *panel = nullptr;
     #else
+    const int panelMargin = 6;
+    const int panelW = 89;
+    const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
     const int chatGap = 6;
     const int chatHeaderH = 20;
     const int chatLegendH = 14;
-    #endif
 
     lv_obj_t *panel = lv_obj_create(screen);
     lv_obj_set_size(panel, panelW, panelH);
@@ -6495,32 +6547,28 @@ static void buildUi() {
     lv_obj_set_style_pad_right(panel, 1, 0);
     lv_obj_set_style_pad_top(panel, 3, 0);
     lv_obj_set_style_pad_bottom(panel, 3, 0);
-    #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TLORA_PAGER_TFT)
     static lv_coord_t panelCols[] = { LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
     static lv_coord_t panelRows[] = {
         LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
         LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
         LV_GRID_TEMPLATE_LAST
     };
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_obj_set_style_pad_row(panel, 2, 0);
-    lv_obj_set_style_pad_column(panel, 2, 0);
-    #else
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_style_pad_column(panel, 4, 0);
-    #endif
     lv_obj_set_layout(panel, LV_LAYOUT_GRID);
     lv_obj_set_grid_dsc_array(panel, panelCols, panelRows);
-    #else
+#else
     lv_obj_set_style_pad_row(panel, 5, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    #endif
+#endif
 
     const int chatX = panelMargin + panelW + chatGap;
     const int chatW = lv_disp_get_hor_res(NULL) - chatX - panelMargin;
     const int chatY = panelMargin + chatHeaderH + chatGap;
     const int chatH = panelH - chatHeaderH - chatGap - chatLegendH - 3;
+    #endif
 
     s_chatHeaderBar = lv_obj_create(screen);
     lv_obj_set_size(s_chatHeaderBar, chatW, chatHeaderH);
@@ -6531,6 +6579,44 @@ static void buildUi() {
     lv_obj_set_style_border_width(s_chatHeaderBar, 1, 0);
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    s_channelStrip = lv_obj_create(screen);
+    lv_obj_set_size(s_channelStrip, chatW, channelStripH);
+    lv_obj_align(s_channelStrip, LV_ALIGN_TOP_LEFT, chatX, stripY);
+    lv_obj_clear_flag(s_channelStrip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_channelStrip, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_channelStrip, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_channelStrip, 1, 0);
+    lv_obj_set_style_border_color(s_channelStrip, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(s_channelStrip, 2, 0);
+    lv_obj_set_style_pad_right(s_channelStrip, 2, 0);
+    lv_obj_set_style_pad_top(s_channelStrip, 2, 0);
+    lv_obj_set_style_pad_bottom(s_channelStrip, 2, 0);
+
+    s_channelList = lv_obj_create(s_channelStrip);
+    lv_obj_set_size(s_channelList, lv_pct(100), lv_pct(100));
+    lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_channelList, LV_DIR_HOR);
+    lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_channelList, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_channelList, 0, 0);
+    lv_obj_set_style_pad_left(s_channelList, 0, 0);
+    lv_obj_set_style_pad_right(s_channelList, 6, 0);
+    lv_obj_set_style_pad_top(s_channelList, 0, 0);
+    lv_obj_set_style_pad_bottom(s_channelList, 0, 0);
+    lv_obj_set_style_pad_column(s_channelList, 4, 0);
+    lv_obj_set_style_width(s_channelList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_channelList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_channelList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_channelList, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_channelList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+#else
+    s_channelStrip = nullptr;
+    s_channelList = nullptr;
+#endif
 
     s_chatHeaderTime = lv_label_create(s_chatHeaderBar);
     lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, 0);
@@ -6614,23 +6700,29 @@ static void buildUi() {
     lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
-        #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_obj_t *btn = lv_obj_create(s_channelList ? s_channelList : screen);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #elif defined(DEVICE_TLORA_PAGER_TFT)
         lv_obj_t *btn = lv_obj_create(panel);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_grid_cell(btn,
                              LV_GRID_ALIGN_STRETCH, 0, 1,
                              LV_GRID_ALIGN_STRETCH, i, 1);
-        #else
+    #else
         lv_obj_t *btn = lv_btn_create(panel);
-        #endif
+    #endif
         s_channelBtns[i] = btn;
-        #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_obj_set_size(btn, 40, kMainScreenChannelBtnHeight);
+    #elif defined(DEVICE_TLORA_PAGER_TFT)
         lv_obj_set_size(btn, lv_pct(100), lv_pct(100));
-        #else
+    #else
         lv_obj_set_width(btn, lv_pct(94));
         lv_obj_set_height(btn, kMainScreenChannelBtnHeight);
-        #endif
+    #endif
         lv_obj_set_style_radius(btn, 6, 0);
         lv_obj_set_style_pad_all(btn, 2, 0);
         lv_obj_set_style_outline_width(btn, 0, 0);
@@ -6642,16 +6734,27 @@ static void buildUi() {
         lv_obj_t *lbl = lv_label_create(btn);
         s_channelLabels[i] = lbl;
         lv_obj_set_style_text_font(lbl, kMainScreenFont, 0);
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_obj_set_width(lbl, LV_SIZE_CONTENT);
+    #else
         lv_obj_set_width(lbl, lv_pct(100));
+    #endif
         lv_obj_set_height(lbl, lv_font_get_line_height(kMainScreenFont));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+    #else
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    #endif
         const char *name = channelName(i);
         if (name[0]) {
             lv_label_set_text(lbl, name);
         } else {
             lv_label_set_text(lbl, "Channel");
         }
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        sizeChannelButtonToLabel(i);
+    #endif
         lv_obj_center(lbl);
     }
 
@@ -6685,6 +6788,8 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
 
     memset(s_channelBtns, 0, sizeof(s_channelBtns));
     memset(s_channelLabels, 0, sizeof(s_channelLabels));
+    s_channelStrip = nullptr;
+    s_channelList = nullptr;
     s_chatHeaderBar = nullptr;
     s_chatHeaderTime = nullptr;
     s_chatHeaderGps = nullptr;
@@ -6732,13 +6837,21 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
         lv_obj_set_style_bg_opa(s_rootScreen, LV_OPA_COVER, 0);
     }
 
-    if (s_channelBtns[0]) {
+    if (s_channelStrip) {
+        lv_obj_set_style_bg_color(s_channelStrip, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_bg_opa(s_channelStrip, LV_OPA_60, 0);
+        lv_obj_set_style_border_color(s_channelStrip, lv_color_hex(0x335D9D), 0);
+    } else if (s_channelBtns[0]) {
         lv_obj_t *panel = lv_obj_get_parent(s_channelBtns[0]);
         if (panel) {
             lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E285B), 0);
             lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
             lv_obj_set_style_border_color(panel, lv_color_hex(0x335D9D), 0);
         }
+    }
+
+    if (s_channelList) {
+        lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
     }
 
     if (s_chatHeaderBar) {
