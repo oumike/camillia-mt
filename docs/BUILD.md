@@ -45,11 +45,6 @@ pio run -e tlora-pager-tft
 pio run -e cardputer-cap
 pio run -e heltec-v4
 pio run -e heltec-v4-vertical
-pio run -e tdeck-lvgl
-pio run -e tlora-pager-tft-lvgl
-pio run -e cardputer-cap-lvgl
-pio run -e heltec-v4-lvgl
-pio run -e heltec-v4-vertical-lvgl
 ```
 
 Open serial monitor without rebuilding:
@@ -64,10 +59,10 @@ pio device monitor
 Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
-  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap, remaps to cardputer-cap-lvgl when present)
-  --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft, remaps to tlora-pager-tft-lvgl when present)
-  --heltec, -H  Use Heltec V4 expansion environment (heltec-v4, remaps to heltec-v4-lvgl when present)
-  --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical, remaps to heltec-v4-vertical-lvgl when present)
+  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap)
+  --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft)
+  --heltec, -H  Use Heltec V4 expansion environment (heltec-v4)
+  --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical)
                 If neither is provided, you'll be prompted to choose a device.
   --erase, -E   Erase flash before clean build/upload
 ```

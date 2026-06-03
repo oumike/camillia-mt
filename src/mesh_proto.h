@@ -107,7 +107,7 @@ void    expandPsk(uint8_t psk, uint8_t out[16]);
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen);
 
 // ── Curve25519 PKI key pair (generated once, stored in NVS) ──
-// Defined in main.cpp; used by mesh_proto.cpp and dm_mgr.cpp.
+// Defined in the active UI entrypoint (main_lvgl.cpp); used by mesh_proto.cpp and dm_mgr.cpp.
 extern uint8_t myPubKey[32];
 extern uint8_t myPrivKey[32];
 

@@ -594,7 +594,7 @@
 #endif
 // CHAR_H is the actual font cell height used for cursor/input positioning.
 // LINE_H and VISIBLE_LINES are runtime globals set at startup from chatSpacing config.
-// Declared in main.cpp, extern here so all modules can reference them.
+// Declared in the active UI entrypoint (main_lvgl.cpp), extern here so all modules can reference them.
 extern int LINE_H;          // row stride in channel/node/settings panels
 extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing

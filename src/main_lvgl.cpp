@@ -15,7 +15,6 @@
 #include "keyboard.h"
 #include "web_config.h"
 #include "debug_flags.h"
-#include "display_splash_common.h"
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WiFiClientSecure.h>
@@ -84,6 +83,7 @@ static lv_obj_t *s_composeInput = nullptr;
 static lv_obj_t *s_composeKeyboard = nullptr;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
+static lv_obj_t *s_cfgInfoList = nullptr;
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_legendModal = nullptr;
 static lv_obj_t *s_liveModal = nullptr;
@@ -147,6 +147,7 @@ static uint32_t s_cfgLastActivateMs = 0;
 static uint32_t s_cfgLastScrollMs = 0;
 static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
+static bool s_cfgInfoPanelFocused = false;
 static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
 static uint32_t s_selectedMsgReplyPacketId = 0;
 static char s_selectedMsgText[MSG_CHARS + 1] = "";
@@ -1412,6 +1413,23 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     return buf;
 }
 
+static const char *cfgDeviceRoleName(uint8_t role) {
+    switch (role) {
+        case 0:  return "CLIENT";
+        case 1:  return "CLIENT_MUTE";
+        case 2:  return "CLIENT_HIDDEN_MQTT";
+        case 3:  return "ROUTER_CLIENT";
+        case 4:  return "REPEATER";
+        case 5:  return "TRACKER";
+        case 6:  return "SENSOR";
+        case 7:  return "TAK";
+        case 8:  return "CLIENT_HIDDEN";
+        case 9:  return "LOST_AND_FOUND";
+        case 10: return "TAK_TRACKER";
+        default: return "UNKNOWN";
+    }
+}
+
 static bool cfgActionNeedsConfirm(int actionId) {
     return actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_CLEAR_NODES
@@ -2240,8 +2258,27 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
 }
 
+static void refreshCfgPanelFocusStyles() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (!s_cfgActionList || !s_cfgInfoList) return;
+
+    const lv_color_t activeBorder = lv_color_hex(0x8FB5E6);
+    const lv_color_t inactiveBorder = lv_color_hex(0x335D9D);
+
+    lv_obj_set_style_border_width(s_cfgActionList, s_cfgInfoPanelFocused ? 1 : 2, 0);
+    lv_obj_set_style_border_color(s_cfgActionList, s_cfgInfoPanelFocused ? inactiveBorder : activeBorder, 0);
+
+    lv_obj_set_style_border_width(s_cfgInfoList, s_cfgInfoPanelFocused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_cfgInfoList, s_cfgInfoPanelFocused ? activeBorder : inactiveBorder, 0);
+#endif
+}
+
 static void refreshCfgModal() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (!s_cfgModal || !s_cfgActionList || !s_cfgInfoList || !s_cfgHeaderStatus) return;
+#else
     if (!s_cfgModal || !s_cfgActionList || !s_cfgHeaderStatus) return;
+#endif
 
     auto contrastColorFor565 = [](uint16_t c) -> lv_color_t {
         uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
@@ -2263,7 +2300,21 @@ static void refreshCfgModal() {
     lv_label_set_text(s_cfgHeaderStatus, s_cfgStatus[0] ? s_cfgStatus : "Ready");
 
     lv_obj_clean(s_cfgActionList);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_clean(s_cfgInfoList);
+    refreshCfgPanelFocusStyles();
+#endif
     lv_obj_t *selectedRowObj = nullptr;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_12;
+    const int cfgPadTop = 3;
+    const int cfgPadBottom = 3;
+#else
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_10;
+    const int cfgPadTop = 2;
+    const int cfgPadBottom = 2;
+#endif
 
     for (int i = 0; i < s_cfgActionCount; i++) {
         const int actionId = s_cfgActions[i];
@@ -2271,13 +2322,13 @@ static void refreshCfgModal() {
 
         lv_obj_t *row = lv_label_create(s_cfgActionList);
         lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_style_text_font(row, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(row, cfgRowFont, 0);
         lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_left(row, 4, 0);
         lv_obj_set_style_pad_right(row, 4, 0);
-        lv_obj_set_style_pad_top(row, 2, 0);
-        lv_obj_set_style_pad_bottom(row, 2, 0);
+        lv_obj_set_style_pad_top(row, cfgPadTop, 0);
+        lv_obj_set_style_pad_bottom(row, cfgPadBottom, 0);
         lv_obj_set_style_radius(row, 3, 0);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_outline_width(row, 0, 0);
@@ -2314,6 +2365,57 @@ static void refreshCfgModal() {
     if (selectedRowObj) {
         lv_obj_scroll_to_view(selectedRowObj, LV_ANIM_OFF);
     }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    static constexpr int kCfgInfoMaxLines = 10;
+    char info[kCfgInfoMaxLines][96] = {};
+    int infoCount = 0;
+
+    bool hasPubKey = false;
+    for (int i = 0; i < 32; i++) {
+        if (myPubKey[i] != 0) {
+            hasPubKey = true;
+            break;
+        }
+    }
+
+    snprintf(info[infoCount++], sizeof(info[0]), "Node ID: !%08lx", (unsigned long)s_myNodeId);
+    snprintf(info[infoCount++], sizeof(info[0]), "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
+    snprintf(info[infoCount++], sizeof(info[0]), "PKI key: %s", hasPubKey ? "present" : "missing");
+    snprintf(info[infoCount++], sizeof(info[0]), "Long: %s", s_cfg.nodeLong);
+    snprintf(info[infoCount++], sizeof(info[0]), "Short: %s", s_cfg.nodeShort);
+    snprintf(info[infoCount++], sizeof(info[0]), "Freq: %.3f MHz", s_cfg.loraFreq);
+    snprintf(info[infoCount++], sizeof(info[0]), "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
+    snprintf(info[infoCount++], sizeof(info[0]), "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
+
+    lv_obj_t *infoHeader = lv_label_create(s_cfgInfoList);
+    lv_obj_set_width(infoHeader, lv_pct(100));
+    lv_obj_set_style_text_font(infoHeader, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(infoHeader, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_set_style_bg_color(infoHeader, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(infoHeader, LV_OPA_70, 0);
+    lv_obj_set_style_pad_left(infoHeader, 4, 0);
+    lv_obj_set_style_pad_right(infoHeader, 4, 0);
+    lv_obj_set_style_pad_top(infoHeader, 3, 0);
+    lv_obj_set_style_pad_bottom(infoHeader, 3, 0);
+    lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
+    lv_label_set_text(infoHeader, "Device Info");
+
+    for (int i = 0; i < infoCount; i++) {
+        lv_obj_t *row = lv_label_create(s_cfgInfoList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, cfgRowFont, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_bg_opa(row, (i & 1) ? LV_OPA_30 : LV_OPA_10, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
+        lv_obj_set_style_pad_left(row, 4, 0);
+        lv_obj_set_style_pad_right(row, 4, 0);
+        lv_obj_set_style_pad_top(row, cfgPadTop, 0);
+        lv_obj_set_style_pad_bottom(row, cfgPadBottom, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, info[i]);
+    }
+#endif
 }
 
 static void onCfgActionRowPressed(lv_event_t *e) {
@@ -2331,8 +2433,10 @@ static void closeCfgModal() {
     }
     s_cfgModal = nullptr;
     s_cfgActionList = nullptr;
+    s_cfgInfoList = nullptr;
     s_cfgHeaderStatus = nullptr;
     s_cfgAwaitEnterRelease = false;
+    s_cfgInfoPanelFocused = false;
 }
 
 static void closeLegendModal() {
@@ -2340,6 +2444,7 @@ static void closeLegendModal() {
         lv_obj_del(s_legendModal);
     }
     s_legendModal = nullptr;
+    refreshChatComposeButtonState();
 }
 
 static void onLegendClosePressed(lv_event_t *e) {
@@ -4970,6 +5075,9 @@ static void openLegendModal() {
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     int modalH = 118;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    modalH = 126;
+#endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     modalH = 126;
 #endif
@@ -4991,6 +5099,10 @@ static void openLegendModal() {
     lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_legendModal, 6, 0);
     lv_obj_set_style_pad_row(s_legendModal, 4, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_style_pad_bottom(s_legendModal, 8, 0);
+    lv_obj_set_style_pad_row(s_legendModal, 5, 0);
+#endif
     lv_obj_set_flex_flow(s_legendModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_legendModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
@@ -5100,6 +5212,8 @@ static void openLegendModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_label_set_text_fmt(hint, "%s/C/N/I/L = Close", modalCloseKeyLabel());
 #endif
+
+    refreshChatComposeButtonState();
 }
 
 static void openCfgModal() {
@@ -5118,6 +5232,7 @@ static void openCfgModal() {
     s_cfgLastScrollMs = 0;
     s_cfgEnterLockUntilMs = 0;
     s_cfgAwaitEnterRelease = false;
+    s_cfgInfoPanelFocused = false;
     if (s_cfgDebugLog) {
         Serial.printf("[lvgl-cfg] open actions=%d\n", s_cfgActionCount);
     }
@@ -5154,18 +5269,78 @@ static void openCfgModal() {
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     lv_obj_t *title = lv_label_create(header);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+#else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+#endif
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Configuration");
 
     s_cfgHeaderStatus = lv_label_create(header);
     lv_obj_set_width(s_cfgHeaderStatus, lv_pct(58));
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
+#else
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_align(s_cfgHeaderStatus, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_color(s_cfgHeaderStatus, lv_color_hex(0x79DDB8), 0);
     lv_label_set_long_mode(s_cfgHeaderStatus, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_cfgHeaderStatus, "Ready");
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_t *cfgColumns = lv_obj_create(s_cfgModal);
+    lv_obj_set_width(cfgColumns, lv_pct(100));
+    lv_obj_set_flex_grow(cfgColumns, 1);
+    lv_obj_clear_flag(cfgColumns, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(cfgColumns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cfgColumns, 0, 0);
+    lv_obj_set_style_pad_all(cfgColumns, 0, 0);
+    lv_obj_set_style_pad_column(cfgColumns, 4, 0);
+    lv_obj_set_flex_flow(cfgColumns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cfgColumns, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    s_cfgActionList = lv_obj_create(cfgColumns);
+    lv_obj_set_width(s_cfgActionList, lv_pct(58));
+    lv_obj_set_height(s_cfgActionList, lv_pct(100));
+    lv_obj_add_flag(s_cfgActionList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgActionList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_cfgActionList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_cfgActionList, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgActionList, 1, 0);
+    lv_obj_set_style_border_color(s_cfgActionList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_cfgActionList, 0, 0);
+    lv_obj_set_style_pad_row(s_cfgActionList, 1, 0);
+    lv_obj_set_style_pad_right(s_cfgActionList, 2, 0);
+    lv_obj_set_style_width(s_cfgActionList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_cfgActionList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_cfgActionList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    s_cfgInfoList = lv_obj_create(cfgColumns);
+    lv_obj_set_width(s_cfgInfoList, lv_pct(42));
+    lv_obj_set_height(s_cfgInfoList, lv_pct(100));
+    lv_obj_add_flag(s_cfgInfoList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgInfoList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_cfgInfoList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_cfgInfoList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_cfgInfoList, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgInfoList, 1, 0);
+    lv_obj_set_style_border_color(s_cfgInfoList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_cfgInfoList, 0, 0);
+    lv_obj_set_style_pad_row(s_cfgInfoList, 1, 0);
+    lv_obj_set_style_pad_right(s_cfgInfoList, 2, 0);
+    lv_obj_set_style_width(s_cfgInfoList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_cfgInfoList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_cfgInfoList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_cfgInfoList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_cfgInfoList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgInfoList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+#else
     s_cfgActionList = lv_obj_create(s_cfgModal);
     lv_obj_set_width(s_cfgActionList, lv_pct(100));
     lv_obj_set_flex_grow(s_cfgActionList, 1);
@@ -5185,6 +5360,7 @@ static void openCfgModal() {
     lv_obj_set_style_radius(s_cfgActionList, 2, LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+#endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     appendHeltecBottomNav(s_cfgModal, HELTEC_NAV_CFG);
@@ -5193,7 +5369,11 @@ static void openCfgModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_label_set_text_fmt(hint, "Wheel = Scroll focused panel   Click wheel = Swap panel   %s = Close", modalCloseKeyLabel());
+#else
     lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
+#endif
 #endif
 
     refreshCfgModal();
@@ -5375,9 +5555,11 @@ static void pumpKeyboardInput() {
         // to avoid one-off selection shifts during activation.
         char k = s_keyboard.readKey();
         const char *src = "key";
+        bool fromTrack = false;
         if (k == KEY_NONE) {
             k = s_keyboard.readTrackball();
             src = "track";
+            fromTrack = (k != KEY_NONE);
         }
         if (k == KEY_NONE) {
             if (s_cfgModal && s_cfgAwaitEnterRelease) {
@@ -5420,7 +5602,22 @@ static void pumpKeyboardInput() {
                 closeCfgModal();
                 continue;
             }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            if (fromTrack && k == KEY_ENTER && s_cfgInfoList) {
+                s_cfgInfoPanelFocused = !s_cfgInfoPanelFocused;
+                refreshCfgPanelFocusStyles();
+                continue;
+            }
+#endif
             if (k == KEY_SCROLL_UP) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                if (s_cfgInfoPanelFocused && s_cfgInfoList) {
+                    const int scrollStep = 18;
+                    const int delta = kPagerWheelChatNav ? scrollStep : -scrollStep;
+                    lv_obj_scroll_by(s_cfgInfoList, 0, delta, LV_ANIM_OFF);
+                    continue;
+                }
+#endif
                 if (kPagerWheelChatNav) {
                     if (s_cfgSelection + 1 < s_cfgActionCount) {
                         s_cfgSelection++;
@@ -5443,6 +5640,14 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_SCROLL_DN) {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                if (s_cfgInfoPanelFocused && s_cfgInfoList) {
+                    const int scrollStep = 18;
+                    const int delta = kPagerWheelChatNav ? -scrollStep : scrollStep;
+                    lv_obj_scroll_by(s_cfgInfoList, 0, delta, LV_ANIM_OFF);
+                    continue;
+                }
+#endif
                 if (kPagerWheelChatNav) {
                     if (s_cfgSelection > 0) {
                         s_cfgSelection--;
@@ -5900,6 +6105,9 @@ static void pumpKeyboardInput() {
 
 static void onChatNewMessagePressed(lv_event_t *e) {
     LV_UNUSED(e);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (s_legendModal) return;
+#endif
     if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
         openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
     } else {
@@ -5910,6 +6118,12 @@ static void onChatNewMessagePressed(lv_event_t *e) {
 static void refreshChatComposeButtonState() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!s_chatNewMsgLabel) return;
+
+    if (s_chatNewMsgBtn) {
+        if (s_legendModal) lv_obj_add_state(s_chatNewMsgBtn, LV_STATE_DISABLED);
+        else               lv_obj_clear_state(s_chatNewMsgBtn, LV_STATE_DISABLED);
+    }
+
     if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
         lv_label_set_text(s_chatNewMsgLabel, "Reply");
     } else {
@@ -6224,14 +6438,36 @@ static void drawBootSplash() {
 #else
     const float flowerScale = 1.0f;
 #endif
+
+    auto drawCamelliaMark = [&](int cx, int cy, float scale) {
+        const int petalOrbitX = max(4, (int)(7.0f * scale));
+        const int petalOrbitY = max(4, (int)(8.0f * scale));
+        const int petalR = max(2, (int)(3.0f * scale));
+        const int centerR = max(2, (int)(2.0f * scale));
+        const int innerR = max(1, (int)(2.0f * scale));
+
+        const int dx[6] = {0, 1, 1, 0, -1, -1};
+        const int dy[6] = {-2, -1, 1, 2, 1, -1};
+
+        for (int i = 0; i < 6; i++) {
+            int px = cx + dx[i] * petalOrbitX;
+            int py = cy + dy[i] * petalOrbitY;
+            displayDev().fillCircle(px, py, petalR, titleCol);
+            displayDev().drawCircle(px, py, petalR, cardEdgeHi);
+        }
+
+        displayDev().fillCircle(cx, cy, centerR + 1, subCol);
+        displayDev().fillCircle(cx, cy, centerR, titleCol);
+        displayDev().fillCircle(cx, cy, innerR, TFT_WHITE);
+    };
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Keep Cardputer splash lightweight and avoid depending on LGFX_TDeck-specific helpers.
     displayDev().fillCircle(cardX + (cardW / 2), cardY + (cardH / 2) - 6, (int)(10.0f * flowerScale), titleCol);
 #else
-    display_splash_detail::drawCamelliaMark(lcd,
-                                            cardX + (cardW / 2),
-                                            cardY + (cardH / 2) - 6,
-                                            flowerScale);
+    drawCamelliaMark(cardX + (cardW / 2),
+                     cardY + (cardH / 2) - 6,
+                     flowerScale);
 #endif
 
     displayDev().setFont(&fonts::DejaVu12);
@@ -6773,7 +7009,6 @@ static void refreshChatView(bool force) {
             lastMsgObj = msg;
             lv_obj_set_width(msg, lv_pct(100));
             lv_obj_set_style_text_font(msg, kMainScreenFont, 0);
-            lv_obj_set_style_text_color(msg, lv_color_hex(0xD9E8FF), 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
             lv_obj_set_style_pad_left(msg, 2, 0);
             lv_obj_set_style_pad_right(msg, 4, 0);
@@ -6784,7 +7019,38 @@ static void refreshChatView(bool force) {
 #else
             lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 #endif
-            lv_label_set_text(msg, rows[i]->text);
+
+            const char *lineText = rows[i]->text;
+            bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
+
+            uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
+            const char *ackSuffix = nullptr;
+            if (rows[i]->packetId) {
+                switch (rows[i]->ack) {
+                    case DisplayLine::ACKED:
+                        textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
+                        if (!isContinuationLine) ackSuffix = " [ACK]";
+                        break;
+                    case DisplayLine::ACKED_RELAY:
+                        textColor565 = TFT_YELLOW;
+                        break;
+                    case DisplayLine::NAKED:
+                    case DisplayLine::TX_FAILED:
+                        textColor565 = TFT_RED;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
+            if (ackSuffix) {
+                char rendered[MSG_CHARS + 16];
+                snprintf(rendered, sizeof(rendered), "%s%s", lineText, ackSuffix);
+                lv_label_set_text(msg, rendered);
+            } else {
+                lv_label_set_text(msg, lineText);
+            }
 
             uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 

@@ -14,6 +14,45 @@ has_env() {
     grep -q "^\[env:${env_name}\]" platformio.ini
 }
 
+remote_tag_exists() {
+    local tag="$1"
+    git ls-remote --tags origin | grep -q "refs/tags/${tag}$"
+}
+
+delete_existing_release_and_tags() {
+    local tag="$1"
+    local remote_exists=false
+
+    echo "Tag ${tag} already exists. Deleting existing release/tag so it can be recreated..."
+
+    if remote_tag_exists "$tag"; then
+        remote_exists=true
+    fi
+
+    if command -v gh >/dev/null 2>&1; then
+        if gh release view "$tag" >/dev/null 2>&1; then
+            gh release delete "$tag" --yes
+            echo "Deleted existing GitHub release ${tag}."
+        else
+            echo "No existing GitHub release for ${tag}."
+        fi
+    elif [[ "$remote_exists" == true ]]; then
+        echo "GitHub CLI (gh) is required to delete an existing GitHub release for ${tag}."
+        echo "Install gh or manually delete the release, then rerun."
+        exit 1
+    fi
+
+    if [[ "$remote_exists" == true ]]; then
+        git push origin ":refs/tags/${tag}"
+        echo "Deleted remote tag ${tag}."
+    fi
+
+    if git tag | grep -q "^${tag}$"; then
+        git tag -d "$tag"
+        echo "Deleted local tag ${tag}."
+    fi
+}
+
 CURRENT=$(cat VERSION 2>/dev/null | tr -d '\n')
 PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
 echo "Current version: ${CURRENT:-unknown}"
@@ -28,10 +67,9 @@ fi
 
 TAG="v$VERSION"
 
-# Check remote tags without fetching locally
-if git ls-remote --tags origin | grep -q "refs/tags/$TAG$"; then
-    echo "Tag $TAG already exists on remote. Aborting."
-    exit 1
+# Recreate existing release/tag when rerunning a version
+if remote_tag_exists "$TAG" || git tag | grep -q "^${TAG}$"; then
+    delete_existing_release_and_tags "$TAG"
 fi
 
 # Update VERSION file
@@ -62,7 +100,7 @@ git push
 
 echo "Changes committed and pushed."
 
-# Remove stale local tag if present (not on remote, so safe to recreate)
+# Remove stale local tag if present
 if git tag | grep -q "^$TAG$"; then
     git tag -d "$TAG"
 fi
