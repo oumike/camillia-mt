@@ -9,23 +9,47 @@
 #include "mesh_proto.h"
 #include "mesh_radio.h"
 #include "node_db.h"
+#include "dm_mgr.h"
 #include "battery_util.h"
 #include "gps.h"
 #include "keyboard.h"
 #include "web_config.h"
+#include "display_splash_common.h"
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <lvgl.h>
 #include <time.h>
+#include <math.h>
 #include <esp_mac.h>
 #include <nvs_flash.h>
 #include <SD.h>
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#include <AudioBoard.h>
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#include <driver/i2s.h>
+#endif
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Cardputer.h>
+#endif
+
+#ifndef APP_VERSION
+#define APP_VERSION "unknown"
+#endif
 
 static LGFX_TDeck lcd;
 static TDeckKeyboard s_keyboard;
 static RhinoConfig s_cfg;
+
+static lgfx::LGFX_Device &displayDev() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return M5Cardputer.Display;
+#else
+    return lcd;
+#endif
+}
 
 uint8_t myPubKey[32] = {0};
 uint8_t myPrivKey[32] = {0};
@@ -58,9 +82,35 @@ static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_legendModal = nullptr;
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
+static lv_obj_t *s_dmModal = nullptr;
+static lv_obj_t *s_dmConvList = nullptr;
+static lv_obj_t *s_dmMsgList = nullptr;
+static lv_obj_t *s_dmNodePickerModal = nullptr;
+static lv_obj_t *s_dmNodePickerList = nullptr;
+static lv_obj_t *s_dmNodePickerTitle = nullptr;
+static lv_obj_t *s_dmNodePickerHint = nullptr;
+static lv_obj_t *s_dmNodePickerRows[MAX_NODES] = {};
+static NodeEntry s_dmNodeSnapshot[MAX_NODES] = {};
+static int s_dmNodeFilteredIdx[MAX_NODES] = {};
+static int s_dmNodeSnapshotCount = 0;
+static int s_dmNodeFilteredCount = 0;
+static int s_dmNodeSelection = -1;
+static constexpr int kDmNodeFilterMax = 24;
+static char s_dmNodeFilter[kDmNodeFilterMax + 1] = {};
+static int s_dmNodeFilterLen = 0;
+static bool s_dmNodeFilterOpen = false;
+static lv_obj_t *s_dmConvRows[MAX_DM_CONVS] = {};
+static uint32_t s_dmConvNodeIds[MAX_DM_CONVS] = {};
+static int s_dmConvCount = 0;
+static int s_dmSelection = -1;
+static int s_dmRenderedConvCount = -1;
+static uint32_t s_dmRenderedNodeId = 0;
+static int s_dmRenderedMsgCount = -1;
+static int s_dmRenderedUnreadTotal = -1;
 static lv_obj_t *s_nodesModal = nullptr;
 static lv_obj_t *s_nodesInfoPanel = nullptr;
 static lv_obj_t *s_nodesDetail = nullptr;
+static lv_obj_t *s_nodesDetailExtra = nullptr;
 static lv_obj_t *s_nodesMapPanel = nullptr;
 static lv_obj_t *s_nodesMapTitle = nullptr;
 static lv_obj_t *s_nodesMapCoords = nullptr;
@@ -95,6 +145,15 @@ static bool s_cfgDebugLog = true;
 static uint32_t s_selectedMsgReplyPacketId = 0;
 static char s_selectedMsgText[MSG_CHARS + 1] = "";
 static uint32_t s_myNodeId = 0;
+
+enum ComposeTarget : uint8_t {
+    COMPOSE_TARGET_CHANNEL = 0,
+    COMPOSE_TARGET_DM = 1,
+};
+
+static ComposeTarget s_composeTarget = COMPOSE_TARGET_CHANNEL;
+static uint32_t s_composeDmNodeId = 0;
+
 static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
 static char s_lastHeaderTime[8] = "";
@@ -110,6 +169,11 @@ static uint32_t s_ntpLastConfigureMs = 0;
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
+static bool s_screenAsleep = false;
+static uint32_t s_lastActivityMs = 0;
+static bool s_themeRebuildPending = false;
+static bool s_themeRebuildReopenCfg = false;
+static int s_themeRebuildCfgSelection = 0;
 static bool s_nodesWifiSessionActive = false;
 static bool s_nodesWifiStateChanged = false;
 static wifi_mode_t s_nodesWifiPrevMode = WIFI_OFF;
@@ -137,15 +201,28 @@ static char s_stateMapOnDemandLastCode[3] = "";
 static constexpr bool kStateMapsEnabled = false;
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr bool kPagerWheelChatNav = true;
+static constexpr bool kUseScrollKeysForMainNav = true;
+static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
 static constexpr int kMainScreenChannelBtnHeight = 24;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = true;
+static constexpr bool kModalCloseUsesEscape = true;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
+static constexpr int kMainScreenChannelBtnHeight = 18;
 #else
 static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = false;
+static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
 #endif
 static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static bool s_cardputerMainChatPanelFocused = false;
+#endif
 
 static constexpr int kRxDedupSize = 32;
 struct SeenPkt {
@@ -154,6 +231,32 @@ struct SeenPkt {
 };
 static SeenPkt s_seenPkts[kRxDedupSize] = {};
 static int s_seenHead = 0;
+
+static inline bool isBackspaceKey(char k) {
+    return k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD;
+}
+
+static inline bool isModalCloseKey(char k) {
+    if (kModalCloseUsesEscape) {
+        return k == KEY_ESCAPE;
+    }
+    return isBackspaceKey(k) || k == KEY_ESCAPE;
+}
+
+static inline const char *modalCloseKeyLabel() {
+    return kModalCloseUsesEscape ? "Esc" : "Bksp";
+}
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
+    if (k == '`' || k == '~') return KEY_ESCAPE;
+    if (allowScrollRemap) {
+        if (k == ';') return KEY_SCROLL_UP;
+        if (k == '.') return KEY_SCROLL_DN;
+    }
+    return k;
+}
+#endif
 
 static void refreshChatView(bool force = false);
 static void collectChatRows(const DisplayLine **rows, int &rowCount);
@@ -179,6 +282,17 @@ static void closeLegendModal();
 static void openLiveModal();
 static void closeLiveModal();
 static void refreshLiveView(bool force = false);
+static void openDmModal();
+static void closeDmModal();
+static void refreshDmModal(bool force = false);
+static void onDmConversationPressed(lv_event_t *e);
+static void openDmNodePicker();
+static void closeDmNodePicker();
+static void refreshDmNodePicker(bool force = false);
+static void snapshotNodesForDmPicker();
+static const NodeEntry *selectedDmNodeForPicker();
+static void dmNodePickerApplyFilter();
+static bool dmNodePickerContainsNoCase(const char *text, const char *needle);
 static bool shouldHideChatLine(const char *text);
 static void openNodesModal();
 static void closeNodesModal();
@@ -208,6 +322,15 @@ static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
 static const char *channelName(int idx);
+static void drawBootSplash();
+static bool pollUserButton(uint32_t nowMs);
+static void wakeScreen();
+static void openComposePromptForDm(uint32_t nodeId);
+static void rebuildUiForThemeChange(bool reopenCfg);
+static void scheduleThemeRebuild(bool reopenCfg);
+static void processPendingThemeRebuild();
+static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection);
+static void applyChannelButtonTheme();
 
 static void stateMapBootstrapRestoreWifi() {
 #if HAS_SD_CARD
@@ -267,24 +390,84 @@ enum CfgActionId {
 struct UiThemePresetLite {
     uint8_t theme;
     uint8_t mode;
+    uint16_t bgMain;
+    uint16_t panelBg;
+    uint16_t panelAlt;
+    uint16_t accent;
     const char *name;
 };
 
+static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
+    return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
+}
+
 static constexpr UiThemePresetLite kUiThemePresets[] = {
-    {UI_THEME_CAMELLIA, UI_MODE_DARK, "Camillia Dark"},
-    {UI_THEME_CAMELLIA, UI_MODE_LIGHT, "Camillia Light"},
-    {UI_THEME_EVERGREEN, UI_MODE_DARK, "Evergreen Dark"},
-    {UI_THEME_EVERGREEN, UI_MODE_LIGHT, "Evergreen Light"},
-    {UI_THEME_EARTHEN, UI_MODE_DARK, "Earthy Dark"},
-    {UI_THEME_EARTHEN, UI_MODE_LIGHT, "Earthy Light"},
-    {UI_THEME_SOLARIZED, UI_MODE_DARK, "Solarized Dark"},
-    {UI_THEME_SOLARIZED, UI_MODE_LIGHT, "Solarized Light"},
-    {UI_THEME_CRIMSON, UI_MODE_DARK, "Crimson Blue Dark"},
-    {UI_THEME_CRIMSON, UI_MODE_LIGHT, "Crimson Blue Light"},
+    {UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark"},
+    {UI_THEME_CAMELLIA, UI_MODE_LIGHT,
+        rgb565(0xff, 0xf7, 0xfa), rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xb0, 0x2f, 0x62),
+        "Camillia Light"},
+    {UI_THEME_EVERGREEN, UI_MODE_DARK,  0x00A8, 0x11AA, 0x1A2C, 0x55B0, "Evergreen Dark"},
+    {UI_THEME_EVERGREEN, UI_MODE_LIGHT, 0xE73C, 0xF7DE, 0xE71B, 0x2D2A, "Evergreen Light"},
+    {UI_THEME_EARTHEN, UI_MODE_DARK,  0x1082, 0x2104, 0x2945, 0xD38B, "Earthy Dark"},
+    {UI_THEME_EARTHEN, UI_MODE_LIGHT, 0xF7DE, 0xFFDF, 0xF75C, 0xB40B, "Earthy Light"},
+    {UI_THEME_SOLARIZED, UI_MODE_DARK,
+        rgb565(0x00, 0x2b, 0x36), rgb565(0x07, 0x36, 0x42), rgb565(0x0c, 0x3c, 0x47), rgb565(0x2a, 0xa1, 0x98),
+        "Solarized Dark"},
+    {UI_THEME_SOLARIZED, UI_MODE_LIGHT,
+        rgb565(0xfd, 0xf6, 0xe3), rgb565(0xfd, 0xf6, 0xe3), rgb565(0xee, 0xe8, 0xd5), rgb565(0x2a, 0xa1, 0x98),
+        "Solarized Light"},
+    {UI_THEME_CRIMSON, UI_MODE_DARK,
+        rgb565(0x06, 0x0f, 0x24), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0xff, 0x4a, 0x58),
+        "Crimson Blue Dark"},
+    {UI_THEME_CRIMSON, UI_MODE_LIGHT,
+        rgb565(0xf3, 0xf7, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xc6, 0x28, 0x39),
+        "Crimson Blue Light"},
 };
 
 static constexpr int kUiThemePresetCount =
     (int)(sizeof(kUiThemePresets) / sizeof(kUiThemePresets[0]));
+
+struct UiPalette {
+    uint16_t bgMain;
+    uint16_t statusTop;
+    uint16_t statusBg;
+    uint16_t panelBg;
+    uint16_t panelAlt;
+    uint16_t panelStrong;
+    uint16_t tabActive;
+    uint16_t tabUnread;
+    uint16_t tabIdle;
+    uint16_t divider;
+    uint16_t dividerHi;
+    uint16_t inputBg;
+    uint16_t inputTop;
+    uint16_t accent;
+    uint16_t cursor;
+    uint16_t textMain;
+    uint16_t textDim;
+    uint16_t textOnAccent;
+    uint16_t statusText;
+    uint16_t selectBg;
+    uint16_t selectAccent;
+    uint16_t nodeHot;
+    uint16_t nodeWarm;
+    uint16_t dmMuted;
+    uint16_t battGood;
+    uint16_t battWarn;
+    uint16_t battBad;
+    uint16_t splashTop;
+    uint16_t splashBottom;
+    uint16_t splashCardBg;
+    uint16_t splashCardEdge;
+    uint16_t splashCardEdgeHi;
+    uint16_t splashTitle;
+    uint16_t splashSub;
+    uint16_t splashDim;
+};
+
+static UiPalette s_ui = {};
+static uint8_t s_appliedUiTheme = 0xFF;
+static uint8_t s_appliedUiMode = 0xFF;
 
 static const char *msgAlertSoundName(uint8_t mode) {
     switch (mode) {
@@ -294,6 +477,596 @@ static const char *msgAlertSoundName(uint8_t mode) {
         case MSG_ALERT_SOUND_DEFAULT:
         default:                     return "Default";
     }
+}
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+namespace {
+static bool sPagerAudioInitTried = false;
+static bool sPagerAudioReady = false;
+static constexpr i2s_port_t kPagerI2SPort = I2S_NUM_0;
+static constexpr uint8_t kPagerAudioVolActive = 50;
+static constexpr uint8_t kPagerAudioVolIdle = 10;
+static constexpr float kPagerToneAmplitude = 7800.0f;
+static uint8_t sPagerAudioVolume = 0xFF;
+static audio_driver::DriverPins sPagerAudioPins;
+static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
+                                                 sPagerAudioPins);
+
+static inline void pagerAudioApplyVolume(uint8_t volume) {
+    if (sPagerAudioVolume == volume) return;
+    sPagerAudioBoard.setVolume(volume);
+    sPagerAudioVolume = volume;
+}
+
+static bool pagerAudioInitI2S() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate = 44100;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+#endif
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 6;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = true;
+    cfg.fixed_mclk = 0;
+
+    esp_err_t err = i2s_driver_install(kPagerI2SPort, &cfg, 0, nullptr);
+    if (err == ESP_ERR_INVALID_STATE) {
+        i2s_driver_uninstall(kPagerI2SPort);
+        err = i2s_driver_install(kPagerI2SPort, &cfg, 0, nullptr);
+    }
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s install failed err=%d\n", (int)err);
+        return false;
+    }
+
+    i2s_pin_config_t pinCfg = {};
+    pinCfg.bck_io_num = PAGER_DAC_I2S_BCK;
+    pinCfg.ws_io_num = PAGER_DAC_I2S_WS;
+    pinCfg.data_out_num = PAGER_DAC_I2S_DOUT;
+    pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+    pinCfg.mck_io_num = PAGER_DAC_I2S_MCLK;
+#endif
+
+    err = i2s_set_pin(kPagerI2SPort, &pinCfg);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s set pin failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kPagerI2SPort);
+        return false;
+    }
+
+    err = i2s_set_clk(kPagerI2SPort, 44100, I2S_BITS_PER_SAMPLE_16BIT,
+                      I2S_CHANNEL_STEREO);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] i2s set clk failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kPagerI2SPort);
+        return false;
+    }
+
+    i2s_zero_dma_buffer(kPagerI2SPort);
+    return true;
+}
+
+static bool pagerAudioEnsureReady() {
+    if (sPagerAudioReady) return true;
+    if (!sPagerAudioInitTried) {
+        sPagerAudioInitTried = true;
+    } else {
+        // Splash playback can run before full UI init on pager; keep retrying.
+        Serial.println("[audio] pager init retry");
+    }
+
+    sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, Wire);
+    sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
+                           PAGER_DAC_I2S_MCLK,
+                           PAGER_DAC_I2S_BCK,
+                           PAGER_DAC_I2S_WS,
+                           PAGER_DAC_I2S_DOUT,
+                           PAGER_DAC_I2S_DIN);
+
+    (void)sPagerAudioBoard.driver().setI2CAddress(PAGER_AUDIO_CODEC_ADDR);
+
+    audio_driver::CodecConfig cfg;
+    cfg.input_device = audio_driver::ADC_INPUT_NONE;
+    cfg.output_device = audio_driver::DAC_OUTPUT_ALL;
+    cfg.i2s.bits = audio_driver::BIT_LENGTH_16BITS;
+    cfg.i2s.rate = audio_driver::RATE_44K;
+    cfg.i2s.channels = audio_driver::CHANNELS2;
+    cfg.i2s.fmt = audio_driver::I2S_NORMAL;
+    cfg.i2s.mode = audio_driver::MODE_SLAVE;
+
+    if (!sPagerAudioBoard.begin(cfg)) {
+        Serial.println("[audio] codec init failed");
+        sPagerAudioReady = false;
+        return false;
+    }
+
+    sPagerAudioVolume = 0xFF;
+    pagerAudioApplyVolume(kPagerAudioVolIdle);
+    sPagerAudioBoard.setMute(false);
+
+    if (!pagerAudioInitI2S()) {
+        sPagerAudioReady = false;
+        return false;
+    }
+
+    sPagerAudioReady = true;
+    Serial.println("[audio] pager codec/i2s ready");
+    return true;
+}
+
+static inline void pagerAudioStartPlayback() {
+    sPagerAudioBoard.setMute(false);
+    pagerAudioApplyVolume(kPagerAudioVolActive);
+    delay(2);
+    i2s_zero_dma_buffer(kPagerI2SPort);
+    // Prime codec/I2S with a short silent pre-roll so the first note isn't clipped.
+    int16_t preRoll[256] = {0};
+    size_t preRollWritten = 0;
+    (void)i2s_write(kPagerI2SPort, preRoll, sizeof(preRoll),
+                    &preRollWritten, 10 / portTICK_PERIOD_MS);
+}
+
+static inline void pagerAudioStopPlayback() {
+    // Push a short silence tail before ending to reduce stop pops.
+    int16_t tail[1024] = {0};
+    size_t tailWritten = 0;
+    (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    i2s_zero_dma_buffer(kPagerI2SPort);
+    pagerAudioApplyVolume(kPagerAudioVolIdle);
+}
+
+static void pagerAudioWriteSilence(uint16_t durationMs) {
+    if (!pagerAudioEnsureReady() || durationMs == 0) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t zeroPcm[kChunkFrames * 2] = {0};
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        size_t written = 0;
+        esp_err_t err = i2s_write(kPagerI2SPort, zeroPcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] i2s silence write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
+    if (!pagerAudioEnsureReady()) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t pcm[kChunkFrames * 2];
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    if (framesRemaining == 0) return;
+    const uint32_t totalFrames = framesRemaining;
+    uint32_t frameIndex = 0;
+    uint32_t attackFrames = kSampleRate / 500;
+    uint32_t releaseFrames = kSampleRate / 400;
+    if (attackFrames < 8) attackFrames = 8;
+    if (releaseFrames < 8) releaseFrames = 8;
+    uint32_t maxRamp = totalFrames / 5;
+    if (maxRamp < 8) maxRamp = 8;
+    if (attackFrames > maxRamp) attackFrames = maxRamp;
+    if (releaseFrames > maxRamp) releaseFrames = maxRamp;
+
+    const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
+    float phase = 0.0f;
+
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        for (int i = 0; i < framesNow; i++) {
+            float s = sinf(phase);
+            phase += phaseStep;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+
+            float env = 1.0f;
+            if (frameIndex < attackFrames) {
+                env = (float)frameIndex / (float)attackFrames;
+            }
+            uint32_t framesToEnd = totalFrames - frameIndex;
+            if (framesToEnd < releaseFrames) {
+                float tail = (float)framesToEnd / (float)releaseFrames;
+                if (tail < env) env = tail;
+            }
+
+            int16_t v = (int16_t)(s * kPagerToneAmplitude * env);
+            pcm[(i * 2)] = v;
+            pcm[(i * 2) + 1] = v;
+            frameIndex++;
+        }
+
+        size_t written = 0;
+        esp_err_t err = i2s_write(kPagerI2SPort, pcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] i2s write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+static void pagerAudioPlayAlertPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {880, 740, 660};
+    static const uint16_t kDurMs[] = {68, 68, 112};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(8);
+    }
+    pagerAudioStopPlayback();
+}
+
+static void pagerAudioPlayChirpyPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {1047, 1319, 1568, 1319};
+    static const uint16_t kDurMs[] = {36, 36, 40, 70};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(6);
+    }
+    pagerAudioStopPlayback();
+}
+
+static void pagerAudioPlayBassPattern() {
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {392, 330, 262};
+    static const uint16_t kDurMs[] = {92, 86, 130};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) pagerAudioWriteSilence(10);
+    }
+    pagerAudioStopPlayback();
+}
+} // namespace
+#endif
+
+#if defined(DEVICE_TDECK)
+namespace {
+static bool sTdeckAudioInitTried = false;
+static bool sTdeckAudioReady = false;
+static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
+
+static bool tdeckAudioInitI2S() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate = 44100;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+#endif
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 6;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = true;
+    cfg.fixed_mclk = 0;
+
+    esp_err_t err = i2s_driver_install(kTdeckI2SPort, &cfg, 0, nullptr);
+    if (err == ESP_ERR_INVALID_STATE) {
+        i2s_driver_uninstall(kTdeckI2SPort);
+        err = i2s_driver_install(kTdeckI2SPort, &cfg, 0, nullptr);
+    }
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s install failed err=%d\n", (int)err);
+        return false;
+    }
+
+    i2s_pin_config_t pinCfg = {};
+    pinCfg.bck_io_num = TDECK_DAC_I2S_BCK;
+    pinCfg.ws_io_num = TDECK_DAC_I2S_WS;
+    pinCfg.data_out_num = TDECK_DAC_I2S_DOUT;
+    pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
+#if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+    pinCfg.mck_io_num = I2S_PIN_NO_CHANGE;
+#endif
+
+    err = i2s_set_pin(kTdeckI2SPort, &pinCfg);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s set pin failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kTdeckI2SPort);
+        return false;
+    }
+
+    err = i2s_set_clk(kTdeckI2SPort, 44100, I2S_BITS_PER_SAMPLE_16BIT,
+                      I2S_CHANNEL_STEREO);
+    if (err != ESP_OK) {
+        Serial.printf("[audio] tdeck i2s set clk failed err=%d\n", (int)err);
+        i2s_driver_uninstall(kTdeckI2SPort);
+        return false;
+    }
+
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+    return true;
+}
+
+static bool tdeckAudioEnsureReady() {
+    if (sTdeckAudioInitTried) return sTdeckAudioReady;
+    sTdeckAudioInitTried = true;
+    sTdeckAudioReady = tdeckAudioInitI2S();
+    if (sTdeckAudioReady) {
+        Serial.println("[audio] tdeck i2s speaker ready");
+    }
+    return sTdeckAudioReady;
+}
+
+static inline void tdeckAudioStartPlayback() {
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+}
+
+static inline void tdeckAudioStopPlayback() {
+    int16_t tail[128] = {0};
+    size_t tailWritten = 0;
+    (void)i2s_write(kTdeckI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    i2s_zero_dma_buffer(kTdeckI2SPort);
+}
+
+static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
+    if (!tdeckAudioEnsureReady()) return;
+
+    static constexpr uint32_t kSampleRate = 44100;
+    static constexpr int kChunkFrames = 120;
+    int16_t pcm[kChunkFrames * 2];
+
+    uint32_t framesRemaining = ((uint32_t)durationMs * kSampleRate) / 1000U;
+    if (framesRemaining == 0) return;
+    const uint32_t totalFrames = framesRemaining;
+    uint32_t frameIndex = 0;
+    uint32_t rampFrames = kSampleRate / 400;
+    if (rampFrames < 12) rampFrames = 12;
+
+    const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
+    float phase = 0.0f;
+
+    while (framesRemaining > 0) {
+        int framesNow = (framesRemaining > (uint32_t)kChunkFrames)
+                        ? kChunkFrames
+                        : (int)framesRemaining;
+        for (int i = 0; i < framesNow; i++) {
+            float s = sinf(phase);
+            phase += phaseStep;
+            if (phase >= 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+
+            float env = 1.0f;
+            if (frameIndex < rampFrames) {
+                env = (float)frameIndex / (float)rampFrames;
+            }
+            uint32_t framesToEnd = totalFrames - frameIndex;
+            if (framesToEnd < rampFrames) {
+                float tail = (float)framesToEnd / (float)rampFrames;
+                if (tail < env) env = tail;
+            }
+
+            int16_t v = (int16_t)(s * 2800.0f * env);
+            pcm[(i * 2)] = v;
+            pcm[(i * 2) + 1] = v;
+            frameIndex++;
+        }
+
+        size_t written = 0;
+        esp_err_t err = i2s_write(kTdeckI2SPort, pcm,
+                                  (size_t)(framesNow * 2 * (int)sizeof(int16_t)),
+                                  &written, portMAX_DELAY);
+        if (err != ESP_OK) {
+            Serial.printf("[audio] tdeck i2s write failed err=%d\n", (int)err);
+            break;
+        }
+        framesRemaining -= (uint32_t)framesNow;
+    }
+}
+
+static void tdeckPlayAlertPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {1760, 1480, 1320};
+    static const uint16_t kDurMs[] = {34, 34, 56};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(10);
+    }
+    tdeckAudioStopPlayback();
+}
+
+static void tdeckPlayChirpyPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {2093, 2637, 3136, 2637};
+    static const uint16_t kDurMs[] = {20, 20, 22, 34};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(6);
+    }
+    tdeckAudioStopPlayback();
+}
+
+static void tdeckPlayBassPattern() {
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    static const uint16_t kNotesHz[] = {784, 659, 523};
+    static const uint16_t kDurMs[] = {54, 50, 74};
+    static const size_t kNoteCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+    for (size_t i = 0; i < kNoteCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kNoteCount) delay(12);
+    }
+    tdeckAudioStopPlayback();
+}
+} // namespace
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+namespace {
+static bool sCardputerAudioReady = false;
+
+static inline void cardputerAudioEnsureReady() {
+    if (sCardputerAudioReady) return;
+    cardputerSpeakerSetVolume(180);
+    sCardputerAudioReady = true;
+}
+
+static void cardputerPlayTonePattern(const uint16_t *notesHz,
+                                     const uint16_t *durMs,
+                                     size_t noteCount,
+                                     uint16_t gapMs) {
+    cardputerAudioEnsureReady();
+    for (size_t i = 0; i < noteCount; i++) {
+        (void)cardputerSpeakerTone((float)notesHz[i], durMs[i], 0, true);
+        delay((uint32_t)durMs[i]);
+        if (i + 1 < noteCount && gapMs) delay(gapMs);
+    }
+}
+
+static void cardputerPlayAlertPattern() {
+    static const uint16_t kNotesHz[] = {1568, 1319, 1175};
+    static const uint16_t kDurMs[] = {34, 34, 56};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 10);
+}
+
+static void cardputerPlayChirpyPattern() {
+    static const uint16_t kNotesHz[] = {1976, 2489, 2960, 2489};
+    static const uint16_t kDurMs[] = {20, 20, 22, 34};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 6);
+}
+
+static void cardputerPlayBassPattern() {
+    static const uint16_t kNotesHz[] = {659, 554, 440};
+    static const uint16_t kDurMs[] = {54, 50, 74};
+    cardputerPlayTonePattern(kNotesHz, kDurMs, sizeof(kNotesHz) / sizeof(kNotesHz[0]), 12);
+}
+} // namespace
+#endif
+
+static void triggerMessageAlert(bool bypassRateLimit = false) {
+    static uint32_t lastAlertMs = 0;
+    uint32_t nowMs = millis();
+    if (!bypassRateLimit && nowMs - lastAlertMs < 120) return;
+    lastAlertMs = nowMs;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (s_cfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            pagerAudioPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            pagerAudioPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            pagerAudioPlayAlertPattern();
+            break;
+    }
+#elif defined(DEVICE_TDECK)
+    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (s_cfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            tdeckPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            tdeckPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            tdeckPlayAlertPattern();
+            break;
+    }
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+
+    switch (s_cfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            cardputerPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            cardputerPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            cardputerPlayAlertPattern();
+            break;
+    }
+#elif (BOARD_BUZZER >= 0)
+    if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
+    tone(BOARD_BUZZER, 1760, 60);
+#endif
+}
+
+static void playSplashStartupRiff() {
+    if (!s_cfg.splashMelodyEnabled) return;
+
+    // Middle-octave riff: E, F, F#, F, E, D#, E
+    static const uint16_t kNotesHz[] = {330, 349, 370, 349, 330, 311, 330};
+    static const uint16_t kQuarterMs = 220;
+    static const uint16_t kPause16thMs = 55;
+    static const uint16_t kDurMs[] = {
+        kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs, kQuarterMs
+    };
+    static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (!pagerAudioEnsureReady()) return;
+    pagerAudioStartPlayback();
+    for (size_t i = 0; i < kCount; i++) {
+        pagerAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kCount) pagerAudioWriteSilence(kPause16thMs);
+    }
+    pagerAudioStopPlayback();
+#elif defined(DEVICE_TDECK)
+    if (!tdeckAudioEnsureReady()) return;
+    tdeckAudioStartPlayback();
+    for (size_t i = 0; i < kCount; i++) {
+        tdeckAudioPlayTone(kNotesHz[i], kDurMs[i]);
+        if (i + 1 < kCount) delay(kPause16thMs);
+    }
+    tdeckAudioStopPlayback();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    cardputerPlayTonePattern(kNotesHz, kDurMs, kCount, kPause16thMs);
+#elif (BOARD_BUZZER >= 0)
+    for (size_t i = 0; i < kCount; i++) {
+        tone(BOARD_BUZZER, kNotesHz[i], kDurMs[i]);
+        delay((uint32_t)kDurMs[i] + (i + 1 < kCount ? kPause16thMs : 0));
+    }
+#endif
 }
 
 static int uiThemePresetIndexFromCfg() {
@@ -333,6 +1106,242 @@ static void persistSplashMelodySetting() {
     p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
     p.end();
 }
+
+static void applyUiThemePalette() {
+    s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
+    s_cfg.uiMode  = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+
+    if (s_cfg.uiTheme == UI_THEME_EARTHEN) {
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                0xF7DE, 0xE6BA, 0xE658, 0xFFDF, 0xF75C, 0xEEB9,
+                0x4228, 0xB40B, 0x7B6D, 0xBD14, 0xCDB6, 0xF75C, 0xEEB9,
+                0xB40B, 0xB40B, 0x31A6, 0x6B4D, 0xFFFF, 0x39C7,
+                0xDDF7, 0xB40B, 0x9B65, 0xA3C8, 0x8C30,
+                0x3666, 0xBC40, 0xA000,
+                0xE6DA, 0xFFDF, 0xF75C, 0xCDB6, 0xDE58, 0x4228, 0x6B4D, 0x9CD3
+            };
+        } else {
+            s_ui = {
+                0x1082, 0x2104, 0x18C3, 0x2104, 0x2945, 0x3186,
+                0xFDD0, 0xE4A8, 0x8C71, 0x5AEB, 0x736D, 0x2945, 0x39A7,
+                0xD38B, 0xD38B, 0xFFDF, 0xC618, 0xFFFF, 0xF7DE,
+                0x6B4D, 0xC38A, 0xE4A8, 0xB40B, 0xA514,
+                0x3666, 0xED80, 0xA000,
+                0x18A3, 0x4228, 0x2966, 0x6B2C, 0x83AE, 0xFFDF, 0xDEBA, 0xBDF7
+            };
+        }
+    } else if (s_cfg.uiTheme == UI_THEME_EVERGREEN) {
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                0xE73C, 0xD697, 0xC5F4, 0xF7DE, 0xE71B, 0xDEB9,
+                0x2148, 0xA321, 0x5B0D, 0xA4F2, 0xBDB4, 0xE71B, 0xD677,
+                0x2D2A, 0x2D2A, 0x2148, 0x636E, 0xFFFF, 0x2148,
+                0x2D2A, 0x45AD, 0x1CAA, 0x2148, 0x7BAF,
+                0x2DA6, 0xBC40, 0xA000,
+                0xD697, 0xF7DE, 0xEF7C, 0xA4F2, 0xBDB4, 0x2148, 0x4AED, 0x7C31
+            };
+        } else {
+            s_ui = {
+                0x00A8, 0x19EC, 0x114A, 0x11AA, 0x1A2C, 0x1A0B,
+                0xFFFF, 0xFD20, 0x8CF1, 0x3B8F, 0x4C31, 0x1A0B, 0x2B2D,
+                0x55B0, 0x55B0, 0xFFFF, 0xA554, 0xFFFF, 0xE77D,
+                0x2AED, 0x55B0, 0x86FF, 0xE73C, 0xC69A,
+                0x3666, 0xED80, 0xA000,
+                0x00A8, 0x228D, 0x1169, 0x4C31, 0x64D4, 0xFFFF, 0xB69A, 0x9D75
+            };
+        }
+    } else if (s_cfg.uiTheme == UI_THEME_SOLARIZED) {
+        const uint16_t base03 = rgb565(0x00, 0x2b, 0x36);
+        const uint16_t base02 = rgb565(0x07, 0x36, 0x42);
+        const uint16_t base01 = rgb565(0x58, 0x6e, 0x75);
+        const uint16_t base00 = rgb565(0x65, 0x7b, 0x83);
+        const uint16_t base0 = rgb565(0x83, 0x94, 0x96);
+        const uint16_t base1 = rgb565(0x93, 0xa1, 0xa1);
+        const uint16_t base2 = rgb565(0xee, 0xe8, 0xd5);
+        const uint16_t base3 = rgb565(0xfd, 0xf6, 0xe3);
+        const uint16_t yellow = rgb565(0xb5, 0x89, 0x00);
+        const uint16_t orange = rgb565(0xcb, 0x4b, 0x16);
+        const uint16_t red = rgb565(0xdc, 0x32, 0x2f);
+        const uint16_t magenta = rgb565(0xd3, 0x36, 0x82);
+        const uint16_t violet = rgb565(0x6c, 0x71, 0xc4);
+        const uint16_t blue = rgb565(0x26, 0x8b, 0xd2);
+        const uint16_t cyan = rgb565(0x2a, 0xa1, 0x98);
+        const uint16_t green = rgb565(0x85, 0x99, 0x00);
+
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                base3, base2, base2, base3, base2, rgb565(0xe7, 0xe1, 0xcf),
+                blue, orange, base1, base1, base0, base2, base2,
+                cyan, blue, base01, base00, base3, base01,
+                rgb565(0xe8, 0xe2, 0xd0), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base2, base3, rgb565(0xf8, 0xf1, 0xdd), base1, base0, blue, cyan, base00
+            };
+        } else {
+            s_ui = {
+                base03, base02, base02, base02, rgb565(0x0c, 0x3c, 0x47), rgb565(0x11, 0x45, 0x52),
+                blue, orange, base01, base01, base00, base02, base02,
+                cyan, yellow, base1, base0, base3, base1,
+                rgb565(0x0e, 0x46, 0x55), cyan, blue, yellow, violet,
+                green, yellow, red,
+                base03, base02, rgb565(0x0b, 0x40, 0x4b), base01, base00, base3, cyan, base0
+            };
+        }
+    } else if (s_cfg.uiTheme == UI_THEME_CRIMSON) {
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                rgb565(0xf3, 0xf7, 0xff), rgb565(0xdc, 0xe8, 0xff), rgb565(0xcf, 0xdf, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xd6, 0xe3, 0xff),
+                rgb565(0x1e, 0x5f, 0xd1), rgb565(0xc6, 0x28, 0x39), rgb565(0x5f, 0x73, 0xa0), rgb565(0xb0, 0xc1, 0xe4), rgb565(0x92, 0xaa, 0xd7), rgb565(0xf1, 0xf6, 0xff), rgb565(0xe2, 0xed, 0xff),
+                rgb565(0xc6, 0x28, 0x39), rgb565(0x2c, 0x74, 0xea), rgb565(0x1b, 0x24, 0x3d), rgb565(0x5c, 0x6c, 0x8f), rgb565(0xff, 0xff, 0xff), rgb565(0x1b, 0x2d, 0x52),
+                rgb565(0xda, 0xe8, 0xff), rgb565(0x2f, 0x78, 0xf0), rgb565(0xb4, 0x21, 0x33), rgb565(0x1f, 0x5c, 0xc3), rgb565(0x8d, 0x9d, 0xbe),
+                rgb565(0x1b, 0x8f, 0x42), rgb565(0xb0, 0x7a, 0x00), rgb565(0x9f, 0x1f, 0x2f),
+                rgb565(0xde, 0xe9, 0xff), rgb565(0xf5, 0xe0, 0xe7), rgb565(0xf7, 0xfb, 0xff), rgb565(0xa5, 0xbb, 0xe7), rgb565(0xdb, 0x4b, 0x5a), rgb565(0x1f, 0x2d, 0x4d), rgb565(0x5d, 0x6e, 0x95), rgb565(0x7d, 0x8e, 0xb2)
+            };
+        } else {
+            s_ui = {
+                rgb565(0x06, 0x0f, 0x24), rgb565(0x0e, 0x1b, 0x3a), rgb565(0x11, 0x23, 0x48), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0x23, 0x43, 0x7d),
+                rgb565(0x42, 0x8f, 0xff), rgb565(0xff, 0x4a, 0x58), rgb565(0x8d, 0xa6, 0xd6), rgb565(0x35, 0x4a, 0x75), rgb565(0x4d, 0x66, 0x98), rgb565(0x10, 0x20, 0x44), rgb565(0x17, 0x2c, 0x5a),
+                rgb565(0xff, 0x4a, 0x58), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0xff, 0xff), rgb565(0xb9, 0xc8, 0xe7), rgb565(0xff, 0xff, 0xff), rgb565(0xe9, 0xf1, 0xff),
+                rgb565(0x1a, 0x36, 0x68), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0x6a, 0x74), rgb565(0x57, 0xa7, 0xff), rgb565(0x7f, 0x91, 0xb9),
+                rgb565(0x39, 0xc9, 0x69), rgb565(0xff, 0xbf, 0x3d), rgb565(0xff, 0x58, 0x58),
+                rgb565(0x07, 0x16, 0x36), rgb565(0x2e, 0x0d, 0x24), rgb565(0x15, 0x27, 0x54), rgb565(0x3b, 0x57, 0x8f), rgb565(0xff, 0x63, 0x70), rgb565(0xf4, 0xf8, 0xff), rgb565(0xb9, 0xc9, 0xe9), rgb565(0x8a, 0x9c, 0xc4)
+            };
+        }
+    } else {
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                rgb565(0xff, 0xf7, 0xfa), rgb565(0xf1, 0xd8, 0xe3), rgb565(0xe8, 0xc2, 0xd5),
+                rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xf3, 0xe0, 0xea),
+                0x3127, 0xC983, 0x73AE, 0xBC92, 0xCD34, 0xFF1B, 0xFCD2,
+                0xB964, 0xB964, 0x20E6, 0x62CC, 0xFFFF, 0x2927,
+                0xB964, 0xDA8E, 0x2C8D, 0x2927, 0x8B2F,
+                0x2DA6, 0xBC40, 0xA000,
+                0xFE97, 0xFFDF, 0xFF9D, 0xBCB2, 0xCD54, 0x2927, 0x6AAB, 0x83AE
+            };
+        } else {
+            s_ui = {
+                0x0843, 0x18A7, 0x1045, 0x1065, 0x18A7, 0x1846,
+                0xFFFF, 0xF46B, 0xA4B2, 0x39A8, 0x4A2A, 0x1846, 0x7228,
+                0xDA8E, 0xDA8E, 0xFFFF, 0xB596, 0xFFFF, 0xF79E,
+                0x7228, 0xDA8E, 0x66FF, 0xDEFB, 0xCE59,
+                0x2DA6, 0xFD20, 0xA000,
+                0x0801, 0x49C8, 0x1023, 0x6AAE, 0x83B2, 0xFFFF, 0xF6FB, 0xB596
+            };
+        }
+    }
+
+    s_appliedUiTheme = s_cfg.uiTheme;
+    s_appliedUiMode = s_cfg.uiMode;
+}
+
+static inline lv_color_t lvColorFrom565(uint16_t c) {
+    uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
+    uint8_t g = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);
+    uint8_t b = (uint8_t)(((c & 0x1F) * 255) / 31);
+    return lv_color_make(r, g, b);
+}
+
+static constexpr uint16_t hex24To565(uint32_t rgb) {
+    return rgb565((uint8_t)((rgb >> 16) & 0xFF),
+                  (uint8_t)((rgb >> 8) & 0xFF),
+                  (uint8_t)(rgb & 0xFF));
+}
+
+static uint16_t blend565(uint16_t c1, uint16_t c2, uint8_t t) {
+    int r1 = (c1 >> 11) & 0x1F;
+    int g1 = (c1 >> 5) & 0x3F;
+    int b1 = c1 & 0x1F;
+    int r2 = (c2 >> 11) & 0x1F;
+    int g2 = (c2 >> 5) & 0x3F;
+    int b2 = c2 & 0x1F;
+    int r = r1 + ((r2 - r1) * t) / 255;
+    int g = g1 + ((g2 - g1) * t) / 255;
+    int b = b1 + ((b2 - b1) * t) / 255;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static bool isTrafficBgColor24(uint32_t rgb) {
+    switch (rgb) {
+        case 0x4A1D1D:
+        case 0x1E3E27:
+        case 0x1B3E34:
+        case 0x4A4318:
+        case 0x4A2D1F:
+        case 0x4A3418:
+        case 0x1A3B40:
+        case 0x33224A:
+        case 0x12345D:
+        case 0x1D2E58:
+        case 0x1A3754:
+        case 0x1A3A3E:
+        case 0x4A3618:
+        case 0x102D52:
+        case 0x3E3619:
+        case 0x10254A:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static lv_color_t themedColorHex(uint32_t rgb) {
+    uint16_t mapped = 0;
+    bool hasMapped = true;
+
+    switch (rgb) {
+        case 0x0B1E44: mapped = s_ui.bgMain; break;
+        case 0x0E285B: mapped = s_ui.panelBg; break;
+        case 0x0F2A5C: mapped = s_ui.panelAlt; break;
+        case 0x102750: mapped = s_ui.tabIdle; break;
+        case 0x102B61:
+        case 0x1E355F: mapped = s_ui.inputBg; break;
+        case 0x123266: mapped = s_ui.panelStrong; break;
+        case 0x2A4E8F: mapped = s_ui.selectBg; break;
+        case 0x2A4FB4: mapped = s_ui.tabActive; break;
+        case 0x2B4D8C:
+        case 0x335D9D: mapped = s_ui.divider; break;
+        case 0x3F669F:
+        case 0x8FB5E6:
+        case 0x5C86C6: mapped = s_ui.dividerHi; break;
+        case 0x4C76BA:
+        case 0x5B86C7: mapped = s_ui.inputTop; break;
+        case 0x79DDB8:
+        case 0x84E07A:
+        case 0x2C7A3B: mapped = s_ui.battGood; break;
+        case 0x8EEBFF: mapped = s_ui.accent; break;
+        case 0x4EC9FF:
+        case 0x90B4FF: mapped = s_ui.selectAccent; break;
+        case 0xA7C7FF: mapped = s_ui.textDim; break;
+        case 0xBFD6FF: mapped = s_ui.statusText; break;
+        case 0xD9E8FF:
+        case 0xE8F1FF: mapped = s_ui.textMain; break;
+        case 0xEAF3FF: mapped = s_ui.textOnAccent; break;
+        case 0xFFF0B8: mapped = s_ui.tabUnread; break;
+        case 0xF4D35E: mapped = s_ui.battWarn; break;
+        case 0xFF6B6B: mapped = s_ui.battBad; break;
+        default: hasMapped = false; break;
+    }
+
+    if (hasMapped) {
+        return lvColorFrom565(mapped);
+    }
+
+    if (isTrafficBgColor24(rgb)) {
+        uint16_t tone = hex24To565(rgb);
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            // Lift live-traffic backgrounds in light mode so they stay readable.
+            tone = blend565(tone, 0xFFFF, 170);
+        }
+        return lvColorFrom565(tone);
+    }
+
+    return lv_color_make((uint8_t)((rgb >> 16) & 0xFF),
+                         (uint8_t)((rgb >> 8) & 0xFF),
+                         (uint8_t)(rgb & 0xFF));
+}
+
+#define lv_color_hex(rgb) themedColorHex((uint32_t)(rgb))
 
 static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     if (!buf || bufLen == 0) return "";
@@ -411,6 +1420,366 @@ static void persistWebCfgEnabled() {
     if (!p.begin("camillia", false)) return;
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
+}
+
+static void setPagerKeyboardBacklight(bool on) {
+#if defined(DEVICE_TLORA_PAGER_TFT) && defined(KB_BL) && (KB_BL >= 0)
+    digitalWrite(KB_BL, on ? HIGH : LOW);
+#else
+    LV_UNUSED(on);
+#endif
+}
+
+static void sleepScreen(const char *reason) {
+    if (s_screenAsleep) return;
+
+    displayDev().setBrightness(0);
+    setPagerKeyboardBacklight(false);
+    s_screenAsleep = true;
+
+    if (reason && reason[0]) {
+        Serial.printf("[screen] sleeping (%s)\n", reason);
+    } else {
+        Serial.println("[screen] sleeping");
+    }
+}
+
+static void wakeScreen() {
+    if (!s_screenAsleep) {
+        s_lastActivityMs = millis();
+        return;
+    }
+
+    displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    setPagerKeyboardBacklight(true);
+    s_screenAsleep = false;
+    s_lastActivityMs = millis();
+
+    // Force repaint after wake so stale text/colors are not shown.
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    s_lastRenderedLiveCount = -1;
+    s_lastRenderedLiveScrollOff = -1;
+    s_lastHeaderTime[0] = '\0';
+    s_lastBattPct = 255;
+    s_lastGpsSats = 255;
+    Serial.println("[screen] woke");
+}
+
+static bool pollUserButton(uint32_t nowMs) {
+#if defined(DEVICE_TLORA_PAGER_TFT) && defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+    static bool userBtnRawPrev = false;
+    static bool userBtnStable = false;
+    static uint32_t userBtnDebounceMs = 0;
+
+    bool userPressed = (digitalRead(USER_BUTTON_PIN) == USER_BUTTON_ACTIVE_LEVEL);
+    if (userPressed != userBtnRawPrev) {
+        userBtnRawPrev = userPressed;
+        userBtnDebounceMs = nowMs;
+    }
+
+    if ((nowMs - userBtnDebounceMs) >= 30 && userPressed != userBtnStable) {
+        userBtnStable = userPressed;
+        if (userBtnStable) {
+            if (s_screenAsleep) {
+                wakeScreen();
+            } else {
+                sleepScreen("BOOT button");
+            }
+            return true;
+        }
+    }
+#else
+    LV_UNUSED(nowMs);
+#endif
+    return false;
+}
+
+static void persistConfigToPrefs() {
+    const char *wifiSsid = webCfgWifiSsid();
+    const char *wifiPass = webCfgWifiPass();
+    if ((!wifiSsid || !wifiSsid[0]) && s_cfg.wifiSsid[0]) wifiSsid = s_cfg.wifiSsid;
+    if ((!wifiPass || !wifiPass[0]) && s_cfg.wifiPass[0]) wifiPass = s_cfg.wifiPass;
+
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+
+    if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
+    if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
+    p.putString("nodeLong", s_cfg.nodeLong);
+    p.putString("nodeShort", s_cfg.nodeShort);
+    p.putFloat("loraFreq", s_cfg.loraFreq);
+    p.putFloat("loraBw", s_cfg.loraBw);
+    p.putUChar("loraSf", s_cfg.loraSf);
+    p.putUChar("loraCr", s_cfg.loraCr);
+    p.putUChar("loraPower", s_cfg.loraPower);
+    p.putUChar("loraHopLim", s_cfg.loraHopLimit);
+    p.putBool("gpsEnabled", s_cfg.gpsEnabled);
+    p.putInt("latI", s_cfg.latI);
+    p.putInt("lonI", s_cfg.lonI);
+    p.putInt("alt", s_cfg.alt);
+    p.putUChar("devRole", s_cfg.deviceRole);
+    p.putUChar("rebroadcast", s_cfg.rebroadcastMode);
+    p.putBool("okToMqtt", s_cfg.okToMqtt);
+    p.putBool("ignoreMqtt", s_cfg.ignoreMqtt);
+    p.putULong("nodeInfoIntv", s_cfg.nodeInfoIntervalS);
+    p.putULong("posIntv", s_cfg.posIntervalS);
+    p.putULong("gpsPollS", s_cfg.gpsPollIntervalS);
+    p.putString("region", s_cfg.region);
+    p.putString("tzDef", s_cfg.tzDef);
+    p.putString("ntpServer", s_cfg.ntpServer);
+    p.putULong("screenOnSecs", s_cfg.screenOnSecs);
+    p.putUChar("dispUnits", s_cfg.displayUnits);
+    p.putBool("compassNorth", s_cfg.compassNorthTop);
+    p.putBool("flipScreen", s_cfg.flipScreen);
+    p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
+    p.putUChar("msgAlertSound", s_cfg.msgAlertSound);
+    p.putUChar("uiTheme", s_cfg.uiTheme);
+    p.putUChar("uiMode", s_cfg.uiMode);
+    p.putBool("btEnabled", s_cfg.btEnabled);
+    p.putUChar("btMode", s_cfg.btMode);
+    p.putULong("btFixedPin", s_cfg.btFixedPin);
+    p.putBool("mqttEnabled", s_cfg.mqttEnabled);
+    p.putString("mqttServer", s_cfg.mqttServer);
+    p.putString("mqttUser", s_cfg.mqttUser);
+    p.putString("mqttPass", s_cfg.mqttPass);
+    p.putString("mqttRoot", s_cfg.mqttRoot);
+    p.putBool("mqttEncrypt", s_cfg.mqttEncryption);
+    p.putBool("mqttMapRpt", s_cfg.mqttMapReport);
+    p.putBool("isPwrSaving", s_cfg.isPowerSaving);
+    p.putULong("lsSecs", s_cfg.lsSecs);
+    p.putULong("minWakeSecs", s_cfg.minWakeSecs);
+    p.putBool("telDevEn", s_cfg.telDeviceEnabled);
+    p.putULong("telDevIntv", s_cfg.telDeviceIntervalS);
+    p.putBool("telEnvEn", s_cfg.telEnvEnabled);
+    p.putULong("telEnvIntv", s_cfg.telEnvIntervalS);
+    p.putBool("cannedEn", s_cfg.cannedEnabled);
+    p.putString("cannedMsgs", s_cfg.cannedMessages);
+    p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
+    p.putUChar("chatSpace", s_cfg.chatSpacing);
+    p.putBool("dbgAcks", s_cfg.debugAcks);
+    p.putBool("dbgMsgs", s_cfg.debugMessages);
+    p.putBool("dbgGps", s_cfg.debugGps);
+    p.putBool("webCfgEnabled", s_webCfgEnabled);
+    p.end();
+}
+
+static void persistChannelsToPrefs() {
+    Preferences cp;
+    if (!cp.begin("mesh_ch", false)) return;
+
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const char *name = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
+        char key[8];
+        snprintf(key, sizeof(key), "n%d", i);
+        cp.putString(key, name ? name : "");
+        snprintf(key, sizeof(key), "k%d", i);
+        cp.putBytes(key, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
+        snprintf(key, sizeof(key), "r%d", i);
+        cp.putUChar(key, CHANNEL_KEYS[i].role);
+    }
+
+    cp.end();
+}
+
+static void loadConfigFromPrefs() {
+    Preferences prefs;
+    if (!prefs.begin("camillia", true)) return;
+
+    String nodeLong = prefs.getString("nodeLong", "");
+    if (nodeLong.length()) {
+        strncpy(s_cfg.nodeLong, nodeLong.c_str(), sizeof(s_cfg.nodeLong) - 1);
+        s_cfg.nodeLong[sizeof(s_cfg.nodeLong) - 1] = '\0';
+    }
+    String nodeShort = prefs.getString("nodeShort", "");
+    if (nodeShort.length()) {
+        strncpy(s_cfg.nodeShort, nodeShort.c_str(), sizeof(s_cfg.nodeShort) - 1);
+        s_cfg.nodeShort[sizeof(s_cfg.nodeShort) - 1] = '\0';
+    }
+
+    float f = prefs.getFloat("loraFreq", 0.0f);
+    if (f > 0.0f) s_cfg.loraFreq = f;
+    f = prefs.getFloat("loraBw", 0.0f);
+    if (f > 0.0f) s_cfg.loraBw = f;
+
+    uint8_t u = prefs.getUChar("loraSf", 0);
+    if (u) s_cfg.loraSf = u;
+    u = prefs.getUChar("loraCr", 0);
+    if (u) s_cfg.loraCr = u;
+    if (s_cfg.loraCr == 8 && s_cfg.loraSf == 11 && s_cfg.loraBw == 250.0f) {
+        s_cfg.loraCr = 5;
+    }
+    u = prefs.getUChar("loraPower", 0);
+    if (u) s_cfg.loraPower = u;
+    u = prefs.getUChar("loraHopLim", 0);
+    if (u) s_cfg.loraHopLimit = u;
+
+    if (prefs.isKey("gpsEnabled")) s_cfg.gpsEnabled = prefs.getBool("gpsEnabled");
+    int32_t i = prefs.getInt("latI", 0);
+    if (i) s_cfg.latI = i;
+    i = prefs.getInt("lonI", 0);
+    if (i) s_cfg.lonI = i;
+    i = prefs.getInt("alt", -1);
+    if (i >= 0) s_cfg.alt = i;
+
+    uint8_t ro = prefs.getUChar("devRole", 0xFF);
+    if (ro != 0xFF) s_cfg.deviceRole = ro;
+    ro = prefs.getUChar("rebroadcast", 0xFF);
+    if (ro != 0xFF) s_cfg.rebroadcastMode = ro;
+
+    if (prefs.isKey("okToMqtt")) s_cfg.okToMqtt = prefs.getBool("okToMqtt");
+    if (prefs.isKey("ignoreMqtt")) s_cfg.ignoreMqtt = prefs.getBool("ignoreMqtt");
+
+    uint32_t ul = prefs.getULong("nodeInfoIntv", 0);
+    if (ul) s_cfg.nodeInfoIntervalS = ul;
+    ul = prefs.getULong("posIntv", 0);
+    if (ul) s_cfg.posIntervalS = ul;
+    if (prefs.isKey("gpsPollS")) {
+        ul = prefs.getULong("gpsPollS", 0);
+        s_cfg.gpsPollIntervalS = (uint32_t)constrain((long)ul, (long)0, (long)3600);
+    } else if (prefs.isKey("gpsPollMs")) {
+        ul = prefs.getULong("gpsPollMs", 0);
+        s_cfg.gpsPollIntervalS = (ul == 0) ? 0 : (uint32_t)constrain((long)((ul + 999UL) / 1000UL), (long)0, (long)3600);
+    }
+
+    String region = prefs.getString("region", "");
+    if (region.length()) {
+        strncpy(s_cfg.region, region.c_str(), sizeof(s_cfg.region) - 1);
+        s_cfg.region[sizeof(s_cfg.region) - 1] = '\0';
+    }
+    String tz = prefs.getString("tzDef", "");
+    if (tz.length()) {
+        strncpy(s_cfg.tzDef, tz.c_str(), sizeof(s_cfg.tzDef) - 1);
+        s_cfg.tzDef[sizeof(s_cfg.tzDef) - 1] = '\0';
+    }
+    String ntp = prefs.getString("ntpServer", "");
+    if (ntp.length()) {
+        strncpy(s_cfg.ntpServer, ntp.c_str(), sizeof(s_cfg.ntpServer) - 1);
+        s_cfg.ntpServer[sizeof(s_cfg.ntpServer) - 1] = '\0';
+    }
+
+    ul = prefs.getULong("screenOnSecs", 0);
+    if (ul) s_cfg.screenOnSecs = ul;
+
+    ro = prefs.getUChar("dispUnits", 0xFF);
+    if (ro != 0xFF) s_cfg.displayUnits = ro;
+    if (prefs.isKey("compassNorth")) s_cfg.compassNorthTop = prefs.getBool("compassNorth");
+    if (prefs.isKey("flipScreen")) s_cfg.flipScreen = prefs.getBool("flipScreen");
+    if (prefs.isKey("splashMelody")) s_cfg.splashMelodyEnabled = prefs.getBool("splashMelody");
+    if (prefs.isKey("msgAlertSound")) {
+        s_cfg.msgAlertSound = (uint8_t)constrain((int)prefs.getUChar("msgAlertSound"), 0, 3);
+    } else if (prefs.isKey("msgAlertBeep")) {
+        s_cfg.msgAlertSound = prefs.getBool("msgAlertBeep") ? MSG_ALERT_SOUND_DEFAULT : MSG_ALERT_SOUND_OFF;
+    }
+    ro = prefs.getUChar("uiTheme", 0xFF);
+    if (ro != 0xFF && ro < UI_THEME_COUNT) s_cfg.uiTheme = ro;
+    ro = prefs.getUChar("uiMode", 0xFF);
+    if (ro != 0xFF && ro <= UI_MODE_LIGHT) s_cfg.uiMode = ro;
+
+    if (prefs.isKey("btEnabled")) s_cfg.btEnabled = prefs.getBool("btEnabled");
+    ro = prefs.getUChar("btMode", 0xFF);
+    if (ro != 0xFF) s_cfg.btMode = ro;
+    ul = prefs.getULong("btFixedPin", 0);
+    if (ul) s_cfg.btFixedPin = ul;
+
+    if (prefs.isKey("mqttEnabled")) s_cfg.mqttEnabled = prefs.getBool("mqttEnabled");
+    String mqttServer = prefs.getString("mqttServer", "");
+    if (mqttServer.length()) {
+        strncpy(s_cfg.mqttServer, mqttServer.c_str(), sizeof(s_cfg.mqttServer) - 1);
+        s_cfg.mqttServer[sizeof(s_cfg.mqttServer) - 1] = '\0';
+    }
+    String mqttUser = prefs.getString("mqttUser", "");
+    if (mqttUser.length()) {
+        strncpy(s_cfg.mqttUser, mqttUser.c_str(), sizeof(s_cfg.mqttUser) - 1);
+        s_cfg.mqttUser[sizeof(s_cfg.mqttUser) - 1] = '\0';
+    }
+    String mqttPass = prefs.getString("mqttPass", "");
+    if (mqttPass.length()) {
+        strncpy(s_cfg.mqttPass, mqttPass.c_str(), sizeof(s_cfg.mqttPass) - 1);
+        s_cfg.mqttPass[sizeof(s_cfg.mqttPass) - 1] = '\0';
+    }
+    String mqttRoot = prefs.getString("mqttRoot", "");
+    if (mqttRoot.length()) {
+        strncpy(s_cfg.mqttRoot, mqttRoot.c_str(), sizeof(s_cfg.mqttRoot) - 1);
+        s_cfg.mqttRoot[sizeof(s_cfg.mqttRoot) - 1] = '\0';
+    }
+    if (prefs.isKey("mqttEncrypt")) s_cfg.mqttEncryption = prefs.getBool("mqttEncrypt");
+    if (prefs.isKey("mqttMapRpt")) s_cfg.mqttMapReport = prefs.getBool("mqttMapRpt");
+
+    if (prefs.isKey("isPwrSaving")) s_cfg.isPowerSaving = prefs.getBool("isPwrSaving");
+    ul = prefs.getULong("lsSecs", 0);
+    if (ul) s_cfg.lsSecs = ul;
+    ul = prefs.getULong("minWakeSecs", 0);
+    if (ul) s_cfg.minWakeSecs = ul;
+
+    if (prefs.isKey("telDevEn")) s_cfg.telDeviceEnabled = prefs.getBool("telDevEn");
+    ul = prefs.getULong("telDevIntv", 0);
+    if (ul) s_cfg.telDeviceIntervalS = ul;
+    if (prefs.isKey("telEnvEn")) s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
+    ul = prefs.getULong("telEnvIntv", 0);
+    if (ul) s_cfg.telEnvIntervalS = ul;
+
+    if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
+    String canned = prefs.getString("cannedMsgs", "");
+    if (canned.length()) {
+        strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
+        s_cfg.cannedMessages[sizeof(s_cfg.cannedMessages) - 1] = '\0';
+    }
+
+    ul = prefs.getULong("nodeIdOvr", 0);
+    if (ul) s_cfg.nodeIdOverride = (uint32_t)ul;
+    ro = prefs.getUChar("chatSpace", 0xFF);
+    if (ro != 0xFF && ro <= 2) s_cfg.chatSpacing = ro;
+
+    if (prefs.isKey("dbgAcks")) s_cfg.debugAcks = prefs.getBool("dbgAcks");
+    if (prefs.isKey("dbgMsgs")) s_cfg.debugMessages = prefs.getBool("dbgMsgs");
+    if (prefs.isKey("dbgGps")) s_cfg.debugGps = prefs.getBool("dbgGps");
+
+    String wifiSsid = prefs.getString("wifiSsid", "");
+    if (wifiSsid.length()) {
+        strncpy(s_cfg.wifiSsid, wifiSsid.c_str(), sizeof(s_cfg.wifiSsid) - 1);
+        s_cfg.wifiSsid[sizeof(s_cfg.wifiSsid) - 1] = '\0';
+    }
+    String wifiPass = prefs.getString("wifiPass", "");
+    if (wifiPass.length()) {
+        strncpy(s_cfg.wifiPass, wifiPass.c_str(), sizeof(s_cfg.wifiPass) - 1);
+        s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
+    }
+    s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
+
+    prefs.end();
+}
+
+static void loadChannelsFromPrefs() {
+    Preferences cp;
+    if (!cp.begin("mesh_ch", true)) return;
+
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        char key[8];
+
+        snprintf(key, sizeof(key), "n%d", i);
+        String name = cp.getString(key, "");
+        name.trim();
+        if (name.length() > 0 && name.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
+            strncpy(CHANNEL_KEYS[i].name_buf, name.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+            CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+            CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+        }
+
+        snprintf(key, sizeof(key), "k%d", i);
+        uint8_t keyBuf[32];
+        size_t keyLen = cp.getBytes(key, keyBuf, sizeof(keyBuf));
+        if (keyLen > 0) {
+            memcpy(CHANNEL_KEYS[i].key, keyBuf, keyLen);
+            CHANNEL_KEYS[i].keyLen = (uint8_t)keyLen;
+        }
+
+        snprintf(key, sizeof(key), "r%d", i);
+        uint8_t role = cp.getUChar(key, 0xFF);
+        if (role != 0xFF) CHANNEL_KEYS[i].role = role;
+    }
+
+    cp.end();
 }
 
 static void deriveNodeId() {
@@ -525,8 +1894,6 @@ static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
 }
 
 static bool pagerSelectChatCursorIndex(int displayIndex) {
-    if (!kPagerWheelChatNav) return false;
-
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
     collectChatRows(rows, rowCount);
@@ -578,6 +1945,8 @@ static void closeComposePrompt() {
     }
     s_composeModal = nullptr;
     s_composeInput = nullptr;
+    s_composeTarget = COMPOSE_TARGET_CHANNEL;
+    s_composeDmNodeId = 0;
     s_composeReplyPacketId = 0;
     s_composeChannelIdx = s_activeChannel;
 }
@@ -586,9 +1955,19 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     if (!s_rootScreen) return;
     if (s_activeChannel < 0 || s_activeChannel >= MESH_CHANNELS) return;
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
+    const lv_coord_t composeInputH = 32;
+#else
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_coord_t composeInputH = 28;
+#endif
+
     closeComposePrompt();
 
     const bool isReply = (replyPacketId != 0);
+    s_composeTarget = COMPOSE_TARGET_CHANNEL;
+    s_composeDmNodeId = 0;
     s_composeReplyPacketId = replyPacketId;
     s_composeChannelIdx = s_activeChannel;
 
@@ -621,7 +2000,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
         formatReplyPreview(replyText, preview, sizeof(preview));
         lv_obj_t *replyLbl = lv_label_create(s_composeModal);
         lv_obj_set_width(replyLbl, lv_pct(100));
-        lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         lv_label_set_text_fmt(replyLbl, "RE: %s", preview[0] ? preview : "(message)");
@@ -629,8 +2008,8 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 
     s_composeInput = lv_textarea_create(s_composeModal);
     lv_obj_set_width(s_composeInput, lv_pct(100));
-    lv_obj_set_height(s_composeInput, 28);
-    lv_obj_set_style_text_font(s_composeInput, &lv_font_montserrat_10, 0);
+    lv_obj_set_height(s_composeInput, composeInputH);
+    lv_obj_set_style_text_font(s_composeInput, composeBodyFont, 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
     lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
     lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
@@ -642,9 +2021,20 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
     lv_obj_set_width(hint, lv_pct(100));
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(hint, composeBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Delete");
+#else
     lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
+#endif
+}
+
+static void openComposePromptForDm(uint32_t nodeId) {
+    if (nodeId == 0) return;
+    openComposePrompt(0, nullptr);
+    s_composeTarget = COMPOSE_TARGET_DM;
+    s_composeDmNodeId = nodeId;
 }
 
 static void sendComposeMessage() {
@@ -662,19 +2052,34 @@ static void sendComposeMessage() {
         deriveNodeId();
     }
     if (s_myNodeId == 0) {
-        Channels.addMessage(txChan, "", "! TX failed (node id)", TFT_RED, 0);
+        if (s_composeTarget == COMPOSE_TARGET_DM && s_composeDmNodeId != 0) {
+            DMs.addMessage(s_composeDmNodeId, nullptr, "", "! TX failed (node id)", TFT_RED,
+                           false, -1, 0);
+        } else {
+            Channels.addMessage(txChan, "", "! TX failed (node id)", TFT_RED, 0);
+        }
         closeComposePrompt();
         refreshChatView(true);
         return;
     }
 
-    bool sentOk = Channels.sendText(s_myNodeId, msg, s_cfg.okToMqtt, txChan, s_composeReplyPacketId);
-    if (!sentOk) {
-        Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
+    bool sentOk = false;
+    if (s_composeTarget == COMPOSE_TARGET_DM && s_composeDmNodeId != 0) {
+        sentOk = DMs.sendDm(s_myNodeId, s_composeDmNodeId, msg);
+        if (!sentOk) {
+            DMs.addMessage(s_composeDmNodeId, nullptr, "", "! TX failed", TFT_RED,
+                           false, -1, 0);
+        }
+    } else {
+        sentOk = Channels.sendText(s_myNodeId, msg, s_cfg.okToMqtt, txChan, s_composeReplyPacketId);
+        if (!sentOk) {
+            Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
+        }
     }
 
     closeComposePrompt();
     refreshChatView(true);
+    refreshDmModal(true);
 }
 
 static void initCfgActions() {
@@ -695,6 +2100,17 @@ static void initCfgActions() {
 
 static void refreshCfgModal() {
     if (!s_cfgModal || !s_cfgActionList || !s_cfgHeaderStatus) return;
+
+    auto contrastColorFor565 = [](uint16_t c) -> lv_color_t {
+        uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
+        uint8_t g = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);
+        uint8_t b = (uint8_t)(((c & 0x1F) * 255) / 31);
+        // Relative luminance approximation for robust light/dark contrast choice.
+        uint16_t luma = (uint16_t)((30U * r + 59U * g + 11U * b) / 100U);
+        return (luma >= 128U) ? lv_color_make(0x00, 0x00, 0x00)
+                              : lv_color_make(0xFF, 0xFF, 0xFF);
+    };
+    const lv_color_t selectionOutlineColor = contrastColorFor565(s_ui.selectBg);
 
     if (s_cfgActionCount <= 0) {
         initCfgActions();
@@ -720,13 +2136,27 @@ static void refreshCfgModal() {
         lv_obj_set_style_pad_right(row, 4, 0);
         lv_obj_set_style_pad_top(row, 2, 0);
         lv_obj_set_style_pad_bottom(row, 2, 0);
+        lv_obj_set_style_radius(row, 3, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_outline_width(row, 0, 0);
+        lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, cfgActionLabel(actionId, rowText, sizeof(rowText)));
 
         if (i == s_cfgSelection) {
             lv_obj_set_style_bg_color(row, lv_color_hex(0x2A4E8F), 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_80, 0);
-            lv_obj_set_style_text_color(row, lv_color_hex(0xEAF3FF), 0);
+            if (s_cfg.uiMode == UI_MODE_LIGHT) {
+                lv_obj_set_style_text_color(row, lv_color_hex(0xE8F1FF), 0);
+            } else {
+                lv_obj_set_style_text_color(row, lv_color_hex(0xEAF3FF), 0);
+            }
+            lv_obj_set_style_border_width(row, 2, 0);
+            lv_obj_set_style_border_color(row, selectionOutlineColor, 0);
+            lv_obj_set_style_outline_width(row, 1, 0);
+            lv_obj_set_style_outline_color(row, selectionOutlineColor, 0);
+            lv_obj_set_style_outline_pad(row, 0, 0);
+            lv_obj_set_style_outline_opa(row, LV_OPA_70, 0);
             selectedRowObj = row;
         } else if (i & 1) {
             lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
@@ -1068,6 +2498,24 @@ static void closeLiveModal() {
     s_lastRenderedLiveScrollOff = -1;
 }
 
+static void closeDmModal() {
+    closeDmNodePicker();
+    if (s_dmModal) {
+        lv_obj_del(s_dmModal);
+    }
+    s_dmModal = nullptr;
+    s_dmConvList = nullptr;
+    s_dmMsgList = nullptr;
+    s_dmConvCount = 0;
+    s_dmSelection = -1;
+    s_dmRenderedConvCount = -1;
+    s_dmRenderedNodeId = 0;
+    s_dmRenderedMsgCount = -1;
+    s_dmRenderedUnreadTotal = -1;
+    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
+    memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
+}
+
 static void closeNodesModal() {
     if (s_nodesModal) {
         lv_obj_del(s_nodesModal);
@@ -1079,6 +2527,7 @@ static void closeNodesModal() {
     s_nodesModal = nullptr;
     s_nodesInfoPanel = nullptr;
     s_nodesDetail = nullptr;
+    s_nodesDetailExtra = nullptr;
     s_nodesMapPanel = nullptr;
     s_nodesMapTitle = nullptr;
     s_nodesMapCoords = nullptr;
@@ -2101,12 +3550,21 @@ static void refreshNodesListSelection() {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
         bool selected = (i == s_nodesSelected);
+        lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+            ? lv_color_hex(0xE8F1FF)
+            : lv_color_hex(0xEAF3FF);
         lv_obj_set_style_bg_color(row, selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266), 0);
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_border_color(row,
                                       selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
                                       0);
+        lv_obj_set_style_text_color(row, rowTextColor, 0);
+
+        lv_obj_t *rowLabel = lv_obj_get_child(row, 0);
+        if (rowLabel) {
+            lv_obj_set_style_text_color(rowLabel, rowTextColor, 0);
+        }
     }
 }
 
@@ -2115,6 +3573,7 @@ static void refreshNodesDetails() {
 
     if (s_nodesSnapshotCount <= 0 || s_nodesSelected < 0 || s_nodesSelected >= s_nodesSnapshotCount) {
         lv_label_set_text(s_nodesDetail, "No nodes seen yet.");
+        if (s_nodesDetailExtra) lv_label_set_text(s_nodesDetailExtra, "");
         return;
     }
 
@@ -2166,30 +3625,60 @@ static void refreshNodesDetails() {
         snprintf(telem, sizeof(telem), "No telemetry data");
     }
 
-    char buf[512];
-    snprintf(buf, sizeof(buf),
-             "Name: %s\n"
-             "Short: %s\n"
-             "ID: !%08X\n"
-             "Last heard: %s\n"
-             "SNR: %.1f dB\n"
-             "Hops: %u\n"
-             "Channel: %d\n"
-             "\n"
-             "Position:\n%s\n"
-             "\n"
-             "Telemetry:\n%s",
-             name,
-             shortName,
-             n.nodeId,
-             heard,
-             (double)n.snr,
-             (unsigned)n.hops,
-             n.chanIdx,
-             pos,
-             telem);
+    if (s_nodesDetailExtra) {
+        char leftBuf[320];
+        char rightBuf[320];
+        snprintf(leftBuf, sizeof(leftBuf),
+                 "Name: %s\n"
+                 "Short: %s\n"
+                 "ID: !%08X\n"
+                 "Last heard: %s\n"
+                 "SNR: %.1f dB\n"
+                 "Hops: %u\n"
+                 "Channel: %d",
+                 name,
+                 shortName,
+                 n.nodeId,
+                 heard,
+                 (double)n.snr,
+                 (unsigned)n.hops,
+                 n.chanIdx);
 
-    lv_label_set_text(s_nodesDetail, buf);
+        snprintf(rightBuf, sizeof(rightBuf),
+                 "Position:\n%s\n"
+                 "\n"
+                 "Telemetry:\n%s",
+                 pos,
+                 telem);
+
+        lv_label_set_text(s_nodesDetail, leftBuf);
+        lv_label_set_text(s_nodesDetailExtra, rightBuf);
+    } else {
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+                 "Name: %s\n"
+                 "Short: %s\n"
+                 "ID: !%08X\n"
+                 "Last heard: %s\n"
+                 "SNR: %.1f dB\n"
+                 "Hops: %u\n"
+                 "Channel: %d\n"
+                 "\n"
+                 "Position:\n%s\n"
+                 "\n"
+                 "Telemetry:\n%s",
+                 name,
+                 shortName,
+                 n.nodeId,
+                 heard,
+                 (double)n.snr,
+                 (unsigned)n.hops,
+                 n.chanIdx,
+                 pos,
+                 telem);
+
+        lv_label_set_text(s_nodesDetail, buf);
+    }
     if (s_nodesInfoPanel) {
         lv_obj_scroll_to_y(s_nodesInfoPanel, 0, LV_ANIM_OFF);
     }
@@ -2209,6 +3698,12 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
 static void refreshLiveView(bool force) {
     if (!s_liveModal || !s_liveList) return;
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *liveBodyFont = &lv_font_montserrat_12;
+#else
+    const lv_font_t *liveBodyFont = &lv_font_montserrat_10;
+#endif
+
     const Channel &ch = Channels.get(CHAN_ANN);
     if (!force && s_lastRenderedLiveCount == ch.count && s_lastRenderedLiveScrollOff == ch.scrollOff) {
         return;
@@ -2227,7 +3722,7 @@ static void refreshLiveView(bool force) {
 
         lv_obj_t *msg = lv_label_create(s_liveList);
         lv_obj_set_width(msg, lv_pct(100));
-        lv_obj_set_style_text_font(msg, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(msg, liveBodyFont, 0);
         lv_obj_set_style_pad_left(msg, 2, 0);
         lv_obj_set_style_pad_right(msg, 4, 0);
         lv_obj_set_style_pad_top(msg, 1, 0);
@@ -2266,7 +3761,7 @@ static void refreshLiveView(bool force) {
 
     if (rowCount == 0) {
         lv_obj_t *empty = lv_label_create(s_liveList);
-        lv_obj_set_style_text_font(empty, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(empty, liveBodyFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         lv_label_set_text(empty, "No live traffic yet");
     }
@@ -2287,6 +3782,7 @@ static void refreshLiveView(bool force) {
 static void openLiveModal() {
     if (!s_rootScreen || s_liveModal) return;
     if (s_composeModal) closeComposePrompt();
+    closeDmModal();
     closeNodesModal();
     closeCfgModal();
     closeLegendModal();
@@ -2354,14 +3850,638 @@ static void openLiveModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "Bksp = Back   C = Clear log");
+    lv_label_set_text_fmt(hint, "%s = Back   C = Clear log", modalCloseKeyLabel());
 
     refreshLiveView(true);
+}
+
+static DmConv *selectedDmConversation() {
+    if (s_dmSelection <= 0) return nullptr;
+    int convIdx = s_dmSelection - 1;
+    if (convIdx < 0 || convIdx >= s_dmConvCount) return nullptr;
+    uint32_t nodeId = s_dmConvNodeIds[convIdx];
+    if (nodeId == 0) return nullptr;
+    return DMs.find(nodeId);
+}
+
+static void onDmConversationPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx > s_dmConvCount) return;
+    s_dmSelection = idx;
+    refreshDmModal(true);
+}
+
+static void onDmNodePressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_dmNodeFilteredCount) return;
+    s_dmNodeSelection = idx;
+    refreshDmNodePicker(true);
+}
+
+static char dmNodePickerAsciiLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static bool dmNodePickerContainsNoCase(const char *text, const char *needle) {
+    if (!needle || !needle[0]) return true;
+    if (!text || !text[0]) return false;
+    for (int i = 0; text[i]; i++) {
+        int j = 0;
+        while (needle[j] && text[i + j]
+               && dmNodePickerAsciiLower(text[i + j]) == dmNodePickerAsciiLower(needle[j])) {
+            j++;
+        }
+        if (!needle[j]) return true;
+    }
+    return false;
+}
+
+static void dmNodePickerApplyFilter() {
+    s_dmNodeFilteredCount = 0;
+
+    bool useFilter = (s_dmNodeFilterOpen && s_dmNodeFilterLen > 0);
+    for (int i = 0; i < s_dmNodeSnapshotCount && s_dmNodeFilteredCount < MAX_NODES; i++) {
+        const NodeEntry &n = s_dmNodeSnapshot[i];
+        if (useFilter) {
+            bool match = false;
+            if (dmNodePickerContainsNoCase(n.shortName, s_dmNodeFilter)) match = true;
+            if (!match && dmNodePickerContainsNoCase(n.longName, s_dmNodeFilter)) match = true;
+            if (!match) continue;
+        }
+
+        s_dmNodeFilteredIdx[s_dmNodeFilteredCount++] = i;
+    }
+
+    if (s_dmNodeFilteredCount <= 0) {
+        s_dmNodeSelection = 0;
+    } else {
+        s_dmNodeSelection = constrain(s_dmNodeSelection, 0, s_dmNodeFilteredCount - 1);
+    }
+}
+
+static void snapshotNodesForDmPicker() {
+    s_dmNodeSnapshotCount = 0;
+    s_dmNodeFilteredCount = 0;
+    s_dmNodeSelection = -1;
+    s_dmNodeFilterOpen = false;
+    s_dmNodeFilterLen = 0;
+    s_dmNodeFilter[0] = '\0';
+
+    int total = Nodes.count();
+    if (total < 0) total = 0;
+    if (total > MAX_NODES) total = MAX_NODES;
+
+    for (int i = 0; i < total && s_dmNodeSnapshotCount < MAX_NODES; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (!n || n->nodeId == 0) continue;
+        if (n->nodeId == s_myNodeId) continue;
+
+        bool seen = false;
+        for (int j = 0; j < s_dmNodeSnapshotCount; j++) {
+            if (s_dmNodeSnapshot[j].nodeId == n->nodeId) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+
+        s_dmNodeSnapshot[s_dmNodeSnapshotCount++] = *n;
+    }
+
+    dmNodePickerApplyFilter();
+}
+
+static const NodeEntry *selectedDmNodeForPicker() {
+    if (s_dmNodeSelection < 0 || s_dmNodeSelection >= s_dmNodeFilteredCount) return nullptr;
+    int snapshotIdx = s_dmNodeFilteredIdx[s_dmNodeSelection];
+    if (snapshotIdx < 0 || snapshotIdx >= s_dmNodeSnapshotCount) return nullptr;
+    return &s_dmNodeSnapshot[snapshotIdx];
+}
+
+static void refreshDmNodePicker(bool force) {
+    LV_UNUSED(force);
+    if (!s_dmNodePickerModal || !s_dmNodePickerList) return;
+
+    if (s_dmNodePickerTitle) {
+        if (s_dmNodeFilterOpen) {
+            char title[64];
+            snprintf(title, sizeof(title), "New DM: Select Node [%s]", s_dmNodeFilter);
+            lv_label_set_text(s_dmNodePickerTitle, title);
+        } else {
+            lv_label_set_text(s_dmNodePickerTitle, "New DM: Select Node");
+        }
+    }
+
+    if (s_dmNodePickerHint) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_label_set_text(s_dmNodePickerHint,
+                          s_dmNodeFilterOpen
+                              ? "Type = Filter   Bksp = Edit Filter   Enter = Start DM   Esc = Back"
+                              : "Type = Filter   Enter = Start DM   Esc = Back");
+#else
+        lv_label_set_text(s_dmNodePickerHint,
+                          s_dmNodeFilterOpen
+                              ? "Type = Filter   Bksp = Edit/Close Filter   Enter = Start DM"
+                              : "Type = Filter   Enter = Start DM   Bksp = Back");
+#endif
+    }
+
+    lv_obj_clean(s_dmNodePickerList);
+    memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
+
+    if (s_dmNodeFilteredCount <= 0) {
+        lv_obj_t *empty = lv_label_create(s_dmNodePickerList);
+        lv_obj_set_width(empty, lv_pct(100));
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+        if (s_dmNodeFilterOpen && s_dmNodeFilterLen > 0) {
+            char noMatch[64];
+            snprintf(noMatch, sizeof(noMatch), "No matches for: %s", s_dmNodeFilter);
+            lv_label_set_text(empty, noMatch);
+        } else {
+            lv_label_set_text(empty, "No known nodes yet");
+        }
+        return;
+    }
+
+    for (int i = 0; i < s_dmNodeFilteredCount; i++) {
+        bool selected = (i == s_dmNodeSelection);
+        int snapshotIdx = s_dmNodeFilteredIdx[i];
+        if (snapshotIdx < 0 || snapshotIdx >= s_dmNodeSnapshotCount) continue;
+        const NodeEntry &n = s_dmNodeSnapshot[snapshotIdx];
+
+        lv_obj_t *row = lv_btn_create(s_dmNodePickerList);
+        s_dmNodePickerRows[i] = row;
+        lv_obj_set_width(row, lv_pct(97));
+        lv_obj_set_height(row, 22);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 3, 0);
+        lv_obj_set_style_pad_right(row, 3, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row,
+                                      selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
+                                      0);
+        lv_obj_set_style_bg_color(row,
+                                  selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
+                                  0);
+        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+
+        char rowText[64];
+        const char *longDisp = n.longName[0] ? n.longName : "(unknown)";
+        const char *shortDisp = liveShortNameUsable(n.shortName) ? n.shortName : "????";
+        snprintf(rowText, sizeof(rowText), "%s (%s)", longDisp, shortDisp);
+        lv_label_set_text(lbl, rowText);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+}
+
+static void openDmNodePicker() {
+    if (!s_dmModal || s_dmNodePickerModal) return;
+
+    snapshotNodesForDmPicker();
+
+    int modalW = lv_disp_get_hor_res(NULL) - 20;
+    int modalH = lv_disp_get_ver_res(NULL) - 24;
+    if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
+    if (modalH < 100) modalH = lv_disp_get_ver_res(NULL) - 8;
+
+    s_dmNodePickerModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_dmNodePickerModal, modalW, modalH);
+    lv_obj_align(s_dmNodePickerModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_dmNodePickerModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_dmNodePickerModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_dmNodePickerModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_dmNodePickerModal, 1, 0);
+    lv_obj_set_style_border_color(s_dmNodePickerModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_dmNodePickerModal, 4, 0);
+    lv_obj_set_style_pad_row(s_dmNodePickerModal, 4, 0);
+    lv_obj_set_flex_flow(s_dmNodePickerModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmNodePickerModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_dmNodePickerModal);
+    s_dmNodePickerTitle = title;
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "New DM: Select Node");
+
+    s_dmNodePickerList = lv_obj_create(s_dmNodePickerModal);
+    lv_obj_set_width(s_dmNodePickerList, lv_pct(100));
+    lv_obj_set_flex_grow(s_dmNodePickerList, 1);
+    lv_obj_add_flag(s_dmNodePickerList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_dmNodePickerList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_dmNodePickerList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_dmNodePickerList, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_dmNodePickerList, 0, 0);
+    lv_obj_set_style_pad_all(s_dmNodePickerList, 0, 0);
+    lv_obj_set_style_pad_right(s_dmNodePickerList, 6, 0);
+    lv_obj_set_style_pad_row(s_dmNodePickerList, 2, 0);
+    lv_obj_set_style_width(s_dmNodePickerList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_dmNodePickerList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_dmNodePickerList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_dmNodePickerList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_dmNodePickerList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmNodePickerList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *hint = lv_label_create(s_dmNodePickerModal);
+    s_dmNodePickerHint = hint;
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_label_set_text(hint, "Type = Filter   Enter = Start DM   Esc = Back");
+#else
+    lv_label_set_text(hint, "Type = Filter   Enter = Start DM   Bksp = Back");
+#endif
+
+    refreshDmNodePicker(true);
+}
+
+static void closeDmNodePicker() {
+    if (s_dmNodePickerModal) {
+        lv_obj_del(s_dmNodePickerModal);
+    }
+    s_dmNodePickerModal = nullptr;
+    s_dmNodePickerList = nullptr;
+    s_dmNodePickerTitle = nullptr;
+    s_dmNodePickerHint = nullptr;
+    s_dmNodeSnapshotCount = 0;
+    s_dmNodeFilteredCount = 0;
+    s_dmNodeSelection = -1;
+    s_dmNodeFilterOpen = false;
+    s_dmNodeFilterLen = 0;
+    s_dmNodeFilter[0] = '\0';
+    memset(s_dmNodeSnapshot, 0, sizeof(s_dmNodeSnapshot));
+    memset(s_dmNodeFilteredIdx, 0, sizeof(s_dmNodeFilteredIdx));
+    memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
+}
+
+static void refreshDmModal(bool force) {
+    if (!s_dmModal || !s_dmConvList || !s_dmMsgList) return;
+
+    uint32_t selectedNodeIdBefore = 0;
+    if (s_dmSelection > 0) {
+        int prevConvIdx = s_dmSelection - 1;
+        if (prevConvIdx >= 0 && prevConvIdx < s_dmConvCount) {
+            selectedNodeIdBefore = s_dmConvNodeIds[prevConvIdx];
+        }
+    }
+
+    memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
+    memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
+    s_dmConvCount = 0;
+
+    int rankedCount = DMs.count();
+    for (int i = 0; i < rankedCount && s_dmConvCount < MAX_DM_CONVS; i++) {
+        DmConv *c = DMs.getByRank(i);
+        if (!c) continue;
+        s_dmConvNodeIds[s_dmConvCount++] = c->nodeId;
+    }
+
+    int totalRows = s_dmConvCount + 1;  // +1 for the "New DM" row
+    if (totalRows <= 0) {
+        s_dmSelection = -1;
+    } else {
+        int selectedIdx = 0;
+        for (int i = 0; i < s_dmConvCount; i++) {
+            if (s_dmConvNodeIds[i] == selectedNodeIdBefore) {
+                selectedIdx = i + 1;
+                break;
+            }
+        }
+        if (selectedNodeIdBefore == 0 && s_dmSelection >= 0) {
+            selectedIdx = s_dmSelection;
+        }
+        if (selectedIdx < 0) selectedIdx = 0;
+        if (selectedIdx >= totalRows) selectedIdx = totalRows - 1;
+        s_dmSelection = selectedIdx;
+    }
+
+    DmConv *selected = selectedDmConversation();
+    if (selected) {
+        DMs.markRead(selected->nodeId);
+    }
+
+    int selectedMsgCount = selected ? selected->count : -1;
+    uint32_t selectedNodeId = selected ? selected->nodeId : 0;
+    int unreadTotal = DMs.unreadMessageCount();
+
+    if (!force
+        && s_dmRenderedConvCount == s_dmConvCount
+        && s_dmRenderedNodeId == selectedNodeId
+        && s_dmRenderedMsgCount == selectedMsgCount
+        && s_dmRenderedUnreadTotal == unreadTotal) {
+        return;
+    }
+
+    lv_obj_clean(s_dmConvList);
+    lv_obj_clean(s_dmMsgList);
+
+    const lv_font_t *dmListFont = kMainScreenFont;
+    const lv_font_t *dmMsgFont = kMainScreenFont;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const int dmListRowH = 24;
+#else
+    const int dmListRowH = 22;
+#endif
+
+    {
+        bool selectedRow = (s_dmSelection == 0);
+        lv_obj_t *row = lv_btn_create(s_dmConvList);
+        lv_obj_set_width(row, lv_pct(97));
+        lv_obj_set_height(row, dmListRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 3, 0);
+        lv_obj_set_style_pad_right(row, 3, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_border_width(row, selectedRow ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row,
+                                      selectedRow ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
+                                      0);
+        lv_obj_set_style_bg_color(row,
+                                  selectedRow ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
+                                  0);
+        lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, dmListFont, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_label_set_text(lbl, "New DM");
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+
+    if (s_dmConvCount > 0) {
+        for (int i = 0; i < s_dmConvCount; i++) {
+            DmConv *c = DMs.find(s_dmConvNodeIds[i]);
+            if (!c) continue;
+
+            int rowIdx = i + 1;
+            bool selectedRow = (rowIdx == s_dmSelection);
+            lv_obj_t *row = lv_btn_create(s_dmConvList);
+            s_dmConvRows[i] = row;
+            lv_obj_set_width(row, lv_pct(97));
+            lv_obj_set_height(row, dmListRowH);
+            lv_obj_set_style_radius(row, 4, 0);
+            lv_obj_set_style_pad_left(row, 3, 0);
+            lv_obj_set_style_pad_right(row, 3, 0);
+            lv_obj_set_style_pad_top(row, 1, 0);
+            lv_obj_set_style_pad_bottom(row, 1, 0);
+            lv_obj_set_style_border_width(row, selectedRow ? 2 : 1, 0);
+            lv_obj_set_style_border_color(row,
+                                          selectedRow ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
+                                          0);
+            lv_obj_set_style_bg_color(row,
+                                      selectedRow ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
+                                      0);
+            lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
+            lv_obj_set_style_shadow_width(row, 0, 0);
+            lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+
+            lv_obj_t *lbl = lv_label_create(row);
+            lv_obj_set_width(lbl, lv_pct(100));
+            lv_obj_set_style_text_font(lbl, dmListFont, 0);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+
+            char name[20];
+            if (liveShortNameUsable(c->shortName)) {
+                snprintf(name, sizeof(name), "%s", c->shortName);
+            } else {
+                snprintf(name, sizeof(name), "!%08lX", (unsigned long)c->nodeId);
+            }
+
+            char rowText[48];
+            if (c->unreadCount > 0 && c->nodeId != selectedNodeId) {
+                snprintf(rowText, sizeof(rowText), "%s (%u)", name, (unsigned)c->unreadCount);
+            } else {
+                snprintf(rowText, sizeof(rowText), "%s", name);
+            }
+            lv_label_set_text(lbl, rowText);
+            lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+        }
+    }
+
+    selected = selectedDmConversation();
+    if (!selected) {
+        lv_obj_t *empty = lv_label_create(s_dmMsgList);
+        lv_obj_set_width(empty, lv_pct(100));
+        lv_obj_set_style_text_font(empty, dmMsgFont, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_text(empty,
+                          (s_dmSelection == 0)
+                              ? "Press Enter on New DM"
+                              : "Select a conversation");
+    } else {
+        int rowCount = 0;
+        for (int row = 0; row < MAX_DM_LINES; row++) {
+            const DmLine *dl = DMs.getLine(selected, row, MAX_DM_LINES);
+            if (!dl) break;
+            rowCount++;
+
+            lv_obj_t *msg = lv_label_create(s_dmMsgList);
+            lv_obj_set_width(msg, lv_pct(100));
+            lv_obj_set_style_text_font(msg, dmMsgFont, 0);
+            lv_obj_set_style_pad_left(msg, 2, 0);
+            lv_obj_set_style_pad_right(msg, 4, 0);
+            lv_obj_set_style_pad_top(msg, 0, 0);
+            lv_obj_set_style_pad_bottom(msg, 0, 0);
+            lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
+
+            uint16_t lineColor = dl->color;
+            switch (dl->ack) {
+                case DmLine::ACKED:
+                    lineColor = (s_cfg.uiMode == UI_MODE_LIGHT) ? (uint16_t)0x0320 : TFT_GREEN;
+                    break;
+                case DmLine::ACKED_RELAY:
+                    lineColor = TFT_YELLOW;
+                    break;
+                case DmLine::NAKED:
+                case DmLine::TX_FAILED:
+                    lineColor = TFT_RED;
+                    break;
+                default:
+                    break;
+            }
+
+            lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
+            lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+            lv_label_set_text(msg, dl->text);
+        }
+
+        if (rowCount == 0) {
+            lv_obj_t *empty = lv_label_create(s_dmMsgList);
+            lv_obj_set_width(empty, lv_pct(100));
+            lv_obj_set_style_text_font(empty, dmMsgFont, 0);
+            lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+            lv_label_set_text(empty, "No messages yet");
+        }
+    }
+
+    s_dmRenderedConvCount = s_dmConvCount;
+    s_dmRenderedNodeId = selected ? selected->nodeId : 0;
+    s_dmRenderedMsgCount = selected ? selected->count : -1;
+    s_dmRenderedUnreadTotal = unreadTotal;
+}
+
+static void openDmModal() {
+    if (!s_rootScreen || s_dmModal) return;
+    if (s_composeModal) closeComposePrompt();
+    closeLiveModal();
+    closeNodesModal();
+    closeCfgModal();
+    closeLegendModal();
+
+    int modalW = lv_disp_get_hor_res(NULL);
+    int modalH = lv_disp_get_ver_res(NULL);
+    int contentW = modalW - 8;
+    int leftW = max(96, (contentW * 38) / 100);
+    int rightW = contentW - leftW - 3;
+
+    s_dmModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_dmModal, modalW, modalH);
+    lv_obj_align(s_dmModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_dmModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_dmModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_dmModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_dmModal, 1, 0);
+    lv_obj_set_style_border_color(s_dmModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_dmModal, 4, 0);
+    lv_obj_set_style_pad_row(s_dmModal, 4, 0);
+    lv_obj_set_flex_flow(s_dmModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_dmModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "DIRECT MESSAGES");
+    lv_obj_center(title);
+
+    lv_obj_t *content = lv_obj_create(s_dmModal);
+    lv_obj_set_width(content, lv_pct(100));
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+    lv_obj_set_style_pad_all(content, 0, 0);
+    lv_obj_set_style_pad_column(content, 3, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *leftPanel = lv_obj_create(content);
+    lv_obj_set_width(leftPanel, leftW);
+    lv_obj_set_height(leftPanel, lv_pct(100));
+    lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(leftPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(leftPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(leftPanel, 1, 0);
+    lv_obj_set_style_border_color(leftPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(leftPanel, 2, 0);
+    lv_obj_set_style_pad_row(leftPanel, 2, 0);
+    lv_obj_set_flex_flow(leftPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(leftPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *leftTitle = lv_label_create(leftPanel);
+    lv_obj_set_width(leftTitle, lv_pct(100));
+    lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(leftTitle, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(leftTitle, "Conversations");
+
+    s_dmConvList = lv_obj_create(leftPanel);
+    lv_obj_set_width(s_dmConvList, lv_pct(100));
+    lv_obj_set_flex_grow(s_dmConvList, 1);
+    lv_obj_add_flag(s_dmConvList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_dmConvList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_dmConvList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_dmConvList, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_dmConvList, 0, 0);
+    lv_obj_set_style_pad_all(s_dmConvList, 0, 0);
+    lv_obj_set_style_pad_right(s_dmConvList, 6, 0);
+    lv_obj_set_style_pad_row(s_dmConvList, 2, 0);
+    lv_obj_set_style_width(s_dmConvList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_dmConvList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_dmConvList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_dmConvList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_dmConvList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *rightPanel = lv_obj_create(content);
+    lv_obj_set_width(rightPanel, rightW);
+    lv_obj_set_height(rightPanel, lv_pct(100));
+    lv_obj_clear_flag(rightPanel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(rightPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(rightPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(rightPanel, 1, 0);
+    lv_obj_set_style_border_color(rightPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(rightPanel, 2, 0);
+    lv_obj_set_style_pad_row(rightPanel, 2, 0);
+    lv_obj_set_flex_flow(rightPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(rightPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *rightTitle = lv_label_create(rightPanel);
+    lv_obj_set_width(rightTitle, lv_pct(100));
+    lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(rightTitle, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(rightTitle, "Messages");
+
+    s_dmMsgList = lv_obj_create(rightPanel);
+    lv_obj_set_width(s_dmMsgList, lv_pct(100));
+    lv_obj_set_flex_grow(s_dmMsgList, 1);
+    lv_obj_add_flag(s_dmMsgList, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_dmMsgList, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_dmMsgList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_dmMsgList, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_dmMsgList, 0, 0);
+    lv_obj_set_style_pad_all(s_dmMsgList, 0, 0);
+    lv_obj_set_style_pad_right(s_dmMsgList, 6, 0);
+    lv_obj_set_style_pad_row(s_dmMsgList, 1, 0);
+    lv_obj_set_style_width(s_dmMsgList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_dmMsgList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_dmMsgList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_dmMsgList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_dmMsgList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmMsgList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *hint = lv_label_create(s_dmModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Compose   %s = Back", modalCloseKeyLabel());
+
+    s_dmRenderedConvCount = -1;
+    s_dmRenderedNodeId = 0;
+    s_dmRenderedMsgCount = -1;
+    s_dmRenderedUnreadTotal = -1;
+    refreshDmModal(true);
 }
 
 static void openNodesModal() {
     if (!s_rootScreen || s_nodesModal) return;
     if (s_composeModal) closeComposePrompt();
+    closeDmModal();
     closeLiveModal();
     closeCfgModal();
     closeLegendModal();
@@ -2374,6 +4494,16 @@ static void openNodesModal() {
     const int contentGap = 3;
     int contentW = modalW - (modalPad * 2);
     if (contentW < 120) contentW = modalW;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
+    const lv_font_t *nodesListFont = &lv_font_montserrat_12;
+    const int nodesListRowH = 28;
+#else
+    const lv_font_t *nodesDetailFont = &lv_font_montserrat_10;
+    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
+    const int nodesListRowH = 22;
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     int rightW = max(62, min(84, (contentW * 22) / 100));
@@ -2443,11 +4573,35 @@ static void openNodesModal() {
     lv_obj_set_style_bg_opa(left, LV_OPA_70, LV_PART_SCROLLBAR);
     lv_obj_set_style_radius(left, 2, LV_PART_SCROLLBAR);
 
-    s_nodesDetail = lv_label_create(left);
-    lv_obj_set_width(s_nodesDetail, lv_pct(100));
-    lv_obj_set_style_text_font(s_nodesDetail, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_t *detailsCols = lv_obj_create(left);
+    lv_obj_set_width(detailsCols, lv_pct(100));
+    lv_obj_clear_flag(detailsCols, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(detailsCols, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(detailsCols, 0, 0);
+    lv_obj_set_style_pad_all(detailsCols, 0, 0);
+    lv_obj_set_style_pad_column(detailsCols, 10, 0);
+    lv_obj_set_flex_flow(detailsCols, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(detailsCols, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    s_nodesDetail = lv_label_create(detailsCols);
+    lv_obj_set_width(s_nodesDetail, lv_pct(50));
+    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
     lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
+
+    s_nodesDetailExtra = lv_label_create(detailsCols);
+    lv_obj_set_width(s_nodesDetailExtra, lv_pct(50));
+    lv_obj_set_style_text_font(s_nodesDetailExtra, nodesDetailFont, 0);
+    lv_obj_set_style_text_color(s_nodesDetailExtra, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(s_nodesDetailExtra, LV_LABEL_LONG_WRAP);
+#else
+    s_nodesDetail = lv_label_create(left);
+    lv_obj_set_width(s_nodesDetail, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
+    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
+#endif
 
     lv_obj_t *right = lv_obj_create(content);
     lv_obj_set_width(right, rightW);
@@ -2488,14 +4642,14 @@ static void openNodesModal() {
     if (s_nodesSnapshotCount <= 0) {
         lv_obj_t *empty = lv_label_create(s_nodesList);
         lv_obj_set_width(empty, lv_pct(100));
-        lv_obj_set_style_text_font(empty, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(empty, nodesListFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         lv_label_set_text(empty, "No nodes seen");
     } else {
         for (int i = 0; i < s_nodesSnapshotCount; i++) {
             lv_obj_t *row = lv_btn_create(s_nodesList);
             lv_obj_set_width(row, lv_pct(96));
-            lv_obj_set_height(row, 22);
+            lv_obj_set_height(row, nodesListRowH);
             lv_obj_set_style_radius(row, 4, 0);
             lv_obj_set_style_pad_left(row, 3, 0);
             lv_obj_set_style_pad_right(row, 3, 0);
@@ -2509,7 +4663,7 @@ static void openNodesModal() {
 
             lv_obj_t *lbl = lv_label_create(row);
             lv_obj_set_width(lbl, lv_pct(100));
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_font(lbl, nodesListFont, 0);
             lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
 
@@ -2532,15 +4686,25 @@ static void openNodesModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "Bksp = Back   Tap node for details");
+    lv_label_set_text_fmt(hint, "Up/Down = Select   %s = Back", modalCloseKeyLabel());
 }
 
 static void openLegendModal() {
     if (!s_rootScreen || s_legendModal) return;
+    closeDmModal();
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     int modalH = 118;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    modalH = 126;
+#endif
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    const lv_font_t *legendBodyFont = &lv_font_montserrat_12;
+#else
+    const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
+#endif
 
     s_legendModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_legendModal, modalW, modalH);
@@ -2561,13 +4725,53 @@ static void openLegendModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Legend");
 
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    lv_obj_t *bodyRow = lv_obj_create(s_legendModal);
+    lv_obj_set_width(bodyRow, lv_pct(100));
+    lv_obj_set_flex_grow(bodyRow, 1);
+    lv_obj_clear_flag(bodyRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(bodyRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bodyRow, 0, 0);
+    lv_obj_set_style_pad_all(bodyRow, 0, 0);
+    lv_obj_set_style_pad_column(bodyRow, 8, 0);
+    lv_obj_set_flex_flow(bodyRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bodyRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *leftCol = lv_label_create(bodyRow);
+    lv_obj_set_width(leftCol, lv_pct(50));
+    lv_obj_set_style_text_font(leftCol, legendBodyFont, 0);
+    lv_obj_set_style_text_color(leftCol, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(leftCol, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(
+        leftCol,
+        "(D) Direct Messages\n"
+        "(C) Configuration\n"
+        "(N) Nodes\n"
+        "L(i)ve (C clears log)\n"
+        "(Enter) Compose/Reply\n"
+        "(Bksp) Clear Selection");
+
+    lv_obj_t *rightCol = lv_label_create(bodyRow);
+    lv_obj_set_width(rightCol, lv_pct(50));
+    lv_obj_set_style_text_font(rightCol, legendBodyFont, 0);
+    lv_obj_set_style_text_color(rightCol, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(rightCol, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(
+        rightCol,
+        "Transport Symbols:\n"
+        "%s Radio Transmission\n"
+        "%s MQTT Transmission",
+        LV_SYMBOL_RADIO_TINY,
+        LV_SYMBOL_GLOBE_TINY);
+#else
     lv_obj_t *body = lv_label_create(s_legendModal);
     lv_obj_set_width(body, lv_pct(100));
-    lv_obj_set_style_text_font(body, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(body, legendBodyFont, 0);
     lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text_fmt(
         body,
+        "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
         "L(i)ve (C clears log)\n"
@@ -2576,22 +4780,22 @@ static void openLegendModal() {
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
-        "%s MQTT Transmission\n"
-        "\n"
-        "(H or ?) Close Legend",
+        "%s MQTT Transmission",
         LV_SYMBOL_RADIO_TINY,
         LV_SYMBOL_GLOBE_TINY);
+#endif
 
     lv_obj_t *hint = lv_label_create(s_legendModal);
     lv_obj_set_width(hint, lv_pct(100));
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(hint, legendBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "Bksp/C/N/I/H/? = Close");
+    lv_label_set_text_fmt(hint, "%s/C/N/I/L = Close", modalCloseKeyLabel());
 }
 
 static void openCfgModal() {
     if (!s_rootScreen || s_cfgModal) return;
     if (s_composeModal) closeComposePrompt();
+    closeDmModal();
     closeNodesModal();
     closeLegendModal();
 
@@ -2676,7 +4880,7 @@ static void openCfgModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "Scroll Up/Down=Select  Enter=Run  Bksp=Close");
+    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
 
     refreshCfgModal();
 }
@@ -2754,8 +4958,18 @@ static void activateCfgSelection() {
             bool ok = cfgImport(s_cfg);
             if (ok) {
                 onWebCfgSaved();
+                persistUiTheme();
+                persistMessageAlertSetting();
+                persistSplashMelodySetting();
+                s_lastRenderedChannel = -1;
+                s_lastRenderedCount = -1;
+                refreshHeaderTime(true);
+                refreshHeaderStatus(true);
+                refreshChannelGlow(true);
+                refreshChatView(true);
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Imported OK - rebooting...");
                 refreshCfgModal();
+                lv_timer_handler();
                 delay(1000);
                 ESP.restart();
             } else {
@@ -2769,7 +4983,12 @@ static void activateCfgSelection() {
             s_cfg.uiTheme = kUiThemePresets[next].theme;
             s_cfg.uiMode = kUiThemePresets[next].mode;
             persistUiTheme();
+            applyUiThemePalette();
+            scheduleThemeRebuild(true);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s", uiThemePresetNameFromCfg());
+            // Do not rebuild/clean cfg rows in this same input cycle.
+            // The deferred theme rebuild will recreate the modal safely.
+            return;
         } break;
 
         case CFG_ACTION_ANNOUNCE:
@@ -2782,6 +5001,7 @@ static void activateCfgSelection() {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MSG_ALERT");
             s_cfg.msgAlertSound = (uint8_t)((s_cfg.msgAlertSound + 1) % 4);
             persistMessageAlertSetting();
+            triggerMessageAlert(true);  // Preview the selected notification profile.
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
             break;
 
@@ -2795,6 +5015,7 @@ static void activateCfgSelection() {
         case CFG_ACTION_CLEAR_MSGS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_MSGS");
             Channels.clearAllMessages(true);
+            DMs.clearAll(true);
             s_selectedMsgReplyPacketId = 0;
             s_selectedMsgText[0] = '\0';
             s_lastRenderedChannel = -1;
@@ -2817,10 +5038,13 @@ static void activateCfgSelection() {
 
         case CFG_ACTION_FACTORY_RESET:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FACTORY_RESET");
+            Channels.clearAllMessages(true);
+            DMs.clearAll(true);
+            Nodes.clearPersisted();
+            clearNodeDbOnSd();
+            sdRmDirRecursive("/camillia/dms");
             nvs_flash_erase();
             nvs_flash_init();
-            Nodes.clearPersisted();
-            Channels.clearAllMessages(true);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Factory reset - rebooting...");
             refreshCfgModal();
             delay(1000);
@@ -2849,6 +5073,19 @@ static void pumpKeyboardInput() {
             break;
         }
 
+        if (s_screenAsleep) {
+            wakeScreen();
+            return;
+        }
+        s_lastActivityMs = millis();
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        // Match v1 Cardputer shortcuts: ';' / '.' navigate lists, and
+        // the key physically labeled '`' acts as Escape to close modals.
+        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
+        k = remapCardputerUiKey(k, !typingContext);
+#endif
+
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
                 char actionText[80];
@@ -2865,7 +5102,7 @@ static void pumpKeyboardInput() {
                               actionId,
                               (actionId >= 0) ? cfgActionLabel(actionId, actionText, sizeof(actionText)) : "(none)");
             }
-            if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
+            if (isModalCloseKey(k)) {
                 closeCfgModal();
                 continue;
             }
@@ -2945,26 +5182,167 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        if (s_nodesModal) {
-            if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
-                closeNodesModal();
-                continue;
-            }
-            if (k == KEY_SCROLL_UP && s_nodesSelected > 0) {
-                s_nodesSelected--;
-                refreshNodesListSelection();
-                refreshNodesDetails();
-                if (s_nodesSelected >= 0 && s_nodesSelected < s_nodesListRowCount && s_nodesListRows[s_nodesSelected]) {
-                    lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+        if (s_dmModal) {
+            if (s_composeModal) {
+                switch (k) {
+                    case KEY_ENTER:
+                        sendComposeMessage();
+                        break;
+                    case KEY_ESCAPE:
+                        closeComposePrompt();
+                        break;
+                    case KEY_BACKSPACE:
+                    case KEY_BACKSPACE_HOLD:
+                        if (s_composeInput) {
+                            const char *cur = lv_textarea_get_text(s_composeInput);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                            if (cur && cur[0] && k == KEY_BACKSPACE) {
+                                lv_textarea_del_char(s_composeInput);
+                            }
+#else
+                            if (!cur || !cur[0]) {
+                                closeComposePrompt();
+                            } else if (k == KEY_BACKSPACE) {
+                                lv_textarea_del_char(s_composeInput);
+                            }
+#endif
+                        }
+                        break;
+                    default:
+                        if (k >= 0x20 && k < 0x7F && s_composeInput) {
+                            char one[2] = {k, '\0'};
+                            lv_textarea_add_text(s_composeInput, one);
+                        }
+                        break;
                 }
                 continue;
             }
-            if (k == KEY_SCROLL_DN && s_nodesSelected + 1 < s_nodesSnapshotCount) {
-                s_nodesSelected++;
-                refreshNodesListSelection();
-                refreshNodesDetails();
-                if (s_nodesSelected >= 0 && s_nodesSelected < s_nodesListRowCount && s_nodesListRows[s_nodesSelected]) {
-                    lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+
+            if (s_dmNodePickerModal) {
+                if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
+                    if (s_dmNodeFilterOpen) {
+                        if (s_dmNodeFilterLen > 0) {
+                            s_dmNodeFilter[--s_dmNodeFilterLen] = '\0';
+                        } else {
+                            s_dmNodeFilterOpen = false;
+                        }
+                        dmNodePickerApplyFilter();
+                        refreshDmNodePicker(true);
+                    } else {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                        // On Cardputer, Escape is the dedicated close action.
+#else
+                        closeDmNodePicker();
+#endif
+                    }
+                    continue;
+                }
+                if (isModalCloseKey(k)) {
+                    closeDmNodePicker();
+                    continue;
+                }
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    if (s_dmNodeFilteredCount > 0) {
+                        int next = s_dmNodeSelection;
+                        if (kPagerWheelChatNav) {
+                            next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                        } else {
+                            next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                        }
+                        if (next < 0) next = 0;
+                        if (next >= s_dmNodeFilteredCount) next = s_dmNodeFilteredCount - 1;
+                        if (next != s_dmNodeSelection) {
+                            s_dmNodeSelection = next;
+                            refreshDmNodePicker(true);
+                        }
+                    }
+                    continue;
+                }
+                if (k == KEY_ENTER) {
+                    const NodeEntry *n = selectedDmNodeForPicker();
+                    if (n && n->nodeId != 0) {
+                        closeDmNodePicker();
+                        openComposePromptForDm(n->nodeId);
+                    }
+                    continue;
+                }
+                if (k >= 0x20 && k < 0x7F) {
+                    if (!s_dmNodeFilterOpen) {
+                        s_dmNodeFilterOpen = true;
+                    }
+                    if (s_dmNodeFilterLen < kDmNodeFilterMax) {
+                        s_dmNodeFilter[s_dmNodeFilterLen++] = k;
+                        s_dmNodeFilter[s_dmNodeFilterLen] = '\0';
+                    }
+                    dmNodePickerApplyFilter();
+                    refreshDmNodePicker(true);
+                    continue;
+                }
+                continue;
+            }
+
+            if (isModalCloseKey(k)) {
+                closeDmModal();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                int totalRows = s_dmConvCount + 1;
+                if (totalRows > 0) {
+                    int next = s_dmSelection;
+                    if (kPagerWheelChatNav) {
+                        next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                    } else {
+                        next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                    }
+                    if (next < 0) next = 0;
+                    if (next >= totalRows) next = totalRows - 1;
+                    if (next != s_dmSelection) {
+                        s_dmSelection = next;
+                        refreshDmModal(true);
+                    }
+                }
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                if (s_dmSelection == 0) {
+                    openDmNodePicker();
+                } else {
+                    DmConv *selected = selectedDmConversation();
+                    if (selected) {
+                        openComposePromptForDm(selected->nodeId);
+                    }
+                }
+                continue;
+            }
+            continue;
+        }
+
+        if (s_nodesModal) {
+            if (isModalCloseKey(k)) {
+                closeNodesModal();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                int nextSelected = s_nodesSelected;
+                if (kPagerWheelChatNav) {
+                    // Pager wheel orientation: UP should move to the next row.
+                    nextSelected += (k == KEY_SCROLL_UP) ? 1 : -1;
+                } else {
+                    nextSelected += (k == KEY_SCROLL_UP) ? -1 : 1;
+                }
+
+                if (nextSelected < 0) nextSelected = 0;
+                if (nextSelected >= s_nodesSnapshotCount) nextSelected = s_nodesSnapshotCount - 1;
+
+                if (nextSelected != s_nodesSelected
+                    && nextSelected >= 0
+                    && nextSelected < s_nodesSnapshotCount) {
+                    s_nodesSelected = nextSelected;
+                    refreshNodesListSelection();
+                    refreshNodesDetails();
+                    if (s_nodesSelected >= 0 && s_nodesSelected < s_nodesListRowCount && s_nodesListRows[s_nodesSelected]) {
+                        lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+                    }
                 }
                 continue;
             }
@@ -2972,7 +5350,7 @@ static void pumpKeyboardInput() {
         }
 
         if (s_liveModal) {
-            if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
+            if (isModalCloseKey(k)) {
                 closeLiveModal();
                 continue;
             }
@@ -2995,9 +5373,14 @@ static void pumpKeyboardInput() {
         }
 
         if (s_legendModal) {
-            if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE
-                || k == 'h' || k == 'H' || k == '?' || k == 'l' || k == 'L') {
+            if (isModalCloseKey(k)
+                || k == 'l' || k == 'L') {
                 closeLegendModal();
+                continue;
+            }
+            if (k == 'd' || k == 'D') {
+                closeLegendModal();
+                openDmModal();
                 continue;
             }
             if (k == 'c' || k == 'C') {
@@ -3019,7 +5402,28 @@ static void pumpKeyboardInput() {
         }
 
         if (!s_composeModal) {
-            if (kPagerWheelChatNav) {
+            if (kUseScrollKeysForMainNav) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                // Cardputer directional labels: '/' is right, ',' is left.
+                if (k == '/') k = KEY_NEXT_CHAN;
+                else if (k == ',') k = KEY_PREV_CHAN;
+#endif
+
+                if (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    if (k == KEY_NEXT_CHAN) {
+                        s_cardputerMainChatPanelFocused = true;
+                    } else {
+                        if (s_pagerChatCursorMode) {
+                            pagerExitChatCursorMode(true);
+                            refreshChatView(true);
+                        }
+                        s_cardputerMainChatPanelFocused = false;
+                    }
+#endif
+                    continue;
+                }
+
                 if (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE) {
                     if (s_pagerChatCursorMode) {
                         pagerExitChatCursorMode(true);
@@ -3029,16 +5433,37 @@ static void pumpKeyboardInput() {
                         s_selectedMsgText[0] = '\0';
                         s_lastRenderedChannel = -1;
                         refreshChatView(true);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    } else if (s_cardputerMainChatPanelFocused) {
+                        s_cardputerMainChatPanelFocused = false;
+#endif
                     }
                     continue;
                 }
 
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    const int navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
+#else
+                    const int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+#endif
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    if (s_cardputerMainChatPanelFocused) {
+                        if (!s_pagerChatCursorMode) {
+                            s_pagerChatCursorMode = true;
+                            if (!pagerSelectChatCursorIndex(-1)) {
+                                s_pagerChatCursorMode = false;
+                            }
+                        } else {
+                            pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
+                        }
+                        continue;
+                    }
+#endif
                     if (s_pagerChatCursorMode) {
-                        int delta = (k == KEY_SCROLL_UP) ? 1 : -1;
-                        pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + delta);
+                        pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
                     } else if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
-                        int nextChannel = s_activeChannel + ((k == KEY_SCROLL_UP) ? 1 : -1);
+                        int nextChannel = s_activeChannel + navDelta;
                         if (nextChannel < 0) nextChannel = MESH_CHANNELS - 1;
                         if (nextChannel >= MESH_CHANNELS) nextChannel = 0;
                         setActiveChannel(nextChannel);
@@ -3066,8 +5491,10 @@ static void pumpKeyboardInput() {
                 }
             }
 
-            if (k == 'h' || k == 'H' || k == '?' || k == 'l' || k == 'L') {
+            if (k == 'l' || k == 'L') {
                 openLegendModal();
+            } else if (k == 'd' || k == 'D') {
+                openDmModal();
             } else if (k == 'c' || k == 'C') {
                 openCfgModal();
             } else if (k == 'n' || k == 'N') {
@@ -3075,6 +5502,15 @@ static void pumpKeyboardInput() {
             } else if (k == 'i' || k == 'I') {
                 openLiveModal();
             } else if (k == KEY_ENTER && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                if (!s_cardputerMainChatPanelFocused) {
+                    s_cardputerMainChatPanelFocused = true;
+                } else if (s_pagerChatCursorMode && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+                    openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
+                } else {
+                    openComposePrompt(0, nullptr);
+                }
+#else
                 if (kPagerWheelChatNav) {
                     openComposePrompt(0, nullptr);
                 } else if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
@@ -3082,6 +5518,7 @@ static void pumpKeyboardInput() {
                 } else {
                     openComposePrompt(0, nullptr);
                 }
+#endif
             } else if (k == KEY_BACKSPACE) {
                 if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
                     s_selectedMsgReplyPacketId = 0;
@@ -3096,15 +5533,24 @@ static void pumpKeyboardInput() {
             case KEY_ENTER:
                 sendComposeMessage();
                 break;
+            case KEY_ESCAPE:
+                closeComposePrompt();
+                break;
             case KEY_BACKSPACE:
             case KEY_BACKSPACE_HOLD:
                 if (s_composeInput) {
                     const char *cur = lv_textarea_get_text(s_composeInput);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    if (cur && cur[0] && k == KEY_BACKSPACE) {
+                        lv_textarea_del_char(s_composeInput);
+                    }
+#else
                     if (!cur || !cur[0]) {
                         closeComposePrompt();
                     } else if (k == KEY_BACKSPACE) {
                         lv_textarea_del_char(s_composeInput);
                     }
+#endif
                 }
                 break;
             default:
@@ -3146,7 +5592,14 @@ static void onChatMessagePressed(lv_event_t *e) {
 }
 
 static void onWebCfgSaved() {
+    uint8_t prevTheme = s_appliedUiTheme;
+    uint8_t prevMode = s_appliedUiMode;
+
+    persistConfigToPrefs();
+    persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
+    applyUiThemePalette();
+
     recomputeChannelHashes();
     deriveNodeId();
     applyTimezoneFromConfig();
@@ -3159,6 +5612,10 @@ static void onWebCfgSaved() {
 
     if (!cfgExport(s_cfg)) {
         Serial.println("[cfg] web save export failed");
+    }
+
+    if ((prevTheme != s_appliedUiTheme || prevMode != s_appliedUiMode) && s_rootScreen) {
+        scheduleThemeRebuild(s_cfgModal != nullptr);
     }
 }
 
@@ -3327,7 +5784,7 @@ static void bootTimeNtpSync() {
 static void lvglFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
-    lcd.pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
+    displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
     lv_disp_flush_ready(disp);
 }
 
@@ -3336,7 +5793,13 @@ static void lvglTouchRead(lv_indev_drv_t *indev, lv_indev_data_t *data) {
 #if TOUCH_POLL_ENABLED
     int32_t tx = 0;
     int32_t ty = 0;
-    if (lcd.getTouch(&tx, &ty)) {
+    if (displayDev().getTouch(&tx, &ty)) {
+        if (s_screenAsleep) {
+            wakeScreen();
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+        s_lastActivityMs = millis();
         data->state = LV_INDEV_STATE_PRESSED;
         data->point.x = tx;
         data->point.y = ty;
@@ -3346,6 +5809,92 @@ static void lvglTouchRead(lv_indev_drv_t *indev, lv_indev_data_t *data) {
 #else
     data->state = LV_INDEV_STATE_RELEASED;
 #endif
+}
+
+static void drawBootSplash() {
+    const int screenW = displayDev().width();
+    const int screenH = displayDev().height();
+
+    auto lerp565 = [](uint16_t c1, uint16_t c2, uint8_t t) -> uint16_t {
+        int r1 = (c1 >> 11) & 0x1F;
+        int g1 = (c1 >> 5) & 0x3F;
+        int b1 = c1 & 0x1F;
+        int r2 = (c2 >> 11) & 0x1F;
+        int g2 = (c2 >> 5) & 0x3F;
+        int b2 = c2 & 0x1F;
+        int r = r1 + ((r2 - r1) * t) / 255;
+        int g = g1 + ((g2 - g1) * t) / 255;
+        int b = b1 + ((b2 - b1) * t) / 255;
+        return (uint16_t)((r << 11) | (g << 5) | b);
+    };
+
+    const uint16_t bgTop = s_ui.splashTop;
+    const uint16_t bgBottom = s_ui.splashBottom;
+    const uint16_t cardBg = s_ui.splashCardBg;
+    const uint16_t cardEdge = s_ui.splashCardEdge;
+    const uint16_t cardEdgeHi = s_ui.splashCardEdgeHi;
+    const uint16_t titleCol = s_ui.splashTitle;
+    const uint16_t subCol = s_ui.splashSub;
+    const uint16_t dimCol = s_ui.splashDim;
+
+    for (int y = 0; y < screenH; y++) {
+        uint8_t t = (uint8_t)((255UL * y) / max(1, screenH - 1));
+        displayDev().drawFastHLine(0, y, screenW, lerp565(bgTop, bgBottom, t));
+    }
+
+    const int cardMargin = 10;
+    const int cardX = cardMargin;
+    const int cardY = 10;
+    const int cardW = screenW - cardMargin * 2;
+    const int cardH = screenH - 20;
+
+    displayDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
+    displayDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
+    displayDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
+
+    const char *firmwareName = "CAMILLIA MT";
+    const char *version = APP_VERSION;
+
+    char nodeLine[72];
+    const char *nodeLong = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "unknown node";
+    const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
+    snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
+
+    displayDev().setFont(&fonts::Orbitron_Light_32);
+    displayDev().setTextSize(0.82f);
+    displayDev().setTextColor(titleCol, cardBg);
+    int fwW = displayDev().textWidth(firmwareName);
+    displayDev().drawString(firmwareName, cardX + max(0, (cardW - fwW) / 2), cardY + 10);
+
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    const float flowerScale = 1.15f;
+#else
+    const float flowerScale = 1.0f;
+#endif
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Keep Cardputer splash lightweight and avoid depending on LGFX_TDeck-specific helpers.
+    displayDev().fillCircle(cardX + (cardW / 2), cardY + (cardH / 2) - 6, (int)(10.0f * flowerScale), titleCol);
+#else
+    display_splash_detail::drawCamelliaMark(lcd,
+                                            cardX + (cardW / 2),
+                                            cardY + (cardH / 2) - 6,
+                                            flowerScale);
+#endif
+
+    displayDev().setFont(&fonts::DejaVu12);
+    displayDev().setTextSize(1.0f);
+    displayDev().setTextColor(subCol, cardBg);
+    int nodeW = displayDev().textWidth(nodeLine);
+    displayDev().drawString(nodeLine, cardX + max(0, (cardW - nodeW) / 2), cardY + cardH - 36);
+
+    char verLine[72];
+    snprintf(verLine, sizeof(verLine), "Version: %s", version);
+    displayDev().setTextColor(dimCol, cardBg);
+    int verW = displayDev().textWidth(verLine);
+    displayDev().drawString(verLine, cardX + max(0, (cardW - verW) / 2), cardY + cardH - 20);
+
+    delay(1200);
+    displayDev().fillScreen(TFT_BLACK);
 }
 
 static void refreshChannelGlow(bool force) {
@@ -3380,8 +5929,9 @@ static void refreshChannelGlow(bool force) {
             lv_label_set_text(lbl, text);
             lv_obj_set_style_text_color(
                 lbl,
-                active ? lv_color_hex(0xEAF3FF)
-                       : (s_channelNeedsAttention[i] ? lv_color_hex(0xFFF0B8) : lv_color_hex(0xD9E8FF)),
+                active
+                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xEAF3FF))
+                    : lv_color_hex(0xD9E8FF),
                 0);
         }
 
@@ -3409,23 +5959,43 @@ static void refreshChannelGlow(bool force) {
     }
 }
 
+static void applyChannelButtonTheme() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *btn = s_channelBtns[i];
+        if (!btn) continue;
+
+        bool active = (i == s_activeChannel);
+        lv_obj_set_style_bg_color(btn, active ? lv_color_hex(0x2A4FB4) : lv_color_hex(0x102750), 0);
+        lv_obj_set_style_bg_opa(btn, active ? LV_OPA_90 : LV_OPA_60, 0);
+        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+        lv_obj_set_style_border_color(btn, active ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C), 0);
+
+        lv_obj_t *lbl = s_channelLabels[i];
+        if (lbl) {
+            lv_obj_set_style_text_color(
+                lbl,
+                active
+                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xEAF3FF))
+                    : lv_color_hex(0xD9E8FF),
+                0);
+        }
+    }
+}
+
 static void setActiveChannel(int channelIdx) {
     if (channelIdx < 0 || channelIdx >= MESH_CHANNELS) return;
     if (s_composeModal && channelIdx != s_composeChannelIdx) closeComposePrompt();
     s_activeChannel = channelIdx;
     s_pagerChatCursorMode = false;
     s_pagerChatCursorDisplayIndex = -1;
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    s_cardputerMainChatPanelFocused = false;
+#endif
     s_selectedMsgReplyPacketId = 0;
     s_selectedMsgText[0] = '\0';
     s_channelNeedsAttention[channelIdx] = false;
     Channels.setActive(channelIdx);
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        bool active = (i == s_activeChannel);
-        lv_obj_set_style_bg_color(s_channelBtns[i], active ? lv_color_hex(0x2A4FB4) : lv_color_hex(0x102750), 0);
-        lv_obj_set_style_bg_opa(s_channelBtns[i], active ? LV_OPA_90 : LV_OPA_60, 0);
-        lv_obj_set_style_border_width(s_channelBtns[i], active ? 2 : 1, 0);
-        lv_obj_set_style_border_color(s_channelBtns[i], active ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C), 0);
-    }
+    applyChannelButtonTheme();
     refreshChannelGlow(true);
     refreshChatView(true);
 }
@@ -3448,41 +6018,15 @@ static void loadConfigFromSd() {
     s_webCfgEnabled = false;
 
     if (!sdBegin()) {
-        Serial.println("[lvgl-poc] SD not available; using default config");
-        return;
-    }
-
-    if (cfgImport(s_cfg)) {
-        myDeviceRole = s_cfg.deviceRole;
-        Serial.println("[lvgl-poc] imported /camillia/config.yaml");
+        Serial.println("[lvgl-poc] SD not available; loading state from NVS");
     } else {
-        Serial.println("[lvgl-poc] config import failed; using default config");
+        Serial.println("[lvgl-poc] boot config import disabled; loading state from NVS");
     }
 
-    // Match v1 behavior: allow persisted web-config timezone to override file/default.
-    Preferences prefs;
-    if (prefs.begin("camillia", true)) {
-        // Keep v1 precedence for Wi-Fi credentials: NVS values can fill blanks.
-        String wifiSsid = prefs.getString("wifiSsid", "");
-        String wifiPass = prefs.getString("wifiPass", "");
-        if (!s_cfg.wifiSsid[0] && wifiSsid.length()) {
-            strncpy(s_cfg.wifiSsid, wifiSsid.c_str(), sizeof(s_cfg.wifiSsid) - 1);
-            s_cfg.wifiSsid[sizeof(s_cfg.wifiSsid) - 1] = '\0';
-        }
-        if (!s_cfg.wifiPass[0] && wifiPass.length()) {
-            strncpy(s_cfg.wifiPass, wifiPass.c_str(), sizeof(s_cfg.wifiPass) - 1);
-            s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
-        }
-
-        String tz = prefs.getString("tzDef", "");
-        if (tz.length()) {
-            strncpy(s_cfg.tzDef, tz.c_str(), sizeof(s_cfg.tzDef) - 1);
-            s_cfg.tzDef[sizeof(s_cfg.tzDef) - 1] = '\0';
-        }
-
-        s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
-        prefs.end();
-    }
+    loadConfigFromPrefs();
+    loadChannelsFromPrefs();
+    applyUiThemePalette();
+    myDeviceRole = s_cfg.deviceRole;
 }
 
 static void refreshHeaderTime(bool force) {
@@ -3497,6 +6041,12 @@ static void refreshHeaderTime(bool force) {
     lv_label_set_text(s_chatHeaderTime, buf);
     strncpy(s_lastHeaderTime, buf, sizeof(s_lastHeaderTime) - 1);
     s_lastHeaderTime[sizeof(s_lastHeaderTime) - 1] = '\0';
+}
+
+static inline lv_color_t headerGoodGreenColor() {
+    return (s_cfg.uiMode == UI_MODE_LIGHT)
+        ? lv_color_hex(0x2C7A3B)
+        : lv_color_hex(0x84E07A);
 }
 
 static void refreshHeaderStatus(bool force) {
@@ -3525,11 +6075,12 @@ static void refreshHeaderStatus(bool force) {
     }
 
     lv_bar_set_value(s_chatHeaderBattBar, battPct, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
     lv_label_set_text_fmt(s_chatHeaderBattText, "%u%%", (unsigned)battPct);
 
     if (gpsEnabled && gpsFix) {
         lv_label_set_text_fmt(s_chatHeaderGps, "GPS %u", (unsigned)gpsSatCount);
-        lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0x84E07A), 0);
+        lv_obj_set_style_text_color(s_chatHeaderGps, headerGoodGreenColor(), 0);
     } else {
         lv_label_set_text(s_chatHeaderGps, "GPS 0");
         lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xFF6B6B), 0);
@@ -3540,7 +6091,7 @@ static void refreshHeaderStatus(bool force) {
     lv_obj_set_style_text_color(
         s_chatHeaderWifi,
         wifiApMode ? lv_color_hex(0xF4D35E)
-                   : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B) : lv_color_hex(0x84E07A)),
+                   : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B) : headerGoodGreenColor()),
         0);
     lv_obj_set_style_text_decor(
         s_chatHeaderWifi,
@@ -3562,10 +6113,18 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     char prefix[44];
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    LV_UNUSED(viaMqtt);
+    NodeEntry *n = Nodes.find(fromNode);
+    const char *hintShort = (n && n->shortName[0]) ? n->shortName : nullptr;
+    liveNodeLabelWithHint(fromNode, hintShort, sender, sizeof(sender), false);
+    snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
+#else
     liveNodeLabel(fromNode, sender, sizeof(sender), false);
     const char *transportIcon = viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
     // Keep a small visual buffer between transport icon and timestamp.
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
+#endif
 
     Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false);
     if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel) {
@@ -3631,11 +6190,107 @@ static bool processMeshPacket(const MeshPacket &pkt) {
 
             if (textBuf[0]) {
                 const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
-                appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt);
+
+                if (pkt.hdr.to == s_myNodeId) {
+                    NodeEntry *sender = Nodes.find(pkt.hdr.from);
+                    char senderShort[5] = {};
+                    if (sender && sender->shortName[0]) {
+                        strncpy(senderShort, sender->shortName, sizeof(senderShort) - 1);
+                        senderShort[sizeof(senderShort) - 1] = '\0';
+                    }
+
+                    char timePrefix[12];
+                    char prefix[32];
+                    liveBuildPrefix(timePrefix, sizeof(timePrefix));
+                    if (senderShort[0]) {
+                        snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, senderShort);
+                    } else {
+                        char who[16];
+                        liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
+                        snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, who);
+                    }
+
+                    bool viewingDm = false;
+                    if (s_dmModal && s_dmSelection >= 0 && s_dmSelection < s_dmConvCount) {
+                        viewingDm = (s_dmConvNodeIds[s_dmSelection] == pkt.hdr.from);
+                    }
+
+                    DMs.addMessage(pkt.hdr.from,
+                                   senderShort[0] ? senderShort : nullptr,
+                                   prefix,
+                                   textBuf,
+                                   TFT_WHITE,
+                                   !viewingDm,
+                                   chanIdx,
+                                   0);
+                    if (viewingDm) {
+                        DMs.markRead(pkt.hdr.from);
+                    }
+                } else {
+                    appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt);
+                }
+
+                triggerMessageAlert();
+
                 appendLiveRxSummary(pkt, chanIdx, "T");
-                return chanIdx == s_activeChannel;
+                return (pkt.hdr.to == s_myNodeId) ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
             }
             return false;
+        }
+
+        case ROUTING_APP: {
+            if (!pkt.requestId) return false;
+
+            uint32_t errorReason = 0;
+            size_t i = 0;
+            while (i < pkt.payloadLen) {
+                uint64_t tag = 0;
+                i = pbReadVarint(pkt.payload, pkt.payloadLen, i, tag);
+                if (!i) break;
+
+                uint32_t field = (uint32_t)(tag >> 3);
+                uint32_t wt = (uint32_t)(tag & 7);
+                if (wt == 0) {
+                    uint64_t v = 0;
+                    i = pbReadVarint(pkt.payload, pkt.payloadLen, i, v);
+                    if (!i) break;
+                    if (field == 3) {
+                        errorReason = (uint32_t)v;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            bool isAck = (errorReason == 0);
+            bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
+
+            if (isAck) {
+                Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
+            } else {
+                Channels.setAckState(pkt.requestId, DisplayLine::NAKED);
+                if (dmRoutingMatched) {
+                    DmConv *conv = DMs.find(pkt.hdr.from);
+                    if (conv) {
+                        const char *errName = routingErrorName(errorReason);
+                        char errMsg[44];
+                        if (errName) {
+                            snprintf(errMsg, sizeof(errMsg), "! NAK %s(%lu)",
+                                     errName,
+                                     (unsigned long)errorReason);
+                        } else {
+                            snprintf(errMsg, sizeof(errMsg), "! NAK err=%lu",
+                                     (unsigned long)errorReason);
+                        }
+                        DMs.addMessage(pkt.hdr.from, nullptr, "", errMsg, TFT_RED,
+                                       false, -1, 0);
+                    }
+                }
+            }
+
+            appendLiveRxSummary(pkt, chanIdx, isAck ? "A" : "K");
+            return true;
         }
 
         case NODEINFO_APP: {
@@ -3725,7 +6380,11 @@ static void refreshChatView(bool force) {
             lv_obj_set_style_pad_right(msg, 4, 0);
             lv_obj_set_style_pad_top(msg, 0, 0);
             lv_obj_set_style_pad_bottom(msg, 0, 0);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
+#else
             lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+#endif
             lv_label_set_text(msg, rows[i]->text);
 
             uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
@@ -3771,8 +6430,12 @@ static void refreshChatView(bool force) {
         }
     }
 
-    if (kPagerWheelChatNav && s_pagerChatCursorMode) {
-        lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
+    if (s_pagerChatCursorMode) {
+        if (selectedMsgObj) {
+            lv_obj_scroll_to_view(selectedMsgObj, LV_ANIM_OFF);
+        } else {
+            lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
+        }
     } else if (stickToBottom) {
         if (lastMsgObj) {
             lv_obj_scroll_to_view(lastMsgObj, LV_ANIM_OFF);
@@ -3797,16 +6460,28 @@ static void buildUi() {
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x0B1E44), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int panelMargin = 2;
+    #else
     const int panelMargin = 6;
+    #endif
     #if defined(DEVICE_TLORA_PAGER_TFT)
-    const int panelW = 108;
+    const int panelW = 89;
+    #elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int panelW = 64;
     #else
     const int panelW = 89;
     #endif
     const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const int chatGap = 3;
+    const int chatHeaderH = 16;
+    const int chatLegendH = 12;
+    #else
     const int chatGap = 6;
     const int chatHeaderH = 20;
     const int chatLegendH = 14;
+    #endif
 
     lv_obj_t *panel = lv_obj_create(screen);
     lv_obj_set_size(panel, panelW, panelH);
@@ -3820,11 +6495,20 @@ static void buildUi() {
     lv_obj_set_style_pad_right(panel, 1, 0);
     lv_obj_set_style_pad_top(panel, 3, 0);
     lv_obj_set_style_pad_bottom(panel, 3, 0);
-    #if defined(DEVICE_TLORA_PAGER_TFT)
-    static lv_coord_t panelCols[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
-    static lv_coord_t panelRows[] = { LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
+    #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    static lv_coord_t panelCols[] = { LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
+    static lv_coord_t panelRows[] = {
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
+        LV_GRID_TEMPLATE_LAST
+    };
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_set_style_pad_row(panel, 2, 0);
+    lv_obj_set_style_pad_column(panel, 2, 0);
+    #else
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_style_pad_column(panel, 4, 0);
+    #endif
     lv_obj_set_layout(panel, LV_LAYOUT_GRID);
     lv_obj_set_grid_dsc_array(panel, panelCols, panelRows);
     #else
@@ -3872,7 +6556,7 @@ static void buildUi() {
     lv_obj_set_style_border_width(s_chatHeaderBattBar, 1, LV_PART_MAIN);
     lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x5B86C7), LV_PART_MAIN);
     lv_obj_set_style_pad_all(s_chatHeaderBattBar, 1, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_chatHeaderBattBar, lv_color_hex(0x84E07A), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, LV_PART_INDICATOR);
 
     s_chatHeaderWifi = lv_label_create(s_chatHeaderBar);
@@ -3927,21 +6611,21 @@ static void buildUi() {
     lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (N)odes   L(i)ve   (L)egend");
+    lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
-        #if defined(DEVICE_TLORA_PAGER_TFT)
+        #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btn = lv_obj_create(panel);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_grid_cell(btn,
-                             LV_GRID_ALIGN_STRETCH, i % 2, 1,
-                             LV_GRID_ALIGN_STRETCH, i / 2, 1);
+                             LV_GRID_ALIGN_STRETCH, 0, 1,
+                             LV_GRID_ALIGN_STRETCH, i, 1);
         #else
         lv_obj_t *btn = lv_btn_create(panel);
         #endif
         s_channelBtns[i] = btn;
-        #if defined(DEVICE_TLORA_PAGER_TFT)
+        #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_set_size(btn, lv_pct(100), lv_pct(100));
         #else
         lv_obj_set_width(btn, lv_pct(94));
@@ -3971,10 +6655,201 @@ static void buildUi() {
         lv_obj_center(lbl);
     }
 
-    setActiveChannel(0);
+    int initialChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
+    setActiveChannel(initialChannel);
     refreshHeaderTime(true);
     refreshHeaderStatus(true);
     lv_scr_load(screen);
+}
+
+static void rebuildUiForThemeChange(bool reopenCfg) {
+    int preservedChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
+    int preservedCfgSelection = s_cfgSelection;
+
+    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
+         indev = lv_indev_get_next(indev)) {
+        lv_indev_reset(indev, nullptr);
+    }
+
+    closeComposePrompt();
+    closeDmModal();
+    closeLiveModal();
+    closeNodesModal();
+    closeLegendModal();
+    closeCfgModal();
+
+    if (s_rootScreen) {
+        lv_obj_del(s_rootScreen);
+        s_rootScreen = nullptr;
+    }
+
+    memset(s_channelBtns, 0, sizeof(s_channelBtns));
+    memset(s_channelLabels, 0, sizeof(s_channelLabels));
+    s_chatHeaderBar = nullptr;
+    s_chatHeaderTime = nullptr;
+    s_chatHeaderGps = nullptr;
+    s_chatHeaderWifi = nullptr;
+    s_chatHeaderBattText = nullptr;
+    s_chatHeaderBattBar = nullptr;
+    s_chatPanel = nullptr;
+    s_chatList = nullptr;
+    s_chatShortcutBar = nullptr;
+    s_chatShortcutText = nullptr;
+
+    s_activeChannel = preservedChannel;
+    buildUi();
+
+    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
+         indev = lv_indev_get_next(indev)) {
+        lv_indev_reset(indev, nullptr);
+    }
+
+    if (reopenCfg) {
+        openCfgModal();
+        if (s_cfgActionCount > 0) {
+            s_cfgSelection = constrain(preservedCfgSelection, 0, s_cfgActionCount - 1);
+        }
+        refreshCfgModal();
+    }
+}
+
+static void scheduleThemeRebuild(bool reopenCfg) {
+    s_themeRebuildPending = true;
+    if (reopenCfg) {
+        s_themeRebuildReopenCfg = true;
+        s_themeRebuildCfgSelection = s_cfgSelection;
+    }
+}
+
+static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
+    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
+         indev = lv_indev_get_next(indev)) {
+        lv_indev_reset(indev, nullptr);
+    }
+
+    if (s_rootScreen) {
+        lv_obj_set_style_bg_color(s_rootScreen, lv_color_hex(0x0B1E44), 0);
+        lv_obj_set_style_bg_opa(s_rootScreen, LV_OPA_COVER, 0);
+    }
+
+    if (s_channelBtns[0]) {
+        lv_obj_t *panel = lv_obj_get_parent(s_channelBtns[0]);
+        if (panel) {
+            lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E285B), 0);
+            lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
+            lv_obj_set_style_border_color(panel, lv_color_hex(0x335D9D), 0);
+        }
+    }
+
+    if (s_chatHeaderBar) {
+        lv_obj_set_style_bg_color(s_chatHeaderBar, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
+    }
+    if (s_chatHeaderTime) lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
+    if (s_chatHeaderGps) lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
+    if (s_chatHeaderBattText) lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
+    if (s_chatHeaderBattBar) {
+        lv_obj_set_style_bg_color(s_chatHeaderBattBar, lv_color_hex(0x1E355F), LV_PART_MAIN);
+        lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x5B86C7), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
+    }
+    if (s_chatHeaderWifi) lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+
+    if (s_chatPanel) {
+        lv_obj_set_style_bg_color(s_chatPanel, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
+    }
+    if (s_chatList) {
+        lv_obj_set_style_bg_color(s_chatList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    }
+    if (s_chatShortcutBar) {
+        lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_hex(0x335D9D), 0);
+    }
+    if (s_chatShortcutText) {
+        lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
+    }
+
+    if (s_liveModal) {
+        lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
+    }
+    if (s_liveList) {
+        lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x0F2A5C), 0);
+        lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+        refreshLiveView(true);
+    }
+
+    if (s_dmModal) {
+        lv_obj_set_style_bg_color(s_dmModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_dmModal, lv_color_hex(0x5C86C6), 0);
+        refreshDmModal(true);
+    }
+    if (s_dmNodePickerModal) {
+        lv_obj_set_style_bg_color(s_dmNodePickerModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_dmNodePickerModal, lv_color_hex(0x5C86C6), 0);
+        refreshDmNodePicker(true);
+    }
+
+    if (s_nodesModal) {
+        lv_obj_set_style_bg_color(s_nodesModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_nodesModal, lv_color_hex(0x5C86C6), 0);
+        refreshNodesListSelection();
+        refreshNodesDetails();
+    }
+
+    if (s_legendModal) {
+        lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
+    }
+
+    if (s_cfgModal) {
+        lv_obj_set_style_bg_color(s_cfgModal, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_border_color(s_cfgModal, lv_color_hex(0x5C86C6), 0);
+        if (s_cfgActionList) {
+            lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x0F2A5C), 0);
+            lv_obj_set_style_border_color(s_cfgActionList, lv_color_hex(0x335D9D), 0);
+            lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+        }
+        if (reopenCfg && s_cfgActionCount > 0) {
+            s_cfgSelection = constrain(reopenSelection, 0, s_cfgActionCount - 1);
+        }
+        refreshCfgModal();
+    } else if (reopenCfg) {
+        openCfgModal();
+        if (s_cfgActionCount > 0) {
+            s_cfgSelection = constrain(reopenSelection, 0, s_cfgActionCount - 1);
+        }
+        refreshCfgModal();
+    }
+
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    s_lastRenderedLiveCount = -1;
+    s_lastRenderedLiveScrollOff = -1;
+    s_lastHeaderTime[0] = '\0';
+    setActiveChannel(constrain(s_activeChannel, 0, MESH_CHANNELS - 1));
+    refreshHeaderTime(true);
+    refreshHeaderStatus(true);
+    refreshChatView(true);
+
+    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
+         indev = lv_indev_get_next(indev)) {
+        lv_indev_reset(indev, nullptr);
+    }
+}
+
+static void processPendingThemeRebuild() {
+    if (!s_themeRebuildPending) return;
+
+    bool reopenCfg = s_themeRebuildReopenCfg;
+    int reopenSelection = s_themeRebuildCfgSelection;
+
+    s_themeRebuildPending = false;
+    s_themeRebuildReopenCfg = false;
+
+    applyThemeToVisibleUi(reopenCfg, reopenSelection);
 }
 
 void setup() {
@@ -3991,12 +6866,25 @@ void setup() {
     digitalWrite(BOARD_VEXT_ENABLE, BOARD_VEXT_ON_LEVEL);
     delay(20);
 #endif
+#if defined(DEVICE_TLORA_PAGER_TFT) && defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+    pinMode(USER_BUTTON_PIN,
+            (USER_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
+#endif
 
-    lcd.init();
-    lcd.setRotation(TFT_ROTATION_DEFAULT);
-    lcd.setBrightness(TFT_BRIGHTNESS_DEFAULT);
-    lcd.fillScreen(TFT_BLACK);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer display is owned by M5Cardputer.Display after keyboard begin.
     s_keyboard.begin();
+    displayDev().setRotation(TFT_ROTATION_DEFAULT);
+    displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    displayDev().fillScreen(TFT_BLACK);
+#else
+    lcd.init();
+    displayDev().setRotation(TFT_ROTATION_DEFAULT);
+    displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    displayDev().fillScreen(TFT_BLACK);
+    s_keyboard.begin();
+#endif
+    setPagerKeyboardBacklight(true);
 
     lv_init();
     nodesMapInitFsDriver();
@@ -4004,19 +6892,31 @@ void setup() {
 
     static lv_disp_drv_t dispDrv;
     lv_disp_drv_init(&dispDrv);
-    dispDrv.hor_res = lcd.width();
-    dispDrv.ver_res = lcd.height();
+    int32_t dispW = displayDev().width();
+    int32_t dispH = displayDev().height();
+    if (dispW <= 0 || dispH <= 0) {
+        dispW = DEVICE_LCD_LANDSCAPE_W;
+        dispH = DEVICE_LCD_LANDSCAPE_H;
+        Serial.printf("[lvgl] WARNING: invalid lcd size, fallback to %ldx%ld\n",
+                      (long)dispW, (long)dispH);
+    }
+    dispDrv.hor_res = dispW;
+    dispDrv.ver_res = dispH;
     dispDrv.flush_cb = lvglFlush;
     dispDrv.draw_buf = &s_drawBuf;
     lv_disp_drv_register(&dispDrv);
 
+#if HAS_TOUCH
     static lv_indev_drv_t touchDrv;
     lv_indev_drv_init(&touchDrv);
     touchDrv.type = LV_INDEV_TYPE_POINTER;
     touchDrv.read_cb = lvglTouchRead;
     lv_indev_drv_register(&touchDrv);
+#endif
 
     loadConfigFromSd();
+    drawBootSplash();
+    playSplashStartupRiff();
     recomputeChannelHashes();
     deriveNodeId();
     syncWifiCredsToPrefs();
@@ -4027,6 +6927,7 @@ void setup() {
     batteryInitAdc();
     gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
+    DMs.init();
     Channels.init();
     Channels.beginPersistence();
     Channels.loadPersisted();
@@ -4036,12 +6937,20 @@ void setup() {
     }
 
     buildUi();
-    Serial.printf("[lvgl-poc] started (%dx%d)\\n", lcd.width(), lcd.height());
+    s_lastActivityMs = millis();
+    Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
 }
 
 void loop() {
+    uint32_t now = millis();
+    if (pollUserButton(now)) {
+        delay(5);
+        return;
+    }
+
     bootstrapStateMapsIfMissing();
     pumpKeyboardInput();
+    processPendingThemeRebuild();
     lv_timer_handler();
     if (webCfgRunning()) {
         webCfgLoop();
@@ -4051,11 +6960,27 @@ void loop() {
         meshChanged = pollMeshRx();
     }
     gpsLoop();
+
+    now = millis();
+    if (!s_screenAsleep && s_cfg.screenOnSecs > 0
+        && (uint32_t)(now - s_lastActivityMs) > (uint32_t)s_cfg.screenOnSecs * 1000UL) {
+        Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
+                      (unsigned long)((now - s_lastActivityMs) / 1000UL),
+                      (unsigned)s_cfg.screenOnSecs);
+        sleepScreen("timeout");
+    }
+
+    if (s_screenAsleep) {
+        delay(5);
+        return;
+    }
+
     refreshChannelGlow(false);
     refreshHeaderTime(false);
     refreshHeaderStatus(false);
     refreshChatView(meshChanged);
     refreshLiveView(meshChanged);
+    refreshDmModal(meshChanged);
     delay(5);
 }
 

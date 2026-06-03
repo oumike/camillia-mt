@@ -8,6 +8,10 @@ static constexpr char CARDPUTER_HID_ENTER = 0x28;
 static constexpr char CARDPUTER_HID_ESCAPE = 0x29;
 static constexpr char CARDPUTER_HID_BACKSPACE = 0x2A;
 static constexpr char CARDPUTER_HID_DELETE = 0x4C;
+static constexpr char CARDPUTER_HID_ARROW_LEFT = 0x50;
+static constexpr char CARDPUTER_HID_ARROW_DOWN = 0x51;
+static constexpr char CARDPUTER_HID_ARROW_UP = 0x52;
+static constexpr char CARDPUTER_HID_ARROW_RIGHT = 0x4F;
 
 static char normalizeCardputerKey(char key) {
     uint8_t raw = (uint8_t)key;
@@ -15,6 +19,10 @@ static char normalizeCardputerKey(char key) {
     if (raw == (uint8_t)CARDPUTER_HID_ESCAPE || raw == 0x1B) return KEY_ESCAPE;
     if (raw == (uint8_t)CARDPUTER_HID_BACKSPACE || raw == (uint8_t)CARDPUTER_HID_DELETE
         || raw == 0x08 || raw == 0x7F) return KEY_BACKSPACE;
+    if (raw == (uint8_t)CARDPUTER_HID_ARROW_UP) return KEY_SCROLL_UP;
+    if (raw == (uint8_t)CARDPUTER_HID_ARROW_DOWN) return KEY_SCROLL_DN;
+    if (raw == (uint8_t)CARDPUTER_HID_ARROW_LEFT) return KEY_PREV_CHAN;
+    if (raw == (uint8_t)CARDPUTER_HID_ARROW_RIGHT) return KEY_NEXT_CHAN;
     return key;
 }
 
@@ -539,6 +547,22 @@ void TDeckKeyboard::pumpCardputerKeys() {
     for (uint8_t hidKey : status.hid_keys) {
         if (hidKey == (uint8_t)CARDPUTER_HID_ESCAPE) {
             enqueueCardputerKey(KEY_ESCAPE);
+            continue;
+        }
+        if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_UP) {
+            enqueueCardputerKey(KEY_SCROLL_UP);
+            continue;
+        }
+        if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_DOWN) {
+            enqueueCardputerKey(KEY_SCROLL_DN);
+            continue;
+        }
+        if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_LEFT) {
+            enqueueCardputerKey(KEY_PREV_CHAN);
+            continue;
+        }
+        if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_RIGHT) {
+            enqueueCardputerKey(KEY_NEXT_CHAN);
             continue;
         }
         if (hidKey == (uint8_t)CARDPUTER_HID_BACKSPACE || hidKey == (uint8_t)CARDPUTER_HID_DELETE) {

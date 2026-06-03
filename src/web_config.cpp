@@ -1832,6 +1832,9 @@ static void handlePostClearNodes() {
 static void handlePostFactoryReset() {
     if (!isLoggedIn()) { redirect("/login"); return; }
 
+    Channels.clearAllMessages(true);
+    DMs.clearAll(true);
+
     // Erase the entire NVS partition
     nvs_flash_erase();
     nvs_flash_init();
@@ -1840,6 +1843,32 @@ static void handlePostFactoryReset() {
     // Delete saved DM conversations from SD card (if supported on this board)
 #if HAS_SD_CARD
     {
+        const char *nodeFiles[] = {
+            "/camillia/nodes.db",
+            "/camillia/nodes.bin",
+            "/camillia/nodes.json",
+            "/camillia/node_db.bin",
+            "/camillia/node_db.json",
+        };
+        for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
+            if (SD.exists(nodeFiles[i])) {
+                SD.remove(nodeFiles[i]);
+            }
+        }
+
+        File nodesDir = SD.open("/camillia/nodes");
+        if (nodesDir && nodesDir.isDirectory()) {
+            File f = nodesDir.openNextFile();
+            while (f) {
+                String fp = String("/camillia/nodes/") + f.name();
+                f.close();
+                SD.remove(fp.c_str());
+                f = nodesDir.openNextFile();
+            }
+            nodesDir.close();
+            SD.rmdir("/camillia/nodes");
+        }
+
         File dir = SD.open("/camillia/dms");
         if (dir && dir.isDirectory()) {
             File f = dir.openNextFile();

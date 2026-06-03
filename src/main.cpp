@@ -965,7 +965,7 @@ static bool syncSelfNodePosition(uint32_t nowMs) {
 
 // ── Settings ──────────────────────────────────────────────────
 #define SETTING_WEBCFG        0
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || (BOARD_BUZZER >= 0)
 #define CFG_MSG_ALERT_TOGGLE  1
 #else
 #define CFG_MSG_ALERT_TOGGLE  0
@@ -1059,7 +1059,7 @@ static inline uint16_t gpsFixColorForUiMode() {
     // Keep GPS fix distinctly green on every theme.
     // Light themes use a darker shade for better contrast on pale backgrounds.
     return (gCfg.uiMode == UI_MODE_LIGHT)
-        ? rgb565(0x1f, 0x7a, 0x2f)
+        ? rgb565(0x14, 0x5f, 0x24)
         : rgb565(0x3a, 0xe0, 0x58);
 }
 
@@ -1080,7 +1080,7 @@ static inline uint16_t gpsNoDataColorForUiMode() {
 static inline uint16_t wifiOkColorForUiMode() {
     // Wi-Fi connected/AP accent color: bright on dark themes, deeper on light themes.
     return (gCfg.uiMode == UI_MODE_LIGHT)
-        ? rgb565(0x1f, 0x7a, 0x2f)
+        ? rgb565(0x14, 0x5f, 0x24)
         : rgb565(0x4a, 0xf2, 0x7a);
 }
 
@@ -1140,7 +1140,9 @@ struct UiThemePreset {
 static constexpr uint8_t UI_THEME_PRESET_COUNT = 10;
 static const UiThemePreset kUiThemePresets[UI_THEME_PRESET_COUNT] = {
     { UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark" },
-    { UI_THEME_CAMELLIA, UI_MODE_LIGHT, 0xFF5D, 0xFFDF, 0xFF1B, 0xB964, "Camillia Light" },
+    { UI_THEME_CAMELLIA, UI_MODE_LIGHT,
+        rgb565(0xff, 0xf7, 0xfa), rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xb0, 0x2f, 0x62),
+        "Camillia Light" },
     { UI_THEME_EVERGREEN, UI_MODE_DARK,  0x00A8, 0x11AA, 0x1A2C, 0x55B0, "Evergreen Dark" },
     { UI_THEME_EVERGREEN, UI_MODE_LIGHT, 0xE73C, 0xF7DE, 0xE71B, 0x2D2A, "Evergreen Light" },
     { UI_THEME_EARTHEN, UI_MODE_DARK,  0x1082, 0x2104, 0x2945, 0xD38B, "Earthy Dark" },
@@ -1322,7 +1324,8 @@ static void applyUiTheme(bool markDirty = true) {
     } else {
         if (gCfg.uiMode == UI_MODE_LIGHT) {
             gUi = {
-                0xFF5D, 0xFD95, 0xFCF2, 0xFFDF, 0xFF1B, 0xFE96,
+                rgb565(0xff, 0xf7, 0xfa), rgb565(0xf1, 0xd8, 0xe3), rgb565(0xe8, 0xc2, 0xd5),
+                rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xf3, 0xe0, 0xea),
                 0x3127, 0xC983, 0x73AE, 0xBC92, 0xCD34, 0xFF1B, 0xFCD2,
                 0xB964, 0xB964, 0x20E6, 0x62CC, 0xFFFF, 0x2927,
                 0xB964, 0xDA8E, 0x2C8D, 0x2927, 0x8B2F,
@@ -4984,6 +4987,7 @@ static uint32_t pickerFilteredIds[MAX_NODES];
 static int      pickerFilteredCount = 0;
 static char     dmPickerFilter[DM_PICKER_FILTER_MAX + 1] = {0};
 static int      dmPickerFilterLen = 0;
+static bool     dmPickerFilterOpen = false;
 
 static char asciiLower(char c) {
     return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
@@ -5034,6 +5038,7 @@ static void pickerSnapshot() {
     }
     dmPickerFilterLen = 0;
     dmPickerFilter[0] = '\0';
+    dmPickerFilterOpen = false;
     pickerApplyFilter();
 }
 
@@ -5076,7 +5081,7 @@ static void drawDmPicker() {
     lcd.fillRect(ix, iy, iw, DM_LINE_H, COL_SELECT_BG);
     lcd.setTextColor(COL_TEXT_ON_ACCENT, COL_SELECT_BG);
     char pickerHeader[DM_LINE_LEN + 1];
-    if (dmPickerFilterLen > 0)
+    if (dmPickerFilterOpen)
         snprintf(pickerHeader, sizeof(pickerHeader), "Select recipient [%s]", dmPickerFilter);
     else
         snprintf(pickerHeader, sizeof(pickerHeader), "Select recipient");
@@ -5120,10 +5125,9 @@ static void drawDmPicker() {
         lcd.fillRect(ix, y, iw, DM_LINE_H, bg);
 
         char entry[DM_LINE_LEN + 1];
-        snprintf(entry, sizeof(entry), "[%s] %-28s !%08x",
-                 n->shortName[0] ? n->shortName : "????",
+        snprintf(entry, sizeof(entry), "%s (%s)",
                  n->longName[0]  ? n->longName  : "(unknown)",
-                 (unsigned)n->nodeId);
+                 n->shortName[0] ? n->shortName : "????");
 
         lcd.setTextColor(col, bg);
         drawClippedText(ix + 4, y + 1, iw - 8, entry);
@@ -8220,10 +8224,13 @@ static void activateSettingsSelection() {
             }
         }
     } else if (settingsSel == SETTING_FACTORY_RESET) {
+        Channels.clearAllMessages(true);
+        DMs.clearAll(true);
+        Nodes.clearPersisted();
+        clearNodeDbOnSd();
+        sdRmDir("/camillia/dms");
         nvs_flash_erase();
         nvs_flash_init();
-        Nodes.clearPersisted();
-        sdRmDir("/camillia/dms");
         snprintf(settingsStatus, sizeof(settingsStatus), "Factory reset - rebooting...");
         dirtyChat = true;
         drawSettings();
@@ -8969,9 +8976,16 @@ static void handleKey(char k) {
 #endif
         }
         if (activeView == CHAN_DM && dmPickerOpen) {
-            if (dmPickerFilterLen > 0) {
-                dmPickerFilter[--dmPickerFilterLen] = '\0';
+            if (dmPickerFilterOpen) {
+                if (dmPickerFilterLen > 0) {
+                    dmPickerFilter[--dmPickerFilterLen] = '\0';
+                } else {
+                    dmPickerFilterOpen = false;
+                }
                 pickerApplyFilter();
+                dirtyChat = true;
+            } else {
+                dmPickerOpen = false;
                 dirtyChat = true;
             }
             return;
@@ -9357,6 +9371,7 @@ static void handleKey(char k) {
         }
 #endif
         if (activeView == CHAN_DM && dmPickerOpen) {
+            dmPickerFilterOpen = true;
             if (dmPickerFilterLen < DM_PICKER_FILTER_MAX) {
                 dmPickerFilter[dmPickerFilterLen++] = k;
                 dmPickerFilter[dmPickerFilterLen] = '\0';

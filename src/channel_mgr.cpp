@@ -61,10 +61,11 @@ void ChannelMgr::init() {
         _chans[i].count     = 0;
         _chans[i].scrollOff = 0;
         _chans[i].unread    = false;
-        _chans[i].active    = true;
         _chans[i].lines = allocChannelLines();
-        if (!_chans[i].lines)
+        _chans[i].active = (_chans[i].lines != nullptr);
+        if (!_chans[i].lines) {
             Serial.printf("[chanmgr] alloc failed for ch%d\n", i);
+        }
     }
     setActive(0);
 }
@@ -111,6 +112,7 @@ void ChannelMgr::prevChannel() { setActive((_active + MAX_CHANNELS - 1) % MAX_CH
 
 void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                             uint32_t packetId, DisplayLine::AckState ack) {
+    if (!ch.lines) return;
     int idx = ch.count % MAX_MSG_LINES;
     DisplayLine &dl = ch.lines[idx];
     strncpy(dl.text, text, MSG_CHARS);
@@ -128,6 +130,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
                             uint16_t color, uint32_t packetId, bool trackAck) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
+    if (!_chans[chanIdx].lines) return -1;
     int firstLine = _chans[chanIdx].count;
     _wordWrap(chanIdx, prefix, text, color, packetId, trackAck);
     if (chanIdx != _active) _chans[chanIdx].unread = true;
@@ -137,6 +140,7 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
 void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
                              uint16_t color, uint32_t packetId, bool trackAck) {
     Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return;
     char line[MSG_CHARS + 1];
     static constexpr int MAX_WRAP_LINES = 64;
     uint16_t segPos[MAX_WRAP_LINES];
@@ -180,6 +184,15 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
             if (bp > 0) take = utf8TakeNoSplit(text, pos, textLen, bp);
         }
 
+        // Avoid wasting wrap width on trailing spaces.
+        while (take > 0 && text[pos + take - 1] == ' ') {
+            take--;
+        }
+        if (take <= 0) {
+            while (pos < textLen && text[pos] == ' ') pos++;
+            continue;
+        }
+
         if (segCount < MAX_WRAP_LINES) {
             segPos[segCount] = (uint16_t)pos;
             segLen[segCount] = (uint16_t)take;
@@ -187,7 +200,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         }
 
         pos += take;
-        if (pos < textLen && text[pos] == ' ') pos++; // skip space after wrap
+        while (pos < textLen && text[pos] == ' ') pos++; // skip all spaces after wrap
         firstLine = false;
     }
 
@@ -232,6 +245,7 @@ void ChannelMgr::beginPersistence() {
 
 void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
 #if HAS_SD_CARD
+    if (!ch.lines) return;
     if (!_persistDirReady) {
         (void)SD.mkdir("/camillia");
         (void)SD.mkdir(kChanPersistDir);
@@ -284,6 +298,7 @@ void ChannelMgr::loadPersisted() {
 
     _persistLoading = true;
     for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
+        if (!_chans[chanIdx].lines) continue;
         char path[48];
         channelPersistPath(chanIdx, path, sizeof(path));
         if (!SD.exists(path)) continue;
@@ -355,7 +370,9 @@ void ChannelMgr::loadPersisted() {
 }
 
 const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {
+    if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return nullptr;
     const Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return nullptr;
     int total = ch.count;
     if (total == 0) return nullptr;
     // row 0 = newest visible line at the top; larger rows are older lines.
@@ -377,6 +394,7 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
             // applies to the full message block, not just the first segment.
             Channel &ch = _chans[_pending[i].chanIdx];
             int chanIdx = _pending[i].chanIdx;
+            if (!ch.lines) return;
             for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
                 if (ch.lines[j].packetId == packetId) {
                     ch.lines[j].ack = state;

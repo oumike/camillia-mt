@@ -9,6 +9,7 @@ ENV_NAME="tdeck"
 DEBUG_ENV_NAME="tdeck-debug"
 TDECK_V2_IMPL_ENV_NAME="tdeck-lvgl"
 TLORA_V2_IMPL_ENV_NAME="tlora-pager-tft-lvgl"
+CARDPUTER_V2_IMPL_ENV_NAME="cardputer-cap-lvgl"
 CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
@@ -50,6 +51,12 @@ resolve_effective_env() {
 	if [ "$ENV_NAME" = "$TLORA_ENV_NAME" ] && [ "$TLORA_V2_IMPL_ENV_NAME" != "$TLORA_ENV_NAME" ] && has_env "$TLORA_V2_IMPL_ENV_NAME"; then
 		echo "[PIO] Remapping $TLORA_ENV_NAME -> $TLORA_V2_IMPL_ENV_NAME"
 		ENV_NAME="$TLORA_V2_IMPL_ENV_NAME"
+	fi
+
+	# Keep cardputer flag/name stable while the 2.0 cardputer build uses LVGL env.
+	if [ "$ENV_NAME" = "$CARDPUTER_ENV_NAME" ] && [ "$CARDPUTER_V2_IMPL_ENV_NAME" != "$CARDPUTER_ENV_NAME" ] && has_env "$CARDPUTER_V2_IMPL_ENV_NAME"; then
+		echo "[PIO] Remapping $CARDPUTER_ENV_NAME -> $CARDPUTER_V2_IMPL_ENV_NAME"
+		ENV_NAME="$CARDPUTER_V2_IMPL_ENV_NAME"
 	fi
 }
 
@@ -109,7 +116,7 @@ show_usage() {
 	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
-	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
+	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME, remaps to $CARDPUTER_V2_IMPL_ENV_NAME when present)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME, remaps to $TLORA_V2_IMPL_ENV_NAME when present)"
 	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"

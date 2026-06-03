@@ -30,7 +30,11 @@ constexpr DisplayUiProfile kDisplayUiProfile = {
         12,
         0,
         -4,
+    #if defined(DEVICE_TDECK)
+        1.15f,
+    #else
         1.0f,
+    #endif
         28,
         15,
         1500,
