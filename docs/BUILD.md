@@ -48,6 +48,8 @@ pio run -e heltec-v4-vertical
 pio run -e tdeck-lvgl
 pio run -e tlora-pager-tft-lvgl
 pio run -e cardputer-cap-lvgl
+pio run -e heltec-v4-lvgl
+pio run -e heltec-v4-vertical-lvgl
 ```
 
 Open serial monitor without rebuilding:
@@ -59,16 +61,13 @@ pio device monitor
 ### Build and flash with helper script
 
 ```bash
-Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--tdeck-lvgl] [--pager-lvgl] [--cardputer-lvgl] [--erase|-E]
+Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
-  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap)
-  --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft)
-  --heltec, -H  Use Heltec V4 expansion environment (heltec-v4)
-  --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical)
-  --tdeck-lvgl       Use LVGL build on T-Deck (tdeck-lvgl)
-  --pager-lvgl       Use LVGL build on T-Lora Pager TFT (tlora-pager-tft-lvgl)
-  --cardputer-lvgl   Use LVGL build on Cardputer + Cap LoRa/GPS (cardputer-cap-lvgl)
+  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap, remaps to cardputer-cap-lvgl when present)
+  --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft, remaps to tlora-pager-tft-lvgl when present)
+  --heltec, -H  Use Heltec V4 expansion environment (heltec-v4, remaps to heltec-v4-lvgl when present)
+  --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical, remaps to heltec-v4-vertical-lvgl when present)
                 If neither is provided, you'll be prompted to choose a device.
   --erase, -E   Erase flash before clean build/upload
 ```
@@ -81,9 +80,6 @@ Example usage:
 ./build-upload-monitor.sh --pager
 ./build-upload-monitor.sh --heltec
 ./build-upload-monitor.sh --vertical
-./build-upload-monitor.sh --tdeck-lvgl
-./build-upload-monitor.sh --pager-lvgl
-./build-upload-monitor.sh --cardputer-lvgl
 ```
 
 You can also run the script with no flags and pick a device from the prompt.

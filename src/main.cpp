@@ -7883,7 +7883,7 @@ static void handleRx(MeshPacket pkt) {
             Serial.printf("[rx] text: \"%s\"\n", tm.text);
         }
 
-        // Sender display for DMs remains short name; channel view uses long name.
+        // Cardputer keeps sender labels compact in chat.
         NodeEntry *n = Nodes.find(pkt.hdr.from);
         const char *senderShort = (n && n->shortName[0]) ? n->shortName : "????";
         const char *senderLong = (n && n->longName[0]) ? n->longName : senderShort;
@@ -7893,7 +7893,11 @@ static void handleRx(MeshPacket pkt) {
 
         if (pkt.hdr.to == myNodeId) {
             // Unicast DM addressed to us
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, senderShort);
+#else
             snprintf(prefix, sizeof(prefix), "%s%s [%s] ", timePrefix, transportTag, senderShort);
+#endif
             bool viewing = (activeView == CHAN_DM && dmConvOpen
                             && dmConvNodeId == pkt.hdr.from);
             DMs.addMessage(pkt.hdr.from, senderShort, prefix, tm.text, incomingNodeColor,
@@ -7913,7 +7917,11 @@ static void handleRx(MeshPacket pkt) {
             dirtyTabs = true;
         } else {
             // Broadcast / relay message — goes to channel
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, senderShort);
+#else
             snprintf(prefix, sizeof(prefix), "%s%s %s: ", timePrefix, transportTag, senderLong);
+#endif
             Channels.addMessage(pkt.chanIdx, prefix, tm.text, incomingNodeColor,
                                 pkt.hdr.id, false);
             triggerMessageAlert();
@@ -9500,7 +9508,11 @@ static void onWebCfgSaved() {
     // Re-save node database (wiped by nvs_flash_erase)
     Nodes.saveAll();
     Serial.println("[cfg] nodes re-saved to NVS");
-    debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
+    bool debugMonitor = gCfg.debugAcks || gCfg.debugMessages || gCfg.debugGps;
+    gCfg.debugAcks = debugMonitor;
+    gCfg.debugMessages = debugMonitor;
+    gCfg.debugGps = debugMonitor;
+    debugSetFlags(debugMonitor, debugMonitor, debugMonitor);
     applyTimezoneFromConfig();
     gNtpConfigured = false;
     gNtpServerActive[0] = '\0';
@@ -9735,7 +9747,11 @@ void setup() {
         if (prefs.isKey("dbgGps"))  gCfg.debugGps = prefs.getBool("dbgGps");
         prefs.end();
     }
-    debugSetFlags(gCfg.debugAcks, gCfg.debugMessages, gCfg.debugGps);
+    bool debugMonitor = gCfg.debugAcks || gCfg.debugMessages || gCfg.debugGps;
+    gCfg.debugAcks = debugMonitor;
+    gCfg.debugMessages = debugMonitor;
+    gCfg.debugGps = debugMonitor;
+    debugSetFlags(debugMonitor, debugMonitor, debugMonitor);
     applyTimezoneFromConfig();
     // Apply chat spacing setting to runtime globals
     LINE_H        = kSpacingPx[gCfg.chatSpacing <= 2 ? gCfg.chatSpacing : 1];

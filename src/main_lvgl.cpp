@@ -14,6 +14,7 @@
 #include "gps.h"
 #include "keyboard.h"
 #include "web_config.h"
+#include "debug_flags.h"
 #include "display_splash_common.h"
 #include <WiFi.h>
 #include <Preferences.h>
@@ -73,11 +74,14 @@ static lv_obj_t *s_chatHeaderBattText = nullptr;
 static lv_obj_t *s_chatHeaderBattBar = nullptr;
 static lv_obj_t *s_chatPanel = nullptr;
 static lv_obj_t *s_chatList = nullptr;
+static lv_obj_t *s_chatNewMsgBtn = nullptr;
+static lv_obj_t *s_chatNewMsgLabel = nullptr;
 static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
 static lv_obj_t *s_rootScreen = nullptr;
 static lv_obj_t *s_composeModal = nullptr;
 static lv_obj_t *s_composeInput = nullptr;
+static lv_obj_t *s_composeKeyboard = nullptr;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
@@ -143,7 +147,7 @@ static uint32_t s_cfgLastActivateMs = 0;
 static uint32_t s_cfgLastScrollMs = 0;
 static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
-static bool s_cfgDebugLog = true;
+static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
 static uint32_t s_selectedMsgReplyPacketId = 0;
 static char s_selectedMsgText[MSG_CHARS + 1] = "";
 static uint32_t s_myNodeId = 0;
@@ -151,6 +155,13 @@ static uint32_t s_myNodeId = 0;
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
     COMPOSE_TARGET_DM = 1,
+};
+
+enum HeltecNavTarget : uint8_t {
+    HELTEC_NAV_CFG = 0,
+    HELTEC_NAV_NODES,
+    HELTEC_NAV_LIVE,
+    HELTEC_NAV_LEGEND,
 };
 
 static ComposeTarget s_composeTarget = COMPOSE_TARGET_CHANNEL;
@@ -271,18 +282,27 @@ static void pumpKeyboardInput();
 static void openComposePrompt(uint32_t replyPacketId = 0, const char *replyText = nullptr);
 static void closeComposePrompt();
 static void sendComposeMessage();
+static void onChatNewMessagePressed(lv_event_t *e);
+static void onComposeKeyboardEvent(lv_event_t *e);
+static void onComposeSendPressed(lv_event_t *e);
+static void onComposeCancelPressed(lv_event_t *e);
+static void refreshChatComposeButtonState();
 static void onChatMessagePressed(lv_event_t *e);
-static void onChatMessageLongPressed(lv_event_t *e);
 static void recomputeChannelHashes();
 static void initCfgActions();
 static void refreshCfgModal();
 static void openCfgModal();
 static void closeCfgModal();
 static void activateCfgSelection();
+static void onCfgActionRowPressed(lv_event_t *e);
 static void openLegendModal();
 static void closeLegendModal();
+static void onLegendClosePressed(lv_event_t *e);
 static void openLiveModal();
 static void closeLiveModal();
+static void onHeltecBottomNavPressed(lv_event_t *e);
+static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget);
+static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget);
 static void refreshLiveView(bool force = false);
 static void openDmModal();
 static void closeDmModal();
@@ -1470,7 +1490,7 @@ static void wakeScreen() {
 }
 
 static bool pollUserButton(uint32_t nowMs) {
-#if defined(DEVICE_TLORA_PAGER_TFT) && defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+#if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
     static bool userBtnRawPrev = false;
     static bool userBtnStable = false;
     static uint32_t userBtnDebounceMs = 0;
@@ -1484,6 +1504,10 @@ static bool pollUserButton(uint32_t nowMs) {
     if ((nowMs - userBtnDebounceMs) >= 30 && userPressed != userBtnStable) {
         userBtnStable = userPressed;
         if (userBtnStable) {
+            if (s_cfgModal) {
+                activateCfgSelection();
+                return true;
+            }
             if (s_screenAsleep) {
                 wakeScreen();
             } else {
@@ -1509,6 +1533,7 @@ static void persistConfigToPrefs() {
 
     if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
     if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
+    if (s_cfg.webCfgPass[0]) p.putString("webPass", s_cfg.webCfgPass);
     p.putString("nodeLong", s_cfg.nodeLong);
     p.putString("nodeShort", s_cfg.nodeShort);
     p.putFloat("loraFreq", s_cfg.loraFreq);
@@ -1738,6 +1763,13 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("dbgMsgs")) s_cfg.debugMessages = prefs.getBool("dbgMsgs");
     if (prefs.isKey("dbgGps")) s_cfg.debugGps = prefs.getBool("dbgGps");
 
+    bool debugMonitor = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
+    s_cfg.debugAcks = debugMonitor;
+    s_cfg.debugMessages = debugMonitor;
+    s_cfg.debugGps = debugMonitor;
+    s_cfgDebugLog = debugMonitor;
+    debugSetFlags(debugMonitor, debugMonitor, debugMonitor);
+
     String wifiSsid = prefs.getString("wifiSsid", "");
     if (wifiSsid.length()) {
         strncpy(s_cfg.wifiSsid, wifiSsid.c_str(), sizeof(s_cfg.wifiSsid) - 1);
@@ -1948,6 +1980,7 @@ static void closeComposePrompt() {
     }
     s_composeModal = nullptr;
     s_composeInput = nullptr;
+    s_composeKeyboard = nullptr;
     s_composeTarget = COMPOSE_TARGET_CHANNEL;
     s_composeDmNodeId = 0;
     s_composeReplyPacketId = 0;
@@ -1974,6 +2007,92 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     s_composeReplyPacketId = replyPacketId;
     s_composeChannelIdx = s_activeChannel;
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    int modalW = lv_disp_get_hor_res(NULL) - 8;
+    int modalH = lv_disp_get_ver_res(NULL) - 8;
+    if (modalW < 180) modalW = lv_disp_get_hor_res(NULL);
+    if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
+
+    s_composeModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_composeModal, modalW, modalH);
+    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_composeModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_composeModal, 1, 0);
+    lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_composeModal, 4, 0);
+    lv_obj_set_style_pad_row(s_composeModal, 3, 0);
+    lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_composeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_composeModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, isReply ? "Reply" : "New Message");
+
+    if (isReply) {
+        char preview[MSG_CHARS + 1];
+        formatReplyPreview(replyText, preview, sizeof(preview));
+        lv_obj_t *replyLbl = lv_label_create(s_composeModal);
+        lv_obj_set_width(replyLbl, lv_pct(100));
+        lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
+        lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
+        lv_label_set_text_fmt(replyLbl, "RE: %s", preview[0] ? preview : "(message)");
+    }
+
+    s_composeInput = lv_textarea_create(s_composeModal);
+    lv_obj_set_width(s_composeInput, lv_pct(100));
+    lv_obj_set_height(s_composeInput, 38);
+    lv_obj_set_style_text_font(s_composeInput, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_composeInput, 1, 0);
+    lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
+    lv_textarea_set_one_line(s_composeInput, true);
+    lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
+    lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+
+    lv_obj_t *row = lv_obj_create(s_composeModal);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, 28);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 4, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *cancelBtn = lv_btn_create(row);
+    lv_obj_set_flex_grow(cancelBtn, 1);
+    lv_obj_set_height(cancelBtn, lv_pct(100));
+    lv_obj_add_event_cb(cancelBtn, onComposeCancelPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
+    lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(cancelLbl, "Cancel");
+    lv_obj_center(cancelLbl);
+
+    lv_obj_t *sendBtn = lv_btn_create(row);
+    lv_obj_set_flex_grow(sendBtn, 1);
+    lv_obj_set_height(sendBtn, lv_pct(100));
+    lv_obj_add_event_cb(sendBtn, onComposeSendPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *sendLbl = lv_label_create(sendBtn);
+    lv_obj_set_style_text_font(sendLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(sendLbl, "Send");
+    lv_obj_center(sendLbl);
+
+    s_composeKeyboard = lv_keyboard_create(s_composeModal);
+    lv_obj_set_width(s_composeKeyboard, lv_pct(100));
+    lv_obj_set_flex_grow(s_composeKeyboard, 1);
+    lv_keyboard_set_textarea(s_composeKeyboard, s_composeInput);
+    lv_obj_add_event_cb(s_composeKeyboard, onComposeKeyboardEvent, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(s_composeKeyboard, onComposeKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+#else
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 140) modalW = lv_disp_get_hor_res(NULL) - 8;
     int modalH = isReply ? 96 : 72;
@@ -2031,6 +2150,26 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 #else
     lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
 #endif
+#endif
+}
+
+static void onComposeKeyboardEvent(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        sendComposeMessage();
+    } else if (code == LV_EVENT_CANCEL) {
+        closeComposePrompt();
+    }
+}
+
+static void onComposeSendPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    sendComposeMessage();
+}
+
+static void onComposeCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeComposePrompt();
 }
 
 static void openComposePromptForDm(uint32_t nodeId) {
@@ -2088,7 +2227,7 @@ static void sendComposeMessage() {
 static void initCfgActions() {
     s_cfgActionCount = 0;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
-#if HAS_SD_CARD
+#if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
@@ -2143,6 +2282,11 @@ static void refreshCfgModal() {
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_outline_width(row, 0, 0);
         lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row,
+                    onCfgActionRowPressed,
+                    LV_EVENT_CLICKED,
+                    (void *)(intptr_t)i);
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, cfgActionLabel(actionId, rowText, sizeof(rowText)));
 
@@ -2172,6 +2316,15 @@ static void refreshCfgModal() {
     }
 }
 
+static void onCfgActionRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_cfgActionCount) return;
+    s_cfgSelection = idx;
+    s_cfgConfirmAction = -1;
+    s_cfgConfirmMs = 0;
+    refreshCfgModal();
+}
+
 static void closeCfgModal() {
     if (s_cfgModal) {
         lv_obj_del(s_cfgModal);
@@ -2187,6 +2340,117 @@ static void closeLegendModal() {
         lv_obj_del(s_legendModal);
     }
     s_legendModal = nullptr;
+}
+
+static void onLegendClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeLegendModal();
+}
+
+static void onHeltecBottomNavPressed(lv_event_t *e) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    int target = (int)(intptr_t)lv_event_get_user_data(e);
+    switch (target) {
+        case HELTEC_NAV_CFG:
+            if (s_cfgModal) closeCfgModal();
+            else openCfgModal();
+            break;
+        case HELTEC_NAV_NODES:
+            if (s_nodesModal) closeNodesModal();
+            else openNodesModal();
+            break;
+        case HELTEC_NAV_LIVE:
+            if (s_liveModal) closeLiveModal();
+            else openLiveModal();
+            break;
+        case HELTEC_NAV_LEGEND:
+            if (s_legendModal) closeLegendModal();
+            else openLegendModal();
+            break;
+        default:
+            break;
+    }
+#else
+    LV_UNUSED(e);
+#endif
+}
+
+static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!bar) return;
+
+    struct NavItem {
+        const char *label;
+        int target;
+    };
+    static const NavItem kItems[] = {
+        {"Config", HELTEC_NAV_CFG},
+        {"Nodes", HELTEC_NAV_NODES},
+        {"Live", HELTEC_NAV_LIVE},
+        {"Legend", HELTEC_NAV_LEGEND},
+    };
+
+    lv_obj_set_style_pad_left(bar, 2, 0);
+    lv_obj_set_style_pad_right(bar, 2, 0);
+    lv_obj_set_style_pad_top(bar, 1, 0);
+    lv_obj_set_style_pad_bottom(bar, 1, 0);
+    lv_obj_set_style_pad_column(bar, 3, 0);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
+        lv_obj_t *btn = lv_btn_create(bar);
+        lv_obj_set_flex_grow(btn, 1);
+        lv_obj_set_height(btn, lv_pct(100));
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 1, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+
+        const bool isActive = (activeTarget == kItems[i].target);
+        lv_obj_set_style_bg_color(btn,
+                                  isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F),
+                                  0);
+        lv_obj_set_style_bg_opa(btn, isActive ? LV_OPA_80 : LV_OPA_60, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn,
+                                      isActive ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x335D9D),
+                                      0);
+
+        lv_obj_add_event_cb(btn,
+                            onHeltecBottomNavPressed,
+                            LV_EVENT_PRESSED,
+                            (void *)(intptr_t)kItems[i].target);
+
+        lv_obj_t *label = lv_label_create(btn);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_text(label, kItems[i].label);
+        lv_obj_center(label);
+    }
+#else
+    LV_UNUSED(bar);
+    LV_UNUSED(activeTarget);
+#endif
+}
+
+static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!parent) return;
+
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_set_width(bar, lv_pct(100));
+    lv_obj_set_height(bar, 26);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(bar, 1, 0);
+    lv_obj_set_style_border_color(bar, lv_color_hex(0x335D9D), 0);
+
+    populateHeltecBottomNav(bar, activeTarget);
+#else
+    LV_UNUSED(parent);
+    LV_UNUSED(activeTarget);
+#endif
 }
 
 static bool isDigitChar(char c) {
@@ -3849,11 +4113,15 @@ static void openLiveModal() {
     lv_obj_set_flex_flow(s_liveList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_liveList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecBottomNav(s_liveModal, HELTEC_NAV_LIVE);
+#else
     lv_obj_t *hint = lv_label_create(s_liveModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_label_set_text_fmt(hint, "%s = Back   C = Clear log", modalCloseKeyLabel());
+#endif
 
     refreshLiveView(true);
 }
@@ -4685,11 +4953,15 @@ static void openNodesModal() {
     refreshNodesListSelection();
     refreshNodesDetails();
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecBottomNav(s_nodesModal, HELTEC_NAV_NODES);
+#else
     lv_obj_t *hint = lv_label_create(s_nodesModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_label_set_text_fmt(hint, "Up/Down = Select   %s = Back", modalCloseKeyLabel());
+#endif
 }
 
 static void openLegendModal() {
@@ -4728,7 +5000,23 @@ static void openLegendModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Legend");
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *body = lv_label_create(s_legendModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, legendBodyFont, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(
+        body,
+        "Touch Navigation:\n"
+        "Use bottom buttons for Config, Nodes, Live, Legend.\n"
+        "\n"
+        "Transport Symbols:\n"
+        "%s Radio Transmission\n"
+        "%s MQTT Transmission",
+        LV_SYMBOL_RADIO_TINY,
+        LV_SYMBOL_GLOBE_TINY);
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     lv_obj_t *bodyRow = lv_obj_create(s_legendModal);
     lv_obj_set_width(bodyRow, lv_pct(100));
     lv_obj_set_flex_grow(bodyRow, 1);
@@ -4788,11 +5076,30 @@ static void openLegendModal() {
         LV_SYMBOL_GLOBE_TINY);
 #endif
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *closeBtn = lv_btn_create(s_legendModal);
+    lv_obj_set_width(closeBtn, lv_pct(100));
+    lv_obj_set_height(closeBtn, 24);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(closeBtn, 1, 0);
+    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x335D9D), 0);
+    lv_obj_add_event_cb(closeBtn, onLegendClosePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, legendBodyFont, 0);
+    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#else
     lv_obj_t *hint = lv_label_create(s_legendModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, legendBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_label_set_text_fmt(hint, "%s/C/N/I/L = Close", modalCloseKeyLabel());
+#endif
 }
 
 static void openCfgModal() {
@@ -4879,11 +5186,15 @@ static void openCfgModal() {
     lv_obj_set_flex_flow(s_cfgActionList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecBottomNav(s_cfgModal, HELTEC_NAV_CFG);
+#else
     lv_obj_t *hint = lv_label_create(s_cfgModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
+#endif
 
     refreshCfgModal();
 }
@@ -5587,15 +5898,24 @@ static void pumpKeyboardInput() {
     }
 }
 
-static void onChatMessageLongPressed(lv_event_t *e) {
-    lv_obj_t *label = lv_event_get_target(e);
-    if (!label) return;
+static void onChatNewMessagePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+        openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
+    } else {
+        openComposePrompt(0, nullptr);
+    }
+}
 
-    uint32_t replyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    if (!replyPacketId) return;
-
-    const char *txt = lv_label_get_text(label);
-    openComposePrompt(replyPacketId, txt);
+static void refreshChatComposeButtonState() {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!s_chatNewMsgLabel) return;
+    if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+        lv_label_set_text(s_chatNewMsgLabel, "Reply");
+    } else {
+        lv_label_set_text(s_chatNewMsgLabel, "New Message");
+    }
+#endif
 }
 
 static void onChatMessagePressed(lv_event_t *e) {
@@ -5610,6 +5930,8 @@ static void onChatMessagePressed(lv_event_t *e) {
     } else {
         s_selectedMsgText[0] = '\0';
     }
+
+    refreshChatComposeButtonState();
 
     // Defer redraw to the normal loop to avoid deleting the active target in-event.
     s_lastRenderedChannel = -1;
@@ -5629,6 +5951,13 @@ static void onWebCfgSaved() {
     applyTimezoneFromConfig();
     gpsSetEnabled(s_cfg.gpsEnabled);
     syncWifiCredsToPrefs();
+
+    bool debugMonitor = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
+    s_cfg.debugAcks = debugMonitor;
+    s_cfg.debugMessages = debugMonitor;
+    s_cfg.debugGps = debugMonitor;
+    s_cfgDebugLog = debugMonitor;
+    debugSetFlags(debugMonitor, debugMonitor, debugMonitor);
 
     s_ntpConfigured = false;
     s_ntpServerActive[0] = '\0';
@@ -5951,7 +6280,7 @@ static void refreshChannelGlow(bool force) {
                 snprintf(text, sizeof(text), "%s", name);
             }
             lv_label_set_text(lbl, text);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
             sizeChannelButtonToLabel(i);
 #endif
             lv_obj_set_style_text_color(
@@ -6024,7 +6353,7 @@ static void setActiveChannel(int channelIdx) {
     Channels.setActive(channelIdx);
     applyChannelButtonTheme();
     refreshChannelGlow(true);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
     if (s_channelList && s_channelBtns[channelIdx]) {
         lv_obj_scroll_to_view(s_channelBtns[channelIdx], LV_ANIM_OFF);
     }
@@ -6045,7 +6374,7 @@ static const char *channelName(int idx) {
 }
 
 static void sizeChannelButtonToLabel(int idx) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
     if (idx < 0 || idx >= MESH_CHANNELS) return;
     lv_obj_t *btn = s_channelBtns[idx];
     lv_obj_t *lbl = s_channelLabels[idx];
@@ -6056,7 +6385,11 @@ static void sizeChannelButtonToLabel(int idx) {
     lv_obj_update_layout(lbl);
 
     lv_coord_t targetW = lv_obj_get_width(lbl) + 14;
+    #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (targetW < 52) targetW = 52;
+    #else
     if (targetW < 34) targetW = 34;
+    #endif
     lv_obj_set_width(btn, targetW);
     lv_obj_set_height(btn, kMainScreenChannelBtnHeight);
     lv_obj_center(lbl);
@@ -6198,11 +6531,18 @@ static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    snprintf(line, sizeof(line), "%s %s c%d",
+             who,
+             (portTag && portTag[0]) ? portTag : "D",
+             chanIdx);
+#else
     snprintf(line, sizeof(line), "R %s>%s %s c%d",
              who,
              liveDestTag(pkt.hdr.to),
              (portTag && portTag[0]) ? portTag : "D",
              chanIdx);
+#endif
     Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
@@ -6213,7 +6553,11 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    snprintf(line, sizeof(line), "%s ENC h%02X", who, pkt.hdr.channel);
+#else
     snprintf(line, sizeof(line), "R %s ENC h%02X", who, pkt.hdr.channel);
+#endif
     Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
@@ -6395,6 +6739,8 @@ static bool pollMeshRx() {
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
+    refreshChatComposeButtonState();
+
     const Channel &ch = Channels.get(s_activeChannel);
     if (!force && s_lastRenderedChannel == s_activeChannel && s_lastRenderedCount == ch.count) {
         return;
@@ -6457,13 +6803,8 @@ static void refreshChatView(bool force) {
 
             lv_obj_add_flag(msg, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(msg, onChatMessagePressed,
-                                LV_EVENT_PRESSED,
+                                LV_EVENT_CLICKED,
                                 (void *)(uintptr_t)replyPacketId);
-            if (replyPacketId) {
-                lv_obj_add_event_cb(msg, onChatMessageLongPressed,
-                                    LV_EVENT_LONG_PRESSED,
-                                    (void *)(uintptr_t)replyPacketId);
-            }
 
             bool nextIsDifferentMessage = false;
             if (n + 1 < displayCount) {
@@ -6527,13 +6868,31 @@ static void buildUi() {
     const int chatY = stripY + channelStripH + chatGap;
     const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
     lv_obj_t *panel = nullptr;
+    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    const int panelMargin = 0;
+    const int chatGap = 3;
+    const int chatHeaderH = 20;
+    const int channelStripH = kMainScreenChannelBtnHeight + 8;
+    const int chatLegendH = 28;
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    const int chatX = panelMargin;
+    const int chatW = screenW - panelMargin * 2;
+    const int stripY = panelMargin + chatHeaderH + 2;
+    const int chatY = stripY + channelStripH + chatGap;
+    const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
+    lv_obj_t *panel = nullptr;
     #else
     const int panelMargin = 6;
     const int panelW = 89;
     const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
     const int chatGap = 6;
     const int chatHeaderH = 20;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    const int chatLegendH = 28;
+#else
     const int chatLegendH = 14;
+#endif
 
     lv_obj_t *panel = lv_obj_create(screen);
     lv_obj_set_size(panel, panelW, panelH);
@@ -6580,7 +6939,7 @@ static void buildUi() {
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
     s_channelStrip = lv_obj_create(screen);
     lv_obj_set_size(s_channelStrip, chatW, channelStripH);
     lv_obj_align(s_channelStrip, LV_ALIGN_TOP_LEFT, chatX, stripY);
@@ -6589,8 +6948,8 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(s_channelStrip, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_channelStrip, 1, 0);
     lv_obj_set_style_border_color(s_channelStrip, lv_color_hex(0x335D9D), 0);
-    lv_obj_set_style_pad_left(s_channelStrip, 2, 0);
-    lv_obj_set_style_pad_right(s_channelStrip, 2, 0);
+    lv_obj_set_style_pad_left(s_channelStrip, 3, 0);
+    lv_obj_set_style_pad_right(s_channelStrip, 3, 0);
     lv_obj_set_style_pad_top(s_channelStrip, 2, 0);
     lv_obj_set_style_pad_bottom(s_channelStrip, 2, 0);
 
@@ -6599,7 +6958,7 @@ static void buildUi() {
     lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_channelList, LV_DIR_HOR);
-    lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_opa(s_channelList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_channelList, 0, 0);
     lv_obj_set_style_pad_left(s_channelList, 0, 0);
@@ -6659,10 +7018,20 @@ static void buildUi() {
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
     lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatPanel, 4, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_style_pad_row(s_chatPanel, 4, 0);
+    lv_obj_set_flex_flow(s_chatPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chatPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+#endif
 
     s_chatList = lv_obj_create(s_chatPanel);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_width(s_chatList, lv_pct(100));
+    lv_obj_set_flex_grow(s_chatList, 1);
+#else
     lv_obj_set_size(s_chatList, lv_pct(100), lv_pct(100));
     lv_obj_align(s_chatList, LV_ALIGN_TOP_LEFT, 0, 0);
+#endif
     lv_obj_add_flag(s_chatList, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chatList, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_chatList, LV_SCROLLBAR_MODE_OFF);
@@ -6678,6 +7047,29 @@ static void buildUi() {
     lv_obj_set_flex_flow(s_chatList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chatList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    s_chatNewMsgBtn = lv_btn_create(s_chatPanel);
+    lv_obj_set_width(s_chatNewMsgBtn, lv_pct(100));
+    lv_obj_set_height(s_chatNewMsgBtn, 28);
+    lv_obj_set_style_radius(s_chatNewMsgBtn, 5, 0);
+    lv_obj_set_style_pad_all(s_chatNewMsgBtn, 2, 0);
+    lv_obj_set_style_shadow_width(s_chatNewMsgBtn, 0, 0);
+    lv_obj_set_style_bg_color(s_chatNewMsgBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_chatNewMsgBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_chatNewMsgBtn, 1, 0);
+    lv_obj_set_style_border_color(s_chatNewMsgBtn, lv_color_hex(0x335D9D), 0);
+    lv_obj_add_event_cb(s_chatNewMsgBtn, onChatNewMessagePressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chatNewMsgLabel = lv_label_create(s_chatNewMsgBtn);
+    lv_obj_set_style_text_font(s_chatNewMsgLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chatNewMsgLabel, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(s_chatNewMsgLabel, "New Message");
+    lv_obj_center(s_chatNewMsgLabel);
+#else
+    s_chatNewMsgBtn = nullptr;
+    s_chatNewMsgLabel = nullptr;
+#endif
+
     s_chatShortcutBar = lv_obj_create(screen);
     lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
     lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
@@ -6691,6 +7083,10 @@ static void buildUi() {
     lv_obj_set_style_pad_top(s_chatShortcutBar, 0, 0);
     lv_obj_set_style_pad_bottom(s_chatShortcutBar, 0, 0);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    s_chatShortcutText = nullptr;
+    populateHeltecBottomNav(s_chatShortcutBar, -1);
+#else
     s_chatShortcutText = lv_label_create(s_chatShortcutBar);
     lv_obj_set_width(s_chatShortcutText, lv_pct(100));
     lv_obj_set_style_text_font(s_chatShortcutText, &lv_font_montserrat_10, 0);
@@ -6698,12 +7094,15 @@ static void buildUi() {
     lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
+#endif
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btn = lv_obj_create(s_channelList ? s_channelList : screen);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
     #elif defined(DEVICE_TLORA_PAGER_TFT)
         lv_obj_t *btn = lv_obj_create(panel);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
@@ -6717,6 +7116,9 @@ static void buildUi() {
         s_channelBtns[i] = btn;
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_set_size(btn, 40, kMainScreenChannelBtnHeight);
+    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_obj_set_width(btn, LV_SIZE_CONTENT);
+        lv_obj_set_height(btn, kMainScreenChannelBtnHeight);
     #elif defined(DEVICE_TLORA_PAGER_TFT)
         lv_obj_set_size(btn, lv_pct(100), lv_pct(100));
     #else
@@ -6729,19 +7131,23 @@ static void buildUi() {
         lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    #if defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_obj_add_event_cb(btn, onChannelPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    #else
         lv_obj_add_event_cb(btn, onChannelPressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+    #endif
 
         lv_obj_t *lbl = lv_label_create(btn);
         s_channelLabels[i] = lbl;
         lv_obj_set_style_text_font(lbl, kMainScreenFont, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
         lv_obj_set_width(lbl, LV_SIZE_CONTENT);
     #else
         lv_obj_set_width(lbl, lv_pct(100));
     #endif
         lv_obj_set_height(lbl, lv_font_get_line_height(kMainScreenFont));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
     #else
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
@@ -6752,11 +7158,13 @@ static void buildUi() {
         } else {
             lv_label_set_text(lbl, "Channel");
         }
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
         sizeChannelButtonToLabel(i);
     #endif
         lv_obj_center(lbl);
     }
+
+    refreshChatComposeButtonState();
 
     int initialChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
     setActiveChannel(initialChannel);
@@ -6798,6 +7206,8 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_chatHeaderBattBar = nullptr;
     s_chatPanel = nullptr;
     s_chatList = nullptr;
+    s_chatNewMsgBtn = nullptr;
+    s_chatNewMsgLabel = nullptr;
     s_chatShortcutBar = nullptr;
     s_chatShortcutText = nullptr;
 
@@ -6874,6 +7284,10 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
     if (s_chatList) {
         lv_obj_set_style_bg_color(s_chatList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    }
+    if (s_chatNewMsgBtn) {
+        lv_obj_set_style_bg_color(s_chatNewMsgBtn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_border_color(s_chatNewMsgBtn, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatShortcutBar) {
         lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
@@ -6979,7 +7393,7 @@ void setup() {
     digitalWrite(BOARD_VEXT_ENABLE, BOARD_VEXT_ON_LEVEL);
     delay(20);
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) && defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+#if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
     pinMode(USER_BUTTON_PIN,
             (USER_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
@@ -7055,6 +7469,8 @@ void setup() {
 }
 
 void loop() {
+    s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
+
     uint32_t now = millis();
     if (pollUserButton(now)) {
         delay(5);

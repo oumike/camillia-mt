@@ -492,9 +492,10 @@
 #define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
 #endif
 #define MY_SPLASH_MELODY_ENABLED 1
-#define MY_DBG_ACKS         0
-#define MY_DBG_MESSAGES     0
-#define MY_DBG_GPS          0
+#define MY_DEBUG_MONITOR    0
+#define MY_DBG_ACKS         MY_DEBUG_MONITOR
+#define MY_DBG_MESSAGES     MY_DEBUG_MONITOR
+#define MY_DBG_GPS          MY_DEBUG_MONITOR
 
 // ── Display UI zones (font0 = 6×8 px) ───────────────────────
 #if DEVICE_UI_VERTICAL
@@ -599,13 +600,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define DM_VISIBLE      (CHAT_H / DM_LINE_H) // visible rows at DM_LINE_H spacing
 // Channel windows now use full-width chat, so wrapping should use display width.
 #if defined(DEVICE_TLORA_PAGER_TFT)
-// Pager LVGL chat panel is significantly wider than T-Deck; allow longer wrapped
-// lines so messages consume the available horizontal space.
-#if defined(UI_LVGL_POC)
-#define MSG_CHARS       62
-#else
-#define MSG_CHARS       53
-#endif
+#define MSG_CHARS       53   // Pager uses wider chat glyphs; keep wraps within visible row width.
 #else
 #define MSG_CHARS       (LCD_W / CHAR_W)
 #endif

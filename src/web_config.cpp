@@ -131,6 +131,19 @@ static void scheduleReboot(uint32_t delayMs) {
     gRebootAtMs = millis() + delayMs;
 }
 
+static bool monitorDebugEnabled() {
+    if (!gCfg) return false;
+    return gCfg->debugAcks || gCfg->debugMessages || gCfg->debugGps;
+}
+
+static void setMonitorDebugEnabled(bool enabled) {
+    if (!gCfg) return;
+    gCfg->debugAcks = enabled;
+    gCfg->debugMessages = enabled;
+    gCfg->debugGps = enabled;
+    debugSetFlags(enabled, enabled, enabled);
+}
+
 static uint8_t readBatteryPctWeb() {
     return batteryReadPercent();
 }
@@ -862,29 +875,6 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
     sendChunk(html);
 
-    // ── Bluetooth ─────────────────────────────────────────────
-    html += "<details><summary>Bluetooth</summary>";
-    html += "<div class='row2'>";
-    html += "<label>Enabled<select name='bt_enabled'>"
-            "<option value='1'"; if ( gCfg->btEnabled) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->btEnabled) html += " selected"; html += ">No</option>"
-            "</select></label>";
-    html += "<label>Mode<select name='bt_mode'>";
-    static const char *btModes[] = {"RANDOM_PIN","FIXED_PIN","NO_PIN"};
-    for (int i = 0; i < 3; i++) {
-        snprintf(tmp, sizeof(tmp), "%d", i);
-        html += "<option value='"; html += tmp; html += "'";
-        if (gCfg->btMode == i) html += " selected";
-        html += ">"; html += btModes[i]; html += "</option>";
-    }
-    html += "</select></label></div>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->btFixedPin);
-    html += "<label>Fixed PIN (when mode = FIXED_PIN)"
-            "<input name='bt_pin' type='number' min='0' max='999999' value='";
-    html += tmp; html += "' style='max-width:150px'></label>";
-    html += "</details>";
-    sendChunk(html);
-
     // Network section moved under Modules (MQTT options).
 
     // ── Display ───────────────────────────────────────────────
@@ -1041,24 +1031,6 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
     sendChunk(html);
 
-        // ── Debug ─────────────────────────────────────────────────
-        html += "<details><summary>Debug</summary>";
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='dbg_acks' value='1'";
-        if (gCfg->debugAcks) html += " checked";
-        html += "> ACKS</label>";
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='dbg_msgs' value='1'";
-        if (gCfg->debugMessages) html += " checked";
-        html += "> Messages</label>";
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='dbg_gps' value='1'";
-        if (gCfg->debugGps) html += " checked";
-        html += "> GPS</label>";
-        html += "<p class='gps-hint'>Enables tagged serial debug output for the selected categories only.</p>";
-        html += "</details>";
-        sendChunk(html);
-
     // WiFi
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>WiFi</h3>"
             "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
@@ -1082,6 +1054,19 @@ static void sendConfigPage(const char *msg = "") {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
+
+    html +=
+        "<h3 style='margin-top:.8em'>Debug Output</h3>"
+        "<form method='POST' action='/set-debug-monitor'>"
+        "<label style='display:flex;align-items:center;gap:.5em'>"
+        "<input type='checkbox' name='dbg_monitor' value='1'";
+    if (monitorDebugEnabled()) html += " checked";
+    html +=
+        "> Enable serial debug output in pio device monitor</label>"
+        "<button type='submit' style='margin-top:.45em;background:#355f9b'>Apply Debug Flag</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "When disabled, debug logs are suppressed from serial monitor output.</p>";
 
     html +=
         "<h3 style='margin-top:.8em'>Software Update</h3>"
@@ -1604,11 +1589,6 @@ static void handlePostSave() {
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
 
-    // Bluetooth
-    gCfg->btEnabled  = server.arg("bt_enabled").toInt() != 0;
-    gCfg->btMode     = (uint8_t)constrain(server.arg("bt_mode").toInt(), 0, 2);
-    gCfg->btFixedPin = (uint32_t)server.arg("bt_pin").toInt();
-
     // Network / MQTT
     gCfg->mqttEnabled = server.arg("mqtt_en").toInt() != 0;
     strncpy(gCfg->mqttServer, server.arg("mqtt_server").c_str(), sizeof(gCfg->mqttServer) - 1);
@@ -1662,10 +1642,6 @@ static void handlePostSave() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     gCfg->msgAlertSound      = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
 #endif
-    gCfg->debugAcks          = (server.arg("dbg_acks") == "1");
-    gCfg->debugMessages      = (server.arg("dbg_msgs") == "1");
-    gCfg->debugGps           = (server.arg("dbg_gps") == "1");
-
     // WiFi credentials — save directly to NVS (not part of gCfg)
     {
         String ssid = server.arg("wifi_ssid");
@@ -1681,11 +1657,42 @@ static void handlePostSave() {
             strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
             gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
         }
+
+        // Persist auth/connectivity keys immediately so reboot recovery doesn't
+        // rely solely on higher-level save callbacks.
+        Preferences prefs;
+        prefs.begin("camillia", false);
+        if (gCfg->webCfgPass[0]) prefs.putString("webPass", gCfg->webCfgPass);
+        if (gCfg->wifiSsid[0]) prefs.putString("wifiSsid", gCfg->wifiSsid);
+        if (gCfg->wifiPass[0]) prefs.putString("wifiPass", gCfg->wifiPass);
+        prefs.end();
     }
 
     if (gOnSave) gOnSave();
     scheduleReboot(900);
     redirectHomeWithFlash("Saved. Rebooting now...");
+}
+
+static void handlePostSetDebugMonitor() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!gCfg) {
+        redirectHomeWithFlash("Debug update failed: no config.");
+        return;
+    }
+
+    bool enabled = (server.arg("dbg_monitor") == "1");
+    setMonitorDebugEnabled(enabled);
+
+    Preferences prefs;
+    prefs.begin("camillia", false);
+    prefs.putBool("dbgAcks", enabled);
+    prefs.putBool("dbgMsgs", enabled);
+    prefs.putBool("dbgGps", enabled);
+    prefs.end();
+
+    redirectHomeWithFlash(enabled
+        ? "Debug monitor enabled."
+        : "Debug monitor disabled.");
 }
 
 static void handleGetLiveData() {
@@ -1979,9 +1986,9 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // Load saved WiFi credentials
     Preferences prefs;
     prefs.begin("camillia", true);
-    String savedSsid = prefs.getString("wifiSsid", "");
-    String savedPass = prefs.getString("wifiPass", "");
-    String savedWebPass = prefs.getString("webPass", "");
+    String savedSsid = prefs.isKey("wifiSsid") ? prefs.getString("wifiSsid", "") : "";
+    String savedPass = prefs.isKey("wifiPass") ? prefs.getString("wifiPass", "") : "";
+    String savedWebPass = prefs.isKey("webPass") ? prefs.getString("webPass", "") : "";
     prefs.end();
     strncpy(gWifiSsid, savedSsid.c_str(), sizeof(gWifiSsid) - 1);
     gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
@@ -2013,6 +2020,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         server.on("/login",   HTTP_GET,  handleGetLogin);
         server.on("/login",   HTTP_POST, handlePostLogin);
         server.on("/save",    HTTP_POST, handlePostSave);
+        server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
         server.on("/live-data", HTTP_GET, handleGetLiveData);
         server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
@@ -2041,12 +2049,19 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     while (WiFi.status() != WL_CONNECTED) {
         if (millis() - start >= kConnectTimeout) {
             Serial.println("[web] STA connect timeout — falling back to AP mode");
-            WiFi.disconnect(true);
-            WiFi.mode(WIFI_OFF);
-            delay(100);
+            WiFi.disconnect(false);
+#ifdef WIFI_AP_STA
+            WiFi.mode(WIFI_AP_STA);
+#else
             WiFi.mode(WIFI_AP);
-            delay(100);
-            WiFi.softAP("camillia-mt");
+#endif
+            delay(120);
+            if (!WiFi.softAP("camillia-mt")) {
+                // Retry with AP-only mode if AP+STA bring-up fails.
+                WiFi.mode(WIFI_AP);
+                delay(120);
+                WiFi.softAP("camillia-mt");
+            }
             delay(500);
             WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
@@ -2054,6 +2069,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             server.on("/login",   HTTP_GET,  handleGetLogin);
             server.on("/login",   HTTP_POST, handlePostLogin);
             server.on("/save",    HTTP_POST, handlePostSave);
+            server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
             server.on("/live-data", HTTP_GET, handleGetLiveData);
             server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
@@ -2080,6 +2096,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     server.on("/login",   HTTP_GET,  handleGetLogin);
     server.on("/login",   HTTP_POST, handlePostLogin);
     server.on("/save",    HTTP_POST, handlePostSave);
+    server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     server.on("/live-data", HTTP_GET, handleGetLiveData);
     server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
     server.on("/logout",  HTTP_GET,  handleGetLogout);

@@ -412,9 +412,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
     out += "webcfg_user: "; out += kWebCfgUser; out += "\n";
     out += "webcfg_pass: "; out += cfg.webCfgPass; out += "\n";
-    snprintf(tmp, sizeof(tmp), "debug_acks: %s\n", cfg.debugAcks ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "debug_messages: %s\n", cfg.debugMessages ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "debug_gps: %s\n", cfg.debugGps ? "true" : "false"); out += tmp;
+    bool debugMonitor = cfg.debugAcks || cfg.debugMessages || cfg.debugGps;
+    snprintf(tmp, sizeof(tmp), "debug_monitor: %s\n", debugMonitor ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "message_alert_sound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -597,6 +596,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "webcfg_pass")) {
                     strncpy(cfg.webCfgPass, val, sizeof(cfg.webCfgPass) - 1);
                     cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
+                }
+                else if (!strcmp(key, "debug_monitor")) {
+                    bool en = parseBoolValue(val);
+                    cfg.debugAcks = en;
+                    cfg.debugMessages = en;
+                    cfg.debugGps = en;
                 }
                 else if (!strcmp(key, "debug_acks"))
                     cfg.debugAcks = parseBoolValue(val);
