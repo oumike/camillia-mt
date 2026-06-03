@@ -4,7 +4,7 @@ set -e
 RELEASE_ENVS=(
     tdeck
     tlora-pager-tft
-    # cardputer-cap
+    cardputer-cap
     # heltec-v4
     # heltec-v4-vertical
 )
