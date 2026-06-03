@@ -2009,17 +2009,37 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     if (!s_rootScreen) return;
     if (s_activeChannel < 0 || s_activeChannel >= MESH_CHANNELS) return;
 
+    // Pager can open compose via paths that don't pass reply args; recover from current selection.
+    if (replyPacketId == 0 && (!replyText || !replyText[0])
+        && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+        replyPacketId = s_selectedMsgReplyPacketId;
+        replyText = s_selectedMsgText;
+    }
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
-    const lv_coord_t composeInputH = 32;
+    const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 6);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 2;
+    const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_TDECK)
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_coord_t composeInputH = (lv_coord_t)(((lv_font_get_line_height(composeBodyFont) + 10) * 11) / 10);
+    const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
+    const lv_coord_t composeModalBottomPad = 2;
+    const lv_coord_t composeModalRowPad = 1;
 #else
     const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
-    const lv_coord_t composeInputH = 28;
+    const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 4;
+    const lv_coord_t composeModalRowPad = 3;
 #endif
+    const lv_coord_t composeReplyRowH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 6);
 
     closeComposePrompt();
 
-    const bool isReply = (replyPacketId != 0);
+    const bool isReply = (replyPacketId != 0) || (replyText && replyText[0]);
     s_composeTarget = COMPOSE_TARGET_CHANNEL;
     s_composeDmNodeId = 0;
     s_composeReplyPacketId = replyPacketId;
@@ -2041,7 +2061,8 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_obj_set_style_border_width(s_composeModal, 1, 0);
     lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
-    lv_obj_set_style_pad_row(s_composeModal, 3, 0);
+    lv_obj_set_style_pad_bottom(s_composeModal, composeModalBottomPad, 0);
+    lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
     lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_composeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
@@ -2059,7 +2080,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
         lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text_fmt(replyLbl, "RE: %s", preview[0] ? preview : "(message)");
+        lv_label_set_text(replyLbl, preview[0] ? preview : "(message)");
     }
 
     s_composeInput = lv_textarea_create(s_composeModal);
@@ -2114,10 +2135,17 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 140) modalW = lv_disp_get_hor_res(NULL) - 8;
     int modalH = isReply ? 96 : 72;
+#if defined(DEVICE_TDECK)
+    modalH = isReply ? 92 : 70;
+#endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_composeModal, modalW, modalH);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, -12);
+#else
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 10);
+#endif
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
@@ -2125,7 +2153,8 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_obj_set_style_border_width(s_composeModal, 1, 0);
     lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
-    lv_obj_set_style_pad_row(s_composeModal, 3, 0);
+    lv_obj_set_style_pad_bottom(s_composeModal, composeModalBottomPad, 0);
+    lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
     lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_composeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
@@ -2138,23 +2167,58 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     if (isReply) {
         char preview[MSG_CHARS + 1];
         formatReplyPreview(replyText, preview, sizeof(preview));
-        lv_obj_t *replyLbl = lv_label_create(s_composeModal);
+        lv_obj_t *replyBox = lv_obj_create(s_composeModal);
+        lv_obj_set_width(replyBox, lv_pct(100));
+        lv_obj_set_height(replyBox, composeReplyRowH);
+        lv_obj_clear_flag(replyBox, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(replyBox, lv_color_hex(0x123266), 0);
+        lv_obj_set_style_bg_opa(replyBox, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(replyBox, 1, 0);
+        lv_obj_set_style_border_color(replyBox, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_pad_left(replyBox, 4, 0);
+        lv_obj_set_style_pad_right(replyBox, 4, 0);
+        lv_obj_set_style_pad_top(replyBox, 1, 0);
+        lv_obj_set_style_pad_bottom(replyBox, 1, 0);
+
+        lv_obj_t *replyLbl = lv_label_create(replyBox);
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text_fmt(replyLbl, "RE: %s", preview[0] ? preview : "(message)");
+        lv_label_set_text(replyLbl, preview[0] ? preview : "(message)");
     }
 
-    s_composeInput = lv_textarea_create(s_composeModal);
+    lv_obj_t *composeInputHost = s_composeModal;
+#if defined(DEVICE_TDECK)
+    lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
+    lv_obj_set_width(composeCenterBand, lv_pct(100));
+    lv_obj_set_flex_grow(composeCenterBand, 1);
+    lv_obj_clear_flag(composeCenterBand, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(composeCenterBand, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(composeCenterBand, 0, 0);
+    lv_obj_set_style_pad_all(composeCenterBand, 0, 0);
+    lv_obj_set_flex_flow(composeCenterBand, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(composeCenterBand, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    composeInputHost = composeCenterBand;
+#endif
+
+    s_composeInput = lv_textarea_create(composeInputHost);
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
+#if defined(DEVICE_TDECK)
+    lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
+    lv_obj_set_style_max_height(s_composeInput, composeInputH, 0);
+#endif
     lv_obj_set_style_text_font(s_composeInput, composeBodyFont, 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
     lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
     lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_composeInput, 1, 0);
     lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
+    lv_obj_set_style_pad_top(s_composeInput, composeInputPadTop, 0);
+    lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
+    lv_obj_set_style_pad_left(s_composeInput, 3, 0);
+    lv_obj_set_style_pad_right(s_composeInput, 3, 0);
     lv_textarea_set_one_line(s_composeInput, true);
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
@@ -2163,10 +2227,25 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, composeBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_pad_top(hint, 0, 0);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_set_style_pad_bottom(hint, 0, 0);
+#elif defined(DEVICE_TDECK)
+    lv_obj_set_style_pad_bottom(hint, 0, 0);
+#else
+    lv_obj_set_style_pad_bottom(hint, 1, 0);
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Delete");
 #else
     lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
+#endif
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Keep the legend anchored near the bottom edge, independent of flex slack.
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_width(hint, modalW - 8);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
 #endif
 #endif
 }
@@ -5555,11 +5634,9 @@ static void pumpKeyboardInput() {
         // to avoid one-off selection shifts during activation.
         char k = s_keyboard.readKey();
         const char *src = "key";
-        bool fromTrack = false;
         if (k == KEY_NONE) {
             k = s_keyboard.readTrackball();
             src = "track";
-            fromTrack = (k != KEY_NONE);
         }
         if (k == KEY_NONE) {
             if (s_cfgModal && s_cfgAwaitEnterRelease) {
@@ -5603,7 +5680,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
 #if defined(DEVICE_TLORA_PAGER_TFT)
-            if (fromTrack && k == KEY_ENTER && s_cfgInfoList) {
+            if (k == KEY_ROLLER && s_cfgInfoList) {
                 s_cfgInfoPanelFocused = !s_cfgInfoPanelFocused;
                 refreshCfgPanelFocusStyles();
                 continue;
@@ -6052,7 +6129,11 @@ static void pumpKeyboardInput() {
                 }
 #else
                 if (kPagerWheelChatNav) {
-                    openComposePrompt(0, nullptr);
+                    if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+                        openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
+                    } else {
+                        openComposePrompt(0, nullptr);
+                    }
                 } else if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
@@ -6440,25 +6521,103 @@ static void drawBootSplash() {
 #endif
 
     auto drawCamelliaMark = [&](int cx, int cy, float scale) {
-        const int petalOrbitX = max(4, (int)(7.0f * scale));
-        const int petalOrbitY = max(4, (int)(8.0f * scale));
-        const int petalR = max(2, (int)(3.0f * scale));
-        const int centerR = max(2, (int)(2.0f * scale));
-        const int innerR = max(1, (int)(2.0f * scale));
+        const uint16_t SHADOW       = 0x18E4;
+        const uint16_t PETAL_OUTER  = 0xF9CF;
+        const uint16_t PETAL_MID    = 0xFADF;
+        const uint16_t PETAL_INNER  = 0xFF7D;
+        const uint16_t PETAL_HILITE = 0xFFDF;
+        const uint16_t PETAL_EDGE   = 0xD8A7;
+        const uint16_t CENTER       = 0xFD20;
+        const uint16_t CENTER_DOT   = 0xFEA0;
+        const uint16_t STEM         = 0x64EC;
+        const uint16_t LEAF_DARK    = 0x2C87;
+        const uint16_t LEAF_LIGHT   = 0x3D68;
 
-        const int dx[6] = {0, 1, 1, 0, -1, -1};
-        const int dy[6] = {-2, -1, 1, 2, 1, -1};
+        auto scaled = [&](float value, int minValue = 0) -> int {
+            int result = (int)lroundf(value * scale);
+            return (result < minValue) ? minValue : result;
+        };
 
-        for (int i = 0; i < 6; i++) {
-            int px = cx + dx[i] * petalOrbitX;
-            int py = cy + dy[i] * petalOrbitY;
-            displayDev().fillCircle(px, py, petalR, titleCol);
-            displayDev().drawCircle(px, py, petalR, cardEdgeHi);
+        const int shadowDx = scaled(1.0f);
+        const int shadowDy = scaled(4.0f);
+        const int shadowR = scaled(34.0f, 1);
+        const int petalOuterOrbitX = scaled(23.0f, 1);
+        const int petalOuterOrbitY = scaled(18.0f, 1);
+        const int petalMidOrbitX = scaled(13.0f, 1);
+        const int petalMidOrbitY = scaled(10.0f, 1);
+        const int petalInnerOrbitX = scaled(6.0f, 1);
+        const int petalInnerOrbitY = scaled(5.0f, 1);
+        const int petalOuterR0 = scaled(11.0f, 1);
+        const int petalOuterR1 = scaled(12.0f, 1);
+        const int petalHiliteOuterDx = scaled(2.0f);
+        const int petalHiliteOuterDy = scaled(2.0f);
+        const int petalHiliteOuterR0 = scaled(7.0f, 1);
+        const int petalHiliteOuterR1 = scaled(8.0f, 1);
+        const int petalMidR = scaled(9.0f, 1);
+        const int petalMidHiliteDx = scaled(1.0f);
+        const int petalMidHiliteDy = scaled(1.0f);
+        const int petalMidHiliteR = scaled(5.0f, 1);
+        const int petalInnerR = scaled(6.0f, 1);
+        const int centerR = scaled(6.0f, 1);
+        const int centerDotOrbit = scaled(4.0f, 1);
+        const int centerDotR = scaled(1.0f, 1);
+        const int stemX = scaled(1.0f);
+        const int stemY = scaled(20.0f);
+        const int stemW = scaled(3.0f, 1);
+        const int stemH = scaled(17.0f, 1);
+        const int stemRadius = scaled(1.0f, 1);
+        const int leafOuterX = scaled(21.0f, 1);
+        const int leafOuterYLeft = scaled(28.0f, 1);
+        const int leafOuterYRight = scaled(29.0f, 1);
+        const int leafOuterR = scaled(8.0f, 1);
+        const int leafInnerX = scaled(14.0f, 1);
+        const int leafInnerYLeft = scaled(30.0f, 1);
+        const int leafInnerYRight = scaled(31.0f, 1);
+        const int leafInnerR = scaled(6.0f, 1);
+
+        displayDev().fillCircle(cx + shadowDx, cy + shadowDy, shadowR, SHADOW);
+
+        for (int i = 0; i < 10; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
+            int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
+            int pr = (i & 1) ? petalOuterR1 : petalOuterR0;
+            int hiliteR = (i & 1) ? petalHiliteOuterR1 : petalHiliteOuterR0;
+            displayDev().fillCircle(px, py, pr, PETAL_OUTER);
+            displayDev().fillCircle(px - petalHiliteOuterDx, py - petalHiliteOuterDy, hiliteR, PETAL_HILITE);
+            displayDev().drawCircle(px, py, pr, PETAL_EDGE);
         }
 
-        displayDev().fillCircle(cx, cy, centerR + 1, subCol);
-        displayDev().fillCircle(cx, cy, centerR, titleCol);
-        displayDev().fillCircle(cx, cy, innerR, TFT_WHITE);
+        for (int i = 0; i < 8; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
+            int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
+            displayDev().fillCircle(px, py, petalMidR, PETAL_MID);
+            displayDev().fillCircle(px - petalMidHiliteDx, py - petalMidHiliteDy, petalMidHiliteR, PETAL_HILITE);
+            displayDev().drawCircle(px, py, petalMidR, PETAL_EDGE);
+        }
+
+        for (int i = 0; i < 5; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
+            int px = cx + (int)lroundf((float)petalInnerOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalInnerOrbitY * sinf(a));
+            displayDev().fillCircle(px, py, petalInnerR, PETAL_INNER);
+        }
+
+        displayDev().fillCircle(cx, cy, centerR, CENTER);
+        displayDev().drawCircle(cx, cy, centerR, 0xD4C0);
+        for (int i = 0; i < 10; i++) {
+            float a = (float)i * 2.0f * (float)M_PI / 10.0f;
+            int sx = cx + (int)lroundf((float)centerDotOrbit * cosf(a));
+            int sy = cy + (int)lroundf((float)centerDotOrbit * sinf(a));
+            displayDev().fillCircle(sx, sy, centerDotR, CENTER_DOT);
+        }
+
+        displayDev().fillRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, STEM);
+        displayDev().fillCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, LEAF_DARK);
+        displayDev().fillCircle(cx - leafInnerX, cy + leafInnerYLeft, leafInnerR, LEAF_LIGHT);
+        displayDev().fillCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, LEAF_DARK);
+        displayDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, LEAF_LIGHT);
     };
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
