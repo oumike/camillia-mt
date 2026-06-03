@@ -2028,6 +2028,12 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
+    const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
+    const lv_coord_t composeModalBottomPad = 2;
+    const lv_coord_t composeModalRowPad = 1;
 #else
     const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
@@ -2189,7 +2195,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
     lv_obj_set_flex_grow(composeCenterBand, 1);
@@ -2205,7 +2211,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     s_composeInput = lv_textarea_create(composeInputHost);
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
     lv_obj_set_style_max_height(s_composeInput, composeInputH, 0);
 #endif
@@ -2230,7 +2236,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
 #else
     lv_obj_set_style_pad_bottom(hint, 1, 0);
