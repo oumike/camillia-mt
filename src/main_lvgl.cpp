@@ -150,7 +150,16 @@ static bool s_cfgAwaitEnterRelease = false;
 static bool s_cfgInfoPanelFocused = false;
 static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
 static uint32_t s_selectedMsgReplyPacketId = 0;
-static char s_selectedMsgText[MSG_CHARS + 1] = "";
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static constexpr size_t kReplyPreviewTextMax = 128;
+#elif defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+static constexpr size_t kReplyPreviewTextMax = 192;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr size_t kReplyPreviewTextMax = 256;
+#else
+static constexpr size_t kReplyPreviewTextMax = 160;
+#endif
+static char s_selectedMsgText[kReplyPreviewTextMax + 1] = "";
 static uint32_t s_myNodeId = 0;
 
 enum ComposeTarget : uint8_t {
@@ -1910,6 +1919,56 @@ static uint32_t resolveReplyPacketId(const DisplayLine *const *rows, int rowCoun
     return replyId;
 }
 
+static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallbackText) {
+    s_selectedMsgReplyPacketId = replyPacketId;
+    s_selectedMsgText[0] = '\0';
+
+    if (replyPacketId != 0) {
+        bool collecting = false;
+        size_t w = 0;
+        for (int row = 0; row < MAX_MSG_LINES; row++) {
+            const DisplayLine *dl = Channels.getLine(s_activeChannel, row);
+            if (!dl) break;
+            if (shouldHideChatLine(dl->text)) continue;
+
+            if (!collecting) {
+                if (dl->packetId != replyPacketId) continue;
+                collecting = true;
+            } else if (dl->packetId != replyPacketId) {
+                break;
+            }
+
+            const char *seg = dl->text;
+            while (*seg == ' ') seg++;  // drop continuation indent padding
+            if (!*seg) continue;
+
+            if (w > 0 && w + 1 < sizeof(s_selectedMsgText)) {
+                s_selectedMsgText[w++] = ' ';
+            }
+
+            while (*seg && w + 1 < sizeof(s_selectedMsgText)) {
+                char c = *seg++;
+                if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+                s_selectedMsgText[w++] = c;
+            }
+            s_selectedMsgText[w] = '\0';
+
+            if (w + 1 >= sizeof(s_selectedMsgText)) break;
+        }
+    }
+
+    if (s_selectedMsgText[0] == '\0' && fallbackText) {
+        strncpy(s_selectedMsgText, fallbackText, sizeof(s_selectedMsgText) - 1);
+        s_selectedMsgText[sizeof(s_selectedMsgText) - 1] = '\0';
+    }
+
+    while (s_selectedMsgText[0] == ' ') {
+        memmove(s_selectedMsgText,
+                s_selectedMsgText + 1,
+                strlen(s_selectedMsgText) + 1);
+    }
+}
+
 static void collectChatRows(const DisplayLine **rows, int &rowCount) {
     rowCount = 0;
     if (!rows) return;
@@ -1968,15 +2027,9 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
 
     s_pagerChatCursorDisplayIndex = displayIndex;
     int rowIdx = displayOrder[displayIndex];
-    s_selectedMsgReplyPacketId = resolveReplyPacketId(rows, rowCount, rowIdx);
-
+    uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, rowIdx);
     const char *txt = rows[rowIdx] ? rows[rowIdx]->text : "";
-    if (txt) {
-        strncpy(s_selectedMsgText, txt, sizeof(s_selectedMsgText) - 1);
-        s_selectedMsgText[sizeof(s_selectedMsgText) - 1] = '\0';
-    } else {
-        s_selectedMsgText[0] = '\0';
-    }
+    setSelectedReplyContext(replyPacketId, txt);
 
     s_lastRenderedChannel = -1;
     return true;
@@ -2032,7 +2085,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
     const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
-    const lv_coord_t composeModalBottomPad = 2;
+    const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
 #else
     const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
@@ -2079,10 +2132,11 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_label_set_text(title, isReply ? "Reply" : "New Message");
 
     if (isReply) {
-        char preview[MSG_CHARS + 1];
+        char preview[kReplyPreviewTextMax + 1];
         formatReplyPreview(replyText, preview, sizeof(preview));
         lv_obj_t *replyLbl = lv_label_create(s_composeModal);
         lv_obj_set_width(replyLbl, lv_pct(100));
+        lv_obj_set_height(replyLbl, lv_font_get_line_height(&lv_font_montserrat_10));
         lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
@@ -2143,6 +2197,8 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     int modalH = isReply ? 96 : 72;
 #if defined(DEVICE_TDECK)
     modalH = isReply ? 92 : 70;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    modalH = isReply ? 82 : 64;
 #endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
@@ -2171,7 +2227,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_label_set_text(title, isReply ? "Reply" : "New Message");
 
     if (isReply) {
-        char preview[MSG_CHARS + 1];
+        char preview[kReplyPreviewTextMax + 1];
         formatReplyPreview(replyText, preview, sizeof(preview));
         lv_obj_t *replyBox = lv_obj_create(s_composeModal);
         lv_obj_set_width(replyBox, lv_pct(100));
@@ -2188,6 +2244,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 
         lv_obj_t *replyLbl = lv_label_create(replyBox);
         lv_obj_set_width(replyLbl, lv_pct(100));
+        lv_obj_set_height(replyLbl, lv_font_get_line_height(composeBodyFont));
         lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
@@ -2198,7 +2255,12 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
+#if defined(DEVICE_TDECK)
     lv_obj_set_flex_grow(composeCenterBand, 1);
+#else
+    // Cardputer: avoid large flex slack above/below the input box.
+    lv_obj_set_height(composeCenterBand, composeInputH + 8);
+#endif
     lv_obj_clear_flag(composeCenterBand, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(composeCenterBand, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(composeCenterBand, 0, 0);
@@ -5162,6 +5224,11 @@ static void openLegendModal() {
     int modalH = 118;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     modalH = 126;
+#if defined(DEVICE_UI_VERTICAL)
+    // Vertical Heltec wraps legend body text into more lines; reserve extra
+    // height so the Close button remains fully visible with padding.
+    modalH = 146;
+#endif
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     modalH = 126;
@@ -5187,6 +5254,9 @@ static void openLegendModal() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_set_style_pad_bottom(s_legendModal, 8, 0);
     lv_obj_set_style_pad_row(s_legendModal, 5, 0);
+#if defined(DEVICE_UI_VERTICAL)
+    lv_obj_set_style_pad_bottom(s_legendModal, 10, 0);
+#endif
 #endif
     lv_obj_set_flex_flow(s_legendModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_legendModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -6223,14 +6293,9 @@ static void onChatMessagePressed(lv_event_t *e) {
     lv_obj_t *label = lv_event_get_target(e);
     if (!label) return;
 
-    s_selectedMsgReplyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    uint32_t replyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
     const char *txt = lv_label_get_text(label);
-    if (txt) {
-        strncpy(s_selectedMsgText, txt, sizeof(s_selectedMsgText) - 1);
-        s_selectedMsgText[sizeof(s_selectedMsgText) - 1] = '\0';
-    } else {
-        s_selectedMsgText[0] = '\0';
-    }
+    setSelectedReplyContext(replyPacketId, txt ? txt : "");
 
     refreshChatComposeButtonState();
 
@@ -6514,11 +6579,13 @@ static void drawBootSplash() {
     const char *nodeShort = s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----";
     snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
 
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
     displayDev().setFont(&fonts::Orbitron_Light_32);
     displayDev().setTextSize(0.82f);
     displayDev().setTextColor(titleCol, cardBg);
     int fwW = displayDev().textWidth(firmwareName);
     displayDev().drawString(firmwareName, cardX + max(0, (cardW - fwW) / 2), cardY + 10);
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     const float flowerScale = 1.15f;
@@ -6627,13 +6694,104 @@ static void drawBootSplash() {
     };
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Keep Cardputer splash lightweight and avoid depending on LGFX_TDeck-specific helpers.
-    displayDev().fillCircle(cardX + (cardW / 2), cardY + (cardH / 2) - 6, (int)(10.0f * flowerScale), titleCol);
+    // Cardputer splash: centered flower with version directly underneath.
+    const int flowerCx = cardX + (cardW / 2);
+    const int flowerCy = cardY + (cardH / 2) - 10;
+    const float cardputerFlowerScale = 0.90f;
+    drawCamelliaMark(flowerCx, flowerCy, cardputerFlowerScale);
+
+    char verLine[72];
+    snprintf(verLine, sizeof(verLine), "Version: %s", version);
+    displayDev().setFont(&fonts::DejaVu12);
+    displayDev().setTextSize(1.0f);
+    displayDev().setTextColor(dimCol, cardBg);
+    // Center version text between the flower and bottom of the display.
+    const int flowerBottom = flowerCy + (int)lroundf(36.0f * cardputerFlowerScale);
+    const int versionBandCenterY = (flowerBottom + screenH) / 2;
+    const int versionTopY = versionBandCenterY - (displayDev().fontHeight() / 2);
+    int verW = displayDev().textWidth(verLine);
+    displayDev().drawString(verLine,
+                            cardX + max(0, (cardW - verW) / 2),
+                            versionTopY);
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    // Pager has much wider horizontal space; use a split layout similar to v1.
+    const int contentInset = 12;
+    const int paneGap = 10;
+    const int contentW = cardW - (contentInset * 2) - paneGap;
+    const int leftX = cardX + contentInset;
+    const int leftW = max(100, (contentW * 46) / 100);
+    const int rightX = leftX + leftW + paneGap;
+    const int rightW = max(100, cardX + cardW - contentInset - rightX);
+
+    auto trimTailToFit = [&](const char *src, int maxWidth) -> String {
+        String out = src ? String(src) : String();
+        if (maxWidth <= 0) return String();
+        while (out.length() > 3 && displayDev().textWidth(out.c_str()) > maxWidth) {
+            out.remove(out.length() - 1);
+        }
+        if (displayDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
+            out.remove(out.length() - 3);
+            out += "...";
+        }
+        return out;
+    };
+
+    auto trimHeadToFit = [&](const char *src, int maxWidth) -> String {
+        String out = src ? String(src) : String();
+        if (maxWidth <= 0) return String();
+        while (out.length() > 3 && displayDev().textWidth(out.c_str()) > maxWidth) {
+            out.remove(0, 1);
+        }
+        if (displayDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
+            out = String("...") + out.substring(3);
+        }
+        return out;
+    };
+
+    displayDev().setFont(&fonts::Orbitron_Light_32);
+    displayDev().setTextSize(1.18f);
+    displayDev().setTextColor(titleCol, cardBg);
+    int fwW = displayDev().textWidth(firmwareName);
+    const int titleY = cardY + 14;
+    displayDev().drawString(firmwareName, leftX + max(0, (leftW - fwW) / 2), titleY);
+
+    int titleH = displayDev().fontHeight();
+    const int flowerAreaTop = titleY + titleH + 10;
+    const int flowerAreaBottom = cardY + cardH - 14;
+    float pagerFlowerScale = min((float)(flowerAreaBottom - flowerAreaTop) / 76.0f,
+                                 (float)(leftW - 16) / 70.0f);
+    if (pagerFlowerScale < 1.10f) pagerFlowerScale = 1.10f;
+    if (pagerFlowerScale > 1.70f) pagerFlowerScale = 1.70f;
+    drawCamelliaMark(leftX + (leftW / 2),
+                     (flowerAreaTop + flowerAreaBottom) / 2,
+                     pagerFlowerScale);
+
+    const int rightInfoTop = titleY + titleH + 6;
+    const int dividerTop = rightInfoTop;
+    const int dividerBottom = cardY + cardH - 16;
+    const int dividerH = max(8, dividerBottom - dividerTop);
+    displayDev().drawFastVLine(rightX - (paneGap / 2), dividerTop, dividerH, cardEdgeHi);
+
+    displayDev().setFont(&fonts::DejaVu12);
+    displayDev().setTextSize(1.0f);
+    displayDev().setTextColor(subCol, cardBg);
+    String longLine = trimTailToFit(nodeLong, rightW);
+    String shortLine = trimTailToFit((String("(") + nodeShort + ")").c_str(), rightW);
+    const int nodeLineY = dividerTop;
+    const int nodeLineStep = displayDev().fontHeight() + 4;
+    displayDev().drawString(longLine.c_str(), rightX, nodeLineY);
+    displayDev().drawString(shortLine.c_str(), rightX, nodeLineY + nodeLineStep);
+
+    char verLine[72];
+    snprintf(verLine, sizeof(verLine), "Version: %s", version);
+    String verText = trimHeadToFit(verLine, rightW);
+    displayDev().setTextColor(dimCol, cardBg);
+    const int versionY = dividerBottom - displayDev().fontHeight();
+    displayDev().drawString(verText.c_str(), rightX, versionY);
 #else
     drawCamelliaMark(cardX + (cardW / 2),
                      cardY + (cardH / 2) - 6,
                      flowerScale);
-#endif
 
     displayDev().setFont(&fonts::DejaVu12);
     displayDev().setTextSize(1.0f);
@@ -6646,6 +6804,7 @@ static void drawBootSplash() {
     displayDev().setTextColor(dimCol, cardBg);
     int verW = displayDev().textWidth(verLine);
     displayDev().drawString(verLine, cardX + max(0, (cardW - verW) / 2), cardY + cardH - 20);
+#endif
 
     delay(1200);
     displayDev().fillScreen(TFT_BLACK);
@@ -7175,11 +7334,16 @@ static void refreshChatView(bool force) {
             lv_obj_set_width(msg, lv_pct(100));
             lv_obj_set_style_text_font(msg, kMainScreenFont, 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+#if defined(DEVICE_TDECK)
+            lv_obj_set_style_pad_left(msg, 1, 0);
+            lv_obj_set_style_pad_right(msg, 0, 0);
+#else
             lv_obj_set_style_pad_left(msg, 2, 0);
             lv_obj_set_style_pad_right(msg, 4, 0);
+#endif
             lv_obj_set_style_pad_top(msg, 0, 0);
             lv_obj_set_style_pad_bottom(msg, 0, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
             lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
 #else
             lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
@@ -7209,13 +7373,13 @@ static void refreshChatView(bool force) {
             }
 
             lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
+            char rendered[MSG_CHARS + 16];
             if (ackSuffix) {
-                char rendered[MSG_CHARS + 16];
                 snprintf(rendered, sizeof(rendered), "%s%s", lineText, ackSuffix);
-                lv_label_set_text(msg, rendered);
             } else {
-                lv_label_set_text(msg, lineText);
+                snprintf(rendered, sizeof(rendered), "%s", lineText);
             }
+            lv_label_set_text(msg, rendered);
 
             uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 
@@ -7469,7 +7633,11 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(s_chatList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chatList, 0, 0);
     lv_obj_set_style_pad_all(s_chatList, 0, 0);
+#if defined(DEVICE_TDECK)
+    lv_obj_set_style_pad_right(s_chatList, 0, 0);
+#else
     lv_obj_set_style_pad_right(s_chatList, 6, 0);
+#endif
     lv_obj_set_style_pad_row(s_chatList, 1, 0);
     lv_obj_set_style_width(s_chatList, 2, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(s_chatList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);

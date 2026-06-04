@@ -601,6 +601,8 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 // Channel windows now use full-width chat, so wrapping should use display width.
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #define MSG_CHARS       53   // Pager uses wider chat glyphs; keep wraps within visible row width.
+#elif defined(DEVICE_TDECK)
+#define MSG_CHARS       36   // T-Deck main chat uses proportional font in a narrower pane than LCD width.
 #else
 #define MSG_CHARS       (LCD_W / CHAR_W)
 #endif

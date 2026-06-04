@@ -171,6 +171,11 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
     while (pos < textLen) {
         int lineStart = firstLine ? prefixLen : CONT_INDENT;
         int avail     = MSG_CHARS - lineStart;
+#if defined(DEVICE_TDECK)
+        // T-Deck LVGL chat rows clip at the extreme right edge unless we keep
+        // a small character safety margin during pre-wrap.
+        avail -= 2;
+#endif
         if (avail <= 0) avail = 1;
 
         int remaining = textLen - pos;
