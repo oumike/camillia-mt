@@ -7163,10 +7163,18 @@ static void refreshChannelGlow(bool force) {
 
     if (s_channelSelectorBtn) {
         bool selectorShouldGlow = anyUnread;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
         selectorShouldGlow = anyUnread && !isChannelDropdownVisible();
 #endif
         if (selectorShouldGlow) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+            lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
+            lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
+            lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_outline_width(s_channelSelectorBtn, 0, 0);
+            lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
+#else
             lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
             lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
             lv_obj_set_style_outline_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
@@ -7177,7 +7185,12 @@ static void refreshChannelGlow(bool force) {
             lv_obj_set_style_shadow_spread(s_channelSelectorBtn, 1, 0);
             lv_obj_set_style_shadow_width(s_channelSelectorBtn, shadowW, 0);
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, pulseOpa, 0);
+#endif
         } else {
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+            lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
+            lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
+#endif
             lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
             lv_obj_set_style_outline_width(s_channelSelectorBtn, 0, 0);
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
@@ -7245,7 +7258,7 @@ static void setActiveChannel(int channelIdx) {
 }
 
 static bool isChannelDropdownVisible() {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     return s_channelList && !lv_obj_has_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
 #else
     return false;
@@ -7253,13 +7266,16 @@ static bool isChannelDropdownVisible() {
 }
 
 static void refreshChannelSelectorLabel() {
-#if !defined(DEVICE_TDECK)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION)
     return;
 #endif
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
     if (!name || !name[0]) name = "Channel";
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    name = "";
+#endif
 
     lv_label_set_text(s_channelSelectorLabel, name);
     if (s_channelSelectorCaretLabel) {
@@ -7268,7 +7284,7 @@ static void refreshChannelSelectorLabel() {
 }
 
 static void setChannelDropdownVisible(bool visible) {
-#if !defined(DEVICE_TDECK)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION)
     LV_UNUSED(visible);
     return;
 #endif
@@ -7285,7 +7301,7 @@ static void setChannelDropdownVisible(bool visible) {
 }
 
 static void onChannelSelectorPressed(lv_event_t *e) {
-#if !defined(DEVICE_TDECK)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION)
     LV_UNUSED(e);
     return;
 #endif
@@ -7367,7 +7383,7 @@ static void refreshHeaderTime(bool force) {
 
     if (!force && strcmp(buf, s_lastHeaderTime) == 0) return;
     lv_label_set_text(s_chatHeaderTime, buf);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     layoutHeaderInlineItems();
 #endif
     strncpy(s_lastHeaderTime, buf, sizeof(s_lastHeaderTime) - 1);
@@ -7375,7 +7391,7 @@ static void refreshHeaderTime(bool force) {
 }
 
 static void layoutHeaderInlineItems() {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!s_chatHeaderTime || !s_chatHeaderBattBar || !s_chatHeaderGps || !s_chatHeaderWifi) return;
 
     lv_obj_align_to(s_chatHeaderTime, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -10, 0);
@@ -7447,7 +7463,7 @@ static void refreshHeaderStatus(bool force) {
         wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
         0);
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     layoutHeaderInlineItems();
 #endif
 
@@ -7856,11 +7872,17 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     lv_obj_t *panel = nullptr;
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
 #if defined(DEVICE_TDECK)
     const int panelMargin = 6;
     const int chatGap = 6;
-    const int chatHeaderH = 25;
     const int chatLegendH = 14;
+#else
+    const int panelMargin = 0;
+    const int chatGap = 3;
+    const int chatLegendH = 28;
+#endif
+    const int chatHeaderH = 25;
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
     const int chatX = panelMargin;
@@ -7873,19 +7895,6 @@ static void buildUi() {
     const int chatHeaderH = 20;
     const int chatLegendH = 12;
     const int channelStripH = kMainScreenChannelBtnHeight + 6;
-    const int screenW = lv_disp_get_hor_res(NULL);
-    const int screenH = lv_disp_get_ver_res(NULL);
-    const int chatX = panelMargin;
-    const int chatW = screenW - panelMargin * 2;
-    const int stripY = panelMargin + chatHeaderH + 2;
-    const int chatY = stripY + channelStripH + chatGap;
-    const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-    const int panelMargin = 0;
-    const int chatGap = 3;
-    const int chatHeaderH = 25;
-    const int channelStripH = kMainScreenChannelBtnHeight + 8;
-    const int chatLegendH = 28;
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
     const int chatX = panelMargin;
@@ -7949,21 +7958,34 @@ static void buildUi() {
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     s_channelStrip = nullptr;
     s_channelList = nullptr;
 
     const int selectorBtnH = chatHeaderH - 6;
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    const int selectorBtnW = 46;
+    const int selectorBtnOffsetX = 1;
+#else
     const int selectorBtnW = min(max(chatW / 3, 96), 220);
+    const int selectorBtnOffsetX = headerPadX;
+#endif
 
     s_channelSelectorBtn = lv_btn_create(s_chatHeaderBar);
     lv_obj_set_size(s_channelSelectorBtn, selectorBtnW, selectorBtnH);
-    lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, headerPadX, 0);
+    lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, selectorBtnOffsetX, 0);
     lv_obj_set_style_radius(s_channelSelectorBtn, 6, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    lv_obj_set_style_pad_left(s_channelSelectorBtn, 0, 0);
+    lv_obj_set_style_pad_right(s_channelSelectorBtn, 0, 0);
+    lv_obj_set_style_pad_top(s_channelSelectorBtn, 0, 0);
+    lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 0, 0);
+#else
     lv_obj_set_style_pad_left(s_channelSelectorBtn, 6, 0);
     lv_obj_set_style_pad_right(s_channelSelectorBtn, 6, 0);
     lv_obj_set_style_pad_top(s_channelSelectorBtn, 2, 0);
     lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 2, 0);
+#endif
     lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
     lv_obj_add_event_cb(s_channelSelectorBtn, onChannelSelectorPressed, LV_EVENT_CLICKED, nullptr);
 
@@ -7977,13 +7999,17 @@ static void buildUi() {
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
     lv_obj_set_style_text_font(s_channelSelectorCaretLabel, headerTextFont, 0);
     lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, 0);
+#else
     lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
+#endif
 #else
     s_channelSelectorBtn = nullptr;
     s_channelSelectorLabel = nullptr;
     s_channelSelectorCaretLabel = nullptr;
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
     s_channelStrip = lv_obj_create(screen);
     lv_obj_set_size(s_channelStrip, chatW, channelStripH);
     lv_obj_align(s_channelStrip, LV_ALIGN_TOP_LEFT, chatX, stripY);
@@ -8028,7 +8054,7 @@ static void buildUi() {
     lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
 
     s_chatHeaderGps = lv_label_create(s_chatHeaderBar);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_align_to(s_chatHeaderGps, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
 #else
     lv_obj_align(s_chatHeaderGps, LV_ALIGN_LEFT_MID, 24, 0);
@@ -8057,7 +8083,7 @@ static void buildUi() {
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
     lv_obj_set_style_text_font(s_chatHeaderWifi, headerIconFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     layoutHeaderInlineItems();
 #endif
 
@@ -8108,7 +8134,7 @@ static void buildUi() {
     lv_obj_set_flex_flow(s_chatList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chatList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     {
         const int dropdownW = min(max(chatW / 2, 120), 260);
         const int maxDropdownH = max(44, chatH - 8);
@@ -8188,7 +8214,7 @@ static void buildUi() {
 #endif
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
         s_channelBtns[i] = btn;
         lv_obj_set_width(btn, lv_pct(100));
@@ -8388,7 +8414,7 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
 
     if (s_channelList) {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
         lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
 #endif
