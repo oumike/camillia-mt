@@ -1,6 +1,7 @@
 #include "battery_util.h"
 #include "config.h"
 #include <Wire.h>
+#include <string.h>
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
@@ -107,6 +108,36 @@ static inline int clampPct(int v) {
     return v;
 }
 
+namespace {
+constexpr uint32_t kBatteryUpdateIntervalMs = 1200UL;
+constexpr float kBatteryAlphaSlow = 0.18f;
+constexpr float kBatteryAlphaFast = 0.45f;
+constexpr float kBatteryFastDeltaV = 0.08f;
+constexpr int kBatteryPctHysteresis = 2;
+
+struct BatteryFilterState {
+    bool initialized;
+    uint32_t lastSampleMs;
+    float filteredVoltage;
+    uint8_t displayPct;
+};
+
+static BatteryFilterState sBatteryFilter = {};
+
+static int batteryVoltageToPct(float vbat) {
+    if (vbat <= 0.0f) return 0;
+    float pctf = (vbat - BATT_VMIN) / (BATT_VMAX - BATT_VMIN) * 100.0f;
+    int pct = (int)(pctf + 0.5f);
+    return clampPct(pct);
+}
+
+static void batteryResetFilter() {
+    memset(&sBatteryFilter, 0, sizeof(sBatteryFilter));
+}
+}
+
+static void batteryRefreshFilter(bool forceSample);
+
 #if (BATT_ADC_PIN >= 0)
 static int32_t batteryReadAdcMilliVoltsOnce() {
     int mv = analogReadMilliVolts(BATT_ADC_PIN);
@@ -197,9 +228,12 @@ void batteryInitAdc() {
         bqMarkUnavailable(millis());
     }
 #endif
+
+    batteryResetFilter();
+    batteryRefreshFilter(true);
 }
 
-float batteryReadVoltage() {
+static float batteryReadVoltageRaw() {
 #if (BATT_ADC_PIN < 0)
 #if defined(DEVICE_TLORA_PAGER_TFT)
     return batteryReadPagerBqVolts();
@@ -222,8 +256,55 @@ float batteryReadVoltage() {
 #endif
 }
 
+static void batteryRefreshFilter(bool forceSample) {
+    uint32_t now = millis();
+    if (!forceSample && sBatteryFilter.initialized
+        && (uint32_t)(now - sBatteryFilter.lastSampleMs) < kBatteryUpdateIntervalMs) {
+        return;
+    }
+
+    float rawV = batteryReadVoltageRaw();
+    sBatteryFilter.lastSampleMs = now;
+
+    if (rawV <= 0.0f) {
+        if (!sBatteryFilter.initialized) {
+            sBatteryFilter.filteredVoltage = 0.0f;
+            sBatteryFilter.displayPct = 0;
+        }
+        return;
+    }
+
+    if (!sBatteryFilter.initialized) {
+        sBatteryFilter.initialized = true;
+        sBatteryFilter.filteredVoltage = rawV;
+        sBatteryFilter.displayPct = (uint8_t)batteryVoltageToPct(rawV);
+        return;
+    }
+
+    float deltaV = rawV - sBatteryFilter.filteredVoltage;
+    if (deltaV < 0.0f) deltaV = -deltaV;
+    float alpha = (deltaV >= kBatteryFastDeltaV) ? kBatteryAlphaFast : kBatteryAlphaSlow;
+    sBatteryFilter.filteredVoltage += (rawV - sBatteryFilter.filteredVoltage) * alpha;
+
+    int targetPct = batteryVoltageToPct(sBatteryFilter.filteredVoltage);
+    int diff = targetPct - (int)sBatteryFilter.displayPct;
+    if (diff >= kBatteryPctHysteresis) {
+        sBatteryFilter.displayPct = (uint8_t)((diff >= 6)
+            ? targetPct
+            : clampPct((int)sBatteryFilter.displayPct + 1));
+    } else if (diff <= -kBatteryPctHysteresis) {
+        sBatteryFilter.displayPct = (uint8_t)((diff <= -6)
+            ? targetPct
+            : clampPct((int)sBatteryFilter.displayPct - 1));
+    }
+}
+
+float batteryReadVoltage() {
+    batteryRefreshFilter(false);
+    return sBatteryFilter.initialized ? sBatteryFilter.filteredVoltage : 0.0f;
+}
+
 uint8_t batteryReadPercent() {
-    float vbat = batteryReadVoltage();
-    int pct = (int)((vbat - BATT_VMIN) / (BATT_VMAX - BATT_VMIN) * 100.0f);
-    return (uint8_t)clampPct(pct);
+    batteryRefreshFilter(false);
+    return sBatteryFilter.initialized ? sBatteryFilter.displayPct : 0;
 }

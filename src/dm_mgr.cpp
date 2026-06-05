@@ -7,6 +7,7 @@
 #include "lgfx_tdeck.h"
 #include "debug_flags.h"
 #include "config.h"
+#include "utf8_utils.h"
 #include <esp_heap_caps.h>
 #include <string.h>
 #if HAS_SD_CARD
@@ -71,7 +72,7 @@ DmConv *DmMgr::findOrCreate(uint32_t nodeId, const char *shortName) {
     memset(c, 0, sizeof(DmConv));
     c->nodeId    = nodeId;
     c->rxChanIdx = -1;
-    strncpy(c->shortName, shortName ? shortName : "????", sizeof(c->shortName) - 1);
+    utf8util::copyTruncate(c->shortName, sizeof(c->shortName), shortName ? shortName : "????");
     c->unread = false;
     c->unreadCount = 0;
 
@@ -203,8 +204,7 @@ void DmMgr::_pushLine(DmConv &c, const char *text, uint16_t color,
                       uint32_t packetId, DmLine::AckState ack) {
     if (!c.lines) return;
     int idx = c.count % MAX_DM_LINES;
-    strncpy(c.lines[idx].text, text, DM_LINE_LEN);
-    c.lines[idx].text[DM_LINE_LEN] = '\0';
+    utf8util::copyTruncate(c.lines[idx].text, sizeof(c.lines[idx].text), text);
     c.lines[idx].color = color;
     c.lines[idx].packetId = packetId;
     c.lines[idx].ack = ack;
@@ -218,11 +218,11 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     DmConv *c = findOrCreate(nodeId, shortName);
     if (!c) return;
 
-    if (shortName && shortName[0])
-        strncpy(c->shortName, shortName, sizeof(c->shortName) - 1);
+    if (shortName && shortName[0]) {
+        utf8util::copyTruncate(c->shortName, sizeof(c->shortName), shortName);
+    }
 
-    strncpy(c->lastText, text, DM_LINE_LEN);
-    c->lastText[DM_LINE_LEN] = '\0';
+    utf8util::copyTruncate(c->lastText, sizeof(c->lastText), text);
     c->lastMs = millis();
     if (markUnread) {
         c->unread = true;
@@ -282,8 +282,7 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
 
         if (wrapped && wrappedCount < MAX_WRAP_LINES) {
             char *dst = wrappedLine(wrappedCount);
-            strncpy(dst, lineBuf, DM_LINE_LEN);
-            dst[DM_LINE_LEN] = '\0';
+            utf8util::copyTruncate(dst, DM_LINE_LEN + 1, lineBuf);
             wrappedCount++;
         } else if (!wrapped) {
             // Low-memory fallback: keep chat usable even if wrapping cache can't be allocated.
@@ -644,8 +643,7 @@ void DmMgr::saveConv(const DmConv *c) {
     for (int i = 0; i < nLines; i++) {
         int idx = (startIdx + i) % MAX_DM_LINES;
         PersistDmLine pl = {};
-        strncpy(pl.text, c->lines[idx].text, DM_LINE_LEN);
-        pl.text[DM_LINE_LEN] = '\0';
+        utf8util::copyTruncate(pl.text, sizeof(pl.text), c->lines[idx].text);
         pl.color = c->lines[idx].color;
         written += f.write((const uint8_t *)&pl, sizeof(PersistDmLine));
     }
@@ -691,11 +689,16 @@ void DmMgr::loadAll() {
         }
 
         uint32_t nodeId;
+        char persistedShortName[5] = {};
         char shortName[5] = {};
         int32_t count, numLines, rxChanIdx;
 
         f.read((uint8_t *)&nodeId, 4);
-        f.read((uint8_t *)shortName, 5);
+        f.read((uint8_t *)persistedShortName, 5);
+        utf8util::copyTruncateBytes(shortName,
+                        sizeof(shortName),
+                        (const uint8_t *)persistedShortName,
+                        sizeof(persistedShortName));
         f.read((uint8_t *)&count, 4);
         f.read((uint8_t *)&numLines, 4);
         f.read((uint8_t *)&rxChanIdx, 4);
@@ -717,8 +720,7 @@ void DmMgr::loadAll() {
             PersistDmLine pl = {};
             if (f.read((uint8_t *)&pl, sizeof(PersistDmLine)) != sizeof(PersistDmLine)) break;
             DmLine line = {};
-            strncpy(line.text, pl.text, DM_LINE_LEN);
-            line.text[DM_LINE_LEN] = '\0';
+            utf8util::copyTruncate(line.text, sizeof(line.text), pl.text);
             line.color = pl.color;
             line.packetId = 0;
             line.ack = DmLine::NONE;
@@ -730,8 +732,7 @@ void DmMgr::loadAll() {
         // Set lastText from the newest line
         if (numLines > 0) {
             int newest = (count - 1) % MAX_DM_LINES;
-            strncpy(c->lastText, c->lines[newest].text, DM_LINE_LEN);
-            c->lastText[DM_LINE_LEN] = '\0';
+            utf8util::copyTruncate(c->lastText, sizeof(c->lastText), c->lines[newest].text);
         }
 
         debugLogMessages("[dm] loaded %08X: %d lines\n", nodeId, (int)numLines);

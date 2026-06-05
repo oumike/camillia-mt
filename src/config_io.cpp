@@ -1,5 +1,6 @@
 #include "config_io.h"
 #include "base64_util.h"
+#include "utf8_utils.h"
 #include <SD.h>
 #include <Preferences.h>
 #include <SPI.h>
@@ -165,9 +166,9 @@ static const char *kRebroadNames[] = {
 static const int kNumRebroadModes = 5;
 
 static const char *kThemeNames[] = {
-    "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON"
+    "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON", "SCARLET_POP"
 };
-static const int kNumThemes = 5;
+static const int kNumThemes = 6;
 
 static const char *kThemeModeNames[] = {
     "DARK", "LIGHT"
@@ -205,7 +206,10 @@ static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
     while (len > 0 && isspace((unsigned char)src[len - 1])) len--;
 
     size_t n = (len < (dstSize - 1)) ? len : (dstSize - 1);
-    memcpy(dst, src, n);
+    while (n > 0 && src[n] != '\0' && utf8util::isContinuationByte((uint8_t)src[n])) {
+        n--;
+    }
+    if (n > 0) memcpy(dst, src, n);
     dst[n] = '\0';
 }
 
@@ -218,10 +222,8 @@ static bool parseBoolValue(const char *val) {
 
 // ── Defaults ─────────────────────────────────────────────────
 void cfgInitDefaults(RhinoConfig &cfg) {
-    strncpy(cfg.nodeLong,  MY_LONG_NAME,  sizeof(cfg.nodeLong)  - 1);
-    strncpy(cfg.nodeShort, MY_SHORT_NAME, sizeof(cfg.nodeShort) - 1);
-    cfg.nodeLong[sizeof(cfg.nodeLong)   - 1] = '\0';
-    cfg.nodeShort[sizeof(cfg.nodeShort) - 1] = '\0';
+    utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), MY_LONG_NAME);
+    utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), MY_SHORT_NAME);
     cfg.gpsEnabled   = (bool)MY_GPS_ENABLED;
     cfg.latI         = MY_LAT_I;
     cfg.lonI         = MY_LON_I;
@@ -509,9 +511,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         const char *nm = ch.name_buf[0] ? ch.name_buf : ch.name;
         base64Encode(ch.key, ch.keyLen, b64buf);
         const char *roleStr = (ch.role == 1) ? "SECONDARY" : (ch.role == 2) ? "DISABLED" : "PRIMARY";
-        snprintf(tmp, sizeof(tmp),
-                 "  - name: %s\n    role: %s\n    key: %s\n    hash: %02x\n",
-                 nm, roleStr, b64buf, ch.hash);
+        out += "  - name: "; out += nm; out += "\n";
+        out += "    role: "; out += roleStr; out += "\n";
+        out += "    key: "; out += b64buf; out += "\n";
+        snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
     }
 }
@@ -577,9 +580,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else {
                 // Top-level key-value (Meshtastic CLI format)
                 if      (!strcmp(key, "owner"))
-                    strncpy(cfg.nodeLong,  val, sizeof(cfg.nodeLong)  - 1);
+                    utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), val);
                 else if (!strcmp(key, "owner_short"))
-                    strncpy(cfg.nodeShort, val, sizeof(cfg.nodeShort) - 1);
+                    utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), val);
                 else if (!strcmp(key, "canned_messages"))
                     strncpy(cfg.cannedMessages, val, sizeof(cfg.cannedMessages) - 1);
                 else if (!strcmp(key, "wifi_ssid")) {
@@ -639,8 +642,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.alt = (int32_t)atol(val);
                 } else if (!strcmp(section, "node")) {
                     // Legacy format
-                    if      (!strcmp(key, "long"))  strncpy(cfg.nodeLong,  val, sizeof(cfg.nodeLong)  - 1);
-                    else if (!strcmp(key, "short")) strncpy(cfg.nodeShort, val, sizeof(cfg.nodeShort) - 1);
+                    if      (!strcmp(key, "long"))  utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), val);
+                    else if (!strcmp(key, "short")) utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), val);
                 } else if (!strcmp(section, "position")) {
                     // Legacy format: stored as scaled int32 * 1e7
                     if      (!strcmp(key, "lat")) cfg.latI = (int32_t)atol(val);
@@ -776,7 +779,7 @@ bool cfgExport(const RhinoConfig &cfg) {
     cfgToYaml(cfg, yaml);
     f.print(yaml);
     f.close();
-    Serial.printf("[cfg] exported to %s\n---\n%s---\n", kPath, yaml.c_str());
+    Serial.printf("[cfg] exported to %s (%u bytes)\n", kPath, (unsigned)yaml.length());
     return true;
 }
 

@@ -3,6 +3,7 @@
 #include "mesh_radio.h"
 #include "lgfx_tdeck.h"
 #include "debug_flags.h"
+#include "utf8_utils.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include <SD.h>
@@ -115,8 +116,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     if (!ch.lines) return;
     int idx = ch.count % MAX_MSG_LINES;
     DisplayLine &dl = ch.lines[idx];
-    strncpy(dl.text, text, MSG_CHARS);
-    dl.text[MSG_CHARS] = '\0';
+    utf8util::copyTruncate(dl.text, sizeof(dl.text), text);
     dl.color    = color;
     dl.packetId = packetId;
     dl.ack      = ack;
@@ -278,8 +278,7 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
     for (int lineIdx = first; lineIdx < ch.count; lineIdx++) {
         const DisplayLine &dl = ch.lines[lineIdx % MAX_MSG_LINES];
         char text[MSG_CHARS + 1];
-        strncpy(text, dl.text, MSG_CHARS);
-        text[MSG_CHARS] = '\0';
+        utf8util::copyTruncate(text, sizeof(text), dl.text);
         for (int i = 0; text[i]; i++) {
             if (text[i] == '\n' || text[i] == '\r') text[i] = ' ';
         }

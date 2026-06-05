@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "web_config.h"
 #include "debug_flags.h"
+#include "utf8_utils.h"
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WiFiClientSecure.h>
@@ -281,6 +282,15 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 }
 #endif
 
+#if defined(DEVICE_TDECK)
+static inline char remapTdeckUiKey(char k, bool allowScrollRemap) {
+    if (!allowScrollRemap) return k;
+    if (k == 'j' || k == 'J') return KEY_SCROLL_UP;
+    if (k == 'k' || k == 'K') return KEY_SCROLL_DN;
+    return k;
+}
+#endif
+
 static void refreshChatView(bool force = false);
 static void collectChatRows(const DisplayLine **rows, int &rowCount);
 static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
@@ -407,8 +417,178 @@ static void stateMapBootstrapRestoreWifi() {
 #define LV_SYMBOL_GLOBE_TINY LV_SYMBOL_WIFI
 #endif
 
+static size_t decodeUtf8Codepoint(const char *src, size_t avail, uint32_t &cp) {
+    cp = 0;
+    if (!src || avail == 0) return 0;
+
+    const uint8_t b0 = (uint8_t)src[0];
+    if (b0 < 0x80) {
+        cp = b0;
+        return 1;
+    }
+
+    if ((b0 & 0xE0) == 0xC0) {
+        if (avail < 2) return 0;
+        const uint8_t b1 = (uint8_t)src[1];
+        if ((b1 & 0xC0) != 0x80) return 0;
+        cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(b1 & 0x3F);
+        return 2;
+    }
+
+    if ((b0 & 0xF0) == 0xE0) {
+        if (avail < 3) return 0;
+        const uint8_t b1 = (uint8_t)src[1];
+        const uint8_t b2 = (uint8_t)src[2];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80) return 0;
+        cp = ((uint32_t)(b0 & 0x0F) << 12)
+           | ((uint32_t)(b1 & 0x3F) << 6)
+           | (uint32_t)(b2 & 0x3F);
+        return 3;
+    }
+
+    if ((b0 & 0xF8) == 0xF0) {
+        if (avail < 4) return 0;
+        const uint8_t b1 = (uint8_t)src[1];
+        const uint8_t b2 = (uint8_t)src[2];
+        const uint8_t b3 = (uint8_t)src[3];
+        if ((b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80) return 0;
+        cp = ((uint32_t)(b0 & 0x07) << 18)
+           | ((uint32_t)(b1 & 0x3F) << 12)
+           | ((uint32_t)(b2 & 0x3F) << 6)
+           | (uint32_t)(b3 & 0x3F);
+        return 4;
+    }
+
+    return 0;
+}
+
+static bool isEmojiCodepoint(uint32_t cp) {
+    if (cp >= 0x1F300 && cp <= 0x1FAFF) return true;
+    if (cp >= 0x2600 && cp <= 0x27BF) return true;
+    if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true; // flag letters
+    return false;
+}
+
+static bool isEmojiJoinerOrModifier(uint32_t cp) {
+    if (cp == 0x200D || cp == 0xFE0F || cp == 0x20E3) return true; // ZWJ, VS16, keycap
+    if (cp >= 0x1F3FB && cp <= 0x1F3FF) return true; // skin tones
+    return false;
+}
+
+static const char *emojiAliasForCodepoint(uint32_t cp) {
+    switch (cp) {
+        case 0x1F600: case 0x1F601: case 0x1F602: case 0x1F603:
+        case 0x1F604: case 0x1F606: case 0x1F60A: case 0x1F642:
+        case 0x263A:
+            return ":)";
+        case 0x1F614: case 0x1F622: case 0x1F62D:
+            return ":(";
+        case 0x1F44D:
+            return "[+]";
+        case 0x1F44E:
+            return "[-]";
+        case 0x2764:
+            return "<3";
+        case 0x1F525:
+            return "[hot]";
+        case 0x1F389:
+            return "[party]";
+        case 0x2705:
+            return "[ok]";
+        case 0x274C:
+            return "[x]";
+        case 0x26A0:
+            return "[!]";
+        case 0x1F64F:
+            return "[pray]";
+        case 0x1F914:
+            return "[?]";
+        case 0x1F440:
+            return "[eyes]";
+        case 0x1F680:
+            return "[go]";
+        case 0x1F4CD:
+            return "[pin]";
+        default:
+            return nullptr;
+    }
+}
+
+static size_t appendTextLiteral(char *dst, size_t dstLen, size_t writePos, const char *lit) {
+    if (!dst || dstLen == 0 || !lit) return writePos;
+    while (*lit && writePos + 1 < dstLen) {
+        dst[writePos++] = *lit++;
+    }
+    dst[writePos] = '\0';
+    return writePos;
+}
+
+static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
+    if (!dst || dstLen == 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+
+    size_t writePos = 0;
+    size_t i = 0;
+    size_t srcLen = strlen(src);
+    while (i < srcLen && writePos + 1 < dstLen) {
+        uint32_t cp = 0;
+        size_t n = decodeUtf8Codepoint(src + i, srcLen - i, cp);
+        if (n == 0) {
+            dst[writePos++] = src[i++];
+            dst[writePos] = '\0';
+            continue;
+        }
+
+        if (isEmojiJoinerOrModifier(cp)) {
+            i += n;
+            continue;
+        }
+
+        // Collapse regional-indicator pairs (flags) into a readable country code.
+        if (cp >= 0x1F1E6 && cp <= 0x1F1FF) {
+            uint32_t cp2 = 0;
+            size_t n2 = decodeUtf8Codepoint(src + i + n, srcLen - (i + n), cp2);
+            if (n2 > 0 && cp2 >= 0x1F1E6 && cp2 <= 0x1F1FF) {
+                char cc[5];
+                cc[0] = '[';
+                cc[1] = (char)('A' + (int)(cp - 0x1F1E6));
+                cc[2] = (char)('A' + (int)(cp2 - 0x1F1E6));
+                cc[3] = ']';
+                cc[4] = '\0';
+                writePos = appendTextLiteral(dst, dstLen, writePos, cc);
+                i += n + n2;
+                continue;
+            }
+        }
+
+        const char *alias = emojiAliasForCodepoint(cp);
+        if (alias) {
+            writePos = appendTextLiteral(dst, dstLen, writePos, alias);
+            i += n;
+            continue;
+        }
+
+        // Keep unknown emoji codepoints as-is so we don't force generic tokens.
+        // If the current font cannot draw them, LVGL will still show its fallback glyph.
+
+        if (writePos + n >= dstLen) break;
+        memcpy(dst + writePos, src + i, n);
+        writePos += n;
+        dst[writePos] = '\0';
+        i += n;
+    }
+}
+
+static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
+    static char safeBuf[768];
+    renderEmojiSafeText(text, safeBuf, sizeof(safeBuf));
+    lv_label_set_text(label, safeBuf);
+}
+
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
+    CFG_ACTION_GPS_TOGGLE,
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
@@ -447,7 +627,7 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
         rgb565(0x00, 0x2b, 0x36), rgb565(0x07, 0x36, 0x42), rgb565(0x0c, 0x3c, 0x47), rgb565(0x2a, 0xa1, 0x98),
         "Solarized Dark"},
     {UI_THEME_SOLARIZED, UI_MODE_LIGHT,
-        rgb565(0xfd, 0xf6, 0xe3), rgb565(0xfd, 0xf6, 0xe3), rgb565(0xee, 0xe8, 0xd5), rgb565(0x2a, 0xa1, 0x98),
+        rgb565(0xee, 0xe8, 0xd5), rgb565(0xfd, 0xf6, 0xe3), rgb565(0xee, 0xe8, 0xd5), rgb565(0x2a, 0xa1, 0x98),
         "Solarized Light"},
     {UI_THEME_CRIMSON, UI_MODE_DARK,
         rgb565(0x06, 0x0f, 0x24), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0xff, 0x4a, 0x58),
@@ -455,6 +635,12 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
     {UI_THEME_CRIMSON, UI_MODE_LIGHT,
         rgb565(0xf3, 0xf7, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xc6, 0x28, 0x39),
         "Crimson Blue Light"},
+    {UI_THEME_SCARLET_POP, UI_MODE_DARK,
+        rgb565(0x15, 0x00, 0x09), rgb565(0x76, 0x00, 0x31), rgb565(0x8b, 0x00, 0x38), rgb565(0xd5, 0x1c, 0x39),
+        "Scarlet Pop Dark"},
+    {UI_THEME_SCARLET_POP, UI_MODE_LIGHT,
+        rgb565(0xff, 0xf2, 0xf4), rgb565(0xff, 0xf8, 0xf9), rgb565(0xff, 0xea, 0xed), rgb565(0xd5, 0x1c, 0x39),
+        "Scarlet Pop Light"},
 };
 
 static constexpr int kUiThemePresetCount =
@@ -1241,6 +1427,26 @@ static void applyUiThemePalette() {
                 rgb565(0x07, 0x16, 0x36), rgb565(0x2e, 0x0d, 0x24), rgb565(0x15, 0x27, 0x54), rgb565(0x3b, 0x57, 0x8f), rgb565(0xff, 0x63, 0x70), rgb565(0xf4, 0xf8, 0xff), rgb565(0xb9, 0xc9, 0xe9), rgb565(0x8a, 0x9c, 0xc4)
             };
         }
+    } else if (s_cfg.uiTheme == UI_THEME_SCARLET_POP) {
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            s_ui = {
+                rgb565(0xff, 0xf2, 0xf4), rgb565(0xff, 0xdf, 0xe3), rgb565(0xff, 0xcf, 0xd6), rgb565(0xff, 0xf8, 0xf9), rgb565(0xff, 0xea, 0xed), rgb565(0xff, 0xdc, 0xe1),
+                rgb565(0xd5, 0x1c, 0x39), rgb565(0xfe, 0xec, 0x41), rgb565(0xc7, 0x6c, 0x77), rgb565(0xd8, 0xa1, 0xaa), rgb565(0xe7, 0xb9, 0xc0), rgb565(0xff, 0xf5, 0xf6), rgb565(0xff, 0xe8, 0xeb),
+                rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0x60, 0x60), rgb565(0x3a, 0x0a, 0x14), rgb565(0x7e, 0x3b, 0x49), rgb565(0xff, 0xff, 0xff), rgb565(0x56, 0x12, 0x22),
+                rgb565(0xff, 0xdd, 0xe2), rgb565(0xd5, 0x1c, 0x39), rgb565(0xc4, 0x22, 0x3b), rgb565(0xe0, 0x55, 0x62), rgb565(0xb5, 0x85, 0x52),
+                rgb565(0x1b, 0x8f, 0x42), rgb565(0xb0, 0x7a, 0x00), rgb565(0x9f, 0x1f, 0x2f),
+                rgb565(0xff, 0xe4, 0xe9), rgb565(0xff, 0xf5, 0xd8), rgb565(0xff, 0xf7, 0xf8), rgb565(0xe5, 0xb4, 0xbc), rgb565(0xff, 0x88, 0x88), rgb565(0x4a, 0x0f, 0x1d), rgb565(0x8c, 0x46, 0x55), rgb565(0xaa, 0x5f, 0x6d)
+            };
+        } else {
+            s_ui = {
+                rgb565(0x15, 0x00, 0x09), rgb565(0x4a, 0x00, 0x1f), rgb565(0x5d, 0x00, 0x27), rgb565(0x76, 0x00, 0x31), rgb565(0x8b, 0x00, 0x38), rgb565(0xa0, 0x0f, 0x39),
+                rgb565(0xff, 0x60, 0x60), rgb565(0xfe, 0xec, 0x41), rgb565(0xc6, 0x5e, 0x68), rgb565(0x6f, 0x2d, 0x3b), rgb565(0x8b, 0x3c, 0x4b), rgb565(0x5c, 0x00, 0x26), rgb565(0x76, 0x00, 0x31),
+                rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0x60, 0x60), rgb565(0xff, 0xf1, 0xf1), rgb565(0xe5, 0xb3, 0xba), rgb565(0xff, 0xff, 0xff), rgb565(0xff, 0xe3, 0xe6),
+                rgb565(0x7a, 0x12, 0x30), rgb565(0xff, 0x60, 0x60), rgb565(0xff, 0x8a, 0x8a), rgb565(0xfe, 0xec, 0x41), rgb565(0x9d, 0x6d, 0x3f),
+                rgb565(0x39, 0xc9, 0x69), rgb565(0xfe, 0xec, 0x41), rgb565(0xff, 0x58, 0x58),
+                rgb565(0x24, 0x00, 0x10), rgb565(0x5a, 0x00, 0x26), rgb565(0x40, 0x00, 0x1a), rgb565(0x7d, 0x23, 0x3f), rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0xf4, 0xf4), rgb565(0xe4, 0xb0, 0xb7), rgb565(0xbd, 0x7b, 0x85)
+            };
+        }
     } else {
         if (s_cfg.uiMode == UI_MODE_LIGHT) {
             s_ui = {
@@ -1386,6 +1592,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Web Config: On (%s)", webCfgIP());
             } else {
                 snprintf(buf, bufLen, "Web Config: Enabled");
+            }
+            break;
+        case CFG_ACTION_GPS_TOGGLE:
+            if (s_cfg.gpsEnabled) {
+                snprintf(buf, bufLen, "GPS: Enabled (Hardware)");
+            } else {
+                snprintf(buf, bufLen, "GPS: Disabled (Default Coords)");
             }
             break;
         case CFG_ACTION_EXPORT:
@@ -1643,13 +1856,11 @@ static void loadConfigFromPrefs() {
 
     String nodeLong = prefs.getString("nodeLong", "");
     if (nodeLong.length()) {
-        strncpy(s_cfg.nodeLong, nodeLong.c_str(), sizeof(s_cfg.nodeLong) - 1);
-        s_cfg.nodeLong[sizeof(s_cfg.nodeLong) - 1] = '\0';
+        utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), nodeLong.c_str());
     }
     String nodeShort = prefs.getString("nodeShort", "");
     if (nodeShort.length()) {
-        strncpy(s_cfg.nodeShort, nodeShort.c_str(), sizeof(s_cfg.nodeShort) - 1);
-        s_cfg.nodeShort[sizeof(s_cfg.nodeShort) - 1] = '\0';
+        utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), nodeShort.c_str());
     }
 
     float f = prefs.getFloat("loraFreq", 0.0f);
@@ -1889,13 +2100,10 @@ static void formatReplyPreview(const char *src, char *dst, size_t dstLen) {
     if (!src) return;
 
     while (*src == ' ') src++;
-    size_t w = 0;
-    while (*src && w + 1 < dstLen) {
-        char c = *src++;
-        if (c == '\r' || c == '\n') c = ' ';
-        dst[w++] = c;
+    utf8util::copyTruncate(dst, dstLen, src);
+    for (size_t i = 0; dst[i]; i++) {
+        if (dst[i] == '\r' || dst[i] == '\n') dst[i] = ' ';
     }
-    dst[w] = '\0';
 }
 
 static uint32_t resolveReplyPacketId(const DisplayLine *const *rows, int rowCount, int rowIdx) {
@@ -1946,11 +2154,18 @@ static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallback
                 s_selectedMsgText[w++] = ' ';
             }
 
-            while (*seg && w + 1 < sizeof(s_selectedMsgText)) {
+            char segBuf[MSG_CHARS + 1];
+            size_t segW = 0;
+            while (*seg && segW < MSG_CHARS) {
                 char c = *seg++;
                 if (c == '\r' || c == '\n' || c == '\t') c = ' ';
-                s_selectedMsgText[w++] = c;
+                segBuf[segW++] = c;
             }
+            segBuf[segW] = '\0';
+
+            size_t room = sizeof(s_selectedMsgText) - w;
+            size_t added = utf8util::copyTruncate(s_selectedMsgText + w, room, segBuf);
+            w += added;
             s_selectedMsgText[w] = '\0';
 
             if (w + 1 >= sizeof(s_selectedMsgText)) break;
@@ -1958,8 +2173,7 @@ static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallback
     }
 
     if (s_selectedMsgText[0] == '\0' && fallbackText) {
-        strncpy(s_selectedMsgText, fallbackText, sizeof(s_selectedMsgText) - 1);
-        s_selectedMsgText[sizeof(s_selectedMsgText) - 1] = '\0';
+        utf8util::copyTruncate(s_selectedMsgText, sizeof(s_selectedMsgText), fallbackText);
     }
 
     while (s_selectedMsgText[0] == ' ') {
@@ -2140,7 +2354,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
         lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text(replyLbl, preview[0] ? preview : "(message)");
+        setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
 
     s_composeInput = lv_textarea_create(s_composeModal);
@@ -2248,7 +2462,7 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
         lv_obj_set_style_text_font(replyLbl, composeBodyFont, 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text(replyLbl, preview[0] ? preview : "(message)");
+        setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
@@ -2392,6 +2606,7 @@ static void sendComposeMessage() {
 static void initCfgActions() {
     s_cfgActionCount = 0;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
 #if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
@@ -2455,6 +2670,10 @@ static void refreshCfgModal() {
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *cfgRowFont = &lv_font_montserrat_12;
+    const int cfgPadTop = 3;
+    const int cfgPadBottom = 3;
+#elif defined(DEVICE_TDECK)
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 3;
     const int cfgPadBottom = 3;
 #else
@@ -2950,13 +3169,19 @@ static LiveTrafficClass classifyLiveTraffic(const DisplayLine &dl) {
     return LIVE_TRAFFIC_DEFAULT;
 }
 
+static inline uint16_t userMessageAccentColor565() {
+    // Keep classic yellow in dark mode, but use darker amber in light mode
+    // for readable contrast against bright backgrounds.
+    return (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x7A, 0x4C, 0x00) : TFT_YELLOW;
+}
+
 static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
     LiveTrafficClass cls = classifyLiveTraffic(dl);
     switch (cls) {
         case LIVE_TRAFFIC_ERROR:   return TFT_RED;
         case LIVE_TRAFFIC_TX_ACK:  return TFT_GREEN;
         case LIVE_TRAFFIC_RX_ACK:  return (uint16_t)0x57EA;
-        case LIVE_TRAFFIC_TX_TEXT: return TFT_YELLOW;
+        case LIVE_TRAFFIC_TX_TEXT: return userMessageAccentColor565();
         case LIVE_TRAFFIC_TX_NODE: return (uint16_t)0xF39C;
         case LIVE_TRAFFIC_TX_POS:  return (uint16_t)0xFD20;
         case LIVE_TRAFFIC_TX_TLM:  return (uint16_t)0x07FF;
@@ -2967,7 +3192,7 @@ static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
         case LIVE_TRAFFIC_RX_TLM:  return (uint16_t)0xA7EA;
         case LIVE_TRAFFIC_RX_ENC:  return TFT_ORANGE;
         case LIVE_TRAFFIC_RX_OTHER:return (uint16_t)0x9DFF;
-        case LIVE_TRAFFIC_TX_OTHER:return (uint16_t)0xFFE0;
+        case LIVE_TRAFFIC_TX_OTHER:return userMessageAccentColor565();
         case LIVE_TRAFFIC_DEFAULT:
         default:
             break;
@@ -4170,8 +4395,8 @@ static void refreshNodesDetails() {
                  pos,
                  telem);
 
-        lv_label_set_text(s_nodesDetail, leftBuf);
-        lv_label_set_text(s_nodesDetailExtra, rightBuf);
+        setLabelTextEmojiSafe(s_nodesDetail, leftBuf);
+        setLabelTextEmojiSafe(s_nodesDetailExtra, rightBuf);
     } else {
         char buf[512];
         snprintf(buf, sizeof(buf),
@@ -4196,7 +4421,7 @@ static void refreshNodesDetails() {
                  pos,
                  telem);
 
-        lv_label_set_text(s_nodesDetail, buf);
+        setLabelTextEmojiSafe(s_nodesDetail, buf);
     }
     if (s_nodesInfoPanel) {
         lv_obj_scroll_to_y(s_nodesInfoPanel, 0, LV_ANIM_OFF);
@@ -4256,7 +4481,7 @@ static void refreshLiveView(bool force) {
                     lineColor = (s_cfg.uiMode == UI_MODE_LIGHT) ? (uint16_t)0x0320 : TFT_GREEN;
                     break;
                 case DisplayLine::ACKED_RELAY:
-                    lineColor = TFT_YELLOW;
+                    lineColor = userMessageAccentColor565();
                     break;
                 case DisplayLine::NAKED:
                     lineColor = TFT_RED;
@@ -4275,7 +4500,7 @@ static void refreshLiveView(bool force) {
 
         char rendered[128];
         formatLiveLineText(*dl, rendered, sizeof(rendered));
-        lv_label_set_text(msg, rendered);
+        setLabelTextEmojiSafe(msg, rendered);
     }
 
     if (rowCount == 0) {
@@ -4563,7 +4788,7 @@ static void refreshDmNodePicker(bool force) {
         const char *longDisp = n.longName[0] ? n.longName : "(unknown)";
         const char *shortDisp = liveShortNameUsable(n.shortName) ? n.shortName : "????";
         snprintf(rowText, sizeof(rowText), "%s (%s)", longDisp, shortDisp);
-        lv_label_set_text(lbl, rowText);
+        setLabelTextEmojiSafe(lbl, rowText);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
     }
 }
@@ -4794,7 +5019,7 @@ static void refreshDmModal(bool force) {
             } else {
                 snprintf(rowText, sizeof(rowText), "%s", name);
             }
-            lv_label_set_text(lbl, rowText);
+            setLabelTextEmojiSafe(lbl, rowText);
             lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
         }
     }
@@ -4831,7 +5056,7 @@ static void refreshDmModal(bool force) {
                     lineColor = (s_cfg.uiMode == UI_MODE_LIGHT) ? (uint16_t)0x0320 : TFT_GREEN;
                     break;
                 case DmLine::ACKED_RELAY:
-                    lineColor = TFT_YELLOW;
+                    lineColor = userMessageAccentColor565();
                     break;
                 case DmLine::NAKED:
                 case DmLine::TX_FAILED:
@@ -4843,7 +5068,7 @@ static void refreshDmModal(bool force) {
 
             lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
-            lv_label_set_text(msg, dl->text);
+            setLabelTextEmojiSafe(msg, dl->text);
         }
 
         if (rowCount == 0) {
@@ -4992,7 +5217,11 @@ static void openDmModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_TDECK)
+    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Compose   %s = Back", modalCloseKeyLabel());
+#else
     lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Compose   %s = Back", modalCloseKeyLabel());
+#endif
 
     s_dmRenderedConvCount = -1;
     s_dmRenderedNodeId = 0;
@@ -5022,6 +5251,10 @@ static void openNodesModal() {
     const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
     const lv_font_t *nodesListFont = &lv_font_montserrat_12;
     const int nodesListRowH = 28;
+#elif defined(DEVICE_TDECK)
+    const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
+    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
+    const int nodesListRowH = 22;
 #else
     const lv_font_t *nodesDetailFont = &lv_font_montserrat_10;
     const lv_font_t *nodesListFont = &lv_font_montserrat_10;
@@ -5193,7 +5426,7 @@ static void openNodesModal() {
             char rowText[56];
             const NodeEntry &n = s_nodesSnapshot[i];
             snprintf(rowText, sizeof(rowText), "%s", n.shortName[0] ? n.shortName : "----");
-            lv_label_set_text(lbl, rowText);
+            setLabelTextEmojiSafe(lbl, rowText);
             lv_obj_center(lbl);
 
             if (s_nodesListRowCount < MAX_NODES) {
@@ -5212,7 +5445,11 @@ static void openNodesModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_TDECK)
+    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   %s = Back", modalCloseKeyLabel());
+#else
     lv_label_set_text_fmt(hint, "Up/Down = Select   %s = Back", modalCloseKeyLabel());
+#endif
 #endif
 }
 
@@ -5426,6 +5663,8 @@ static void openCfgModal() {
     lv_obj_t *title = lv_label_create(header);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+#elif defined(DEVICE_TDECK)
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 #else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
 #endif
@@ -5436,6 +5675,8 @@ static void openCfgModal() {
     lv_obj_set_width(s_cfgHeaderStatus, lv_pct(58));
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
+#elif defined(DEVICE_TDECK)
+    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_14, 0);
 #else
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
 #endif
@@ -5522,10 +5763,16 @@ static void openCfgModal() {
 #else
     lv_obj_t *hint = lv_label_create(s_cfgModal);
     lv_obj_set_width(hint, lv_pct(100));
+#if defined(DEVICE_TDECK)
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+#else
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text_fmt(hint, "Wheel = Scroll focused panel   Click wheel = Swap panel   %s = Close", modalCloseKeyLabel());
+#elif defined(DEVICE_TDECK)
+    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
 #endif
@@ -5593,6 +5840,20 @@ static void activateCfgSelection() {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config enabled (start failed)");
                 }
             }
+        } break;
+
+        case CFG_ACTION_GPS_TOGGLE: {
+            s_cfg.gpsEnabled = !s_cfg.gpsEnabled;
+            gpsSetEnabled(s_cfg.gpsEnabled);
+            persistConfigToPrefs();
+            if (s_cfg.gpsEnabled) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "GPS enabled (hardware)");
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "GPS disabled (using default coordinates)");
+            }
+            refreshHeaderStatus(true);
         } break;
 
         case CFG_ACTION_EXPORT: {
@@ -5735,6 +5996,12 @@ static void pumpKeyboardInput() {
         k = remapCardputerUiKey(k, !typingContext);
 #endif
 
+#if defined(DEVICE_TDECK)
+    // Optional vim-style navigation keys for every up/down navigation view.
+    bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
+    k = remapTdeckUiKey(k, !typingContext);
+#endif
+
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
                 char actionText[80];
@@ -5750,6 +6017,15 @@ static void pumpKeyboardInput() {
                               s_cfgSelection,
                               actionId,
                               (actionId >= 0) ? cfgActionLabel(actionId, actionText, sizeof(actionText)) : "(none)");
+            }
+            if (s_cfgAwaitEnterRelease) {
+                if (s_cfgDebugLog) {
+                    unsigned char uk = (unsigned char)k;
+                    char display = (k >= 0x20 && k < 0x7F) ? k : '.';
+                    Serial.printf("[lvgl-cfg] key-block waiting-release code=0x%02X chr=%c\n",
+                                  (unsigned)uk, display);
+                }
+                continue;
             }
             if (isModalCloseKey(k)) {
                 closeCfgModal();
@@ -5824,10 +6100,6 @@ static void pumpKeyboardInput() {
             }
             if (k == KEY_ENTER) {
                 uint32_t now = millis();
-                if (s_cfgAwaitEnterRelease) {
-                    if (s_cfgDebugLog) Serial.println("[lvgl-cfg] enter-block awaiting release");
-                    continue;
-                }
                 if ((uint32_t)(now - s_cfgLastScrollMs) < 180) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Selection settling - press Enter again");
                     if (s_cfgDebugLog) {
@@ -7137,10 +7409,11 @@ static bool processMeshPacket(const MeshPacket &pkt) {
     switch (pkt.portnum) {
         case TEXT_MESSAGE_APP: {
             char textBuf[MESH_TEXT_MAX_LEN + 1];
-            size_t copy = pkt.payloadLen;
-            if (copy > MESH_TEXT_MAX_LEN) copy = MESH_TEXT_MAX_LEN;
-            memcpy(textBuf, pkt.payload, copy);
-            textBuf[copy] = '\0';
+            size_t copy = utf8util::copyTruncateBytes(
+                textBuf,
+                sizeof(textBuf),
+                pkt.payload,
+                pkt.payloadLen);
             for (size_t i = 0; i < copy; i++) {
                 if (textBuf[i] == '\r' || textBuf[i] == '\n') textBuf[i] = ' ';
             }
@@ -7152,8 +7425,7 @@ static bool processMeshPacket(const MeshPacket &pkt) {
                     NodeEntry *sender = Nodes.find(pkt.hdr.from);
                     char senderShort[5] = {};
                     if (sender && sender->shortName[0]) {
-                        strncpy(senderShort, sender->shortName, sizeof(senderShort) - 1);
-                        senderShort[sizeof(senderShort) - 1] = '\0';
+                        utf8util::copyTruncate(senderShort, sizeof(senderShort), sender->shortName);
                     }
 
                     char timePrefix[12];
@@ -7361,7 +7633,7 @@ static void refreshChatView(bool force) {
                         if (!isContinuationLine) ackSuffix = " [ACK]";
                         break;
                     case DisplayLine::ACKED_RELAY:
-                        textColor565 = TFT_YELLOW;
+                        textColor565 = userMessageAccentColor565();
                         break;
                     case DisplayLine::NAKED:
                     case DisplayLine::TX_FAILED:
@@ -7379,7 +7651,7 @@ static void refreshChatView(bool force) {
             } else {
                 snprintf(rendered, sizeof(rendered), "%s", lineText);
             }
-            lv_label_set_text(msg, rendered);
+            setLabelTextEmojiSafe(msg, rendered);
 
             uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 

@@ -16,6 +16,7 @@
 #include "debug_flags.h"
 #include "gps.h"
 #include "battery_util.h"
+#include "utf8_utils.h"
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 static const uint32_t kReleaseCheckTimeoutMs = 7000;
@@ -441,6 +442,7 @@ static void sendConfigPage(const char *msg = "") {
     char tmp[96];
     String html = kHead;
     uint8_t themePreset =
+        (gCfg->uiTheme == UI_THEME_SCARLET_POP) ? (gCfg->uiMode == UI_MODE_LIGHT ? 11 : 10) :
         (gCfg->uiTheme == UI_THEME_CRIMSON)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 9 : 8) :
         (gCfg->uiTheme == UI_THEME_SOLARIZED) ? (gCfg->uiMode == UI_MODE_LIGHT ? 7 : 6) :
         (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
@@ -900,11 +902,6 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "<label>Chat Line Spacing (reboot required)<select name='chat_space'>"
-            "<option value='0'"; if (gCfg->chatSpacing == 0) html += " selected"; html += ">Tight</option>"
-            "<option value='1'"; if (gCfg->chatSpacing == 1) html += " selected"; html += ">Normal</option>"
-            "<option value='2'"; if (gCfg->chatSpacing == 2) html += " selected"; html += ">Loose</option>"
-            "</select></label>";
         html += "<label>Theme<select name='ui_theme_preset' id='sel-theme-preset'>"
             "<option value='0'"; if (themePreset == 0) html += " selected"; html += ">Camillia Dark</option>"
             "<option value='1'"; if (themePreset == 1) html += " selected"; html += ">Camillia Light</option>"
@@ -916,6 +913,8 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='7'"; if (themePreset == 7) html += " selected"; html += ">Solarized Light</option>"
             "<option value='8'"; if (themePreset == 8) html += " selected"; html += ">Crimson Blue Dark</option>"
             "<option value='9'"; if (themePreset == 9) html += " selected"; html += ">Crimson Blue Light</option>"
+            "<option value='10'"; if (themePreset == 10) html += " selected"; html += ">Scarlet Pop Dark</option>"
+            "<option value='11'"; if (themePreset == 11) html += " selected"; html += ">Scarlet Pop Light</option>"
             "</select></label>";
         html += "<script>"
             "(function(){"
@@ -929,7 +928,9 @@ static void sendConfigPage(const char *msg = "") {
                             "'6':{bg:'#002b36',panel:'#073642',panel2:'#0b4552',line:'#586e75',text:'#eee8d5',dim:'#93a1a1',accent:'#2aa198',ink:'#002b36'},"
                             "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'},"
                             "'8':{bg:'#060f24',panel:'#12244c',panel2:'#1b3363',line:'#3b578f',text:'#f4f8ff',dim:'#b9c9e9',accent:'#ff4a58',ink:'#ffffff'},"
-                            "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'}"
+                            "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'},"
+                            "'10':{bg:'#150009',panel:'#760031',panel2:'#8b0038',line:'#6f2d3b',text:'#fff1f1',dim:'#e5b3ba',accent:'#d51c39',ink:'#ffffff'},"
+                            "'11':{bg:'#fff2f4',panel:'#fff8f9',panel2:'#ffeaed',line:'#d8a1aa',text:'#3a0a14',dim:'#7e3b49',accent:'#d51c39',ink:'#ffffff'}"
             "};"
             "function apply(){"
               "var k=document.getElementById('sel-theme-preset').value;"
@@ -1467,10 +1468,8 @@ static void handlePostSave() {
     // Node identity
     String lng  = server.arg("long");
     String shrt = server.arg("short");
-    strncpy(gCfg->nodeLong,  lng.c_str(),  sizeof(gCfg->nodeLong)  - 1);
-    strncpy(gCfg->nodeShort, shrt.c_str(), sizeof(gCfg->nodeShort) - 1);
-    gCfg->nodeLong[sizeof(gCfg->nodeLong)   - 1] = '\0';
-    gCfg->nodeShort[sizeof(gCfg->nodeShort) - 1] = '\0';
+    utf8util::copyTruncate(gCfg->nodeLong, sizeof(gCfg->nodeLong), lng.c_str());
+    utf8util::copyTruncate(gCfg->nodeShort, sizeof(gCfg->nodeShort), shrt.c_str());
 
     // Web config auth (username is fixed to admin)
     String webPass = server.arg("web_pass");
@@ -1594,9 +1593,12 @@ static void handlePostSave() {
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
-    gCfg->chatSpacing     = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
+    // Legacy compatibility: only apply chat spacing if an older web form sends it.
+    if (server.hasArg("chat_space")) {
+        gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
+    }
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 9);
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 11);
         if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
@@ -1606,7 +1608,9 @@ static void handlePostSave() {
         else if (preset == 6) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_DARK; }
         else if (preset == 7) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_LIGHT; }
         else if (preset == 8) { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_DARK; }
-        else                  { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 9) { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_LIGHT; }
+        else if (preset == 10){ gCfg->uiTheme = UI_THEME_SCARLET_POP; gCfg->uiMode = UI_MODE_DARK; }
+        else                  { gCfg->uiTheme = UI_THEME_SCARLET_POP; gCfg->uiMode = UI_MODE_LIGHT; }
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);

@@ -1,4 +1,5 @@
 #include "node_db.h"
+#include "utf8_utils.h"
 #include <Preferences.h>
 
 NodeDB Nodes;
@@ -45,8 +46,8 @@ void NodeDB::init() {
         NodeEntry *e = &_nodes[_count++];
         memset(e, 0, sizeof(*e));
         e->nodeId = ids[i];
-        strncpy(e->longName,  b.longName,  sizeof(e->longName)  - 1);
-        strncpy(e->shortName, b.shortName, sizeof(e->shortName) - 1);
+        utf8util::copyTruncate(e->longName, sizeof(e->longName), b.longName);
+        utf8util::copyTruncate(e->shortName, sizeof(e->shortName), b.shortName);
         e->latI = b.latI; e->lonI = b.lonI; e->alt = b.alt;
         e->battPct = b.battPct; e->voltage = b.voltage;
         memcpy(e->pubKey, b.pubKey, 32);
@@ -70,8 +71,8 @@ void NodeDB::_save(uint32_t nodeId) {
     if (!e || !e->nodeId) return;
 
     NodeBlob b = {};
-    strncpy(b.longName,  e->longName,  sizeof(b.longName)  - 1);
-    strncpy(b.shortName, e->shortName, sizeof(b.shortName) - 1);
+    utf8util::copyTruncate(b.longName, sizeof(b.longName), e->longName);
+    utf8util::copyTruncate(b.shortName, sizeof(b.shortName), e->shortName);
     b.latI = e->latI; b.lonI = e->lonI; b.alt = e->alt;
     b.battPct = e->battPct; b.voltage = e->voltage;
     memcpy(b.pubKey, e->pubKey, 32);
@@ -194,12 +195,12 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
     bool changed = false;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
-        strncpy(e->longName,  u.longName,  sizeof(e->longName)  - 1);
+        utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;
         changed = true;
     }
     if (u.shortName[0] && strncmp(e->shortName, u.shortName, sizeof(e->shortName) - 1) != 0) {
-        strncpy(e->shortName, u.shortName, sizeof(e->shortName) - 1);
+        utf8util::copyTruncate(e->shortName, sizeof(e->shortName), u.shortName);
         e->hasName = true;
         changed = true;
     }
