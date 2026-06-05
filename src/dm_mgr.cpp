@@ -380,17 +380,19 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
 
     if (usePki) {
         hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
-        usedPki = true;
         usedHash = 0;
         debugLogMessages("[dm] using PKI path\n");
         if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
-            debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
-            addLiveDmLine("T DM ER pki", TFT_RED);
-            return false;
+            debugLogMessages("[dm] PKI encrypt failed; falling back to channel-key path\n");
+            usePki = false;
+        } else {
+            usedPki = true;
+            payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
+            debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
         }
-        payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
-        debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
-    } else {
+    }
+
+    if (!usedPki) {
         // Fall back to channel-key encryption
         int chanIdx = -1;
         const char *chanSource = "primary";

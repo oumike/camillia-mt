@@ -2298,14 +2298,14 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
-    const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 6);
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_TDECK)
     const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
-    const lv_coord_t composeInputH = (lv_coord_t)(((lv_font_get_line_height(composeBodyFont) + 10) * 11) / 10);
-    const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
+    const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -2422,8 +2422,10 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 140) modalW = lv_disp_get_hor_res(NULL) - 8;
     int modalH = isReply ? 96 : 72;
-#if defined(DEVICE_TDECK)
-    modalH = isReply ? 92 : 70;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    modalH = isReply ? 126 : 104;
+#elif defined(DEVICE_TDECK)
+    modalH = isReply ? 118 : 96;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     modalH = isReply ? 82 : 64;
 #endif
@@ -2514,7 +2516,11 @@ static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    lv_textarea_set_one_line(s_composeInput, false);
+#else
     lv_textarea_set_one_line(s_composeInput, true);
+#endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
 
@@ -4737,13 +4743,13 @@ static void refreshDmNodePicker(bool force) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
-                              ? "Type = Filter   Bksp = Edit Filter   Enter = Start DM   Esc = Back"
-                              : "Type = Filter   Enter = Start DM   Esc = Back");
+                              ? "Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back"
+                              : "Type = Filter   Enter = Open DM   Esc = Back");
 #else
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
-                              ? "Type = Filter   Bksp = Edit/Close Filter   Enter = Start DM"
-                              : "Type = Filter   Enter = Start DM   Bksp = Back");
+                              ? "Type = Filter   Bksp = Edit/Close Filter   Enter = Open DM"
+                              : "Type = Filter   Enter = Open DM   Bksp = Back");
 #endif
     }
 
@@ -4860,9 +4866,9 @@ static void openDmNodePicker() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(hint, "Type = Filter   Enter = Start DM   Esc = Back");
+    lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
 #else
-    lv_label_set_text(hint, "Type = Filter   Enter = Start DM   Bksp = Back");
+    lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Bksp = Back");
 #endif
 
     refreshDmNodePicker(true);
@@ -6218,8 +6224,23 @@ static void pumpKeyboardInput() {
                 if (k == KEY_ENTER) {
                     const NodeEntry *n = selectedDmNodeForPicker();
                     if (n && n->nodeId != 0) {
+                        const uint32_t selectedNodeId = n->nodeId;
+                        DmConv *conv = DMs.find(selectedNodeId);
+                        if (!conv) {
+                            const char *shortName = liveShortNameUsable(n->shortName) ? n->shortName : nullptr;
+                            conv = DMs.findOrCreate(selectedNodeId, shortName);
+                        }
                         closeDmNodePicker();
-                        openComposePromptForDm(n->nodeId);
+                        refreshDmModal(true);
+                        if (conv) {
+                            for (int i = 0; i < s_dmConvCount; i++) {
+                                if (s_dmConvNodeIds[i] == selectedNodeId) {
+                                    s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+                                    break;
+                                }
+                            }
+                            refreshDmModal(true);
+                        }
                     }
                     continue;
                 }
@@ -8148,7 +8169,7 @@ static void buildUi() {
         lv_obj_set_scroll_dir(s_channelList, LV_DIR_VER);
         lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
-        lv_obj_set_style_bg_opa(s_channelList, LV_OPA_80, 0);
+        lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_channelList, 1, 0);
         lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
         lv_obj_set_style_radius(s_channelList, 6, 0);
@@ -8416,6 +8437,7 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     if (s_channelList) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
 #endif
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
