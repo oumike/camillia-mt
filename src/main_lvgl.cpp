@@ -242,6 +242,11 @@ static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
 #endif
+#if defined(DEVICE_TDECK)
+static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
+#else
+static const lv_font_t *kChannelChatFont = kMainScreenFont;
+#endif
 static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -7591,7 +7596,7 @@ static void refreshChatView(bool force) {
 
     if (rowCount == 0) {
         lv_obj_t *empty = lv_label_create(s_chatList);
-        lv_obj_set_style_text_font(empty, kMainScreenFont, 0);
+        lv_obj_set_style_text_font(empty, kChannelChatFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         lv_label_set_text(empty, "No messages yet");
     } else {
@@ -7604,7 +7609,7 @@ static void refreshChatView(bool force) {
             lv_obj_t *msg = lv_label_create(s_chatList);
             lastMsgObj = msg;
             lv_obj_set_width(msg, lv_pct(100));
-            lv_obj_set_style_text_font(msg, kMainScreenFont, 0);
+            lv_obj_set_style_text_font(msg, kChannelChatFont, 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #if defined(DEVICE_TDECK)
             lv_obj_set_style_pad_left(msg, 1, 0);
@@ -7880,7 +7885,12 @@ static void buildUi() {
     lv_obj_set_size(s_chatPanel, chatW, chatH);
     lv_obj_align(s_chatPanel, LV_ALIGN_TOP_LEFT, chatX, chatY);
     lv_obj_clear_flag(s_chatPanel, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_chatPanel, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_color(
+        s_chatPanel,
+        (s_cfg.uiTheme == UI_THEME_SOLARIZED && s_cfg.uiMode == UI_MODE_LIGHT)
+            ? lv_color_hex(0x0F2A5C)
+            : lv_color_hex(0x0E285B),
+        0);
     lv_obj_set_style_bg_opa(s_chatPanel, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
     lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
@@ -8150,7 +8160,12 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     if (s_chatHeaderWifi) lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
 
     if (s_chatPanel) {
-        lv_obj_set_style_bg_color(s_chatPanel, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_bg_color(
+            s_chatPanel,
+            (s_cfg.uiTheme == UI_THEME_SOLARIZED && s_cfg.uiMode == UI_MODE_LIGHT)
+                ? lv_color_hex(0x0F2A5C)
+                : lv_color_hex(0x0E285B),
+            0);
         lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatList) {
