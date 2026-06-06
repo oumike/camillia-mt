@@ -379,6 +379,7 @@ static void setChannelDropdownVisible(bool visible);
 static void refreshChannelSelectorLabel();
 static void onChannelSelectorPressed(lv_event_t *e);
 static void drawBootSplash();
+static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
 static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
@@ -554,6 +555,16 @@ static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
         }
 
         if (isEmojiJoinerOrModifier(cp)) {
+            i += n;
+            continue;
+        }
+
+        // Normalize common apostrophe variants to ASCII for font-consistent rendering.
+        if (cp == 0x2018 || cp == 0x2019 || cp == 0x02BC || cp == 0xFF07 || cp == 0x2032) {
+            if (writePos + 1 < dstLen) {
+                dst[writePos++] = '\'';
+                dst[writePos] = '\0';
+            }
             i += n;
             continue;
         }
@@ -2729,11 +2740,7 @@ static void refreshCfgModal() {
         if (i == s_cfgSelection) {
             lv_obj_set_style_bg_color(row, lv_color_hex(0x2A4E8F), 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_80, 0);
-            if (s_cfg.uiMode == UI_MODE_LIGHT) {
-                lv_obj_set_style_text_color(row, lv_color_hex(0xE8F1FF), 0);
-            } else {
-                lv_obj_set_style_text_color(row, lv_color_hex(0xEAF3FF), 0);
-            }
+            lv_obj_set_style_text_color(row, lv_color_make(0xF8, 0xFB, 0xFF), 0);
             lv_obj_set_style_border_width(row, 2, 0);
             lv_obj_set_style_border_color(row, selectionOutlineColor, 0);
             lv_obj_set_style_outline_width(row, 1, 0);
@@ -2865,6 +2872,27 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
 #endif
 }
 
+static lv_color_t chatPanelBackgroundColor() {
+    if (s_cfg.uiMode == UI_MODE_LIGHT) {
+        if (s_cfg.uiTheme == UI_THEME_SOLARIZED || s_cfg.uiTheme == UI_THEME_CRIMSON) {
+            return lv_color_hex(0x0F2A5C);
+        }
+        if (s_cfg.uiTheme == UI_THEME_EVERGREEN) {
+            return lv_color_hex(0xDDF1DE);
+        }
+        if (s_cfg.uiTheme == UI_THEME_EARTHEN) {
+            return lv_color_hex(0xE9DCCB);
+        }
+        if (s_cfg.uiTheme == UI_THEME_CAMELLIA) {
+            return lv_color_hex(0xF7DDE3);
+        }
+        if (s_cfg.uiTheme == UI_THEME_SCARLET_POP) {
+            return lv_color_hex(0xE5B4BC);
+        }
+    }
+    return lv_color_hex(0x0E285B);
+}
+
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!bar) return;
@@ -2888,6 +2916,9 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
+    const lv_color_t navBgColor = chatPanelBackgroundColor();
+    const lv_color_t navTextColor = lv_color_hex(0xD9E8FF);
+
     for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
         lv_obj_t *btn = lv_btn_create(bar);
         lv_obj_set_flex_grow(btn, 1);
@@ -2897,9 +2928,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
         const bool isActive = (activeTarget == kItems[i].target);
-        lv_obj_set_style_bg_color(btn,
-                                  isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F),
-                                  0);
+        lv_obj_set_style_bg_color(
+            btn,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? navBgColor
+                                            : (isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F)),
+            0);
         lv_obj_set_style_bg_opa(btn, isActive ? LV_OPA_80 : LV_OPA_60, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn,
@@ -2913,7 +2946,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 
         lv_obj_t *label = lv_label_create(btn);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(label, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(label, navTextColor, 0);
         lv_label_set_text(label, kItems[i].label);
         lv_obj_center(label);
     }
@@ -7154,7 +7187,7 @@ static void refreshChannelGlow(bool force) {
             lv_obj_set_style_text_color(
                 lbl,
                 active
-                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xEAF3FF))
+                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xD9E8FF))
                     : lv_color_hex(0xD9E8FF),
                 0);
         }
@@ -7226,7 +7259,12 @@ static void applyChannelButtonTheme() {
         if (!btn) continue;
 
         bool active = (i == s_activeChannel);
-        lv_obj_set_style_bg_color(btn, active ? lv_color_hex(0x2A4FB4) : lv_color_hex(0x102750), 0);
+        lv_obj_set_style_bg_color(
+            btn,
+            (s_cfg.uiMode == UI_MODE_LIGHT)
+                ? chatPanelBackgroundColor()
+                : (active ? lv_color_hex(0x2A4FB4) : lv_color_hex(0x102750)),
+            0);
         lv_obj_set_style_bg_opa(btn, active ? LV_OPA_90 : LV_OPA_60, 0);
         lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
         lv_obj_set_style_border_color(btn, active ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C), 0);
@@ -7236,23 +7274,32 @@ static void applyChannelButtonTheme() {
             lv_obj_set_style_text_color(
                 lbl,
                 active
-                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xEAF3FF))
+                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xD9E8FF))
                     : lv_color_hex(0xD9E8FF),
                 0);
         }
     }
 
     if (s_channelSelectorBtn) {
-        lv_obj_set_style_bg_color(s_channelSelectorBtn, lv_color_hex(0x102750), 0);
+        lv_obj_set_style_bg_color(
+            s_channelSelectorBtn,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x102750),
+            0);
         lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_70, 0);
         lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
         lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
     }
     if (s_channelSelectorLabel) {
-        lv_obj_set_style_text_color(s_channelSelectorLabel, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(
+            s_channelSelectorLabel,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
     }
     if (s_channelSelectorCaretLabel) {
-        lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(
+            s_channelSelectorCaretLabel,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
     }
 }
 
@@ -7278,6 +7325,14 @@ static void setActiveChannel(int channelIdx) {
     refreshChatView(true);
 }
 
+static bool useCompactVerticalHeltecSelector() {
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(HELTEC_COMPACT_SELECTOR)
+    return true;
+#else
+    return false;
+#endif
+}
+
 static bool isChannelDropdownVisible() {
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
     return s_channelList && !lv_obj_has_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
@@ -7294,14 +7349,56 @@ static void refreshChannelSelectorLabel() {
 
     const char *name = channelName(s_activeChannel);
     if (!name || !name[0]) name = "Channel";
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    name = "";
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (useCompactVerticalHeltecSelector()) {
+        name = "";
+    }
 #endif
 
     lv_label_set_text(s_channelSelectorLabel, name);
+    lv_obj_set_style_text_color(
+        s_channelSelectorLabel,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+        0);
     if (s_channelSelectorCaretLabel) {
         lv_label_set_text(s_channelSelectorCaretLabel, isChannelDropdownVisible() ? "^" : "v");
+        lv_obj_set_style_text_color(
+            s_channelSelectorCaretLabel,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
     }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!useCompactVerticalHeltecSelector()) {
+        if (s_channelSelectorBtn) {
+            // Fit selector width to the active channel name on non-compact Heltec.
+            lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_CLIP);
+            lv_obj_set_width(s_channelSelectorLabel, LV_SIZE_CONTENT);
+            lv_obj_update_layout(s_channelSelectorLabel);
+
+            lv_coord_t textW = lv_obj_get_width(s_channelSelectorLabel);
+            lv_coord_t desiredW = textW + 24; // text + inner padding + caret room
+            if (desiredW < 96) desiredW = 96;
+
+            lv_obj_t *header = lv_obj_get_parent(s_channelSelectorBtn);
+            if (header) {
+                // Reserve room for centered time and right-side status indicators.
+                lv_coord_t maxW = lv_obj_get_width(header) - 120;
+                if (maxW < 96) maxW = 96;
+                if (desiredW > maxW) desiredW = maxW;
+            }
+
+            lv_obj_set_width(s_channelSelectorBtn, desiredW);
+            lv_obj_set_width(s_channelSelectorLabel, desiredW - 22);
+            lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
+            lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
+            if (s_channelSelectorCaretLabel) {
+                lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
+            }
+            layoutHeaderInlineItems();
+        }
+    }
+#endif
 }
 
 static void setChannelDropdownVisible(bool visible) {
@@ -7374,6 +7471,61 @@ static void sizeChannelButtonToLabel(int idx) {
     lv_obj_center(lbl);
 #else
     LV_UNUSED(idx);
+#endif
+}
+
+static void fitChannelDropdownToButtonContent() {
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+    // This fitter applies only to the floating channel dropdown list.
+    if (!s_channelList || s_channelStrip) return;
+
+    lv_coord_t maxLabelW = 0;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *lbl = s_channelLabels[i];
+        if (!lbl) continue;
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_obj_set_width(lbl, LV_SIZE_CONTENT);
+        lv_obj_update_layout(lbl);
+        lv_coord_t w = lv_obj_get_width(lbl);
+        if (w > maxLabelW) maxLabelW = w;
+    }
+    if (maxLabelW <= 0) return;
+
+    const lv_coord_t listPadLeft = 4;
+    const lv_coord_t listPadRight = 4;
+    const lv_coord_t buttonTextPad = 10; // small breathing room around longest label
+    const lv_coord_t scrollbarGutter = 8; // keep scrollbar between panel edge and buttons
+
+    lv_coord_t buttonW = maxLabelW + buttonTextPad;
+    if (buttonW < 56) buttonW = 56;
+
+    lv_coord_t dropdownW = listPadLeft + buttonW + scrollbarGutter + listPadRight;
+    lv_obj_t *parent = lv_obj_get_parent(s_channelList);
+    if (parent) {
+        lv_coord_t maxW = lv_obj_get_width(parent) - 8;
+        if (maxW > 0 && dropdownW > maxW) {
+            dropdownW = maxW;
+            lv_coord_t maxButtonW = dropdownW - listPadLeft - listPadRight - scrollbarGutter;
+            if (maxButtonW < 44) maxButtonW = 44;
+            if (buttonW > maxButtonW) buttonW = maxButtonW;
+        }
+    }
+
+    lv_obj_set_width(s_channelList, dropdownW);
+    lv_obj_set_style_pad_left(s_channelList, listPadLeft, 0);
+    lv_obj_set_style_pad_right(s_channelList, listPadRight, 0);
+    lv_obj_set_style_pad_right(s_channelList, 4, LV_PART_SCROLLBAR);
+
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *btn = s_channelBtns[i];
+        lv_obj_t *lbl = s_channelLabels[i];
+        if (!btn || !lbl) continue;
+
+        lv_obj_set_width(btn, buttonW);
+        lv_obj_set_width(lbl, max((lv_coord_t)1, (lv_coord_t)(buttonW - 8)));
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_center(lbl);
+    }
 #endif
 }
 
@@ -7984,9 +8136,10 @@ static void buildUi() {
     s_channelList = nullptr;
 
     const int selectorBtnH = chatHeaderH - 6;
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    const int selectorBtnW = 46;
-    const int selectorBtnOffsetX = 1;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    const bool compactHeltecSelector = useCompactVerticalHeltecSelector();
+    const int selectorBtnW = compactHeltecSelector ? 46 : min(max(chatW / 3, 96), 220);
+    const int selectorBtnOffsetX = compactHeltecSelector ? 1 : headerPadX;
 #else
     const int selectorBtnW = min(max(chatW / 3, 96), 220);
     const int selectorBtnOffsetX = headerPadX;
@@ -7996,11 +8149,18 @@ static void buildUi() {
     lv_obj_set_size(s_channelSelectorBtn, selectorBtnW, selectorBtnH);
     lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, selectorBtnOffsetX, 0);
     lv_obj_set_style_radius(s_channelSelectorBtn, 6, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    lv_obj_set_style_pad_left(s_channelSelectorBtn, 0, 0);
-    lv_obj_set_style_pad_right(s_channelSelectorBtn, 0, 0);
-    lv_obj_set_style_pad_top(s_channelSelectorBtn, 0, 0);
-    lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 0, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (compactHeltecSelector) {
+        lv_obj_set_style_pad_left(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_pad_right(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_pad_top(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 0, 0);
+    } else {
+        lv_obj_set_style_pad_left(s_channelSelectorBtn, 6, 0);
+        lv_obj_set_style_pad_right(s_channelSelectorBtn, 6, 0);
+        lv_obj_set_style_pad_top(s_channelSelectorBtn, 2, 0);
+        lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 2, 0);
+    }
 #else
     lv_obj_set_style_pad_left(s_channelSelectorBtn, 6, 0);
     lv_obj_set_style_pad_right(s_channelSelectorBtn, 6, 0);
@@ -8020,8 +8180,12 @@ static void buildUi() {
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
     lv_obj_set_style_text_font(s_channelSelectorCaretLabel, headerTextFont, 0);
     lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (compactHeltecSelector) {
+        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, 0);
+    } else {
+        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
+    }
 #else
     lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
 #endif
@@ -8114,9 +8278,7 @@ static void buildUi() {
     lv_obj_clear_flag(s_chatPanel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(
         s_chatPanel,
-        (s_cfg.uiTheme == UI_THEME_SOLARIZED && s_cfg.uiMode == UI_MODE_LIGHT)
-            ? lv_color_hex(0x0F2A5C)
-            : lv_color_hex(0x0E285B),
+        chatPanelBackgroundColor(),
         0);
     lv_obj_set_style_bg_opa(s_chatPanel, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
@@ -8335,6 +8497,8 @@ static void buildUi() {
 #endif
     }
 
+    fitChannelDropdownToButtonContent();
+
     refreshChatComposeButtonState();
 
     int initialChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
@@ -8447,10 +8611,16 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
         lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
     }
     if (s_channelSelectorLabel) {
-        lv_obj_set_style_text_color(s_channelSelectorLabel, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(
+            s_channelSelectorLabel,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
     }
     if (s_channelSelectorCaretLabel) {
-        lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(
+            s_channelSelectorCaretLabel,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+            0);
     }
 
     if (s_chatHeaderBar) {
@@ -8470,9 +8640,7 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     if (s_chatPanel) {
         lv_obj_set_style_bg_color(
             s_chatPanel,
-            (s_cfg.uiTheme == UI_THEME_SOLARIZED && s_cfg.uiMode == UI_MODE_LIGHT)
-                ? lv_color_hex(0x0F2A5C)
-                : lv_color_hex(0x0E285B),
+            chatPanelBackgroundColor(),
             0);
         lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     }
