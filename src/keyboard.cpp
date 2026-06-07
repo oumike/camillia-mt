@@ -315,7 +315,7 @@ char TDeckKeyboard::readTrackball() {
     static unsigned long pendingClickMs = 0;
     static unsigned long lastClickSeenMs = 0;
     static unsigned long lastClickEmitMs = 0;
-    const unsigned long moveDebounceMs = 20;
+    const unsigned long moveDebounceMs = 12;
     const unsigned long clickQuietMs = 70;
     const unsigned long clickExpireMs = 800;
     const unsigned long clickEdgeDebounceMs = 80;
@@ -362,12 +362,12 @@ char TDeckKeyboard::readTrackball() {
     if (now - lastMoveEmitMs >= moveDebounceMs) {
         // One notch is four state transitions on typical rotary encoders.
         if (accum >= 4) {
-            accum = 0;
+            accum -= 4;
             lastMoveEmitMs = now;
             return KEY_SCROLL_DN;
         }
         if (accum <= -4) {
-            accum = 0;
+            accum += 4;
             lastMoveEmitMs = now;
             return KEY_SCROLL_UP;
         }

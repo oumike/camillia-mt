@@ -569,6 +569,29 @@ static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
             continue;
         }
 
+        // Normalize common dash variants for font-consistent rendering.
+        if (cp == 0x2014 || cp == 0x2015) { // em dash, horizontal bar
+            if (writePos + 2 < dstLen) {
+                dst[writePos++] = '-';
+                dst[writePos++] = '-';
+                dst[writePos] = '\0';
+            } else if (writePos + 1 < dstLen) {
+                dst[writePos++] = '-';
+                dst[writePos] = '\0';
+            }
+            i += n;
+            continue;
+        }
+        if (cp == 0x2010 || cp == 0x2011 || cp == 0x2012 || cp == 0x2013
+            || cp == 0x2212 || cp == 0xFE58 || cp == 0xFE63 || cp == 0xFF0D) {
+            if (writePos + 1 < dstLen) {
+                dst[writePos++] = '-';
+                dst[writePos] = '\0';
+            }
+            i += n;
+            continue;
+        }
+
         // Collapse regional-indicator pairs (flags) into a readable country code.
         if (cp >= 0x1F1E6 && cp <= 0x1F1FF) {
             uint32_t cp2 = 0;
