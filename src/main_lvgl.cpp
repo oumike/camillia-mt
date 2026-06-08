@@ -93,8 +93,11 @@ static lv_obj_t *s_legendModal = nullptr;
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
 static lv_obj_t *s_dmModal = nullptr;
+static lv_obj_t *s_dmConvPanel = nullptr;
 static lv_obj_t *s_dmConvList = nullptr;
+static lv_obj_t *s_dmMsgPanel = nullptr;
 static lv_obj_t *s_dmMsgList = nullptr;
+static lv_obj_t *s_dmHintLabel = nullptr;
 static lv_obj_t *s_dmNodePickerModal = nullptr;
 static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
@@ -117,6 +120,14 @@ static int s_dmRenderedConvCount = -1;
 static uint32_t s_dmRenderedNodeId = 0;
 static int s_dmRenderedMsgCount = -1;
 static int s_dmRenderedUnreadTotal = -1;
+static bool s_dmMsgPanelFocused = false;
+static uint32_t s_dmDeletePendingNodeId = 0;
+static uint32_t s_dmDeleteConfirmUntilMs = 0;
+static char s_dmDeleteFlashMsg[64] = "";
+static uint32_t s_dmDeleteFlashUntilMs = 0;
+static uint32_t s_dmTouchPressStartMs = 0;
+static int s_dmTouchPressRowIdx = -1;
+static bool s_dmTouchLongPressTriggered = false;
 static lv_obj_t *s_nodesModal = nullptr;
 static lv_obj_t *s_nodesInfoPanel = nullptr;
 static lv_obj_t *s_nodesDetail = nullptr;
@@ -165,6 +176,8 @@ static constexpr size_t kReplyPreviewTextMax = 160;
 #endif
 static char s_selectedMsgText[kReplyPreviewTextMax + 1] = "";
 static uint32_t s_myNodeId = 0;
+static uint32_t s_nextNodeInfoTxMs = 0;
+static uint32_t s_nextPositionTxMs = 0;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -336,7 +349,9 @@ static void refreshLiveView(bool force = false);
 static void openDmModal();
 static void closeDmModal();
 static void refreshDmModal(bool force = false);
+static void refreshDmPanelFocusStyles();
 static void onDmConversationPressed(lv_event_t *e);
+static void onDmConversationPressState(lv_event_t *e);
 static void openDmNodePicker();
 static void closeDmNodePicker();
 static void refreshDmNodePicker(bool force = false);
@@ -356,6 +371,7 @@ static const NodeEntry *currentNodesSelection();
 static void refreshNodesMap(const NodeEntry *node);
 static void onWebCfgSaved();
 static bool pollMeshRx();
+static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void syncWifiCredsToPrefs();
 static void persistWebCfgEnabled();
@@ -3323,14 +3339,25 @@ static void closeDmModal() {
         lv_obj_del(s_dmModal);
     }
     s_dmModal = nullptr;
+    s_dmConvPanel = nullptr;
     s_dmConvList = nullptr;
+    s_dmMsgPanel = nullptr;
     s_dmMsgList = nullptr;
+    s_dmHintLabel = nullptr;
     s_dmConvCount = 0;
     s_dmSelection = -1;
     s_dmRenderedConvCount = -1;
     s_dmRenderedNodeId = 0;
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
+    s_dmMsgPanelFocused = false;
+    s_dmDeletePendingNodeId = 0;
+    s_dmDeleteConfirmUntilMs = 0;
+    s_dmDeleteFlashMsg[0] = '\0';
+    s_dmDeleteFlashUntilMs = 0;
+    s_dmTouchPressStartMs = 0;
+    s_dmTouchPressRowIdx = -1;
+    s_dmTouchLongPressTriggered = false;
     memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
 }
@@ -4687,11 +4714,147 @@ static DmConv *selectedDmConversation() {
     return DMs.find(nodeId);
 }
 
+static const char *dmDeleteTriggerLabel() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return "Fn+Bksp";
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+    return "Bksp";
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    return "Long-press";
+#else
+    return "Sym+Bksp";
+#endif
+}
+
+static bool dmDeleteConfirmActive(uint32_t nowMs) {
+    if (s_dmDeletePendingNodeId == 0) return false;
+    if ((int32_t)(nowMs - s_dmDeleteConfirmUntilMs) > 0) {
+        s_dmDeletePendingNodeId = 0;
+        s_dmDeleteConfirmUntilMs = 0;
+        return false;
+    }
+    return true;
+}
+
+static void dmDeleteSetFlash(const char *msg, uint32_t ttlMs = 2200) {
+    if (!msg) msg = "";
+    strncpy(s_dmDeleteFlashMsg, msg, sizeof(s_dmDeleteFlashMsg) - 1);
+    s_dmDeleteFlashMsg[sizeof(s_dmDeleteFlashMsg) - 1] = '\0';
+    s_dmDeleteFlashUntilMs = millis() + ttlMs;
+}
+
+static bool dmDeleteTriggerKey(char k) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    LV_UNUSED(k);
+    return false;
+#elif defined(DEVICE_TDECK)
+    return (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE);
+#else
+    return (k == KEY_BACKSPACE_HOLD);
+#endif
+}
+
+static void dmRequestDeleteSelectedConversation() {
+    DmConv *selected = selectedDmConversation();
+    if (!selected) return;
+
+    uint32_t nodeId = selected->nodeId;
+    uint32_t now = millis();
+
+    if (dmDeleteConfirmActive(now) && s_dmDeletePendingNodeId == nodeId) {
+        bool ok = DMs.deleteConversation(nodeId);
+        s_dmDeletePendingNodeId = 0;
+        s_dmDeleteConfirmUntilMs = 0;
+        if (ok) {
+            dmDeleteSetFlash("Conversation deleted");
+            s_dmSelection = 0;
+            s_dmMsgPanelFocused = false;
+            s_dmRenderedConvCount = -1;
+            s_dmRenderedNodeId = 0;
+            s_dmRenderedMsgCount = -1;
+            s_dmRenderedUnreadTotal = -1;
+        } else {
+            dmDeleteSetFlash("Delete failed");
+        }
+        refreshDmModal(true);
+        return;
+    }
+
+    s_dmDeletePendingNodeId = nodeId;
+    s_dmDeleteConfirmUntilMs = now + 6000UL;
+    dmDeleteSetFlash("Confirm delete");
+    refreshDmModal(true);
+}
+
+static void refreshDmPanelFocusStyles() {
+    if (!s_dmConvPanel || !s_dmMsgPanel) return;
+
+    bool msgFocused = s_dmMsgPanelFocused && (s_dmSelection > 0);
+    lv_obj_set_style_border_width(s_dmConvPanel, msgFocused ? 1 : 2, 0);
+    lv_obj_set_style_border_color(
+        s_dmConvPanel,
+        msgFocused ? lv_color_hex(0x335D9D) : lv_color_hex(0x90B4FF),
+        0);
+
+    lv_obj_set_style_border_width(s_dmMsgPanel, msgFocused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(
+        s_dmMsgPanel,
+        msgFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D),
+        0);
+}
+
 static void onDmConversationPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > s_dmConvCount) return;
+    uint32_t selectedNodeId = 0;
+    if (idx > 0 && idx - 1 < s_dmConvCount) {
+        selectedNodeId = s_dmConvNodeIds[idx - 1];
+    }
     s_dmSelection = idx;
+    s_dmMsgPanelFocused = (idx > 0);
+    if (selectedNodeId == 0 || selectedNodeId != s_dmDeletePendingNodeId) {
+        s_dmDeletePendingNodeId = 0;
+        s_dmDeleteConfirmUntilMs = 0;
+    }
     refreshDmModal(true);
+}
+
+static void onDmConversationPressState(lv_event_t *e) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx <= 0 || idx > s_dmConvCount) return;
+
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        s_dmTouchPressStartMs = millis();
+        s_dmTouchPressRowIdx = idx;
+        s_dmTouchLongPressTriggered = false;
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSING) {
+        if (s_dmTouchPressRowIdx == idx
+            && !s_dmTouchLongPressTriggered
+            && (millis() - s_dmTouchPressStartMs) >= 3000UL) {
+            s_dmTouchLongPressTriggered = true;
+            s_dmSelection = idx;
+            s_dmMsgPanelFocused = false;
+            dmRequestDeleteSelectedConversation();
+        }
+        return;
+    }
+
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_dmTouchPressRowIdx == idx) {
+            s_dmTouchPressStartMs = 0;
+            s_dmTouchPressRowIdx = -1;
+            s_dmTouchLongPressTriggered = false;
+        }
+        return;
+    }
+#else
+    LV_UNUSED(e);
+#endif
 }
 
 static void onDmNodePressed(lv_event_t *e) {
@@ -4785,7 +4948,13 @@ static void refreshDmNodePicker(bool force) {
     LV_UNUSED(force);
     if (!s_dmNodePickerModal || !s_dmNodePickerList) return;
 
+    const lv_color_t dmPickerTextColor =
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF);
+    const lv_color_t dmPickerHintColor =
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF);
+
     if (s_dmNodePickerTitle) {
+        lv_obj_set_style_text_color(s_dmNodePickerTitle, dmPickerTextColor, 0);
         if (s_dmNodeFilterOpen) {
             char title[64];
             snprintf(title, sizeof(title), "New DM: Select Node [%s]", s_dmNodeFilter);
@@ -4796,6 +4965,7 @@ static void refreshDmNodePicker(bool force) {
     }
 
     if (s_dmNodePickerHint) {
+        lv_obj_set_style_text_color(s_dmNodePickerHint, dmPickerHintColor, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
@@ -4816,7 +4986,7 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_t *empty = lv_label_create(s_dmNodePickerList);
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_font(empty, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(empty, dmPickerTextColor, 0);
         if (s_dmNodeFilterOpen && s_dmNodeFilterLen > 0) {
             char noMatch[64];
             snprintf(noMatch, sizeof(noMatch), "No matches for: %s", s_dmNodeFilter);
@@ -4856,6 +5026,7 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_t *lbl = lv_label_create(row);
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, dmPickerTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
 
@@ -4895,7 +5066,10 @@ static void openDmNodePicker() {
     s_dmNodePickerTitle = title;
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_color(
+        title,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+        0);
     lv_label_set_text(title, "New DM: Select Node");
 
     s_dmNodePickerList = lv_obj_create(s_dmNodePickerModal);
@@ -4920,7 +5094,10 @@ static void openDmNodePicker() {
     s_dmNodePickerHint = hint;
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_color(
+        hint,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
+        0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
 #else
@@ -4951,6 +5128,24 @@ static void closeDmNodePicker() {
 
 static void refreshDmModal(bool force) {
     if (!s_dmModal || !s_dmConvList || !s_dmMsgList) return;
+
+    uint32_t now = millis();
+    bool hadDeletePending = (s_dmDeletePendingNodeId != 0);
+    bool hasDeletePending = dmDeleteConfirmActive(now);
+    if (hadDeletePending != hasDeletePending) {
+        force = true;
+    }
+
+    if (s_dmDeleteFlashUntilMs != 0 && (int32_t)(now - s_dmDeleteFlashUntilMs) > 0) {
+        s_dmDeleteFlashMsg[0] = '\0';
+        s_dmDeleteFlashUntilMs = 0;
+        force = true;
+    }
+
+    const lv_color_t dmPanelTextColor =
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF);
+    const uint16_t dmMessageBaseColor =
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x1B, 0x24, 0x3D) : TFT_WHITE;
 
     uint32_t selectedNodeIdBefore = 0;
     if (s_dmSelection > 0) {
@@ -4993,11 +5188,21 @@ static void refreshDmModal(bool force) {
     DmConv *selected = selectedDmConversation();
     if (selected) {
         DMs.markRead(selected->nodeId);
+    } else {
+        s_dmMsgPanelFocused = false;
     }
 
     int selectedMsgCount = selected ? selected->count : -1;
     uint32_t selectedNodeId = selected ? selected->nodeId : 0;
     int unreadTotal = DMs.unreadMessageCount();
+
+    const bool selectedConvChanged = (s_dmRenderedNodeId != selectedNodeId);
+    const bool selectedMsgIncreased =
+        (selectedNodeId != 0)
+        && (s_dmRenderedNodeId == selectedNodeId)
+        && (s_dmRenderedMsgCount >= 0)
+        && (selectedMsgCount > s_dmRenderedMsgCount);
+    const bool autoScrollToLatest = selectedConvChanged || selectedMsgIncreased;
 
     if (!force
         && s_dmRenderedConvCount == s_dmConvCount
@@ -5038,10 +5243,15 @@ static void refreshDmModal(bool force) {
         lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
+        lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)0);
+        lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)0);
+        lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)0);
+        lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESS_LOST, (void *)(intptr_t)0);
 
         lv_obj_t *lbl = lv_label_create(row);
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, dmListFont, 0);
+        lv_obj_set_style_text_color(lbl, dmPanelTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_label_set_text(lbl, "New DM");
@@ -5074,10 +5284,15 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
             lv_obj_set_style_shadow_width(row, 0, 0);
             lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+            lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+            lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)rowIdx);
+            lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)rowIdx);
+            lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESS_LOST, (void *)(intptr_t)rowIdx);
 
             lv_obj_t *lbl = lv_label_create(row);
             lv_obj_set_width(lbl, lv_pct(100));
             lv_obj_set_style_text_font(lbl, dmListFont, 0);
+            lv_obj_set_style_text_color(lbl, dmPanelTextColor, 0);
             lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
 
@@ -5104,19 +5319,27 @@ static void refreshDmModal(bool force) {
         lv_obj_t *empty = lv_label_create(s_dmMsgList);
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_font(empty, dmMsgFont, 0);
-        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(empty, dmPanelTextColor, 0);
         lv_label_set_text(empty,
                           (s_dmSelection == 0)
-                              ? "Press Enter on New DM"
+                              ? "Backspace to return to Main Screen"
                               : "Select a conversation");
     } else {
+        const DmLine *renderRows[MAX_DM_LINES] = {};
         int rowCount = 0;
+        lv_obj_t *lastMsgObj = nullptr;
         for (int row = 0; row < MAX_DM_LINES; row++) {
             const DmLine *dl = DMs.getLine(selected, row, MAX_DM_LINES);
             if (!dl) break;
-            rowCount++;
+            renderRows[rowCount++] = dl;
+        }
+
+        for (int row = rowCount - 1; row >= 0; row--) {
+            const DmLine *dl = renderRows[row];
+            if (!dl) continue;
 
             lv_obj_t *msg = lv_label_create(s_dmMsgList);
+            lastMsgObj = msg;
             lv_obj_set_width(msg, lv_pct(100));
             lv_obj_set_style_text_font(msg, dmMsgFont, 0);
             lv_obj_set_style_pad_left(msg, 2, 0);
@@ -5141,16 +5364,24 @@ static void refreshDmModal(bool force) {
                     break;
             }
 
+            if (s_cfg.uiMode == UI_MODE_LIGHT && lineColor == TFT_WHITE) {
+                lineColor = dmMessageBaseColor;
+            }
+
             lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
             setLabelTextEmojiSafe(msg, dl->text);
+        }
+
+        if (autoScrollToLatest && lastMsgObj) {
+            lv_obj_scroll_to_view(lastMsgObj, LV_ANIM_OFF);
         }
 
         if (rowCount == 0) {
             lv_obj_t *empty = lv_label_create(s_dmMsgList);
             lv_obj_set_width(empty, lv_pct(100));
             lv_obj_set_style_text_font(empty, dmMsgFont, 0);
-            lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+            lv_obj_set_style_text_color(empty, dmPanelTextColor, 0);
             lv_label_set_text(empty, "No messages yet");
         }
     }
@@ -5159,6 +5390,38 @@ static void refreshDmModal(bool force) {
     s_dmRenderedNodeId = selected ? selected->nodeId : 0;
     s_dmRenderedMsgCount = selected ? selected->count : -1;
     s_dmRenderedUnreadTotal = unreadTotal;
+
+    if (s_dmHintLabel) {
+        if (s_dmDeletePendingNodeId != 0 && s_dmDeleteConfirmUntilMs != 0) {
+            uint32_t remainS = (uint32_t)((s_dmDeleteConfirmUntilMs - now + 999UL) / 1000UL);
+            if (remainS > 9) remainS = 9;
+            lv_label_set_text_fmt(s_dmHintLabel,
+                                  "Delete pending: %s again to confirm (%lus)",
+                                  dmDeleteTriggerLabel(),
+                                  (unsigned long)remainS);
+        } else if (s_dmDeleteFlashMsg[0]) {
+            lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
+        } else {
+#if defined(DEVICE_TDECK)
+            lv_label_set_text_fmt(s_dmHintLabel,
+                                  "Up/Down/J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+            lv_label_set_text_fmt(s_dmHintLabel,
+                                  "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+            lv_label_set_text_fmt(s_dmHintLabel,
+                                  "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
+                                  modalCloseKeyLabel());
+#else
+            lv_label_set_text_fmt(s_dmHintLabel,
+                                  "Up/Down = Select   Enter = Compose/Focus   %s = Delete   %s = Back",
+                                  dmDeleteTriggerLabel(),
+                                  modalCloseKeyLabel());
+#endif
+        }
+    }
+
+    refreshDmPanelFocusStyles();
 }
 
 static void openDmModal() {
@@ -5199,7 +5462,10 @@ static void openDmModal() {
 
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_color(
+        title,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+        0);
     lv_label_set_text(title, "DIRECT MESSAGES");
     lv_obj_center(title);
 
@@ -5215,6 +5481,7 @@ static void openDmModal() {
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     lv_obj_t *leftPanel = lv_obj_create(content);
+    s_dmConvPanel = leftPanel;
     lv_obj_set_width(leftPanel, leftW);
     lv_obj_set_height(leftPanel, lv_pct(100));
     lv_obj_clear_flag(leftPanel, LV_OBJ_FLAG_SCROLLABLE);
@@ -5230,7 +5497,10 @@ static void openDmModal() {
     lv_obj_t *leftTitle = lv_label_create(leftPanel);
     lv_obj_set_width(leftTitle, lv_pct(100));
     lv_obj_set_style_text_font(leftTitle, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(leftTitle, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_color(
+        leftTitle,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+        0);
     lv_label_set_text(leftTitle, "Conversations");
 
     s_dmConvList = lv_obj_create(leftPanel);
@@ -5252,6 +5522,7 @@ static void openDmModal() {
     lv_obj_set_flex_align(s_dmConvList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     lv_obj_t *rightPanel = lv_obj_create(content);
+    s_dmMsgPanel = rightPanel;
     lv_obj_set_width(rightPanel, rightW);
     lv_obj_set_height(rightPanel, lv_pct(100));
     lv_obj_clear_flag(rightPanel, LV_OBJ_FLAG_SCROLLABLE);
@@ -5267,7 +5538,10 @@ static void openDmModal() {
     lv_obj_t *rightTitle = lv_label_create(rightPanel);
     lv_obj_set_width(rightTitle, lv_pct(100));
     lv_obj_set_style_text_font(rightTitle, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(rightTitle, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_color(
+        rightTitle,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+        0);
     lv_label_set_text(rightTitle, "Messages");
 
     s_dmMsgList = lv_obj_create(rightPanel);
@@ -5289,19 +5563,35 @@ static void openDmModal() {
     lv_obj_set_flex_align(s_dmMsgList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     lv_obj_t *hint = lv_label_create(s_dmModal);
+    s_dmHintLabel = hint;
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_color(
+        hint,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
+        0);
 #if defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Compose   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint,
+                          "Up/Down/J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    lv_label_set_text_fmt(hint,
+                          "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text_fmt(hint,
+                          "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
+                          modalCloseKeyLabel());
 #else
-    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Compose   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint,
+                          "Up/Down = Select   Enter = Compose/Focus   %s = Delete   %s = Back",
+                          dmDeleteTriggerLabel(),
+                          modalCloseKeyLabel());
 #endif
 
     s_dmRenderedConvCount = -1;
     s_dmRenderedNodeId = 0;
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
+    s_dmMsgPanelFocused = false;
     refreshDmModal(true);
 }
 
@@ -6315,11 +6605,55 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
+            // T-Deck: when a conversation is selected, backspace is a delete
+            // action and should not be interpreted as focus/navigation behavior.
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_dmSelection > 0) {
+                if (s_dmMsgPanelFocused) {
+                    s_dmMsgPanelFocused = false;
+                    s_dmDeletePendingNodeId = 0;
+                    s_dmDeleteConfirmUntilMs = 0;
+                    refreshDmModal(true);
+                } else {
+                    dmRequestDeleteSelectedConversation();
+                }
+                continue;
+            }
+#endif
+
+            if (dmDeleteTriggerKey(k) && s_dmSelection > 0) {
+                dmRequestDeleteSelectedConversation();
+                continue;
+            }
+
             if (isModalCloseKey(k)) {
+                if (dmDeleteConfirmActive(millis())) {
+                    s_dmDeletePendingNodeId = 0;
+                    s_dmDeleteConfirmUntilMs = 0;
+                    dmDeleteSetFlash("Delete canceled");
+                    refreshDmModal(true);
+                    continue;
+                }
                 closeDmModal();
                 continue;
             }
+
+            if (k == KEY_ROLLER && s_dmSelection > 0) {
+                s_dmMsgPanelFocused = !s_dmMsgPanelFocused;
+                refreshDmPanelFocusStyles();
+                continue;
+            }
+
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                if (s_dmMsgPanelFocused && s_dmSelection > 0 && s_dmMsgList) {
+                    const int scrollStep = 18;
+                    const int delta = (k == KEY_SCROLL_UP)
+                        ? (kPagerWheelChatNav ? scrollStep : -scrollStep)
+                        : (kPagerWheelChatNav ? -scrollStep : scrollStep);
+                    lv_obj_scroll_by(s_dmMsgList, 0, delta, LV_ANIM_OFF);
+                    continue;
+                }
+
                 int totalRows = s_dmConvCount + 1;
                 if (totalRows > 0) {
                     int next = s_dmSelection;
@@ -6331,6 +6665,9 @@ static void pumpKeyboardInput() {
                     if (next < 0) next = 0;
                     if (next >= totalRows) next = totalRows - 1;
                     if (next != s_dmSelection) {
+                        s_dmDeletePendingNodeId = 0;
+                        s_dmDeleteConfirmUntilMs = 0;
+                        s_dmMsgPanelFocused = false;
                         s_dmSelection = next;
                         refreshDmModal(true);
                     }
@@ -6338,12 +6675,24 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER) {
+                if (s_dmSelection > 0 && dmDeleteConfirmActive(millis())) {
+                    DmConv *selected = selectedDmConversation();
+                    if (selected && selected->nodeId == s_dmDeletePendingNodeId) {
+                        dmRequestDeleteSelectedConversation();
+                        continue;
+                    }
+                }
                 if (s_dmSelection == 0) {
                     openDmNodePicker();
                 } else {
                     DmConv *selected = selectedDmConversation();
                     if (selected) {
-                        openComposePromptForDm(selected->nodeId);
+                        if (!s_dmMsgPanelFocused) {
+                            s_dmMsgPanelFocused = true;
+                            refreshDmPanelFocusStyles();
+                        } else {
+                            openComposePromptForDm(selected->nodeId);
+                        }
                     }
                 }
                 continue;
@@ -7914,6 +8263,99 @@ static bool pollMeshRx() {
     return changed;
 }
 
+static uint32_t announceIntervalMs(uint32_t intervalS) {
+    if (intervalS == 0) return 0;
+    if (intervalS >= (0xFFFFFFFFUL / 1000UL)) return 0xFFFFFFFFUL;
+    uint32_t ms = intervalS * 1000UL;
+    return (ms < 1000UL) ? 1000UL : ms;
+}
+
+static bool announceDue(uint32_t nowMs, uint32_t nextMs, uint32_t intervalS) {
+    if (intervalS == 0) return false;
+    if (nextMs == 0) return true;
+    return (int32_t)(nowMs - nextMs) >= 0;
+}
+
+static void scheduleAnnounceNext(uint32_t &nextMs, uint32_t nowMs, uint32_t intervalS) {
+    uint32_t intervalMs = announceIntervalMs(intervalS);
+    if (intervalMs == 0) {
+        nextMs = 0;
+        return;
+    }
+    nextMs = nowMs + intervalMs;
+}
+
+static void scheduleAnnounceRetry(uint32_t &nextMs, uint32_t nowMs) {
+    nextMs = nowMs + 5000UL;
+}
+
+static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM) {
+    if (gpsIsEnabled() && gpsHasFix()) {
+        latI = gpsLatI();
+        lonI = gpsLonI();
+        altM = gpsAltM();
+        return true;
+    }
+
+    NodeEntry *self = Nodes.find(s_myNodeId);
+    if (self && self->hasPosition && (self->latI != 0 || self->lonI != 0)) {
+        latI = self->latI;
+        lonI = self->lonI;
+        altM = self->alt;
+        return true;
+    }
+
+    if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+        latI = s_cfg.latI;
+        lonI = s_cfg.lonI;
+        altM = s_cfg.alt;
+        return true;
+    }
+
+    return false;
+}
+
+static void serviceNodeInfoAnnounce(uint32_t nowMs) {
+    bool forceAnnounce = webCfgAnnounceRequested();
+
+    bool nodeInfoDue = forceAnnounce || announceDue(nowMs, s_nextNodeInfoTxMs, s_cfg.nodeInfoIntervalS);
+    bool positionDue = forceAnnounce || announceDue(nowMs, s_nextPositionTxMs, s_cfg.posIntervalS);
+
+    if (!nodeInfoDue && !positionDue) return;
+
+    if (!s_radioReady) {
+        if (forceAnnounce) webCfgQueueAnnounce();
+        return;
+    }
+
+    if (nodeInfoDue) {
+        bool ok = Channels.sendNodeInfo(s_myNodeId,
+                                        s_cfg.nodeLong,
+                                        s_cfg.nodeShort,
+                                        0xFFFFFFFF,
+                                        false,
+                                        s_cfg.okToMqtt);
+        if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, nowMs, s_cfg.nodeInfoIntervalS);
+        else scheduleAnnounceRetry(s_nextNodeInfoTxMs, nowMs);
+    }
+
+    if (positionDue) {
+        int32_t latI = 0;
+        int32_t lonI = 0;
+        int32_t altM = 0;
+        if (resolveAnnouncePosition(latI, lonI, altM)) {
+            bool ok = Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt);
+            if (ok) scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
+            else scheduleAnnounceRetry(s_nextPositionTxMs, nowMs);
+        } else {
+            scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
+            if (forceAnnounce) {
+                Channels.addMessage(CHAN_ANN, "", "[position] skip: no fix/fallback", TFT_DARKGREY, 0, false);
+            }
+        }
+    }
+}
+
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
@@ -8161,7 +8603,9 @@ static void buildUi() {
     const int selectorBtnH = chatHeaderH - 6;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool compactHeltecSelector = useCompactVerticalHeltecSelector();
-    const int selectorBtnW = compactHeltecSelector ? 46 : min(max(chatW / 3, 96), 220);
+    const int selectorBtnW = compactHeltecSelector
+        ? max((int)lv_font_get_line_height(headerTextFont) + 4, 14)
+        : min(max(chatW / 3, 96), 220);
     const int selectorBtnOffsetX = compactHeltecSelector ? 1 : headerPadX;
 #else
     const int selectorBtnW = min(max(chatW / 3, 96), 220);
@@ -8174,10 +8618,10 @@ static void buildUi() {
     lv_obj_set_style_radius(s_channelSelectorBtn, 6, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (compactHeltecSelector) {
-        lv_obj_set_style_pad_left(s_channelSelectorBtn, 0, 0);
-        lv_obj_set_style_pad_right(s_channelSelectorBtn, 0, 0);
-        lv_obj_set_style_pad_top(s_channelSelectorBtn, 0, 0);
-        lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_pad_left(s_channelSelectorBtn, 1, 0);
+        lv_obj_set_style_pad_right(s_channelSelectorBtn, 1, 0);
+        lv_obj_set_style_pad_top(s_channelSelectorBtn, 1, 0);
+        lv_obj_set_style_pad_bottom(s_channelSelectorBtn, 1, 0);
     } else {
         lv_obj_set_style_pad_left(s_channelSelectorBtn, 6, 0);
         lv_obj_set_style_pad_right(s_channelSelectorBtn, 6, 0);
@@ -8197,8 +8641,19 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_channelSelectorLabel, headerTextFont, 0);
     lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (compactHeltecSelector) {
+        lv_obj_set_width(s_channelSelectorLabel, 1);
+        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_add_flag(s_channelSelectorLabel, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_set_width(s_channelSelectorLabel, selectorBtnW - 22);
+        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
+    }
+#else
     lv_obj_set_width(s_channelSelectorLabel, selectorBtnW - 22);
     lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
+#endif
 
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
     lv_obj_set_style_text_font(s_channelSelectorCaretLabel, headerTextFont, 0);
@@ -8874,6 +9329,7 @@ void loop() {
         meshChanged = pollMeshRx();
     }
     gpsLoop();
+    serviceNodeInfoAnnounce(now);
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0

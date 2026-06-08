@@ -543,6 +543,13 @@ void TDeckKeyboard::pumpCardputerKeys() {
         return;
     }
 
+    // Cardputer delete is Fn+Backspace. Surface it as KEY_BACKSPACE_HOLD so
+    // UI code can bind delete behavior without hijacking normal backspace.
+    if (status.fn && status.del) {
+        enqueueCardputerKey(KEY_BACKSPACE_HOLD);
+        return;
+    }
+
     bool hidDeleteQueued = false;
     for (uint8_t hidKey : status.hid_keys) {
         if (hidKey == (uint8_t)CARDPUTER_HID_ESCAPE) {
@@ -566,13 +573,15 @@ void TDeckKeyboard::pumpCardputerKeys() {
             continue;
         }
         if (hidKey == (uint8_t)CARDPUTER_HID_BACKSPACE || hidKey == (uint8_t)CARDPUTER_HID_DELETE) {
-            enqueueCardputerKey(KEY_BACKSPACE);
+            enqueueCardputerKey(status.fn ? KEY_BACKSPACE_HOLD : KEY_BACKSPACE);
             hidDeleteQueued = true;
         }
     }
 
     if (status.tab) enqueueCardputerKey(KEY_TAB);
-    if (status.del && !hidDeleteQueued) enqueueCardputerKey(KEY_BACKSPACE);
+    if (status.del && !hidDeleteQueued) {
+        enqueueCardputerKey(status.fn ? KEY_BACKSPACE_HOLD : KEY_BACKSPACE);
+    }
 
     bool nodeFocusChordQueued = false;
     for (char key : status.word) {
@@ -608,7 +617,11 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0x0D: return KEY_ENTER;
         case 0x0A: return KEY_ENTER;
         case 0x1B: return KEY_ESCAPE;
-        case 0x7F: return KEY_BACKSPACE;
+#if defined(DEVICE_TDECK)
+    case 0x7F: return KEY_BACKSPACE_HOLD;
+#else
+    case 0x7F: return KEY_BACKSPACE;
+#endif
         case 0x08: return KEY_BACKSPACE;
         case 0x05: return KEY_NODE_FOCUS;  // ALT+E
         default:   return (char)raw;
