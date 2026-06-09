@@ -1,133 +1,134 @@
 # Camillia MT Use Guide
 
-This guide shows the main screens and basic actions.
+This guide reflects current firmware navigation and controls.
 
-## 1. Chat screen
+## Main screen
 
-Use this screen to read channel messages and send quick replies.
+The main screen is channel chat. Use it to read traffic, select reply targets, and start compose.
 
-- Top is a list of configured channels
-- The bottom tabs switch between major views.
-- The chat is in the center.
-- The input line is near the bottom.
+Global shortcuts (keyboard builds, when no modal is open):
+- D opens Direct Messages
+- C opens Config
+- N opens Nodes
+- I opens Live
+- L opens Legend
+- Enter opens compose (or reply compose if a message is selected in the chat screen)
+- Backspace clears selected reply context
 
-![Chat screen](screenshots/RiJa_screen_20260523_144152.png)
+![Chat screen](screenshots/RiCa_screen_20260609_110546.png)
+![Chat screen 2](screenshots/RiCa_screen_20260609_110604.png)
+![New message](screenshots/RiCa_screen_20260609_110637.png)
+![Reply message](screenshots/RiCa_screen_20260609_110658.png)
 
-## 2. Map screen
+## Live screen
 
-Use this screen to view node locations.
+Live shows decoded RX and TX traffic with per-traffic coloring.
 
-- Open the MAP tab.
-- Use zoom controls to move in and out.
-- Use the "ME" action to center on your node.
+- Open with I from chat
+- Scroll with Up and Down input
+- Press C to clear the log
+- Close with the device close key (see device sections below)
 
-![Map screen](screenshots/RiJa_screen_20260523_144255.png)
+![Live screen](screenshots/RiCa_screen_20260609_110224.png)
 
-## 3. Live screen
+## Config screen
 
-Use this screen for real-time radio and routing activity.
+Config includes Web Config controls, export and import, theme toggles, announce, and reset actions.
 
-- Open the LIVE tab.
-- Watch packet and route events as they appear.
-- Use this when checking network flow.
+- Open with C from chat
+- Navigate action rows with Up and Down input
+- Enter runs the selected action
+- Import, Clear Nodes, and Factory Reset require a second Enter confirmation
 
-![Live screen](screenshots/RiJa_screen_20260523_144338.png)
+![Config screen](screenshots/RiCa_screen_20260609_110933.png)
 
-## 4. Config screen
+## Nodes screen
 
-Use this screen to view settings and device information.
+Nodes shows discovered nodes and detail fields, including map position details.
 
-- Open the CFG tab.
-- Review Web Config address, role ID, and node ID.
-- Use clear and reset actions carefully.
+- Open with N from chat
+- Navigate rows with Up and Down input
+- Close with the device close key
 
-![Config screen](screenshots/RiJa_screen_20260523_144350.png)
+![Node details screen](screenshots/RiCa_screen_20260609_110407.png)
 
-## 5. Node details screen
+## Direct Messages
 
-Use this screen to inspect one node in detail.
+Direct messaging:
 
-- Open the NODES tab and select a node.
-- Review signal quality, location, and channel.
-- The mini map shows the selected node position.
+- Pressing enter on New DM opens node picker
+- Enter on a conversation focuses message panel
+- Enter again in focused message panel opens compose for that DM
 
-![Node details screen](screenshots/RiJa_screen_20260523_144406.png)
+![Node select](screenshots/RiCa_screen_20260609_112419.png)
+![Message view](screenshots/RiCa_screen_20260609_113850.png)
+Delete behavior:
+- T-Deck and T-Lora Pager: Backspace triggers delete confirmation on selected conversation
+- Cardputer: Fn+Backspace triggers delete confirmation on selected conversation
+- Heltec touch build: long-press a conversation row for delete confirmation
 
-## Controls
+## Legend screen
 
-### LilyGo T-Deck (`tdeck`)
+Legend explains shortcuts and transport symbols.
 
-Keyboard and hardware controls:
-- Trackball left and right: previous and next channel or tab.
-- Trackball up and down: scroll messages or panel lists.
-- Trackball click: confirm selection.
-- Enter: start compose or send, depending on context.
-- Backspace: delete one character.
-- Tab: cycle focus between message pane and node list.
-- Alt + E: toggle node list focus.
-- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+- Open with L from chat
+- While legend is open, D, C, N, and I jump directly into those screens
 
-Map keyboard shortcuts:
-- Symbol + I: zoom in.
-- Symbol + O: zoom out.
-- Symbol + M: center on your node.
+## Compose behavior
 
-On-screen controls:
-- Bottom buttons: Prev, DM, MAP, LIVE, CFG, NODES, Next.
-- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
+- Enter sends
+- Backspace deletes a character
+- Cardputer: Esc closes compose
+- Other keyboard builds: Backspace on empty compose closes
 
-### LilyGo T-Lora Pager TFT (`tlora-pager-tft`)
+## Device controls
 
-Keyboard and wheel controls:
-- Roller up and down: switch channel or tab in channel view.
-- Roller click: toggle row-cursor mode in channel view.
-- In row-cursor mode, roller up and down: move through message rows.
-- Enter: start compose or send, depending on context.
-- Backspace: delete one character.
-- Tab: cycle focus between message pane and node list.
-- Alt + E: toggle node list focus.
-- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+### LilyGo T-Deck (tdeck)
 
-Map keyboard shortcuts:
-- Symbol + I: zoom in.
-- Symbol + O: zoom out.
-- Symbol + M: center on your node.
+Primary usage is touch plus keyboard shortcuts.
 
-On-screen controls:
-- Bottom buttons: DM, MAP, LIVE, CFG, NODES.
-- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
+- Use touch for channel chips and UI buttons
+- D, C, N, I, L open main modals
+- Enter opens compose or reply compose
+- Optional Vim-style helpers in navigation views: J maps to Up and K maps to Down
+- Modal close key: Backspace (Esc also works)
 
-### M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`)
+### LilyGo T-Lora Pager TFT (tlora-pager-tft)
 
-Keyboard controls:
-- Enter: start compose or send, depending on context.
-- Backspace: delete one character.
-- Tab: cycle focus between message pane and node list.
-- Alt + E: toggle node list focus.
-- Fn + `;`: scroll up.
-- Fn + `.`: scroll down.
-- Fn + `,`: previous channel.
-- Fn + `/`: next channel.
-- Panel shortcuts when not typing: `D` DM, `M` MAP, `L` LIVE, `C` CFG, `N` NODES.
+Primary usage is wheel plus keyboard.
 
-Map keyboard shortcuts:
-- `;`: previous node.
-- `.`: next node.
-- `,`: zoom out.
-- `/`: zoom in.
+- Wheel Up and Down on chat switches channels
+- Wheel Click enters row cursor mode
+- In row cursor mode, Wheel Up and Down moves selected chat row
+- Backspace exits row cursor mode
+- Enter opens compose or reply compose
+- Config modal: Wheel Click swaps focus between action list and info panel
+- DM modal: Wheel Click swaps focus between conversation list and message list
+- Modal close key: Backspace (Esc also works)
 
-On-screen controls:
-- No touch controls in this build profile.
+### M5Stack Cardputer + Cap LoRa/GPS (cardputer-cap)
 
-### Heltec WiFi LoRa 32 V4 + TFT expansion (`heltec-v4`, `heltec-v4-vertical`)
+Primary usage is keyboard.
 
-Touch controls:
-- Bottom buttons: Prev, DM, MAP, LIVE, CFG, NODES, Next.
-- MAP buttons: Previous Node, Next Node, `+`, `-`, `ME`.
-- DM panel: on-screen Up and Down buttons.
-- NODES panel: on-screen Up and Down buttons.
-- CFG panel: on-screen Up and Down buttons.
-- Tap the input area in message views to open the on-screen keyboard.
+- Channel switch: comma for previous, slash for next
+- Navigation: semicolon and period act as Up and Down in list views
+- Arrow keys map to the same directional actions
+- Escape closes modals and exits chat focus mode
+- Enter opens compose or confirms selected actions
+- Fn+Backspace is the DM delete trigger
 
-Keyboard controls:
-- No physical keyboard controls in this build profile.
+### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)
+
+Primary usage is touch.
+
+- Bottom touch nav provides Config, Nodes, Live, and Legend
+- Use on-screen touch lists and buttons inside each modal
+- DM modal is not on the bottom touch nav row
+
+## Close key summary
+
+- Cardputer label: Esc
+- T-Deck and T-Lora Pager label: Bksp
+- Heltec touch: use on-screen navigation and close controls
+
+Esc is accepted as a close key in most keyboard flows.

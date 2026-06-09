@@ -61,6 +61,13 @@ static constexpr uint16_t kMaxHorRes =
 static constexpr uint16_t kDrawBufLines = 40;
 static lv_color_t s_drawBufMem[kMaxHorRes * kDrawBufLines];
 static lv_disp_draw_buf_t s_drawBuf;
+#if defined(DEVICE_TDECK)
+static uint16_t *s_screenshotCaptureFrame = nullptr;
+static int32_t s_screenshotCaptureW = 0;
+static int32_t s_screenshotCaptureH = 0;
+static bool s_screenshotCaptureActive = false;
+static bool s_screenshotCaptureTouched = false;
+#endif
 static lv_obj_t *s_channelBtns[MESH_CHANNELS] = {};
 static lv_obj_t *s_channelLabels[MESH_CHANNELS] = {};
 static bool s_channelNeedsAttention[MESH_CHANNELS] = {};
@@ -370,6 +377,7 @@ static bool nodesSnapshotContains(uint32_t nodeId);
 static const NodeEntry *currentNodesSelection();
 static void refreshNodesMap(const NodeEntry *node);
 static void onWebCfgSaved();
+static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void applyTimezoneFromConfig();
@@ -6194,7 +6202,11 @@ static void activateCfgSelection() {
                 s_webCfgEnabled = true;
                 persistWebCfgEnabled();
 
+#if HAS_SD_CARD
+                bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
+#else
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
+#endif
                 if (ok) {
                     if (webCfgIsOnboarding()) {
                         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Setup: %s", webCfgIP());
@@ -7049,13 +7061,257 @@ static void onWebCfgSaved() {
     }
 }
 
+static uint32_t pngCrc32Update(uint32_t crc, const uint8_t *data, size_t len) {
+    if (!data) return crc;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc >> 1) ^ ((crc & 1U) ? 0xEDB88320UL : 0UL);
+        }
+    }
+    return crc;
+}
+
+static uint32_t pngAdler32Update(uint32_t adler, const uint8_t *data, size_t len) {
+    if (!data) return adler;
+    uint32_t a = adler & 0xFFFFU;
+    uint32_t b = (adler >> 16) & 0xFFFFU;
+    for (size_t i = 0; i < len; i++) {
+        a += data[i];
+        if (a >= 65521U) a -= 65521U;
+        b += a;
+        if (b >= 65521U) b %= 65521U;
+    }
+    return (b << 16) | a;
+}
+
+static bool fileWriteAll(File &f, const uint8_t *data, size_t len) {
+    if (!data && len) return false;
+    while (len > 0) {
+        size_t n = f.write(data, len);
+        if (n == 0) return false;
+        data += n;
+        len -= n;
+    }
+    return true;
+}
+
+static bool fileWriteBe32(File &f, uint32_t v) {
+    uint8_t b[4] = {
+        (uint8_t)((v >> 24) & 0xFF),
+        (uint8_t)((v >> 16) & 0xFF),
+        (uint8_t)((v >> 8) & 0xFF),
+        (uint8_t)(v & 0xFF),
+    };
+    return fileWriteAll(f, b, sizeof(b));
+}
+
+static bool pngWriteChunk(File &f, const char type[4], const uint8_t *data, uint32_t len) {
+    if (!type) return false;
+    if (!fileWriteBe32(f, len)) return false;
+    if (!fileWriteAll(f, (const uint8_t *)type, 4)) return false;
+    if (len > 0 && !fileWriteAll(f, data, len)) return false;
+
+    uint32_t crc = 0xFFFFFFFFUL;
+    crc = pngCrc32Update(crc, (const uint8_t *)type, 4);
+    if (len > 0) crc = pngCrc32Update(crc, data, len);
+    crc ^= 0xFFFFFFFFUL;
+    return fileWriteBe32(f, crc);
+}
+
+static bool captureWebScreenshotPng(const char *outPath) {
+#if !HAS_SD_CARD
+    (void)outPath;
+    return false;
+#else
+    if (!outPath || !outPath[0]) return false;
+
+    const int32_t w = displayDev().width();
+    const int32_t h = displayDev().height();
+    if (w <= 0 || h <= 0) return false;
+
+    const size_t rowPixels = (size_t)w;
+    const size_t scanlineLen = 1 + rowPixels * 3;
+
+#if defined(DEVICE_TDECK)
+    const size_t frame565Bytes = rowPixels * (size_t)h * sizeof(uint16_t);
+    uint16_t *frame565 = (uint16_t *)malloc(frame565Bytes);
+    if (!frame565) return false;
+    memset(frame565, 0, frame565Bytes);
+
+    s_screenshotCaptureFrame = frame565;
+    s_screenshotCaptureW = w;
+    s_screenshotCaptureH = h;
+    s_screenshotCaptureTouched = false;
+    s_screenshotCaptureActive = true;
+
+    lv_obj_invalidate(lv_scr_act());
+    for (int i = 0; i < 12 && !s_screenshotCaptureTouched; i++) {
+        lv_timer_handler();
+        delay(12);
+    }
+
+    s_screenshotCaptureActive = false;
+    s_screenshotCaptureFrame = nullptr;
+    s_screenshotCaptureW = 0;
+    s_screenshotCaptureH = 0;
+
+    if (!s_screenshotCaptureTouched) {
+        free(frame565);
+        return false;
+    }
+#endif
+    uint8_t *scanline = (uint8_t *)malloc(scanlineLen);
+#if defined(DEVICE_TDECK)
+    if (!scanline) {
+        free(frame565);
+        free(scanline);
+        return false;
+    }
+#else
+    if (!scanline) {
+        free(scanline);
+        return false;
+    }
+#endif
+
+    if (SD.exists(outPath)) SD.remove(outPath);
+    File f = SD.open(outPath, FILE_WRITE);
+    if (!f) {
+#if defined(DEVICE_TDECK)
+        free(frame565);
+#endif
+        free(scanline);
+        return false;
+    }
+
+    bool resumeRx = Radio.isReady();
+    if (resumeRx) Radio.setRxPaused(true);
+
+    bool ok = true;
+    do {
+        static const uint8_t kPngSig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+        if (!fileWriteAll(f, kPngSig, sizeof(kPngSig))) { ok = false; break; }
+
+        uint8_t ihdr[13];
+        ihdr[0] = (uint8_t)(((uint32_t)w >> 24) & 0xFF);
+        ihdr[1] = (uint8_t)(((uint32_t)w >> 16) & 0xFF);
+        ihdr[2] = (uint8_t)(((uint32_t)w >> 8) & 0xFF);
+        ihdr[3] = (uint8_t)((uint32_t)w & 0xFF);
+        ihdr[4] = (uint8_t)(((uint32_t)h >> 24) & 0xFF);
+        ihdr[5] = (uint8_t)(((uint32_t)h >> 16) & 0xFF);
+        ihdr[6] = (uint8_t)(((uint32_t)h >> 8) & 0xFF);
+        ihdr[7] = (uint8_t)((uint32_t)h & 0xFF);
+        ihdr[8] = 8;   // bit depth
+        ihdr[9] = 2;   // truecolor RGB
+        ihdr[10] = 0;  // compression method
+        ihdr[11] = 0;  // filter method
+        ihdr[12] = 0;  // no interlace
+        if (!pngWriteChunk(f, "IHDR", ihdr, sizeof(ihdr))) { ok = false; break; }
+
+        // zlib stream with deflate "stored" blocks, one block per scanline.
+        uint64_t idatLen64 = 2ULL + (uint64_t)h * (5ULL + (uint64_t)scanlineLen) + 4ULL;
+        if (idatLen64 > 0xFFFFFFFFULL) { ok = false; break; }
+        uint32_t idatLen = (uint32_t)idatLen64;
+
+        if (!fileWriteBe32(f, idatLen)) { ok = false; break; }
+        if (!fileWriteAll(f, (const uint8_t *)"IDAT", 4)) { ok = false; break; }
+
+        uint32_t idatCrc = 0xFFFFFFFFUL;
+        idatCrc = pngCrc32Update(idatCrc, (const uint8_t *)"IDAT", 4);
+
+        const uint8_t zlibHdr[2] = {0x78, 0x01};
+        if (!fileWriteAll(f, zlibHdr, sizeof(zlibHdr))) { ok = false; break; }
+        idatCrc = pngCrc32Update(idatCrc, zlibHdr, sizeof(zlibHdr));
+
+        uint32_t adler = 1;
+        for (int32_t y = 0; y < h; y++) {
+            scanline[0] = 0; // filter: None
+
+#if defined(DEVICE_TDECK)
+            const uint16_t *srcRow = frame565 + ((size_t)y * rowPixels);
+            size_t p = 1;
+            for (int32_t x = 0; x < w; x++) {
+                uint16_t c = srcRow[x];
+#if LV_COLOR_16_SWAP
+                c = (uint16_t)((c << 8) | (c >> 8));
+#endif
+
+                uint8_t r = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+                uint8_t g = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+                uint8_t b = (uint8_t)((c & 0x1F) * 255 / 31);
+                scanline[p++] = r;
+                scanline[p++] = g;
+                scanline[p++] = b;
+            }
+#else
+            displayDev().waitDMA();
+            displayDev().startWrite();
+            displayDev().readRectRGB(0, y, w, 1, scanline + 1);
+            displayDev().endWrite();
+#endif
+
+            adler = pngAdler32Update(adler, scanline, scanlineLen);
+
+            uint16_t blockLen = (uint16_t)scanlineLen;
+            uint16_t nlen = (uint16_t)~blockLen;
+            uint8_t blockHdr[5] = {
+                (uint8_t)((y == (h - 1)) ? 1 : 0),
+                (uint8_t)(blockLen & 0xFF),
+                (uint8_t)((blockLen >> 8) & 0xFF),
+                (uint8_t)(nlen & 0xFF),
+                (uint8_t)((nlen >> 8) & 0xFF),
+            };
+
+            if (!fileWriteAll(f, blockHdr, sizeof(blockHdr))) { ok = false; break; }
+            idatCrc = pngCrc32Update(idatCrc, blockHdr, sizeof(blockHdr));
+
+            if (!fileWriteAll(f, scanline, scanlineLen)) { ok = false; break; }
+            idatCrc = pngCrc32Update(idatCrc, scanline, scanlineLen);
+        }
+        if (!ok) break;
+
+        uint8_t adlerBe[4] = {
+            (uint8_t)((adler >> 24) & 0xFF),
+            (uint8_t)((adler >> 16) & 0xFF),
+            (uint8_t)((adler >> 8) & 0xFF),
+            (uint8_t)(adler & 0xFF),
+        };
+        if (!fileWriteAll(f, adlerBe, sizeof(adlerBe))) { ok = false; break; }
+        idatCrc = pngCrc32Update(idatCrc, adlerBe, sizeof(adlerBe));
+
+        idatCrc ^= 0xFFFFFFFFUL;
+        if (!fileWriteBe32(f, idatCrc)) { ok = false; break; }
+
+        if (!pngWriteChunk(f, "IEND", nullptr, 0)) { ok = false; break; }
+    } while (false);
+
+    if (resumeRx) Radio.setRxPaused(false);
+
+    f.close();
+    if (!ok && SD.exists(outPath)) {
+        SD.remove(outPath);
+    }
+
+#if defined(DEVICE_TDECK)
+    free(frame565);
+#endif
+    free(scanline);
+    return ok;
+#endif
+}
+
 static void startWebConfigAuto() {
     if (!s_webCfgEnabled) {
         Serial.println("[web] auto start disabled");
         return;
     }
     if (webCfgRunning()) return;
+#if HAS_SD_CARD
+    bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
+#else
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
+#endif
     if (!ok) {
         Serial.println("[web] auto start failed");
         return;
@@ -7215,6 +7471,27 @@ static void lvglFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *co
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
+#if defined(DEVICE_TDECK)
+    if (s_screenshotCaptureActive && s_screenshotCaptureFrame && s_screenshotCaptureW > 0 && s_screenshotCaptureH > 0) {
+        int32_t capX1 = area->x1 < 0 ? 0 : area->x1;
+        int32_t capY1 = area->y1 < 0 ? 0 : area->y1;
+        int32_t capX2 = area->x2 >= s_screenshotCaptureW ? (s_screenshotCaptureW - 1) : area->x2;
+        int32_t capY2 = area->y2 >= s_screenshotCaptureH ? (s_screenshotCaptureH - 1) : area->y2;
+
+        if (capX1 <= capX2 && capY1 <= capY2) {
+            for (int32_t y = capY1; y <= capY2; y++) {
+                int32_t srcY = y - area->y1;
+                int32_t srcX = capX1 - area->x1;
+                lv_color_t *src = color_p + (srcY * w) + srcX;
+                uint16_t *dst = s_screenshotCaptureFrame + ((size_t)y * (size_t)s_screenshotCaptureW) + capX1;
+                for (int32_t x = capX1; x <= capX2; x++) {
+                    *dst++ = (uint16_t)(src++)->full;
+                }
+            }
+            s_screenshotCaptureTouched = true;
+        }
+    }
+#endif
     lv_disp_flush_ready(disp);
 }
 

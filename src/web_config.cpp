@@ -10,6 +10,7 @@
 #include <Preferences.h>
 #include <nvs_flash.h>
 #include <SD.h>
+#include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
@@ -21,6 +22,8 @@
 static const uint32_t kConnectTimeout  = 10000;  // ms
 static const uint32_t kReleaseCheckTimeoutMs = 7000;
 static const char    *kLatestReleaseApiUrl = "https://api.github.com/repos/oumike/camillia-mt/releases/latest";
+static const char    *kLatestVersionRawUrl = "https://raw.githubusercontent.com/oumike/camillia-mt/main/VERSION";
+static const char    *kLatestReleasePageUrl = "https://github.com/oumike/camillia-mt/releases/latest";
 
 static const char    *kUser            = "admin";
 static const char    *kDefaultWebPass  = "admin";
@@ -43,6 +46,81 @@ static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
 static bool           gRebootPending   = false;
 static uint32_t       gRebootAtMs      = 0;
+
+static int compareVersionTags(const char *a, const char *b);
+static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut);
+
+enum ReleaseCheckState : uint8_t {
+    RELEASE_CHECK_IDLE = 0,
+    RELEASE_CHECK_PENDING,
+    RELEASE_CHECK_RUNNING,
+    RELEASE_CHECK_DONE_OK,
+    RELEASE_CHECK_DONE_ERR,
+};
+
+static ReleaseCheckState gReleaseCheckState = RELEASE_CHECK_IDLE;
+static bool              gReleaseCheckUpdateAvailable = false;
+static uint32_t          gReleaseCheckStartedAtMs = 0;
+static uint32_t          gReleaseCheckFinishedAtMs = 0;
+static char              gReleaseCheckLatest[48] = "";
+static char              gReleaseCheckUrl[192] = "";
+static char              gReleaseCheckErr[192] = "";
+
+static void clearReleaseCheckResult() {
+    gReleaseCheckUpdateAvailable = false;
+    gReleaseCheckStartedAtMs = 0;
+    gReleaseCheckFinishedAtMs = 0;
+    gReleaseCheckLatest[0] = '\0';
+    gReleaseCheckUrl[0] = '\0';
+    gReleaseCheckErr[0] = '\0';
+}
+
+static const char *releaseCheckStateName(ReleaseCheckState s) {
+    if (s == RELEASE_CHECK_PENDING) return "pending";
+    if (s == RELEASE_CHECK_RUNNING) return "running";
+    if (s == RELEASE_CHECK_DONE_OK) return "done";
+    if (s == RELEASE_CHECK_DONE_ERR) return "error";
+    return "idle";
+}
+
+static void queueReleaseCheckNow() {
+    clearReleaseCheckResult();
+    gReleaseCheckState = RELEASE_CHECK_PENDING;
+}
+
+static void runQueuedReleaseCheck() {
+    if (gReleaseCheckState != RELEASE_CHECK_PENDING) return;
+
+    gReleaseCheckState = RELEASE_CHECK_RUNNING;
+    gReleaseCheckStartedAtMs = millis();
+
+    String latest;
+    String url;
+    String err;
+    bool ok = fetchLatestReleaseInfo(latest, url, err);
+
+    if (ok) {
+        gReleaseCheckUpdateAvailable = compareVersionTags(APP_VERSION, latest.c_str()) < 0;
+        strncpy(gReleaseCheckLatest, latest.c_str(), sizeof(gReleaseCheckLatest) - 1);
+        gReleaseCheckLatest[sizeof(gReleaseCheckLatest) - 1] = '\0';
+        strncpy(gReleaseCheckUrl, url.c_str(), sizeof(gReleaseCheckUrl) - 1);
+        gReleaseCheckUrl[sizeof(gReleaseCheckUrl) - 1] = '\0';
+        gReleaseCheckState = RELEASE_CHECK_DONE_OK;
+    } else {
+        strncpy(gReleaseCheckErr, err.c_str(), sizeof(gReleaseCheckErr) - 1);
+        gReleaseCheckErr[sizeof(gReleaseCheckErr) - 1] = '\0';
+        size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        char memDiag[96];
+        snprintf(memDiag, sizeof(memDiag), " [heap int free=%u largest=%u]",
+                 (unsigned)freeInt, (unsigned)largestInt);
+        strncat(gReleaseCheckErr, memDiag,
+                sizeof(gReleaseCheckErr) - strlen(gReleaseCheckErr) - 1);
+        gReleaseCheckState = RELEASE_CHECK_DONE_ERR;
+    }
+
+    gReleaseCheckFinishedAtMs = millis();
+}
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -246,6 +324,57 @@ static int compareVersionTags(const char *a, const char *b) {
     return 0;
 }
 
+static void trimAsciiWhitespace(String &s) {
+    int start = 0;
+    while (start < s.length() && isspace((unsigned char)s.charAt(start))) start++;
+
+    int end = s.length();
+    while (end > start && isspace((unsigned char)s.charAt(end - 1))) end--;
+
+    if (start == 0 && end == s.length()) return;
+    s = s.substring(start, end);
+}
+
+static bool fetchLatestTagFromVersionFile(String &tagOut, String &errOut) {
+    tagOut = "";
+    errOut = "";
+
+    WiFiClientSecure rawClient;
+    rawClient.setInsecure();
+
+    HTTPClient raw;
+    if (!raw.begin(rawClient, kLatestVersionRawUrl)) {
+        errOut = "Failed to start VERSION request";
+        return false;
+    }
+
+    raw.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+    raw.addHeader("User-Agent", "camillia-mt-webcfg");
+
+    int rawCode = raw.GET();
+    if (rawCode <= 0) {
+        errOut = "VERSION network error";
+        raw.end();
+        return false;
+    }
+    if (rawCode != 200) {
+        errOut = String("VERSION HTTP ") + String(rawCode);
+        raw.end();
+        return false;
+    }
+
+    tagOut = raw.getString();
+    raw.end();
+    trimAsciiWhitespace(tagOut);
+
+    if (tagOut.length() == 0) {
+        errOut = "VERSION file empty";
+        return false;
+    }
+
+    return true;
+}
+
 static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut) {
     tagOut = "";
     urlOut = "";
@@ -259,38 +388,49 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
     WiFiClientSecure client;
     client.setInsecure();
 
+    String apiErr;
     HTTPClient http;
     if (!http.begin(client, kLatestReleaseApiUrl)) {
-        errOut = "Failed to start HTTPS request";
-        return false;
-    }
+        apiErr = "Failed to start HTTPS request";
+    } else {
+        http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+        http.addHeader("User-Agent", "camillia-mt-webcfg");
+        http.addHeader("Accept", "application/vnd.github+json");
 
-    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
-    http.addHeader("User-Agent", "camillia-mt-webcfg");
-    http.addHeader("Accept", "application/vnd.github+json");
-
-    int code = http.GET();
-    if (code <= 0) {
-        errOut = "Network error";
+        int code = http.GET();
+        if (code <= 0) {
+            apiErr = "Network error";
+        } else if (code != 200) {
+            apiErr = String("Release API HTTP ") + String(code);
+        } else {
+            String body = http.getString();
+            if (extractJsonStringField(body, "tag_name", tagOut) && tagOut.length() > 0) {
+                (void)extractJsonStringField(body, "html_url", urlOut);
+                if (urlOut.length() == 0) urlOut = kLatestReleasePageUrl;
+                http.end();
+                return true;
+            }
+            apiErr = "Release tag not found";
+        }
         http.end();
-        return false;
-    }
-    if (code != 200) {
-        errOut = String("Release API HTTP ") + String(code);
-        http.end();
-        return false;
     }
 
-    String body = http.getString();
-    http.end();
-
-    if (!extractJsonStringField(body, "tag_name", tagOut) || tagOut.length() == 0) {
-        errOut = "Release tag not found";
-        return false;
+    String versionErr;
+    if (fetchLatestTagFromVersionFile(tagOut, versionErr)) {
+        urlOut = kLatestReleasePageUrl;
+        return true;
     }
 
-    (void)extractJsonStringField(body, "html_url", urlOut);
-    return true;
+    if (apiErr.length() && versionErr.length()) {
+        errOut = apiErr + "; fallback failed (" + versionErr + ")";
+    } else if (apiErr.length()) {
+        errOut = apiErr;
+    } else {
+        errOut = versionErr;
+    }
+
+    urlOut = kLatestReleasePageUrl;
+    return false;
 }
 
 // ── HTML helpers ──────────────────────────────────────────────
@@ -351,14 +491,25 @@ static const char kHead[] =
         ".live-toolbar span{font-size:.68em;color:var(--text-dim)}"
         ".live-feed{height:300px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg)}"
         ".live-line{padding:.11em .34em;border-bottom:1px solid rgba(255,255,255,.04);"
-            "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.66em;line-height:1.18;color:#dfe7ef}"
-        ".live-line:nth-child(odd){background:var(--panel-2)}"
-        ".live-line.live-rx{color:#67d8ff}"
-        ".live-line.live-tx{color:#ffd56b}"
-        ".live-line.live-ack{color:#89e7a5}"
-        ".live-line.live-dm{color:#f2a4ff}"
-        ".live-line.live-enc{color:#ffbe73}"
-        ".live-line.live-err{color:#ff8f8f;font-weight:700}"
+            "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.66em;line-height:1.18;"
+            "color:#dfe7ef;background:#10254a}"
+        ".live-line:nth-child(odd){filter:brightness(1.06)}"
+        ".live-line.live-default{background:#10254a;color:#dfe7ef}"
+        ".live-line.live-err{background:#4a1d1d;color:#ff8f8f;font-weight:700}"
+        ".live-line.live-tx-ack{background:#1e3e27;color:#89e7a5}"
+        ".live-line.live-rx-ack{background:#1b3e34;color:#7de8d2}"
+        ".live-line.live-tx-text{background:#4a4318;color:#ffd56b}"
+        ".live-line.live-tx-node{background:#4a2d1f;color:#f7b46d}"
+        ".live-line.live-tx-pos{background:#4a3418;color:#ffc875}"
+        ".live-line.live-tx-tlm{background:#1a3b40;color:#84efff}"
+        ".live-line.live-tx-dm{background:#33224a;color:#f2a4ff}"
+        ".live-line.live-rx-text{background:#12345d;color:#67d8ff}"
+        ".live-line.live-rx-node{background:#1d2e58;color:#9ec3ff}"
+        ".live-line.live-rx-pos{background:#1a3754;color:#b6e5ff}"
+        ".live-line.live-rx-tlm{background:#1a3a3e;color:#9ceadf}"
+        ".live-line.live-rx-enc{background:#4a3618;color:#ffbe73}"
+        ".live-line.live-rx-other{background:#102d52;color:#8fbfff}"
+        ".live-line.live-tx-other{background:#3e3619;color:#e7c96f}"
         ".leaflet-container{font:12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
         ".leaflet-control-attribution{font-size:.65em}"
     ".row2{display:grid;grid-template-columns:1fr 1fr;gap:.5em}"
@@ -1180,63 +1331,207 @@ static void sendConfigPage(const char *msg = "") {
                             "el.textContent=msg||'';"
                             "return el;"
                         "}"
+                        "function parseVersionNums(v){"
+                            "var m=String(v||'').match(/\\d+/g);"
+                            "if(!m)return [];"
+                            "for(var i=0;i<m.length;i++)m[i]=parseInt(m[i],10)||0;"
+                            "return m;"
+                        "}"
+                        "function compareVersionNums(a,b){"
+                            "var va=parseVersionNums(a),vb=parseVersionNums(b);"
+                            "var n=va.length>vb.length?va.length:vb.length;"
+                            "if(n<1)n=1;"
+                            "for(var i=0;i<n;i++){"
+                                "var xa=i<va.length?va[i]:0;"
+                                "var xb=i<vb.length?vb[i]:0;"
+                                "if(xa<xb)return -1;"
+                                "if(xa>xb)return 1;"
+                            "}"
+                            "return 0;"
+                        "}"
+                        "function pollDeviceReleaseCheck(deadline,done){"
+                            "var poll=function(start){"
+                                "var path='/release-check'+(start?'?start=1':'');"
+                                "var req=fetch(path,{cache:'no-store'})"
+                                    ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();});"
+                                "var timeout=new Promise(function(_,reject){setTimeout(function(){reject(new Error('timeout'));},15000);});"
+                                "Promise.race([req,timeout])"
+                                    ".then(function(d){"
+                                        "var cur=(d&&d.current)?d.current:'unknown';"
+                                        "var st=(d&&d.status)?d.status:'';"
+                                        "if(st==='pending'||st==='running'||st==='idle'){"
+                                            "setReleaseCheckResult('Checking latest release...','#b0b8c8');"
+                                            "if(Date.now()>=deadline){setReleaseCheckResult('Update check failed: request timed out','#ff9f9f');done();return;}"
+                                            "setTimeout(function(){poll(false);},900);"
+                                            "return;"
+                                        "}"
+                                        "if(d&&d.error){setReleaseCheckResult('Update check failed: '+d.error,'#ff9f9f');done();return;}"
+                                        "var latest=(d&&d.latest)?d.latest:'';"
+                                        "if(d&&d.updateAvailable){"
+                                            "var el=setReleaseCheckResult('New release available: '+latest+' (current '+cur+').','#8ef2b8');"
+                                            "if(el&&d.url){"
+                                                "var a=document.createElement('a');"
+                                                "a.href=d.url;"
+                                                "a.target='_blank';"
+                                                "a.rel='noopener';"
+                                                "a.style.marginLeft='0.45em';"
+                                                "a.textContent='View release';"
+                                                "el.appendChild(a);"
+                                            "}"
+                                        "}else if(latest){"
+                                            "setReleaseCheckResult('You are up to date ('+cur+'). Latest: '+latest+'.','#8ef2b8');"
+                                        "}else{"
+                                            "setReleaseCheckResult('No release information returned.','#ffd181');"
+                                        "}"
+                                        "done();"
+                                    "})"
+                                    ".catch(function(err){"
+                                        "var msg=(err&&err.message)?err.message:'network error';"
+                                        "if(msg==='timeout')msg='request timed out';"
+                                        "setReleaseCheckResult('Update check failed: '+msg,'#ff9f9f');"
+                                        "done();"
+                                    "});"
+                            "};"
+                            "poll(true);"
+                        "}"
                         "function checkLatestRelease(){"
                             "var btn=document.getElementById('check-release-btn');"
                             "if(btn)btn.disabled=true;"
                             "var done=function(){if(btn)btn.disabled=false;};"
+                            "var deadline=Date.now()+35000;"
                             "setReleaseCheckResult('Checking latest release...','#b0b8c8');"
-                            "fetch('/release-check',{cache:'no-store'})"
+                            "var cur='" APP_VERSION "';"
+                            "var releaseUrl='https://github.com/oumike/camillia-mt/releases/latest';"
+                            "var apiReq=fetch('https://api.github.com/repos/oumike/camillia-mt/releases/latest',{cache:'no-store',headers:{'Accept':'application/vnd.github+json'}})"
                                 ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();})"
                                 ".then(function(d){"
-                                    "var cur=(d&&d.current)?d.current:'unknown';"
-                                    "if(d&&d.error){setReleaseCheckResult('Update check failed: '+d.error,'#ff9f9f');done();return;}"
-                                    "var latest=(d&&d.latest)?d.latest:'';"
-                                    "if(d&&d.updateAvailable){"
+                                    "var latest=(d&&d.tag_name)?String(d.tag_name).trim():'';"
+                                    "var url=(d&&d.html_url)?d.html_url:releaseUrl;"
+                                    "if(!latest)throw new Error('missing tag');"
+                                    "return {latest:latest,url:url};"
+                                "})"
+                                ".catch(function(){"
+                                    "return fetch('https://raw.githubusercontent.com/oumike/camillia-mt/main/VERSION',{cache:'no-store'})"
+                                        ".then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.text();})"
+                                        ".then(function(t){"
+                                            "var latest=String(t||'').trim();"
+                                            "if(!latest)throw new Error('missing tag');"
+                                            "return {latest:latest,url:releaseUrl};"
+                                        "});"
+                                "});"
+                            "var timeout=new Promise(function(_,reject){setTimeout(function(){reject(new Error('timeout'));},15000);});"
+                            "Promise.race([apiReq,timeout])"
+                                ".then(function(info){"
+                                    "var latest=(info&&info.latest)?info.latest:'';"
+                                    "if(!latest){setReleaseCheckResult('No release information returned.','#ffd181');done();return;}"
+                                    "if(compareVersionNums(cur,latest)<0){"
                                         "var el=setReleaseCheckResult('New release available: '+latest+' (current '+cur+').','#8ef2b8');"
-                                        "if(el&&d.url){"
+                                        "if(el&&info.url){"
                                             "var a=document.createElement('a');"
-                                            "a.href=d.url;"
+                                            "a.href=info.url;"
                                             "a.target='_blank';"
                                             "a.rel='noopener';"
                                             "a.style.marginLeft='0.45em';"
                                             "a.textContent='View release';"
                                             "el.appendChild(a);"
                                         "}"
-                                    "}else if(latest){"
-                                        "setReleaseCheckResult('You are up to date ('+cur+'). Latest: '+latest+'.','#8ef2b8');"
-                                    "}else{"
-                                        "setReleaseCheckResult('No release information returned.','#ffd181');"
+                                        "done();"
+                                        "return;"
                                     "}"
+                                    "setReleaseCheckResult('You are up to date ('+cur+'). Latest: '+latest+'.','#8ef2b8');"
                                     "done();"
                                 "})"
-                                ".catch(function(err){setReleaseCheckResult('Update check failed: '+(err&&err.message?err.message:'network error'),'#ff9f9f');done();});"
+                                ".catch(function(){"
+                                    "setReleaseCheckResult('Checking latest release on device...','#b0b8c8');"
+                                    "pollDeviceReleaseCheck(deadline,done);"
+                                "});"
                         "}"
-                        "function liveBodyText(t){"
-                            "var s=(t||'').trimStart();"
-                            "if(s.length>=6&&s.charCodeAt(0)>=48&&s.charCodeAt(0)<=57&&s.charCodeAt(1)>=48&&s.charCodeAt(1)<=57&&s.charAt(2)===':'&&s.charCodeAt(3)>=48&&s.charCodeAt(3)<=57&&s.charCodeAt(4)>=48&&s.charCodeAt(4)<=57&&s.charAt(5)===' ')s=s.slice(6).trimStart();"
-                            "return s;"
+                        "function liveSplitTimestamp(t){"
+                            "var s=String(t||'').trim();"
+                            "var m=s.match(/^(\\d\\d:\\d\\d)\\s+(.*)$/);"
+                            "if(m)return {ts:m[1],body:String(m[2]||'').trim()};"
+                            "return {ts:'',body:s};"
                         "}"
-                        "function liveTypeClass(t){"
-                            "var s=liveBodyText(t);"
-                            "if(!s)return '';"
-                            "if(s.indexOf(' ER')>=0)return 'live-err';"
-                            "if(s.indexOf('T ACK')===0)return 'live-ack';"
-                            "if(s.indexOf('T DM')===0)return 'live-dm';"
-                            "if(s.indexOf('R ')===0&&s.indexOf(' ENC ')>=0)return 'live-enc';"
-                            "if(s.indexOf('R ')===0)return 'live-rx';"
-                            "if(s.indexOf('T ')===0)return 'live-tx';"
-                            "return '';"
+                        "function liveWithTs(ts,msg){"
+                            "return ts?(ts+' '+msg):msg;"
+                        "}"
+                        "function liveDestLabel(dst){"
+                            "if(dst==='U')return 'unicast';"
+                            "if(dst==='B')return 'broadcast';"
+                            "return dst;"
+                        "}"
+                        "function liveFormatFriendly(t){"
+                            "var p=liveSplitTimestamp(t);"
+                            "var body=p.body;"
+                            "var ts=p.ts;"
+                            "if(!body)return '';"
+                            "var m=body.match(/^R\\s+([^>\\s]+)>([^\\s]+)\\s+([A-Z])\\s+c(\\d+)\\s+([^\\s]+)/);"
+                            "if(m){"
+                                "var who=m[1],dst=m[2],tag=m[3],ch=m[4],id=m[5];"
+                                "if(tag==='T')return liveWithTs(ts,'RX text from '+who+' to '+liveDestLabel(dst)+' on ch'+ch+' id:'+id);"
+                                "if(tag==='N')return liveWithTs(ts,'RX nodeinfo from '+who+' to '+liveDestLabel(dst)+' on ch'+ch+' id:'+id);"
+                                "if(tag==='P')return liveWithTs(ts,'RX position from '+who+' to '+liveDestLabel(dst)+' on ch'+ch+' id:'+id);"
+                                "if(tag==='E')return liveWithTs(ts,'RX telemetry from '+who+' to '+liveDestLabel(dst)+' on ch'+ch+' id:'+id);"
+                                "return liveWithTs(ts,'RX packet from '+who+' to '+liveDestLabel(dst)+' on ch'+ch+' id:'+id);"
+                            "}"
+                            "m=body.match(/^R\\s+ACK\\s+([^\\s]+)\\s+([0-9A-Fa-f]{1,8})\\s+h([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'RX routing ACK from '+m[1]+' req:'+m[2].toUpperCase()+' hash:'+m[3]);"
+                            "m=body.match(/^R\\s+NAK\\s+([^\\s]+)\\s+([0-9A-Fa-f]{1,8})\\s+err(\\d+)\\s+h([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'RX routing NAK from '+m[1]+' req:'+m[2].toUpperCase()+' err:'+m[3]+' hash:'+m[4]);"
+                            "m=body.match(/^R\\s+([^\\s]+)\\s+ENC\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'RX encrypted packet from '+m[1]+' (hash '+m[2]+')');"
+                            "m=body.match(/^T\\s+ACK\\s+([^\\s]+)\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX routing ACK to '+m[1]+' ('+m[2]+')');"
+                            "m=body.match(/^T\\s+TXT\\s+([^\\s]+)\\s+c(\\d+)\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX text to '+liveDestLabel(m[1])+' on ch'+m[2]+' id:'+m[3]);"
+                            "m=body.match(/^T\\s+TXT\\s+([^\\s]+)\\s+ER$/);"
+                            "if(m)return liveWithTs(ts,'TX text to '+liveDestLabel(m[1])+' FAILED');"
+                            "m=body.match(/^T\\s+POS\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX position to '+liveDestLabel(m[1])+' id:'+m[2]+' ('+m[3]+')');"
+                            "m=body.match(/^T\\s+NOD\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX nodeinfo '+(m[1]==='U'?'unicast':'broadcast')+' to '+m[2]+' ('+m[3]+')');"
+                            "m=body.match(/^T\\s+DM\\s+([^\\s]+)\\s+([^\\s]+)\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX DM to '+m[2]+' via '+m[1]+' id:'+m[3]);"
+                            "m=body.match(/^T\\s+DM\\s+ER\\s+([^\\s]+)/);"
+                            "if(m)return liveWithTs(ts,'TX DM FAILED ('+m[1]+')');"
+                            "return t||'';"
+                        "}"
+                        "function liveTrafficClass(t){"
+                            "var s=liveSplitTimestamp(t).body;"
+                            "if(!s)return 'live-default';"
+                            "if(s.indexOf(' ER')>=0||s.indexOf('R NAK')===0)return 'live-err';"
+                            "if(s.indexOf('T ACK')===0)return 'live-tx-ack';"
+                            "if(s.indexOf('R ACK')===0)return 'live-rx-ack';"
+                            "if(s.indexOf('T DM')===0)return 'live-tx-dm';"
+                            "if(s.indexOf('R ')===0&&s.indexOf(' ENC ')>=0)return 'live-rx-enc';"
+                            "var m=s.match(/^R\\s+([^>\\s]+)>([^\\s]+)\\s+([A-Z])\\s+c(\\d+)\\s+([^\\s]+)/);"
+                            "if(m){"
+                                "if(m[3]==='T')return 'live-rx-text';"
+                                "if(m[3]==='N')return 'live-rx-node';"
+                                "if(m[3]==='P')return 'live-rx-pos';"
+                                "if(m[3]==='E')return 'live-rx-tlm';"
+                                "return 'live-rx-other';"
+                            "}"
+                            "if(s.indexOf('T TXT')===0)return 'live-tx-text';"
+                            "if(s.indexOf('T NOD')===0)return 'live-tx-node';"
+                            "if(s.indexOf('T POS')===0)return 'live-tx-pos';"
+                            "if(s.indexOf('T TLM')===0)return 'live-tx-tlm';"
+                            "if(s.indexOf('R ')===0)return 'live-rx-other';"
+                            "if(s.indexOf('T ')===0)return 'live-tx-other';"
+                            "return 'live-default';"
                         "}"
                         "function appendLiveLines(lines){"
                             "var box=document.getElementById('live-feed');"
                             "if(!box||!lines||!lines.length)return;"
                             "var autoScroll=(box.scrollTop+box.clientHeight+18)>=box.scrollHeight;"
                             "for(var i=0;i<lines.length;i++){"
-                                "var txt=(lines[i]&&lines[i].t)?lines[i].t:'';"
-                                "var cls=liveTypeClass(txt);"
+                                "var raw=(lines[i]&&lines[i].t)?lines[i].t:'';"
+                                "var txt=liveFormatFriendly(raw);"
+                                "var cls=liveTrafficClass(raw);"
                                 "var row=document.createElement('div');"
-                                "row.className=cls?('live-line '+cls):'live-line';"
+                                "row.className='live-line '+cls;"
                                 "row.textContent=txt;"
+                                "if(raw&&raw!==txt)row.title=raw;"
                                 "box.appendChild(row);"
                             "}"
                             "while(box.childElementCount>400){box.removeChild(box.firstChild);}"
@@ -1735,34 +2030,52 @@ static void handleGetReleaseCheck() {
         return;
     }
 
-    String current = APP_VERSION;
-    String latest;
-    String url;
-    String err;
-    bool ok = fetchLatestReleaseInfo(latest, url, err);
-    bool updateAvailable = false;
-    if (ok) {
-        updateAvailable = compareVersionTags(current.c_str(), latest.c_str()) < 0;
+    bool startNow = false;
+    if (server.hasArg("start")) {
+        String arg = server.arg("start");
+        startNow = (arg == "1" || arg == "true");
     }
 
+    if (startNow) {
+        if (gReleaseCheckState != RELEASE_CHECK_RUNNING &&
+            gReleaseCheckState != RELEASE_CHECK_PENDING) {
+            queueReleaseCheckNow();
+        }
+    }
+
+    String current = APP_VERSION;
     String out = "{";
     out += "\"current\":\"";
     appendJsonEscaped(out, current.c_str());
     out += "\"";
-    if (ok) {
+    out += ",\"status\":\"";
+    out += releaseCheckStateName(gReleaseCheckState);
+    out += "\"";
+
+    if (gReleaseCheckState == RELEASE_CHECK_DONE_OK) {
         out += ",\"latest\":\"";
-        appendJsonEscaped(out, latest.c_str());
+        appendJsonEscaped(out, gReleaseCheckLatest);
         out += "\"";
         out += ",\"updateAvailable\":";
-        out += updateAvailable ? "true" : "false";
+        out += gReleaseCheckUpdateAvailable ? "true" : "false";
         out += ",\"url\":\"";
-        appendJsonEscaped(out, url.c_str());
+        appendJsonEscaped(out, gReleaseCheckUrl);
         out += "\"";
-    } else {
+    } else if (gReleaseCheckState == RELEASE_CHECK_DONE_ERR) {
         out += ",\"error\":\"";
-        appendJsonEscaped(out, err.c_str());
+        appendJsonEscaped(out, gReleaseCheckErr);
         out += "\"";
     }
+
+    if (gReleaseCheckStartedAtMs > 0) {
+        out += ",\"startedMs\":";
+        out += String(gReleaseCheckStartedAtMs);
+    }
+    if (gReleaseCheckFinishedAtMs > 0) {
+        out += ",\"finishedMs\":";
+        out += String(gReleaseCheckFinishedAtMs);
+    }
+
     out += "}";
 
     server.sendHeader("Cache-Control", "no-store");
@@ -1972,6 +2285,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     gFlashMsg[0] = '\0';
     gRebootPending = false;
     gRebootAtMs = 0;
+    clearReleaseCheckResult();
+    gReleaseCheckState = RELEASE_CHECK_IDLE;
 
     // Load saved WiFi credentials
     Preferences prefs;
@@ -2111,6 +2426,8 @@ void webCfgEnd() {
     gFlashMsg[0] = '\0';
     gRebootPending = false;
     gRebootAtMs = 0;
+    clearReleaseCheckResult();
+    gReleaseCheckState = RELEASE_CHECK_IDLE;
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -2131,6 +2448,7 @@ void webCfgLoop() {
     if (!running) return;
 
     server.handleClient();
+    runQueuedReleaseCheck();
     if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
         gRebootPending = false;
         server.stop();
