@@ -18,6 +18,7 @@
 #define KEY_PAGE_DN     0x85
 #define KEY_ROLLER      0x86   // trackball click
 #define KEY_BACKSPACE_HOLD 0x87  // long-hold BACKSPACE (non-touch panel close)
+#define KEY_FN_ENTER    0x88   // Fn+Enter (Cardputer compose shortcut)
 #define KEY_NODE_FOCUS  0x05   // ALT+E — focus/unfocus node list; verify with serial if wrong
 
 class TDeckKeyboard {
@@ -44,6 +45,7 @@ private:
     uint8_t _cardputerTail = 0;
     uint8_t _cardputerCount = 0;
     bool _cardputerEnterDown = false;
+    uint32_t _cardputerFnSeenMs = 0;
 
     void enqueueCardputerKey(char key);
     char dequeueCardputerKey();

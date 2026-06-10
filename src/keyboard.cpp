@@ -2,7 +2,36 @@
 #include "keyboard.h"
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+#ifdef KEY_BACKSPACE
+#undef KEY_BACKSPACE
+#endif
+#ifdef KEY_TAB
+#undef KEY_TAB
+#endif
+#ifdef KEY_ENTER
+#undef KEY_ENTER
+#endif
+#ifdef KEY_ESCAPE
+#undef KEY_ESCAPE
+#endif
 #include <M5Cardputer.h>
+
+#ifdef KEY_BACKSPACE
+#undef KEY_BACKSPACE
+#endif
+#ifdef KEY_TAB
+#undef KEY_TAB
+#endif
+#ifdef KEY_ENTER
+#undef KEY_ENTER
+#endif
+#ifdef KEY_ESCAPE
+#undef KEY_ESCAPE
+#endif
+#define KEY_BACKSPACE   0x08
+#define KEY_TAB         0x09
+#define KEY_ENTER       0x0A
+#define KEY_ESCAPE      0x1B
 
 static constexpr char CARDPUTER_HID_ENTER = 0x28;
 static constexpr char CARDPUTER_HID_ESCAPE = 0x29;
@@ -513,6 +542,12 @@ void TDeckKeyboard::pumpCardputerKeys() {
     auto &status = M5Cardputer.Keyboard.keysState();
     bool changed = M5Cardputer.Keyboard.isChange();
     bool pressed = M5Cardputer.Keyboard.isPressed();
+    const uint32_t now = millis();
+
+    if (status.fn) {
+        _cardputerFnSeenMs = now;
+    }
+    const bool fnActiveForEnter = status.fn || ((uint32_t)(now - _cardputerFnSeenMs) <= 180U);
 
     bool enterPressed = M5Cardputer.BtnA.isPressed() || status.enter;
     for (uint8_t hidKey : status.hid_keys) {
@@ -531,7 +566,7 @@ void TDeckKeyboard::pumpCardputerKeys() {
     }
 
     if (enterPressed && !_cardputerEnterDown) {
-        enqueueCardputerKey(KEY_ENTER);
+        enqueueCardputerKey(fnActiveForEnter ? KEY_FN_ENTER : KEY_ENTER);
         // Treat Enter as a discrete high-priority action so it reaches
         // main-loop handling even if other key state changes occur this tick.
         _cardputerEnterDown = enterPressed;
@@ -614,8 +649,8 @@ void TDeckKeyboard::pumpCardputerKeys() {
 
 char TDeckKeyboard::mapKey(uint8_t raw) {
     switch (raw) {
-        case 0x0D: return KEY_ENTER;
-        case 0x0A: return KEY_ENTER;
+    case 0x0D: return KEY_ENTER;
+    case 0x0A: return KEY_ENTER;
         case 0x1B: return KEY_ESCAPE;
 #if defined(DEVICE_TDECK)
     case 0x7F: return KEY_BACKSPACE_HOLD;
