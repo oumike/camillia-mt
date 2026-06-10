@@ -24,7 +24,7 @@ Global shortcuts (keyboard builds, when no modal is open):
 
 Live shows decoded RX and TX traffic with per-traffic coloring.
 
-- Open with I from chat
+- Open with I from the main screen
 - Scroll with Up and Down input
 - Press C to clear the log
 - Close with the device close key (see device sections below)
@@ -35,7 +35,7 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 
 Config includes Web Config controls, export and import, theme toggles, announce, and reset actions.
 
-- Open with C from chat
+- Open with C from the main screen
 - Navigate action rows with Up and Down input
 - Enter runs the selected action
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
@@ -46,7 +46,7 @@ Config includes Web Config controls, export and import, theme toggles, announce,
 
 Nodes shows discovered nodes and detail fields, including map position details.
 
-- Open with N from chat
+- Open with N from the main screen
 - Navigate rows with Up and Down input
 - Close with the device close key
 
@@ -56,6 +56,7 @@ Nodes shows discovered nodes and detail fields, including map position details.
 
 Direct messaging:
 
+- Open with D from the main screen
 - Pressing enter on New DM opens node picker
 - Enter on a conversation focuses message panel
 - Enter again in focused message panel opens compose for that DM
@@ -71,7 +72,7 @@ Delete behavior:
 
 Legend explains shortcuts and transport symbols.
 
-- Open with L from chat
+- Open with L from the main screen
 - While legend is open, D, C, N, and I jump directly into those screens
 
 ## Compose behavior
