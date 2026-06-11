@@ -17,6 +17,7 @@ struct NodeEntry {
     bool     hasPosition;
     bool     hasTelemetry;
     bool     hasName;         // true once a real NODEINFO name has been received
+    bool     favorite;        // pinned by user; sorted to top in node and DM lists
     int      chanIdx;         // channel last heard on
     uint8_t  chanHash;        // raw on-air channel hash last heard from this node
     bool     hasChanHash;
@@ -39,7 +40,7 @@ public:
     NodeEntry *upsert(uint32_t nodeId);
     NodeEntry *find(uint32_t nodeId);
 
-    // Sorted by lastHeardMs descending (most recent first).
+    // Sorted with favorites first, then by recency.
     NodeEntry *getByRank(int rank);
     int        count() const { return _count; }
 
@@ -47,6 +48,7 @@ public:
     void updateUser(uint32_t nodeId, const UserInfo &u);
     void updatePosition(uint32_t nodeId, const PositionInfo &p);
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
+    bool setFavorite(uint32_t nodeId, bool favorite);
 
 private:
     NodeEntry _nodes[MAX_NODES];

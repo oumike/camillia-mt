@@ -90,6 +90,9 @@ if [[ ${#BUILD_ARGS[@]} -eq 0 ]]; then
     exit 1
 fi
 
+echo "Running full clean for release environments..."
+~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
 

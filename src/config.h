@@ -373,6 +373,10 @@
 #define USER_BUTTON_PIN   0
 #define USER_BUTTON_ACTIVE_LEVEL LOW
 
+// Heltec side button labeled "35" controls display sleep/wake.
+#define DISPLAY_TOGGLE_BUTTON_PIN   35
+#define DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL LOW
+
 #define HAS_GPS         1
 #define GPS_RX          38
 #define GPS_TX          39

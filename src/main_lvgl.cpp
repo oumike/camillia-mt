@@ -178,11 +178,34 @@ static char s_nodesMapImageSrc[96] = {};
 static lv_fs_drv_t s_nodesMapFsDrv;
 static bool s_nodesMapFsDrvReady = false;
 static lv_obj_t *s_nodesList = nullptr;
+static lv_obj_t *s_nodesTitleLabel = nullptr;
+static lv_obj_t *s_nodesHintLabel = nullptr;
 static lv_obj_t *s_nodesListRows[MAX_NODES] = {};
 static int s_nodesListRowCount = 0;
 static NodeEntry s_nodesSnapshot[MAX_NODES] = {};
+static int s_nodesFilteredIdx[MAX_NODES] = {};
 static int s_nodesSnapshotCount = 0;
+static int s_nodesFilteredCount = 0;
 static int s_nodesSelected = -1;
+static constexpr int kNodesFilterMax = 24;
+static char s_nodesFilter[kNodesFilterMax + 1] = {};
+static int s_nodesFilterLen = 0;
+static bool s_nodesFilterOpen = false;
+static constexpr int kNodesActionCount = 3;
+static lv_obj_t *s_nodesActionModal = nullptr;
+static lv_obj_t *s_nodesActionRows[kNodesActionCount] = {};
+static int s_nodesActionSelection = 0;
+static uint32_t s_nodesActionNodeId = 0;
+static lv_obj_t *s_tracerouteBackdrop = nullptr;
+static lv_obj_t *s_tracerouteModal = nullptr;
+static lv_obj_t *s_tracerouteStatusLabel = nullptr;
+static lv_obj_t *s_tracerouteResultsBox = nullptr;
+static lv_obj_t *s_tracerouteResultsLabel = nullptr;
+static uint32_t s_tracerouteNodeId = 0;
+static uint32_t s_traceroutePacketId = 0;
+static uint32_t s_tracerouteStartedMs = 0;
+static bool s_tracerouteAwaitingRouting = false;
+static bool s_tracerouteAwaitingReply = false;
 static int s_activeChannel = 0;
 static int s_lastRenderedChannel = -1;
 static int s_lastRenderedCount = -1;
@@ -222,6 +245,7 @@ enum ComposeTarget : uint8_t {
 
 enum HeltecNavTarget : uint8_t {
     HELTEC_NAV_CFG = 0,
+    HELTEC_NAV_DM,
     HELTEC_NAV_NODES,
     HELTEC_NAV_LIVE,
     HELTEC_NAV_LEGEND,
@@ -387,6 +411,9 @@ static void openDmModal();
 static void closeDmModal();
 static void refreshDmModal(bool force = false);
 static void refreshDmPanelFocusStyles();
+static void activateDmSelection();
+static bool dmDeleteConfirmActive(uint32_t nowMs);
+static void dmRequestDeleteSelectedConversation();
 static void onDmConversationPressed(lv_event_t *e);
 static void onDmConversationPressState(lv_event_t *e);
 static void openDmNodePicker();
@@ -394,15 +421,36 @@ static void closeDmNodePicker();
 static void refreshDmNodePicker(bool force = false);
 static void snapshotNodesForDmPicker();
 static const NodeEntry *selectedDmNodeForPicker();
+static void activateDmNodePickerSelection();
 static void dmNodePickerApplyFilter();
 static bool dmNodePickerContainsNoCase(const char *text, const char *needle);
 static bool shouldHideChatLine(const char *text);
 static void openNodesModal();
 static void closeNodesModal();
 static void snapshotNodesForModal();
+static void nodesApplyFilter();
+static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
 static void onNodeSnapshotPressed(lv_event_t *e);
+static void onNodesActionRowPressed(lv_event_t *e);
+static void openNodesActionMenu();
+static void closeNodesActionMenu();
+static void refreshNodesActionMenuSelection();
+static void executeNodesActionSelection();
+static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId);
+static void closeTracerouteProgressModal();
+static void onTracerouteBackdropPressed(lv_event_t *e);
+static void tracerouteProgressSetStatus(const char *status, lv_color_t color);
+static void tracerouteProgressSetTxResult(bool ok);
+static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, uint32_t errorReason,
+                                        const uint8_t *routeReplyPayload = nullptr,
+                                        size_t routeReplyLen = 0,
+                                        bool viaMqtt = false);
+static void tracerouteProgressOnResponse(const MeshPacket &pkt);
+static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t payloadLen, bool viaMqtt);
+static void tracerouteProgressRenderRoutes(const MeshPacket &pkt);
+static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut = nullptr);
 static bool nodesSnapshotContains(uint32_t nodeId);
 static const NodeEntry *currentNodesSelection();
 static void refreshNodesMap(const NodeEntry *node);
@@ -818,17 +866,32 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
     sPagerAudioVolume = volume;
 }
 
+static bool pagerAudioSelectCommFormat(i2s_config_t &cfg) {
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    return true;
+#elif defined(I2S_COMM_FORMAT_I2S_MSB)
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+    return true;
+#elif defined(I2S_COMM_FORMAT_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_I2S;
+    return true;
+#elif defined(I2S_COMM_FORMAT_STAND_MSB)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
+    return true;
+#else
+    Serial.println("[audio] pager no supported i2s comm format");
+    return false;
+#endif
+}
+
 static bool pagerAudioInitI2S() {
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     cfg.sample_rate = 44100;
     cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-#if defined(I2S_COMM_FORMAT_STAND_I2S)
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-#else
-    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
-#endif
+    if (!pagerAudioSelectCommFormat(cfg)) return false;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
     cfg.dma_buf_count = 6;
     cfg.dma_buf_len = 256;
@@ -1074,17 +1137,32 @@ static bool sTdeckAudioInitTried = false;
 static bool sTdeckAudioReady = false;
 static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
 
+static bool tdeckAudioSelectCommFormat(i2s_config_t &cfg) {
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    return true;
+#elif defined(I2S_COMM_FORMAT_I2S_MSB)
+    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
+    return true;
+#elif defined(I2S_COMM_FORMAT_I2S)
+    cfg.communication_format = I2S_COMM_FORMAT_I2S;
+    return true;
+#elif defined(I2S_COMM_FORMAT_STAND_MSB)
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
+    return true;
+#else
+    Serial.println("[audio] tdeck no supported i2s comm format");
+    return false;
+#endif
+}
+
 static bool tdeckAudioInitI2S() {
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     cfg.sample_rate = 44100;
     cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
-#if defined(I2S_COMM_FORMAT_STAND_I2S)
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-#else
-    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
-#endif
+    if (!tdeckAudioSelectCommFormat(cfg)) return false;
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
     cfg.dma_buf_count = 6;
     cfg.dma_buf_len = 256;
@@ -1849,17 +1927,59 @@ static bool pollUserButton(uint32_t nowMs) {
                 activateCfgSelection();
                 return true;
             }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+            if (s_dmModal && s_dmNodePickerModal && !s_composeModal) {
+                activateDmNodePickerSelection();
+                return true;
+            }
+            if (s_dmModal && !s_dmNodePickerModal && !s_composeModal) {
+                activateDmSelection();
+                return true;
+            }
+            if (s_nodesModal && !s_composeModal && !s_nodesActionModal && !s_tracerouteModal) {
+                openNodesActionMenu();
+                return true;
+            }
+#else
             if (s_screenAsleep) {
                 wakeScreen();
             } else {
                 sleepScreen("BOOT button");
             }
             return true;
+#endif
         }
     }
-#else
+#endif
+
+#if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
+    static bool displayBtnRawPrev = false;
+    static bool displayBtnStable = false;
+    static uint32_t displayBtnDebounceMs = 0;
+
+    bool displayPressed = (digitalRead(DISPLAY_TOGGLE_BUTTON_PIN) == DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL);
+    if (displayPressed != displayBtnRawPrev) {
+        displayBtnRawPrev = displayPressed;
+        displayBtnDebounceMs = nowMs;
+    }
+
+    if ((nowMs - displayBtnDebounceMs) >= 30 && displayPressed != displayBtnStable) {
+        displayBtnStable = displayPressed;
+        if (displayBtnStable) {
+            if (s_screenAsleep) {
+                wakeScreen();
+            } else {
+                sleepScreen("GPIO35 button");
+            }
+            return true;
+        }
+    }
+#endif
+
+#if !((defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)) || (defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)))
     LV_UNUSED(nowMs);
 #endif
+
     return false;
 }
 
@@ -1955,18 +2075,25 @@ static void loadConfigFromPrefs() {
     Preferences prefs;
     if (!prefs.begin("camillia", true)) return;
 
-    String nodeLong = prefs.getString("nodeLong", "");
+    auto getStringIfKey = [&](const char *key) -> String {
+        return prefs.isKey(key) ? prefs.getString(key, "") : String();
+    };
+    auto getFloatIfKey = [&](const char *key, float defaultVal) -> float {
+        return prefs.isKey(key) ? prefs.getFloat(key, defaultVal) : defaultVal;
+    };
+
+    String nodeLong = getStringIfKey("nodeLong");
     if (nodeLong.length()) {
         utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), nodeLong.c_str());
     }
-    String nodeShort = prefs.getString("nodeShort", "");
+    String nodeShort = getStringIfKey("nodeShort");
     if (nodeShort.length()) {
         utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), nodeShort.c_str());
     }
 
-    float f = prefs.getFloat("loraFreq", 0.0f);
+    float f = getFloatIfKey("loraFreq", 0.0f);
     if (f > 0.0f) s_cfg.loraFreq = f;
-    f = prefs.getFloat("loraBw", 0.0f);
+    f = getFloatIfKey("loraBw", 0.0f);
     if (f > 0.0f) s_cfg.loraBw = f;
 
     uint8_t u = prefs.getUChar("loraSf", 0);
@@ -2009,17 +2136,17 @@ static void loadConfigFromPrefs() {
         s_cfg.gpsPollIntervalS = (ul == 0) ? 0 : (uint32_t)constrain((long)((ul + 999UL) / 1000UL), (long)0, (long)3600);
     }
 
-    String region = prefs.getString("region", "");
+    String region = getStringIfKey("region");
     if (region.length()) {
         strncpy(s_cfg.region, region.c_str(), sizeof(s_cfg.region) - 1);
         s_cfg.region[sizeof(s_cfg.region) - 1] = '\0';
     }
-    String tz = prefs.getString("tzDef", "");
+    String tz = getStringIfKey("tzDef");
     if (tz.length()) {
         strncpy(s_cfg.tzDef, tz.c_str(), sizeof(s_cfg.tzDef) - 1);
         s_cfg.tzDef[sizeof(s_cfg.tzDef) - 1] = '\0';
     }
-    String ntp = prefs.getString("ntpServer", "");
+    String ntp = getStringIfKey("ntpServer");
     if (ntp.length()) {
         strncpy(s_cfg.ntpServer, ntp.c_str(), sizeof(s_cfg.ntpServer) - 1);
         s_cfg.ntpServer[sizeof(s_cfg.ntpServer) - 1] = '\0';
@@ -2050,22 +2177,22 @@ static void loadConfigFromPrefs() {
     if (ul) s_cfg.btFixedPin = ul;
 
     if (prefs.isKey("mqttEnabled")) s_cfg.mqttEnabled = prefs.getBool("mqttEnabled");
-    String mqttServer = prefs.getString("mqttServer", "");
+    String mqttServer = getStringIfKey("mqttServer");
     if (mqttServer.length()) {
         strncpy(s_cfg.mqttServer, mqttServer.c_str(), sizeof(s_cfg.mqttServer) - 1);
         s_cfg.mqttServer[sizeof(s_cfg.mqttServer) - 1] = '\0';
     }
-    String mqttUser = prefs.getString("mqttUser", "");
+    String mqttUser = getStringIfKey("mqttUser");
     if (mqttUser.length()) {
         strncpy(s_cfg.mqttUser, mqttUser.c_str(), sizeof(s_cfg.mqttUser) - 1);
         s_cfg.mqttUser[sizeof(s_cfg.mqttUser) - 1] = '\0';
     }
-    String mqttPass = prefs.getString("mqttPass", "");
+    String mqttPass = getStringIfKey("mqttPass");
     if (mqttPass.length()) {
         strncpy(s_cfg.mqttPass, mqttPass.c_str(), sizeof(s_cfg.mqttPass) - 1);
         s_cfg.mqttPass[sizeof(s_cfg.mqttPass) - 1] = '\0';
     }
-    String mqttRoot = prefs.getString("mqttRoot", "");
+    String mqttRoot = getStringIfKey("mqttRoot");
     if (mqttRoot.length()) {
         strncpy(s_cfg.mqttRoot, mqttRoot.c_str(), sizeof(s_cfg.mqttRoot) - 1);
         s_cfg.mqttRoot[sizeof(s_cfg.mqttRoot) - 1] = '\0';
@@ -2087,7 +2214,7 @@ static void loadConfigFromPrefs() {
     if (ul) s_cfg.telEnvIntervalS = ul;
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
-    String canned = prefs.getString("cannedMsgs", "");
+    String canned = getStringIfKey("cannedMsgs");
     if (canned.length()) {
         strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
         s_cfg.cannedMessages[sizeof(s_cfg.cannedMessages) - 1] = '\0';
@@ -2109,12 +2236,12 @@ static void loadConfigFromPrefs() {
     s_cfgDebugLog = debugMonitor;
     debugSetFlags(debugMonitor, debugMonitor, debugMonitor);
 
-    String wifiSsid = prefs.getString("wifiSsid", "");
+    String wifiSsid = getStringIfKey("wifiSsid");
     if (wifiSsid.length()) {
         strncpy(s_cfg.wifiSsid, wifiSsid.c_str(), sizeof(s_cfg.wifiSsid) - 1);
         s_cfg.wifiSsid[sizeof(s_cfg.wifiSsid) - 1] = '\0';
     }
-    String wifiPass = prefs.getString("wifiPass", "");
+    String wifiPass = getStringIfKey("wifiPass");
     if (wifiPass.length()) {
         strncpy(s_cfg.wifiPass, wifiPass.c_str(), sizeof(s_cfg.wifiPass) - 1);
         s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
@@ -2126,31 +2253,38 @@ static void loadConfigFromPrefs() {
 
 static void loadChannelsFromPrefs() {
     Preferences cp;
-    if (!cp.begin("mesh_ch", true)) return;
+    // Open read-write so first boot can create namespace instead of logging NOT_FOUND.
+    if (!cp.begin("mesh_ch", false)) return;
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
         char key[8];
 
         snprintf(key, sizeof(key), "n%d", i);
-        String name = cp.getString(key, "");
-        name.trim();
-        if (name.length() > 0 && name.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
-            strncpy(CHANNEL_KEYS[i].name_buf, name.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
-            CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
-            CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+        if (cp.isKey(key)) {
+            String name = cp.getString(key, "");
+            name.trim();
+            if (name.length() > 0 && name.length() < sizeof(CHANNEL_KEYS[i].name_buf)) {
+                strncpy(CHANNEL_KEYS[i].name_buf, name.c_str(), sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+                CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+                CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+            }
         }
 
         snprintf(key, sizeof(key), "k%d", i);
-        uint8_t keyBuf[32];
-        size_t keyLen = cp.getBytes(key, keyBuf, sizeof(keyBuf));
-        if (keyLen > 0) {
-            memcpy(CHANNEL_KEYS[i].key, keyBuf, keyLen);
-            CHANNEL_KEYS[i].keyLen = (uint8_t)keyLen;
+        if (cp.isKey(key)) {
+            uint8_t keyBuf[32];
+            size_t keyLen = cp.getBytes(key, keyBuf, sizeof(keyBuf));
+            if (keyLen > 0) {
+                memcpy(CHANNEL_KEYS[i].key, keyBuf, keyLen);
+                CHANNEL_KEYS[i].keyLen = (uint8_t)keyLen;
+            }
         }
 
         snprintf(key, sizeof(key), "r%d", i);
-        uint8_t role = cp.getUChar(key, 0xFF);
-        if (role != 0xFF) CHANNEL_KEYS[i].role = role;
+        if (cp.isKey(key)) {
+            uint8_t role = cp.getUChar(key, 0xFF);
+            if (role != 0xFF) CHANNEL_KEYS[i].role = role;
+        }
     }
 
     cp.end();
@@ -2759,6 +2893,9 @@ static void refreshCfgModal() {
                               : lv_color_make(0xFF, 0xFF, 0xFF);
     };
     const lv_color_t selectionOutlineColor = contrastColorFor565(s_ui.selectBg);
+    const lv_color_t selectionBgColor = lvColorFrom565(s_ui.selectBg);
+    const lv_color_t selectionTextColor = contrastColorFor565(s_ui.selectBg);
+    const lv_opa_t selectionBgOpa = (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80;
 
     if (s_cfgActionCount <= 0) {
         initCfgActions();
@@ -2815,9 +2952,9 @@ static void refreshCfgModal() {
         lv_label_set_text(row, cfgActionLabel(actionId, rowText, sizeof(rowText)));
 
         if (i == s_cfgSelection) {
-            lv_obj_set_style_bg_color(row, lv_color_hex(0x2A4E8F), 0);
-            lv_obj_set_style_bg_opa(row, LV_OPA_80, 0);
-            lv_obj_set_style_text_color(row, lv_color_make(0xF8, 0xFB, 0xFF), 0);
+            lv_obj_set_style_bg_color(row, selectionBgColor, 0);
+            lv_obj_set_style_bg_opa(row, selectionBgOpa, 0);
+            lv_obj_set_style_text_color(row, selectionTextColor, 0);
             lv_obj_set_style_border_width(row, 2, 0);
             lv_obj_set_style_border_color(row, selectionOutlineColor, 0);
             lv_obj_set_style_outline_width(row, 1, 0);
@@ -2929,6 +3066,10 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_cfgModal) closeCfgModal();
             else openCfgModal();
             break;
+        case HELTEC_NAV_DM:
+            if (s_dmModal) closeDmModal();
+            else openDmModal();
+            break;
         case HELTEC_NAV_NODES:
             if (s_nodesModal) closeNodesModal();
             else openNodesModal();
@@ -2979,17 +3120,38 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         int target;
     };
     static const NavItem kItems[] = {
+#if defined(DEVICE_UI_VERTICAL)
+        {"Cfg", HELTEC_NAV_CFG},
+        {"DM", HELTEC_NAV_DM},
+        {"Nodes", HELTEC_NAV_NODES},
+        {"Live", HELTEC_NAV_LIVE},
+        {"Leg", HELTEC_NAV_LEGEND},
+#else
         {"Config", HELTEC_NAV_CFG},
+        {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
         {"Legend", HELTEC_NAV_LEGEND},
+#endif
     };
 
-    lv_obj_set_style_pad_left(bar, 2, 0);
-    lv_obj_set_style_pad_right(bar, 2, 0);
-    lv_obj_set_style_pad_top(bar, 1, 0);
-    lv_obj_set_style_pad_bottom(bar, 1, 0);
-    lv_obj_set_style_pad_column(bar, 3, 0);
+#if defined(DEVICE_UI_VERTICAL)
+    const int barPadX = 1;
+    const int barPadY = 1;
+    const int barPadCol = 1;
+    const int btnPad = 0;
+#else
+    const int barPadX = 2;
+    const int barPadY = 1;
+    const int barPadCol = 2;
+    const int btnPad = 1;
+#endif
+
+    lv_obj_set_style_pad_left(bar, barPadX, 0);
+    lv_obj_set_style_pad_right(bar, barPadX, 0);
+    lv_obj_set_style_pad_top(bar, barPadY, 0);
+    lv_obj_set_style_pad_bottom(bar, barPadY, 0);
+    lv_obj_set_style_pad_column(bar, barPadCol, 0);
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
@@ -3001,7 +3163,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_height(btn, lv_pct(100));
         lv_obj_set_style_radius(btn, 4, 0);
-        lv_obj_set_style_pad_all(btn, 1, 0);
+        lv_obj_set_style_pad_all(btn, btnPad, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
         const bool isActive = (activeTarget == kItems[i].target);
@@ -3037,9 +3199,15 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!parent) return;
 
+#if defined(DEVICE_UI_VERTICAL)
+    const int navBarHeight = 24;
+#else
+    const int navBarHeight = 26;
+#endif
+
     lv_obj_t *bar = lv_obj_create(parent);
     lv_obj_set_width(bar, lv_pct(100));
-    lv_obj_set_height(bar, 26);
+    lv_obj_set_height(bar, navBarHeight);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_60, 0);
@@ -3092,6 +3260,7 @@ static const char *livePortLabel(const char *tag) {
     if (strcmp(tag, "N") == 0) return "nodeinfo";
     if (strcmp(tag, "P") == 0) return "position";
     if (strcmp(tag, "E") == 0) return "telemetry";
+    if (strcmp(tag, "R") == 0) return "traceroute";
     if (strcmp(tag, "A") == 0) return "routing";
     return "data";
 }
@@ -3401,6 +3570,7 @@ static void closeDmModal() {
 }
 
 static void closeNodesModal() {
+    closeNodesActionMenu();
     if (s_nodesModal) {
         lv_obj_del(s_nodesModal);
     }
@@ -3418,11 +3588,21 @@ static void closeNodesModal() {
     s_nodesMapMarker = nullptr;
     s_nodesMapTileLayer = nullptr;
     s_nodesMapImage = nullptr;
+    s_nodesTitleLabel = nullptr;
+    s_nodesHintLabel = nullptr;
     s_nodesMapImageSrc[0] = '\0';
     s_nodesList = nullptr;
     s_nodesListRowCount = 0;
     s_nodesSnapshotCount = 0;
+    s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
+    s_nodesFilterOpen = false;
+    s_nodesFilterLen = 0;
+    s_nodesFilter[0] = '\0';
+    memset(s_nodesFilteredIdx, 0, sizeof(s_nodesFilteredIdx));
+    s_nodesActionSelection = 0;
+    s_nodesActionNodeId = 0;
+    memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 }
 
@@ -3466,7 +3646,11 @@ static bool nodesShortNameDisplayable(const char *shortName) {
 
 static void snapshotNodesForModal() {
     s_nodesSnapshotCount = 0;
+    s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
+    s_nodesFilterOpen = false;
+    s_nodesFilterLen = 0;
+    s_nodesFilter[0] = '\0';
 
     int total = Nodes.count();
     if (total < 0) total = 0;
@@ -3480,8 +3664,38 @@ static void snapshotNodesForModal() {
         s_nodesSnapshot[s_nodesSnapshotCount++] = *n;
     }
 
-    if (s_nodesSnapshotCount > 0) {
+    nodesApplyFilter();
+}
+
+static void nodesApplyFilter() {
+    s_nodesFilteredCount = 0;
+
+    for (int i = 0; i < s_nodesSnapshotCount && s_nodesFilteredCount < MAX_NODES; i++) {
+        const NodeEntry &n = s_nodesSnapshot[i];
+        bool match = true;
+
+        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+            char nodeIdText[16];
+            snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)n.nodeId);
+            match = dmNodePickerContainsNoCase(n.longName, s_nodesFilter)
+                 || dmNodePickerContainsNoCase(n.shortName, s_nodesFilter)
+                 || dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter);
+        }
+
+        if (match) {
+            s_nodesFilteredIdx[s_nodesFilteredCount++] = i;
+        }
+    }
+
+    if (s_nodesFilteredCount <= 0) {
+        s_nodesSelected = -1;
+        return;
+    }
+
+    if (s_nodesSelected < 0) {
         s_nodesSelected = 0;
+    } else if (s_nodesSelected >= s_nodesFilteredCount) {
+        s_nodesSelected = s_nodesFilteredCount - 1;
     }
 }
 
@@ -4311,10 +4525,12 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 }
 
 static const NodeEntry *currentNodesSelection() {
-    if (s_nodesSnapshotCount <= 0 || s_nodesSelected < 0 || s_nodesSelected >= s_nodesSnapshotCount) {
+    if (s_nodesFilteredCount <= 0 || s_nodesSelected < 0 || s_nodesSelected >= s_nodesFilteredCount) {
         return nullptr;
     }
-    return &s_nodesSnapshot[s_nodesSelected];
+    int snapshotIdx = s_nodesFilteredIdx[s_nodesSelected];
+    if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) return nullptr;
+    return &s_nodesSnapshot[snapshotIdx];
 }
 
 static void refreshNodesMap(const NodeEntry *node) {
@@ -4429,6 +4645,110 @@ static void clearNodeDbOnSd() {
 #endif
 }
 
+static void refreshNodesListRows() {
+    if (!s_nodesList) return;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *nodesListFont = &lv_font_montserrat_12;
+    const int nodesListRowH = 28;
+#else
+    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
+    const int nodesListRowH = 22;
+#endif
+
+    if (s_nodesTitleLabel) {
+        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+            char titleText[56];
+            snprintf(titleText, sizeof(titleText), "NODES [%s]", s_nodesFilter);
+            lv_label_set_text(s_nodesTitleLabel, titleText);
+        } else {
+            lv_label_set_text(s_nodesTitleLabel, "NODES");
+        }
+    }
+
+    if (s_nodesHintLabel) {
+        if (s_nodesFilterOpen) {
+#if defined(DEVICE_TDECK)
+            lv_label_set_text_fmt(s_nodesHintLabel,
+                                  "Type=Filter  Up/Down/J/K=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
+                                  modalCloseKeyLabel());
+#else
+            lv_label_set_text_fmt(s_nodesHintLabel,
+                                  "Type=Filter  Up/Down=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
+                                  modalCloseKeyLabel());
+#endif
+        } else {
+#if defined(DEVICE_TDECK)
+            lv_label_set_text_fmt(s_nodesHintLabel,
+                                  "Up/Down/J/K=Select  Enter=Actions  Type=Filter  %s=Back",
+                                  modalCloseKeyLabel());
+#else
+            lv_label_set_text_fmt(s_nodesHintLabel,
+                                  "Up/Down=Select  Enter=Actions  Type=Filter  %s=Back",
+                                  modalCloseKeyLabel());
+#endif
+        }
+    }
+
+    lv_obj_clean(s_nodesList);
+    s_nodesListRowCount = 0;
+    memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
+
+    if (s_nodesFilteredCount <= 0) {
+        lv_obj_t *empty = lv_label_create(s_nodesList);
+        lv_obj_set_width(empty, lv_pct(100));
+        lv_obj_set_style_text_font(empty, nodesListFont, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+            char noMatch[64];
+            snprintf(noMatch, sizeof(noMatch), "No matches for: %s", s_nodesFilter);
+            lv_label_set_text(empty, noMatch);
+        } else {
+            lv_label_set_text(empty, "No nodes seen");
+        }
+        return;
+    }
+
+    for (int rowIdx = 0; rowIdx < s_nodesFilteredCount; rowIdx++) {
+        int snapshotIdx = s_nodesFilteredIdx[rowIdx];
+        if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) continue;
+        const NodeEntry &n = s_nodesSnapshot[snapshotIdx];
+
+        lv_obj_t *row = lv_btn_create(s_nodesList);
+        lv_obj_set_width(row, lv_pct(96));
+        lv_obj_set_height(row, nodesListRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 3, 0);
+        lv_obj_set_style_pad_right(row, 3, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(0x2B4D8C), 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN | LV_STATE_PRESSED);
+        lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, nodesListFont, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+
+        char rowText[56];
+        snprintf(rowText,
+             sizeof(rowText),
+             "%s%s",
+             n.favorite ? "* " : "",
+             n.shortName[0] ? n.shortName : "----");
+        setLabelTextEmojiSafe(lbl, rowText);
+        lv_obj_center(lbl);
+
+        if (s_nodesListRowCount < MAX_NODES) {
+            s_nodesListRows[s_nodesListRowCount++] = row;
+        }
+    }
+}
+
 static void refreshNodesListSelection() {
     for (int i = 0; i < s_nodesListRowCount; i++) {
         lv_obj_t *row = s_nodesListRows[i];
@@ -4455,13 +4775,14 @@ static void refreshNodesListSelection() {
 static void refreshNodesDetails() {
     if (!s_nodesDetail) return;
 
-    if (s_nodesSnapshotCount <= 0 || s_nodesSelected < 0 || s_nodesSelected >= s_nodesSnapshotCount) {
+    const NodeEntry *selectedNode = currentNodesSelection();
+    if (!selectedNode) {
         lv_label_set_text(s_nodesDetail, "No nodes seen yet.");
         if (s_nodesDetailExtra) lv_label_set_text(s_nodesDetailExtra, "");
         return;
     }
 
-    const NodeEntry &n = s_nodesSnapshot[s_nodesSelected];
+    const NodeEntry &n = *selectedNode;
 
     char name[48];
     if (n.hasName && n.longName[0]) {
@@ -4570,13 +4891,611 @@ static void refreshNodesDetails() {
 
 static void onNodeSnapshotPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx < 0 || idx >= s_nodesSnapshotCount) return;
+    if (idx < 0 || idx >= s_nodesFilteredCount) return;
+    if (s_nodesActionModal) {
+        closeNodesActionMenu();
+    }
     s_nodesSelected = idx;
     refreshNodesListSelection();
     refreshNodesDetails();
     if (idx >= 0 && idx < s_nodesListRowCount && s_nodesListRows[idx]) {
         lv_obj_scroll_to_view(s_nodesListRows[idx], LV_ANIM_OFF);
     }
+}
+
+static void closeTracerouteProgressModal() {
+    if (s_tracerouteBackdrop) {
+        lv_obj_del(s_tracerouteBackdrop);
+    }
+    s_tracerouteBackdrop = nullptr;
+    s_tracerouteModal = nullptr;
+    s_tracerouteStatusLabel = nullptr;
+    s_tracerouteResultsBox = nullptr;
+    s_tracerouteResultsLabel = nullptr;
+    s_tracerouteNodeId = 0;
+    s_traceroutePacketId = 0;
+    s_tracerouteStartedMs = 0;
+    s_tracerouteAwaitingRouting = false;
+    s_tracerouteAwaitingReply = false;
+}
+
+static void onTracerouteBackdropPressed(lv_event_t *e) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (lv_event_get_target(e) == s_tracerouteBackdrop) {
+        closeTracerouteProgressModal();
+    }
+#else
+    LV_UNUSED(e);
+#endif
+}
+
+static void tracerouteProgressSetStatus(const char *status, lv_color_t color) {
+    if (!s_tracerouteStatusLabel) return;
+    lv_obj_set_style_text_color(s_tracerouteStatusLabel, color, 0);
+    lv_label_set_text(s_tracerouteStatusLabel, (status && status[0]) ? status : "-");
+}
+
+static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t payloadLen, bool viaMqtt) {
+    if (!s_tracerouteModal || !s_tracerouteResultsBox || !s_tracerouteResultsLabel) return;
+    if (!payload || payloadLen == 0) return;
+
+    constexpr int kMaxPathNodes = 12;
+    constexpr int kMaxEdges = 7;
+    uint32_t route[kMaxPathNodes] = {};
+    uint32_t routeBack[kMaxPathNodes] = {};
+    int routeCount = 0;
+    int routeBackCount = 0;
+
+    auto skipPb = [](const uint8_t *buf, size_t len, size_t off, uint32_t wtype) -> size_t {
+        if (wtype == 0) {
+            uint64_t v = 0;
+            return pbReadVarint(buf, len, off, v);
+        }
+        if (wtype == 1) return (off + 8 <= len) ? (off + 8) : 0;
+        if (wtype == 5) return (off + 4 <= len) ? (off + 4) : 0;
+        if (wtype == 2) {
+            uint64_t sz = 0;
+            size_t j = pbReadVarint(buf, len, off, sz);
+            if (!j) return 0;
+            if (j + sz > len) return 0;
+            return j + sz;
+        }
+        return 0;
+    };
+
+    auto appendNode = [](uint32_t node, uint32_t *out, int cap, int &count) {
+        if (count >= cap) return;
+        if (count > 0 && out[count - 1] == node) return;
+        out[count++] = node;
+    };
+
+    size_t i = 0;
+    while (i < payloadLen) {
+        uint64_t tag = 0;
+        i = pbReadVarint(payload, payloadLen, i, tag);
+        if (!i) break;
+
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint32_t wtype = (uint32_t)(tag & 7);
+        const bool isRouteField = (field == 1 || field == 3);
+
+        if (isRouteField && wtype == 5) {
+            if (i + 4 > payloadLen) break;
+            uint32_t node = (uint32_t)payload[i]
+                          | ((uint32_t)payload[i + 1] << 8)
+                          | ((uint32_t)payload[i + 2] << 16)
+                          | ((uint32_t)payload[i + 3] << 24);
+            if (field == 1) appendNode(node, route, kMaxPathNodes, routeCount);
+            else appendNode(node, routeBack, kMaxPathNodes, routeBackCount);
+            i += 4;
+            continue;
+        }
+
+        if (isRouteField && wtype == 2) {
+            uint64_t sz = 0;
+            size_t j = pbReadVarint(payload, payloadLen, i, sz);
+            if (!j) break;
+            if (j + sz > payloadLen) break;
+            size_t end = j + sz;
+            while (j + 4 <= end) {
+                uint32_t node = (uint32_t)payload[j]
+                              | ((uint32_t)payload[j + 1] << 8)
+                              | ((uint32_t)payload[j + 2] << 16)
+                              | ((uint32_t)payload[j + 3] << 24);
+                if (field == 1) appendNode(node, route, kMaxPathNodes, routeCount);
+                else appendNode(node, routeBack, kMaxPathNodes, routeBackCount);
+                j += 4;
+            }
+            i = end;
+            continue;
+        }
+
+        i = skipPb(payload, payloadLen, i, wtype);
+        if (!i) break;
+    }
+
+    struct Edge {
+        uint32_t from;
+        uint32_t to;
+        bool viaMqtt;
+    };
+    Edge edges[kMaxEdges] = {};
+    int edgeCount = 0;
+
+    auto appendEdges = [&](const uint32_t *path, int count, bool viaMqtt) {
+        for (int idx = 0; idx + 1 < count && edgeCount < kMaxEdges; idx++) {
+            edges[edgeCount++] = {path[idx], path[idx + 1], viaMqtt};
+        }
+    };
+
+    appendEdges(route, routeCount, false);
+    appendEdges(routeBack, routeBackCount, viaMqtt);
+
+    if (edgeCount == 0 && routeCount > 0 && s_myNodeId != 0) {
+        edges[edgeCount++] = {s_myNodeId, route[0], false};
+    }
+
+    // Meshtastic direct traceroute replies can have empty route arrays.
+    if (edgeCount == 0 && s_myNodeId != 0 && s_tracerouteNodeId != 0) {
+        edges[edgeCount++] = {s_myNodeId, s_tracerouteNodeId, false};
+        if (edgeCount < kMaxEdges) {
+            edges[edgeCount++] = {s_tracerouteNodeId, s_myNodeId, viaMqtt};
+        }
+    }
+
+    char text[420];
+    text[0] = '\0';
+
+    for (int idx = 0; idx < edgeCount; idx++) {
+        char from[20];
+        char to[20];
+        liveNodeLabel(edges[idx].from, from, sizeof(from), true);
+        liveNodeLabel(edges[idx].to, to, sizeof(to), true);
+
+        const char *sep = "";
+        if (idx > 0) {
+            sep = ((idx % 3) == 0) ? "\n" : ", ";
+        }
+
+        const char *transport = edges[idx].viaMqtt ? "mqtt" : "radio";
+
+        size_t used = strlen(text);
+        if (used + 8 >= sizeof(text)) break;
+        snprintf(text + used, sizeof(text) - used, "%s%s -> %s (%s)", sep, from, to, transport);
+    }
+
+    if (!text[0]) {
+        strncpy(text, "No hop path in reply", sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+    }
+
+    lv_label_set_text(s_tracerouteResultsLabel, text);
+    lv_obj_clear_flag(s_tracerouteResultsBox, LV_OBJ_FLAG_HIDDEN);
+
+    int rows = (edgeCount + 2) / 3;
+    if (rows < 3) rows = 3;
+    if (rows > 3) rows = 3;
+
+    lv_coord_t lineH = lv_font_get_line_height(&lv_font_montserrat_10);
+    lv_coord_t boxH = (lv_coord_t)(rows * (lineH + 2) + 8);
+    lv_obj_set_height(s_tracerouteResultsBox, boxH);
+
+    const int maxModalH = lv_disp_get_ver_res(NULL) - 8;
+    int modalH = 104 + boxH;
+    if (modalH > maxModalH) modalH = maxModalH;
+    lv_obj_set_height(s_tracerouteModal, (lv_coord_t)modalH);
+}
+
+static void tracerouteProgressRenderRoutes(const MeshPacket &pkt) {
+    tracerouteProgressRenderRoutesPayload(pkt.payload, pkt.payloadLen, (pkt.hdr.flags & 0x10) != 0);
+}
+
+static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
+    if (!s_rootScreen) return;
+
+    closeTracerouteProgressModal();
+
+    s_tracerouteNodeId = nodeId;
+    s_traceroutePacketId = packetId;
+    s_tracerouteStartedMs = millis();
+    s_tracerouteAwaitingRouting = true;
+    s_tracerouteAwaitingReply = false;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+
+    s_tracerouteBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_tracerouteBackdrop, w, h);
+    lv_obj_align(s_tracerouteBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_tracerouteBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_tracerouteBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_tracerouteBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_tracerouteBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_tracerouteBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_tracerouteBackdrop, 0, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_add_event_cb(s_tracerouteBackdrop, onTracerouteBackdropPressed, LV_EVENT_PRESSED, nullptr);
+#endif
+
+    int modalW = w - 8;
+    if (modalW < 180) modalW = w - 4;
+    if (modalW < 120) modalW = w;
+    const int modalH = 96;
+
+    s_tracerouteModal = lv_obj_create(s_tracerouteBackdrop);
+    lv_obj_set_size(s_tracerouteModal, modalW, modalH);
+    lv_obj_align(s_tracerouteModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_tracerouteModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_tracerouteModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_tracerouteModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_tracerouteModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_tracerouteModal, 1, 0);
+    lv_obj_set_style_border_color(s_tracerouteModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_tracerouteModal, 4, 0);
+    lv_obj_set_style_pad_bottom(s_tracerouteModal, 6, 0);
+    lv_obj_set_style_pad_row(s_tracerouteModal, 3, 0);
+    lv_obj_set_flex_flow(s_tracerouteModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_tracerouteModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_tracerouteBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_tracerouteModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Traceroute");
+
+    lv_obj_t *target = lv_label_create(s_tracerouteModal);
+    lv_obj_set_width(target, lv_pct(100));
+    lv_obj_set_style_text_font(target, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(target, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(target, LV_TEXT_ALIGN_CENTER, 0);
+    char who[20];
+    liveNodeLabel(nodeId, who, sizeof(who), true);
+    char targetLine[48];
+    snprintf(targetLine, sizeof(targetLine), "%s  %08lX", who, (unsigned long)packetId);
+    lv_label_set_text(target, targetLine);
+
+    s_tracerouteStatusLabel = lv_label_create(s_tracerouteModal);
+    lv_obj_set_width(s_tracerouteStatusLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_tracerouteStatusLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_align(s_tracerouteStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
+    tracerouteProgressSetStatus("Sending request...", lv_color_hex(0xE8F1FF));
+
+    s_tracerouteResultsBox = lv_obj_create(s_tracerouteModal);
+    lv_obj_set_width(s_tracerouteResultsBox, lv_pct(100));
+    lv_obj_set_height(s_tracerouteResultsBox, 52);
+    lv_obj_clear_flag(s_tracerouteResultsBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_tracerouteResultsBox, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(s_tracerouteResultsBox, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_tracerouteResultsBox, 1, 0);
+    lv_obj_set_style_border_color(s_tracerouteResultsBox, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(s_tracerouteResultsBox, 4, 0);
+    lv_obj_set_style_pad_right(s_tracerouteResultsBox, 4, 0);
+    lv_obj_set_style_pad_top(s_tracerouteResultsBox, 3, 0);
+    lv_obj_set_style_pad_bottom(s_tracerouteResultsBox, 3, 0);
+    lv_obj_add_flag(s_tracerouteResultsBox, LV_OBJ_FLAG_HIDDEN);
+
+    s_tracerouteResultsLabel = lv_label_create(s_tracerouteResultsBox);
+    lv_obj_set_width(s_tracerouteResultsLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_tracerouteResultsLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_tracerouteResultsLabel, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(s_tracerouteResultsLabel, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(s_tracerouteResultsLabel, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_tracerouteResultsLabel, "");
+
+    lv_obj_t *hint = lv_label_create(s_tracerouteModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -2);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    char hintText[56];
+    snprintf(hintText, sizeof(hintText), "%s=Close  Tap outside=Close", modalCloseKeyLabel());
+    lv_label_set_text(hint, hintText);
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_label_set_text(hint, "Bksp=Close");
+#else
+    char hintText[24];
+    snprintf(hintText, sizeof(hintText), "%s=Close", modalCloseKeyLabel());
+    lv_label_set_text(hint, hintText);
+#endif
+}
+
+static void tracerouteProgressSetTxResult(bool ok) {
+    if (!s_tracerouteModal) return;
+
+    if (!ok) {
+        s_tracerouteAwaitingRouting = false;
+        s_tracerouteAwaitingReply = false;
+        tracerouteProgressSetStatus("Send failed", lv_color_hex(0xFF8080));
+        return;
+    }
+
+    tracerouteProgressSetStatus("Sent. Waiting for route ACK...", lv_color_hex(0xE8F1FF));
+}
+
+static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, uint32_t errorReason,
+                                        const uint8_t *routeReplyPayload,
+                                        size_t routeReplyLen,
+                                        bool viaMqtt) {
+    if (!s_tracerouteModal) return;
+    if (requestId == 0 || requestId != s_traceroutePacketId) return;
+
+    char who[20];
+    liveNodeLabel(fromNode, who, sizeof(who), false);
+
+    if (errorReason == 0) {
+        if (routeReplyPayload && routeReplyLen > 0) {
+            s_tracerouteAwaitingRouting = false;
+            s_tracerouteAwaitingReply = false;
+            char status[72];
+            snprintf(status, sizeof(status), "Reply from %s", who);
+            tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
+            tracerouteProgressRenderRoutesPayload(routeReplyPayload, routeReplyLen, viaMqtt);
+            return;
+        }
+
+        s_tracerouteAwaitingRouting = false;
+        s_tracerouteAwaitingReply = true;
+        char status[72];
+        snprintf(status, sizeof(status), "ACK from %s. Waiting for reply...", who);
+        tracerouteProgressSetStatus(status, lv_color_hex(0xE8F1FF));
+        return;
+    }
+
+    s_tracerouteAwaitingRouting = false;
+    s_tracerouteAwaitingReply = false;
+    const char *errName = routingErrorName(errorReason);
+    char status[80];
+    if (errName) {
+        snprintf(status, sizeof(status), "NAK %s(%lu)", errName, (unsigned long)errorReason);
+    } else {
+        snprintf(status, sizeof(status), "NAK err=%lu", (unsigned long)errorReason);
+    }
+    tracerouteProgressSetStatus(status, lv_color_hex(0xFF8080));
+}
+
+static void tracerouteProgressOnResponse(const MeshPacket &pkt) {
+    if (!s_tracerouteModal) return;
+    if (!s_tracerouteAwaitingRouting && !s_tracerouteAwaitingReply) return;
+    if (s_tracerouteNodeId != 0 && pkt.hdr.from != s_tracerouteNodeId) return;
+
+    s_tracerouteAwaitingRouting = false;
+    s_tracerouteAwaitingReply = false;
+    char who[20];
+    liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
+    uint32_t elapsedMs = (s_tracerouteStartedMs != 0) ? (millis() - s_tracerouteStartedMs) : 0;
+    char status[72];
+    snprintf(status, sizeof(status), "Reply from %s (%lus)", who, (unsigned long)(elapsedMs / 1000UL));
+    tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
+    tracerouteProgressRenderRoutes(pkt);
+}
+
+static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
+    if (packetIdOut) *packetIdOut = 0;
+    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF) return false;
+
+    if (s_myNodeId == 0) {
+        deriveNodeId();
+    }
+
+    uint32_t packetId = nextMeshPacketId();
+    if (packetIdOut) *packetIdOut = packetId;
+    openTracerouteProgressModal(toNodeId, packetId);
+
+    bool ok = false;
+    if (s_myNodeId != 0 && Radio.isReady()) {
+        uint8_t proto[64];
+        uint8_t cipher[96];
+        size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true);
+        if (protoLen > 0) {
+            const ChannelKey &ck = CHANNEL_KEYS[0];  // LongFast
+            if (encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+                uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
+                MeshHdr hdr = {};
+                hdr.to = toNodeId;
+                hdr.from = s_myNodeId;
+                hdr.id = packetId;
+                hdr.channel = ck.hash;
+                hdr.flags = (uint8_t)((1 << 3) |  // want_ack
+                                      (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                                      ((MESH_HOP_LIMIT & 0x07) << 5));
+                hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+                memcpy(frame, &hdr, sizeof(hdr));
+                memcpy(frame + sizeof(hdr), cipher, protoLen);
+                ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+            }
+        }
+    }
+
+    char prefix[12];
+    liveBuildPrefix(prefix, sizeof(prefix));
+    char dst[16];
+    liveNodeLabel(toNodeId, dst, sizeof(dst), true);
+    char status[72];
+    snprintf(status, sizeof(status), "T TRC U %s %08lX %s",
+             dst, (unsigned long)packetId, ok ? "OK" : "ER");
+    Channels.addMessage(CHAN_ANN, prefix, status, ok ? TFT_DARKGREY : TFT_RED, 0, false);
+    tracerouteProgressSetTxResult(ok);
+    return ok;
+}
+
+static void refreshNodesActionMenuSelection() {
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    for (int i = 0; i < kNodesActionCount; i++) {
+        lv_obj_t *row = s_nodesActionRows[i];
+        if (!row) continue;
+        bool selected = (i == s_nodesActionSelection);
+        lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
+    }
+}
+
+static void closeNodesActionMenu() {
+    if (s_nodesActionModal) {
+        lv_obj_del(s_nodesActionModal);
+    }
+    s_nodesActionModal = nullptr;
+    s_nodesActionSelection = 0;
+    s_nodesActionNodeId = 0;
+    memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
+}
+
+static void executeNodesActionSelection() {
+    if (s_nodesActionNodeId == 0) {
+        closeNodesActionMenu();
+        return;
+    }
+
+    if (s_nodesActionSelection == 0) {
+        uint32_t packetId = 0;
+        (void)sendTracerouteToNode(s_nodesActionNodeId, &packetId);
+        closeNodesActionMenu();
+        return;
+    }
+
+    if (s_nodesActionSelection == 1) {
+        uint32_t nodeId = s_nodesActionNodeId;
+        DmConv *conv = DMs.find(nodeId);
+        if (!conv) {
+            const NodeEntry *node = Nodes.find(nodeId);
+            const char *shortName = (node && liveShortNameUsable(node->shortName)) ? node->shortName : nullptr;
+            conv = DMs.findOrCreate(nodeId, shortName);
+        }
+
+        closeNodesActionMenu();
+
+        openDmModal();
+        if (conv) {
+            for (int i = 0; i < s_dmConvCount; i++) {
+                if (s_dmConvNodeIds[i] == nodeId) {
+                    s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+                    s_dmMsgPanelFocused = false;
+                    refreshDmModal(true);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
+    if (s_nodesActionSelection == 2) {
+        uint32_t nodeId = s_nodesActionNodeId;
+        const NodeEntry *node = Nodes.find(nodeId);
+        const bool isFavorite = node && node->favorite;
+        (void)Nodes.setFavorite(nodeId, !isFavorite);
+        closeNodesActionMenu();
+
+        snapshotNodesForModal();
+        s_nodesSelected = -1;
+        for (int i = 0; i < s_nodesFilteredCount; i++) {
+            int snapshotIdx = s_nodesFilteredIdx[i];
+            if (snapshotIdx >= 0
+                && snapshotIdx < s_nodesSnapshotCount
+                && s_nodesSnapshot[snapshotIdx].nodeId == nodeId) {
+                s_nodesSelected = i;
+                break;
+            }
+        }
+        if (s_nodesSelected < 0 && s_nodesFilteredCount > 0) {
+            s_nodesSelected = 0;
+        }
+        refreshNodesListRows();
+        refreshNodesListSelection();
+        refreshNodesDetails();
+        return;
+    }
+}
+
+static void onNodesActionRowPressed(lv_event_t *e) {
+    int action = (int)(intptr_t)lv_event_get_user_data(e);
+    if (action < 0 || action >= kNodesActionCount) return;
+    s_nodesActionSelection = action;
+    refreshNodesActionMenuSelection();
+    executeNodesActionSelection();
+}
+
+static void openNodesActionMenu() {
+    if (!s_nodesModal) return;
+    const NodeEntry *selected = currentNodesSelection();
+    if (!selected || selected->nodeId == 0) return;
+
+    if (s_nodesActionModal) {
+        closeNodesActionMenu();
+    }
+
+    s_nodesActionNodeId = selected->nodeId;
+    s_nodesActionSelection = 0;
+
+    const int modalW = min(190, lv_disp_get_hor_res(NULL) - 14);
+    const int modalH = 132;
+
+    lv_obj_t *actionParent = s_rootScreen ? s_rootScreen : s_nodesModal;
+    s_nodesActionModal = lv_obj_create(actionParent);
+    lv_obj_set_size(s_nodesActionModal, modalW, modalH);
+    lv_obj_align(s_nodesActionModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodesActionModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_nodesActionModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_nodesActionModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodesActionModal, 1, 0);
+    lv_obj_set_style_border_color(s_nodesActionModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_nodesActionModal, 4, 0);
+    lv_obj_set_style_pad_row(s_nodesActionModal, 4, 0);
+    lv_obj_set_flex_flow(s_nodesActionModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodesActionModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_nodesActionModal);
+
+    lv_obj_t *title = lv_label_create(s_nodesActionModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Node Actions");
+
+    const bool selectedIsFavorite = selected->favorite;
+    const char *kActionLabels[kNodesActionCount] = {
+        "Traceroute",
+        "Send DM",
+        selectedIsFavorite ? "Remove Favorite" : "Add Favorite"
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                    ? lv_color_hex(0x13233D)
+                                    : lv_color_hex(0xD9E8FF);
+    for (int i = 0; i < kNodesActionCount; i++) {
+        lv_obj_t *row = lv_btn_create(s_nodesActionModal);
+        s_nodesActionRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, 26);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 4, 0);
+        lv_obj_set_style_pad_right(row, 4, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onNodesActionRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(lbl, kActionLabels[i]);
+        lv_obj_center(lbl);
+    }
+
+    refreshNodesActionMenuSelection();
 }
 
 static void refreshLiveView(bool force) {
@@ -4750,6 +5669,31 @@ static DmConv *selectedDmConversation() {
     uint32_t nodeId = s_dmConvNodeIds[convIdx];
     if (nodeId == 0) return nullptr;
     return DMs.find(nodeId);
+}
+
+static void activateDmSelection() {
+    if (s_dmSelection > 0 && dmDeleteConfirmActive(millis())) {
+        DmConv *selected = selectedDmConversation();
+        if (selected && selected->nodeId == s_dmDeletePendingNodeId) {
+            dmRequestDeleteSelectedConversation();
+            return;
+        }
+    }
+
+    if (s_dmSelection == 0) {
+        openDmNodePicker();
+        return;
+    }
+
+    DmConv *selected = selectedDmConversation();
+    if (!selected) return;
+
+    if (!s_dmMsgPanelFocused) {
+        s_dmMsgPanelFocused = true;
+        refreshDmPanelFocusStyles();
+    } else {
+        openComposePromptForDm(selected->nodeId);
+    }
 }
 
 static const char *dmDeleteTriggerLabel() {
@@ -4982,6 +5926,30 @@ static const NodeEntry *selectedDmNodeForPicker() {
     return &s_dmNodeSnapshot[snapshotIdx];
 }
 
+static void activateDmNodePickerSelection() {
+    const NodeEntry *n = selectedDmNodeForPicker();
+    if (!n || n->nodeId == 0) return;
+
+    const uint32_t selectedNodeId = n->nodeId;
+    DmConv *conv = DMs.find(selectedNodeId);
+    if (!conv) {
+        const char *shortName = liveShortNameUsable(n->shortName) ? n->shortName : nullptr;
+        conv = DMs.findOrCreate(selectedNodeId, shortName);
+    }
+
+    closeDmNodePicker();
+    refreshDmModal(true);
+    if (!conv) return;
+
+    for (int i = 0; i < s_dmConvCount; i++) {
+        if (s_dmConvNodeIds[i] == selectedNodeId) {
+            s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
+            break;
+        }
+    }
+    refreshDmModal(true);
+}
+
 static void refreshDmNodePicker(bool force) {
     LV_UNUSED(force);
     if (!s_dmNodePickerModal || !s_dmNodePickerList) return;
@@ -5071,7 +6039,12 @@ static void refreshDmNodePicker(bool force) {
         char rowText[64];
         const char *longDisp = n.longName[0] ? n.longName : "(unknown)";
         const char *shortDisp = liveShortNameUsable(n.shortName) ? n.shortName : "????";
-        snprintf(rowText, sizeof(rowText), "%s (%s)", longDisp, shortDisp);
+        snprintf(rowText,
+             sizeof(rowText),
+             "%s%s (%s)",
+             n.favorite ? "* " : "",
+             longDisp,
+             shortDisp);
         setLabelTextEmojiSafe(lbl, rowText);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
     }
@@ -5342,10 +6315,21 @@ static void refreshDmModal(bool force) {
             }
 
             char rowText[48];
+            NodeEntry *n = Nodes.find(c->nodeId);
+            const bool favorite = (n && n->favorite);
             if (c->unreadCount > 0 && c->nodeId != selectedNodeId) {
-                snprintf(rowText, sizeof(rowText), "%s (%u)", name, (unsigned)c->unreadCount);
+                snprintf(rowText,
+                         sizeof(rowText),
+                         "%s%s (%u)",
+                         favorite ? "* " : "",
+                         name,
+                         (unsigned)c->unreadCount);
             } else {
-                snprintf(rowText, sizeof(rowText), "%s", name);
+                snprintf(rowText,
+                         sizeof(rowText),
+                         "%s%s",
+                         favorite ? "* " : "",
+                         name);
             }
             setLabelTextEmojiSafe(lbl, rowText);
             lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
@@ -5631,6 +6615,10 @@ static void openDmModal() {
     s_dmRenderedUnreadTotal = -1;
     s_dmMsgPanelFocused = false;
     refreshDmModal(true);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
+#endif
 }
 
 static void openNodesModal() {
@@ -5652,16 +6640,10 @@ static void openNodesModal() {
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
-    const lv_font_t *nodesListFont = &lv_font_montserrat_12;
-    const int nodesListRowH = 28;
 #elif defined(DEVICE_TDECK)
     const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
-    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
-    const int nodesListRowH = 22;
 #else
     const lv_font_t *nodesDetailFont = &lv_font_montserrat_10;
-    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
-    const int nodesListRowH = 22;
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -5699,6 +6681,7 @@ static void openNodesModal() {
     lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
 
     lv_obj_t *title = lv_label_create(header);
+    s_nodesTitleLabel = title;
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "NODES");
@@ -5798,45 +6781,8 @@ static void openNodesModal() {
     s_nodesListRowCount = 0;
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 
-    if (s_nodesSnapshotCount <= 0) {
-        lv_obj_t *empty = lv_label_create(s_nodesList);
-        lv_obj_set_width(empty, lv_pct(100));
-        lv_obj_set_style_text_font(empty, nodesListFont, 0);
-        lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
-        lv_label_set_text(empty, "No nodes seen");
-    } else {
-        for (int i = 0; i < s_nodesSnapshotCount; i++) {
-            lv_obj_t *row = lv_btn_create(s_nodesList);
-            lv_obj_set_width(row, lv_pct(96));
-            lv_obj_set_height(row, nodesListRowH);
-            lv_obj_set_style_radius(row, 4, 0);
-            lv_obj_set_style_pad_left(row, 3, 0);
-            lv_obj_set_style_pad_right(row, 3, 0);
-            lv_obj_set_style_pad_top(row, 1, 0);
-            lv_obj_set_style_pad_bottom(row, 1, 0);
-            lv_obj_set_style_border_width(row, 1, 0);
-            lv_obj_set_style_border_color(row, lv_color_hex(0x2B4D8C), 0);
-            lv_obj_set_style_shadow_width(row, 0, 0);
-            lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN | LV_STATE_PRESSED);
-            lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
-
-            lv_obj_t *lbl = lv_label_create(row);
-            lv_obj_set_width(lbl, lv_pct(100));
-            lv_obj_set_style_text_font(lbl, nodesListFont, 0);
-            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-            lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-
-            char rowText[56];
-            const NodeEntry &n = s_nodesSnapshot[i];
-            snprintf(rowText, sizeof(rowText), "%s", n.shortName[0] ? n.shortName : "----");
-            setLabelTextEmojiSafe(lbl, rowText);
-            lv_obj_center(lbl);
-
-            if (s_nodesListRowCount < MAX_NODES) {
-                s_nodesListRows[s_nodesListRowCount++] = row;
-            }
-        }
-    }
+    nodesApplyFilter();
+    refreshNodesListRows();
 
     refreshNodesListSelection();
     refreshNodesDetails();
@@ -5845,13 +6791,14 @@ static void openNodesModal() {
     appendHeltecBottomNav(s_nodesModal, HELTEC_NAV_NODES);
 #else
     lv_obj_t *hint = lv_label_create(s_nodesModal);
+    s_nodesHintLabel = hint;
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "Up/Down/J/K=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
 #else
-    lv_label_set_text_fmt(hint, "Up/Down = Select   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "Up/Down=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
 #endif
 #endif
 }
@@ -5916,7 +6863,7 @@ static void openLegendModal() {
     lv_label_set_text_fmt(
         body,
         "Touch Navigation:\n"
-        "Use bottom buttons for Config, Nodes, Live, Legend.\n"
+        "Use bottom buttons for Config, DM, Nodes, Live, Legend.\n"
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -6409,6 +7356,17 @@ static void pumpKeyboardInput() {
     k = remapTdeckUiKey(k, !typingContext);
 #endif
 
+        if (s_tracerouteModal) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if (k == KEY_ESCAPE || isBackspaceKey(k)) {
+#else
+            if (isModalCloseKey(k)) {
+#endif
+                closeTracerouteProgressModal();
+            }
+            continue;
+        }
+
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
                 char actionText[80];
@@ -6610,26 +7568,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
                 if (k == KEY_ENTER) {
-                    const NodeEntry *n = selectedDmNodeForPicker();
-                    if (n && n->nodeId != 0) {
-                        const uint32_t selectedNodeId = n->nodeId;
-                        DmConv *conv = DMs.find(selectedNodeId);
-                        if (!conv) {
-                            const char *shortName = liveShortNameUsable(n->shortName) ? n->shortName : nullptr;
-                            conv = DMs.findOrCreate(selectedNodeId, shortName);
-                        }
-                        closeDmNodePicker();
-                        refreshDmModal(true);
-                        if (conv) {
-                            for (int i = 0; i < s_dmConvCount; i++) {
-                                if (s_dmConvNodeIds[i] == selectedNodeId) {
-                                    s_dmSelection = i + 1;  // +1 because row 0 is "New DM"
-                                    break;
-                                }
-                            }
-                            refreshDmModal(true);
-                        }
-                    }
+                    activateDmNodePickerSelection();
                     continue;
                 }
                 if (k >= 0x20 && k < 0x7F) {
@@ -6717,34 +7656,109 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER) {
-                if (s_dmSelection > 0 && dmDeleteConfirmActive(millis())) {
-                    DmConv *selected = selectedDmConversation();
-                    if (selected && selected->nodeId == s_dmDeletePendingNodeId) {
-                        dmRequestDeleteSelectedConversation();
-                        continue;
-                    }
-                }
-                if (s_dmSelection == 0) {
-                    openDmNodePicker();
-                } else {
-                    DmConv *selected = selectedDmConversation();
-                    if (selected) {
-                        if (!s_dmMsgPanelFocused) {
-                            s_dmMsgPanelFocused = true;
-                            refreshDmPanelFocusStyles();
-                        } else {
-                            openComposePromptForDm(selected->nodeId);
-                        }
-                    }
-                }
+                activateDmSelection();
                 continue;
             }
             continue;
         }
 
         if (s_nodesModal) {
+            if (s_composeModal) {
+                switch (k) {
+                    case KEY_ENTER:
+                        sendComposeMessage();
+                        break;
+                    case KEY_ESCAPE:
+                        closeComposePrompt();
+                        break;
+                    case KEY_BACKSPACE:
+                    case KEY_BACKSPACE_HOLD:
+                        if (s_composeInput) {
+                            const char *cur = lv_textarea_get_text(s_composeInput);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                            if (cur && cur[0] && k == KEY_BACKSPACE) {
+                                lv_textarea_del_char(s_composeInput);
+                            }
+#else
+                            if (!cur || !cur[0]) {
+                                closeComposePrompt();
+                            } else if (k == KEY_BACKSPACE) {
+                                lv_textarea_del_char(s_composeInput);
+                            }
+#endif
+                        }
+                        break;
+                    default:
+                        if (k >= 0x20 && k < 0x7F && s_composeInput) {
+                            char one[2] = {k, '\0'};
+                            lv_textarea_add_text(s_composeInput, one);
+                        }
+                        break;
+                }
+                continue;
+            }
+
+            if (s_nodesActionModal) {
+                if (isModalCloseKey(k)) {
+                    closeNodesActionMenu();
+                    continue;
+                }
+
+                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    int next = s_nodesActionSelection;
+                    if (kPagerWheelChatNav) {
+                        next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                    } else {
+                        next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                    }
+                    if (next < 0) next = 0;
+                    if (next >= kNodesActionCount) next = kNodesActionCount - 1;
+                    if (next != s_nodesActionSelection) {
+                        s_nodesActionSelection = next;
+                        refreshNodesActionMenuSelection();
+                    }
+                    continue;
+                }
+
+                if (k == KEY_ENTER) {
+                    executeNodesActionSelection();
+                    continue;
+                }
+                continue;
+            }
+
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen) {
+                if (s_nodesFilterLen > 0) {
+                    s_nodesFilter[--s_nodesFilterLen] = '\0';
+                } else {
+                    s_nodesFilterOpen = false;
+                }
+                nodesApplyFilter();
+                refreshNodesListRows();
+                refreshNodesListSelection();
+                refreshNodesDetails();
+                continue;
+            }
+
+            if (k >= 0x20 && k < 0x7F) {
+                if (!s_nodesFilterOpen) s_nodesFilterOpen = true;
+                if (s_nodesFilterLen < kNodesFilterMax) {
+                    s_nodesFilter[s_nodesFilterLen++] = k;
+                    s_nodesFilter[s_nodesFilterLen] = '\0';
+                }
+                nodesApplyFilter();
+                refreshNodesListRows();
+                refreshNodesListSelection();
+                refreshNodesDetails();
+                continue;
+            }
+
             if (isModalCloseKey(k)) {
                 closeNodesModal();
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                openNodesActionMenu();
                 continue;
             }
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
@@ -6757,11 +7771,11 @@ static void pumpKeyboardInput() {
                 }
 
                 if (nextSelected < 0) nextSelected = 0;
-                if (nextSelected >= s_nodesSnapshotCount) nextSelected = s_nodesSnapshotCount - 1;
+                if (nextSelected >= s_nodesFilteredCount) nextSelected = s_nodesFilteredCount - 1;
 
                 if (nextSelected != s_nodesSelected
                     && nextSelected >= 0
-                    && nextSelected < s_nodesSnapshotCount) {
+                    && nextSelected < s_nodesFilteredCount) {
                     s_nodesSelected = nextSelected;
                     refreshNodesListSelection();
                     refreshNodesDetails();
@@ -7976,6 +8990,7 @@ static void refreshChannelGlow(bool force) {
         const bool selectorNavCursor = (!s_cardputerMainChatPanelFocused
                         && !s_pagerChatCursorMode
                         && !isChannelDropdownVisible()
+                        && !s_tracerouteModal
                         && !s_composeModal
                         && !s_cfgModal
                         && !s_legendModal
@@ -8612,6 +9627,8 @@ static bool processMeshPacket(const MeshPacket &pkt) {
             if (!pkt.requestId) return false;
 
             uint32_t errorReason = 0;
+            const uint8_t *routeReplyPayload = nullptr;
+            size_t routeReplyLen = 0;
             size_t i = 0;
             while (i < pkt.payloadLen) {
                 uint64_t tag = 0;
@@ -8626,8 +9643,23 @@ static bool processMeshPacket(const MeshPacket &pkt) {
                     if (!i) break;
                     if (field == 3) {
                         errorReason = (uint32_t)v;
-                        break;
                     }
+                } else if (wt == 2) {
+                    uint64_t sz = 0;
+                    size_t j = pbReadVarint(pkt.payload, pkt.payloadLen, i, sz);
+                    if (!j) break;
+                    if (j + sz > pkt.payloadLen) break;
+                    if (field == 2) {
+                        routeReplyPayload = pkt.payload + j;
+                        routeReplyLen = (size_t)sz;
+                    }
+                    i = j + sz;
+                } else if (wt == 5) {
+                    if (i + 4 > pkt.payloadLen) break;
+                    i += 4;
+                } else if (wt == 1) {
+                    if (i + 8 > pkt.payloadLen) break;
+                    i += 8;
                 } else {
                     break;
                 }
@@ -8635,6 +9667,12 @@ static bool processMeshPacket(const MeshPacket &pkt) {
 
             bool isAck = (errorReason == 0);
             bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
+            tracerouteProgressOnRouting(pkt.hdr.from,
+                                        pkt.requestId,
+                                        errorReason,
+                                        routeReplyPayload,
+                                        routeReplyLen,
+                                        (pkt.hdr.flags & 0x10) != 0);
 
             if (isAck) {
                 Channels.setAckStateFrom(pkt.requestId, pkt.hdr.from);
@@ -8687,6 +9725,12 @@ static bool processMeshPacket(const MeshPacket &pkt) {
                 Nodes.updateTelemetry(pkt.hdr.from, t);
             }
             appendLiveRxSummary(pkt, chanIdx, "E");
+            return false;
+        }
+
+        case TRACEROUTE_APP: {
+            tracerouteProgressOnResponse(pkt);
+            appendLiveRxSummary(pkt, chanIdx, "R");
             return false;
         }
 
@@ -9653,6 +10697,10 @@ void setup() {
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
     pinMode(USER_BUTTON_PIN,
             (USER_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
+#endif
+#if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
+    pinMode(DISPLAY_TOGGLE_BUTTON_PIN,
+            (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)

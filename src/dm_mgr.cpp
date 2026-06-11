@@ -186,12 +186,25 @@ void DmMgr::clearAll(bool clearPersisted) {
 #endif
 }
 
-// ── _sort: insertion sort by lastMs descending ────────────────
+// ── _sort: favorites first, then lastMs descending ────────────
 void DmMgr::_sort() {
+    auto isFavoriteConv = [](const DmConv &conv) -> bool {
+        NodeEntry *n = Nodes.find(conv.nodeId);
+        return n && n->favorite;
+    };
+
+    auto shouldComeBefore = [&](const DmConv &a, const DmConv &b) -> bool {
+        bool aFav = isFavoriteConv(a);
+        bool bFav = isFavoriteConv(b);
+        if (aFav != bFav) return aFav;
+        if (a.lastMs != b.lastMs) return a.lastMs > b.lastMs;
+        return a.nodeId < b.nodeId;
+    };
+
     for (int i = 1; i < _count; i++) {
         DmConv tmp = _convs[i];
         int j = i - 1;
-        while (j >= 0 && _convs[j].lastMs < tmp.lastMs) {
+        while (j >= 0 && shouldComeBefore(tmp, _convs[j])) {
             _convs[j + 1] = _convs[j];
             j--;
         }

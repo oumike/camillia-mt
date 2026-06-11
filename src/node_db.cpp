@@ -18,7 +18,7 @@ struct NodeBlob {
     float   battPct, voltage;
     uint8_t pubKey[32];
     uint8_t chanIdx;
-    // bit 0 = hasPosition, 1 = hasName, 2 = hasPubKey, 3 = hasTelemetry
+    // bit 0 = hasPosition, 1 = hasName, 2 = hasPubKey, 3 = hasTelemetry, 4 = favorite
     uint8_t flags;
 };
 
@@ -56,6 +56,7 @@ void NodeDB::init() {
         e->hasName      = (b.flags & 2) != 0;
         e->hasPubKey    = (b.flags & 4) != 0;
         e->hasTelemetry = (b.flags & 8) != 0;
+        e->favorite     = (b.flags & 16) != 0;
         e->lastHeardMs  = 0;  // unknown after reboot
         e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
@@ -78,7 +79,8 @@ void NodeDB::_save(uint32_t nodeId) {
     memcpy(b.pubKey, e->pubKey, 32);
     b.chanIdx = (uint8_t)e->chanIdx;
     b.flags = (e->hasPosition  ? 1 : 0) | (e->hasName      ? 2 : 0)
-            | (e->hasPubKey    ? 4 : 0) | (e->hasTelemetry ? 8 : 0);
+            | (e->hasPubKey    ? 4 : 0) | (e->hasTelemetry ? 8 : 0)
+            | (e->favorite     ? 16 : 0);
 
     char key[12]; nodeKey(key, nodeId);
     Preferences p; p.begin("nodes", false);
@@ -157,6 +159,8 @@ static int cmpNodes(const void *a, const void *b) {
     const NodeEntry *nb = (const NodeEntry *)b;
     if (!na->nodeId) return  1;
     if (!nb->nodeId) return -1;
+    if (na->favorite && !nb->favorite) return -1;
+    if (!na->favorite && nb->favorite) return  1;
     if (na->hasName && !nb->hasName) return -1;
     if (!na->hasName && nb->hasName) return  1;
     if (na->lastHeardMs > nb->lastHeardMs) return -1;
@@ -245,4 +249,15 @@ void NodeDB::updateTelemetry(uint32_t nodeId, const TelemetryInfo &t) {
         _save(nodeId);
         e->lastPersistMs = now;
     }
+}
+
+bool NodeDB::setFavorite(uint32_t nodeId, bool favorite) {
+    NodeEntry *e = find(nodeId);
+    if (!e || !e->nodeId) return false;
+    if (e->favorite == favorite) return false;
+
+    e->favorite = favorite;
+    _save(nodeId);
+    e->lastPersistMs = millis();
+    return true;
 }

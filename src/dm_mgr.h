@@ -42,7 +42,7 @@ public:
 
     DmConv   *find(uint32_t nodeId);
     DmConv   *findOrCreate(uint32_t nodeId, const char *shortName);
-    DmConv   *getByRank(int idx);     // 0 = most recently messaged
+    DmConv   *getByRank(int idx);     // favorites first, then most recently messaged
     int       count() const { return _count; }
     bool      hasUnread() const;
     int       unreadMessageCount() const;
