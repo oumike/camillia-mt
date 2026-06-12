@@ -867,22 +867,13 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
 }
 
 static bool pagerAudioSelectCommFormat(i2s_config_t &cfg) {
-#if defined(I2S_COMM_FORMAT_STAND_I2S)
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-    return true;
-#elif defined(I2S_COMM_FORMAT_I2S_MSB)
-    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
-    return true;
-#elif defined(I2S_COMM_FORMAT_I2S)
-    cfg.communication_format = I2S_COMM_FORMAT_I2S;
-    return true;
-#elif defined(I2S_COMM_FORMAT_STAND_MSB)
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
-    return true;
 #else
-    Serial.println("[audio] pager no supported i2s comm format");
-    return false;
+    // Legacy drivers expect I2S Philips mode as I2S | I2S_MSB.
+    cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
 #endif
+    return true;
 }
 
 static bool pagerAudioInitI2S() {
@@ -1138,22 +1129,12 @@ static bool sTdeckAudioReady = false;
 static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
 
 static bool tdeckAudioSelectCommFormat(i2s_config_t &cfg) {
-#if defined(I2S_COMM_FORMAT_STAND_I2S)
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
-    return true;
-#elif defined(I2S_COMM_FORMAT_I2S_MSB)
-    cfg.communication_format = I2S_COMM_FORMAT_I2S_MSB;
-    return true;
-#elif defined(I2S_COMM_FORMAT_I2S)
-    cfg.communication_format = I2S_COMM_FORMAT_I2S;
-    return true;
-#elif defined(I2S_COMM_FORMAT_STAND_MSB)
-    cfg.communication_format = I2S_COMM_FORMAT_STAND_MSB;
-    return true;
 #else
-    Serial.println("[audio] tdeck no supported i2s comm format");
-    return false;
+    cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
 #endif
+    return true;
 }
 
 static bool tdeckAudioInitI2S() {
