@@ -9133,17 +9133,30 @@ static void refreshChannelSelectorLabel() {
     }
 #endif
 
+#if defined(DEVICE_TDECK)
+    const bool showSelectorCaret = false;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    const bool showSelectorCaret = useCompactVerticalHeltecSelector();
+#else
+    const bool showSelectorCaret = true;
+#endif
+
     lv_label_set_text(s_channelSelectorLabel, name);
     lv_obj_set_style_text_color(
         s_channelSelectorLabel,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
         0);
     if (s_channelSelectorCaretLabel) {
-        lv_label_set_text(s_channelSelectorCaretLabel, isChannelDropdownVisible() ? "^" : "v");
-        lv_obj_set_style_text_color(
-            s_channelSelectorCaretLabel,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-            0);
+        if (showSelectorCaret) {
+            lv_obj_clear_flag(s_channelSelectorCaretLabel, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(s_channelSelectorCaretLabel, isChannelDropdownVisible() ? "^" : "v");
+            lv_obj_set_style_text_color(
+                s_channelSelectorCaretLabel,
+                (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
+                0);
+        } else {
+            lv_obj_add_flag(s_channelSelectorCaretLabel, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -9155,7 +9168,7 @@ static void refreshChannelSelectorLabel() {
             lv_obj_update_layout(s_channelSelectorLabel);
 
             lv_coord_t textW = lv_obj_get_width(s_channelSelectorLabel);
-            lv_coord_t desiredW = textW + 24; // text + inner padding + caret room
+            lv_coord_t desiredW = textW + (showSelectorCaret ? 24 : 10); // text + padding (+ optional caret room)
             if (desiredW < 96) desiredW = 96;
 
             lv_obj_t *header = lv_obj_get_parent(s_channelSelectorBtn);
@@ -9167,10 +9180,10 @@ static void refreshChannelSelectorLabel() {
             }
 
             lv_obj_set_width(s_channelSelectorBtn, desiredW);
-            lv_obj_set_width(s_channelSelectorLabel, desiredW - 22);
+            lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (desiredW - 22) : (desiredW - 8));
             lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
             lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
-            if (s_channelSelectorCaretLabel) {
+            if (showSelectorCaret && s_channelSelectorCaretLabel) {
                 lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
             }
             layoutHeaderInlineItems();
@@ -10084,6 +10097,21 @@ static void buildUi() {
     const int selectorBtnOffsetX = headerPadX;
 #endif
 
+#if defined(DEVICE_TDECK)
+    const bool showSelectorCaret = false;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    const bool showSelectorCaret = compactHeltecSelector;
+#else
+    const bool showSelectorCaret = true;
+#endif
+
+    const lv_font_t *selectorTextFont = headerTextFont;
+#if defined(DEVICE_TDECK)
+    selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
+#endif
+
     s_channelSelectorBtn = lv_btn_create(s_chatHeaderBar);
     lv_obj_set_size(s_channelSelectorBtn, selectorBtnW, selectorBtnH);
     lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, selectorBtnOffsetX, 0);
@@ -10110,7 +10138,7 @@ static void buildUi() {
     lv_obj_add_event_cb(s_channelSelectorBtn, onChannelSelectorPressed, LV_EVENT_CLICKED, nullptr);
 
     s_channelSelectorLabel = lv_label_create(s_channelSelectorBtn);
-    lv_obj_set_style_text_font(s_channelSelectorLabel, headerTextFont, 0);
+    lv_obj_set_style_text_font(s_channelSelectorLabel, selectorTextFont, 0);
     lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -10119,16 +10147,16 @@ static void buildUi() {
         lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_add_flag(s_channelSelectorLabel, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_set_width(s_channelSelectorLabel, selectorBtnW - 22);
+        lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (selectorBtnW - 22) : (selectorBtnW - 8));
         lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
     }
 #else
-    lv_obj_set_width(s_channelSelectorLabel, selectorBtnW - 22);
+    lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (selectorBtnW - 22) : (selectorBtnW - 8));
     lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
 #endif
 
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
-    lv_obj_set_style_text_font(s_channelSelectorCaretLabel, headerTextFont, 0);
+    lv_obj_set_style_text_font(s_channelSelectorCaretLabel, selectorTextFont, 0);
     lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (compactHeltecSelector) {
@@ -10139,6 +10167,9 @@ static void buildUi() {
 #else
     lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
 #endif
+    if (!showSelectorCaret) {
+        lv_obj_add_flag(s_channelSelectorCaretLabel, LV_OBJ_FLAG_HIDDEN);
+    }
 #else
     s_channelSelectorBtn = nullptr;
     s_channelSelectorLabel = nullptr;
@@ -10316,6 +10347,15 @@ static void buildUi() {
     lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
 #endif
 
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_font_t *channelNavFont = kMainScreenFont;
+#if defined(DEVICE_TDECK)
+    channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
+#endif
+#endif
+
     for (int i = 0; i < MESH_CHANNELS; i++) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
@@ -10335,9 +10375,9 @@ static void buildUi() {
 
         lv_obj_t *lbl = lv_label_create(btn);
         s_channelLabels[i] = lbl;
-        lv_obj_set_style_text_font(lbl, kMainScreenFont, 0);
+    lv_obj_set_style_text_font(lbl, channelNavFont, 0);
         lv_obj_set_width(lbl, lv_pct(100));
-        lv_obj_set_height(lbl, lv_font_get_line_height(kMainScreenFont));
+    lv_obj_set_height(lbl, lv_font_get_line_height(channelNavFont));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
 
