@@ -105,6 +105,7 @@ static lv_obj_t *s_channelList = nullptr;
 static lv_obj_t *s_channelSelectorBtn = nullptr;
 static lv_obj_t *s_channelSelectorLabel = nullptr;
 static lv_obj_t *s_channelSelectorCaretLabel = nullptr;
+static lv_coord_t s_channelSelectorFixedBtnW = 0;
 static lv_obj_t *s_chatHeaderBar = nullptr;
 static lv_obj_t *s_chatHeaderTime = nullptr;
 static lv_obj_t *s_chatHeaderGps = nullptr;
@@ -6812,7 +6813,13 @@ static void openLegendModal() {
     s_legendModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_legendModal, modalW, modalH);
     lv_obj_align(s_legendModal, LV_ALIGN_CENTER, 0, 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_add_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_legendModal, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_AUTO);
+#else
     lv_obj_clear_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
+#endif
     lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_legendModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_legendModal, 1, 0);
@@ -7793,6 +7800,14 @@ static void pumpKeyboardInput() {
         }
 
         if (s_legendModal) {
+            if (k == KEY_SCROLL_UP) {
+                lv_obj_scroll_by(s_legendModal, 0, 18, LV_ANIM_OFF);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN) {
+                lv_obj_scroll_by(s_legendModal, 0, -18, LV_ANIM_OFF);
+                continue;
+            }
             if (isModalCloseKey(k)
                 || k == 'l' || k == 'L') {
                 closeLegendModal();
@@ -9137,6 +9152,8 @@ static void refreshChannelSelectorLabel() {
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = useCompactVerticalHeltecSelector();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    const bool showSelectorCaret = false;
 #else
     const bool showSelectorCaret = true;
 #endif
@@ -9159,35 +9176,64 @@ static void refreshChannelSelectorLabel() {
         }
     }
 
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    bool allowDynamicSelectorWidth = true;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (!useCompactVerticalHeltecSelector()) {
-        if (s_channelSelectorBtn) {
-            // Fit selector width to the active channel name on non-compact Heltec.
+    allowDynamicSelectorWidth = !useCompactVerticalHeltecSelector();
+#endif
+    if (allowDynamicSelectorWidth && s_channelSelectorBtn) {
+        const lv_coord_t selectorEdgePad = 6;
+        const lv_coord_t selectorAntiClip = 2;
+
+        // Keep selector width fixed: size it once from channel 0 label and never resize on channel changes.
+        if (s_channelSelectorFixedBtnW <= 0) {
+            const char *firstChannelName = channelName(0);
+            if (!firstChannelName || !firstChannelName[0]) firstChannelName = "Channel";
+
+            lv_label_set_text(s_channelSelectorLabel, firstChannelName);
             lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_CLIP);
             lv_obj_set_width(s_channelSelectorLabel, LV_SIZE_CONTENT);
             lv_obj_update_layout(s_channelSelectorLabel);
 
             lv_coord_t textW = lv_obj_get_width(s_channelSelectorLabel);
-            lv_coord_t desiredW = textW + (showSelectorCaret ? 24 : 10); // text + padding (+ optional caret room)
-            if (desiredW < 96) desiredW = 96;
+            // Measure button width from text + equal edge padding (+ optional caret room).
+            lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
+#if defined(DEVICE_TDECK)
+            if (desiredW < 56) desiredW = 56;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+            if (desiredW < 60) desiredW = 60;
+#else
+            if (desiredW < 72) desiredW = 72;
+#endif
 
             lv_obj_t *header = lv_obj_get_parent(s_channelSelectorBtn);
             if (header) {
-                // Reserve room for centered time and right-side status indicators.
-                lv_coord_t maxW = lv_obj_get_width(header) - 120;
-                if (maxW < 96) maxW = 96;
-                if (desiredW > maxW) desiredW = maxW;
+                lv_coord_t maxW = lv_obj_get_width(header) - 110;
+                if (maxW > 0 && desiredW > maxW) desiredW = maxW;
             }
-
-            lv_obj_set_width(s_channelSelectorBtn, desiredW);
-            lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (desiredW - 22) : (desiredW - 8));
-            lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
-            lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
-            if (showSelectorCaret && s_channelSelectorCaretLabel) {
-                lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
-            }
-            layoutHeaderInlineItems();
+            if (desiredW < 44) desiredW = 44;
+            s_channelSelectorFixedBtnW = desiredW;
         }
+
+        lv_label_set_text(s_channelSelectorLabel, name);
+        lv_obj_set_width(s_channelSelectorBtn, s_channelSelectorFixedBtnW);
+        lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
+
+        if (showSelectorCaret) {
+            lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_set_width(s_channelSelectorLabel, s_channelSelectorFixedBtnW - 22);
+            lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 1);
+            if (s_channelSelectorCaretLabel) {
+                lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 1);
+            }
+        } else {
+            // Non-caret selector uses centered text in a centered text box for equal left/right padding.
+            lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_width(s_channelSelectorLabel, max((lv_coord_t)1, (lv_coord_t)(s_channelSelectorFixedBtnW - (selectorEdgePad * 2))));
+            lv_obj_align(s_channelSelectorLabel, LV_ALIGN_CENTER, 0, 1);
+        }
+
+        layoutHeaderInlineItems();
     }
 #endif
 }
@@ -9297,7 +9343,7 @@ static void fitChannelDropdownToButtonContent() {
 
     const lv_coord_t listPadLeft = 4;
     const lv_coord_t listPadRight = 4;
-    const lv_coord_t buttonTextPad = 10; // small breathing room around longest label
+    const lv_coord_t buttonTextPad = 8; // 4px left + 4px right, matching button inner padding
     const lv_coord_t scrollbarGutter = 8; // keep scrollbar between panel edge and buttons
 
     lv_coord_t buttonW = maxLabelW + buttonTextPad;
@@ -9369,22 +9415,45 @@ static void refreshHeaderTime(bool force) {
 
 static void layoutHeaderInlineItems() {
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (!s_chatHeaderTime || !s_chatHeaderBattBar || !s_chatHeaderGps || !s_chatHeaderWifi) return;
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (!s_channelSelectorBtn || !s_chatHeaderBattText) return;
+    if (!s_chatHeaderTime || !s_chatHeaderBattBar) return;
+    if (!s_channelSelectorBtn || !s_chatHeaderBattText || !s_chatHeaderBar) return;
 
-    lv_obj_align(s_chatHeaderBattText, LV_ALIGN_RIGHT_MID, -4, 0);
-    lv_obj_align_to(s_chatHeaderBattBar, s_chatHeaderBattText, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+    const lv_coord_t headerTextYOffset = 1;
 
-    // Cardputer header order: selector -> WiFi -> GPS -> time -> battery.
-    lv_obj_align_to(s_chatHeaderWifi, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-    lv_obj_align_to(s_chatHeaderGps, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
-    lv_obj_align_to(s_chatHeaderTime, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -6, 0);
-#else
-    lv_obj_align_to(s_chatHeaderTime, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -10, 0);
-    lv_obj_align_to(s_chatHeaderGps, s_chatHeaderTime, LV_ALIGN_OUT_LEFT_MID, -12, 0);
-    lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -8, 0);
-#endif
+    // Keep battery icon at the far right, with percent text close to it.
+    lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, headerTextYOffset);
+
+    // Keep time centered between the left-side cluster and battery percentage.
+    lv_obj_update_layout(s_chatHeaderBar);
+    lv_coord_t selectorRight = lv_obj_get_x(s_channelSelectorBtn) + lv_obj_get_width(s_channelSelectorBtn);
+    lv_coord_t battLeft = lv_obj_get_x(s_chatHeaderBattText);
+    lv_coord_t timeW = lv_obj_get_width(s_chatHeaderTime);
+    lv_coord_t slotStart = selectorRight + 4;
+
+    // If GPS/WiFi remain in the header, reserve that area to avoid overlap with time.
+    if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
+        lv_obj_align_to(s_chatHeaderGps, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 5, headerTextYOffset);
+        lv_coord_t statusRight = lv_obj_get_x(s_chatHeaderGps) + lv_obj_get_width(s_chatHeaderGps);
+        if (s_chatHeaderWifi && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
+            lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, headerTextYOffset);
+            lv_coord_t wifiRight = lv_obj_get_x(s_chatHeaderWifi) + lv_obj_get_width(s_chatHeaderWifi);
+            if (wifiRight > statusRight) statusRight = wifiRight;
+        }
+        slotStart = statusRight + 2;
+    }
+
+    lv_coord_t slotEnd = battLeft - 2;
+
+    if (slotEnd <= slotStart || timeW <= 0) {
+        lv_obj_align_to(s_chatHeaderTime, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 6, headerTextYOffset);
+    } else {
+        lv_coord_t x = slotStart + (slotEnd - slotStart - timeW) / 2;
+        if (x < slotStart) x = slotStart;
+        lv_coord_t maxX = slotEnd - timeW;
+        if (x > maxX) x = maxX;
+        lv_obj_align(s_chatHeaderTime, LV_ALIGN_LEFT_MID, x, headerTextYOffset);
+    }
 #endif
 }
 
@@ -9400,6 +9469,20 @@ static inline lv_color_t headerGpsBadColor() {
         bad = blend565(bad, 0xFFFF, 96);
     }
     return lvColorFrom565(bad);
+}
+
+static inline lv_color_t headerBatteryDotColor(uint8_t battPct) {
+    if (battPct >= 80) {
+        return headerGoodGreenColor();
+    }
+    if (battPct >= 40) {
+        return (s_cfg.uiMode == UI_MODE_LIGHT)
+            ? lv_color_hex(0xA77900)
+            : lv_color_hex(0xF4D35E);
+    }
+    return (s_cfg.uiMode == UI_MODE_LIGHT)
+        ? lv_color_hex(0xC74242)
+        : lv_color_hex(0xFF6B6B);
 }
 
 static void refreshHeaderStatus(bool force) {
@@ -9427,27 +9510,22 @@ static void refreshHeaderStatus(bool force) {
         return;
     }
 
-    lv_bar_set_value(s_chatHeaderBattBar, battPct, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerBatteryDotColor(battPct), 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text_fmt(s_chatHeaderBattText, "%u", (unsigned)battPct);
 #else
     lv_label_set_text_fmt(s_chatHeaderBattText, "%u%%", (unsigned)battPct);
 #endif
 
-        if (gpsEnabled && gpsFix) {
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
-        lv_label_set_text_fmt(s_chatHeaderGps, "G%u", (unsigned)gpsSatCount);
-    #else
-        lv_label_set_text_fmt(s_chatHeaderGps, "GPS %u", (unsigned)gpsSatCount);
-    #endif
+    if (gpsEnabled) {
+        lv_label_set_text_fmt(s_chatHeaderGps, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
+    } else {
+        lv_label_set_text(s_chatHeaderGps, LV_SYMBOL_GPS);
+    }
+
+    if (gpsEnabled && gpsFix) {
         lv_obj_set_style_text_color(s_chatHeaderGps, headerGoodGreenColor(), 0);
     } else {
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
-        lv_label_set_text(s_chatHeaderGps, "G0");
-    #else
-        lv_label_set_text(s_chatHeaderGps, "GPS 0");
-    #endif
         lv_obj_set_style_text_color(s_chatHeaderGps, headerGpsBadColor(), 0);
     }
 
@@ -9462,7 +9540,16 @@ static void refreshHeaderStatus(bool force) {
         s_chatHeaderWifi,
         wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
         0);
-    lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+    lv_obj_t *gpsParent = lv_obj_get_parent(s_chatHeaderGps);
+    lv_obj_t *wifiParent = lv_obj_get_parent(s_chatHeaderWifi);
+    if (gpsParent && gpsParent == wifiParent) {
+        if (gpsParent == s_chatShortcutBar) {
+            lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
+            lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+        } else {
+            lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+        }
+    }
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     layoutHeaderInlineItems();
 #endif
@@ -9987,6 +10074,7 @@ static void refreshChatView(bool force) {
 static void buildUi() {
     lv_obj_t *screen = lv_obj_create(NULL);
     s_rootScreen = screen;
+    s_channelSelectorFixedBtnW = 0;
     lv_obj_remove_style_all(screen);
     lv_obj_set_size(screen, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
     lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
@@ -10014,7 +10102,7 @@ static void buildUi() {
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const int panelMargin = 2;
     const int chatGap = 0;
-    const int chatHeaderH = 20;
+    const int chatHeaderH = 22;
     const int chatLegendH = 12;
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
@@ -10076,7 +10164,9 @@ static void buildUi() {
     lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
 
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
+#endif
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     s_channelStrip = nullptr;
@@ -10101,8 +10191,16 @@ static void buildUi() {
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = compactHeltecSelector;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    const bool showSelectorCaret = false;
 #else
     const bool showSelectorCaret = true;
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_coord_t selectorTextYOffset = 0;
+#else
+    const lv_coord_t selectorTextYOffset = 1;
 #endif
 
     const lv_font_t *selectorTextFont = headerTextFont;
@@ -10144,15 +10242,15 @@ static void buildUi() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (compactHeltecSelector) {
         lv_obj_set_width(s_channelSelectorLabel, 1);
-        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 0, selectorTextYOffset);
         lv_obj_add_flag(s_channelSelectorLabel, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (selectorBtnW - 22) : (selectorBtnW - 8));
-        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
+        lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, selectorTextYOffset);
     }
 #else
     lv_obj_set_width(s_channelSelectorLabel, showSelectorCaret ? (selectorBtnW - 22) : (selectorBtnW - 8));
-    lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, 0);
+    lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 4, selectorTextYOffset);
 #endif
 
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
@@ -10160,12 +10258,12 @@ static void buildUi() {
     lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (compactHeltecSelector) {
-        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, selectorTextYOffset);
     } else {
-        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
+        lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, selectorTextYOffset);
     }
 #else
-    lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, 0);
+    lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_RIGHT_MID, -5, selectorTextYOffset);
 #endif
     if (!showSelectorCaret) {
         lv_obj_add_flag(s_channelSelectorCaretLabel, LV_OBJ_FLAG_HIDDEN);
@@ -10183,42 +10281,45 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_chatHeaderTime, headerTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
     s_chatHeaderGps = lv_label_create(s_chatHeaderBar);
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_align_to(s_chatHeaderGps, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
-#else
-    lv_obj_align(s_chatHeaderGps, LV_ALIGN_LEFT_MID, 24, 0);
-#endif
     lv_obj_set_style_text_font(s_chatHeaderGps, headerTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
+#else
+    s_chatHeaderGps = nullptr;
+#endif
+
+    s_chatHeaderBattBar = lv_obj_create(s_chatHeaderBar);
+    lv_obj_remove_style_all(s_chatHeaderBattBar);
+    lv_obj_set_size(s_chatHeaderBattBar,
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    6,
+#else
+                    (chatHeaderH >= 25) ? 8 : 7,
+#endif
+                    (chatHeaderH >= 25) ? 8 : 7);
+    lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
+    lv_obj_set_style_radius(s_chatHeaderBattBar, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), 0);
+    lv_obj_set_style_border_width(s_chatHeaderBattBar, 1, 0);
+    lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x274A84), 0);
+    lv_obj_set_style_pad_all(s_chatHeaderBattBar, 0, 0);
 
     s_chatHeaderBattText = lv_label_create(s_chatHeaderBar);
-    lv_obj_align(s_chatHeaderBattText, LV_ALIGN_RIGHT_MID, -headerPadX, 0);
+    lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, 0);
     lv_obj_set_style_text_font(s_chatHeaderBattText, headerTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
 
-    s_chatHeaderBattBar = lv_bar_create(s_chatHeaderBar);
-    lv_obj_set_size(s_chatHeaderBattBar,
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-                    22,
-#else
-                    (chatHeaderH >= 25) ? 34 : 26,
-#endif
-                    (chatHeaderH >= 25) ? 10 : 8);
-    lv_obj_align_to(s_chatHeaderBattBar, s_chatHeaderBattText, LV_ALIGN_OUT_LEFT_MID, -7, 0);
-    lv_bar_set_range(s_chatHeaderBattBar, 0, 100);
-    lv_obj_set_style_bg_color(s_chatHeaderBattBar, lv_color_hex(0x1E355F), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_chatHeaderBattBar, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x5B86C7), LV_PART_MAIN);
-    lv_obj_set_style_pad_all(s_chatHeaderBattBar, 1, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(s_chatHeaderBattBar, LV_OPA_COVER, LV_PART_INDICATOR);
-
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
     s_chatHeaderWifi = lv_label_create(s_chatHeaderBar);
-    lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+    lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     lv_obj_set_style_text_font(s_chatHeaderWifi, headerIconFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+#else
+    s_chatHeaderWifi = nullptr;
+#endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     layoutHeaderInlineItems();
 #endif
@@ -10339,12 +10440,30 @@ static void buildUi() {
     populateHeltecBottomNav(s_chatShortcutBar, -1);
 #else
     s_chatShortcutText = lv_label_create(s_chatShortcutBar);
-    lv_obj_set_width(s_chatShortcutText, lv_pct(100));
+    const lv_coord_t bottomStatusReserve = (chatLegendH >= 14) ? 74 : 62;
+    lv_coord_t legendTextW = chatW - bottomStatusReserve;
+    if (legendTextW < 40) legendTextW = chatW;
+    lv_obj_set_width(s_chatShortcutText, legendTextW);
     lv_obj_set_style_text_font(s_chatShortcutText, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
-    lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_label_set_text(s_chatShortcutText, "(C)fg (D)M (N)ode L(i)ve (L)egend");
+#else
     lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
+#endif
+
+    s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
+    lv_obj_set_style_text_font(s_chatHeaderGps, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
+
+    s_chatHeaderWifi = lv_label_create(s_chatShortcutBar);
+    lv_obj_set_style_text_font(s_chatHeaderWifi, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 #endif
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -10496,6 +10615,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_channelSelectorBtn = nullptr;
     s_channelSelectorLabel = nullptr;
     s_channelSelectorCaretLabel = nullptr;
+    s_channelSelectorFixedBtnW = 0;
     s_chatHeaderBar = nullptr;
     s_chatHeaderTime = nullptr;
     s_chatHeaderGps = nullptr;
@@ -10591,9 +10711,8 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     if (s_chatHeaderGps) lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
     if (s_chatHeaderBattText) lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
     if (s_chatHeaderBattBar) {
-        lv_obj_set_style_bg_color(s_chatHeaderBattBar, lv_color_hex(0x1E355F), LV_PART_MAIN);
-        lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x5B86C7), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), LV_PART_INDICATOR);
+        lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x274A84), 0);
+        lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), 0);
     }
     if (s_chatHeaderWifi) lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
 
