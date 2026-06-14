@@ -166,9 +166,10 @@ static const char *kRebroadNames[] = {
 static const int kNumRebroadModes = 5;
 
 static const char *kThemeNames[] = {
-    "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON", "SCARLET_POP"
+    "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON", "SCARLET_POP",
+    "INK_WASH", "LAVENDAR_FIELDS", "WILD_FLOWERS", "QUIET_LUXURY", "MORNING_DEW", "WINTER_CHILL"
 };
-static const int kNumThemes = 6;
+static const int kNumThemes = 12;
 
 static const char *kThemeModeNames[] = {
     "DARK", "LIGHT"

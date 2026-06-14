@@ -11,7 +11,13 @@ enum UiThemeFamily : uint8_t {
     UI_THEME_SOLARIZED = 3,
     UI_THEME_CRIMSON = 4,
     UI_THEME_SCARLET_POP = 5,
-    UI_THEME_COUNT = 6
+    UI_THEME_INK_WASH = 6,
+    UI_THEME_LAVENDAR_FIELDS = 7,
+    UI_THEME_WILD_FLOWERS = 8,
+    UI_THEME_QUIET_LUXURY = 9,
+    UI_THEME_MORNING_DEW = 10,
+    UI_THEME_WINTER_CHILL = 11,
+    UI_THEME_COUNT = 12
 };
 
 enum UiThemeMode : uint8_t {

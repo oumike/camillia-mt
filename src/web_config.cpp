@@ -592,13 +592,8 @@ static void sendConfigPage(const char *msg = "") {
 
     char tmp[96];
     String html = kHead;
-    uint8_t themePreset =
-        (gCfg->uiTheme == UI_THEME_SCARLET_POP) ? (gCfg->uiMode == UI_MODE_LIGHT ? 11 : 10) :
-        (gCfg->uiTheme == UI_THEME_CRIMSON)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 9 : 8) :
-        (gCfg->uiTheme == UI_THEME_SOLARIZED) ? (gCfg->uiMode == UI_MODE_LIGHT ? 7 : 6) :
-        (gCfg->uiTheme == UI_THEME_EARTHEN)   ? (gCfg->uiMode == UI_MODE_LIGHT ? 5 : 4) :
-        (gCfg->uiTheme == UI_THEME_EVERGREEN) ? (gCfg->uiMode == UI_MODE_LIGHT ? 3 : 2) :
-                                                (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0);
+    uint8_t themeBase = (uint8_t)constrain((int)gCfg->uiTheme, 0, UI_THEME_COUNT - 1);
+    uint8_t themePreset = (uint8_t)(themeBase * 2 + (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0));
     int totalNodes = Nodes.count();
     uint8_t battPct = readBatteryPctWeb();
     const char *battCls = (battPct >= 60) ? "metric-good" : ((battPct >= 25) ? "metric-warn" : "metric-bad");
@@ -1066,6 +1061,18 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='9'"; if (themePreset == 9) html += " selected"; html += ">Crimson Blue Light</option>"
             "<option value='10'"; if (themePreset == 10) html += " selected"; html += ">Scarlet Pop Dark</option>"
             "<option value='11'"; if (themePreset == 11) html += " selected"; html += ">Scarlet Pop Light</option>"
+            "<option value='12'"; if (themePreset == 12) html += " selected"; html += ">Ink Wash Dark</option>"
+            "<option value='13'"; if (themePreset == 13) html += " selected"; html += ">Ink Wash Light</option>"
+            "<option value='14'"; if (themePreset == 14) html += " selected"; html += ">Lavendar Fields Dark</option>"
+            "<option value='15'"; if (themePreset == 15) html += " selected"; html += ">Lavendar Fields Light</option>"
+            "<option value='16'"; if (themePreset == 16) html += " selected"; html += ">Wild Flowers Dark</option>"
+            "<option value='17'"; if (themePreset == 17) html += " selected"; html += ">Wild Flowers Light</option>"
+            "<option value='18'"; if (themePreset == 18) html += " selected"; html += ">Quiet Luxury Dark</option>"
+            "<option value='19'"; if (themePreset == 19) html += " selected"; html += ">Quiet Luxury Light</option>"
+            "<option value='20'"; if (themePreset == 20) html += " selected"; html += ">Morning Dew Dark</option>"
+            "<option value='21'"; if (themePreset == 21) html += " selected"; html += ">Morning Dew Light</option>"
+            "<option value='22'"; if (themePreset == 22) html += " selected"; html += ">Winter Chill Dark</option>"
+            "<option value='23'"; if (themePreset == 23) html += " selected"; html += ">Winter Chill Light</option>"
             "</select></label>";
         html += "<script>"
             "(function(){"
@@ -1081,7 +1088,19 @@ static void sendConfigPage(const char *msg = "") {
                             "'8':{bg:'#060f24',panel:'#12244c',panel2:'#1b3363',line:'#3b578f',text:'#f4f8ff',dim:'#b9c9e9',accent:'#ff4a58',ink:'#ffffff'},"
                             "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'},"
                             "'10':{bg:'#150009',panel:'#760031',panel2:'#8b0038',line:'#6f2d3b',text:'#fff1f1',dim:'#e5b3ba',accent:'#d51c39',ink:'#ffffff'},"
-                            "'11':{bg:'#fff2f4',panel:'#fff8f9',panel2:'#ffeaed',line:'#d8a1aa',text:'#3a0a14',dim:'#7e3b49',accent:'#d51c39',ink:'#ffffff'}"
+                            "'11':{bg:'#fff2f4',panel:'#fff8f9',panel2:'#ffeaed',line:'#d8a1aa',text:'#3a0a14',dim:'#7e3b49',accent:'#d51c39',ink:'#ffffff'},"
+                            "'12':{bg:'#111318',panel:'#1c2128',panel2:'#252b34',line:'#4a525d',text:'#f3f6fa',dim:'#b7c0cc',accent:'#d8dde4',ink:'#080d14'},"
+                            "'13':{bg:'#f3f5f7',panel:'#ffffff',panel2:'#e8ebef',line:'#c2c9d0',text:'#1e242c',dim:'#5e6876',accent:'#2e3440',ink:'#ffffff'},"
+                            "'14':{bg:'#1a1230',panel:'#251a45',panel2:'#2f2258',line:'#58457f',text:'#f2eefe',dim:'#c9c0e6',accent:'#b79bff',ink:'#160f2a'},"
+                            "'15':{bg:'#f5effb',panel:'#fff9ff',panel2:'#ede1f7',line:'#c7b5db',text:'#2f2440',dim:'#6d5f82',accent:'#7b5ba7',ink:'#ffffff'},"
+                            "'16':{bg:'#1a2430',panel:'#253547',panel2:'#2d455b',line:'#4b6881',text:'#edf4fb',dim:'#bccbd9',accent:'#c78fcf',ink:'#25192d'},"
+                            "'17':{bg:'#f6faf4',panel:'#ffffff',panel2:'#e5f0e2',line:'#bccfb7',text:'#24332f',dim:'#63756f',accent:'#8a5faf',ink:'#ffffff'},"
+                            "'18':{bg:'#2a1f17',panel:'#34271e',panel2:'#403126',line:'#6a5848',text:'#f6eee6',dim:'#c9b9a8',accent:'#d9c7a3',ink:'#2a1f16'},"
+                            "'19':{bg:'#faf4ea',panel:'#fffdf8',panel2:'#f1e7d5',line:'#cdbfa8',text:'#3b2f24',dim:'#7b6b57',accent:'#a8844f',ink:'#ffffff'},"
+                            "'20':{bg:'#12282a',panel:'#1a3638',panel2:'#234345',line:'#4d7072',text:'#ebf7f5',dim:'#b3d0cc',accent:'#9cd8c8',ink:'#123130'},"
+                            "'21':{bg:'#eef9f6',panel:'#ffffff',panel2:'#ddf1ec',line:'#b5d5cd',text:'#213531',dim:'#5f7c76',accent:'#4e9c8a',ink:'#ffffff'},"
+                            "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
+                            "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'}"
             "};"
             "function apply(){"
               "var k=document.getElementById('sel-theme-preset').value;"
@@ -1947,19 +1966,9 @@ static void handlePostSave() {
         gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     }
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 11);
-        if (preset == 0)      { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_DARK; }
-        else if (preset == 1) { gCfg->uiTheme = UI_THEME_CAMELLIA; gCfg->uiMode = UI_MODE_LIGHT; }
-        else if (preset == 2) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_DARK; }
-        else if (preset == 3) { gCfg->uiTheme = UI_THEME_EVERGREEN; gCfg->uiMode = UI_MODE_LIGHT; }
-        else if (preset == 4) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_DARK; }
-        else if (preset == 5) { gCfg->uiTheme = UI_THEME_EARTHEN;   gCfg->uiMode = UI_MODE_LIGHT; }
-        else if (preset == 6) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_DARK; }
-        else if (preset == 7) { gCfg->uiTheme = UI_THEME_SOLARIZED; gCfg->uiMode = UI_MODE_LIGHT; }
-        else if (preset == 8) { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_DARK; }
-        else if (preset == 9) { gCfg->uiTheme = UI_THEME_CRIMSON;   gCfg->uiMode = UI_MODE_LIGHT; }
-        else if (preset == 10){ gCfg->uiTheme = UI_THEME_SCARLET_POP; gCfg->uiMode = UI_MODE_DARK; }
-        else                  { gCfg->uiTheme = UI_THEME_SCARLET_POP; gCfg->uiMode = UI_MODE_LIGHT; }
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 23);
+        gCfg->uiTheme = (uint8_t)constrain((int)(preset / 2), 0, UI_THEME_COUNT - 1);
+        gCfg->uiMode = (uint8_t)((preset & 1) ? UI_MODE_LIGHT : UI_MODE_DARK);
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);

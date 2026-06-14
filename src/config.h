@@ -453,7 +453,7 @@
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
-#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON
+#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL
 #define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
 
 // ── Bluetooth defaults ─────────────────────────────────────────
