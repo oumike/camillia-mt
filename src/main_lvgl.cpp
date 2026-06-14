@@ -10450,9 +10450,9 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(s_chatShortcutText, "(C)fg (D)M (N)ode L(i)ve (L)egend");
+    lv_label_set_text(s_chatShortcutText, "(L)egend");
 #else
-    lv_label_set_text(s_chatShortcutText, "(D)M   (C)FG   (N)odes   L(i)ve   (L)egend");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   L(i)ve   (L)egend");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
