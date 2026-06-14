@@ -764,6 +764,8 @@ static constexpr uint16_t rgb565(uint8_t red, uint8_t green, uint8_t blue) {
     return (uint16_t)(((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3));
 }
 
+static uint16_t blend565(uint16_t c1, uint16_t c2, uint8_t t);
+
 static constexpr UiThemePresetLite kUiThemePresets[] = {
     {UI_THEME_CAMELLIA, UI_MODE_DARK,  0x0843, 0x1065, 0x18A7, 0xDA8E, "Camillia Dark"},
     {UI_THEME_CAMELLIA, UI_MODE_LIGHT,
@@ -791,6 +793,42 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
     {UI_THEME_SCARLET_POP, UI_MODE_LIGHT,
         rgb565(0xff, 0xf2, 0xf4), rgb565(0xff, 0xf8, 0xf9), rgb565(0xff, 0xea, 0xed), rgb565(0xd5, 0x1c, 0x39),
         "Scarlet Pop Light"},
+    {UI_THEME_INK_WASH, UI_MODE_DARK,
+        rgb565(0x11, 0x13, 0x18), rgb565(0x1C, 0x21, 0x28), rgb565(0x25, 0x2B, 0x34), rgb565(0xD8, 0xDD, 0xE4),
+        "Ink Wash Dark"},
+    {UI_THEME_INK_WASH, UI_MODE_LIGHT,
+        rgb565(0xF3, 0xF5, 0xF7), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xE8, 0xEB, 0xEF), rgb565(0x2E, 0x34, 0x40),
+        "Ink Wash Light"},
+    {UI_THEME_LAVENDAR_FIELDS, UI_MODE_DARK,
+        rgb565(0x1A, 0x12, 0x30), rgb565(0x25, 0x1A, 0x45), rgb565(0x2F, 0x22, 0x58), rgb565(0xB7, 0x9B, 0xFF),
+        "Lavendar Fields Dark"},
+    {UI_THEME_LAVENDAR_FIELDS, UI_MODE_LIGHT,
+        rgb565(0xF5, 0xEF, 0xFB), rgb565(0xFF, 0xF9, 0xFF), rgb565(0xED, 0xE1, 0xF7), rgb565(0x7B, 0x5B, 0xA7),
+        "Lavendar Fields Light"},
+    {UI_THEME_WILD_FLOWERS, UI_MODE_DARK,
+        rgb565(0x1A, 0x24, 0x30), rgb565(0x25, 0x35, 0x47), rgb565(0x2D, 0x45, 0x5B), rgb565(0xC7, 0x8F, 0xCF),
+        "Wild Flowers Dark"},
+    {UI_THEME_WILD_FLOWERS, UI_MODE_LIGHT,
+        rgb565(0xF6, 0xFA, 0xF4), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xE5, 0xF0, 0xE2), rgb565(0x8A, 0x5F, 0xAF),
+        "Wild Flowers Light"},
+    {UI_THEME_QUIET_LUXURY, UI_MODE_DARK,
+        rgb565(0x2A, 0x1F, 0x17), rgb565(0x34, 0x27, 0x1E), rgb565(0x40, 0x31, 0x26), rgb565(0xD9, 0xC7, 0xA3),
+        "Quiet Luxury Dark"},
+    {UI_THEME_QUIET_LUXURY, UI_MODE_LIGHT,
+        rgb565(0xFA, 0xF4, 0xEA), rgb565(0xFF, 0xFD, 0xF8), rgb565(0xF1, 0xE7, 0xD5), rgb565(0xA8, 0x84, 0x4F),
+        "Quiet Luxury Light"},
+    {UI_THEME_MORNING_DEW, UI_MODE_DARK,
+        rgb565(0x12, 0x28, 0x2A), rgb565(0x1A, 0x36, 0x38), rgb565(0x23, 0x43, 0x45), rgb565(0x9C, 0xD8, 0xC8),
+        "Morning Dew Dark"},
+    {UI_THEME_MORNING_DEW, UI_MODE_LIGHT,
+        rgb565(0xEE, 0xF9, 0xF6), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xDD, 0xF1, 0xEC), rgb565(0x4E, 0x9C, 0x8A),
+        "Morning Dew Light"},
+    {UI_THEME_WINTER_CHILL, UI_MODE_DARK,
+        rgb565(0x15, 0x1F, 0x2B), rgb565(0x1C, 0x2A, 0x3A), rgb565(0x24, 0x36, 0x49), rgb565(0x8F, 0xB3, 0xD9),
+        "Winter Chill Dark"},
+    {UI_THEME_WINTER_CHILL, UI_MODE_LIGHT,
+        rgb565(0xF1, 0xF7, 0xFC), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xDF, 0xEB, 0xF6), rgb565(0x5C, 0x86, 0xB2),
+        "Winter Chill Light"},
 };
 
 static constexpr int kUiThemePresetCount =
@@ -1130,7 +1168,7 @@ static bool sTdeckAudioReady = false;
 static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
 
 static bool tdeckAudioSelectCommFormat(i2s_config_t &cfg) {
-#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
 #else
     cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
@@ -1491,145 +1529,65 @@ static void applyUiThemePalette() {
     s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
     s_cfg.uiMode  = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
 
-    if (s_cfg.uiTheme == UI_THEME_EARTHEN) {
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                0xF7DE, 0xE6BA, 0xE658, 0xFFDF, 0xF75C, 0xEEB9,
-                0x4228, 0xB40B, 0x7B6D, 0xBD14, 0xCDB6, 0xF75C, 0xEEB9,
-                0xB40B, 0xB40B, 0x31A6, 0x6B4D, 0xFFFF, 0x39C7,
-                0xDDF7, 0xB40B, 0x9B65, 0xA3C8, 0x8C30,
-                0x3666, 0xBC40, 0xA000,
-                0xE6DA, 0xFFDF, 0xF75C, 0xCDB6, 0xDE58, 0x4228, 0x6B4D, 0x9CD3
-            };
-        } else {
-            s_ui = {
-                0x1082, 0x2104, 0x18C3, 0x2104, 0x2945, 0x3186,
-                0xFDD0, 0xE4A8, 0x8C71, 0x5AEB, 0x736D, 0x2945, 0x39A7,
-                0xD38B, 0xD38B, 0xFFDF, 0xC618, 0xFFFF, 0xF7DE,
-                0x6B4D, 0xC38A, 0xE4A8, 0xB40B, 0xA514,
-                0x3666, 0xED80, 0xA000,
-                0x18A3, 0x4228, 0x2966, 0x6B2C, 0x83AE, 0xFFDF, 0xDEBA, 0xBDF7
-            };
-        }
-    } else if (s_cfg.uiTheme == UI_THEME_EVERGREEN) {
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                0xE73C, 0xD697, 0xC5F4, 0xF7DE, 0xE71B, 0xDEB9,
-                0x2148, 0xA321, 0x5B0D, 0xA4F2, 0xBDB4, 0xE71B, 0xD677,
-                0x2D2A, 0x2D2A, 0x2148, 0x636E, 0xFFFF, 0x2148,
-                0x2D2A, 0x45AD, 0x1CAA, 0x2148, 0x7BAF,
-                0x2DA6, 0xBC40, 0xA000,
-                0xD697, 0xF7DE, 0xEF7C, 0xA4F2, 0xBDB4, 0x2148, 0x4AED, 0x7C31
-            };
-        } else {
-            s_ui = {
-                0x00A8, 0x19EC, 0x114A, 0x11AA, 0x1A2C, 0x1A0B,
-                0xFFFF, 0xFD20, 0x8CF1, 0x3B8F, 0x4C31, 0x1A0B, 0x2B2D,
-                0x55B0, 0x55B0, 0xFFFF, 0xA554, 0xFFFF, 0xE77D,
-                0x2AED, 0x55B0, 0x86FF, 0xE73C, 0xC69A,
-                0x3666, 0xED80, 0xA000,
-                0x00A8, 0x228D, 0x1169, 0x4C31, 0x64D4, 0xFFFF, 0xB69A, 0x9D75
-            };
-        }
-    } else if (s_cfg.uiTheme == UI_THEME_SOLARIZED) {
-        const uint16_t base03 = rgb565(0x00, 0x2b, 0x36);
-        const uint16_t base02 = rgb565(0x07, 0x36, 0x42);
-        const uint16_t base01 = rgb565(0x58, 0x6e, 0x75);
-        const uint16_t base00 = rgb565(0x65, 0x7b, 0x83);
-        const uint16_t base0 = rgb565(0x83, 0x94, 0x96);
-        const uint16_t base1 = rgb565(0x93, 0xa1, 0xa1);
-        const uint16_t base2 = rgb565(0xee, 0xe8, 0xd5);
-        const uint16_t base3 = rgb565(0xfd, 0xf6, 0xe3);
-        const uint16_t yellow = rgb565(0xb5, 0x89, 0x00);
-        const uint16_t orange = rgb565(0xcb, 0x4b, 0x16);
-        const uint16_t red = rgb565(0xdc, 0x32, 0x2f);
-        const uint16_t magenta = rgb565(0xd3, 0x36, 0x82);
-        const uint16_t violet = rgb565(0x6c, 0x71, 0xc4);
-        const uint16_t blue = rgb565(0x26, 0x8b, 0xd2);
-        const uint16_t cyan = rgb565(0x2a, 0xa1, 0x98);
-        const uint16_t green = rgb565(0x85, 0x99, 0x00);
-
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                base3, base2, base2, base3, base2, rgb565(0xe7, 0xe1, 0xcf),
-                blue, orange, base1, base1, base0, base2, base2,
-                cyan, blue, base01, base00, base3, base01,
-                rgb565(0xe8, 0xe2, 0xd0), cyan, blue, yellow, violet,
-                green, yellow, red,
-                base2, base3, rgb565(0xf8, 0xf1, 0xdd), base1, base0, blue, cyan, base00
-            };
-        } else {
-            s_ui = {
-                base03, base02, base02, base02, rgb565(0x0c, 0x3c, 0x47), rgb565(0x11, 0x45, 0x52),
-                blue, orange, base01, base01, base00, base02, base02,
-                cyan, yellow, base1, base0, base3, base1,
-                rgb565(0x0e, 0x46, 0x55), cyan, blue, yellow, violet,
-                green, yellow, red,
-                base03, base02, rgb565(0x0b, 0x40, 0x4b), base01, base00, base3, cyan, base0
-            };
-        }
-    } else if (s_cfg.uiTheme == UI_THEME_CRIMSON) {
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                rgb565(0xf3, 0xf7, 0xff), rgb565(0xdc, 0xe8, 0xff), rgb565(0xcf, 0xdf, 0xff), rgb565(0xf8, 0xfb, 0xff), rgb565(0xe6, 0xef, 0xff), rgb565(0xd6, 0xe3, 0xff),
-                rgb565(0x1e, 0x5f, 0xd1), rgb565(0xc6, 0x28, 0x39), rgb565(0x5f, 0x73, 0xa0), rgb565(0xb0, 0xc1, 0xe4), rgb565(0x92, 0xaa, 0xd7), rgb565(0xf1, 0xf6, 0xff), rgb565(0xe2, 0xed, 0xff),
-                rgb565(0xc6, 0x28, 0x39), rgb565(0x2c, 0x74, 0xea), rgb565(0x1b, 0x24, 0x3d), rgb565(0x5c, 0x6c, 0x8f), rgb565(0xff, 0xff, 0xff), rgb565(0x1b, 0x2d, 0x52),
-                rgb565(0xda, 0xe8, 0xff), rgb565(0x2f, 0x78, 0xf0), rgb565(0xb4, 0x21, 0x33), rgb565(0x1f, 0x5c, 0xc3), rgb565(0x8d, 0x9d, 0xbe),
-                rgb565(0x1b, 0x8f, 0x42), rgb565(0xb0, 0x7a, 0x00), rgb565(0x9f, 0x1f, 0x2f),
-                rgb565(0xde, 0xe9, 0xff), rgb565(0xf5, 0xe0, 0xe7), rgb565(0xf7, 0xfb, 0xff), rgb565(0xa5, 0xbb, 0xe7), rgb565(0xdb, 0x4b, 0x5a), rgb565(0x1f, 0x2d, 0x4d), rgb565(0x5d, 0x6e, 0x95), rgb565(0x7d, 0x8e, 0xb2)
-            };
-        } else {
-            s_ui = {
-                rgb565(0x06, 0x0f, 0x24), rgb565(0x0e, 0x1b, 0x3a), rgb565(0x11, 0x23, 0x48), rgb565(0x12, 0x24, 0x4c), rgb565(0x1b, 0x33, 0x63), rgb565(0x23, 0x43, 0x7d),
-                rgb565(0x42, 0x8f, 0xff), rgb565(0xff, 0x4a, 0x58), rgb565(0x8d, 0xa6, 0xd6), rgb565(0x35, 0x4a, 0x75), rgb565(0x4d, 0x66, 0x98), rgb565(0x10, 0x20, 0x44), rgb565(0x17, 0x2c, 0x5a),
-                rgb565(0xff, 0x4a, 0x58), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0xff, 0xff), rgb565(0xb9, 0xc8, 0xe7), rgb565(0xff, 0xff, 0xff), rgb565(0xe9, 0xf1, 0xff),
-                rgb565(0x1a, 0x36, 0x68), rgb565(0x52, 0xa3, 0xff), rgb565(0xff, 0x6a, 0x74), rgb565(0x57, 0xa7, 0xff), rgb565(0x7f, 0x91, 0xb9),
-                rgb565(0x39, 0xc9, 0x69), rgb565(0xff, 0xbf, 0x3d), rgb565(0xff, 0x58, 0x58),
-                rgb565(0x07, 0x16, 0x36), rgb565(0x2e, 0x0d, 0x24), rgb565(0x15, 0x27, 0x54), rgb565(0x3b, 0x57, 0x8f), rgb565(0xff, 0x63, 0x70), rgb565(0xf4, 0xf8, 0xff), rgb565(0xb9, 0xc9, 0xe9), rgb565(0x8a, 0x9c, 0xc4)
-            };
-        }
-    } else if (s_cfg.uiTheme == UI_THEME_SCARLET_POP) {
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                rgb565(0xff, 0xf2, 0xf4), rgb565(0xff, 0xdf, 0xe3), rgb565(0xff, 0xcf, 0xd6), rgb565(0xff, 0xf8, 0xf9), rgb565(0xff, 0xea, 0xed), rgb565(0xff, 0xdc, 0xe1),
-                rgb565(0xd5, 0x1c, 0x39), rgb565(0xfe, 0xec, 0x41), rgb565(0xc7, 0x6c, 0x77), rgb565(0xd8, 0xa1, 0xaa), rgb565(0xe7, 0xb9, 0xc0), rgb565(0xff, 0xf5, 0xf6), rgb565(0xff, 0xe8, 0xeb),
-                rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0x60, 0x60), rgb565(0x3a, 0x0a, 0x14), rgb565(0x7e, 0x3b, 0x49), rgb565(0xff, 0xff, 0xff), rgb565(0x56, 0x12, 0x22),
-                rgb565(0xff, 0xdd, 0xe2), rgb565(0xd5, 0x1c, 0x39), rgb565(0xc4, 0x22, 0x3b), rgb565(0xe0, 0x55, 0x62), rgb565(0xb5, 0x85, 0x52),
-                rgb565(0x1b, 0x8f, 0x42), rgb565(0xb0, 0x7a, 0x00), rgb565(0x9f, 0x1f, 0x2f),
-                rgb565(0xff, 0xe4, 0xe9), rgb565(0xff, 0xf5, 0xd8), rgb565(0xff, 0xf7, 0xf8), rgb565(0xe5, 0xb4, 0xbc), rgb565(0xff, 0x88, 0x88), rgb565(0x4a, 0x0f, 0x1d), rgb565(0x8c, 0x46, 0x55), rgb565(0xaa, 0x5f, 0x6d)
-            };
-        } else {
-            s_ui = {
-                rgb565(0x15, 0x00, 0x09), rgb565(0x4a, 0x00, 0x1f), rgb565(0x5d, 0x00, 0x27), rgb565(0x76, 0x00, 0x31), rgb565(0x8b, 0x00, 0x38), rgb565(0xa0, 0x0f, 0x39),
-                rgb565(0xff, 0x60, 0x60), rgb565(0xfe, 0xec, 0x41), rgb565(0xc6, 0x5e, 0x68), rgb565(0x6f, 0x2d, 0x3b), rgb565(0x8b, 0x3c, 0x4b), rgb565(0x5c, 0x00, 0x26), rgb565(0x76, 0x00, 0x31),
-                rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0x60, 0x60), rgb565(0xff, 0xf1, 0xf1), rgb565(0xe5, 0xb3, 0xba), rgb565(0xff, 0xff, 0xff), rgb565(0xff, 0xe3, 0xe6),
-                rgb565(0x7a, 0x12, 0x30), rgb565(0xff, 0x60, 0x60), rgb565(0xff, 0x8a, 0x8a), rgb565(0xfe, 0xec, 0x41), rgb565(0x9d, 0x6d, 0x3f),
-                rgb565(0x39, 0xc9, 0x69), rgb565(0xfe, 0xec, 0x41), rgb565(0xff, 0x58, 0x58),
-                rgb565(0x24, 0x00, 0x10), rgb565(0x5a, 0x00, 0x26), rgb565(0x40, 0x00, 0x1a), rgb565(0x7d, 0x23, 0x3f), rgb565(0xd5, 0x1c, 0x39), rgb565(0xff, 0xf4, 0xf4), rgb565(0xe4, 0xb0, 0xb7), rgb565(0xbd, 0x7b, 0x85)
-            };
-        }
-    } else {
-        if (s_cfg.uiMode == UI_MODE_LIGHT) {
-            s_ui = {
-                rgb565(0xff, 0xf7, 0xfa), rgb565(0xf1, 0xd8, 0xe3), rgb565(0xe8, 0xc2, 0xd5),
-                rgb565(0xff, 0xfd, 0xfe), rgb565(0xf8, 0xee, 0xf3), rgb565(0xf3, 0xe0, 0xea),
-                0x3127, 0xC983, 0x73AE, 0xBC92, 0xCD34, 0xFF1B, 0xFCD2,
-                0xB964, 0xB964, 0x20E6, 0x62CC, 0xFFFF, 0x2927,
-                0xB964, 0xDA8E, 0x2C8D, 0x2927, 0x8B2F,
-                0x2DA6, 0xBC40, 0xA000,
-                0xFE97, 0xFFDF, 0xFF9D, 0xBCB2, 0xCD54, 0x2927, 0x6AAB, 0x83AE
-            };
-        } else {
-            s_ui = {
-                0x0843, 0x18A7, 0x1045, 0x1065, 0x18A7, 0x1846,
-                0xFFFF, 0xF46B, 0xA4B2, 0x39A8, 0x4A2A, 0x1846, 0x7228,
-                0xDA8E, 0xDA8E, 0xFFFF, 0xB596, 0xFFFF, 0xF79E,
-                0x7228, 0xDA8E, 0x66FF, 0xDEFB, 0xCE59,
-                0x2DA6, 0xFD20, 0xA000,
-                0x0801, 0x49C8, 0x1023, 0x6AAE, 0x83B2, 0xFFFF, 0xF6FB, 0xB596
-            };
+    const UiThemePresetLite *preset = &kUiThemePresets[0];
+    for (int i = 0; i < kUiThemePresetCount; i++) {
+        if (kUiThemePresets[i].theme == s_cfg.uiTheme && kUiThemePresets[i].mode == s_cfg.uiMode) {
+            preset = &kUiThemePresets[i];
+            break;
         }
     }
+
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const uint16_t bgMain = preset->bgMain;
+    const uint16_t panelBg = preset->panelBg;
+    const uint16_t panelAlt = preset->panelAlt;
+    const uint16_t accent = preset->accent;
+
+    const uint16_t statusTop = blend565(bgMain, panelBg, isLight ? 128 : 96);
+    const uint16_t statusBg = isLight ? panelAlt : panelBg;
+    const uint16_t panelStrong = blend565(panelAlt, accent, isLight ? 36 : 48);
+    const uint16_t tabActive = accent;
+    const uint16_t tabUnread = blend565(accent, rgb565(0xFF, 0xB3, 0x00), 92);
+    const uint16_t tabIdle = blend565(panelAlt, bgMain, isLight ? 90 : 120);
+    const uint16_t divider = blend565(panelAlt, bgMain, isLight ? 135 : 150);
+    const uint16_t dividerHi = blend565(panelAlt, accent, isLight ? 74 : 92);
+    const uint16_t inputBg = panelAlt;
+    const uint16_t inputTop = blend565(panelBg, panelAlt, 120);
+    const uint16_t cursor = accent;
+
+    const uint16_t textMain = isLight ? rgb565(0x1E, 0x24, 0x2C) : rgb565(0xF3, 0xF6, 0xFA);
+    const uint16_t textDim = isLight ? rgb565(0x5E, 0x68, 0x76) : rgb565(0xB7, 0xC0, 0xCC);
+    const uint16_t textOnAccent = isLight ? rgb565(0xFF, 0xFF, 0xFF) : rgb565(0x08, 0x0D, 0x14);
+    const uint16_t statusText = textMain;
+
+    const uint16_t selectBg = blend565(panelAlt, accent, isLight ? 36 : 44);
+    const uint16_t selectAccent = accent;
+    const uint16_t nodeHot = blend565(accent, rgb565(0xFF, 0x58, 0x58), 140);
+    const uint16_t nodeWarm = blend565(accent, rgb565(0xFF, 0xB7, 0x2C), 120);
+    const uint16_t dmMuted = isLight ? rgb565(0x8E, 0x95, 0xA2) : rgb565(0x8C, 0x97, 0xA8);
+
+    const uint16_t battGood = rgb565(0x3A, 0xC7, 0x62);
+    const uint16_t battWarn = rgb565(0xF2, 0xB5, 0x2E);
+    const uint16_t battBad = rgb565(0xE0, 0x4F, 0x4F);
+
+    const uint16_t splashTop = statusTop;
+    const uint16_t splashBottom = bgMain;
+    const uint16_t splashCardBg = panelBg;
+    const uint16_t splashCardEdge = blend565(panelBg, accent, isLight ? 52 : 66);
+    const uint16_t splashCardEdgeHi = blend565(panelAlt, accent, isLight ? 74 : 92);
+    const uint16_t splashTitle = textMain;
+    const uint16_t splashSub = textDim;
+    const uint16_t splashDim = blend565(textDim, panelBg, isLight ? 84 : 72);
+
+    s_ui = {
+        bgMain, statusTop, statusBg, panelBg, panelAlt, panelStrong,
+        tabActive, tabUnread, tabIdle, divider, dividerHi, inputBg, inputTop,
+        accent, cursor, textMain, textDim, textOnAccent, statusText,
+        selectBg, selectAccent, nodeHot, nodeWarm, dmMuted,
+        battGood, battWarn, battBad,
+        splashTop, splashBottom, splashCardBg, splashCardEdge, splashCardEdgeHi,
+        splashTitle, splashSub, splashDim
+    };
 
     s_appliedUiTheme = s_cfg.uiTheme;
     s_appliedUiMode = s_cfg.uiMode;
@@ -3074,23 +3032,9 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
 
 static lv_color_t chatPanelBackgroundColor() {
     if (s_cfg.uiMode == UI_MODE_LIGHT) {
-        if (s_cfg.uiTheme == UI_THEME_SOLARIZED || s_cfg.uiTheme == UI_THEME_CRIMSON) {
-            return lv_color_hex(0x0F2A5C);
-        }
-        if (s_cfg.uiTheme == UI_THEME_EVERGREEN) {
-            return lv_color_hex(0xDDF1DE);
-        }
-        if (s_cfg.uiTheme == UI_THEME_EARTHEN) {
-            return lv_color_hex(0xE9DCCB);
-        }
-        if (s_cfg.uiTheme == UI_THEME_CAMELLIA) {
-            return lv_color_hex(0xF7DDE3);
-        }
-        if (s_cfg.uiTheme == UI_THEME_SCARLET_POP) {
-            return lv_color_hex(0xE5B4BC);
-        }
+        return lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, 52));
     }
-    return lv_color_hex(0x0E285B);
+    return lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, 34));
 }
 
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
@@ -10157,8 +10101,11 @@ static void buildUi() {
     lv_obj_set_size(s_chatHeaderBar, chatW, chatHeaderH);
     lv_obj_align(s_chatHeaderBar, LV_ALIGN_TOP_LEFT, chatX, panelMargin);
     lv_obj_clear_flag(s_chatHeaderBar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_chatHeaderBar, lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_chatHeaderBar, LV_OPA_70, 0);
+    lv_obj_set_style_bg_color(
+        s_chatHeaderBar,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
+        0);
+    lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
     lv_obj_set_style_border_width(s_chatHeaderBar, 1, 0);
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
@@ -10704,7 +10651,11 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
 
     if (s_chatHeaderBar) {
-        lv_obj_set_style_bg_color(s_chatHeaderBar, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_bg_color(
+            s_chatHeaderBar,
+            (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
+            0);
+        lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
         lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatHeaderTime) lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
