@@ -4,7 +4,7 @@
 #include "mesh_proto.h"
 #include "node_db.h"
 #include "channel_mgr.h"
-#include "lgfx_tdeck.h"
+#include "hal/display.h"
 #include "debug_flags.h"
 #include "config.h"
 #include "utf8_utils.h"
