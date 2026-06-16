@@ -5,93 +5,53 @@
 #include <Wire.h>
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
+#include "hal/xl9555.h"
 namespace {
-constexpr uint8_t kXl9555RegOut0 = 0x02;
-constexpr uint8_t kXl9555RegOut1 = 0x03;
-constexpr uint8_t kXl9555RegCfg0 = 0x06;
-constexpr uint8_t kXl9555RegCfg1 = 0x07;
 
-constexpr uint8_t kExpGpsEn  = 4;
-constexpr uint8_t kExpGpsRst = 7;
-constexpr uint8_t kExpGpioEn = 9;
-
-static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    Wire.write(val);
-    return Wire.endTransmission() == 0;
-}
-
-static bool xl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom((int)addr, 1) != 1) return false;
-    val = Wire.read();
-    return true;
-}
-
-static void xl9555SetOutput(uint8_t pin, bool level, bool invertDirSense,
-                            uint8_t &out0, uint8_t &out1,
-                            uint8_t &cfg0, uint8_t &cfg1) {
-    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
-    if (pin < 8) {
-        if (invertDirSense) cfg0 |= bit;
-        else                cfg0 &= (uint8_t)~bit;
-        if (level) out0 |= bit;
-        else       out0 &= (uint8_t)~bit;
-    } else {
-        if (invertDirSense) cfg1 |= bit;
-        else                cfg1 &= (uint8_t)~bit;
-        if (level) out1 |= bit;
-        else       out1 &= (uint8_t)~bit;
-    }
-}
-
-static int pagerFindExpanderAddr() {
-    for (uint8_t a = 0x20; a <= 0x27; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) return (int)a;
-    }
-    return -1;
-}
+// GPS rail management for the T-LoRa Pager using the XL9555 GPIO expander.
+// The expander controls GPS power-enable, reset, and shared GPIO rail.
 
 static bool pagerPrimeGpsRails(bool invertDirSense) {
     Wire.begin(KB_SDA, KB_SCL);
-    int expAddr = pagerFindExpanderAddr();
+    int expAddr = xl9555FindAddr();
     if (expAddr < 0) {
         Serial.println("[gps] pager expander not found (0x20-0x27)");
         return false;
     }
 
     uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
-    if (!xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut0, out0)
-        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut1, out1)
-        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
-        || !xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
+    if (!xl9555ReadAll((uint8_t)expAddr, out0, out1, cfg0, cfg1)) {
         Serial.printf("[gps] pager expander read failed addr=0x%02X\n", expAddr);
         return false;
     }
 
-    // Ensure GPS rail is on, then pulse reset low->high to recover modules
-    // that boot into a stale UART/output state.
-    xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    // Keep shared expander GPIO rail enabled like LilyGo reference bring-up.
-    xl9555SetOutput(kExpGpioEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpsRst, false, invertDirSense, out0, out1, cfg0, cfg1);
-    if (!xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0)
-        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1)
-        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
-        || !xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1)) {
+    if (invertDirSense) {
+        // Some board revisions have the direction-sense polarity inverted.
+        // When invertDirSense=true, swap the cfg bit logic so the rails still
+        // come up in the correct state on those units.
+        xl9555SetInput(XL9555_PIN_GPS_EN,  cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_GPIO_EN, cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_GPS_RST, cfg0, cfg1);
+    } else {
+        // Standard polarity: drive GPS_EN and GPIO_EN high, pulse GPS_RST low→high.
+        xl9555SetOutput(XL9555_PIN_GPS_EN,  true,  out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_GPIO_EN, true,  out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_GPS_RST, false, out0, out1, cfg0, cfg1);
+    }
+
+    if (!xl9555WriteAll((uint8_t)expAddr, out0, out1, cfg0, cfg1)) {
         Serial.printf("[gps] pager expander write failed addr=0x%02X invert=%d\n",
                       expAddr, invertDirSense ? 1 : 0);
         return false;
     }
 
-    delay(20);
-    xl9555SetOutput(kExpGpsRst, true, invertDirSense, out0, out1, cfg0, cfg1);
-    (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0);
-    (void)xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1);
+    delay(20);  // Hold reset low briefly to ensure the GPS module latches it
+
+    // Release reset high
+    xl9555SetOutput(XL9555_PIN_GPS_RST, true, out0, out1, cfg0, cfg1);
+    (void)xl9555WriteReg((uint8_t)expAddr, XL9555_REG_OUT0, out0);
+    (void)xl9555WriteReg((uint8_t)expAddr, XL9555_REG_OUT1, out1);
+
     Serial.printf("[gps] pager rails primed addr=0x%02X invert=%d\n",
                   expAddr, invertDirSense ? 1 : 0);
     return true;

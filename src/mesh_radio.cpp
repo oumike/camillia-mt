@@ -3,118 +3,59 @@
 #include <Wire.h>
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-#include <M5Unified.h>
-#include <utility/PI4IOE5V6408_Class.hpp>
+#  include <M5Unified.h>
+#  include <utility/PI4IOE5V6408_Class.hpp>
 #endif
 
-volatile bool MeshRadio::_rxFlag = false;
-MeshRadio Radio;
-static constexpr bool kVerboseRadioIo = false;
-static uint32_t sLastRxDoneMs = 0;
-
 #if defined(DEVICE_TLORA_PAGER_TFT)
+#  include "hal/xl9555.h"
 namespace {
-constexpr uint8_t kXl9555RegOut0 = 0x02;
-constexpr uint8_t kXl9555RegOut1 = 0x03;
-constexpr uint8_t kXl9555RegCfg0 = 0x06;
-constexpr uint8_t kXl9555RegCfg1 = 0x07;
 
-constexpr uint8_t kExpDrvEn  = 0;
-constexpr uint8_t kExpAmpEn  = 1;
-constexpr uint8_t kExpKbRst  = 2;
-constexpr uint8_t kExpLoraEn = 3;
-constexpr uint8_t kExpGpsEn  = 4;
-constexpr uint8_t kExpNfcEn  = 5;
-constexpr uint8_t kExpGpsRst = 7;
-constexpr uint8_t kExpKbEn   = 8;
-constexpr uint8_t kExpGpioEn = 9;
-constexpr uint8_t kExpSdPullen = 11;
-constexpr uint8_t kExpSdEn   = 12;
-
-static bool xl9555WriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    Wire.write(val);
-    return Wire.endTransmission() == 0;
-}
-
-static bool xl9555ReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom((int)addr, 1) != 1) return false;
-    val = Wire.read();
-    return true;
-}
-
-static void xl9555SetOutput(uint8_t pin, bool level, bool invertDirSense,
-                            uint8_t &out0, uint8_t &out1,
-                            uint8_t &cfg0, uint8_t &cfg1) {
-    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
-    if (pin < 8) {
-        if (invertDirSense) cfg0 |= bit;
-        else                cfg0 &= (uint8_t)~bit;
-        if (level) out0 |= bit;
-        else       out0 &= (uint8_t)~bit;
-    } else {
-        if (invertDirSense) cfg1 |= bit;
-        else                cfg1 &= (uint8_t)~bit;
-        if (level) out1 |= bit;
-        else       out1 &= (uint8_t)~bit;
-    }
-}
-
-static void xl9555SetInput(uint8_t pin, bool invertDirSense,
-                           uint8_t &cfg0, uint8_t &cfg1) {
-    uint8_t bit = (uint8_t)(1U << (pin & 0x07));
-    if (pin < 8) {
-        if (invertDirSense) cfg0 &= (uint8_t)~bit;
-        else                cfg0 |= bit;
-    } else {
-        if (invertDirSense) cfg1 &= (uint8_t)~bit;
-        else                cfg1 |= bit;
-    }
-}
-
-static int pagerFindExpanderAddr() {
-    for (uint8_t a = 0x20; a <= 0x27; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) return (int)a;
-    }
-    return -1;
-}
-
+// Arm all T-LoRa Pager peripheral rails via the XL9555 GPIO expander so the
+// SX1262 (and other peripherals) see a clean power-on sequence.
+// invertDirSense=true is tried on a retry if the first attempt fails,
+// as some board revisions have opposite direction-register polarity.
 static bool pagerPrimeLoRaRail(bool invertDirSense) {
     Wire.begin(KB_SDA, KB_SCL);
-    int expAddr = pagerFindExpanderAddr();
+    int expAddr = xl9555FindAddr();
     if (expAddr < 0) {
         Serial.println("[radio] pager expander not found (0x20-0x27)");
         return false;
     }
 
     uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
-    (void)xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut0, out0);
-    (void)xl9555ReadReg((uint8_t)expAddr, kXl9555RegOut1, out1);
-    (void)xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0);
-    (void)xl9555ReadReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1);
+    (void)xl9555ReadAll((uint8_t)expAddr, out0, out1, cfg0, cfg1);
 
-    // Match LilyGo pager init: set expand control rails high before radio probe.
-    xl9555SetOutput(kExpDrvEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpAmpEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpKbRst, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpLoraEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpsEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpNfcEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpsRst, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpKbEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpGpioEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetOutput(kExpSdEn, true, invertDirSense, out0, out1, cfg0, cfg1);
-    xl9555SetInput(kExpSdPullen, invertDirSense, cfg0, cfg1);
+    if (invertDirSense) {
+        // Inverted polarity: configure all rails as inputs, which on these
+        // units has the effect of enabling the peripheral power switches.
+        xl9555SetInput(XL9555_PIN_DRV_EN,    cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_AMP_EN,    cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_KB_RST,    cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_LORA_EN,   cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_GPS_EN,    cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_NFC_EN,    cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_GPS_RST,   cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_KB_EN,     cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_GPIO_EN,   cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_SD_EN,     cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_SD_PULLEN, cfg0, cfg1);
+    } else {
+        // Standard polarity: drive all rail enables high, SD pull-down as input.
+        xl9555SetOutput(XL9555_PIN_DRV_EN,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_AMP_EN,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_KB_RST,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_LORA_EN, true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_GPS_EN,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_NFC_EN,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_GPS_RST, true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_KB_EN,   true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_GPIO_EN, true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_SD_EN,   true, out0, out1, cfg0, cfg1);
+        xl9555SetInput(XL9555_PIN_SD_PULLEN, cfg0, cfg1);
+    }
 
-    bool ok = xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut0, out0)
-           && xl9555WriteReg((uint8_t)expAddr, kXl9555RegOut1, out1)
-           && xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg0, cfg0)
-           && xl9555WriteReg((uint8_t)expAddr, kXl9555RegCfg1, cfg1);
+    bool ok = xl9555WriteAll((uint8_t)expAddr, out0, out1, cfg0, cfg1);
     if (!ok) {
         Serial.printf("[radio] pager expander write failed addr=0x%02X invert=%d\n",
                       expAddr, invertDirSense ? 1 : 0);
@@ -123,11 +64,16 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
 
     Serial.printf("[radio] pager expander armed addr=0x%02X invert=%d\n",
                   expAddr, invertDirSense ? 1 : 0);
-    delay(12);
+    delay(12);  // Allow rails to stabilize before SX1262 probe
     return true;
 }
 } // namespace
 #endif
+
+volatile bool MeshRadio::_rxFlag = false;
+MeshRadio Radio;
+static constexpr bool kVerboseRadioIo = false;
+static uint32_t sLastRxDoneMs = 0;
 
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 

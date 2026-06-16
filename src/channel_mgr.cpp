@@ -1,7 +1,7 @@
 #include "channel_mgr.h"
 #include "live_util.h"
 #include "mesh_radio.h"
-#include "lgfx_tdeck.h"
+#include "hal/display.h"
 #include "debug_flags.h"
 #include "utf8_utils.h"
 #include "esp_heap_caps.h"

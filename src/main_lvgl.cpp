@@ -4,7 +4,7 @@
 #include "config.h"
 #include "channel_mgr.h"
 #include "config_io.h"
-#include "lgfx_tdeck.h"
+#include "hal/display.h"
 #include "live_util.h"
 #include "mesh_proto.h"
 #include "mesh_radio.h"
