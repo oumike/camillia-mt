@@ -23,6 +23,12 @@
 #  define DEVICE_UI_VERTICAL 0
 #endif
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#  define HAS_ENV_SENSOR_TELEMETRY 1
+#else
+#  define HAS_ENV_SENSOR_TELEMETRY 0
+#endif
+
 // ── Hardware pin definitions (per-device) ────────────────────────────────────
 // All BOARD_*, TFT_*, LORA_*, GPS_*, BATT_*, HAS_* macros are defined here.
 #include "hal/board.h"
@@ -44,6 +50,26 @@
 // ── Node identity (change to your callsign/name) ─────────────
 #define MY_LONG_NAME    "Camillia"
 #define MY_SHORT_NAME   "CaMi"
+
+// ── Meshtastic HardwareModel advertised in NODEINFO ─────────
+// Source: meshtastic/protobufs meshtastic/mesh.proto (HardwareModel enum).
+// Use per-target values so each firmware reports its actual hardware class.
+#define MESH_HW_MODEL_T_DECK        50
+#define MESH_HW_MODEL_T_LORA_PAGER  103
+#define MESH_HW_MODEL_HELTEC_V4     110
+#define MESH_HW_MODEL_M5_CARDPUTER  112
+
+#if defined(DEVICE_TDECK)
+#define MY_HW_MODEL MESH_HW_MODEL_T_DECK
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+#define MY_HW_MODEL MESH_HW_MODEL_T_LORA_PAGER
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+#define MY_HW_MODEL MESH_HW_MODEL_M5_CARDPUTER
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
+#else
+#define MY_HW_MODEL MESH_HW_MODEL_T_DECK
+#endif
 
 #define MY_GPS_ENABLED  1     // runtime default (can be toggled via web config)
 
@@ -91,9 +117,9 @@
 
 // ── Module defaults ────────────────────────────────────────────
 #define MY_TEL_DEV_EN       1
-#define MY_TEL_DEV_INTV     7200
+#define MY_TEL_DEV_INTV     3600
 #define MY_TEL_ENV_EN       0
-#define MY_TEL_ENV_INTV     7200
+#define MY_TEL_ENV_INTV     3600
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)

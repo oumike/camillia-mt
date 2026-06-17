@@ -3,6 +3,7 @@
 #include "mesh_radio.h"
 #include "hal/display.h"
 #include "debug_flags.h"
+#include "battery_util.h"
 #include "utf8_utils.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
@@ -570,6 +571,80 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     {
         char live[56];
         snprintf(live, sizeof(live), "T POS B %08X %s",
+                 packetId, ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
+bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
+    if (!Radio.isReady()) return false;
+
+    uint8_t proto[80], cipher[80];
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodeTelemetryDevice(batteryReadPercent(), batteryReadVoltage(),
+                                            proto, sizeof(proto), bitfield);
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
+                        proto, cipher, protoLen)) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + 80];
+    MeshHdr hdr = {};
+    hdr.to      = 0xFFFFFFFF;
+    hdr.from    = myNodeId;
+    hdr.id      = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    {
+        char live[56];
+        snprintf(live, sizeof(live), "T TEL D %08X %s",
+                 packetId, ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
+bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
+                                          float temperatureC, float humidityPct, float pressureHpa,
+                                          bool okToMqtt) {
+    if (!Radio.isReady()) return false;
+
+    uint8_t proto[96], cipher[96];
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodeTelemetryEnvironment(temperatureC, humidityPct, pressureHpa,
+                                                 proto, sizeof(proto), bitfield);
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
+                        proto, cipher, protoLen)) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + 96];
+    MeshHdr hdr = {};
+    hdr.to      = 0xFFFFFFFF;
+    hdr.from    = myNodeId;
+    hdr.id      = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    {
+        char live[56];
+        snprintf(live, sizeof(live), "T TEL E %08X %s",
                  packetId, ok ? "OK" : "ER");
         addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }

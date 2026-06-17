@@ -92,8 +92,14 @@ static size_t pbSkip(const uint8_t *buf, size_t len, size_t i, int wtype) {
 
 bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
-                uint32_t &requestId, bool &wantResponse) {
+                uint32_t &requestId, bool &wantResponse,
+                uint32_t *destNode, bool *hasDestNode,
+                uint32_t *sourceNode, bool *hasSourceNode) {
     portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0; wantResponse = false;
+    if (destNode) *destNode = 0;
+    if (sourceNode) *sourceNode = 0;
+    if (hasDestNode) *hasDestNode = false;
+    if (hasSourceNode) *hasSourceNode = false;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -103,6 +109,13 @@ bool decodeData(const uint8_t *buf, size_t len,
             if (field == 1) portnum = (uint32_t)v;
             else if (field == 3) wantResponse = (v != 0);
             else if (field == 6) requestId = (uint32_t)v;   // request_id varint (Meshtastic standard)
+            else if (field == 4 && destNode) {
+                *destNode = (uint32_t)v;
+                if (hasDestNode) *hasDestNode = true;
+            } else if (field == 5 && sourceNode) {
+                *sourceNode = (uint32_t)v;
+                if (hasSourceNode) *hasSourceNode = true;
+            }
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
@@ -112,6 +125,13 @@ bool decodeData(const uint8_t *buf, size_t len,
             if (i + 4 <= len) {
                 uint32_t v; memcpy(&v, buf + i, 4);
                 if (field == 6) requestId = v;
+                else if (field == 4 && destNode) {
+                    *destNode = v;
+                    if (hasDestNode) *hasDestNode = true;
+                } else if (field == 5 && sourceNode) {
+                    *sourceNode = v;
+                    if (hasSourceNode) *hasSourceNode = true;
+                }
             }
             i += 4;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
@@ -182,14 +202,14 @@ bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out) {
 }
 
 bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
-    // Telemetry.device_metrics = field 1 (DeviceMetrics)
-    // DeviceMetrics: battery_level=1(uint32), voltage=2(float), channel_utilization=3(float), air_util_tx=4(float)
-    out = {0, 0, 0, 0, false};
+    // Telemetry.device_metrics = field 2 (legacy senders may use 1)
+    // Telemetry.environment_metrics = field 3
+    out = {0, 0, 0, 0, 0, 0, 0, false, false, false};
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
         uint32_t field = tag >> 3, wtype = tag & 7;
-        if (wtype == 2 && field == 1) {
+        if (wtype == 2 && (field == 1 || field == 2)) {
             // DeviceMetrics submessage
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             const uint8_t *dm = buf + i; size_t dmLen = sz; i += sz;
@@ -210,9 +230,31 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
                     j += 4;
                 } else { j = pbSkip(dm, dmLen, j, w2); if (!j) break; }
             }
-            out.valid = true;
+            out.hasDeviceMetrics = true;
+        } else if (wtype == 2 && field == 3) {
+            // EnvironmentMetrics submessage
+            uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
+            const uint8_t *em = buf + i; size_t emLen = sz; i += sz;
+            size_t j = 0;
+            while (j < emLen) {
+                uint64_t t2; j = pbReadVarint(em, emLen, j, t2); if (!j) break;
+                uint32_t f2 = t2 >> 3, w2 = t2 & 7;
+                if (w2 == 5) {
+                    if (j + 4 <= emLen) {
+                        float fv; memcpy(&fv, em + j, 4);
+                        if (f2 == 1) out.temperatureC = fv;
+                        else if (f2 == 2) out.humidityPct = fv;
+                        else if (f2 == 3) out.pressureHpa = fv;
+                    }
+                    j += 4;
+                } else {
+                    j = pbSkip(em, emLen, j, w2); if (!j) break;
+                }
+            }
+            out.hasEnvironmentMetrics = true;
         } else { i = pbSkip(buf, len, i, wtype); if (!i) break; }
     }
+    out.valid = out.hasDeviceMetrics || out.hasEnvironmentMetrics;
     return true;
 }
 
@@ -495,7 +537,7 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     memcpy(user + u, mac6, 6); u += 6;
 
     u += pbWriteVarint(user + u, (5 << 3) | 0);
-    u += pbWriteVarint(user + u, 50); // HardwareModel::T_DECK = 50
+    u += pbWriteVarint(user + u, MY_HW_MODEL);
 
     // field 6 = is_licensed: omit (defaults to false).
     // Official Meshtastic firmware STRIPS the public key when is_licensed=true,
@@ -578,6 +620,103 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
         n += pbWriteVarint(buf + n, (9 << 3) | 0);
         n += pbWriteVarint(buf + n, bitfield);
     }
+    return n;
+}
+
+size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
+                             uint8_t *buf, size_t bufLen,
+                             uint32_t bitfield) {
+    // Telemetry.oneof variant field 2 = DeviceMetrics
+    uint8_t dev[16];
+    size_t d = 0;
+
+    // DeviceMetrics.battery_level = field 1, varint
+    d += pbWriteVarint(dev + d, (1 << 3) | 0);
+    d += pbWriteVarint(dev + d, battPct);
+
+    // DeviceMetrics.voltage = field 2, fixed32 float
+    if (d + 5 > sizeof(dev)) return 0;
+    dev[d++] = (2 << 3) | 5;
+    memcpy(dev + d, &voltage, 4);
+    d += 4;
+
+    uint8_t telem[24];
+    size_t t = 0;
+
+    // Telemetry.device_metrics = field 2, length-delimited
+    t += pbWriteVarint(telem + t, (2 << 3) | 2);
+    t += pbWriteVarint(telem + t, d);
+    if (t + d > sizeof(telem)) return 0;
+    memcpy(telem + t, dev, d);
+    t += d;
+
+    // Wrap in Data message
+    size_t n = 0;
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, TELEMETRY_APP);
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, t);
+    if (n + t > bufLen) return 0;
+    memcpy(buf + n, telem, t);
+    n += t;
+
+    if (bitfield) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (9 << 3) | 0);
+        n += pbWriteVarint(buf + n, bitfield);
+    }
+
+    return n;
+}
+
+size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float pressureHpa,
+                                  uint8_t *buf, size_t bufLen,
+                                  uint32_t bitfield) {
+    // Telemetry.oneof variant field 3 = EnvironmentMetrics
+    uint8_t env[24];
+    size_t e = 0;
+
+    auto writeFloatField = [&](uint8_t field, float value) -> bool {
+        if (e + 5 > sizeof(env)) return false;
+        env[e++] = (uint8_t)((field << 3) | 5);
+        memcpy(env + e, &value, 4);
+        e += 4;
+        return true;
+    };
+
+    // EnvironmentMetrics.temperature = 1
+    // EnvironmentMetrics.relative_humidity = 2
+    // EnvironmentMetrics.barometric_pressure = 3
+    if (!writeFloatField(1, temperatureC)) return 0;
+    if (!writeFloatField(2, humidityPct)) return 0;
+    if (!writeFloatField(3, pressureHpa)) return 0;
+
+    uint8_t telem[32];
+    size_t t = 0;
+
+    // Telemetry.environment_metrics = field 3, length-delimited
+    t += pbWriteVarint(telem + t, (3 << 3) | 2);
+    t += pbWriteVarint(telem + t, e);
+    if (t + e > sizeof(telem)) return 0;
+    memcpy(telem + t, env, e);
+    t += e;
+
+    // Wrap in Data message
+    size_t n = 0;
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, TELEMETRY_APP);
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, t);
+    if (n + t > bufLen) return 0;
+    memcpy(buf + n, telem, t);
+    n += t;
+
+    if (bitfield) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (9 << 3) | 0);
+        n += pbWriteVarint(buf + n, bitfield);
+    }
+
     return n;
 }
 

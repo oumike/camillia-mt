@@ -32,6 +32,7 @@ const char *webCfgIP();
 bool webCfgAnnounceRequested();
 
 // Queue a NODEINFO+position re-announce to be processed in the main loop.
+// Also forces immediate telemetry broadcast when telemetry is enabled.
 void webCfgQueueAnnounce();
 
 // True if the server is running in first-boot WiFi onboarding mode.

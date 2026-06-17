@@ -72,6 +72,14 @@ public:
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
                       bool unusedCompat = false);
 
+    // Broadcast TELEMETRY_APP device metrics on LongFast.
+    bool sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt = false);
+
+    // Broadcast TELEMETRY_APP environment metrics on LongFast.
+    bool sendTelemetryEnvironment(uint32_t myNodeId,
+                                  float temperatureC, float humidityPct, float pressureHpa,
+                                  bool okToMqtt = false);
+
     // Clear all channel messages in memory and optionally remove persisted logs.
     void clearAllMessages(bool clearPersisted = true);
 

@@ -53,6 +53,10 @@ struct MeshPacket {
     uint8_t  payload[220];    // decrypted inner payload (after Data wrapper)
     size_t   payloadLen;
     uint32_t requestId;       // non-zero for ROUTING_APP ACK/NAK
+    uint32_t dataDest;        // Data.dest (field 4), when present
+    uint32_t dataSource;      // Data.source (field 5), when present
+    bool     hasDataDest;
+    bool     hasDataSource;
     bool     wantResponse;    // Data.want_response: requester wants us to send our NODEINFO back
     bool     decrypted;
     int      chanIdx;         // which channel key was used (-1 = none, -2 = PKI)
@@ -84,6 +88,11 @@ struct TelemetryInfo {
     float voltage;
     float chUtil;
     float airUtil;
+    float temperatureC;
+    float humidityPct;
+    float pressureHpa;
+    bool  hasDeviceMetrics;
+    bool  hasEnvironmentMetrics;
     bool  valid;
 };
 
@@ -93,7 +102,9 @@ size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val);
 // Decode Data message: fills portnum, payload slice, requestId, wantResponse
 bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
-                uint32_t &requestId, bool &wantResponse);
+                uint32_t &requestId, bool &wantResponse,
+                uint32_t *destNode = nullptr, bool *hasDestNode = nullptr,
+                uint32_t *sourceNode = nullptr, bool *hasSourceNode = nullptr);
 
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
@@ -172,6 +183,15 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
 // bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
+
+// Encode TELEMETRY_APP Data messages.
+size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
+                             uint8_t *buf, size_t bufLen,
+                             uint32_t bitfield = 0);
+
+size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float pressureHpa,
+                                  uint8_t *buf, size_t bufLen,
+                                  uint32_t bitfield = 0);
 
 // Encode a ROUTING_APP Data message.
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).

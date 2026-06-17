@@ -1142,26 +1142,34 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->telDeviceEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->telDeviceEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->telDeviceIntervalS);
-    html += "<label>Device Interval (s)<input name='tel_dev_intv' type='number' min='60' value='";
+    uint32_t telemetryIntervalMins = (gCfg->telDeviceIntervalS >= 60UL)
+        ? (uint32_t)(gCfg->telDeviceIntervalS / 60UL)
+        : 60UL;
+    if (telemetryIntervalMins < 60UL) telemetryIntervalMins = 60UL;
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)telemetryIntervalMins);
+    html += "<label>Broadcast Interval (min)<input name='tel_bcast_mins' type='number' min='60' value='";
     html += tmp; html += "'></label></div>";
+
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Sensor Telemetry</h3>";
     html += "<div class='row2'>";
-    html += "<label>Environment Telemetry<select name='tel_env_en'>"
+#if HAS_ENV_SENSOR_TELEMETRY
+    html += "<label>Environment Sensor Telemetry<select name='tel_env_en'>"
             "<option value='1'"; if ( gCfg->telEnvEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->telEnvEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->telEnvIntervalS);
-    html += "<label>Env Interval (s)<input name='tel_env_intv' type='number' min='60' value='";
-    html += tmp; html += "'></label></div>";
+    html += "<label>Sensor Interval<input type='text' value='Uses broadcast interval above' disabled></label>";
+#else
+    html += "<label>Environment Sensor Telemetry<input type='text' value='Unavailable on this build' disabled></label>";
+    html += "<label>Sensor Interval<input type='text' value='Unavailable on this build' disabled></label>";
+    html += "<input type='hidden' name='tel_env_en' value='0'>";
+#endif
+    html += "</div>";
     // Canned Messages
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Canned Messages</h3>";
     html += "<label>Enabled<select name='canned_en'>"
             "<option value='1'"; if ( gCfg->cannedEnabled) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->cannedEnabled) html += " selected"; html += ">No</option>"
             "</select></label>";
-    html += "<label>Messages (pipe-separated, e.g. Hi|Bye|Yes|No)"
-            "<input name='canned_msgs' type='text' maxlength='199' value='";
-    html += gCfg->cannedMessages; html += "'></label>";
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Alerts</h3>";
     html += "<label>Notification Sound<select name='msg_alert_sound'>"
@@ -1981,12 +1989,31 @@ static void handlePostSave() {
     gCfg->minWakeSecs   = (uint32_t)server.arg("min_wake").toInt();
 
     // Modules
+    uint32_t telemetryIntervalS = 3600UL;
+    if (server.hasArg("tel_bcast_mins")) {
+        long mins = server.arg("tel_bcast_mins").toInt();
+        if (mins < 60L) mins = 60L;
+        telemetryIntervalS = (uint32_t)mins * 60UL;
+    } else if (server.hasArg("tel_dev_intv")) {
+        long sec = server.arg("tel_dev_intv").toInt();
+        if (sec < 3600L) sec = 3600L;
+        telemetryIntervalS = (uint32_t)sec;
+    }
+
     gCfg->telDeviceEnabled   = server.arg("tel_dev_en").toInt() != 0;
-    gCfg->telDeviceIntervalS = (uint32_t)max((long)60, server.arg("tel_dev_intv").toInt());
+    gCfg->telDeviceIntervalS = telemetryIntervalS;
+#if HAS_ENV_SENSOR_TELEMETRY
     gCfg->telEnvEnabled      = server.arg("tel_env_en").toInt() != 0;
-    gCfg->telEnvIntervalS    = (uint32_t)max((long)60, server.arg("tel_env_intv").toInt());
+    gCfg->telEnvIntervalS    = telemetryIntervalS;
+#else
+    gCfg->telEnvEnabled      = false;
+    if (gCfg->telEnvIntervalS < 3600UL) gCfg->telEnvIntervalS = 3600UL;
+#endif
     gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
-    strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
+    if (server.hasArg("canned_msgs")) {
+        strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
+        gCfg->cannedMessages[sizeof(gCfg->cannedMessages) - 1] = '\0';
+    }
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     gCfg->msgAlertSound      = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
 #endif

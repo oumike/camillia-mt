@@ -384,89 +384,41 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     int usedChanIdx = -1;
     uint8_t usedHash = 0;
 
-    // Prefer PKI if we have the recipient's Curve25519 public key
+    // Direct DM interop policy: require PKI. Channel-key "legacy DM" paths are
+    // often rejected by modern Meshtastic nodes as NO_CHANNEL.
     debugLogMessages("[dm] node=%s  hasPubKey=%d\n",
                      node ? "found" : "null", node ? (int)node->hasPubKey : -1);
+    if (!node || !node->hasPubKey) {
+        debugLogMessages("[dm] sendDm FAIL: recipient pubkey missing\n");
+        addLiveDmLine("T DM ER noPK", TFT_RED);
 
-    // Plai/Cardputer behavior: use PKI for unicast whenever peer pubkey is known.
-    bool usePki = node && node->hasPubKey && !node->pkiNoChannel;
-
-    if (usePki) {
-        hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
-        usedHash = 0;
-        debugLogMessages("[dm] using PKI path\n");
-        if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
-            debugLogMessages("[dm] PKI encrypt failed; falling back to channel-key path\n");
-            usePki = false;
-        } else {
-            usedPki = true;
-            payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
-            debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
+        static uint32_t sLastNodeInfoReqNode = 0;
+        static uint32_t sLastNodeInfoReqMs = 0;
+        uint32_t now = millis();
+        if (resolvedToNodeId != sLastNodeInfoReqNode || (now - sLastNodeInfoReqMs) > 5000) {
+            (void)Channels.sendNodeInfo(myNodeId,
+                                        MY_LONG_NAME,
+                                        MY_SHORT_NAME,
+                                        resolvedToNodeId,
+                                        true,
+                                        false);
+            sLastNodeInfoReqNode = resolvedToNodeId;
+            sLastNodeInfoReqMs = now;
         }
+        return false;
     }
 
-    if (!usedPki) {
-        // Fall back to channel-key encryption
-        int chanIdx = -1;
-        const char *chanSource = "primary";
-        int hashChanIdx = -1;
-
-        if (node && node->hasChanHash && node->chanHash != 0) {
-            for (int i = 0; i < MESH_CHANNELS; i++) {
-                if (CHANNEL_KEYS[i].hash == node->chanHash) {
-                    hashChanIdx = i;
-                    break;
-                }
-            }
-        }
-
-        // If destination was remapped to a fresher node ID, avoid taking channel
-        // hints from the stale conversation entry.
-        DmConv *conv = (resolvedToNodeId == toNodeId)
-                        ? find(toNodeId)
-                        : find(resolvedToNodeId);
-        if (hashChanIdx >= 0) {
-            chanIdx = hashChanIdx;
-            chanSource = "hash";
-        } else if (conv && conv->rxChanIdx >= 0 && conv->rxChanIdx < MESH_CHANNELS) {
-            chanIdx = conv->rxChanIdx;
-            chanSource = "dm";
-        } else if (node && node->chanIdx >= 0 && node->chanIdx < MESH_CHANNELS) {
-            chanIdx = node->chanIdx;
-            chanSource = "node";
-        } else {
-            int active = Channels.activeIdx();
-            if (active >= 0 && active < MESH_CHANNELS) {
-                chanIdx = active;
-                chanSource = "active";
-            } else {
-                chanIdx = 0;
-            }
-        }
-
-        const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
-        uint8_t txHash = ck.hash;
-        const char *hashSource = "local";
-        // Only override the on-air hash when we don't have a local channel
-        // entry for that hash (same key, different channel name interop).
-        if (hashChanIdx < 0 && node && node->hasChanHash && node->chanHash != 0) {
-            txHash = node->chanHash;
-            hashSource = "node";
-        }
-        hdr.channel = txHash;
-        usedChanIdx = chanIdx;
-        usedHash = txHash;
-        debugLogMessages("[dm] using chan-key path: chanIdx=%d (%s) source=%s keyLen=%d hash=0x%02X (%s)\n",
-                 chanIdx, ck.name, chanSource, ck.keyLen, txHash, hashSource);
-
-        if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
-                            proto, cipher, protoLen)) {
-            debugLogMessages("[dm] sendDm FAIL: encrypt failed\n");
-            addLiveDmLine("T DM ER enc", TFT_RED);
-            return false;
-        }
-        payloadLen = protoLen;
+    hdr.channel = 0; // PKI marker (channel 0 = not a channel-key hash)
+    usedHash = 0;
+    debugLogMessages("[dm] using PKI path\n");
+    if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
+        debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
+        addLiveDmLine("T DM ER pki", TFT_RED);
+        return false;
     }
+    usedPki = true;
+    payloadLen = protoLen + 12; // ciphertext + tag(8) + extraNonce(4)
+    debugLogMessages("[dm] PKI encrypt OK, payloadLen=%u\n", (unsigned)payloadLen);
 
     debugLogMessages("[dm] transmitting: frameLen=%u\n", (unsigned)(sizeof(MeshHdr) + payloadLen));
     uint8_t frame[sizeof(MeshHdr) + 280];

@@ -12,10 +12,17 @@ struct NodeEntry {
     float    snr;
     float    battPct;
     float    voltage;
+    float    chUtil;
+    float    airUtil;
+    float    temperatureC;
+    float    humidityPct;
+    float    pressureHpa;
     uint8_t  hops;            // hop_start - hop_limit of last packet
     uint32_t lastHeardMs;
     bool     hasPosition;
     bool     hasTelemetry;
+    bool     hasDeviceTelemetry;
+    bool     hasEnvironmentTelemetry;
     bool     hasName;         // true once a real NODEINFO name has been received
     bool     favorite;        // pinned by user; sorted to top in node and DM lists
     int      chanIdx;         // channel last heard on

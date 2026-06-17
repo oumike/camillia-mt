@@ -223,6 +223,10 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     memcpy(&pkt.hdr, buf, sizeof(MeshHdr));
     pkt.portnum = 0;
     pkt.requestId = 0;
+    pkt.dataDest = 0;
+    pkt.dataSource = 0;
+    pkt.hasDataDest = false;
+    pkt.hasDataSource = false;
     pkt.wantResponse = false;
     pkt.payloadLen = 0;
     pkt.decrypted = false;
@@ -247,7 +251,10 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 
             if (pkt.decrypted) {
                 const uint8_t *payPtr; size_t payLen;
-                decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen, pkt.requestId, pkt.wantResponse);
+                decodeData(plain, payloadLen, pkt.portnum, payPtr, payLen,
+                           pkt.requestId, pkt.wantResponse,
+                           &pkt.dataDest, &pkt.hasDataDest,
+                           &pkt.dataSource, &pkt.hasDataSource);
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;

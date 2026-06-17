@@ -11,7 +11,7 @@ static const uint32_t kNodePersistMinMs = 10000;  // throttle hot-path NVS write
 // Key "ids" : blob of uint32_t[n]  — list of known nodeIds
 // Key "n_XXXXXXXX" : NodeBlob for that nodeId (hex, 8 chars → 10-char key)
 
-struct NodeBlob {
+struct NodeBlobV1 {
     char    longName[40];
     char    shortName[5];
     int32_t latI, lonI, alt;
@@ -19,6 +19,20 @@ struct NodeBlob {
     uint8_t pubKey[32];
     uint8_t chanIdx;
     // bit 0 = hasPosition, 1 = hasName, 2 = hasPubKey, 3 = hasTelemetry, 4 = favorite
+    uint8_t flags;
+};
+
+struct NodeBlob {
+    char    longName[40];
+    char    shortName[5];
+    int32_t latI, lonI, alt;
+    float   battPct, voltage;
+    float   chUtil, airUtil;
+    float   temperatureC, humidityPct, pressureHpa;
+    uint8_t pubKey[32];
+    uint8_t chanIdx;
+    // bit 0 = hasPosition, 1 = hasName, 2 = hasPubKey, 3 = hasTelemetry,
+    // bit 4 = favorite, 5 = hasDeviceTelemetry, 6 = hasEnvironmentTelemetry
     uint8_t flags;
 };
 
@@ -41,8 +55,26 @@ void NodeDB::init() {
     int n = (int)(p.getBytes("ids", ids, sizeof(ids)) / sizeof(uint32_t));
     for (int i = 0; i < n && _count < MAX_NODES; i++) {
         char key[12]; nodeKey(key, ids[i]);
+        size_t blobLen = p.getBytesLength(key);
+        if (blobLen == 0) continue;
+
         NodeBlob b = {};
-        if (p.getBytes(key, &b, sizeof(b)) != sizeof(b)) continue;
+        if (blobLen == sizeof(NodeBlob)) {
+            if (p.getBytes(key, &b, sizeof(b)) != sizeof(b)) continue;
+        } else if (blobLen == sizeof(NodeBlobV1)) {
+            NodeBlobV1 v1 = {};
+            if (p.getBytes(key, &v1, sizeof(v1)) != sizeof(v1)) continue;
+            utf8util::copyTruncate(b.longName, sizeof(b.longName), v1.longName);
+            utf8util::copyTruncate(b.shortName, sizeof(b.shortName), v1.shortName);
+            b.latI = v1.latI; b.lonI = v1.lonI; b.alt = v1.alt;
+            b.battPct = v1.battPct; b.voltage = v1.voltage;
+            memcpy(b.pubKey, v1.pubKey, 32);
+            b.chanIdx = v1.chanIdx;
+            b.flags = v1.flags;
+        } else {
+            continue;
+        }
+
         NodeEntry *e = &_nodes[_count++];
         memset(e, 0, sizeof(*e));
         e->nodeId = ids[i];
@@ -50,6 +82,10 @@ void NodeDB::init() {
         utf8util::copyTruncate(e->shortName, sizeof(e->shortName), b.shortName);
         e->latI = b.latI; e->lonI = b.lonI; e->alt = b.alt;
         e->battPct = b.battPct; e->voltage = b.voltage;
+        e->chUtil = b.chUtil; e->airUtil = b.airUtil;
+        e->temperatureC = b.temperatureC;
+        e->humidityPct = b.humidityPct;
+        e->pressureHpa = b.pressureHpa;
         memcpy(e->pubKey, b.pubKey, 32);
         e->chanIdx      = b.chanIdx;
         e->hasPosition  = (b.flags & 1) != 0;
@@ -57,6 +93,13 @@ void NodeDB::init() {
         e->hasPubKey    = (b.flags & 4) != 0;
         e->hasTelemetry = (b.flags & 8) != 0;
         e->favorite     = (b.flags & 16) != 0;
+        e->hasDeviceTelemetry = (b.flags & 32) != 0;
+        e->hasEnvironmentTelemetry = (b.flags & 64) != 0;
+        // Backward compatibility for older blobs that only exposed a single telemetry bit.
+        if (e->hasTelemetry && !e->hasDeviceTelemetry && !e->hasEnvironmentTelemetry) {
+            e->hasDeviceTelemetry = true;
+        }
+        e->hasTelemetry = e->hasDeviceTelemetry || e->hasEnvironmentTelemetry;
         e->lastHeardMs  = 0;  // unknown after reboot
         e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
@@ -76,11 +119,17 @@ void NodeDB::_save(uint32_t nodeId) {
     utf8util::copyTruncate(b.shortName, sizeof(b.shortName), e->shortName);
     b.latI = e->latI; b.lonI = e->lonI; b.alt = e->alt;
     b.battPct = e->battPct; b.voltage = e->voltage;
+        b.chUtil = e->chUtil; b.airUtil = e->airUtil;
+        b.temperatureC = e->temperatureC;
+        b.humidityPct = e->humidityPct;
+        b.pressureHpa = e->pressureHpa;
     memcpy(b.pubKey, e->pubKey, 32);
     b.chanIdx = (uint8_t)e->chanIdx;
     b.flags = (e->hasPosition  ? 1 : 0) | (e->hasName      ? 2 : 0)
             | (e->hasPubKey    ? 4 : 0) | (e->hasTelemetry ? 8 : 0)
-            | (e->favorite     ? 16 : 0);
+            | (e->favorite     ? 16 : 0)
+            | (e->hasDeviceTelemetry ? 32 : 0)
+            | (e->hasEnvironmentTelemetry ? 64 : 0);
 
     char key[12]; nodeKey(key, nodeId);
     Preferences p; p.begin("nodes", false);
@@ -240,10 +289,35 @@ void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {
 void NodeDB::updateTelemetry(uint32_t nodeId, const TelemetryInfo &t) {
     if (!t.valid) return;
     NodeEntry *e = upsert(nodeId);
-    bool changed = (e->battPct != t.battPct) || (e->voltage != t.voltage) || !e->hasTelemetry;
-    e->battPct      = t.battPct;
-    e->voltage      = t.voltage;
-    e->hasTelemetry = true;
+    bool changed = false;
+
+    if (t.hasDeviceMetrics) {
+        if ((e->battPct != t.battPct) || (e->voltage != t.voltage)
+            || (e->chUtil != t.chUtil) || (e->airUtil != t.airUtil)
+            || !e->hasDeviceTelemetry) {
+            changed = true;
+        }
+        e->battPct = t.battPct;
+        e->voltage = t.voltage;
+        e->chUtil = t.chUtil;
+        e->airUtil = t.airUtil;
+        e->hasDeviceTelemetry = true;
+    }
+
+    if (t.hasEnvironmentMetrics) {
+        if ((e->temperatureC != t.temperatureC)
+            || (e->humidityPct != t.humidityPct)
+            || (e->pressureHpa != t.pressureHpa)
+            || !e->hasEnvironmentTelemetry) {
+            changed = true;
+        }
+        e->temperatureC = t.temperatureC;
+        e->humidityPct = t.humidityPct;
+        e->pressureHpa = t.pressureHpa;
+        e->hasEnvironmentTelemetry = true;
+    }
+
+    e->hasTelemetry = e->hasDeviceTelemetry || e->hasEnvironmentTelemetry;
     uint32_t now = millis();
     if (changed && (now - e->lastPersistMs >= kNodePersistMinMs)) {
         _save(nodeId);

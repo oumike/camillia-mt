@@ -279,7 +279,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.minWakeSecs        = MY_MIN_WAKE_SECS;
     cfg.telDeviceEnabled   = MY_TEL_DEV_EN;
     cfg.telDeviceIntervalS = MY_TEL_DEV_INTV;
-    cfg.telEnvEnabled      = MY_TEL_ENV_EN;
+    cfg.telEnvEnabled      = HAS_ENV_SENSOR_TELEMETRY ? (bool)MY_TEL_ENV_EN : false;
     cfg.telEnvIntervalS    = MY_TEL_ENV_INTV;
     cfg.cannedEnabled      = MY_CANNED_EN;
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
@@ -767,6 +767,11 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     }
 
     cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
+    if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
+    if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;
+#if !HAS_ENV_SENSOR_TELEMETRY
+    cfg.telEnvEnabled = false;
+#endif
     return true;
 }
 

@@ -11,6 +11,7 @@
 #include "node_db.h"
 #include "dm_mgr.h"
 #include "battery_util.h"
+#include "env_sensor.h"
 #include "gps.h"
 #include "keyboard.h"
 #include "web_config.h"
@@ -26,6 +27,7 @@
 #include <esp_mac.h>
 #include <nvs_flash.h>
 #include <SD.h>
+#include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #include <AudioBoard.h>
 #endif
@@ -238,6 +240,8 @@ static char s_selectedMsgText[kReplyPreviewTextMax + 1] = "";
 static uint32_t s_myNodeId = 0;
 static uint32_t s_nextNodeInfoTxMs = 0;
 static uint32_t s_nextPositionTxMs = 0;
+static uint32_t s_nextDeviceTelemetryTxMs = 0;
+static uint32_t s_nextEnvTelemetryTxMs = 0;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -383,7 +387,9 @@ static void refreshHeaderStatus(bool force = false);
 static void layoutHeaderInlineItems();
 static void refreshChannelGlow(bool force = false);
 static void pumpKeyboardInput();
-static void openComposePrompt(uint32_t replyPacketId = 0, const char *replyText = nullptr);
+static void openComposePrompt(uint32_t replyPacketId = 0,
+                              const char *replyText = nullptr,
+                              bool allowSelectedReplyFallback = true);
 static void closeComposePrompt();
 static void sendComposeMessage();
 static void onChatNewMessagePressed(lv_event_t *e);
@@ -459,6 +465,7 @@ static void onWebCfgSaved();
 static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
+static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void syncWifiCredsToPrefs();
 static void persistWebCfgEnabled();
@@ -2152,6 +2159,8 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("telEnvEn")) s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
     ul = prefs.getULong("telEnvIntv", 0);
     if (ul) s_cfg.telEnvIntervalS = ul;
+    if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
+    if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     String canned = getStringIfKey("cannedMsgs");
@@ -2230,6 +2239,68 @@ static void loadChannelsFromPrefs() {
     cp.end();
 }
 
+static bool loadPkiPairFromPrefs(Preferences &prefs, const char *pubKeyName,
+                                 const char *privKeyName,
+                                 uint8_t pubOut[32], uint8_t privOut[32]) {
+    if (!pubKeyName || !privKeyName) return false;
+    if (prefs.getBytesLength(pubKeyName) != 32 || prefs.getBytesLength(privKeyName) != 32) {
+        return false;
+    }
+    return (prefs.getBytes(pubKeyName, pubOut, 32) == 32)
+        && (prefs.getBytes(privKeyName, privOut, 32) == 32);
+}
+
+static void persistPkiPair(Preferences &prefs, const uint8_t pubKey[32], const uint8_t privKey[32]) {
+    prefs.putBytes("pub25519", pubKey, 32);
+    prefs.putBytes("priv25519", privKey, 32);
+    // Keep legacy key names in sync for older builds/tools.
+    prefs.putBytes("pubKey", pubKey, 32);
+    prefs.putBytes("privKey", privKey, 32);
+}
+
+static void initPkiIdentity() {
+    memset(myPubKey, 0, sizeof(myPubKey));
+    memset(myPrivKey, 0, sizeof(myPrivKey));
+
+    Preferences prefs;
+    if (!prefs.begin("camillia", false)) {
+        Serial.println("[pki] failed to open NVS namespace");
+        return;
+    }
+
+    bool loaded = loadPkiPairFromPrefs(prefs, "pub25519", "priv25519", myPubKey, myPrivKey);
+    if (!loaded) {
+        loaded = loadPkiPairFromPrefs(prefs, "pubKey", "privKey", myPubKey, myPrivKey);
+    }
+
+    bool valid = false;
+    if (loaded) {
+        uint8_t derivedPub[32] = {0};
+        if (Curve25519::eval(derivedPub, myPrivKey, nullptr)) {
+            if (memcmp(derivedPub, myPubKey, 32) == 0) {
+                valid = true;
+            } else {
+                uint8_t reversedPub[32];
+                for (int i = 0; i < 32; i++) reversedPub[i] = myPubKey[31 - i];
+                if (memcmp(derivedPub, reversedPub, 32) == 0) {
+                    memcpy(myPubKey, derivedPub, 32);
+                    persistPkiPair(prefs, myPubKey, myPrivKey);
+                    valid = true;
+                    Serial.println("[pki] corrected stored pubkey endianness");
+                }
+            }
+        }
+    }
+
+    if (!valid) {
+        Curve25519::dh1(myPubKey, myPrivKey);
+        persistPkiPair(prefs, myPubKey, myPrivKey);
+        Serial.println("[pki] generated new Curve25519 identity");
+    }
+
+    prefs.end();
+}
+
 static void deriveNodeId() {
     uint32_t baseNodeId = 0;
     Preferences prefs;
@@ -2260,6 +2331,7 @@ static void deriveNodeId() {
     }
 
     Serial.printf("[lvgl] Node ID: !%08x\n", s_myNodeId);
+    initPkiIdentity();
 }
 
 static void recomputeChannelHashes() {
@@ -2447,12 +2519,15 @@ static void closeComposePrompt() {
     s_composeChannelIdx = s_activeChannel;
 }
 
-static void openComposePrompt(uint32_t replyPacketId, const char *replyText) {
+static void openComposePrompt(uint32_t replyPacketId,
+                              const char *replyText,
+                              bool allowSelectedReplyFallback) {
     if (!s_rootScreen) return;
     if (s_activeChannel < 0 || s_activeChannel >= MESH_CHANNELS) return;
 
     // Pager can open compose via paths that don't pass reply args; recover from current selection.
-    if (replyPacketId == 0 && (!replyText || !replyText[0])
+    if (allowSelectedReplyFallback
+        && replyPacketId == 0 && (!replyText || !replyText[0])
         && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
         replyPacketId = s_selectedMsgReplyPacketId;
         replyText = s_selectedMsgText;
@@ -2734,7 +2809,7 @@ static void onComposeCancelPressed(lv_event_t *e) {
 
 static void openComposePromptForDm(uint32_t nodeId) {
     if (nodeId == 0) return;
-    openComposePrompt(0, nullptr);
+    openComposePrompt(0, nullptr, false);
     s_composeTarget = COMPOSE_TARGET_DM;
     s_composeDmNodeId = nodeId;
 }
@@ -4746,12 +4821,30 @@ static void refreshNodesDetails() {
         snprintf(pos, sizeof(pos), "No position data");
     }
 
-    char telem[96];
+    char telem[220];
     if (n.hasTelemetry) {
-        snprintf(telem, sizeof(telem),
-                 "Battery: %.0f%%\nVoltage: %.2f V\nEnvironment: n/a",
-                 (double)n.battPct,
-                 (double)n.voltage);
+        telem[0] = '\0';
+        if (n.hasDeviceTelemetry) {
+            snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                     "Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%",
+                     (double)n.battPct,
+                     (double)n.voltage,
+                     (double)n.chUtil,
+                     (double)n.airUtil);
+        }
+        if (n.hasEnvironmentTelemetry) {
+            if (telem[0]) {
+                snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem), "\n");
+            }
+            snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                     "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
+                     (double)n.temperatureC,
+                     (double)n.humidityPct,
+                     (double)n.pressureHpa);
+        }
+        if (!telem[0]) {
+            snprintf(telem, sizeof(telem), "No telemetry data");
+        }
     } else {
         snprintf(telem, sizeof(telem), "No telemetry data");
     }
@@ -8071,6 +8164,12 @@ static void onWebCfgSaved() {
     uint8_t prevTheme = s_appliedUiTheme;
     uint8_t prevMode = s_appliedUiMode;
 
+#if !HAS_ENV_SENSOR_TELEMETRY
+    s_cfg.telEnvEnabled = false;
+#endif
+    if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
+    if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
+
     persistConfigToPrefs();
     persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
@@ -9335,6 +9434,11 @@ static void loadConfigFromSd() {
     }
 
     loadConfigFromPrefs();
+#if !HAS_ENV_SENSOR_TELEMETRY
+    s_cfg.telEnvEnabled = false;
+#endif
+    if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
+    if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
     loadChannelsFromPrefs();
     applyUiThemePalette();
     myDeviceRole = s_cfg.deviceRole;
@@ -9574,16 +9678,98 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
     Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
-static bool processMeshPacket(const MeshPacket &pkt) {
+static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t errorReason) {
+    if (!Radio.isReady()) return false;
+    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0) return false;
+
+    uint8_t proto[64];
+    size_t protoLen = encodeRouting(requestId, s_myNodeId, errorReason, proto, sizeof(proto));
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[0];  // ROUTING replies on primary channel.
+    uint8_t cipher[96];
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+        return false;
+    }
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
+    MeshHdr hdr = {};
+    hdr.to = toNodeId;
+    hdr.from = s_myNodeId;
+    hdr.id = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    return Radio.transmit(frame, sizeof(hdr) + protoLen);
+}
+
+static bool processMeshPacket(const MeshPacket &rxPkt) {
+    MeshPacket pkt = rxPkt;
+
     if (isDuplicate(pkt.hdr.from, pkt.hdr.id)) return false;
 
     // Match v1 behavior: ignore reflected copies of our own transmitted packets.
     if (s_myNodeId != 0 && pkt.hdr.from == s_myNodeId) return false;
 
     Nodes.updateFromPacket(pkt);
+
+    if (!pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
+        NodeEntry *sender = Nodes.find(pkt.hdr.from);
+        if (sender && sender->hasPubKey) {
+            uint8_t plain[256];
+            size_t plainLen = sizeof(plain);
+            if (decryptPki(pkt.hdr, pkt.rawCipher, pkt.rawLen, sender->pubKey, plain, plainLen)) {
+                pkt.decrypted = true;
+                pkt.chanIdx = -2;
+                const uint8_t *payPtr = nullptr;
+                size_t payLen = 0;
+                decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
+                           pkt.requestId, pkt.wantResponse,
+                           &pkt.dataDest, &pkt.hasDataDest,
+                           &pkt.dataSource, &pkt.hasDataSource);
+                if (payPtr && payLen <= sizeof(pkt.payload)) {
+                    memcpy(pkt.payload, payPtr, payLen);
+                    pkt.payloadLen = payLen;
+                }
+            }
+        }
+    }
+
+    bool wantsAck = ((pkt.hdr.flags & (1 << 3)) != 0);
+    bool addressedToMe = (pkt.hdr.to == s_myNodeId)
+                      || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
+
     int chanIdx = (pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS) ? pkt.chanIdx : 0;
     if (!pkt.decrypted) {
         appendLiveRxEncrypted(pkt);
+
+        if (wantsAck && addressedToMe) {
+            uint32_t err = (pkt.hdr.channel == 0) ? 35u : 6u;  // PKI_UNKNOWN_PUBKEY / NO_CHANNEL
+            (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, err);
+
+            if (err == 35) {
+                static uint32_t sLastNodeInfoReqNode = 0;
+                static uint32_t sLastNodeInfoReqMs = 0;
+                uint32_t now = millis();
+                if (pkt.hdr.from != sLastNodeInfoReqNode || (now - sLastNodeInfoReqMs) > 5000) {
+                    (void)Channels.sendNodeInfo(s_myNodeId,
+                                                s_cfg.nodeLong,
+                                                s_cfg.nodeShort,
+                                                pkt.hdr.from,
+                                                true,
+                                                s_cfg.okToMqtt);
+                    sLastNodeInfoReqNode = pkt.hdr.from;
+                    sLastNodeInfoReqMs = now;
+                }
+            }
+        }
         return false;
     }
 
@@ -9601,8 +9787,10 @@ static bool processMeshPacket(const MeshPacket &pkt) {
 
             if (textBuf[0]) {
                 const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+                bool isDirectToMe = (pkt.hdr.to == s_myNodeId)
+                                 || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
 
-                if (pkt.hdr.to == s_myNodeId) {
+                if (isDirectToMe) {
                     NodeEntry *sender = Nodes.find(pkt.hdr.from);
                     char senderShort[5] = {};
                     if (sender && sender->shortName[0]) {
@@ -9641,9 +9829,12 @@ static bool processMeshPacket(const MeshPacket &pkt) {
                 }
 
                 triggerMessageAlert();
+                if (wantsAck && isDirectToMe) {
+                    (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+                }
 
                 appendLiveRxSummary(pkt, chanIdx, "T");
-                return (pkt.hdr.to == s_myNodeId) ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
+                return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
             }
             return false;
         }
@@ -9731,6 +9922,9 @@ static bool processMeshPacket(const MeshPacket &pkt) {
             if (decodeUser(pkt.payload, pkt.payloadLen, u)) {
                 Nodes.updateUser(pkt.hdr.from, u);
             }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
             appendLiveRxSummary(pkt, chanIdx, "N");
             return false;
         }
@@ -9739,6 +9933,9 @@ static bool processMeshPacket(const MeshPacket &pkt) {
             PositionInfo p = {};
             if (decodePosition(pkt.payload, pkt.payloadLen, p)) {
                 Nodes.updatePosition(pkt.hdr.from, p);
+            }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
             }
             appendLiveRxSummary(pkt, chanIdx, "P");
             return false;
@@ -9749,12 +9946,18 @@ static bool processMeshPacket(const MeshPacket &pkt) {
             if (decodeTelemetry(pkt.payload, pkt.payloadLen, t)) {
                 Nodes.updateTelemetry(pkt.hdr.from, t);
             }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
             appendLiveRxSummary(pkt, chanIdx, "E");
             return false;
         }
 
         case TRACEROUTE_APP: {
             tracerouteProgressOnResponse(pkt);
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
             appendLiveRxSummary(pkt, chanIdx, "R");
             return false;
         }
@@ -9869,6 +10072,61 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
             }
         }
     }
+
+    // Manual announce should also push telemetry immediately (when enabled).
+    // serviceTelemetryAnnounce() runs later in the loop and will transmit now
+    // because nextTx=0 means "due immediately".
+    if (forceAnnounce) {
+        if (s_cfg.telDeviceEnabled) s_nextDeviceTelemetryTxMs = 0;
+#if HAS_ENV_SENSOR_TELEMETRY
+        if (s_cfg.telEnvEnabled) s_nextEnvTelemetryTxMs = 0;
+#endif
+    }
+}
+
+static void serviceTelemetryAnnounce(uint32_t nowMs) {
+    bool devDue = s_cfg.telDeviceEnabled
+        && announceDue(nowMs, s_nextDeviceTelemetryTxMs, s_cfg.telDeviceIntervalS);
+
+#if HAS_ENV_SENSOR_TELEMETRY
+    bool envDue = s_cfg.telEnvEnabled
+        && announceDue(nowMs, s_nextEnvTelemetryTxMs, s_cfg.telEnvIntervalS);
+#else
+    bool envDue = false;
+#endif
+
+    if (!devDue && !envDue) return;
+    if (!s_radioReady) return;
+
+    if (devDue) {
+        bool ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt);
+        if (ok) scheduleAnnounceNext(s_nextDeviceTelemetryTxMs, nowMs, s_cfg.telDeviceIntervalS);
+        else scheduleAnnounceRetry(s_nextDeviceTelemetryTxMs, nowMs);
+    }
+
+#if HAS_ENV_SENSOR_TELEMETRY
+    if (envDue) {
+        bool hasSensor = envHasSensor() || envBegin();
+        if (!hasSensor) {
+            scheduleAnnounceNext(s_nextEnvTelemetryTxMs, nowMs, s_cfg.telEnvIntervalS);
+            return;
+        }
+
+        EnvReading env = {};
+        if (!envRead(env)) {
+            scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, nowMs);
+            return;
+        }
+
+        bool ok = Channels.sendTelemetryEnvironment(s_myNodeId,
+                                                    env.temperatureC,
+                                                    env.humidityPct,
+                                                    env.pressureHpa,
+                                                    s_cfg.okToMqtt);
+        if (ok) scheduleAnnounceNext(s_nextEnvTelemetryTxMs, nowMs, s_cfg.telEnvIntervalS);
+        else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, nowMs);
+    }
+#endif
 }
 
 static void refreshChatView(bool force) {
@@ -10848,6 +11106,9 @@ void setup() {
     startWebConfigAuto();
     bootstrapStateMapsIfMissing();
     batteryInitAdc();
+#if HAS_ENV_SENSOR_TELEMETRY
+    (void)envBegin();
+#endif
     gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
     DMs.init();
@@ -10886,6 +11147,7 @@ void loop() {
     }
     gpsLoop();
     serviceNodeInfoAnnounce(now);
+    serviceTelemetryAnnounce(now);
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0

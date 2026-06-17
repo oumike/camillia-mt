@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include "keyboard.h"
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
+#include "hal/tlora_rotary_decoder.h"
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #ifdef KEY_BACKSPACE
 #undef KEY_BACKSPACE
@@ -99,6 +103,7 @@ uint32_t sTloraModifierSetMs = 0;
 bool sTloraBackspaceDown = false;
 bool sTloraBackspaceHoldSent = false;
 uint32_t sTloraBackspaceDownMs = 0;
+TloraRotaryDecoder sTloraRotaryDecoder;
 
 const char kTloraTapMap[31][3] = {
     {'q', 'Q', '1'},
@@ -306,6 +311,11 @@ void TDeckKeyboard::begin() {
 
     _instance = this;
 #if defined(DEVICE_TLORA_PAGER_TFT)
+    // Initialize the dedicated rotary decoder with current A/B line levels.
+    uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
+    uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
+    sTloraRotaryDecoder.reset(a, b, millis());
+
     // TLora pager uses a quadrature wheel (A/B). Decode A/B state in
     // readTrackball() to avoid direction jitter from edge-only interrupts.
     if (TBALL_CLICK >= 0) attachInterrupt(digitalPinToInterrupt(TBALL_CLICK), _isrClick, FALLING);
@@ -329,83 +339,17 @@ char TDeckKeyboard::readTrackball() {
     unsigned long now = millis();
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    // Quadrature decode table for transitions: prevAB<<2 | currAB.
-    // Returns -1/0/+1 movement steps.
-    static const int8_t qdec[16] = {
-         0, -1, +1,  0,
-        +1,  0,  0, -1,
-        -1,  0,  0, +1,
-         0, +1, -1,  0
-    };
-    static uint8_t prevAB = 0xFF;
-    static int8_t accum = 0;
-    static unsigned long lastMoveEmitMs = 0;
-    static bool pendingClick = false;
-    static unsigned long pendingClickMs = 0;
-    static unsigned long lastClickSeenMs = 0;
-    static unsigned long lastClickEmitMs = 0;
-    const unsigned long moveDebounceMs = 12;
-    const unsigned long clickQuietMs = 70;
-    const unsigned long clickExpireMs = 800;
-    const unsigned long clickEdgeDebounceMs = 80;
-    const unsigned long clickEmitMinIntervalMs = 280;
-
     bool clk = false;
     noInterrupts();
     clk = _click;
     _click = false;
     interrupts();
-
-    if (clk && (now - lastClickSeenMs >= clickEdgeDebounceMs)) {
-        pendingClick = true;
-        pendingClickMs = now;
-        lastClickSeenMs = now;
-    }
-
     uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
     uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
-    uint8_t currAB = (uint8_t)((a << 1) | b);
-
-    if (prevAB == 0xFF) {
-        prevAB = currAB;
-    } else if (currAB != prevAB) {
-        int8_t delta = qdec[(prevAB << 2) | currAB];
-        prevAB = currAB;
-        if (delta != 0) {
-            accum += delta;
-            _lastScrollMs = now;
-        }
-    }
-
-    // Prioritize click delivery once wheel motion settles so entering/exiting
-    // channel-scroll mode doesn't lose the first notch to channel navigation.
-    if (pendingClick && (now - _lastScrollMs >= clickQuietMs)) {
-        pendingClick = false;
-        if (now - lastClickEmitMs < clickEmitMinIntervalMs) {
-            return KEY_NONE;
-        }
-        lastClickEmitMs = now;
-        return KEY_ROLLER;
-    }
-
-    if (now - lastMoveEmitMs >= moveDebounceMs) {
-        // One notch is four state transitions on typical rotary encoders.
-        if (accum >= 4) {
-            accum -= 4;
-            lastMoveEmitMs = now;
-            return KEY_SCROLL_DN;
-        }
-        if (accum <= -4) {
-            accum += 4;
-            lastMoveEmitMs = now;
-            return KEY_SCROLL_UP;
-        }
-    }
-
-    // Expire stale pending clicks to avoid ghost toggles.
-    if (pendingClick && (now - pendingClickMs > clickExpireMs)) {
-        pendingClick = false;
-    }
+    TloraRotaryAction action = sTloraRotaryDecoder.poll(a, b, clk, now, _lastScrollMs);
+    if (action == TloraRotaryAction::ScrollUp) return KEY_SCROLL_UP;
+    if (action == TloraRotaryAction::ScrollDown) return KEY_SCROLL_DN;
+    if (action == TloraRotaryAction::Click) return KEY_ROLLER;
     return KEY_NONE;
 #else
     static unsigned long lastMoveEmitMs = 0;
