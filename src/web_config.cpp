@@ -639,6 +639,7 @@ static void sendConfigPage(const char *msg = "") {
         lon = lonRec;
         return true;
     };
+    const bool useImperialUnits = (gCfg && gCfg->displayUnits != 0);
     for (int i = 0; i < totalNodes; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         if (!n) continue;
@@ -699,9 +700,36 @@ static void sendConfigPage(const char *msg = "") {
         char rawPosBuf[64];
         snprintf(rawPosBuf, sizeof(rawPosBuf), "%ld, %ld", (long)n->latI, (long)n->lonI);
 
-        char telemBuf[72];
+        char telemBuf[180];
         if (n->hasTelemetry) {
-            snprintf(telemBuf, sizeof(telemBuf), "%.0f%% / %.2fV", n->battPct, n->voltage);
+            telemBuf[0] = '\0';
+            if (n->hasDeviceTelemetry) {
+                snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                         "%.0f%% / %.2fV", n->battPct, n->voltage);
+            }
+            if (n->hasEnvironmentTelemetry) {
+                if (telemBuf[0]) {
+                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf), " | ");
+                }
+                if (useImperialUnits) {
+                    float tempF = n->temperatureC * (9.0f / 5.0f) + 32.0f;
+                    float pressureInHg = n->pressureHpa * 0.0295299831f;
+                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                             "%.1fF %.1f%% %.2finHg",
+                             (double)tempF,
+                             (double)n->humidityPct,
+                             (double)pressureInHg);
+                } else {
+                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                             "%.1fC %.1f%% %.1fhPa",
+                             (double)n->temperatureC,
+                             (double)n->humidityPct,
+                             (double)n->pressureHpa);
+                }
+            }
+            if (!telemBuf[0]) {
+                snprintf(telemBuf, sizeof(telemBuf), "none");
+            }
         } else {
             snprintf(telemBuf, sizeof(telemBuf), "none");
         }
@@ -1031,9 +1059,9 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
     html += tmp; html += "'></label>";
-    html += "<label>Units<select name='disp_units'>"
-            "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric</option>"
-            "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial</option>"
+        html += "<label>Units (Display &amp; Telemetry)<select name='disp_units'>"
+            "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
+            "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
             "</select></label></div>";
     html += "<div class='row2'>";
     html += "<label>Compass North Top<select name='compass_north'>"

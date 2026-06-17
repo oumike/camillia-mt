@@ -183,6 +183,10 @@ static bool s_nodesMapFsDrvReady = false;
 static lv_obj_t *s_nodesList = nullptr;
 static lv_obj_t *s_nodesTitleLabel = nullptr;
 static lv_obj_t *s_nodesHintLabel = nullptr;
+static lv_obj_t *s_nodesFilterBtn = nullptr;
+static lv_obj_t *s_nodesFilterDialog = nullptr;
+static lv_obj_t *s_nodesFilterInput = nullptr;
+static lv_obj_t *s_nodesFilterKeyboard = nullptr;
 static lv_obj_t *s_nodesListRows[MAX_NODES] = {};
 static int s_nodesListRowCount = 0;
 static NodeEntry s_nodesSnapshot[MAX_NODES] = {};
@@ -276,6 +280,15 @@ static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
 static bool s_screenAsleep = false;
 static uint32_t s_lastActivityMs = 0;
+static constexpr uint32_t kScreenWakeInputDelayMs = 3000UL;
+static uint32_t s_screenWakeBlockedUntilMs = 0;
+#if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
+static constexpr uint32_t kTdeckTrackballSleepHoldMs = 2000UL;
+static bool s_tdeckTrackballHoldActive = false;
+static bool s_tdeckTrackballHoldTriggered = false;
+static uint32_t s_tdeckTrackballHoldStartMs = 0;
+static bool s_tdeckSuppressRollerClick = false;
+#endif
 static bool s_themeRebuildPending = false;
 static bool s_themeRebuildReopenCfg = false;
 static int s_themeRebuildCfgSelection = 0;
@@ -436,6 +449,12 @@ static void openNodesModal();
 static void closeNodesModal();
 static void snapshotNodesForModal();
 static void nodesApplyFilter();
+static void applyNodesFilterText(const char *text);
+static void openNodesFilterDialog();
+static void closeNodesFilterDialog();
+static void onNodesFilterButtonPressed(lv_event_t *e);
+static void onNodesFilterKeyboardEvent(lv_event_t *e);
+static void onNodesFilterInputEvent(lv_event_t *e);
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
@@ -749,6 +768,7 @@ enum CfgActionId {
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
+    CFG_ACTION_UNITS,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
@@ -913,7 +933,7 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
 }
 
 static bool pagerAudioSelectCommFormat(i2s_config_t &cfg) {
-#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 4)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
 #else
     // Legacy drivers expect I2S Philips mode as I2S | I2S_MSB.
@@ -1175,7 +1195,7 @@ static bool sTdeckAudioReady = false;
 static constexpr i2s_port_t kTdeckI2SPort = I2S_NUM_0;
 
 static bool tdeckAudioSelectCommFormat(i2s_config_t &cfg) {
-#if defined(I2S_COMM_FORMAT_STAND_I2S)
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 4)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
 #else
     cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
@@ -1736,6 +1756,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_THEME:
             snprintf(buf, bufLen, "Theme: %s", uiThemePresetNameFromCfg());
             break;
+        case CFG_ACTION_UNITS:
+            snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
+            break;
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
@@ -1825,6 +1848,7 @@ static void sleepScreen(const char *reason) {
     displayDev().setBrightness(0);
     setPagerKeyboardBacklight(false);
     s_screenAsleep = true;
+    s_screenWakeBlockedUntilMs = millis() + kScreenWakeInputDelayMs;
 
     if (reason && reason[0]) {
         Serial.printf("[screen] sleeping (%s)\n", reason);
@@ -1853,6 +1877,53 @@ static void wakeScreen() {
     s_lastBattPct = 255;
     s_lastGpsSats = 255;
     Serial.println("[screen] woke");
+}
+
+static bool tryWakeScreenFromInput(uint32_t nowMs) {
+    if (!s_screenAsleep) {
+        s_lastActivityMs = nowMs;
+        return true;
+    }
+
+    if ((int32_t)(nowMs - s_screenWakeBlockedUntilMs) < 0) {
+        return false;
+    }
+
+    wakeScreen();
+    return true;
+}
+
+static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
+#if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
+    const bool pressed = (digitalRead(TBALL_CLICK) == LOW);
+
+    if (pressed) {
+        if (!s_tdeckTrackballHoldActive) {
+            s_tdeckTrackballHoldActive = true;
+            s_tdeckTrackballHoldTriggered = false;
+            s_tdeckTrackballHoldStartMs = nowMs;
+        }
+
+        if (!s_tdeckTrackballHoldTriggered
+            && (uint32_t)(nowMs - s_tdeckTrackballHoldStartMs) >= kTdeckTrackballSleepHoldMs) {
+            s_tdeckTrackballHoldTriggered = true;
+            // Ignore any pending click event from this same press.
+            s_tdeckSuppressRollerClick = true;
+            if (!s_screenAsleep) {
+                sleepScreen("T-Deck trackball hold");
+                return true;
+            }
+        }
+    } else {
+        s_tdeckTrackballHoldActive = false;
+        s_tdeckTrackballHoldTriggered = false;
+        s_tdeckSuppressRollerClick = false;
+    }
+#else
+    LV_UNUSED(nowMs);
+#endif
+
+    return false;
 }
 
 static bool pollUserButton(uint32_t nowMs) {
@@ -1889,13 +1960,22 @@ static bool pollUserButton(uint32_t nowMs) {
             }
 #else
             if (s_screenAsleep) {
-                wakeScreen();
+                if (!tryWakeScreenFromInput(nowMs)) {
+                    return true;
+                }
             } else {
                 sleepScreen("BOOT button");
             }
             return true;
 #endif
         }
+    }
+
+    if (userBtnStable && s_screenAsleep) {
+        if (!tryWakeScreenFromInput(nowMs)) {
+            return true;
+        }
+        return true;
     }
 #endif
 
@@ -1914,12 +1994,21 @@ static bool pollUserButton(uint32_t nowMs) {
         displayBtnStable = displayPressed;
         if (displayBtnStable) {
             if (s_screenAsleep) {
-                wakeScreen();
+                if (!tryWakeScreenFromInput(nowMs)) {
+                    return true;
+                }
             } else {
                 sleepScreen("GPIO35 button");
             }
             return true;
         }
+    }
+
+    if (displayBtnStable && s_screenAsleep) {
+        if (!tryWakeScreenFromInput(nowMs)) {
+            return true;
+        }
+        return true;
     }
 #endif
 
@@ -2868,6 +2957,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
@@ -3126,13 +3216,13 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
-        {"Leg", HELTEC_NAV_LEGEND},
+        {"Help", HELTEC_NAV_LEGEND},
 #else
         {"Config", HELTEC_NAV_CFG},
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
-        {"Legend", HELTEC_NAV_LEGEND},
+        {"Help", HELTEC_NAV_LEGEND},
 #endif
     };
 
@@ -3571,6 +3661,7 @@ static void closeDmModal() {
 }
 
 static void closeNodesModal() {
+    closeNodesFilterDialog();
     closeNodesActionMenu();
     if (s_nodesModal) {
         lv_obj_del(s_nodesModal);
@@ -3591,6 +3682,10 @@ static void closeNodesModal() {
     s_nodesMapImage = nullptr;
     s_nodesTitleLabel = nullptr;
     s_nodesHintLabel = nullptr;
+    s_nodesFilterBtn = nullptr;
+    s_nodesFilterDialog = nullptr;
+    s_nodesFilterInput = nullptr;
+    s_nodesFilterKeyboard = nullptr;
     s_nodesMapImageSrc[0] = '\0';
     s_nodesList = nullptr;
     s_nodesListRowCount = 0;
@@ -3698,6 +3793,131 @@ static void nodesApplyFilter() {
     } else if (s_nodesSelected >= s_nodesFilteredCount) {
         s_nodesSelected = s_nodesFilteredCount - 1;
     }
+}
+
+static void applyNodesFilterText(const char *text) {
+    if (!text) text = "";
+
+    size_t len = strlen(text);
+    if (len > kNodesFilterMax) len = kNodesFilterMax;
+
+    if (len > 0) {
+        memcpy(s_nodesFilter, text, len);
+        s_nodesFilter[len] = '\0';
+        s_nodesFilterLen = (int)len;
+        s_nodesFilterOpen = true;
+    } else {
+        s_nodesFilterOpen = false;
+        s_nodesFilterLen = 0;
+        s_nodesFilter[0] = '\0';
+    }
+
+    nodesApplyFilter();
+    refreshNodesListRows();
+    refreshNodesListSelection();
+    refreshNodesDetails();
+
+    if (s_nodesSelected >= 0
+        && s_nodesSelected < s_nodesListRowCount
+        && s_nodesListRows[s_nodesSelected]) {
+        lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+    }
+}
+
+static void closeNodesFilterDialog() {
+    if (s_nodesFilterDialog) {
+        lv_obj_del(s_nodesFilterDialog);
+    }
+    s_nodesFilterDialog = nullptr;
+    s_nodesFilterInput = nullptr;
+    s_nodesFilterKeyboard = nullptr;
+}
+
+static void onNodesFilterKeyboardEvent(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        const char *text = (s_nodesFilterInput) ? lv_textarea_get_text(s_nodesFilterInput) : "";
+        applyNodesFilterText(text);
+        closeNodesFilterDialog();
+    } else if (code == LV_EVENT_CANCEL) {
+        closeNodesFilterDialog();
+    }
+}
+
+static void onNodesFilterInputEvent(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_READY) return;
+    const char *text = (s_nodesFilterInput) ? lv_textarea_get_text(s_nodesFilterInput) : "";
+    applyNodesFilterText(text);
+    closeNodesFilterDialog();
+}
+
+static void openNodesFilterDialog() {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!s_nodesModal || s_nodesFilterDialog) return;
+
+    int dialogW = lv_disp_get_hor_res(NULL);
+    int dialogH = lv_disp_get_ver_res(NULL);
+    if (dialogW < 180) dialogW = lv_obj_get_width(s_nodesModal);
+    if (dialogH < 120) dialogH = lv_obj_get_height(s_nodesModal);
+
+    s_nodesFilterDialog = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_nodesFilterDialog, dialogW, dialogH);
+    lv_obj_align(s_nodesFilterDialog, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(s_nodesFilterDialog, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_nodesFilterDialog, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_style_bg_color(s_nodesFilterDialog, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterDialog, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
+    lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
+    lv_obj_set_style_pad_row(s_nodesFilterDialog, 3, 0);
+    lv_obj_set_flex_flow(s_nodesFilterDialog, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodesFilterDialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_nodesFilterDialog);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "Filter Nodes");
+
+    s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
+    lv_obj_set_width(s_nodesFilterInput, lv_pct(100));
+    lv_obj_set_height(s_nodesFilterInput, 28);
+    lv_obj_set_style_text_font(s_nodesFilterInput, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_nodesFilterInput, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(s_nodesFilterInput, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterInput, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodesFilterInput, 1, 0);
+    lv_obj_set_style_border_color(s_nodesFilterInput, lv_color_hex(0x4C76BA), 0);
+    lv_obj_set_style_pad_left(s_nodesFilterInput, 3, 0);
+    lv_obj_set_style_pad_right(s_nodesFilterInput, 3, 0);
+    lv_textarea_set_one_line(s_nodesFilterInput, true);
+    lv_textarea_set_max_length(s_nodesFilterInput, kNodesFilterMax);
+    lv_textarea_set_placeholder_text(s_nodesFilterInput, "Type to filter nodes");
+    if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+        lv_textarea_set_text(s_nodesFilterInput, s_nodesFilter);
+    } else {
+        lv_textarea_set_text(s_nodesFilterInput, "");
+    }
+    lv_textarea_set_cursor_pos(s_nodesFilterInput, LV_TEXTAREA_CURSOR_LAST);
+    lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
+
+    s_nodesFilterKeyboard = lv_keyboard_create(s_nodesFilterDialog);
+    lv_obj_set_width(s_nodesFilterKeyboard, lv_pct(100));
+    lv_obj_set_flex_grow(s_nodesFilterKeyboard, 1);
+    lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
+    lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+    lv_obj_move_foreground(s_nodesFilterDialog);
+#endif
+}
+
+static void onNodesFilterButtonPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    openNodesFilterDialog();
 }
 
 static bool nodesSnapshotContains(uint32_t nodeId) {
@@ -4755,9 +4975,11 @@ static void refreshNodesListSelection() {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
         bool selected = (i == s_nodesSelected);
-        lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
-            ? lv_color_hex(0xE8F1FF)
-            : lv_color_hex(0xEAF3FF);
+        lv_color_t rowTextColor = lv_color_hex(0xE8F1FF);
+        if (s_cfg.uiMode != UI_MODE_LIGHT) {
+            // Dark themes: keep node names brighter for better list readability.
+            rowTextColor = selected ? lv_color_hex(0xFFFFFF) : lv_color_hex(0xF2F8FF);
+        }
         lv_obj_set_style_bg_color(row, selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266), 0);
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
@@ -4821,6 +5043,7 @@ static void refreshNodesDetails() {
         snprintf(pos, sizeof(pos), "No position data");
     }
 
+    const bool useImperial = (s_cfg.displayUnits != 0);
     char telem[220];
     if (n.hasTelemetry) {
         telem[0] = '\0';
@@ -4836,11 +5059,21 @@ static void refreshNodesDetails() {
             if (telem[0]) {
                 snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem), "\n");
             }
-            snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                     "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
-                     (double)n.temperatureC,
-                     (double)n.humidityPct,
-                     (double)n.pressureHpa);
+            if (useImperial) {
+                float tempF = n.temperatureC * (9.0f / 5.0f) + 32.0f;
+                float pressureInHg = n.pressureHpa * 0.0295299831f;
+                snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                         "Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg",
+                         (double)tempF,
+                         (double)n.humidityPct,
+                         (double)pressureInHg);
+            } else {
+                snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                         "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
+                         (double)n.temperatureC,
+                         (double)n.humidityPct,
+                         (double)n.pressureHpa);
+            }
         }
         if (!telem[0]) {
             snprintf(telem, sizeof(telem), "No telemetry data");
@@ -5047,7 +5280,6 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
         }
     };
 
-    appendEdges(route, routeCount, false);
     appendEdges(routeBack, routeBackCount, viaMqtt);
 
     if (edgeCount == 0 && routeCount > 0 && s_myNodeId != 0) {
@@ -6706,6 +6938,29 @@ static void openNodesModal() {
     lv_label_set_text(title, "NODES");
     lv_obj_center(title);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    s_nodesFilterBtn = lv_btn_create(header);
+    lv_obj_set_size(s_nodesFilterBtn, 58, 20);
+    lv_obj_align(s_nodesFilterBtn, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_set_style_radius(s_nodesFilterBtn, 4, 0);
+    lv_obj_set_style_pad_left(s_nodesFilterBtn, 6, 0);
+    lv_obj_set_style_pad_right(s_nodesFilterBtn, 6, 0);
+    lv_obj_set_style_pad_top(s_nodesFilterBtn, 1, 0);
+    lv_obj_set_style_pad_bottom(s_nodesFilterBtn, 1, 0);
+    lv_obj_set_style_shadow_width(s_nodesFilterBtn, 0, 0);
+    lv_obj_set_style_bg_color(s_nodesFilterBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_nodesFilterBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_nodesFilterBtn, 1, 0);
+    lv_obj_set_style_border_color(s_nodesFilterBtn, lv_color_hex(0x335D9D), 0);
+    lv_obj_add_event_cb(s_nodesFilterBtn, onNodesFilterButtonPressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *filterLabel = lv_label_create(s_nodesFilterBtn);
+    lv_obj_set_style_text_font(filterLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(filterLabel, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(filterLabel, "Filter");
+    lv_obj_center(filterLabel);
+#endif
+
     lv_obj_t *content = lv_obj_create(s_nodesModal);
     lv_obj_set_width(content, lv_pct(100));
     lv_obj_set_flex_grow(content, 1);
@@ -6827,21 +7082,23 @@ static void openLegendModal() {
     closeDmModal();
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
-    int modalH = 118;
+    int modalH = 132;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    modalH = 126;
+    modalH = 142;
 #if defined(DEVICE_UI_VERTICAL)
     // Vertical Heltec wraps legend body text into more lines; reserve extra
     // height so the Close button remains fully visible with padding.
-    modalH = 146;
+    modalH = 162;
 #endif
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    modalH = 126;
+    modalH = 146;
 #endif
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK)
+    const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *legendBodyFont = &lv_font_montserrat_12;
 #else
     const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
@@ -6856,6 +7113,7 @@ static void openLegendModal() {
     lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_AUTO);
 #else
     lv_obj_clear_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_OFF);
 #endif
     lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_legendModal, LV_OPA_COVER, 0);
@@ -6877,7 +7135,7 @@ static void openLegendModal() {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Legend");
+    lv_label_set_text(title, "Help");
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_t *body = lv_label_create(s_legendModal);
@@ -6888,7 +7146,7 @@ static void openLegendModal() {
     lv_label_set_text_fmt(
         body,
         "Touch Navigation:\n"
-        "Use bottom buttons for Config, DM, Nodes, Live, Legend.\n"
+        "Use bottom buttons for Config, DM, Nodes, Live, Help.\n"
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -6912,27 +7170,59 @@ static void openLegendModal() {
     lv_obj_set_style_text_font(leftCol, legendBodyFont, 0);
     lv_obj_set_style_text_color(leftCol, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(leftCol, LV_LABEL_LONG_WRAP);
+#if defined(DEVICE_TDECK)
     lv_label_set_text(
         leftCol,
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
-        "L(i)ve (C clears log)\n"
-        "(Enter) Compose/Reply\n"
-        "(Bksp) Clear Selection");
+        "(L) Live (C clears log)\n"
+        "(H) Help\n"
+        "(Enter) Compose/Reply");
+#else
+    lv_label_set_text(
+        leftCol,
+        "(D) Direct Messages\n"
+        "(C) Configuration\n"
+        "(N) Nodes\n"
+        "(L) Live (C clears log)\n"
+        "(H) Help\n"
+        "(Enter) Compose/Reply");
+#endif
 
-    lv_obj_t *rightCol = lv_label_create(bodyRow);
+    lv_obj_t *rightCol = lv_obj_create(bodyRow);
     lv_obj_set_width(rightCol, lv_pct(50));
-    lv_obj_set_style_text_font(rightCol, legendBodyFont, 0);
-    lv_obj_set_style_text_color(rightCol, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(rightCol, LV_LABEL_LONG_WRAP);
+    lv_obj_set_flex_grow(rightCol, 1);
+    lv_obj_clear_flag(rightCol, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(rightCol, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(rightCol, 0, 0);
+    lv_obj_set_style_pad_all(rightCol, 0, 0);
+    lv_obj_set_style_pad_row(rightCol, 2, 0);
+    lv_obj_set_flex_flow(rightCol, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(rightCol, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *rightMain = lv_label_create(rightCol);
+    lv_obj_set_width(rightMain, lv_pct(100));
+    lv_obj_set_style_text_font(rightMain, legendBodyFont, 0);
+    lv_obj_set_style_text_color(rightMain, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(rightMain, LV_LABEL_LONG_WRAP);
     lv_label_set_text_fmt(
-        rightCol,
+        rightMain,
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
         "%s MQTT Transmission",
         LV_SYMBOL_RADIO_TINY,
         LV_SYMBOL_GLOBE_TINY);
+
+#if defined(DEVICE_TDECK)
+    lv_obj_t *rightNote = lv_label_create(rightCol);
+    lv_obj_set_width(rightNote, lv_pct(100));
+    // Use a larger font to emphasize this as a bold-style callout.
+    lv_obj_set_style_text_font(rightNote, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(rightNote, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_long_mode(rightNote, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(rightNote, "\nT-Deck trackball: hold click 2s to sleep");
+#endif
 #else
     lv_obj_t *body = lv_label_create(s_legendModal);
     lv_obj_set_width(body, lv_pct(100));
@@ -6944,9 +7234,9 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
-        "L(i)ve (C clears log)\n"
+        "(L) Live (C clears log)\n"
+        "(H) Help\n"
         "(Enter) Compose/Reply\n"
-        "(Bksp) Clear Selection\n"
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -6977,7 +7267,7 @@ static void openLegendModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, legendBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "%s/C/N/I/L = Close", modalCloseKeyLabel());
+    lv_label_set_text(hint, "Backspace to close Help");
 #endif
 
     refreshChatComposeButtonState();
@@ -7280,6 +7570,15 @@ static void activateCfgSelection() {
             return;
         } break;
 
+        case CFG_ACTION_UNITS:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
+            s_cfg.displayUnits = (uint8_t)(s_cfg.displayUnits ? 0 : 1);
+            persistConfigToPrefs();
+            refreshNodesDetails();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Units: %s",
+                     s_cfg.displayUnits ? "Imperial" : "Metric");
+            break;
+
         case CFG_ACTION_ANNOUNCE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ANNOUNCE");
             webCfgQueueAnnounce();
@@ -7349,10 +7648,12 @@ static void pumpKeyboardInput() {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
         // to avoid one-off selection shifts during activation.
         char k = s_keyboard.readKey();
+        bool fromTrackball = false;
         const char *src = "key";
         if (k == KEY_NONE) {
             k = s_keyboard.readTrackball();
             src = "track";
+            fromTrackball = true;
         }
         if (k == KEY_NONE) {
             if (s_cfgModal && s_cfgAwaitEnterRelease) {
@@ -7362,8 +7663,20 @@ static void pumpKeyboardInput() {
             break;
         }
 
+#if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
+        if (k == KEY_ROLLER && s_tdeckSuppressRollerClick) {
+            continue;
+        }
+#endif
+
         if (s_screenAsleep) {
-            wakeScreen();
+            // Rolling the trackball should not wake the display.
+            if (fromTrackball && k != KEY_ROLLER) {
+                continue;
+            }
+            if (!tryWakeScreenFromInput(millis())) {
+                continue;
+            }
             return;
         }
         s_lastActivityMs = millis();
@@ -7837,6 +8150,7 @@ static void pumpKeyboardInput() {
         }
 
         if (s_legendModal) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
             if (k == KEY_SCROLL_UP) {
                 lv_obj_scroll_by(s_legendModal, 0, 18, LV_ANIM_OFF);
                 continue;
@@ -7845,8 +8159,9 @@ static void pumpKeyboardInput() {
                 lv_obj_scroll_by(s_legendModal, 0, -18, LV_ANIM_OFF);
                 continue;
             }
+#endif
             if (isModalCloseKey(k)
-                || k == 'l' || k == 'L') {
+                || k == 'h' || k == 'H') {
                 closeLegendModal();
                 continue;
             }
@@ -7860,14 +8175,14 @@ static void pumpKeyboardInput() {
                 openCfgModal();
                 continue;
             }
-            if (k == 'i' || k == 'I') {
-                closeLegendModal();
-                openLiveModal();
-                continue;
-            }
             if (k == 'n' || k == 'N') {
                 closeLegendModal();
                 openNodesModal();
+                continue;
+            }
+            if (k == 'l' || k == 'L') {
+                closeLegendModal();
+                openLiveModal();
                 continue;
             }
             continue;
@@ -8037,15 +8352,15 @@ static void pumpKeyboardInput() {
             }
 
             if (k == 'l' || k == 'L') {
-                openLegendModal();
+                openLiveModal();
             } else if (k == 'd' || k == 'D') {
                 openDmModal();
             } else if (k == 'c' || k == 'C') {
                 openCfgModal();
             } else if (k == 'n' || k == 'N') {
                 openNodesModal();
-            } else if (k == 'i' || k == 'I') {
-                openLiveModal();
+            } else if (k == 'h' || k == 'H') {
+                openLegendModal();
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             } else if ((k == KEY_ENTER || k == KEY_FN_ENTER)
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
@@ -8642,7 +8957,7 @@ static void lvglTouchRead(lv_indev_drv_t *indev, lv_indev_data_t *data) {
     int32_t ty = 0;
     if (displayDev().getTouch(&tx, &ty)) {
         if (s_screenAsleep) {
-            wakeScreen();
+            (void)tryWakeScreenFromInput(millis());
             data->state = LV_INDEV_STATE_RELEASED;
             return;
         }
@@ -10655,9 +10970,9 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(s_chatShortcutText, "(L)egend");
+    lv_label_set_text(s_chatShortcutText, "(H)elp");
 #else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   L(i)ve   (L)egend");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive   (H)elp");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
@@ -11129,6 +11444,10 @@ void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
     uint32_t now = millis();
+    if (serviceTdeckTrackballSleepHold(now)) {
+        delay(5);
+        return;
+    }
     if (pollUserButton(now)) {
         delay(5);
         return;
