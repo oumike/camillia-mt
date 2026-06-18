@@ -382,9 +382,10 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 }
 #endif
 
-#if defined(DEVICE_TDECK)
-static inline char remapTdeckUiKey(char k, bool allowScrollRemap) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+static inline char remapJkUiKey(char k, bool allowScrollRemap) {
     if (!allowScrollRemap) return k;
+    // Keep vim-style mapping stable everywhere: j=up, k=down.
     if (k == 'j' || k == 'J') return KEY_SCROLL_UP;
     if (k == 'k' || k == 'K') return KEY_SCROLL_DN;
     return k;
@@ -7681,18 +7682,22 @@ static void pumpKeyboardInput() {
         }
         s_lastActivityMs = millis();
 
+        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
+        bool navFromJk = false;
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // Match v1 Cardputer shortcuts: ';' / '.' navigate lists, and
         // the key physically labeled '`' acts as Escape to close modals.
-        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
         k = remapCardputerUiKey(k, !typingContext);
 #endif
 
-#if defined(DEVICE_TDECK)
-    // Optional vim-style navigation keys for every up/down navigation view.
-    bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
-    k = remapTdeckUiKey(k, !typingContext);
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+        navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
+        // Enable vim-style j/k navigation for all keyboard-capable builds.
+        k = remapJkUiKey(k, !typingContext);
 #endif
+
+        const bool invertScrollNav = kPagerWheelChatNav && !navFromJk;
 
         if (s_tracerouteModal) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -7750,7 +7755,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 #endif
-                if (kPagerWheelChatNav) {
+                if (invertScrollNav) {
                     if (s_cfgSelection + 1 < s_cfgActionCount) {
                         s_cfgSelection++;
                         s_cfgLastScrollMs = millis();
@@ -7780,7 +7785,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 #endif
-                if (kPagerWheelChatNav) {
+                if (invertScrollNav) {
                     if (s_cfgSelection > 0) {
                         s_cfgSelection--;
                         s_cfgLastScrollMs = millis();
@@ -7891,7 +7896,7 @@ static void pumpKeyboardInput() {
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                     if (s_dmNodeFilteredCount > 0) {
                         int next = s_dmNodeSelection;
-                        if (kPagerWheelChatNav) {
+                        if (invertScrollNav) {
                             next += (k == KEY_SCROLL_UP) ? 1 : -1;
                         } else {
                             next += (k == KEY_SCROLL_UP) ? -1 : 1;
@@ -7967,8 +7972,8 @@ static void pumpKeyboardInput() {
                 if (s_dmMsgPanelFocused && s_dmSelection > 0 && s_dmMsgList) {
                     const int scrollStep = 18;
                     const int delta = (k == KEY_SCROLL_UP)
-                        ? (kPagerWheelChatNav ? scrollStep : -scrollStep)
-                        : (kPagerWheelChatNav ? -scrollStep : scrollStep);
+                        ? (invertScrollNav ? scrollStep : -scrollStep)
+                        : (invertScrollNav ? -scrollStep : scrollStep);
                     lv_obj_scroll_by(s_dmMsgList, 0, delta, LV_ANIM_OFF);
                     continue;
                 }
@@ -7976,7 +7981,7 @@ static void pumpKeyboardInput() {
                 int totalRows = s_dmConvCount + 1;
                 if (totalRows > 0) {
                     int next = s_dmSelection;
-                    if (kPagerWheelChatNav) {
+                    if (invertScrollNav) {
                         next += (k == KEY_SCROLL_UP) ? 1 : -1;
                     } else {
                         next += (k == KEY_SCROLL_UP) ? -1 : 1;
@@ -8044,7 +8049,7 @@ static void pumpKeyboardInput() {
 
                 if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                     int next = s_nodesActionSelection;
-                    if (kPagerWheelChatNav) {
+                    if (invertScrollNav) {
                         next += (k == KEY_SCROLL_UP) ? 1 : -1;
                     } else {
                         next += (k == KEY_SCROLL_UP) ? -1 : 1;
@@ -8101,7 +8106,7 @@ static void pumpKeyboardInput() {
             }
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 int nextSelected = s_nodesSelected;
-                if (kPagerWheelChatNav) {
+                if (invertScrollNav) {
                     // Pager wheel orientation: UP should move to the next row.
                     nextSelected += (k == KEY_SCROLL_UP) ? 1 : -1;
                 } else {
@@ -8277,7 +8282,8 @@ static void pumpKeyboardInput() {
                         if (isChannelDropdownVisible()) {
                             int next = s_cardputerDropdownSelection;
                             if (next < 0 || next >= MESH_CHANNELS) next = s_activeChannel;
-                            if (kPagerWheelChatNav) {
+                            // Channel selector expects j/k opposite from list navigation.
+                            if (navFromJk || invertScrollNav) {
                                 next += (k == KEY_SCROLL_UP) ? 1 : -1;
                             } else {
                                 next += (k == KEY_SCROLL_UP) ? -1 : 1;
@@ -8321,7 +8327,13 @@ static void pumpKeyboardInput() {
                         int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                         pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
                     } else if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
-                        int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                        // Channel list uses reversed j/k semantics by request.
+                        int navDelta;
+                        if (navFromJk) {
+                            navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
+                        } else {
+                            navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                        }
                         int nextChannel = s_activeChannel + navDelta;
                         if (nextChannel < 0) nextChannel = MESH_CHANNELS - 1;
                         if (nextChannel >= MESH_CHANNELS) nextChannel = 0;
