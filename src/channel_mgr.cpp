@@ -651,6 +651,51 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
     return ok;
 }
 
+bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
+                                  uint32_t nodeBroadcastIntervalS,
+                                  const NeighborEdgeInfo *neighbors,
+                                  size_t neighborCount,
+                                  bool okToMqtt) {
+    if (!Radio.isReady()) return false;
+
+    uint8_t proto[224], cipher[224];
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodeNeighborInfo(myNodeId,
+                                         nodeBroadcastIntervalS,
+                                         neighbors,
+                                         neighborCount,
+                                         proto,
+                                         sizeof(proto),
+                                         bitfield);
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
+                        proto, cipher, protoLen)) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + 224];
+    MeshHdr hdr = {};
+    hdr.to      = 0xFFFFFFFF;
+    hdr.from    = myNodeId;
+    hdr.id      = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    {
+        char live[64];
+        snprintf(live, sizeof(live), "T NBR B %08X %s",
+                 packetId, ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
 bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                               const char *longName, const char *shortName,
                               uint32_t toNodeId, bool wantResponse,

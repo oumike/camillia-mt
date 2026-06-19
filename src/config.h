@@ -120,6 +120,10 @@
 #define MY_TEL_DEV_INTV     3600
 #define MY_TEL_ENV_EN       0
 #define MY_TEL_ENV_INTV     3600
+#define MY_NEIGHBORINFO_EN  0
+#define MY_NEIGHBORINFO_INTV 21600
+#define MY_NEIGHBORINFO_LORA 1
+#define NEIGHBORINFO_MIN_INTERVAL_S 14400
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)

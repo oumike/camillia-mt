@@ -96,6 +96,23 @@ struct TelemetryInfo {
     bool  valid;
 };
 
+static constexpr size_t MESH_NEIGHBOR_MAX = 10;
+
+struct NeighborEdgeInfo {
+    uint32_t nodeId;
+    float    snr;
+    uint32_t lastRxTime;
+    uint32_t nodeBroadcastIntervalS;
+};
+
+struct NeighborInfoPayload {
+    uint32_t nodeId;
+    uint32_t lastSentById;
+    uint32_t nodeBroadcastIntervalS;
+    NeighborEdgeInfo neighbors[MESH_NEIGHBOR_MAX];
+    uint8_t  neighborCount;
+};
+
 // ── Protobuf helpers ──────────────────────────────────────────
 size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val);
 
@@ -109,6 +126,7 @@ bool decodeData(const uint8_t *buf, size_t len,
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
 bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out);
+bool decodeNeighborInfo(const uint8_t *buf, size_t len, NeighborInfoPayload &out);
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Expand a 1-byte PSK to the 16-byte Meshtastic DEFAULT_KEY variant.
@@ -192,6 +210,13 @@ size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
 size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float pressureHpa,
                                   uint8_t *buf, size_t bufLen,
                                   uint32_t bitfield = 0);
+
+size_t encodeNeighborInfo(uint32_t nodeId,
+                          uint32_t nodeBroadcastIntervalS,
+                          const NeighborEdgeInfo *neighbors,
+                          size_t neighborCount,
+                          uint8_t *buf, size_t bufLen,
+                          uint32_t bitfield = 0);
 
 // Encode a ROUTING_APP Data message.
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).

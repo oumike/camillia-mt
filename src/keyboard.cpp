@@ -1,10 +1,6 @@
 #include <Arduino.h>
 #include "keyboard.h"
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-#include "hal/tlora_rotary_decoder.h"
-#endif
-
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #ifdef KEY_BACKSPACE
 #undef KEY_BACKSPACE
@@ -97,13 +93,26 @@ constexpr uint16_t TLORA_BKSP_HOLD_MS = 3000;
 constexpr uint8_t TLORA_KEYNUM_BACKSPACE = 30;
 constexpr uint8_t TLORA_MOD_SHIFT = 0x01;
 constexpr uint8_t TLORA_MOD_SYM = 0x02;
+constexpr int8_t kRotaryDelta[16] = {
+    0, -1,  1,  0,
+    1,  0,  0, -1,
+   -1,  0,  0,  1,
+    0,  1, -1,  0,
+};
+constexpr int8_t kRotaryDetentTransitions = 4;
+constexpr int16_t kRotaryQueueMax = 24;
 
 uint8_t sTloraModifier = 0;
 uint32_t sTloraModifierSetMs = 0;
 bool sTloraBackspaceDown = false;
 bool sTloraBackspaceHoldSent = false;
 uint32_t sTloraBackspaceDownMs = 0;
-TloraRotaryDecoder sTloraRotaryDecoder;
+
+static inline uint8_t tloraReadRotaryAB() {
+    uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
+    uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
+    return (uint8_t)((b << 1) | a);
+}
 
 const char kTloraTapMap[31][3] = {
     {'q', 'Q', '1'},
@@ -311,13 +320,17 @@ void TDeckKeyboard::begin() {
 
     _instance = this;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    // Initialize the dedicated rotary decoder with current A/B line levels.
-    uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
-    uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
-    sTloraRotaryDecoder.reset(a, b, millis());
+    // Use CHANGE interrupts on A/B so every quadrature edge is captured even
+    // under UI load. readTrackball() drains queued detent steps.
+    noInterrupts();
+    _rotaryPrevAB = tloraReadRotaryAB();
+    _rotaryAccum = 0;
+    _rotaryQueued = 0;
+    _click = false;
+    interrupts();
 
-    // TLora pager uses a quadrature wheel (A/B). Decode A/B state in
-    // readTrackball() to avoid direction jitter from edge-only interrupts.
+    if (TBALL_UP >= 0) attachInterrupt(digitalPinToInterrupt(TBALL_UP), _isrPagerRotary, CHANGE);
+    if (TBALL_DOWN >= 0) attachInterrupt(digitalPinToInterrupt(TBALL_DOWN), _isrPagerRotary, CHANGE);
     if (TBALL_CLICK >= 0) attachInterrupt(digitalPinToInterrupt(TBALL_CLICK), _isrClick, FALLING);
 #else
     // Physical mapping (empirically confirmed):
@@ -339,17 +352,44 @@ char TDeckKeyboard::readTrackball() {
     unsigned long now = millis();
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
+    static bool pendingClick = false;
+    static unsigned long pendingClickMs = 0;
+    constexpr unsigned long clickQuietMs = 90;
+    constexpr unsigned long clickExpireMs = 500;
+
     bool clk = false;
+    int16_t queued = 0;
     noInterrupts();
     clk = _click;
     _click = false;
+    queued = _rotaryQueued;
+    if (queued > 0) {
+        _rotaryQueued = queued - 1;
+    } else if (queued < 0) {
+        _rotaryQueued = queued + 1;
+    }
     interrupts();
-    uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
-    uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
-    TloraRotaryAction action = sTloraRotaryDecoder.poll(a, b, clk, now, _lastScrollMs);
-    if (action == TloraRotaryAction::ScrollUp) return KEY_SCROLL_UP;
-    if (action == TloraRotaryAction::ScrollDown) return KEY_SCROLL_DN;
-    if (action == TloraRotaryAction::Click) return KEY_ROLLER;
+
+    if (queued > 0) {
+        _lastScrollMs = now;
+        return KEY_SCROLL_UP;
+    }
+    if (queued < 0) {
+        _lastScrollMs = now;
+        return KEY_SCROLL_DN;
+    }
+
+    if (clk) {
+        pendingClick = true;
+        pendingClickMs = now;
+    }
+    if (pendingClick && (now - _lastScrollMs >= clickQuietMs)) {
+        pendingClick = false;
+        return KEY_ROLLER;
+    }
+    if (pendingClick && (now - pendingClickMs > clickExpireMs)) {
+        pendingClick = false;
+    }
     return KEY_NONE;
 #else
     static unsigned long lastMoveEmitMs = 0;
@@ -611,4 +651,36 @@ void IRAM_ATTR TDeckKeyboard::_isrRight() { if (_instance) _instance->_dx++; }
 void IRAM_ATTR TDeckKeyboard::_isrLeft()  { if (_instance) _instance->_dx--; }
 void IRAM_ATTR TDeckKeyboard::_isrUp()    { if (_instance) _instance->_dy--; }
 void IRAM_ATTR TDeckKeyboard::_isrDown()  { if (_instance) _instance->_dy++; }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+void IRAM_ATTR TDeckKeyboard::_isrPagerRotary() {
+    if (!_instance) return;
+
+    TDeckKeyboard *kb = _instance;
+    uint8_t curr = tloraReadRotaryAB();
+    uint8_t prev = (uint8_t)(kb->_rotaryPrevAB & 0x03);
+    uint8_t idx = (uint8_t)((prev << 2) | curr);
+    int8_t delta = kRotaryDelta[idx];
+
+    kb->_rotaryPrevAB = curr;
+
+    if (delta == 0) {
+        // Invalid jump/noise; clear partial state to avoid drift.
+        if (curr != prev) kb->_rotaryAccum = 0;
+        return;
+    }
+
+    int8_t accum = (int8_t)(kb->_rotaryAccum + delta);
+    if (accum >= kRotaryDetentTransitions) {
+        kb->_rotaryAccum = 0;
+        if (kb->_rotaryQueued < kRotaryQueueMax) kb->_rotaryQueued++;
+        return;
+    }
+    if (accum <= -kRotaryDetentTransitions) {
+        kb->_rotaryAccum = 0;
+        if (kb->_rotaryQueued > -kRotaryQueueMax) kb->_rotaryQueued--;
+        return;
+    }
+    kb->_rotaryAccum = accum;
+}
+#endif
 void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = true; }

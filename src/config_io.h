@@ -87,6 +87,11 @@ struct RhinoConfig {
     bool     telEnvEnabled;
     uint32_t telEnvIntervalS;
 
+    // Module: Neighbor Info
+    bool     neighborInfoEnabled;
+    uint32_t neighborInfoIntervalS;
+    bool     neighborInfoOverLora;
+
     // Module: Canned Messages
     bool     cannedEnabled;
     char     cannedMessages[200];

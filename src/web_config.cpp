@@ -1192,6 +1192,25 @@ static void sendConfigPage(const char *msg = "") {
     html += "<input type='hidden' name='tel_env_en' value='0'>";
 #endif
     html += "</div>";
+
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Neighborhood Info</h3>";
+    html += "<div class='row2'>";
+    html += "<label>Enabled<select name='neighbor_info_en'>"
+            "<option value='1'"; if ( gCfg->neighborInfoEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->neighborInfoEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    uint32_t neighborInfoIntervalMins = (gCfg->neighborInfoIntervalS >= 60UL)
+        ? (uint32_t)(gCfg->neighborInfoIntervalS / 60UL)
+        : 240UL;
+    if (neighborInfoIntervalMins < 240UL) neighborInfoIntervalMins = 240UL;
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)neighborInfoIntervalMins);
+    html += "<label>Broadcast Interval (min)<input name='neighbor_info_mins' type='number' min='240' value='";
+    html += tmp; html += "'></label></div>";
+    html += "<label>Transmit Over LoRa<select name='neighbor_info_lora'>"
+            "<option value='1'"; if ( gCfg->neighborInfoOverLora) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->neighborInfoOverLora) html += " selected"; html += ">No</option>"
+            "</select></label>";
+
     // Canned Messages
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Canned Messages</h3>";
     html += "<label>Enabled<select name='canned_en'>"
@@ -1514,6 +1533,7 @@ static void sendConfigPage(const char *msg = "") {
                             "if(tag==='N')return 'nodeinfo';"
                             "if(tag==='P')return 'position';"
                             "if(tag==='E')return 'telemetry';"
+                            "if(tag==='G')return 'neighborinfo';"
                             "if(tag==='A')return 'routing';"
                             "return 'data';"
                         "}"
@@ -2037,6 +2057,28 @@ static void handlePostSave() {
     gCfg->telEnvEnabled      = false;
     if (gCfg->telEnvIntervalS < 3600UL) gCfg->telEnvIntervalS = 3600UL;
 #endif
+
+    uint32_t neighborInfoIntervalS = gCfg->neighborInfoIntervalS;
+    if (server.hasArg("neighbor_info_mins")) {
+        long mins = server.arg("neighbor_info_mins").toInt();
+        if (mins < 240L) mins = 240L;
+        neighborInfoIntervalS = (uint32_t)mins * 60UL;
+    } else if (server.hasArg("neighbor_info_intv")) {
+        long sec = server.arg("neighbor_info_intv").toInt();
+        if (sec < (long)NEIGHBORINFO_MIN_INTERVAL_S) sec = (long)NEIGHBORINFO_MIN_INTERVAL_S;
+        neighborInfoIntervalS = (uint32_t)sec;
+    }
+    if (neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
+        neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
+    if (server.hasArg("neighbor_info_en")) {
+        gCfg->neighborInfoEnabled = server.arg("neighbor_info_en").toInt() != 0;
+    }
+    gCfg->neighborInfoIntervalS = neighborInfoIntervalS;
+    if (server.hasArg("neighbor_info_lora")) {
+        gCfg->neighborInfoOverLora = server.arg("neighbor_info_lora").toInt() != 0;
+    }
+
     gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
     if (server.hasArg("canned_msgs")) {
         strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);

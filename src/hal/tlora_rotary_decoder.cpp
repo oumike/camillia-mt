@@ -15,7 +15,8 @@ constexpr uint8_t R_CW_BEGIN_M = 0x4;
 constexpr uint8_t R_CCW_BEGIN_M = 0x5;
 
 // Ben Buxton half-step table (same core algorithm as Rotary.cpp with HALF_STEP).
-// This emits on both 00 and 11 phases for higher sensitivity in both directions.
+// The raw decoder emits on both 00 and 11 phases; a larger debounce below
+// coalesces those into one movement per physical wheel click.
 constexpr uint8_t kTransitionTable[6][4] = {
     {R_START_M,                      R_CW_BEGIN,      R_CCW_BEGIN,    R_START},
     {static_cast<uint8_t>(R_START_M | DIR_CCW), R_START,         R_CCW_BEGIN,    R_START},
@@ -25,7 +26,7 @@ constexpr uint8_t kTransitionTable[6][4] = {
     {R_START_M,                      R_CCW_BEGIN_M,   R_START_M,      static_cast<uint8_t>(R_START | DIR_CCW)},
 };
 
-constexpr unsigned long kMoveDebounceMs = 2;
+constexpr unsigned long kMoveDebounceMs = 18;
 constexpr unsigned long kClickQuietMs = 70;
 constexpr unsigned long kClickExpireMs = 800;
 constexpr unsigned long kClickEdgeDebounceMs = 80;

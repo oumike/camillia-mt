@@ -220,7 +220,7 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-static int s_cfgActions[14] = {};
+static int s_cfgActions[16] = {};
 static char s_cfgStatus[96] = "";
 static int s_cfgConfirmAction = -1;
 static uint32_t s_cfgConfirmMs = 0;
@@ -246,6 +246,7 @@ static uint32_t s_nextNodeInfoTxMs = 0;
 static uint32_t s_nextPositionTxMs = 0;
 static uint32_t s_nextDeviceTelemetryTxMs = 0;
 static uint32_t s_nextEnvTelemetryTxMs = 0;
+static uint32_t s_nextNeighborInfoTxMs = 0;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -486,6 +487,7 @@ static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
+static void serviceNeighborInfoAnnounce(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void syncWifiCredsToPrefs();
 static void persistWebCfgEnabled();
@@ -771,6 +773,7 @@ enum CfgActionId {
     CFG_ACTION_THEME,
     CFG_ACTION_UNITS,
     CFG_ACTION_ANNOUNCE,
+    CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_CLEAR_MSGS,
@@ -1763,6 +1766,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
+        case CFG_ACTION_NEIGHBOR_INFO:
+            snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
+            break;
         case CFG_ACTION_MSG_ALERT:
             snprintf(buf, bufLen, "Notification Sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
             break;
@@ -2079,6 +2085,9 @@ static void persistConfigToPrefs() {
     p.putULong("telDevIntv", s_cfg.telDeviceIntervalS);
     p.putBool("telEnvEn", s_cfg.telEnvEnabled);
     p.putULong("telEnvIntv", s_cfg.telEnvIntervalS);
+    p.putBool("nbrInfoEn", s_cfg.neighborInfoEnabled);
+    p.putULong("nbrInfoIntv", s_cfg.neighborInfoIntervalS);
+    p.putBool("nbrInfoLoRa", s_cfg.neighborInfoOverLora);
     p.putBool("cannedEn", s_cfg.cannedEnabled);
     p.putString("cannedMsgs", s_cfg.cannedMessages);
     p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
@@ -2249,8 +2258,15 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("telEnvEn")) s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
     ul = prefs.getULong("telEnvIntv", 0);
     if (ul) s_cfg.telEnvIntervalS = ul;
+    if (prefs.isKey("nbrInfoEn")) s_cfg.neighborInfoEnabled = prefs.getBool("nbrInfoEn");
+    ul = prefs.getULong("nbrInfoIntv", 0);
+    if (ul) s_cfg.neighborInfoIntervalS = ul;
+    if (prefs.isKey("nbrInfoLoRa")) s_cfg.neighborInfoOverLora = prefs.getBool("nbrInfoLoRa");
     if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
     if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
+    if (s_cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
+        s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     String canned = getStringIfKey("cannedMsgs");
@@ -2960,6 +2976,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
@@ -7586,6 +7603,19 @@ static void activateCfgSelection() {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "NODEINFO broadcast queued.");
             break;
 
+        case CFG_ACTION_NEIGHBOR_INFO:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NEIGHBOR_INFO");
+            s_cfg.neighborInfoEnabled = !s_cfg.neighborInfoEnabled;
+            persistConfigToPrefs();
+            if (s_cfg.neighborInfoEnabled) {
+                s_nextNeighborInfoTxMs = 0;
+            }
+            snprintf(s_cfgStatus,
+                     sizeof(s_cfgStatus),
+                     "Neighborhood info: %s",
+                     s_cfg.neighborInfoEnabled ? "On" : "Off");
+            break;
+
         case CFG_ACTION_MSG_ALERT:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MSG_ALERT");
             s_cfg.msgAlertSound = (uint8_t)((s_cfg.msgAlertSound + 1) % 4);
@@ -8496,6 +8526,9 @@ static void onWebCfgSaved() {
 #endif
     if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
     if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
+    if (s_cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
+        s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
 
     persistConfigToPrefs();
     persistChannelsToPrefs();
@@ -9766,6 +9799,9 @@ static void loadConfigFromSd() {
 #endif
     if (s_cfg.telDeviceIntervalS < 3600UL) s_cfg.telDeviceIntervalS = 3600UL;
     if (s_cfg.telEnvIntervalS < 3600UL) s_cfg.telEnvIntervalS = 3600UL;
+    if (s_cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
+        s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
     loadChannelsFromPrefs();
     applyUiThemePalette();
     myDeviceRole = s_cfg.deviceRole;
@@ -10280,6 +10316,22 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             return false;
         }
 
+        case NEIGHBORINFO_APP: {
+            NeighborInfoPayload n = {};
+            if (decodeNeighborInfo(pkt.payload, pkt.payloadLen, n)) {
+                debugLogMessages("[neighborinfo] from=!%08lx node=!%08lx neighbors=%u interval=%lus\n",
+                                 (unsigned long)pkt.hdr.from,
+                                 (unsigned long)n.nodeId,
+                                 (unsigned)n.neighborCount,
+                                 (unsigned long)n.nodeBroadcastIntervalS);
+            }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
+            appendLiveRxSummary(pkt, chanIdx, "G");
+            return false;
+        }
+
         case TRACEROUTE_APP: {
             tracerouteProgressOnResponse(pkt);
             if (wantsAck && addressedToMe) {
@@ -10408,6 +10460,9 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
 #if HAS_ENV_SENSOR_TELEMETRY
         if (s_cfg.telEnvEnabled) s_nextEnvTelemetryTxMs = 0;
 #endif
+        if (s_cfg.neighborInfoEnabled && s_cfg.neighborInfoOverLora) {
+            s_nextNeighborInfoTxMs = 0;
+        }
     }
 }
 
@@ -10454,6 +10509,42 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
         else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, nowMs);
     }
 #endif
+}
+
+static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
+    bool due = s_cfg.neighborInfoEnabled
+        && s_cfg.neighborInfoOverLora
+        && announceDue(nowMs, s_nextNeighborInfoTxMs, s_cfg.neighborInfoIntervalS);
+
+    if (!due) return;
+    if (!s_radioReady) return;
+
+    NeighborEdgeInfo neighbors[MESH_NEIGHBOR_MAX] = {};
+    size_t neighborCount = 0;
+    int totalNodes = Nodes.count();
+    for (int rank = 0; rank < totalNodes && neighborCount < MESH_NEIGHBOR_MAX; rank++) {
+        NodeEntry *entry = Nodes.getByRank(rank);
+        if (!entry || entry->nodeId == 0 || entry->nodeId == s_myNodeId) continue;
+        if (entry->hops != 0) continue;
+        if (entry->lastHeardMs == 0) continue;
+
+        neighbors[neighborCount].nodeId = entry->nodeId;
+        neighbors[neighborCount].snr = entry->snr;
+        neighborCount++;
+    }
+
+    if (neighborCount == 0) {
+        scheduleAnnounceNext(s_nextNeighborInfoTxMs, nowMs, s_cfg.neighborInfoIntervalS);
+        return;
+    }
+
+    bool ok = Channels.sendNeighborInfo(s_myNodeId,
+                                        s_cfg.neighborInfoIntervalS,
+                                        neighbors,
+                                        neighborCount,
+                                        s_cfg.okToMqtt);
+    if (ok) scheduleAnnounceNext(s_nextNeighborInfoTxMs, nowMs, s_cfg.neighborInfoIntervalS);
+    else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, nowMs);
 }
 
 static void refreshChatView(bool force) {
@@ -11479,6 +11570,7 @@ void loop() {
     gpsLoop();
     serviceNodeInfoAnnounce(now);
     serviceTelemetryAnnounce(now);
+    serviceNeighborInfoAnnounce(now);
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0

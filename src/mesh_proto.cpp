@@ -258,6 +258,96 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
     return true;
 }
 
+bool decodeNeighborInfo(const uint8_t *buf, size_t len, NeighborInfoPayload &out) {
+    memset(&out, 0, sizeof(out));
+    size_t i = 0;
+
+    auto readNodeId = [&](const uint8_t *src, size_t srcLen, size_t &off, uint32_t wt, uint32_t &dst) -> bool {
+        if (wt == 0) {
+            uint64_t v = 0;
+            size_t next = pbReadVarint(src, srcLen, off, v);
+            if (!next) return false;
+            off = next;
+            dst = (uint32_t)v;
+            return true;
+        }
+        if (wt == 5) {
+            if (off + 4 > srcLen) return false;
+            uint32_t v = (uint32_t)src[off]
+                       | ((uint32_t)src[off + 1] << 8)
+                       | ((uint32_t)src[off + 2] << 16)
+                       | ((uint32_t)src[off + 3] << 24);
+            off += 4;
+            dst = v;
+            return true;
+        }
+        return false;
+    };
+
+    while (i < len) {
+        uint64_t tag = 0;
+        i = pbReadVarint(buf, len, i, tag);
+        if (!i) break;
+
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint32_t wt = (uint32_t)(tag & 7);
+
+        if (field == 1) {
+            if (!readNodeId(buf, len, i, wt, out.nodeId)) break;
+        } else if (field == 2) {
+            if (!readNodeId(buf, len, i, wt, out.lastSentById)) break;
+        } else if (field == 3 && wt == 0) {
+            uint64_t v = 0;
+            i = pbReadVarint(buf, len, i, v);
+            if (!i) break;
+            out.nodeBroadcastIntervalS = (uint32_t)v;
+        } else if (field == 4 && wt == 2) {
+            uint64_t sz = 0;
+            size_t j = pbReadVarint(buf, len, i, sz);
+            if (!j) break;
+            if (j + sz > len) break;
+
+            if (out.neighborCount < MESH_NEIGHBOR_MAX) {
+                NeighborEdgeInfo edge = {};
+                size_t k = j;
+                size_t kEnd = j + (size_t)sz;
+                while (k < kEnd) {
+                    uint64_t t2 = 0;
+                    k = pbReadVarint(buf, kEnd, k, t2);
+                    if (!k) break;
+
+                    uint32_t f2 = (uint32_t)(t2 >> 3);
+                    uint32_t w2 = (uint32_t)(t2 & 7);
+                    if (f2 == 1) {
+                        if (!readNodeId(buf, kEnd, k, w2, edge.nodeId)) break;
+                    } else if (f2 == 2 && w2 == 5) {
+                        if (k + 4 > kEnd) break;
+                        memcpy(&edge.snr, buf + k, 4);
+                        k += 4;
+                    } else if (f2 == 3) {
+                        if (!readNodeId(buf, kEnd, k, w2, edge.lastRxTime)) break;
+                    } else if (f2 == 4) {
+                        if (!readNodeId(buf, kEnd, k, w2, edge.nodeBroadcastIntervalS)) break;
+                    } else {
+                        k = pbSkip(buf, kEnd, k, w2);
+                        if (!k) break;
+                    }
+                }
+                if (edge.nodeId != 0) {
+                    out.neighbors[out.neighborCount++] = edge;
+                }
+            }
+
+            i = j + (size_t)sz;
+        } else {
+            i = pbSkip(buf, len, i, wt);
+            if (!i) break;
+        }
+    }
+
+    return true;
+}
+
 // ── AES-CTR core ─────────────────────────────────────────────
 static bool aesCtr(const uint8_t *key, uint8_t keyLen,
                    uint32_t packetId, uint32_t fromNode,
@@ -710,6 +800,74 @@ size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float p
     if (n + t > bufLen) return 0;
     memcpy(buf + n, telem, t);
     n += t;
+
+    if (bitfield) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (9 << 3) | 0);
+        n += pbWriteVarint(buf + n, bitfield);
+    }
+
+    return n;
+}
+
+size_t encodeNeighborInfo(uint32_t nodeId,
+                          uint32_t nodeBroadcastIntervalS,
+                          const NeighborEdgeInfo *neighbors,
+                          size_t neighborCount,
+                          uint8_t *buf, size_t bufLen,
+                          uint32_t bitfield) {
+    if (neighborCount > 0 && neighbors == nullptr) return 0;
+    if (neighborCount > MESH_NEIGHBOR_MAX) neighborCount = MESH_NEIGHBOR_MAX;
+
+    uint8_t info[208];
+    size_t p = 0;
+
+    // NeighborInfo.node_id
+    p += pbWriteVarint(info + p, (1 << 3) | 0);
+    p += pbWriteVarint(info + p, nodeId);
+
+    // NeighborInfo.last_sent_by_id
+    p += pbWriteVarint(info + p, (2 << 3) | 0);
+    p += pbWriteVarint(info + p, nodeId);
+
+    // NeighborInfo.node_broadcast_interval_secs
+    p += pbWriteVarint(info + p, (3 << 3) | 0);
+    p += pbWriteVarint(info + p, nodeBroadcastIntervalS);
+
+    for (size_t idx = 0; idx < neighborCount; idx++) {
+        const NeighborEdgeInfo &edge = neighbors[idx];
+        if (edge.nodeId == 0) continue;
+
+        uint8_t edgeMsg[24];
+        size_t e = 0;
+
+        // Neighbor.node_id
+        e += pbWriteVarint(edgeMsg + e, (1 << 3) | 0);
+        e += pbWriteVarint(edgeMsg + e, edge.nodeId);
+
+        // Neighbor.snr
+        edgeMsg[e++] = (2 << 3) | 5;
+        memcpy(edgeMsg + e, &edge.snr, 4);
+        e += 4;
+
+        // Fields 3 and 4 are local-storage metadata in Meshtastic and are not
+        // sent over mesh links, so they are intentionally omitted.
+
+        if (p + e + 3 > sizeof(info)) break;
+        p += pbWriteVarint(info + p, (4 << 3) | 2);
+        p += pbWriteVarint(info + p, e);
+        memcpy(info + p, edgeMsg, e);
+        p += e;
+    }
+
+    size_t n = 0;
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, NEIGHBORINFO_APP);
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, p);
+    if (n + p > bufLen) return 0;
+    memcpy(buf + n, info, p);
+    n += p;
 
     if (bitfield) {
         if (n + 6 > bufLen) return 0;

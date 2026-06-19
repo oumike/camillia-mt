@@ -281,6 +281,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.telDeviceIntervalS = MY_TEL_DEV_INTV;
     cfg.telEnvEnabled      = HAS_ENV_SENSOR_TELEMETRY ? (bool)MY_TEL_ENV_EN : false;
     cfg.telEnvIntervalS    = MY_TEL_ENV_INTV;
+    cfg.neighborInfoEnabled = MY_NEIGHBORINFO_EN;
+    cfg.neighborInfoIntervalS = MY_NEIGHBORINFO_INTV;
+    cfg.neighborInfoOverLora = MY_NEIGHBORINFO_LORA;
     cfg.cannedEnabled      = MY_CANNED_EN;
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
@@ -501,6 +504,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    deviceUpdateInterval: %lu\n",  (unsigned long)cfg.telDeviceIntervalS);    out += tmp;
     snprintf(tmp, sizeof(tmp), "    environmentMeasurementEnabled: %s\n", cfg.telEnvEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    environmentUpdateInterval: %lu\n",    (unsigned long)cfg.telEnvIntervalS);    out += tmp;
+    out += "  neighbor_info:\n";
+    snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.neighborInfoEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    update_interval: %lu\n", (unsigned long)cfg.neighborInfoIntervalS); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    transmit_over_lora: %s\n", cfg.neighborInfoOverLora ? "true" : "false"); out += tmp;
     // owner
     out += "owner: ";       out += cfg.nodeLong;  out += "\n";
     out += "owner_short: "; out += cfg.nodeShort; out += "\n";
@@ -757,6 +764,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "deviceUpdateInterval"))          cfg.telDeviceIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "environmentMeasurementEnabled")) cfg.telEnvEnabled      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "environmentUpdateInterval"))     cfg.telEnvIntervalS    = (uint32_t)atol(val);
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "neighbor_info")) {
+                if      (!strcmp(key, "enabled"))            cfg.neighborInfoEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "update_interval"))    cfg.neighborInfoIntervalS = (uint32_t)atol(val);
+                else if (!strcmp(key, "transmit_over_lora")) cfg.neighborInfoOverLora = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "channels") && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
@@ -769,6 +780,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
     if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
     if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;
+    if (cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
+        cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
+    }
 #if !HAS_ENV_SENSOR_TELEMETRY
     cfg.telEnvEnabled = false;
 #endif

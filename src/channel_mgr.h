@@ -80,6 +80,13 @@ public:
                                   float temperatureC, float humidityPct, float pressureHpa,
                                   bool okToMqtt = false);
 
+    // Broadcast NEIGHBORINFO_APP on LongFast.
+    bool sendNeighborInfo(uint32_t myNodeId,
+                          uint32_t nodeBroadcastIntervalS,
+                          const NeighborEdgeInfo *neighbors,
+                          size_t neighborCount,
+                          bool okToMqtt = false);
+
     // Clear all channel messages in memory and optionally remove persisted logs.
     void clearAllMessages(bool clearPersisted = true);
 

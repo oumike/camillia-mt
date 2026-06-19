@@ -31,6 +31,11 @@ public:
     volatile int8_t _dx    = 0;
     volatile int8_t _dy    = 0;
     volatile bool   _click = false;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    volatile uint8_t _rotaryPrevAB = 0;
+    volatile int8_t  _rotaryAccum = 0;
+    volatile int16_t _rotaryQueued = 0;
+#endif
     static TDeckKeyboard *_instance;
 
     unsigned long _lastScrollMs = 0;  // tracks most recent scroll event for click guard
@@ -57,6 +62,9 @@ private:
     static void IRAM_ATTR _isrUp();
     static void IRAM_ATTR _isrDown();
     static void IRAM_ATTR _isrClick();
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    static void IRAM_ATTR _isrPagerRotary();
+#endif
 };
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
