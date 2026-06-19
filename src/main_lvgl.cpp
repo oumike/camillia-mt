@@ -2255,7 +2255,16 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("telDevEn")) s_cfg.telDeviceEnabled = prefs.getBool("telDevEn");
     ul = prefs.getULong("telDevIntv", 0);
     if (ul) s_cfg.telDeviceIntervalS = ul;
-    if (prefs.isKey("telEnvEn")) s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
+    bool hasTelEnvPref = prefs.isKey("telEnvEn");
+    if (hasTelEnvPref) {
+        s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
+#if HAS_ENV_SENSOR_TELEMETRY
+    } else {
+        // On sensor-capable targets, enable env telemetry by default unless
+        // the user explicitly saved a preference.
+        s_cfg.telEnvEnabled = true;
+#endif
+    }
     ul = prefs.getULong("telEnvIntv", 0);
     if (ul) s_cfg.telEnvIntervalS = ul;
     if (prefs.isKey("nbrInfoEn")) s_cfg.neighborInfoEnabled = prefs.getBool("nbrInfoEn");
@@ -3382,6 +3391,21 @@ static const char *liveDestLabel(const char *tag) {
     return "node";
 }
 
+static const char *liveTxResultLabel(const char *tag) {
+    if (!tag || !tag[0]) return "unknown";
+    if (strcmp(tag, "OK") == 0) return "sent";
+    if (strcmp(tag, "ER") == 0) return "failed";
+    if (strcmp(tag, "NR") == 0) return "radio not ready";
+    return tag;
+}
+
+static const char *liveTelemetryKindLabel(const char *tag) {
+    if (!tag || !tag[0]) return "telemetry";
+    if (strcmp(tag, "D") == 0) return "device telemetry";
+    if (strcmp(tag, "E") == 0) return "environment telemetry";
+    return "telemetry";
+}
+
 static const char *routingErrorName(uint32_t errorReason) {
     switch (errorReason) {
         case 0:  return "NONE";
@@ -3480,6 +3504,14 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
         return;
     }
 
+    if (sscanf(body, "T TXT %7s NR", dst) == 1) {
+        if (ts[0]) snprintf(out, outLen, "%s TX text to %s not sent (radio not ready)",
+                            ts, liveDestLabel(dst));
+        else snprintf(out, outLen, "TX text to %s not sent (radio not ready)",
+                      liveDestLabel(dst));
+        return;
+    }
+
     if (sscanf(body, "T TXT %7s ER", dst) == 1) {
         if (ts[0]) snprintf(out, outLen, "%s TX text to %s FAILED",
                             ts, liveDestLabel(dst));
@@ -3505,6 +3537,32 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
                       (strcmp(dst, "U") == 0) ? "unicast" : "broadcast",
                       who,
                       stat);
+        return;
+    }
+
+    if (sscanf(body, "T TEL %7s %15s %11s", dst, id, stat) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX %s to broadcast id:%s (%s)",
+                            ts,
+                            liveTelemetryKindLabel(dst),
+                            id,
+                            liveTxResultLabel(stat));
+        else snprintf(out, outLen, "TX %s to broadcast id:%s (%s)",
+                      liveTelemetryKindLabel(dst),
+                      id,
+                      liveTxResultLabel(stat));
+        return;
+    }
+
+    if (sscanf(body, "T NBR %7s %15s %11s", dst, id, stat) == 3) {
+        if (ts[0]) snprintf(out, outLen, "%s TX neighborhood info to %s id:%s (%s)",
+                            ts,
+                            liveDestLabel(dst),
+                            id,
+                            liveTxResultLabel(stat));
+        else snprintf(out, outLen, "TX neighborhood info to %s id:%s (%s)",
+                      liveDestLabel(dst),
+                      id,
+                      liveTxResultLabel(stat));
         return;
     }
 
@@ -3569,7 +3627,7 @@ static LiveTrafficClass classifyLiveTraffic(const DisplayLine &dl) {
     if (strncmp(body, "T TXT", 5) == 0) return LIVE_TRAFFIC_TX_TEXT;
     if (strncmp(body, "T NOD", 5) == 0) return LIVE_TRAFFIC_TX_NODE;
     if (strncmp(body, "T POS", 5) == 0) return LIVE_TRAFFIC_TX_POS;
-    if (strncmp(body, "T TLM", 5) == 0) return LIVE_TRAFFIC_TX_TLM;
+    if (strncmp(body, "T TLM", 5) == 0 || strncmp(body, "T TEL", 5) == 0) return LIVE_TRAFFIC_TX_TLM;
     if (strncmp(body, "R ", 2) == 0) return LIVE_TRAFFIC_RX_OTHER;
     if (strncmp(body, "T ", 2) == 0) return LIVE_TRAFFIC_TX_OTHER;
 
@@ -3630,6 +3688,18 @@ static lv_color_t liveLineBgColor(const DisplayLine &dl) {
         default:
             return lv_color_hex(0x10254A);
     }
+}
+
+static lv_color_t liveListBackdropColor() {
+    if (s_cfg.uiMode == UI_MODE_LIGHT) {
+        // Keep live-log canvas dark in light mode for text readability.
+        return lv_color_make(0x0F, 0x2A, 0x5C);
+    }
+    return lv_color_hex(0x0F2A5C);
+}
+
+static lv_opa_t liveListBackdropOpa() {
+    return (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_50;
 }
 
 static lv_color_t tftColorToLv(uint16_t c) {
@@ -5904,8 +5974,8 @@ static void openLiveModal() {
     lv_obj_add_flag(s_liveList, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_liveList, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_liveList, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(s_liveList, LV_OPA_50, 0);
+    lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
+    lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
     lv_obj_set_style_border_width(s_liveList, 1, 0);
     lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_liveList, 0, 0);
@@ -10490,7 +10560,9 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
     if (envDue) {
         bool hasSensor = envHasSensor() || envBegin();
         if (!hasSensor) {
-            scheduleAnnounceNext(s_nextEnvTelemetryTxMs, nowMs, s_cfg.telEnvIntervalS);
+            // If the sensor was slow to come up at boot, retry sooner than the
+            // full telemetry interval so env telemetry starts promptly.
+            s_nextEnvTelemetryTxMs = nowMs + 30000UL;
             return;
         }
 
@@ -11370,7 +11442,8 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
         lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
     }
     if (s_liveList) {
-        lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x0F2A5C), 0);
+        lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
+        lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
         lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
         lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
         refreshLiveView(true);

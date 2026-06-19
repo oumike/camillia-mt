@@ -9,9 +9,10 @@
 #include <math.h>
 
 static Adafruit_BME280 gBme280;
-static bool gTriedInit = false;
 static bool gReady = false;
 static uint8_t gI2cAddr = 0;
+static uint32_t gLastInitAttemptMs = 0;
+static bool gLoggedProbeFailure = false;
 
 static TwoWire &envWire() {
 #if (TOUCH_I2C_PORT == 1)
@@ -22,8 +23,13 @@ static TwoWire &envWire() {
 }
 
 bool envBegin() {
-    if (gTriedInit) return gReady;
-    gTriedInit = true;
+    if (gReady) return true;
+
+    uint32_t nowMs = millis();
+    if (gLastInitAttemptMs != 0 && (uint32_t)(nowMs - gLastInitAttemptMs) < 5000UL) {
+        return false;
+    }
+    gLastInitAttemptMs = nowMs;
 
     TwoWire &w = envWire();
     w.begin(TOUCH_SDA, TOUCH_SCL, 400000U);
@@ -34,8 +40,15 @@ bool envBegin() {
         if (gBme280.begin(addr, &w)) {
             gReady = true;
             gI2cAddr = addr;
+            Serial.printf("[env] detected %s\n", envSensorName());
+            gLoggedProbeFailure = false;
             break;
         }
+    }
+
+    if (!gReady && !gLoggedProbeFailure) {
+        Serial.println("[env] sensor probe failed (0x76/0x77)");
+        gLoggedProbeFailure = true;
     }
 
     return gReady;
