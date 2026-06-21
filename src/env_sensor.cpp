@@ -1,3 +1,10 @@
+// env_sensor.cpp — Heltec V4 expansion environment sensor backend.
+//
+// Detects and reads one of BME280, BMP280, or AHT20 over I2C across a small
+// set of known Heltec routes. Boot-time probing is conservative; deeper
+// diagnostics are exposed via envDebugScan()/envDebugFullScan() so they can
+// be triggered from the serial CLI without scanning at every boot.
+
 #include "env_sensor.h"
 #include "config.h"
 
@@ -8,6 +15,8 @@
 #include <Adafruit_BME280.h>
 #include <Adafruit_BMP280.h>
 #include <math.h>
+
+// ── Backend state ─────────────────────────────────────────────────────────────
 
 enum EnvBackend : uint8_t {
     ENV_BACKEND_NONE = 0,
@@ -28,31 +37,55 @@ static const char *gProbeRoute = nullptr;
 static uint32_t gLastInitAttemptMs = 0;
 static bool gLoggedProbeFailure = false;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-static constexpr int kHeltecAltEnvSda = 41;
-static constexpr int kHeltecAltEnvScl = 42;
-static constexpr int kHeltecBaseI2cSda = 3;
-static constexpr int kHeltecBaseI2cScl = 4;
-static constexpr int kHeltecOledI2cSda = 17;
-static constexpr int kHeltecOledI2cScl = 18;
+// ── Route table ───────────────────────────────────────────────────────────────
+// Single source of truth for SDA/SCL pin combinations to probe. The first
+// entry is the touch-shared bus; alternate routes are restricted to Wire0 so
+// the touch controller on Wire1 is never reconfigured mid-run.
+
+struct EnvRoute {
+    TwoWire *wire;
+    int sda;
+    int scl;
+    const char *name;
+};
+
+static const EnvRoute kEnvRoutes[] = {
+#if (TOUCH_I2C_PORT == 1)
+    { &Wire1, TOUCH_SDA, TOUCH_SCL, "touch-route" },
+#else
+    { &Wire,  TOUCH_SDA, TOUCH_SCL, "touch-route" },
 #endif
+    { &Wire, 41, 42, "wire0-41/42" },
+    { &Wire,  3,  4, "wire0-3/4"   },
+    { &Wire, 17, 18, "wire0-17/18" },
+};
+static constexpr size_t kEnvRouteCount = sizeof(kEnvRoutes) / sizeof(kEnvRoutes[0]);
 
 static TwoWire &envWire() {
-#if (TOUCH_I2C_PORT == 1)
-    return Wire1;
-#else
-    return Wire;
-#endif
+    return *kEnvRoutes[0].wire;
 }
 
 static Adafruit_BMP280 *envBmpForWire(TwoWire &w) {
     return (&w == &Wire1) ? &gBmp280Wire1 : &gBmp280Wire;
 }
 
+static void envResetCachedState() {
+    gReady = false;
+    gI2cAddr = 0;
+    gBackend = ENV_BACKEND_NONE;
+    gBmp280Active = nullptr;
+    gEnvWireActive = nullptr;
+    gProbeRoute = nullptr;
+    gLastInitAttemptMs = 0;
+    gLoggedProbeFailure = false;
+}
+
 static bool envAddressPresent(TwoWire &w, uint8_t addr) {
     w.beginTransmission(addr);
     return w.endTransmission(true) == 0;
 }
+
+// ── AHT20 minimal driver ──────────────────────────────────────────────────────
 
 static bool envAhtWrite(TwoWire &w, const uint8_t *data, size_t len) {
     w.beginTransmission(0x38);
@@ -107,6 +140,8 @@ static bool envAhtProbe(TwoWire &w) {
     return true;
 }
 
+// ── Chip ID read (BMx280 family register 0xD0) ───────────────────────────────
+
 static bool envReadChipId(TwoWire &w, uint8_t addr, uint8_t &chipId) {
     chipId = 0;
     if (!envAddressPresent(w, addr)) return false;
@@ -119,11 +154,16 @@ static bool envReadChipId(TwoWire &w, uint8_t addr, uint8_t &chipId) {
     return true;
 }
 
+// ── Probe ─────────────────────────────────────────────────────────────────────
+
+// Attempt to initialise a supported sensor on the given bus/pins. On success,
+// sets the module's global state so envRead()/envSensorName() can be used.
 static bool envTryProbe(TwoWire &w, int sda, int scl, const char *routeName, uint32_t freqHz) {
     if (sda < 0 || scl < 0) return false;
 
     w.begin(sda, scl, freqHz);
 
+    // BMx280-family detection: read chip ID at 0xD0 on the two known addresses.
     const uint8_t candidates[] = { 0x76, 0x77 };
     for (size_t i = 0; i < sizeof(candidates); i++) {
         uint8_t addr = candidates[i];
@@ -158,6 +198,7 @@ static bool envTryProbe(TwoWire &w, int sda, int scl, const char *routeName, uin
         }
     }
 
+    // AHT20 fallback (temperature + humidity, no pressure).
     if (envAhtProbe(w)) {
         gReady = true;
         gI2cAddr = 0x38;
@@ -171,6 +212,23 @@ static bool envTryProbe(TwoWire &w, int sda, int scl, const char *routeName, uin
     return false;
 }
 
+// Walk all known routes at both 400kHz and 100kHz looking for a supported
+// sensor. The touch route is probed first to share its existing bus init.
+static bool envTryProbeAllRoutes() {
+    for (size_t i = 0; i < kEnvRouteCount; i++) {
+        const EnvRoute &r = kEnvRoutes[i];
+        if (envTryProbe(*r.wire, r.sda, r.scl, r.name, 400000U)
+            || envTryProbe(*r.wire, r.sda, r.scl, r.name, 100000U)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ── Diagnostics ───────────────────────────────────────────────────────────────
+
+// Lightweight per-route scan: ACKs the addresses we care about and reads
+// chip ID for the BMx280 candidates. Used at boot failure and on `env scan`.
 static void envScanRoute(TwoWire &w, int sda, int scl, const char *routeName) {
     if (sda < 0 || scl < 0) return;
 
@@ -192,16 +250,16 @@ static void envScanRoute(TwoWire &w, int sda, int scl, const char *routeName) {
 
     Serial.printf("[env] scan %s sda=%d scl=%d ack2E=%s ack38=%s ack76=%s ack77=%s ids76/77=%s/%s\n",
                   routeName ? routeName : "route",
-                  sda,
-                  scl,
+                  sda, scl,
                   has2E ? "Y" : "N",
                   has38 ? "Y" : "N",
                   has76 ? "Y" : "N",
                   has77 ? "Y" : "N",
-                  id76Txt,
-                  id77Txt);
+                  id76Txt, id77Txt);
 }
 
+// Exhaustive per-route scan: ACKs every address in 0x03..0x77. Used on
+// `env scan all` to discover unknown sensors.
 static void envScanRouteFull(TwoWire &w, int sda, int scl, const char *routeName) {
     if (sda < 0 || scl < 0) return;
 
@@ -236,96 +294,47 @@ static void envScanRouteFull(TwoWire &w, int sda, int scl, const char *routeName
 
     Serial.printf("[env] full-scan %s sda=%d scl=%d count=%d addrs=%s ids76/77=%s/%s\n",
                   routeName ? routeName : "route",
-                  sda,
-                  scl,
-                  found,
-                  addrs,
-                  id76Txt,
-                  id77Txt);
+                  sda, scl, found, addrs,
+                  id76Txt, id77Txt);
 }
 
-static void envLogProbeRoutes() {
-    TwoWire &primary = envWire();
-    envScanRoute(primary, TOUCH_SDA, TOUCH_SCL, "touch-route");
-
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Keep Wire1 reserved for touch-route so touch input is never disrupted.
-    envScanRoute(Wire, kHeltecAltEnvSda, kHeltecAltEnvScl, "wire0-41/42");
-    envScanRoute(Wire, kHeltecBaseI2cSda, kHeltecBaseI2cScl, "wire0-3/4");
-    envScanRoute(Wire, kHeltecOledI2cSda, kHeltecOledI2cScl, "wire0-17/18");
-#endif
-}
-
-static void envBuildProbeSummary(TwoWire &w, char *out, size_t outLen) {
-    if (!out || outLen == 0) return;
-    out[0] = '\0';
-
-    bool has38 = envAddressPresent(w, 0x38);
-    uint8_t id76 = 0;
-    uint8_t id77 = 0;
-    bool has76 = envReadChipId(w, 0x76, id76);
-    bool has77 = envReadChipId(w, 0x77, id77);
-    if (!has38 && !has76 && !has77) return;
-
-    char a76[8] = "--";
-    char a77[8] = "--";
-    if (has76) snprintf(a76, sizeof(a76), "0x%02X", id76);
-    if (has77) snprintf(a77, sizeof(a77), "0x%02X", id77);
-    snprintf(out, outLen, " ack38=%s ids: 0x76=%s 0x77=%s", has38 ? "Y" : "N", a76, a77);
-}
-
-static bool envTryProbeAllRoutes() {
-    TwoWire &primary = envWire();
-
-    if (envTryProbe(primary, TOUCH_SDA, TOUCH_SCL, "touch-route", 400000U)
-        || envTryProbe(primary, TOUCH_SDA, TOUCH_SCL, "touch-route", 100000U)) {
-        return true;
+// Walk the route table invoking `scanFn` on each entry. Used by both the
+// quick-scan and full-scan diagnostic flows.
+typedef void (*EnvScanFn)(TwoWire &, int, int, const char *);
+static void envForEachRoute(EnvScanFn scanFn) {
+    for (size_t i = 0; i < kEnvRouteCount; i++) {
+        const EnvRoute &r = kEnvRoutes[i];
+        scanFn(*r.wire, r.sda, r.scl, r.name);
     }
-
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (envTryProbe(Wire, kHeltecAltEnvSda, kHeltecAltEnvScl, "wire0-41/42", 400000U)
-        || envTryProbe(Wire, kHeltecAltEnvSda, kHeltecAltEnvScl, "wire0-41/42", 100000U)
-        || envTryProbe(Wire, kHeltecBaseI2cSda, kHeltecBaseI2cScl, "wire0-3/4", 400000U)
-        || envTryProbe(Wire, kHeltecBaseI2cSda, kHeltecBaseI2cScl, "wire0-3/4", 100000U)
-        || envTryProbe(Wire, kHeltecOledI2cSda, kHeltecOledI2cScl, "wire0-17/18", 400000U)
-        || envTryProbe(Wire, kHeltecOledI2cSda, kHeltecOledI2cScl, "wire0-17/18", 100000U)) {
-        return true;
-    }
-#endif
-
-    return false;
 }
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 bool envBegin() {
     if (gReady) return true;
 
     uint32_t nowMs = millis();
+    // Throttle retries so a missing sensor doesn't spam the bus.
     if (gLastInitAttemptMs != 0 && (uint32_t)(nowMs - gLastInitAttemptMs) < 5000UL) {
         return false;
     }
     gLastInitAttemptMs = nowMs;
 
     if (envTryProbeAllRoutes()) {
-        if (gProbeRoute && gProbeRoute[0]) {
-            Serial.printf("[env] detected %s via %s\n", envSensorName(), gProbeRoute);
-        } else {
-            Serial.printf("[env] detected %s\n", envSensorName());
-        }
+        Serial.printf("[env] detected %s via %s\n",
+                      envSensorName(),
+                      (gProbeRoute && gProbeRoute[0]) ? gProbeRoute : "route");
         gLoggedProbeFailure = false;
         return true;
     }
 
-    if (!gReady && !gLoggedProbeFailure) {
-        TwoWire &w = envWire();
-        char probeSummary[48] = {};
-        envBuildProbeSummary(w, probeSummary, sizeof(probeSummary));
-        Serial.printf("[env] sensor probe failed (BME280/BMP280 @0x76/0x77, AHT20 @0x38)%s\n",
-                      probeSummary);
-        envLogProbeRoutes();
+    // Log once per cold-start so failure is visible without repeating.
+    if (!gLoggedProbeFailure) {
+        Serial.println("[env] sensor probe failed (BME280/BMP280 @0x76/0x77, AHT20 @0x38)");
+        envForEachRoute(envScanRoute);
         gLoggedProbeFailure = true;
     }
-
-    return gReady;
+    return false;
 }
 
 bool envHasSensor() {
@@ -379,56 +388,26 @@ const char *envSensorName() {
 }
 
 bool envDebugScan(bool forceReprobe) {
-    if (forceReprobe) {
-        gReady = false;
-        gI2cAddr = 0;
-        gBackend = ENV_BACKEND_NONE;
-        gBmp280Active = nullptr;
-        gEnvWireActive = nullptr;
-        gProbeRoute = nullptr;
-        gLastInitAttemptMs = 0;
-        gLoggedProbeFailure = false;
-    }
+    if (forceReprobe) envResetCachedState();
 
     bool ok = envBegin();
-    if (ok) {
-        envLogProbeRoutes();
-    }
+    if (ok) envForEachRoute(envScanRoute);
     return ok;
 }
 
 bool envDebugFullScan(bool forceReprobe) {
-    if (forceReprobe) {
-        gReady = false;
-        gI2cAddr = 0;
-        gBackend = ENV_BACKEND_NONE;
-        gBmp280Active = nullptr;
-        gEnvWireActive = nullptr;
-        gProbeRoute = nullptr;
-        gLastInitAttemptMs = 0;
-        gLoggedProbeFailure = false;
-    }
+    if (forceReprobe) envResetCachedState();
 
-    TwoWire &primary = envWire();
-    envScanRouteFull(primary, TOUCH_SDA, TOUCH_SCL, "touch-route");
-
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    envScanRouteFull(Wire, kHeltecAltEnvSda, kHeltecAltEnvScl, "wire0-41/42");
-    envScanRouteFull(Wire, kHeltecBaseI2cSda, kHeltecBaseI2cScl, "wire0-3/4");
-    envScanRouteFull(Wire, kHeltecOledI2cSda, kHeltecOledI2cScl, "wire0-17/18");
-#endif
+    envForEachRoute(envScanRouteFull);
 
     bool ok = envTryProbeAllRoutes();
     if (ok) {
-        if (gProbeRoute && gProbeRoute[0]) {
-            Serial.printf("[env] full-scan detected %s via %s\n", envSensorName(), gProbeRoute);
-        } else {
-            Serial.printf("[env] full-scan detected %s\n", envSensorName());
-        }
+        Serial.printf("[env] full-scan detected %s via %s\n",
+                      envSensorName(),
+                      (gProbeRoute && gProbeRoute[0]) ? gProbeRoute : "route");
     } else {
         Serial.println("[env] full-scan detected no supported sensor");
     }
-
     return ok;
 }
 

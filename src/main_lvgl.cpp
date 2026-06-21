@@ -2265,18 +2265,10 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("telDevEn")) s_cfg.telDeviceEnabled = prefs.getBool("telDevEn");
     ul = prefs.getULong("telDevIntv", 0);
     if (ul) s_cfg.telDeviceIntervalS = ul;
-    bool hasTelEnvPref = prefs.isKey("telEnvEn");
-    if (hasTelEnvPref) {
-        s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
-#if HAS_ENV_SENSOR_TELEMETRY
-    } else {
-        // Keep env telemetry disabled by default unless explicitly enabled.
-        s_cfg.telEnvEnabled = false;
-#endif
-    }
+    if (prefs.isKey("telEnvEn")) s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Temporary rollback: keep env telemetry disabled on Heltec until
-    // sensor wiring/model detection is finalized.
+    // Temporary rollback: keep env telemetry disabled on Heltec until sensor
+    // wiring/model detection is finalized. Overrides any saved preference.
     s_cfg.telEnvEnabled = false;
 #endif
     ul = prefs.getULong("telEnvIntv", 0);
@@ -11546,6 +11538,8 @@ static void processPendingThemeRebuild() {
     applyThemeToVisibleUi(reopenCfg, reopenSelection);
 }
 
+// In-place normalise a serial CLI line: trim whitespace, collapse runs of
+// spaces, and lowercase the command so dispatch can use plain strcmp().
 static void normalizeSerialCommand(char *line) {
     if (!line) return;
 
@@ -11586,6 +11580,9 @@ static void normalizeSerialCommand(char *line) {
     }
 }
 
+// Dispatch a single normalised CLI command. Aliases are intentional so the
+// common shorthand a developer might type (`scan`, `i2c`) maps to the same
+// action as the canonical command.
 static void handleSerialCommandLine(char *line) {
     normalizeSerialCommand(line);
     if (!line || !line[0]) return;
@@ -11645,6 +11642,8 @@ static void handleSerialCommandLine(char *line) {
     Serial.println("[cli] try: help");
 }
 
+// Drain pending bytes from the USB CDC serial port and dispatch any
+// complete newline-terminated command lines. Called once per loop().
 static void serviceSerialCommands() {
     while (Serial.available() > 0) {
         int raw = Serial.read();

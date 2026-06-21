@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install PlatformIO
-        run: pip install platformio
+        run: pip install platformio esptool
 
       - name: Build firmware
         run: |
@@ -34,30 +34,71 @@ jobs:
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
 
-      # ── Rename artifacts to include tag version ───────────────
-      - name: Collect artifacts
+      # ── Merge bootloader + partitions + app into a single factory image ──
+      # PlatformIO's per-env firmware.bin is app-only (loads at 0x10000), so
+      # writing it at 0x0 clobbers the bootloader and bricks the device with
+      # "Invalid image block, can't boot." We publish a merged image instead
+      # so both flash.sh and the web flasher can safely write at 0x0.
+      - name: Merge factory images
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -e
+          TAG=${GITHUB_REF_NAME}
+          mkdir -p dist
+
+          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+            -name boot_app0.bin | head -1)
+          if [ -z "$BOOT_APP0" ]; then
+            echo "boot_app0.bin not found" >&2
+            exit 1
+          fi
+
+          merge_env() {
+            local env="$1"
+            local size="$2"
+            local out="$3"
+            local d=".pio/build/${env}"
+            echo "Merging ${env} (flash size ${size}) -> ${out}"
+            python -m esptool --chip esp32s3 merge_bin \
+              -o "${out}" \
+              --flash_mode dio \
+              --flash_freq 80m \
+              --flash_size "${size}" \
+              0x0     "${d}/bootloader.bin" \
+              0x8000  "${d}/partitions.bin" \
+              0xe000  "${BOOT_APP0}" \
+              0x10000 "${d}/firmware.bin"
+          }
+
+          merge_env tdeck              16MB "dist/camillia-mt-tdeck-${TAG}.bin"
+          merge_env tlora-pager-tft    16MB "dist/camillia-mt-tlora-pager-tft-${TAG}.bin"
+          merge_env cardputer-cap      8MB  "dist/camillia-mt-cardputer-cap-${TAG}.bin"
+          merge_env heltec-v4          16MB "dist/camillia-mt-heltec-${TAG}.bin"
+          merge_env heltec-v4-vertical 16MB "dist/camillia-mt-heltec-vertical-${TAG}.bin"
+
+          ls -l dist/
+
+      # ── Rename ELF/map artifacts to include tag version ───────
+      # The merged .bin files are produced by the "Merge factory images" step;
+      # here we only attach symbol/map files for debugging.
+      - name: Collect debug artifacts
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG=${GITHUB_REF_NAME}
-          mkdir dist
+          mkdir -p dist
 
-          cp .pio/build/tdeck/firmware.bin  dist/camillia-mt-tdeck-${TAG}.bin
           cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-tdeck-${TAG}.elf
           cp .pio/build/tdeck/firmware.map  dist/camillia-mt-tdeck-${TAG}.map 2>/dev/null || true
 
-          cp .pio/build/tlora-pager-tft/firmware.bin  dist/camillia-mt-tlora-pager-tft-${TAG}.bin
           cp .pio/build/tlora-pager-tft/firmware.elf  dist/camillia-mt-tlora-pager-tft-${TAG}.elf
           cp .pio/build/tlora-pager-tft/firmware.map  dist/camillia-mt-tlora-pager-tft-${TAG}.map 2>/dev/null || true
 
-          cp .pio/build/cardputer-cap/firmware.bin  dist/camillia-mt-cardputer-cap-${TAG}.bin
           cp .pio/build/cardputer-cap/firmware.elf  dist/camillia-mt-cardputer-cap-${TAG}.elf
           cp .pio/build/cardputer-cap/firmware.map  dist/camillia-mt-cardputer-cap-${TAG}.map 2>/dev/null || true
 
-          cp .pio/build/heltec-v4/firmware.bin  dist/camillia-mt-heltec-${TAG}.bin
           cp .pio/build/heltec-v4/firmware.elf  dist/camillia-mt-heltec-${TAG}.elf
           cp .pio/build/heltec-v4/firmware.map  dist/camillia-mt-heltec-${TAG}.map 2>/dev/null || true
 
-          cp .pio/build/heltec-v4-vertical/firmware.bin  dist/camillia-mt-heltec-vertical-${TAG}.bin
           cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
           cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
 

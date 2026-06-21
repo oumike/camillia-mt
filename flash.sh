@@ -1,5 +1,10 @@
 #!/bin/bash
-# Flash Camillia-MT to a connected T-Deck.
+# Flash Camillia-MT to a connected ESP32-S3 board.
+# Expects a merged factory image (bootloader + partitions + boot_app0 + app),
+# such as the camillia-mt-*-vX.Y.Z.bin produced by .github/workflows/build.yml.
+# That layout is written at 0x0; an app-only firmware.bin from .pio/build/<env>
+# is NOT compatible with this script.
+#
 # Usage: ./flash.sh <firmware.bin> [port]
 # Default port: /dev/ttyUSB0 (Linux) — use /dev/cu.usbmodem* on macOS.
 
@@ -19,4 +24,6 @@ if [[ -z "$FIRMWARE" || ! -f "$FIRMWARE" ]]; then
 fi
 
 echo "Flashing $FIRMWARE to $PORT..."
-esptool.py --chip esp32s3 --port "$PORT" write_flash 0x0 "$FIRMWARE"
+esptool.py --chip esp32s3 --port "$PORT" --baud 921600 \
+    --before default_reset --after hard_reset \
+    write_flash -z 0x0 "$FIRMWARE"

@@ -2450,6 +2450,30 @@ static void handleGetLogout() {
 
 // ── Public API ────────────────────────────────────────────────
 
+// Register the common HTTP routes shared by all three lifecycle paths
+// (onboarding AP, STA-fallback AP, normal STA). The onboarding path
+// additionally registers /setup and /onboard before calling this.
+static void registerCommonRoutes() {
+    server.on("/",                  HTTP_GET,  handleGetRoot);
+    server.on("/login",             HTTP_GET,  handleGetLogin);
+    server.on("/login",             HTTP_POST, handlePostLogin);
+    server.on("/save",              HTTP_POST, handlePostSave);
+    server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
+    server.on("/live-data",         HTTP_GET,  handleGetLiveData);
+    server.on("/release-check",     HTTP_GET,  handleGetReleaseCheck);
+    server.on("/logout",            HTTP_GET,  handleGetLogout);
+    server.on("/announce",          HTTP_POST, handlePostAnnounce);
+    server.on("/telemetry",         HTTP_POST, handlePostTelemetry);
+    if (gOnScreenshotPng) {
+        server.on("/screenshot",    HTTP_GET,  handleGetScreenshot);
+    }
+    server.on("/export",            HTTP_GET,  handleGetExport);
+    server.on("/import",            HTTP_POST, handleImportDone, handleImportUpload);
+    server.on("/clear-messages",    HTTP_POST, handlePostClearMessages);
+    server.on("/clear-nodes",       HTTP_POST, handlePostClearNodes);
+    server.on("/factory-reset",     HTTP_POST, handlePostFactoryReset);
+}
+
 bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
                  WebCfgScreenshotPngCb onScreenshotPng) {
     if (running) return true;
@@ -2498,24 +2522,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         // Serve both the onboarding WiFi page and full config
         server.on("/setup",   HTTP_GET,  handleGetOnboard);
         server.on("/onboard", HTTP_POST, handlePostOnboard);
-        server.on("/",        HTTP_GET,  handleGetRoot);
-        server.on("/login",   HTTP_GET,  handleGetLogin);
-        server.on("/login",   HTTP_POST, handlePostLogin);
-        server.on("/save",    HTTP_POST, handlePostSave);
-        server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
-        server.on("/live-data", HTTP_GET, handleGetLiveData);
-        server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
-        server.on("/logout",  HTTP_GET,  handleGetLogout);
-        server.on("/announce",HTTP_POST, handlePostAnnounce);
-        server.on("/telemetry",HTTP_POST, handlePostTelemetry);
-        if (gOnScreenshotPng) {
-            server.on("/screenshot", HTTP_GET, handleGetScreenshot);
-        }
-        server.on("/export",  HTTP_GET,  handleGetExport);
-        server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-        server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
-        server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
-        server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
+        registerCommonRoutes();
         server.begin();
         running = true;
         Serial.printf("[web] onboarding AP at http://%s/\n", ipBuf);
@@ -2548,24 +2555,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             delay(500);
             WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-            server.on("/",        HTTP_GET,  handleGetRoot);
-            server.on("/login",   HTTP_GET,  handleGetLogin);
-            server.on("/login",   HTTP_POST, handlePostLogin);
-            server.on("/save",    HTTP_POST, handlePostSave);
-            server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
-            server.on("/live-data", HTTP_GET, handleGetLiveData);
-            server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
-            server.on("/logout",  HTTP_GET,  handleGetLogout);
-            server.on("/announce",HTTP_POST, handlePostAnnounce);
-            server.on("/telemetry",HTTP_POST, handlePostTelemetry);
-            if (gOnScreenshotPng) {
-                server.on("/screenshot", HTTP_GET, handleGetScreenshot);
-            }
-            server.on("/export",  HTTP_GET,  handleGetExport);
-            server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-            server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
-            server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
-            server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
+            registerCommonRoutes();
             server.begin();
             running = true;
             Serial.printf("[web] AP fallback at http://%s/\n", ipBuf);
@@ -2576,24 +2566,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-    server.on("/",        HTTP_GET,  handleGetRoot);
-    server.on("/login",   HTTP_GET,  handleGetLogin);
-    server.on("/login",   HTTP_POST, handlePostLogin);
-    server.on("/save",    HTTP_POST, handlePostSave);
-    server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
-    server.on("/live-data", HTTP_GET, handleGetLiveData);
-    server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
-    server.on("/logout",  HTTP_GET,  handleGetLogout);
-    server.on("/announce",HTTP_POST, handlePostAnnounce);
-    server.on("/telemetry",HTTP_POST, handlePostTelemetry);
-    if (gOnScreenshotPng) {
-        server.on("/screenshot", HTTP_GET, handleGetScreenshot);
-    }
-    server.on("/export",  HTTP_GET,  handleGetExport);
-    server.on("/import",        HTTP_POST, handleImportDone, handleImportUpload);
-    server.on("/clear-messages", HTTP_POST, handlePostClearMessages);
-    server.on("/clear-nodes",   HTTP_POST, handlePostClearNodes);
-    server.on("/factory-reset", HTTP_POST, handlePostFactoryReset);
+    registerCommonRoutes();
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
