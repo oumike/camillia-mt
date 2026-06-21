@@ -24,6 +24,7 @@
 #include <lvgl.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 #include <esp_mac.h>
 #include <nvs_flash.h>
 #include <SD.h>
@@ -247,6 +248,8 @@ static uint32_t s_nextPositionTxMs = 0;
 static uint32_t s_nextDeviceTelemetryTxMs = 0;
 static uint32_t s_nextEnvTelemetryTxMs = 0;
 static uint32_t s_nextNeighborInfoTxMs = 0;
+static char s_serialCmdBuf[96] = {};
+static size_t s_serialCmdLen = 0;
 
 enum ComposeTarget : uint8_t {
     COMPOSE_TARGET_CHANNEL = 0,
@@ -485,6 +488,9 @@ static void refreshNodesMap(const NodeEntry *node);
 static void onWebCfgSaved();
 static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
+static void serviceSerialCommands();
+static void handleSerialCommandLine(char *line);
+static void normalizeSerialCommand(char *line);
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void serviceNeighborInfoAnnounce(uint32_t nowMs);
@@ -773,6 +779,7 @@ enum CfgActionId {
     CFG_ACTION_THEME,
     CFG_ACTION_UNITS,
     CFG_ACTION_ANNOUNCE,
+    CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
@@ -1766,6 +1773,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
+        case CFG_ACTION_TELEMETRY:
+            snprintf(buf, bufLen, "Send Telemetry Now");
+            break;
         case CFG_ACTION_NEIGHBOR_INFO:
             snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
             break;
@@ -2260,11 +2270,15 @@ static void loadConfigFromPrefs() {
         s_cfg.telEnvEnabled = prefs.getBool("telEnvEn");
 #if HAS_ENV_SENSOR_TELEMETRY
     } else {
-        // On sensor-capable targets, enable env telemetry by default unless
-        // the user explicitly saved a preference.
-        s_cfg.telEnvEnabled = true;
+        // Keep env telemetry disabled by default unless explicitly enabled.
+        s_cfg.telEnvEnabled = false;
 #endif
     }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Temporary rollback: keep env telemetry disabled on Heltec until
+    // sensor wiring/model detection is finalized.
+    s_cfg.telEnvEnabled = false;
+#endif
     ul = prefs.getULong("telEnvIntv", 0);
     if (ul) s_cfg.telEnvIntervalS = ul;
     if (prefs.isKey("nbrInfoEn")) s_cfg.neighborInfoEnabled = prefs.getBool("nbrInfoEn");
@@ -2985,6 +2999,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
@@ -7673,6 +7688,12 @@ static void activateCfgSelection() {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "NODEINFO broadcast queued.");
             break;
 
+        case CFG_ACTION_TELEMETRY:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec TELEMETRY");
+            webCfgQueueTelemetry();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Telemetry TX queued.");
+            break;
+
         case CFG_ACTION_NEIGHBOR_INFO:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NEIGHBOR_INFO");
             s_cfg.neighborInfoEnabled = !s_cfg.neighborInfoEnabled;
@@ -10537,18 +10558,23 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
 }
 
 static void serviceTelemetryAnnounce(uint32_t nowMs) {
-    bool devDue = s_cfg.telDeviceEnabled
-        && announceDue(nowMs, s_nextDeviceTelemetryTxMs, s_cfg.telDeviceIntervalS);
+    bool forceTelemetry = webCfgTelemetryRequested();
+
+    bool devDue = forceTelemetry || (s_cfg.telDeviceEnabled
+        && announceDue(nowMs, s_nextDeviceTelemetryTxMs, s_cfg.telDeviceIntervalS));
 
 #if HAS_ENV_SENSOR_TELEMETRY
     bool envDue = s_cfg.telEnvEnabled
-        && announceDue(nowMs, s_nextEnvTelemetryTxMs, s_cfg.telEnvIntervalS);
+        && (forceTelemetry || announceDue(nowMs, s_nextEnvTelemetryTxMs, s_cfg.telEnvIntervalS));
 #else
     bool envDue = false;
 #endif
 
     if (!devDue && !envDue) return;
-    if (!s_radioReady) return;
+    if (!s_radioReady) {
+        if (forceTelemetry) webCfgQueueTelemetry();
+        return;
+    }
 
     if (devDue) {
         bool ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt);
@@ -11520,6 +11546,129 @@ static void processPendingThemeRebuild() {
     applyThemeToVisibleUi(reopenCfg, reopenSelection);
 }
 
+static void normalizeSerialCommand(char *line) {
+    if (!line) return;
+
+    size_t len = strlen(line);
+    while (len > 0) {
+        char c = line[len - 1];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            line[--len] = '\0';
+        } else {
+            break;
+        }
+    }
+
+    size_t start = 0;
+    while (line[start] == ' ' || line[start] == '\t') start++;
+    if (start > 0) {
+        memmove(line, line + start, strlen(line + start) + 1);
+    }
+
+    bool lastWasSpace = false;
+    size_t out = 0;
+    for (size_t i = 0; line[i]; i++) {
+        unsigned char c = (unsigned char)line[i];
+        if (c == '\t') c = ' ';
+        if (c == ' ') {
+            if (lastWasSpace) continue;
+            lastWasSpace = true;
+            line[out++] = ' ';
+            continue;
+        }
+        lastWasSpace = false;
+        line[out++] = (char)tolower(c);
+    }
+    line[out] = '\0';
+
+    if (out > 0 && line[out - 1] == ' ') {
+        line[out - 1] = '\0';
+    }
+}
+
+static void handleSerialCommandLine(char *line) {
+    normalizeSerialCommand(line);
+    if (!line || !line[0]) return;
+
+    if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
+        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now");
+        return;
+    }
+
+    if (strcmp(line, "env") == 0 || strcmp(line, "env status") == 0) {
+        bool hasSensor = envHasSensor() || envBegin();
+        Serial.printf("[cli] env status: %s\n", hasSensor ? envSensorName() : "none");
+        if (hasSensor) {
+            EnvReading env = {};
+            if (envRead(env)) {
+                Serial.printf("[cli] env sample: T=%.2fC H=%.2f%% P=%.2fhPa\n",
+                              (double)env.temperatureC,
+                              (double)env.humidityPct,
+                              (double)env.pressureHpa);
+            }
+        }
+        return;
+    }
+
+    if (strcmp(line, "env scan") == 0
+        || strcmp(line, "scan") == 0
+        || strcmp(line, "i2c") == 0
+        || strcmp(line, "i2c scan") == 0) {
+        Serial.println("[cli] env scan requested");
+        bool ok = envDebugScan(true);
+        Serial.printf("[cli] env scan result: %s\n", ok ? envSensorName() : "none");
+        return;
+    }
+
+    if (strcmp(line, "env scan all") == 0
+        || strcmp(line, "scan all") == 0
+        || strcmp(line, "i2c scan all") == 0) {
+        Serial.println("[cli] full i2c scan requested");
+        bool ok = envDebugFullScan(true);
+        Serial.printf("[cli] full i2c scan result: %s\n", ok ? envSensorName() : "none");
+        return;
+    }
+
+    if (strcmp(line, "telemetry") == 0 || strcmp(line, "telemetry now") == 0) {
+        webCfgQueueTelemetry();
+        Serial.println("[cli] telemetry queued");
+        return;
+    }
+
+    if (strcmp(line, "announce") == 0 || strcmp(line, "announce now") == 0) {
+        webCfgQueueAnnounce();
+        Serial.println("[cli] announce queued");
+        return;
+    }
+
+    Serial.printf("[cli] unknown command: %s\n", line);
+    Serial.println("[cli] try: help");
+}
+
+static void serviceSerialCommands() {
+    while (Serial.available() > 0) {
+        int raw = Serial.read();
+        if (raw < 0) break;
+
+        char c = (char)raw;
+        if (c == '\r') continue;
+
+        if (c == '\n') {
+            if (s_serialCmdLen > 0) {
+                s_serialCmdBuf[s_serialCmdLen] = '\0';
+                handleSerialCommandLine(s_serialCmdBuf);
+                s_serialCmdLen = 0;
+                s_serialCmdBuf[0] = '\0';
+            }
+            continue;
+        }
+
+        if (s_serialCmdLen + 1 < sizeof(s_serialCmdBuf)) {
+            s_serialCmdBuf[s_serialCmdLen++] = c;
+        }
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(120);
@@ -11597,9 +11746,6 @@ void setup() {
     startWebConfigAuto();
     bootstrapStateMapsIfMissing();
     batteryInitAdc();
-#if HAS_ENV_SENSOR_TELEMETRY
-    (void)envBegin();
-#endif
     gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
     DMs.init();
@@ -11629,6 +11775,7 @@ void loop() {
         return;
     }
 
+    serviceSerialCommands();
     bootstrapStateMapsIfMissing();
     pumpKeyboardInput();
     processPendingThemeRebuild();

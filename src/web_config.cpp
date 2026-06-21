@@ -41,6 +41,7 @@ static RhinoConfig   *gCfg             = nullptr;
 static WebCfgSaveCb   gOnSave          = nullptr;
 static WebCfgScreenshotPngCb gOnScreenshotPng = nullptr;
 static volatile bool  gAnnounceReq     = false;
+static volatile bool  gTelemetryReq    = false;
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
@@ -1254,6 +1255,14 @@ static void sendConfigPage(const char *msg = "") {
         "Forces immediate re-announcement to the mesh (NODEINFO + position).</p>";
 
     html +=
+        "<form method='POST' action='/telemetry'>"
+        "<button type='submit' style='background:#0f766e'>"
+        "&#128202; Send Telemetry Now</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Forces immediate telemetry TX (device + environment when available).</p>";
+
+    html +=
         "<h3 style='margin-top:.8em'>Debug Output</h3>"
         "<form method='POST' action='/set-debug-monitor'>"
         "<label style='display:flex;align-items:center;gap:.5em'>"
@@ -2250,6 +2259,12 @@ static void handlePostAnnounce() {
     redirectHomeWithFlash("NODEINFO broadcast queued.");
 }
 
+static void handlePostTelemetry() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    webCfgQueueTelemetry();
+    redirectHomeWithFlash("Telemetry TX queued.");
+}
+
 static void handleGetScreenshot() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gOnScreenshotPng) {
@@ -2442,6 +2457,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     gCfg    = cfg;
     gOnSave = onSave;
     gOnScreenshotPng = onScreenshotPng;
+    gAnnounceReq = false;
+    gTelemetryReq = false;
     gFlashMsg[0] = '\0';
     gRebootPending = false;
     gRebootAtMs = 0;
@@ -2490,6 +2507,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
         server.on("/logout",  HTTP_GET,  handleGetLogout);
         server.on("/announce",HTTP_POST, handlePostAnnounce);
+        server.on("/telemetry",HTTP_POST, handlePostTelemetry);
         if (gOnScreenshotPng) {
             server.on("/screenshot", HTTP_GET, handleGetScreenshot);
         }
@@ -2539,6 +2557,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
             server.on("/logout",  HTTP_GET,  handleGetLogout);
             server.on("/announce",HTTP_POST, handlePostAnnounce);
+            server.on("/telemetry",HTTP_POST, handlePostTelemetry);
             if (gOnScreenshotPng) {
                 server.on("/screenshot", HTTP_GET, handleGetScreenshot);
             }
@@ -2566,6 +2585,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     server.on("/release-check", HTTP_GET, handleGetReleaseCheck);
     server.on("/logout",  HTTP_GET,  handleGetLogout);
     server.on("/announce",HTTP_POST, handlePostAnnounce);
+    server.on("/telemetry",HTTP_POST, handlePostTelemetry);
     if (gOnScreenshotPng) {
         server.on("/screenshot", HTTP_GET, handleGetScreenshot);
     }
@@ -2595,6 +2615,8 @@ void webCfgEnd() {
     gCfg        = nullptr;
     gOnSave     = nullptr;
     gOnScreenshotPng = nullptr;
+    gAnnounceReq = false;
+    gTelemetryReq = false;
     running     = false;
     gOnboarding = false;
     Serial.println("[web] stopped");
@@ -2628,4 +2650,14 @@ bool webCfgAnnounceRequested() {
 
 void webCfgQueueAnnounce() {
     gAnnounceReq = true;
+}
+
+bool webCfgTelemetryRequested() {
+    if (!gTelemetryReq) return false;
+    gTelemetryReq = false;
+    return true;
+}
+
+void webCfgQueueTelemetry() {
+    gTelemetryReq = true;
 }

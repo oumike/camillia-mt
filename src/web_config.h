@@ -35,6 +35,13 @@ bool webCfgAnnounceRequested();
 // Also forces immediate telemetry broadcast when telemetry is enabled.
 void webCfgQueueAnnounce();
 
+// Returns true (and clears the flag) if the web UI requested telemetry TX.
+bool webCfgTelemetryRequested();
+
+// Queue immediate telemetry TX to be processed in the main loop.
+// Sends device telemetry and environment telemetry when available.
+void webCfgQueueTelemetry();
+
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
 

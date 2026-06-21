@@ -20,3 +20,12 @@ bool envRead(EnvReading &out);
 
 // Human-friendly sensor backend name, or "none".
 const char *envSensorName();
+
+// Run a runtime diagnostic scan/probe of known environment sensor routes.
+// If forceReprobe is true, clears cached state and probes immediately.
+// Returns true when a supported sensor is detected.
+bool envDebugScan(bool forceReprobe = true);
+
+// Run an extended runtime I2C scan (0x03..0x77) across known routes.
+// Also performs a supported-sensor reprobe and returns true if detected.
+bool envDebugFullScan(bool forceReprobe = true);

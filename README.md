@@ -35,7 +35,7 @@ No additional hardware required.
 
 Notes:
 - All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tlora-pager-tft`, and `cardputer-cap`).
-- Environmental telemetry via BME280 is available on Heltec V4 expansion builds when a compatible sensor is present.
+- Environmental telemetry via BME280/BMP280/AHT20 is available on Heltec V4 expansion builds when a compatible sensor is present.
 
 ## Features
 

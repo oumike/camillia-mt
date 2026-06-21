@@ -118,11 +118,7 @@
 // ── Module defaults ────────────────────────────────────────────
 #define MY_TEL_DEV_EN       1
 #define MY_TEL_DEV_INTV     3600
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-#define MY_TEL_ENV_EN       1
-#else
 #define MY_TEL_ENV_EN       0
-#endif
 #define MY_TEL_ENV_INTV     3600
 #define MY_NEIGHBORINFO_EN  0
 #define MY_NEIGHBORINFO_INTV 21600
