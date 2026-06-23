@@ -287,6 +287,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.cannedEnabled      = MY_CANNED_EN;
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
+    cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
     cfg.chatSpacing        = MY_CHAT_SPACING;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
@@ -491,6 +492,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "module_config:\n";
     out += "  cannedMessage:\n";
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.cannedEnabled ? "true" : "false"); out += tmp;
+    out += "  storeForward:\n";
+    snprintf(tmp, sizeof(tmp), "    client_enabled: %s\n", cfg.snfClientEnabled ? "true" : "false"); out += tmp;
     out += "  mqtt:\n";
     out += "    address: "; out += cfg.mqttServer; out += "\n";
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n",           cfg.mqttEnabled   ? "true" : "false"); out += tmp;
@@ -770,6 +773,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "transmit_over_lora")) cfg.neighborInfoOverLora = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
+                if (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "channels") && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
                 if (!strcmp(key, "role"))
                     CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;

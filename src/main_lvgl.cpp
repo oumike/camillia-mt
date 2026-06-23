@@ -132,6 +132,38 @@ static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_legendModal = nullptr;
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
+
+// Live chart history (channel utilization + SNR/RSSI sparkline data).
+struct ChartHist {
+    static constexpr int CAP = 60;
+    float v[CAP] = {};
+    int count = 0;       // 0..CAP valid samples
+    int head = 0;        // index of oldest sample when count == CAP
+    uint32_t seq = 0;    // bumps on every push for change detection
+    float lastVal = 0.0f;
+    bool hasLast = false;
+};
+static ChartHist s_chUtilHist;
+static ChartHist s_airUtilHist;
+static ChartHist s_snrHist;
+static ChartHist s_rssiHist;
+
+static lv_obj_t *s_chUtilChartModal = nullptr;
+static lv_obj_t *s_chUtilChart = nullptr;
+static lv_chart_series_t *s_chUtilSeries = nullptr;
+static lv_chart_series_t *s_airUtilSeries = nullptr;
+static lv_obj_t *s_chUtilStatsLabel = nullptr;
+static uint32_t s_chUtilRenderedSeq = 0;
+static uint32_t s_airUtilRenderedSeq = 0;
+
+static lv_obj_t *s_snrChartModal = nullptr;
+static lv_obj_t *s_snrChart = nullptr;
+static lv_chart_series_t *s_snrSeries = nullptr;
+static lv_chart_series_t *s_rssiSeries = nullptr;
+static lv_obj_t *s_snrStatsLabel = nullptr;
+static uint32_t s_snrRenderedSeq = 0;
+static uint32_t s_rssiRenderedSeq = 0;
+
 static lv_obj_t *s_dmModal = nullptr;
 static lv_obj_t *s_dmConvPanel = nullptr;
 static lv_obj_t *s_dmConvList = nullptr;
@@ -221,7 +253,7 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-static int s_cfgActions[16] = {};
+static int s_cfgActions[20] = {};
 static char s_cfgStatus[96] = "";
 static int s_cfgConfirmAction = -1;
 static uint32_t s_cfgConfirmMs = 0;
@@ -432,6 +464,13 @@ static void onHeltecBottomNavPressed(lv_event_t *e);
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget);
 static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget);
 static void refreshLiveView(bool force = false);
+static void openChUtilChartModal();
+static void closeChUtilChartModal();
+static void refreshChUtilChart(bool force = false);
+static void openSnrRssiChartModal();
+static void closeSnrRssiChartModal();
+static void refreshSnrRssiChart(bool force = false);
+static void chartPushSample(ChartHist &h, float value);
 static void openDmModal();
 static void closeDmModal();
 static void refreshDmModal(bool force = false);
@@ -766,6 +805,7 @@ static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
 }
 
 static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
+    if (!label || !lv_obj_is_valid(label)) return;
     static char safeBuf[768];
     renderEmojiSafeText(text, safeBuf, sizeof(safeBuf));
     lv_label_set_text(label, safeBuf);
@@ -781,6 +821,7 @@ enum CfgActionId {
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
+    CFG_ACTION_SNF_CLIENT,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_CLEAR_MSGS,
@@ -1779,6 +1820,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_NEIGHBOR_INFO:
             snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_SNF_CLIENT:
+            snprintf(buf, bufLen, "Store&Fwd Client: %s", s_cfg.snfClientEnabled ? "On" : "Off");
+            break;
         case CFG_ACTION_MSG_ALERT:
             snprintf(buf, bufLen, "Notification Sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
             break;
@@ -2100,6 +2144,7 @@ static void persistConfigToPrefs() {
     p.putBool("nbrInfoLoRa", s_cfg.neighborInfoOverLora);
     p.putBool("cannedEn", s_cfg.cannedEnabled);
     p.putString("cannedMsgs", s_cfg.cannedMessages);
+    p.putBool("snfClientEn", s_cfg.snfClientEnabled);
     p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
     p.putUChar("chatSpace", s_cfg.chatSpacing);
     p.putBool("dbgAcks", s_cfg.debugAcks);
@@ -2284,6 +2329,7 @@ static void loadConfigFromPrefs() {
     }
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
+    if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
     String canned = getStringIfKey("cannedMsgs");
     if (canned.length()) {
         strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
@@ -2655,25 +2701,25 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_14;
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_TDECK)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
     const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
 #else
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_10;
+    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
@@ -2730,8 +2776,8 @@ static void openComposePrompt(uint32_t replyPacketId,
 
     s_composeInput = lv_textarea_create(s_composeModal);
     lv_obj_set_width(s_composeInput, lv_pct(100));
-    lv_obj_set_height(s_composeInput, 38);
-    lv_obj_set_style_text_font(s_composeInput, &lv_font_montserrat_12, 0);
+    lv_obj_set_height(s_composeInput, 44);
+    lv_obj_set_style_text_font(s_composeInput, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
     lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
     lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
@@ -2779,13 +2825,13 @@ static void openComposePrompt(uint32_t replyPacketId,
 #else
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 140) modalW = lv_disp_get_hor_res(NULL) - 8;
-    int modalH = isReply ? 96 : 72;
+    int modalH = isReply ? 100 : 76;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    modalH = isReply ? 126 : 104;
+    modalH = isReply ? 138 : 116;
 #elif defined(DEVICE_TDECK)
-    modalH = isReply ? 118 : 96;
+    modalH = isReply ? 126 : 104;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    modalH = isReply ? 82 : 64;
+    modalH = isReply ? 88 : 70;
 #endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
@@ -2993,6 +3039,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
@@ -3324,15 +3371,38 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!parent) return;
 
-#if defined(DEVICE_UI_VERTICAL)
-    const int navBarHeight = 24;
-#else
-    const int navBarHeight = 26;
-#endif
+    // Match the height used by the main chat screen's shortcut bar
+    // (chatLegendH == 28) so the nav buttons render at the exact same
+    // width/height inside DM/Cfg/Nodes/Live as on the home screen.
+    const int navBarHeight = 28;
+
+    // Modal containers all use border_width=1 + pad_all=4. The bar needs to
+    // span the full display width and sit flush with the bottom edge, so it
+    // is placed with IGNORE_LAYOUT and offset back through the parent pad +
+    // border. A transparent spacer keeps the flex column reserving the same
+    // vertical room the bar would otherwise occupy.
+    const int padInset = 4;
+    const int borderInset = 1;
+    const int contentReserve = navBarHeight - padInset - borderInset;
+
+    lv_obj_t *spacer = lv_obj_create(parent);
+    lv_obj_set_width(spacer, lv_pct(100));
+    lv_obj_set_height(spacer, contentReserve > 0 ? contentReserve : 1);
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spacer, 0, 0);
+    lv_obj_set_style_pad_all(spacer, 0, 0);
 
     lv_obj_t *bar = lv_obj_create(parent);
-    lv_obj_set_width(bar, lv_pct(100));
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_width(bar, lv_disp_get_hor_res(NULL));
     lv_obj_set_height(bar, navBarHeight);
+    // BOTTOM_LEFT anchor with negative x cancels parent pad+border on the left,
+    // positive y pushes through pad+border on the bottom — bar ends up at the
+    // device edges identical to the home-screen shortcut bar.
+    lv_obj_align(bar, LV_ALIGN_BOTTOM_LEFT,
+                 -(padInset + borderInset),
+                 padInset + borderInset);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_60, 0);
@@ -3717,13 +3787,77 @@ static lv_color_t tftColorToLv(uint16_t c) {
 }
 
 static void closeLiveModal() {
-    if (s_liveModal) {
+    if (s_liveModal && lv_obj_is_valid(s_liveModal)) {
         lv_obj_del(s_liveModal);
     }
     s_liveModal = nullptr;
     s_liveList = nullptr;
     s_lastRenderedLiveCount = -1;
     s_lastRenderedLiveScrollOff = -1;
+}
+
+static void chartPushSample(ChartHist &h, float value) {
+    if (h.count < ChartHist::CAP) {
+        h.v[(h.head + h.count) % ChartHist::CAP] = value;
+        h.count++;
+    } else {
+        h.v[h.head] = value;
+        h.head = (h.head + 1) % ChartHist::CAP;
+    }
+    h.lastVal = value;
+    h.hasLast = true;
+    h.seq++;
+}
+
+static float chartSampleAt(const ChartHist &h, int index) {
+    // index 0 = oldest, index count-1 = newest.
+    if (index < 0 || index >= h.count) return 0.0f;
+    return h.v[(h.head + index) % ChartHist::CAP];
+}
+
+// ── Web-config snapshot getters (see web_config.h) ─────────────
+static void chartFillSnapshot(const ChartHist &h, WebChartSnapshot &out) {
+    static_assert(ChartHist::CAP == WebChartSnapshot::CAP,
+                  "ChartHist::CAP must match WebChartSnapshot::CAP");
+    out.count = h.count;
+    out.hasLast = h.hasLast;
+    out.lastVal = h.lastVal;
+    for (int i = 0; i < h.count && i < WebChartSnapshot::CAP; i++) {
+        out.values[i] = chartSampleAt(h, i);
+    }
+    for (int i = h.count; i < WebChartSnapshot::CAP; i++) {
+        out.values[i] = 0.0f;
+    }
+}
+void webChartSnapshotChUtil(WebChartSnapshot &out)  { chartFillSnapshot(s_chUtilHist,  out); }
+void webChartSnapshotAirUtil(WebChartSnapshot &out) { chartFillSnapshot(s_airUtilHist, out); }
+void webChartSnapshotSnr(WebChartSnapshot &out)     { chartFillSnapshot(s_snrHist,     out); }
+void webChartSnapshotRssi(WebChartSnapshot &out)    { chartFillSnapshot(s_rssiHist,    out); }
+
+static void closeChUtilChartModal() {
+    if (s_chUtilChartModal && lv_obj_is_valid(s_chUtilChartModal)) {
+        lv_obj_del(s_chUtilChartModal);
+    }
+    s_chUtilChartModal = nullptr;
+    s_chUtilChart = nullptr;
+    s_chUtilSeries = nullptr;
+    s_airUtilSeries = nullptr;
+    s_chUtilStatsLabel = nullptr;
+    s_chUtilRenderedSeq = 0;
+    s_airUtilRenderedSeq = 0;
+}
+
+static void closeSnrRssiChartModal() {
+    if (s_snrChartModal && lv_obj_is_valid(s_snrChartModal)) {
+        lv_obj_del(s_snrChartModal);
+    }
+    s_snrChartModal = nullptr;
+    s_snrChart = nullptr;
+    s_snrSeries = nullptr;
+    s_rssiSeries = nullptr;
+    s_snrStatsLabel = nullptr;
+    s_snrRenderedSeq = 0;
+    s_rssiRenderedSeq = 0;
 }
 
 static void closeDmModal() {
@@ -5846,6 +5980,21 @@ static void openNodesActionMenu() {
 
 static void refreshLiveView(bool force) {
     if (!s_liveModal || !s_liveList) return;
+    if (!lv_obj_is_valid(s_liveModal) || !lv_obj_is_valid(s_liveList)) {
+        s_liveModal = nullptr;
+        s_liveList = nullptr;
+        s_lastRenderedLiveCount = -1;
+        s_lastRenderedLiveScrollOff = -1;
+        return;
+    }
+    if (lv_obj_get_parent(s_liveList) != s_liveModal
+        || lv_obj_get_disp(s_liveModal) == nullptr
+        || lv_obj_get_disp(s_liveList) == nullptr) {
+        s_liveList = nullptr;
+        s_lastRenderedLiveCount = -1;
+        s_lastRenderedLiveScrollOff = -1;
+        return;
+    }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *liveBodyFont = &lv_font_montserrat_12;
@@ -5973,7 +6122,45 @@ static void openLiveModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "LIVE");
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    // Vertical Heltec is narrow; the right-anchored chart buttons would
+    // overdraw a centered title. Left-align with a small inset instead.
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+#else
     lv_obj_center(title);
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Dedicated header buttons (Heltec touch) for the two live charts.
+    auto makeLiveChartBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+                               lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 52, 20);
+        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_left(btn, 4, 0);
+        lv_obj_set_style_pad_right(btn, 4, 0);
+        lv_obj_set_style_pad_top(btn, 1, 0);
+        lv_obj_set_style_pad_bottom(btn, 1, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x335D9D), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+        return btn;
+    };
+    // Rightmost: SNR/RSSI. To its left: ChUtil.
+    makeLiveChartBtn(header, "SNR", -4,
+                     [](lv_event_t *e) { LV_UNUSED(e); openSnrRssiChartModal(); });
+    makeLiveChartBtn(header, "ChUtil", -60,
+                     [](lv_event_t *e) { LV_UNUSED(e); openChUtilChartModal(); });
+#endif
 
     s_liveList = lv_obj_create(s_liveModal);
     lv_obj_set_width(s_liveList, lv_pct(100));
@@ -6002,10 +6189,413 @@ static void openLiveModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "%s = Back   C = Clear log", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   U = ChUtil   S = SNR/RSSI", modalCloseKeyLabel());
 #endif
 
     refreshLiveView(true);
+}
+
+static int16_t chartClampInt(float v, int16_t lo, int16_t hi) {
+    if (v < (float)lo) return lo;
+    if (v > (float)hi) return hi;
+    return (int16_t)lroundf(v);
+}
+
+static void onChUtilChartDrawEvent(lv_event_t *e) {
+    lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
+    if (!dsc) return;
+    if (dsc->part != LV_PART_TICKS) return;
+    if (!dsc->text) return;
+    if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
+        lv_snprintf(dsc->text, dsc->text_length, "%d%%", (int)dsc->value);
+    }
+}
+
+static void onSnrChartDrawEvent(lv_event_t *e) {
+    lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
+    if (!dsc) return;
+    if (dsc->part != LV_PART_TICKS) return;
+    if (!dsc->text) return;
+    if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
+        lv_snprintf(dsc->text, dsc->text_length, "%d dB", (int)dsc->value);
+    } else if (dsc->id == LV_CHART_AXIS_SECONDARY_Y) {
+        lv_snprintf(dsc->text, dsc->text_length, "%d dBm", (int)dsc->value);
+    }
+}
+
+static void refreshChUtilChart(bool force) {
+    if (!s_chUtilChartModal || !s_chUtilChart) return;
+    if (!lv_obj_is_valid(s_chUtilChartModal) || !lv_obj_is_valid(s_chUtilChart)) {
+        s_chUtilChartModal = nullptr;
+        s_chUtilChart = nullptr;
+        s_chUtilSeries = nullptr;
+        s_airUtilSeries = nullptr;
+        s_chUtilStatsLabel = nullptr;
+        return;
+    }
+
+    if (!force
+        && s_chUtilRenderedSeq == s_chUtilHist.seq
+        && s_airUtilRenderedSeq == s_airUtilHist.seq) {
+        return;
+    }
+
+    auto fillSeries = [&](lv_chart_series_t *series, const ChartHist &h) {
+        if (!series) return;
+        const int offset = ChartHist::CAP - h.count;  // right-align newest sample
+        for (int i = 0; i < ChartHist::CAP; i++) {
+            int sampleIdx = i - offset;
+            if (sampleIdx >= 0 && sampleIdx < h.count) {
+                int16_t v = chartClampInt(chartSampleAt(h, sampleIdx), 0, 100);
+                lv_chart_set_value_by_id(s_chUtilChart, series, i, v);
+            } else {
+                lv_chart_set_value_by_id(s_chUtilChart, series, i, LV_CHART_POINT_NONE);
+            }
+        }
+    };
+    fillSeries(s_chUtilSeries, s_chUtilHist);
+    fillSeries(s_airUtilSeries, s_airUtilHist);
+    lv_chart_refresh(s_chUtilChart);
+
+    s_chUtilRenderedSeq = s_chUtilHist.seq;
+    s_airUtilRenderedSeq = s_airUtilHist.seq;
+
+    if (s_chUtilStatsLabel && lv_obj_is_valid(s_chUtilStatsLabel)) {
+        char text[160];
+        char chCur[16] = "--";
+        char airCur[16] = "--";
+        if (s_chUtilHist.hasLast) snprintf(chCur, sizeof(chCur), "%.1f%%", (double)s_chUtilHist.lastVal);
+        if (s_airUtilHist.hasLast) snprintf(airCur, sizeof(airCur), "%.1f%%", (double)s_airUtilHist.lastVal);
+
+        float chSum = 0.0f, chMax = 0.0f;
+        for (int i = 0; i < s_chUtilHist.count; i++) {
+            float s = chartSampleAt(s_chUtilHist, i);
+            chSum += s;
+            if (s > chMax) chMax = s;
+        }
+        float airSum = 0.0f, airMax = 0.0f;
+        for (int i = 0; i < s_airUtilHist.count; i++) {
+            float s = chartSampleAt(s_airUtilHist, i);
+            airSum += s;
+            if (s > airMax) airMax = s;
+        }
+        float chAvg = (s_chUtilHist.count > 0) ? (chSum / s_chUtilHist.count) : 0.0f;
+        float airAvg = (s_airUtilHist.count > 0) ? (airSum / s_airUtilHist.count) : 0.0f;
+
+        snprintf(text, sizeof(text),
+                 "ChUtil  cur %s  avg %.1f%%  max %.1f%%   n=%d\n"
+                 "AirTx   cur %s  avg %.1f%%  max %.1f%%   n=%d",
+                 chCur, (double)chAvg, (double)chMax, s_chUtilHist.count,
+                 airCur, (double)airAvg, (double)airMax, s_airUtilHist.count);
+        lv_label_set_text(s_chUtilStatsLabel, text);
+    }
+}
+
+static void openChUtilChartModal() {
+    if (!s_rootScreen) return;
+    if (s_chUtilChartModal) return;
+
+    int modalW = lv_disp_get_hor_res(NULL);
+    int modalH = lv_disp_get_ver_res(NULL);
+
+    s_chUtilChartModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chUtilChartModal, modalW, modalH);
+    lv_obj_align(s_chUtilChartModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chUtilChartModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_chUtilChartModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chUtilChartModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chUtilChartModal, 1, 0);
+    lv_obj_set_style_border_color(s_chUtilChartModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chUtilChartModal, 4, 0);
+    lv_obj_set_style_pad_row(s_chUtilChartModal, 4, 0);
+    lv_obj_set_flex_flow(s_chUtilChartModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chUtilChartModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_chUtilChartModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(header, 4, 0);
+    lv_obj_set_style_pad_right(header, 4, 0);
+    lv_obj_set_style_pad_top(header, 1, 0);
+    lv_obj_set_style_pad_bottom(header, 1, 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "CHANNEL UTILIZATION (%)");
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+#else
+    lv_obj_center(title);
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch close button anchored to the right side of the header.
+    lv_obj_t *headerClose = lv_btn_create(header);
+    lv_obj_set_size(headerClose, 48, 20);
+    lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_radius(headerClose, 4, 0);
+    lv_obj_set_style_pad_all(headerClose, 0, 0);
+    lv_obj_set_style_shadow_width(headerClose, 0, 0);
+    lv_obj_set_style_bg_color(headerClose, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(headerClose, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(headerClose, 1, 0);
+    lv_obj_set_style_border_color(headerClose, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(headerClose,
+                        [](lv_event_t *e) { LV_UNUSED(e); closeChUtilChartModal(); },
+                        LV_EVENT_CLICKED,
+                        nullptr);
+    lv_obj_t *headerCloseLbl = lv_label_create(headerClose);
+    lv_obj_set_style_text_font(headerCloseLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(headerCloseLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(headerCloseLbl, "Close");
+    lv_obj_center(headerCloseLbl);
+#endif
+
+    s_chUtilChart = lv_chart_create(s_chUtilChartModal);
+    lv_obj_set_width(s_chUtilChart, lv_pct(100));
+    lv_obj_set_flex_grow(s_chUtilChart, 1);
+    lv_chart_set_type(s_chUtilChart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(s_chUtilChart, ChartHist::CAP);
+    lv_chart_set_range(s_chUtilChart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(s_chUtilChart, 5, 6);
+    lv_chart_set_update_mode(s_chUtilChart, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_chart_set_axis_tick(s_chUtilChart, LV_CHART_AXIS_PRIMARY_Y, 4, 2, 5, 2, true, 40);
+    lv_obj_set_style_size(s_chUtilChart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_chUtilChart, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_chUtilChart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_chUtilChart, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_border_width(s_chUtilChart, 1, 0);
+    lv_obj_set_style_line_color(s_chUtilChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(s_chUtilChart, LV_OPA_40, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_chUtilChart, &lv_font_montserrat_10, LV_PART_TICKS);
+    lv_obj_set_style_text_color(s_chUtilChart, lv_color_hex(0xA7C7FF), LV_PART_TICKS);
+    lv_obj_add_event_cb(s_chUtilChart, onChUtilChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+
+    s_chUtilSeries = lv_chart_add_series(s_chUtilChart,
+                                         lv_color_hex(0x4FD1C5),
+                                         LV_CHART_AXIS_PRIMARY_Y);
+    s_airUtilSeries = lv_chart_add_series(s_chUtilChart,
+                                          lv_color_hex(0xF6AD55),
+                                          LV_CHART_AXIS_PRIMARY_Y);
+    if (s_chUtilSeries) lv_chart_set_all_value(s_chUtilChart, s_chUtilSeries, LV_CHART_POINT_NONE);
+    if (s_airUtilSeries) lv_chart_set_all_value(s_chUtilChart, s_airUtilSeries, LV_CHART_POINT_NONE);
+
+    s_chUtilStatsLabel = lv_label_create(s_chUtilChartModal);
+    lv_obj_set_width(s_chUtilStatsLabel, lv_pct(100));
+    lv_label_set_long_mode(s_chUtilStatsLabel, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_chUtilStatsLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chUtilStatsLabel, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(s_chUtilStatsLabel, "ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0");
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_chUtilChartModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "%s = Back   teal=ChUtil  orange=AirTx", modalCloseKeyLabel());
+#endif
+
+    s_chUtilRenderedSeq = 0;
+    s_airUtilRenderedSeq = 0;
+    refreshChUtilChart(true);
+}
+
+static void refreshSnrRssiChart(bool force) {
+    if (!s_snrChartModal || !s_snrChart) return;
+    if (!lv_obj_is_valid(s_snrChartModal) || !lv_obj_is_valid(s_snrChart)) {
+        s_snrChartModal = nullptr;
+        s_snrChart = nullptr;
+        s_snrSeries = nullptr;
+        s_rssiSeries = nullptr;
+        s_snrStatsLabel = nullptr;
+        return;
+    }
+
+    if (!force
+        && s_snrRenderedSeq == s_snrHist.seq
+        && s_rssiRenderedSeq == s_rssiHist.seq) {
+        return;
+    }
+
+    auto fillSeries = [&](lv_chart_series_t *series, const ChartHist &h, int16_t lo, int16_t hi) {
+        if (!series) return;
+        const int offset = ChartHist::CAP - h.count;  // right-align newest sample
+        for (int i = 0; i < ChartHist::CAP; i++) {
+            int sampleIdx = i - offset;
+            if (sampleIdx >= 0 && sampleIdx < h.count) {
+                int16_t v = chartClampInt(chartSampleAt(h, sampleIdx), lo, hi);
+                lv_chart_set_value_by_id(s_snrChart, series, i, v);
+            } else {
+                lv_chart_set_value_by_id(s_snrChart, series, i, LV_CHART_POINT_NONE);
+            }
+        }
+    };
+    fillSeries(s_snrSeries, s_snrHist, -25, 15);
+    fillSeries(s_rssiSeries, s_rssiHist, -130, -30);
+    lv_chart_refresh(s_snrChart);
+
+    s_snrRenderedSeq = s_snrHist.seq;
+    s_rssiRenderedSeq = s_rssiHist.seq;
+
+    if (s_snrStatsLabel && lv_obj_is_valid(s_snrStatsLabel)) {
+        char text[160];
+        char snrCur[16] = "--";
+        char rssiCur[16] = "--";
+        if (s_snrHist.hasLast) snprintf(snrCur, sizeof(snrCur), "%.1fdB", (double)s_snrHist.lastVal);
+        if (s_rssiHist.hasLast) snprintf(rssiCur, sizeof(rssiCur), "%.0fdBm", (double)s_rssiHist.lastVal);
+
+        float snrSum = 0.0f, snrMin = 1000.0f, snrMax = -1000.0f;
+        for (int i = 0; i < s_snrHist.count; i++) {
+            float s = chartSampleAt(s_snrHist, i);
+            snrSum += s;
+            if (s < snrMin) snrMin = s;
+            if (s > snrMax) snrMax = s;
+        }
+        float rssiSum = 0.0f, rssiMin = 1000.0f, rssiMax = -1000.0f;
+        for (int i = 0; i < s_rssiHist.count; i++) {
+            float s = chartSampleAt(s_rssiHist, i);
+            rssiSum += s;
+            if (s < rssiMin) rssiMin = s;
+            if (s > rssiMax) rssiMax = s;
+        }
+        float snrAvg = (s_snrHist.count > 0) ? (snrSum / s_snrHist.count) : 0.0f;
+        float rssiAvg = (s_rssiHist.count > 0) ? (rssiSum / s_rssiHist.count) : 0.0f;
+
+        if (s_snrHist.count == 0) snrMin = snrMax = 0.0f;
+        if (s_rssiHist.count == 0) rssiMin = rssiMax = 0.0f;
+
+        snprintf(text, sizeof(text),
+                 "SNR   cur %s  avg %.1fdB  min %.1f  max %.1f   n=%d\n"
+                 "RSSI  cur %s  avg %.0fdBm min %.0f  max %.0f   n=%d",
+                 snrCur, (double)snrAvg, (double)snrMin, (double)snrMax, s_snrHist.count,
+                 rssiCur, (double)rssiAvg, (double)rssiMin, (double)rssiMax, s_rssiHist.count);
+        lv_label_set_text(s_snrStatsLabel, text);
+    }
+}
+
+static void openSnrRssiChartModal() {
+    if (!s_rootScreen) return;
+    if (s_snrChartModal) return;
+
+    int modalW = lv_disp_get_hor_res(NULL);
+    int modalH = lv_disp_get_ver_res(NULL);
+
+    s_snrChartModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_snrChartModal, modalW, modalH);
+    lv_obj_align(s_snrChartModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_snrChartModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_snrChartModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_snrChartModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_snrChartModal, 1, 0);
+    lv_obj_set_style_border_color(s_snrChartModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_snrChartModal, 4, 0);
+    lv_obj_set_style_pad_row(s_snrChartModal, 4, 0);
+    lv_obj_set_flex_flow(s_snrChartModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_snrChartModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_snrChartModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(header, 4, 0);
+    lv_obj_set_style_pad_right(header, 4, 0);
+    lv_obj_set_style_pad_top(header, 1, 0);
+    lv_obj_set_style_pad_bottom(header, 1, 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "SNR (dB)  /  RSSI (dBm)");
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+#else
+    lv_obj_center(title);
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch close button anchored to the right side of the header.
+    lv_obj_t *headerClose = lv_btn_create(header);
+    lv_obj_set_size(headerClose, 48, 20);
+    lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_radius(headerClose, 4, 0);
+    lv_obj_set_style_pad_all(headerClose, 0, 0);
+    lv_obj_set_style_shadow_width(headerClose, 0, 0);
+    lv_obj_set_style_bg_color(headerClose, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(headerClose, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(headerClose, 1, 0);
+    lv_obj_set_style_border_color(headerClose, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(headerClose,
+                        [](lv_event_t *e) { LV_UNUSED(e); closeSnrRssiChartModal(); },
+                        LV_EVENT_CLICKED,
+                        nullptr);
+    lv_obj_t *headerCloseLbl = lv_label_create(headerClose);
+    lv_obj_set_style_text_font(headerCloseLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(headerCloseLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(headerCloseLbl, "Close");
+    lv_obj_center(headerCloseLbl);
+#endif
+
+    s_snrChart = lv_chart_create(s_snrChartModal);
+    lv_obj_set_width(s_snrChart, lv_pct(100));
+    lv_obj_set_flex_grow(s_snrChart, 1);
+    lv_chart_set_type(s_snrChart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(s_snrChart, ChartHist::CAP);
+    lv_chart_set_range(s_snrChart, LV_CHART_AXIS_PRIMARY_Y, -25, 15);
+    lv_chart_set_range(s_snrChart, LV_CHART_AXIS_SECONDARY_Y, -130, -30);
+    lv_chart_set_div_line_count(s_snrChart, 5, 6);
+    lv_chart_set_update_mode(s_snrChart, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_chart_set_axis_tick(s_snrChart, LV_CHART_AXIS_PRIMARY_Y, 4, 2, 5, 2, true, 50);
+    lv_chart_set_axis_tick(s_snrChart, LV_CHART_AXIS_SECONDARY_Y, 4, 2, 5, 2, true, 56);
+    lv_obj_set_style_size(s_snrChart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_snrChart, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_snrChart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_snrChart, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_border_width(s_snrChart, 1, 0);
+    lv_obj_set_style_line_color(s_snrChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(s_snrChart, LV_OPA_40, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_snrChart, &lv_font_montserrat_10, LV_PART_TICKS);
+    lv_obj_set_style_text_color(s_snrChart, lv_color_hex(0xA7C7FF), LV_PART_TICKS);
+    lv_obj_add_event_cb(s_snrChart, onSnrChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+
+    s_snrSeries = lv_chart_add_series(s_snrChart,
+                                      lv_color_hex(0x68D391),
+                                      LV_CHART_AXIS_PRIMARY_Y);
+    s_rssiSeries = lv_chart_add_series(s_snrChart,
+                                       lv_color_hex(0xF687B3),
+                                       LV_CHART_AXIS_SECONDARY_Y);
+    if (s_snrSeries) lv_chart_set_all_value(s_snrChart, s_snrSeries, LV_CHART_POINT_NONE);
+    if (s_rssiSeries) lv_chart_set_all_value(s_snrChart, s_rssiSeries, LV_CHART_POINT_NONE);
+
+    s_snrStatsLabel = lv_label_create(s_snrChartModal);
+    lv_obj_set_width(s_snrStatsLabel, lv_pct(100));
+    lv_label_set_long_mode(s_snrStatsLabel, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_snrStatsLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_snrStatsLabel, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(s_snrStatsLabel,
+                      "SNR   cur --  avg --  min --  max --   n=0\n"
+                      "RSSI  cur --  avg --  min --  max --   n=0");
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_snrChartModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "%s = Back   green=SNR  pink=RSSI", modalCloseKeyLabel());
+#endif
+
+    s_snrRenderedSeq = 0;
+    s_rssiRenderedSeq = 0;
+    refreshSnrRssiChart(true);
 }
 
 static DmConv *selectedDmConversation() {
@@ -6714,7 +7304,9 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_pad_right(msg, 4, 0);
             lv_obj_set_style_pad_top(msg, 0, 0);
             lv_obj_set_style_pad_bottom(msg, 0, 0);
-            lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
+            // DmMgr now stores one logical message per DmLine; let LVGL wrap it
+            // to the actual pane pixel width so font metrics drive line breaks.
+            lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 
             uint16_t lineColor = dl->color;
             switch (dl->ack) {
@@ -6802,7 +7394,8 @@ static void openDmModal() {
 
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
-    int contentW = modalW - 8;
+    // s_dmModal has border=1 + pad_all=4, so usable content width is modalW - 2*1 - 2*4.
+    int contentW = modalW - 10;
     int leftW = max(96, (contentW * 38) / 100);
     int rightW = contentW - leftW - 3;
 
@@ -7699,6 +8292,16 @@ static void activateCfgSelection() {
                      s_cfg.neighborInfoEnabled ? "On" : "Off");
             break;
 
+        case CFG_ACTION_SNF_CLIENT:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_CLIENT");
+            s_cfg.snfClientEnabled = !s_cfg.snfClientEnabled;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus,
+                     sizeof(s_cfgStatus),
+                     "Store&Fwd Client: %s",
+                     s_cfg.snfClientEnabled ? "On" : "Off");
+            break;
+
         case CFG_ACTION_MSG_ALERT:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MSG_ALERT");
             s_cfg.msgAlertSound = (uint8_t)((s_cfg.msgAlertSound + 1) % 4);
@@ -8244,6 +8847,20 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        if (s_chUtilChartModal) {
+            if (isModalCloseKey(k)) {
+                closeChUtilChartModal();
+            }
+            continue;
+        }
+
+        if (s_snrChartModal) {
+            if (isModalCloseKey(k)) {
+                closeSnrRssiChartModal();
+            }
+            continue;
+        }
+
         if (s_liveModal) {
             if (isModalCloseKey(k)) {
                 closeLiveModal();
@@ -8254,6 +8871,14 @@ static void pumpKeyboardInput() {
                 s_lastRenderedLiveCount = -1;
                 s_lastRenderedLiveScrollOff = -1;
                 refreshLiveView(true);
+                continue;
+            }
+            if (k == 'u' || k == 'U') {
+                openChUtilChartModal();
+                continue;
+            }
+            if (k == 's' || k == 'S') {
+                openSnrRssiChartModal();
                 continue;
             }
             if (k == KEY_SCROLL_UP && s_liveList) {
@@ -10094,18 +10719,14 @@ static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    snprintf(line, sizeof(line), "%s %s c%d",
-             who,
-             (portTag && portTag[0]) ? portTag : "D",
-             chanIdx);
-#else
+    // Keep the compact, decodable form on every build so formatLiveLineText
+    // can render the verbose live row (Cardputer previously emitted a shorter
+    // unrecognised form that fell through to the raw fallback).
     snprintf(line, sizeof(line), "R %s>%s %s c%d",
              who,
              liveDestTag(pkt.hdr.to),
              (portTag && portTag[0]) ? portTag : "D",
              chanIdx);
-#endif
     Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
@@ -10116,11 +10737,7 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    snprintf(line, sizeof(line), "%s ENC h%02X", who, pkt.hdr.channel);
-#else
     snprintf(line, sizeof(line), "R %s ENC h%02X", who, pkt.hdr.channel);
-#endif
     Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
@@ -10165,6 +10782,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     if (s_myNodeId != 0 && pkt.hdr.from == s_myNodeId) return false;
 
     Nodes.updateFromPacket(pkt);
+
+    // Live SNR/RSSI sparkline samples (one per received packet).
+    chartPushSample(s_snrHist, pkt.snr);
+    chartPushSample(s_rssiHist, pkt.rssi);
 
     if (!pkt.decrypted && pkt.hdr.channel == 0 && pkt.rawLen > 12) {
         NodeEntry *sender = Nodes.find(pkt.hdr.from);
@@ -10285,6 +10906,128 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             return false;
         }
 
+        case STORE_FORWARD_APP: {
+            // If the user has disabled the Store-and-Forward client, drop these
+            // packets silently (no live entry, no display).
+            if (!s_cfg.snfClientEnabled) {
+                return false;
+            }
+
+            // Decode the Meshtastic StoreAndForward proto looking for:
+            //   field 1 (varint): rr  (RequestResponse enum)
+            //   field 5 (bytes):  text payload (only present for replayed text)
+            uint32_t rr = 0;
+            const uint8_t *sfText = nullptr;
+            size_t sfTextLen = 0;
+            size_t i = 0;
+            while (i < pkt.payloadLen) {
+                uint64_t tag = 0;
+                i = pbReadVarint(pkt.payload, pkt.payloadLen, i, tag);
+                if (!i) break;
+
+                uint32_t field = (uint32_t)(tag >> 3);
+                uint32_t wt = (uint32_t)(tag & 7);
+                if (wt == 0) {
+                    uint64_t v = 0;
+                    i = pbReadVarint(pkt.payload, pkt.payloadLen, i, v);
+                    if (!i) break;
+                    if (field == 1) rr = (uint32_t)v;
+                } else if (wt == 2) {
+                    uint64_t sz = 0;
+                    size_t j = pbReadVarint(pkt.payload, pkt.payloadLen, i, sz);
+                    if (!j) break;
+                    if (j + sz > pkt.payloadLen) break;
+                    if (field == 5) {
+                        sfText = pkt.payload + j;
+                        sfTextLen = (size_t)sz;
+                    }
+                    i = j + sz;
+                } else if (wt == 5) {
+                    if (i + 4 > pkt.payloadLen) break;
+                    i += 4;
+                } else if (wt == 1) {
+                    if (i + 8 > pkt.payloadLen) break;
+                    i += 8;
+                } else {
+                    break;
+                }
+            }
+
+            // Only act on text-replay variants (ROUTER_TEXT_BROADCAST=8,
+            // ROUTER_TEXT_DIRECT=9). Heartbeats/stats/etc. are just logged.
+            bool isTextReplay = (rr == 8 || rr == 9) && sfText && sfTextLen > 0;
+            if (isTextReplay) {
+                char textBuf[MESH_TEXT_MAX_LEN + 1];
+                size_t copy = utf8util::copyTruncateBytes(
+                    textBuf,
+                    sizeof(textBuf),
+                    sfText,
+                    sfTextLen);
+                for (size_t k = 0; k < copy; k++) {
+                    if (textBuf[k] == '\r' || textBuf[k] == '\n') textBuf[k] = ' ';
+                }
+
+                if (textBuf[0]) {
+                    // Prefix the replayed text with "[SF]" so the user can tell
+                    // it came from a Store-and-Forward server rather than the
+                    // original sender in real time.
+                    char prefixedBuf[MESH_TEXT_MAX_LEN + 1];
+                    snprintf(prefixedBuf, sizeof(prefixedBuf), "[SF] %s", textBuf);
+
+                    const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+                    // rr=9 (ROUTER_TEXT_DIRECT) means this replay is for a DM
+                    // that was originally addressed to us.
+                    bool isDirectToMe = (rr == 9);
+
+                    if (isDirectToMe) {
+                        NodeEntry *sender = Nodes.find(pkt.hdr.from);
+                        char senderShort[5] = {};
+                        if (sender && sender->shortName[0]) {
+                            utf8util::copyTruncate(senderShort, sizeof(senderShort), sender->shortName);
+                        }
+
+                        char timePrefix[12];
+                        char prefix[32];
+                        liveBuildPrefix(timePrefix, sizeof(timePrefix));
+                        if (senderShort[0]) {
+                            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, senderShort);
+                        } else {
+                            char who[16];
+                            liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
+                            snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, who);
+                        }
+
+                        bool viewingDm = false;
+                        if (s_dmModal && s_dmSelection >= 0 && s_dmSelection < s_dmConvCount) {
+                            viewingDm = (s_dmConvNodeIds[s_dmSelection] == pkt.hdr.from);
+                        }
+
+                        DMs.addMessage(pkt.hdr.from,
+                                       senderShort[0] ? senderShort : nullptr,
+                                       prefix,
+                                       prefixedBuf,
+                                       TFT_WHITE,
+                                       !viewingDm,
+                                       chanIdx,
+                                       0);
+                        if (viewingDm) {
+                            DMs.markRead(pkt.hdr.from);
+                        }
+                    } else {
+                        appendRxText(chanIdx, pkt.hdr.from, prefixedBuf, pkt.hdr.id, viaMqtt);
+                    }
+
+                    triggerMessageAlert();
+                    appendLiveRxSummary(pkt, chanIdx, "F");
+                    return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
+                }
+            }
+
+            // Non-text S&F traffic (heartbeats, stats, pings). Just log.
+            appendLiveRxSummary(pkt, chanIdx, "F");
+            return false;
+        }
+
         case ROUTING_APP: {
             if (!pkt.requestId) return false;
 
@@ -10391,6 +11134,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             TelemetryInfo t = {};
             if (decodeTelemetry(pkt.payload, pkt.payloadLen, t)) {
                 Nodes.updateTelemetry(pkt.hdr.from, t);
+                if (t.hasDeviceMetrics) {
+                    chartPushSample(s_chUtilHist, t.chUtil);
+                    chartPushSample(s_airUtilHist, t.airUtil);
+                }
             }
             if (wantsAck && addressedToMe) {
                 (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
@@ -11456,15 +12203,27 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
 
     if (s_liveModal) {
-        lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
+        if (lv_obj_is_valid(s_liveModal) && lv_obj_get_disp(s_liveModal) != nullptr) {
+            lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
+            lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
+        } else {
+            s_liveModal = nullptr;
+        }
     }
     if (s_liveList) {
-        lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
-        lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
-        lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
-        lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-        refreshLiveView(true);
+        if (lv_obj_is_valid(s_liveList)
+            && lv_obj_get_disp(s_liveList) != nullptr
+            && s_liveModal
+            && lv_obj_is_valid(s_liveModal)
+            && lv_obj_get_parent(s_liveList) == s_liveModal) {
+            lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
+            lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
+            lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
+            lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+            refreshLiveView(true);
+        } else {
+            s_liveList = nullptr;
+        }
     }
 
     if (s_dmModal) {
@@ -11810,6 +12569,8 @@ void loop() {
     refreshHeaderStatus(false);
     refreshChatView(meshChanged);
     refreshLiveView(meshChanged);
+    refreshChUtilChart(meshChanged);
+    refreshSnrRssiChart(meshChanged);
     refreshDmModal(meshChanged);
     delay(5);
 }

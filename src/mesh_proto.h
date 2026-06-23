@@ -38,6 +38,7 @@ enum PortNum : uint32_t {
     POSITION_APP     = 3,
     NODEINFO_APP     = 4,
     ROUTING_APP      = 5,    // ACK/NAK packets (Meshtastic PortNum_ROUTING_APP)
+    STORE_FORWARD_APP = 65,  // Store and Forward module (replayed messages)
     TELEMETRY_APP    = 67,
     NEIGHBORINFO_APP = 71,
     TRACEROUTE_APP   = 70,   // traceroute (not ACK)

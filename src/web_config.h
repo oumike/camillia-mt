@@ -48,3 +48,19 @@ bool webCfgIsOnboarding();
 // Current WiFi credentials (updated by web UI save, used by NVS save callback)
 const char *webCfgWifiSsid();
 const char *webCfgWifiPass();
+
+// ── Live chart history snapshot API ───────────────────────────────
+// Allows the web UI to render the same channel-utilization and SNR/RSSI
+// sparklines as the on-device live feed (keyboard shortcuts u/s).
+// values[] is filled oldest -> newest; only the first `count` entries are valid.
+struct WebChartSnapshot {
+    static constexpr int CAP = 60;
+    float values[CAP];
+    int count;
+    bool hasLast;
+    float lastVal;
+};
+void webChartSnapshotChUtil(WebChartSnapshot &out);
+void webChartSnapshotAirUtil(WebChartSnapshot &out);
+void webChartSnapshotSnr(WebChartSnapshot &out);
+void webChartSnapshotRssi(WebChartSnapshot &out);

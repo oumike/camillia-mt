@@ -4,16 +4,18 @@
 #include "config.h"
 
 #define MAX_DM_CONVS    16
+// One DmLine holds one full logical message (prefix + body). The UI label uses
+// LVGL's wrap mode to break the text to the actual pane pixel width, so we no
+// longer pre-wrap to a character grid (which produced awkward, mismatched
+// breaks against the real font width).
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define MAX_DM_LINES    80
+#define MAX_DM_LINES    24   // RAM-limited (no PSRAM)
+#define DM_LINE_LEN    200
 #else
-#define MAX_DM_LINES   200
+#define MAX_DM_LINES    60   // PSRAM-backed; covers typical DM history
+#define DM_LINE_LEN    240   // covers max Meshtastic text payload + prefix
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT)
-#define DM_LINE_LEN     53   // pager 1.5x experiment (approx 480 / 9 chars)
-#else
-#define DM_LINE_LEN     53   // LCD_W / CHAR_W = 320/6 baseline
-#endif
+
 #define MAX_DM_PENDING_TX 12
 
 struct DmLine {

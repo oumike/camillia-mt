@@ -96,6 +96,9 @@ struct RhinoConfig {
     bool     cannedEnabled;
     char     cannedMessages[200];
 
+    // Module: Store and Forward (client)
+    bool     snfClientEnabled;
+
     // Chat display
     uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 

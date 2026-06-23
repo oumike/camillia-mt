@@ -32,22 +32,6 @@ static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
     Channels.addMessage(CHAN_ANN, prefix, text, color);
 }
 
-static inline bool isUtf8Continuation(uint8_t b) {
-    return (b & 0xC0u) == 0x80u;
-}
-
-// Returns a byte count <= maxBytes that does not split a UTF-8 sequence.
-static int utf8TakeNoSplit(const char *text, int pos, int textLen, int maxBytes) {
-    if (!text || maxBytes <= 0 || pos >= textLen) return 0;
-    int take = min(textLen - pos, maxBytes);
-    while (take > 0 && (pos + take) < textLen
-           && isUtf8Continuation((uint8_t)text[pos + take])) {
-        take--;
-    }
-    if (take <= 0) take = min(1, textLen - pos);  // fallback for malformed input
-    return take;
-}
-
 // ── init ──────────────────────────────────────────────────────
 void DmMgr::init() {
     memset(_convs, 0, sizeof(_convs));
@@ -243,80 +227,16 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
     }
     if (chanIdx >= 0 && chanIdx < MESH_CHANNELS) c->rxChanIdx = chanIdx;
 
-    // Combine prefix + text then word-wrap at DM_LINE_LEN
-    char full[512];
-    int prefixLen = prefix ? strlen(prefix) : 0;
-    snprintf(full, sizeof(full), "%s%s", prefix ? prefix : "", text);
-    int len = strlen(full);
-    static constexpr int MAX_WRAP_LINES = 64;
-    char *wrapped = (char *)allocDmStorage(MAX_WRAP_LINES * (DM_LINE_LEN + 1));
-    int wrappedCount = 0;
+    // Store the full message (prefix + body) in a single DmLine. The UI label
+    // uses LVGL's wrap mode to break the text to the real pane pixel width.
+    char full[DM_LINE_LEN + 1];
+    int written = snprintf(full, sizeof(full), "%s%s",
+                           prefix ? prefix : "",
+                           text ? text : "");
+    if (written < 0) written = 0;
 
-    auto wrappedLine = [&](int idx) -> char * {
-        return wrapped + (idx * (DM_LINE_LEN + 1));
-    };
-
-    if (len == 0) {
-        _pushLine(*c, "", color, packetId,
-                  packetId ? DmLine::PENDING : DmLine::NONE);
-        c->scrollOff = 0;
-        _sort();
-        return;
-    }
-
-    int pos = 0;
-    bool firstLine = true;
-    while (pos < len) {
-        int remain = len - pos;
-        int take   = utf8TakeNoSplit(full, pos, len, DM_LINE_LEN);
-
-        // Try to break at a word boundary
-        if (take < remain && full[pos + take] != ' ' && full[pos + take - 1] != ' ') {
-            int bp = take - 1;
-            while (bp > 0 && full[pos + bp] != ' ') bp--;
-            if (bp > 0) take = utf8TakeNoSplit(full, pos, len, bp + 1);
-        }
-
-        char lineBuf[DM_LINE_LEN + 1];
-        if (firstLine) {
-            strncpy(lineBuf, full + pos, take);
-            lineBuf[take] = '\0';
-        } else {
-            // Indent continuation lines to align under the message text
-            int indent = (prefixLen < DM_LINE_LEN) ? prefixLen : 0;
-            int msgTake = take;
-            if (indent + msgTake > DM_LINE_LEN) msgTake = DM_LINE_LEN - indent;
-            snprintf(lineBuf, sizeof(lineBuf), "%*s%.*s", indent, "", msgTake, full + pos);
-        }
-
-        // Trim trailing spaces
-        int end = (int)strlen(lineBuf) - 1;
-        while (end >= 0 && lineBuf[end] == ' ') lineBuf[end--] = '\0';
-
-        if (wrapped && wrappedCount < MAX_WRAP_LINES) {
-            char *dst = wrappedLine(wrappedCount);
-            utf8util::copyTruncate(dst, DM_LINE_LEN + 1, lineBuf);
-            wrappedCount++;
-        } else if (!wrapped) {
-            // Low-memory fallback: keep chat usable even if wrapping cache can't be allocated.
-            _pushLine(*c, lineBuf, color, packetId,
-                      packetId ? DmLine::PENDING : DmLine::NONE);
-        }
-
-        pos += take;
-        while (pos < len && full[pos] == ' ') pos++;
-        firstLine = false;
-    }
-
-    // Conversation view is newest-at-top; reverse insertion keeps wrapped
-    // messages readable from top to bottom.
-    for (int i = wrappedCount - 1; i >= 0; i--) {
-        bool logicalFirst = (i == 0);
-        _pushLine(*c, wrappedLine(i), color, packetId,
-                  (packetId && logicalFirst) ? DmLine::PENDING : DmLine::NONE);
-    }
-
-    if (wrapped) free(wrapped);
+    _pushLine(*c, full, color, packetId,
+              packetId ? DmLine::PENDING : DmLine::NONE);
 
     c->scrollOff = 0;  // jump to latest on new message
     saveConv(c);       // save before _sort() — sort may move the struct in the array
@@ -565,7 +485,10 @@ const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows
 //   Body:   numLines × DmLine entries, written oldest → newest
 
 static const char *kDmDir = "/camillia/dms";
-static const uint32_t DM_MAGIC = 0x434D444D;  // "CMDM"
+// Magic was bumped when on-disk DmLine.text width changed to support full
+// Meshtastic-sized payloads in one record. Older "CMDM" files used a smaller
+// fixed-width record and are skipped on load (transcripts are not migrated).
+static const uint32_t DM_MAGIC = 0x434D444E;  // "CMDN"
 struct PersistDmLine {
     char     text[DM_LINE_LEN + 1];
     uint16_t color;

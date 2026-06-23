@@ -126,6 +126,7 @@
 #define NEIGHBORINFO_MIN_INTERVAL_S 14400
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
+#define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 #define MSG_ALERT_SOUND_DEFAULT 0

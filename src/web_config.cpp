@@ -491,6 +491,15 @@ static const char kHead[] =
         ".live-toolbar{display:flex;justify-content:space-between;align-items:center;gap:.5em;margin-bottom:.45em}"
         ".live-toolbar span{font-size:.68em;color:var(--text-dim)}"
         ".live-feed{height:380px;overflow:auto;border:1px solid var(--line);border-radius:6px;background:var(--bg)}"
+        ".chart-wrap{margin-top:.6em;display:grid;grid-template-columns:1fr;gap:.7em}"
+        ".chart-box{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
+        ".chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5em;margin-bottom:.35em;font-size:.85em}"
+        ".chart-stats{font-size:.72em;color:var(--text-dim);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}"
+        ".chart-canvas{width:100%;height:180px;display:block;background:var(--bg);border:1px solid var(--line);border-radius:6px}"
+        ".chart-legend{margin-top:.3em;font-size:.72em;color:var(--text-dim)}"
+        ".chart-legend .swatch{display:inline-block;width:.8em;height:.8em;margin-right:.25em;vertical-align:middle;border-radius:2px}"
+        ".sw-chutil{background:#67d8ff}.sw-airutil{background:#ffd56b}"
+        ".sw-snr{background:#9ceadf}.sw-rssi{background:#f7b46d}"
         ".live-line{padding:.13em .38em;border-bottom:1px solid rgba(255,255,255,.08);"
             "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7em;line-height:1.2;"
             "color:#dfe7ef;background:#10254a}"
@@ -1218,6 +1227,13 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->cannedEnabled) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->cannedEnabled) html += " selected"; html += ">No</option>"
             "</select></label>";
+
+    // Store and Forward (client)
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Store &amp; Forward (Client)</h3>";
+    html += "<label>Receive Replayed Messages<select name='snf_client_en'>"
+            "<option value='1'"; if ( gCfg->snfClientEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->snfClientEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Alerts</h3>";
     html += "<label>Notification Sound<select name='msg_alert_sound'>"
@@ -1345,6 +1361,28 @@ static void sendConfigPage(const char *msg = "") {
             "<span id='live-status'>Paused</span>"
             "</div>"
             "<div id='live-feed' class='live-feed'></div>"
+            "</div>"
+            "<h3 style='margin-top:1.2em'>Live Charts</h3>"
+            "<p class='gps-hint'>Same data shown on-device via the live feed shortcuts (U / S). Last 60 samples, newest on the right.</p>"
+            "<div class='chart-wrap'>"
+              "<div class='chart-box'>"
+                "<div class='chart-head'><strong>Channel Utilization (%)</strong>"
+                  "<span id='chart-chutil-stats' class='chart-stats'>--</span></div>"
+                "<canvas id='chart-chutil' class='chart-canvas' width='600' height='180'></canvas>"
+                "<div class='chart-legend'>"
+                  "<span class='swatch sw-chutil'></span>ChUtil"
+                  "&nbsp;&nbsp;<span class='swatch sw-airutil'></span>AirTx"
+                "</div>"
+              "</div>"
+              "<div class='chart-box'>"
+                "<div class='chart-head'><strong>SNR (dB) / RSSI (dBm)</strong>"
+                  "<span id='chart-snr-stats' class='chart-stats'>--</span></div>"
+                "<canvas id='chart-snr' class='chart-canvas' width='600' height='180'></canvas>"
+                "<div class='chart-legend'>"
+                  "<span class='swatch sw-snr'></span>SNR (left axis, dB)"
+                  "&nbsp;&nbsp;<span class='swatch sw-rssi'></span>RSSI (right axis, dBm)"
+                "</div>"
+              "</div>"
             "</div>";
 
     html += "</div><div class='tab-panel' id='tab-map'>";
@@ -1693,12 +1731,122 @@ static void sendConfigPage(const char *msg = "") {
                             "setLiveStatus('Connecting...');"
                             "pollLiveFeed();"
                             "livePollTimer=setInterval(pollLiveFeed,1500);"
+                            "startChartPolling();"
                         "}"
                         "function stopLivePolling(){"
                             "if(!livePollTimer)return;"
                             "clearInterval(livePollTimer);"
                             "livePollTimer=null;"
                             "setLiveStatus('Paused');"
+                            "stopChartPolling();"
+                        "}"
+                        "var chartPollTimer=null;"
+                        "function drawChartFrame(ctx,w,h,pad){"
+                            "ctx.clearRect(0,0,w,h);"
+                            "ctx.fillStyle='#0a1a36';ctx.fillRect(0,0,w,h);"
+                            "ctx.strokeStyle='#1f3a6a';ctx.lineWidth=1;"
+                            "ctx.beginPath();"
+                            "for(var i=0;i<=4;i++){"
+                                "var y=pad.t+(h-pad.t-pad.b)*i/4;"
+                                "ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);"
+                            "}"
+                            "for(var j=0;j<=6;j++){"
+                                "var x=pad.l+(w-pad.l-pad.r)*j/6;"
+                                "ctx.moveTo(x,pad.t);ctx.lineTo(x,h-pad.b);"
+                            "}"
+                            "ctx.stroke();"
+                        "}"
+                        "function drawSeries(ctx,vals,cap,minV,maxV,pad,w,h,color){"
+                            "if(!vals||vals.length<1)return;"
+                            "if(maxV<=minV)maxV=minV+1;"
+                            "var iw=w-pad.l-pad.r,ih=h-pad.t-pad.b;"
+                            "var step=iw/Math.max(1,cap-1);"
+                            "var offset=cap-vals.length;"
+                            "ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();"
+                            "var started=false;"
+                            "for(var i=0;i<vals.length;i++){"
+                                "var idx=offset+i;"
+                                "var x=pad.l+idx*step;"
+                                "var nv=(vals[i]-minV)/(maxV-minV);"
+                                "if(nv<0)nv=0;if(nv>1)nv=1;"
+                                "var y=pad.t+(1-nv)*ih;"
+                                "if(!started){ctx.moveTo(x,y);started=true;}"
+                                "else ctx.lineTo(x,y);"
+                            "}"
+                            "ctx.stroke();"
+                        "}"
+                        "function drawYLabels(ctx,pad,w,h,minV,maxV,suffix,align){"
+                            "ctx.fillStyle='#7ea1d4';ctx.font='10px ui-monospace,Menlo,Consolas,monospace';"
+                            "ctx.textBaseline='middle';"
+                            "for(var i=0;i<=4;i++){"
+                                "var v=maxV-(maxV-minV)*i/4;"
+                                "var y=pad.t+(h-pad.t-pad.b)*i/4;"
+                                "var label=Math.round(v)+suffix;"
+                                "if(align==='right'){ctx.textAlign='left';ctx.fillText(label,w-pad.r+2,y);}"
+                                "else{ctx.textAlign='right';ctx.fillText(label,pad.l-2,y);}"
+                            "}"
+                        "}"
+                        "function statsLine(name,unit,s){"
+                            "if(!s||!s.values||s.values.length<1)return name+' --';"
+                            "var sum=0,mn=Infinity,mx=-Infinity;"
+                            "for(var i=0;i<s.values.length;i++){var v=s.values[i];sum+=v;if(v<mn)mn=v;if(v>mx)mx=v;}"
+                            "var avg=sum/s.values.length;"
+                            "var cur=(s.hasLast?s.last:s.values[s.values.length-1]);"
+                            "return name+' cur '+cur.toFixed(1)+unit+'  avg '+avg.toFixed(1)+unit+'  min '+mn.toFixed(1)+unit+'  max '+mx.toFixed(1)+unit+'  n='+s.values.length;"
+                        "}"
+                        "function renderChUtilChart(d){"
+                            "var c=document.getElementById('chart-chutil');if(!c)return;"
+                            "var ctx=c.getContext('2d');"
+                            "var w=c.width=c.clientWidth||600;var h=c.height=180;"
+                            "var pad={l:36,r:10,t:8,b:14};"
+                            "drawChartFrame(ctx,w,h,pad);"
+                            "drawYLabels(ctx,pad,w,h,0,100,'%','left');"
+                            "var cap=d.capacity||60;"
+                            "drawSeries(ctx,(d.chUtil&&d.chUtil.values)||[],cap,0,100,pad,w,h,'#67d8ff');"
+                            "drawSeries(ctx,(d.airUtil&&d.airUtil.values)||[],cap,0,100,pad,w,h,'#ffd56b');"
+                            "var stats=document.getElementById('chart-chutil-stats');"
+                            "if(stats)stats.textContent=statsLine('ChUtil','%',d.chUtil)+'   '+statsLine('AirTx','%',d.airUtil);"
+                        "}"
+                        "function seriesBounds(vals,fallbackLo,fallbackHi){"
+                            "if(!vals||!vals.length)return[fallbackLo,fallbackHi];"
+                            "var mn=Infinity,mx=-Infinity;"
+                            "for(var i=0;i<vals.length;i++){var v=vals[i];if(v<mn)mn=v;if(v>mx)mx=v;}"
+                            "var pad=(mx-mn)*0.15;if(pad<1)pad=1;"
+                            "return[Math.floor(mn-pad),Math.ceil(mx+pad)];"
+                        "}"
+                        "function renderSnrChart(d){"
+                            "var c=document.getElementById('chart-snr');if(!c)return;"
+                            "var ctx=c.getContext('2d');"
+                            "var w=c.width=c.clientWidth||600;var h=c.height=180;"
+                            "var pad={l:40,r:48,t:8,b:14};"
+                            "drawChartFrame(ctx,w,h,pad);"
+                            "var snrVals=(d.snr&&d.snr.values)||[];"
+                            "var rssiVals=(d.rssi&&d.rssi.values)||[];"
+                            "var sb=seriesBounds(snrVals,-20,15);"
+                            "var rb=seriesBounds(rssiVals,-130,-30);"
+                            "drawYLabels(ctx,pad,w,h,sb[0],sb[1],'dB','left');"
+                            "drawYLabels(ctx,pad,w,h,rb[0],rb[1],'dBm','right');"
+                            "var cap=d.capacity||60;"
+                            "drawSeries(ctx,snrVals,cap,sb[0],sb[1],pad,w,h,'#9ceadf');"
+                            "drawSeries(ctx,rssiVals,cap,rb[0],rb[1],pad,w,h,'#f7b46d');"
+                            "var stats=document.getElementById('chart-snr-stats');"
+                            "if(stats)stats.textContent=statsLine('SNR','dB',d.snr)+'   '+statsLine('RSSI','dBm',d.rssi);"
+                        "}"
+                        "function pollChartData(){"
+                            "fetch('/chart-data',{cache:'no-store',credentials:'same-origin'})"
+                                ".then(function(r){if(!r.ok)throw r;return r.json();})"
+                                ".then(function(d){renderChUtilChart(d);renderSnrChart(d);})"
+                                ".catch(function(){});"
+                        "}"
+                        "function startChartPolling(){"
+                            "if(chartPollTimer)return;"
+                            "pollChartData();"
+                            "chartPollTimer=setInterval(pollChartData,2000);"
+                        "}"
+                        "function stopChartPolling(){"
+                            "if(!chartPollTimer)return;"
+                            "clearInterval(chartPollTimer);"
+                            "chartPollTimer=null;"
                         "}"
                         "function ensureNodeMap(){"
                             "var mapEl=document.getElementById('node-heatmap');"
@@ -2093,6 +2241,9 @@ static void handlePostSave() {
         strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
         gCfg->cannedMessages[sizeof(gCfg->cannedMessages) - 1] = '\0';
     }
+    if (server.hasArg("snf_client_en")) {
+        gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;
+    }
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     gCfg->msgAlertSound      = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
 #endif
@@ -2189,6 +2340,65 @@ static void handleGetLiveData() {
     }
 
     out += "]}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", out);
+}
+
+// Returns JSON snapshots of the four live-chart series so the web UI can
+// render the same channel-utilization and SNR/RSSI charts that the on-device
+// live feed exposes via the u/s keyboard shortcuts.
+static void handleGetChartData() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    WebChartSnapshot chUtil, airUtil, snr, rssi;
+    webChartSnapshotChUtil(chUtil);
+    webChartSnapshotAirUtil(airUtil);
+    webChartSnapshotSnr(snr);
+    webChartSnapshotRssi(rssi);
+
+    String out;
+    out.reserve(4096);
+
+    auto appendSeries = [&](const char *name, const WebChartSnapshot &s) {
+        out += "\"";
+        out += name;
+        out += "\":{\"count\":";
+        out += String(s.count);
+        out += ",\"hasLast\":";
+        out += (s.hasLast ? "true" : "false");
+        out += ",\"last\":";
+        if (s.hasLast) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f", (double)s.lastVal);
+            out += buf;
+        } else {
+            out += "null";
+        }
+        out += ",\"values\":[";
+        for (int i = 0; i < s.count; i++) {
+            if (i > 0) out += ",";
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f", (double)s.values[i]);
+            out += buf;
+        }
+        out += "]}";
+    };
+
+    out += "{\"capacity\":";
+    out += String(WebChartSnapshot::CAP);
+    out += ",";
+    appendSeries("chUtil", chUtil);
+    out += ",";
+    appendSeries("airUtil", airUtil);
+    out += ",";
+    appendSeries("snr", snr);
+    out += ",";
+    appendSeries("rssi", rssi);
+    out += "}";
+
     server.sendHeader("Cache-Control", "no-store");
     server.send(200, "application/json", out);
 }
@@ -2460,6 +2670,7 @@ static void registerCommonRoutes() {
     server.on("/save",              HTTP_POST, handlePostSave);
     server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     server.on("/live-data",         HTTP_GET,  handleGetLiveData);
+    server.on("/chart-data",        HTTP_GET,  handleGetChartData);
     server.on("/release-check",     HTTP_GET,  handleGetReleaseCheck);
     server.on("/logout",            HTTP_GET,  handleGetLogout);
     server.on("/announce",          HTTP_POST, handlePostAnnounce);
