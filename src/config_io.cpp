@@ -412,8 +412,6 @@ bool sdBegin() {
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
     char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
-    // canned_messages top-level
-    out += "canned_messages: "; out += cfg.cannedMessages; out += "\n";
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
@@ -427,13 +425,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "splash_melody_enabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false");
     out += tmp;
     out += "config:\n";
-    // bluetooth
-    out += "  bluetooth:\n";
-    snprintf(tmp, sizeof(tmp), "    enabled: %s\n",    cfg.btEnabled ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    fixedPin: %lu\n",  (unsigned long)cfg.btFixedPin);    out += tmp;
-    out += "    mode: ";
-    out += (cfg.btMode == 1 ? "FIXED_PIN" : cfg.btMode == 2 ? "NO_PIN" : "RANDOM_PIN");
-    out += "\n";
     // device
     out += "  device:\n";
     snprintf(tmp, sizeof(tmp), "    nodeInfoBroadcastSecs: %lu\n", (unsigned long)cfg.nodeInfoIntervalS); out += tmp;
@@ -490,18 +481,13 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "  lon: %.7f\n",  cfg.lonI * 1e-7f);    out += tmp;
     // module_config
     out += "module_config:\n";
-    out += "  cannedMessage:\n";
-    snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.cannedEnabled ? "true" : "false"); out += tmp;
     out += "  storeForward:\n";
     snprintf(tmp, sizeof(tmp), "    client_enabled: %s\n", cfg.snfClientEnabled ? "true" : "false"); out += tmp;
+    // MQTT subsection intentionally limited to the two cross-build routing
+    // flags. Broker credentials/address are excluded from export.
     out += "  mqtt:\n";
-    out += "    address: "; out += cfg.mqttServer; out += "\n";
-    snprintf(tmp, sizeof(tmp), "    enabled: %s\n",           cfg.mqttEnabled   ? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    encryptionEnabled: %s\n", cfg.mqttEncryption? "true" : "false"); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n",cfg.mqttMapReport? "true" : "false"); out += tmp;
-    out += "    password: "; out += cfg.mqttPass; out += "\n";
-    out += "    root: ";     out += cfg.mqttRoot; out += "\n";
-    out += "    username: "; out += cfg.mqttUser; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
     out += "  telemetry:\n";
     snprintf(tmp, sizeof(tmp), "    deviceTelemetryEnabled: %s\n", cfg.telDeviceEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    deviceUpdateInterval: %lu\n",  (unsigned long)cfg.telDeviceIntervalS);    out += tmp;
@@ -762,6 +748,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "password"))           strncpy(cfg.mqttPass,    val, sizeof(cfg.mqttPass)    - 1);
                 else if (!strcmp(key, "root"))               strncpy(cfg.mqttRoot,    val, sizeof(cfg.mqttRoot)    - 1);
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
+                else if (!strcmp(key, "ok_to_mqtt"))         cfg.okToMqtt     = parseBoolValue(val);
+                else if (!strcmp(key, "ignore_mqtt"))        cfg.ignoreMqtt   = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
                 if      (!strcmp(key, "deviceTelemetryEnabled"))        cfg.telDeviceEnabled   = (!strcmp(val,"true"));
                 else if (!strcmp(key, "deviceUpdateInterval"))          cfg.telDeviceIntervalS = (uint32_t)atol(val);

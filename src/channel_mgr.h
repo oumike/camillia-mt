@@ -9,6 +9,7 @@ struct DisplayLine {
     uint16_t color;
     uint32_t packetId;    // 0 = not a sent message
     enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
+    uint32_t epoch;       // wall-clock seconds when this line was added (0 = unknown)
 };
 
 struct Channel {
@@ -103,9 +104,11 @@ private:
     bool       _persistDirReady = false;
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
-                   uint16_t color, uint32_t packetId, bool trackAck);
+                   uint16_t color, uint32_t packetId, bool trackAck,
+                   uint32_t epoch);
     void _pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
-                   uint32_t packetId, DisplayLine::AckState ack);
+                   uint32_t packetId, DisplayLine::AckState ack,
+                   uint32_t epoch);
     void _persistChannel(int chanIdx, const Channel &ch);
 };
 

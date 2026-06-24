@@ -23,6 +23,7 @@ struct DmLine {
     uint16_t color;
     uint32_t packetId;  // 0 = not a locally-sent DM line
     enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
+    uint32_t epoch;     // wall-clock seconds when this line was added (0 = unknown)
 };
 
 struct DmConv {
@@ -91,7 +92,8 @@ private:
 
     void _sort();
     void _pushLine(DmConv &c, const char *text, uint16_t color,
-                   uint32_t packetId, DmLine::AckState ack);
+                   uint32_t packetId, DmLine::AckState ack,
+                   uint32_t epoch);
     void _setAckState(uint32_t packetId, DmLine::AckState state);
 };
 

@@ -429,6 +429,10 @@ static inline char remapJkUiKey(char k, bool allowScrollRemap) {
 #endif
 
 static void refreshChatView(bool force = false);
+static uint32_t chatDateBucket(uint32_t epoch);
+static void formatChatDateLabel(uint32_t epoch, char *out, size_t len);
+static void insertChatDateMarker(lv_obj_t *parent, uint32_t epoch,
+                                 const lv_font_t *font);
 static void collectChatRows(const DisplayLine **rows, int &rowCount);
 static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
                                   int *displayOrder, int &displayCount);
@@ -5107,12 +5111,16 @@ static void refreshNodesListRows() {
 #endif
 
     if (s_nodesTitleLabel) {
+        int nodeCount = s_nodesSnapshotCount;
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
-            char titleText[56];
-            snprintf(titleText, sizeof(titleText), "NODES [%s]", s_nodesFilter);
+            char titleText[64];
+            snprintf(titleText, sizeof(titleText), "NODES [%s] (%d)",
+                     s_nodesFilter, nodeCount);
             lv_label_set_text(s_nodesTitleLabel, titleText);
         } else {
-            lv_label_set_text(s_nodesTitleLabel, "NODES");
+            char titleText[32];
+            snprintf(titleText, sizeof(titleText), "NODES (%d)", nodeCount);
+            lv_label_set_text(s_nodesTitleLabel, titleText);
         }
     }
 
@@ -7292,9 +7300,19 @@ static void refreshDmModal(bool force) {
             renderRows[rowCount++] = dl;
         }
 
+        uint32_t lastDateBucket = 0;
         for (int row = rowCount - 1; row >= 0; row--) {
             const DmLine *dl = renderRows[row];
             if (!dl) continue;
+
+            // Insert a date marker before the first DM that lands on a new
+            // local calendar day. DM lines store one logical message each, so
+            // every line is a "first of group" candidate.
+            uint32_t curBucket = chatDateBucket(dl->epoch);
+            if (curBucket != 0 && curBucket != lastDateBucket) {
+                insertChatDateMarker(s_dmMsgList, dl->epoch, dmMsgFont);
+                lastDateBucket = curBucket;
+            }
 
             lv_obj_t *msg = lv_label_create(s_dmMsgList);
             lastMsgObj = msg;
@@ -8650,7 +8668,12 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
             if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_dmSelection > 0) {
                 if (s_dmMsgPanelFocused) {
+                    // Move focus out of the message pane to the "New DM" row
+                    // (index 0) rather than the previously-selected conversation
+                    // so a follow-up backspace closes the DM modal instead of
+                    // arming the delete-conversation confirmation.
                     s_dmMsgPanelFocused = false;
+                    s_dmSelection = 0;
                     s_dmDeletePendingNodeId = 0;
                     s_dmDeleteConfirmUntilMs = 0;
                     refreshDmModal(true);
@@ -11384,6 +11407,92 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, nowMs);
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Chat / DM date markers
+//
+// A horizontal divider with a date label ("--- June 24th 2026 ---") is
+// inserted above the first message that lands on a new local-calendar day.
+// Each stored message snapshots its wall-clock epoch when it arrives; if
+// epoch is 0 (clock not yet synced when message was received, or loaded from
+// legacy persistence) no marker is drawn for that message.
+// ──────────────────────────────────────────────────────────────────────────
+static uint32_t chatDateBucket(uint32_t epoch) {
+    if (epoch < 1700000000) return 0;
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    // year*512 + yday is a cheap monotonically-unique key per local calendar day.
+    return (uint32_t)((tmv.tm_year + 1900) * 512 + tmv.tm_yday);
+}
+
+static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
+    if (!out || len == 0) return;
+    out[0] = '\0';
+    if (epoch < 1700000000) return;
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    static const char *kMonths[12] = {
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    };
+    int day = tmv.tm_mday;
+    const char *suf = "th";
+    int mod100 = day % 100;
+    int mod10 = day % 10;
+    if (!(mod100 >= 11 && mod100 <= 13)) {
+        if (mod10 == 1) suf = "st";
+        else if (mod10 == 2) suf = "nd";
+        else if (mod10 == 3) suf = "rd";
+    }
+    int monIdx = tmv.tm_mon;
+    if (monIdx < 0 || monIdx > 11) monIdx = 0;
+    snprintf(out, len, "%s %d%s %d",
+             kMonths[monIdx], day, suf, 1900 + tmv.tm_year);
+}
+
+static void insertChatDateMarker(lv_obj_t *parent, uint32_t epoch,
+                                 const lv_font_t *font) {
+    if (!parent || !font) return;
+    char dateBuf[40];
+    formatChatDateLabel(epoch, dateBuf, sizeof(dateBuf));
+    if (!dateBuf[0]) return;
+
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_top(row, 3, 0);
+    lv_obj_set_style_pad_bottom(row, 3, 0);
+    lv_obj_set_style_pad_left(row, 0, 0);
+    lv_obj_set_style_pad_right(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 4, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *left = lv_obj_create(row);
+    lv_obj_remove_style_all(left);
+    lv_obj_set_height(left, 1);
+    lv_obj_set_flex_grow(left, 1);
+    lv_obj_set_style_bg_color(left, lv_color_hex(0x6F8FBF), 0);
+    lv_obj_set_style_bg_opa(left, LV_OPA_70, 0);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text(lbl, dateBuf);
+
+    lv_obj_t *right = lv_obj_create(row);
+    lv_obj_remove_style_all(right);
+    lv_obj_set_height(right, 1);
+    lv_obj_set_flex_grow(right, 1);
+    lv_obj_set_style_bg_color(right, lv_color_hex(0x6F8FBF), 0);
+    lv_obj_set_style_bg_opa(right, LV_OPA_70, 0);
+}
+
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
@@ -11415,8 +11524,24 @@ static void refreshChatView(bool force) {
         int displayCount = 0;
         buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
 
+        uint32_t lastDateBucket = 0;
         for (int n = 0; n < displayCount; n++) {
             int i = displayOrder[n];
+
+            const char *lineText = rows[i]->text;
+            bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
+
+            // Insert a date marker before the first line of any message that
+            // lands on a new local calendar day. Continuation lines from a
+            // wrapped multi-line message keep the same epoch and are skipped.
+            if (!isContinuationLine) {
+                uint32_t curBucket = chatDateBucket(rows[i]->epoch);
+                if (curBucket != 0 && curBucket != lastDateBucket) {
+                    insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
+                    lastDateBucket = curBucket;
+                }
+            }
+
             lv_obj_t *msg = lv_label_create(s_chatList);
             lastMsgObj = msg;
             lv_obj_set_width(msg, lv_pct(100));
@@ -11436,9 +11561,6 @@ static void refreshChatView(bool force) {
 #else
             lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 #endif
-
-            const char *lineText = rows[i]->text;
-            bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
 
             uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
             const char *ackSuffix = nullptr;

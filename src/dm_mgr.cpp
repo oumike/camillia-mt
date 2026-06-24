@@ -198,13 +198,15 @@ void DmMgr::_sort() {
 
 // ── _pushLine: append one rendered line ───────────────────────
 void DmMgr::_pushLine(DmConv &c, const char *text, uint16_t color,
-                      uint32_t packetId, DmLine::AckState ack) {
+                      uint32_t packetId, DmLine::AckState ack,
+                      uint32_t epoch) {
     if (!c.lines) return;
     int idx = c.count % MAX_DM_LINES;
     utf8util::copyTruncate(c.lines[idx].text, sizeof(c.lines[idx].text), text);
     c.lines[idx].color = color;
     c.lines[idx].packetId = packetId;
     c.lines[idx].ack = ack;
+    c.lines[idx].epoch = epoch;
     c.count++;
 }
 
@@ -235,8 +237,12 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
                            text ? text : "");
     if (written < 0) written = 0;
 
+    time_t nowEpoch = time(nullptr);
+    uint32_t epoch = (nowEpoch >= 1700000000) ? (uint32_t)nowEpoch : 0;
+
     _pushLine(*c, full, color, packetId,
-              packetId ? DmLine::PENDING : DmLine::NONE);
+              packetId ? DmLine::PENDING : DmLine::NONE,
+              epoch);
 
     c->scrollOff = 0;  // jump to latest on new message
     saveConv(c);       // save before _sort() — sort may move the struct in the array
@@ -486,12 +492,14 @@ const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows
 
 static const char *kDmDir = "/camillia/dms";
 // Magic was bumped when on-disk DmLine.text width changed to support full
-// Meshtastic-sized payloads in one record. Older "CMDM" files used a smaller
-// fixed-width record and are skipped on load (transcripts are not migrated).
-static const uint32_t DM_MAGIC = 0x434D444E;  // "CMDN"
+// Meshtastic-sized payloads in one record. Older "CMDM"/"CMDN" files used
+// shorter records (no epoch field) and are skipped on load (transcripts are
+// not migrated).
+static const uint32_t DM_MAGIC = 0x434D444F;  // "CMDO"
 struct PersistDmLine {
     char     text[DM_LINE_LEN + 1];
     uint16_t color;
+    uint32_t epoch;   // wall-clock seconds when added (0 = unknown)
 };
 
 void DmMgr::saveConv(const DmConv *c) {
@@ -535,6 +543,7 @@ void DmMgr::saveConv(const DmConv *c) {
         PersistDmLine pl = {};
         utf8util::copyTruncate(pl.text, sizeof(pl.text), c->lines[idx].text);
         pl.color = c->lines[idx].color;
+        pl.epoch = c->lines[idx].epoch;
         written += f.write((const uint8_t *)&pl, sizeof(PersistDmLine));
     }
 
@@ -614,6 +623,7 @@ void DmMgr::loadAll() {
             line.color = pl.color;
             line.packetId = 0;
             line.ack = DmLine::NONE;
+            line.epoch = pl.epoch;
             int idx = i % MAX_DM_LINES;
             c->lines[idx] = line;
         }

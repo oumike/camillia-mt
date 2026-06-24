@@ -98,4 +98,18 @@ This project is a bit more than a proof of concept but not something that has an
 
 ## License
 
-GNU General Public License v3.0 (GPLv3)
+Camillia-MT is released under the **GNU General Public License v3.0 or later**
+(`SPDX-License-Identifier: GPL-3.0-or-later`).
+
+Copyright © 2025–2026 Michael A. Cojocari and contributors.
+
+This firmware is Meshtastic-compatible and links against, or interoperates
+with, portions of the Meshtastic project (also GPLv3), so it is distributed
+under the same license. There is **no warranty**; see the full license text
+for details. The full license should accompany this source distribution in a
+file named `LICENSE` (or `COPYING`); if it is missing, you can obtain a copy at
+<https://www.gnu.org/licenses/gpl-3.0.html>.
+
+Third-party libraries used by this project (e.g. LVGL, RadioLib, Arduino-ESP32,
+TFT_eSPI / LovyanGFX, nanopb) remain under their respective licenses; see each
+library's source for terms.
