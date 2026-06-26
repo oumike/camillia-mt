@@ -231,7 +231,7 @@ static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
 static bool s_nodesFilterOpen = false;
-static constexpr int kNodesActionCount = 3;
+static constexpr int kNodesActionCount = 5;
 static lv_obj_t *s_nodesActionModal = nullptr;
 static lv_obj_t *s_nodesActionRows[kNodesActionCount] = {};
 static int s_nodesActionSelection = 0;
@@ -5904,6 +5904,29 @@ static void executeNodesActionSelection() {
         refreshNodesDetails();
         return;
     }
+
+    if (s_nodesActionSelection == 3) {
+        uint32_t nodeId = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        if (Radio.isReady() && s_myNodeId != 0) {
+            (void)Channels.sendNodeInfo(s_myNodeId,
+                                        s_cfg.nodeLong,
+                                        s_cfg.nodeShort,
+                                        nodeId,
+                                        /*wantResponse=*/true,
+                                        s_cfg.okToMqtt);
+        }
+        return;
+    }
+
+    if (s_nodesActionSelection == 4) {
+        uint32_t nodeId = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        if (Radio.isReady() && s_myNodeId != 0) {
+            (void)Channels.sendPositionRequest(s_myNodeId, nodeId);
+        }
+        return;
+    }
 }
 
 static void onNodesActionRowPressed(lv_event_t *e) {
@@ -5927,7 +5950,7 @@ static void openNodesActionMenu() {
     s_nodesActionSelection = 0;
 
     const int modalW = min(190, lv_disp_get_hor_res(NULL) - 14);
-    const int modalH = 132;
+    const int modalH = min(190, lv_disp_get_ver_res(NULL) - 10);
 
     lv_obj_t *actionParent = s_rootScreen ? s_rootScreen : s_nodesModal;
     s_nodesActionModal = lv_obj_create(actionParent);
@@ -5955,7 +5978,9 @@ static void openNodesActionMenu() {
     const char *kActionLabels[kNodesActionCount] = {
         "Traceroute",
         "Send DM",
-        selectedIsFavorite ? "Remove Favorite" : "Add Favorite"
+        selectedIsFavorite ? "Remove Favorite" : "Add Favorite",
+        "Request Info",
+        "Request Position"
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                     ? lv_color_hex(0x13233D)

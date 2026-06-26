@@ -73,6 +73,10 @@ public:
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
                       bool unusedCompat = false);
 
+    // Send a unicast POSITION_APP request to a peer (empty payload + want_response).
+    // Peer should reply with its current Position broadcast.
+    bool sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId);
+
     // Broadcast TELEMETRY_APP device metrics on LongFast.
     bool sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt = false);
 

@@ -925,6 +925,26 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
     return n;
 }
 
+size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
+    // Empty Position payload + want_response=true: peer replies with their Position.
+    size_t n = 0;
+
+    // Data.portnum = POSITION_APP
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, POSITION_APP);
+
+    // Data.payload = empty Position
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, 0);
+
+    // Data.want_response = true
+    n += pbWriteVarint(buf + n, (3 << 3) | 0);
+    n += pbWriteVarint(buf + n, 1);
+
+    if (n > bufLen) return 0;
+    return n;
+}
+
 const char *portnumName(uint32_t p) {
     switch (p) {
         case TEXT_MESSAGE_APP:  return "TEXT";

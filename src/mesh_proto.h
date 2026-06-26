@@ -229,5 +229,9 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
 // payload. wantResponse should stay true for request packets.
 size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = true);
 
+// Encode a POSITION_APP Data request with an empty payload and want_response=true.
+// Used to ask a specific peer to reply with their current Position.
+size_t encodePositionRequest(uint8_t *buf, size_t bufLen);
+
 // ── Port name helper ──────────────────────────────────────────
 const char *portnumName(uint32_t p);

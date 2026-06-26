@@ -599,6 +599,44 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     return ok;
 }
 
+bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId) {
+    if (!Radio.isReady()) return false;
+    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF) return false;
+
+    uint8_t proto[32], cipher[32];
+    size_t protoLen = encodePositionRequest(proto, sizeof(proto));
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
+                        proto, cipher, protoLen)) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + 32];
+    MeshHdr hdr = {};
+    hdr.to      = toNodeId;
+    hdr.from    = myNodeId;
+    hdr.id      = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    debugLogMessages("[position] request to !%08X %s\n", toNodeId, ok ? "OK" : "FAILED");
+    {
+        char dst[16];
+        liveNodeLabel(toNodeId, dst, sizeof(dst), true);
+        char live[64];
+        snprintf(live, sizeof(live), "T POS U %s %08X %s",
+                 dst, packetId, ok ? "OK" : "ER");
+        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
 bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
