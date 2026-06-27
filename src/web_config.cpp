@@ -1,4 +1,5 @@
 #include "web_config.h"
+#include "mesh_channel_plan.h"
 #include "base64_util.h"
 #include "node_db.h"
 #include "channel_mgr.h"
@@ -947,7 +948,7 @@ static void sendConfigPage(const char *msg = "") {
     // ── LoRa Radio ────────────────────────────────────────────
     html += "<details open><summary>LoRa Radio</summary>";
     html += "<div class='row2'>"
-            "<label>Region<select name='region' id='sel-rgn'>"
+            "<label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>"
             "<option value='US'>US (902&ndash;928 MHz)</option>"
             "<option value='EU_433'>EU 433 (433&ndash;434 MHz)</option>"
             "<option value='EU_868'>EU 868 (869.4&ndash;869.65 MHz)</option>"
@@ -975,7 +976,7 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='BR_902'>BR 902 (902&ndash;907.5 MHz)</option>"
             "<option value='LORA_24'>LoRa 2.4 GHz (2400&ndash;2483.5 MHz)</option>"
             "</select></label>"
-            "<label>Modem Preset<select id='sel-pst'>"
+            "<label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>"
             "<option value='Long Fast'>Long Fast (default)</option>"
             "<option value='Long Moderate'>Long Moderate</option>"
             "<option value='Long Slow'>Long Slow</option>"
@@ -987,63 +988,52 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='Short Turbo'>Short Turbo</option>"
             "</select></label></div>";
     html += "<script>document.getElementById('sel-rgn').value='";
-    html += gCfg->region; html += "';</script>";
-    html += "<button type='button' onclick='applyPreset()'"
-            " style='margin-top:.5em;background:#555'>Apply Preset to fields below</button>"
-            "<p class='gps-hint'>Fills frequency, BW, SF, CR and TX power from preset.</p>"
+    html += gCfg->region; html += "';"
+            "document.getElementById('sel-pst').value='";
+    html += kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name;
+    html += "';</script>";
+    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically from region and preset.</p>"
             "<script>"
-            "var R={'US':{f:906.875,p:22},'EU_433':{f:433.5,p:10},'EU_868':{f:869.525,p:22},"
-            "'CN':{f:490.0,p:19},'JP':{f:922.0,p:13},'ANZ':{f:921.5,p:22},'ANZ_433':{f:433.92,p:14},"
-            "'RU':{f:868.95,p:20},'KR':{f:921.5,p:22},'TW':{f:922.5,p:22},'IN':{f:866.0,p:22},"
-            "'NZ_865':{f:866.0,p:22},'TH':{f:922.5,p:16},'UA_433':{f:433.85,p:10},'UA_868':{f:868.3,p:14},"
-            "'MY_433':{f:434.0,p:20},'MY_919':{f:921.5,p:22},'SG_923':{f:921.0,p:20},'PH_433':{f:433.85,p:10},"
-            "'PH_868':{f:868.7,p:14},'PH_915':{f:916.5,p:22},'KZ_433':{f:433.925,p:10},'KZ_863':{f:865.5,p:22},"
-            "'NP_865':{f:866.5,p:22},'BR_902':{f:904.75,p:22},'LORA_24':{f:2441.75,p:10}};"
-            "var P={'Long Fast':{bw:250,sf:11,cr:5},'Long Moderate':{bw:125,sf:11,cr:8},"
-            "'Long Slow':{bw:125,sf:12,cr:8},'Long Turbo':{bw:500,sf:11,cr:8},"
-            "'Medium Fast':{bw:250,sf:9,cr:5},'Medium Slow':{bw:250,sf:10,cr:5},"
-            "'Short Fast':{bw:250,sf:7,cr:5},'Short Slow':{bw:250,sf:8,cr:5},'Short Turbo':{bw:500,sf:7,cr:5}};"
+            // Region band edges {start,end MHz, power dBm} — mirror kRegions.
+            "var R={'US':{s:902,e:928,p:22},'EU_433':{s:433,e:434,p:10},'EU_868':{s:869.4,e:869.65,p:22},"
+            "'CN':{s:470,e:510,p:19},'JP':{s:920.5,e:923.5,p:13},'ANZ':{s:915,e:928,p:22},'ANZ_433':{s:433.05,e:434.79,p:14},"
+            "'RU':{s:868.7,e:869.2,p:20},'KR':{s:920,e:923,p:22},'TW':{s:920,e:925,p:22},'IN':{s:865,e:867,p:22},"
+            "'NZ_865':{s:864,e:868,p:22},'TH':{s:920,e:925,p:16},'UA_433':{s:433,e:434.7,p:10},'UA_868':{s:868,e:868.6,p:14},"
+            "'MY_433':{s:433,e:435,p:20},'MY_919':{s:919,e:924,p:22},'SG_923':{s:917,e:925,p:20},'PH_433':{s:433,e:434.7,p:10},"
+            "'PH_868':{s:868,e:869.4,p:14},'PH_915':{s:915,e:918,p:22},'KZ_433':{s:433.075,e:434.775,p:10},'KZ_863':{s:863,e:868,p:22},"
+            "'NP_865':{s:865,e:868,p:22},'BR_902':{s:902,e:907.5,p:22},'LORA_24':{s:2400,e:2483.5,p:10}};"
+            // Preset params {bw kHz, sf, cr, channel name for frequency-slot hash}.
+            "var P={'Long Fast':{bw:250,sf:11,cr:5,cn:'LongFast'},'Long Moderate':{bw:125,sf:11,cr:8,cn:'LongMod'},"
+            "'Long Slow':{bw:125,sf:12,cr:8,cn:'LongSlow'},'Long Turbo':{bw:500,sf:11,cr:8,cn:'LongTurbo'},"
+            "'Medium Fast':{bw:250,sf:9,cr:5,cn:'MediumFast'},'Medium Slow':{bw:250,sf:10,cr:5,cn:'MediumSlow'},"
+            "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'}};"
+            // djb2 hash + Meshtastic frequency-slot calc, matching regionSlotFreq().
+            "function djb2(t){var h=5381;for(var i=0;i<t.length;i++)h=((h*33)+t.charCodeAt(i))>>>0;return h;}"
+            "function slotFreq(r,p){var bw=p.bw/1000;var n=Math.floor((r.e-r.s)/bw);if(n<1)n=1;"
+              "var slot=djb2(p.cn)%n;return r.s+bw/2+slot*bw;}"
             "function applyPreset(){"
               "var r=R[document.getElementById('sel-rgn').value];"
               "var p=P[document.getElementById('sel-pst').value];"
               "if(!r||!p)return;"
-              "document.querySelector('[name=freq]').value=r.f.toFixed(3);"
-              "document.querySelector('[name=bw]').value=p.bw;"
-              "document.querySelector('[name=sf]').value=p.sf;"
-              "document.querySelector('[name=cr]').value=p.cr;"
+              "document.getElementById('d-freq').textContent=slotFreq(r,p).toFixed(3)+' MHz';"
+              "document.getElementById('d-bw').textContent=p.bw+' kHz';"
+              "document.getElementById('d-sf').textContent='SF'+p.sf;"
+              "document.getElementById('d-cr').textContent='4/'+p.cr;"
               "document.querySelector('[name=pwr]').value=r.p;"
             "}"
+            "document.addEventListener('DOMContentLoaded',applyPreset);"
             "</script>";
-    html += "<div class='row2'>";
-    snprintf(tmp, sizeof(tmp), "%.3f", gCfg->loraFreq);
-    html += "<label>Frequency (MHz)<input name='freq' type='number' step='0.001' min='150' max='2500' value='";
-    html += tmp; html += "'></label>";
-    html += "<label>Bandwidth (kHz)<select name='bw'>";
-    const float bwOpts[] = {125.0f,250.0f,500.0f};
-    const char *bwLabels[] = {"125 kHz","250 kHz","500 kHz"};
-    for (int i = 0; i < 3; i++) {
-        snprintf(tmp, sizeof(tmp), "%.0f", bwOpts[i]);
-        html += "<option value='"; html += tmp; html += "'";
-        if (fabsf(gCfg->loraBw - bwOpts[i]) < 0.1f) html += " selected";
-        html += ">"; html += bwLabels[i]; html += "</option>";
-    }
-    html += "</select></label></div><div class='row2'>";
-    html += "<label>Spreading Factor<select name='sf'>";
-    for (int sf = 7; sf <= 12; sf++) {
-        snprintf(tmp, sizeof(tmp), "%d", sf);
-        html += "<option value='"; html += tmp; html += "'";
-        if (gCfg->loraSf == sf) html += " selected";
-        html += ">SF"; html += tmp; html += "</option>";
-    }
-    html += "</select></label>";
-    html += "<label>Coding Rate<select name='cr'>";
-    for (int cr = 5; cr <= 8; cr++) {
-        snprintf(tmp, sizeof(tmp), "%d", cr);
-        html += "<option value='"; html += tmp; html += "'";
-        if (gCfg->loraCr == cr) html += " selected";
-        html += ">4/"; html += tmp; html += "</option>";
-    }
-    html += "</select></label></div><div class='row2'>";
+    html += "<div class='row2' style='align-items:center'>"
+            "<label>Frequency<span id='d-freq' style='display:inline-block;padding:.25em .5em;"
+            "background:#333;border-radius:4px;min-width:8em;text-align:center'>—</span></label>"
+            "<label>Bandwidth<span id='d-bw' style='display:inline-block;padding:.25em .5em;"
+            "background:#333;border-radius:4px;min-width:6em;text-align:center'>—</span></label>"
+            "</div><div class='row2' style='align-items:center'>"
+            "<label>Spreading Factor<span id='d-sf' style='display:inline-block;padding:.25em .5em;"
+            "background:#333;border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+            "<label>Coding Rate<span id='d-cr' style='display:inline-block;padding:.25em .5em;"
+            "background:#333;border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+            "</div><div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
     html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
     html += tmp; html += "'></label>";
@@ -2131,13 +2121,12 @@ static void handlePostSave() {
     if (rgn.length() > 0 && rgn.length() < sizeof(gCfg->region))
         strncpy(gCfg->region, rgn.c_str(), sizeof(gCfg->region) - 1);
 
-    // LoRa
+    // LoRa — derive freq/BW/SF/CR from region + preset; keep power and hop manual
     gCfg->okToMqtt    = (server.arg("ok_to_mqtt")   == "1");
     gCfg->ignoreMqtt  = (server.arg("ignore_mqtt")  == "1");
-    gCfg->loraFreq     = server.arg("freq").toFloat();
-    gCfg->loraBw       = server.arg("bw").toFloat();
-    gCfg->loraSf       = (uint8_t)constrain(server.arg("sf").toInt(),  7, 12);
-    gCfg->loraCr       = (uint8_t)constrain(server.arg("cr").toInt(),  5,  8);
+    String presetStr = server.arg("modem_preset");
+    gCfg->modemPreset = presetFromName(presetStr.c_str());
+    applyPresetParams(*gCfg);   // sets loraFreq, loraBw, loraSf, loraCr from region+preset
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
 

@@ -306,6 +306,7 @@ static uint8_t s_lastBattPct = 255;
 static uint8_t s_lastGpsSats = 255;
 static bool s_lastGpsEnabled = false;
 static bool s_lastGpsFix = false;
+static uint32_t s_lastGpsSampleMs = 0;
 static bool s_lastWifiConnected = false;
 static bool s_lastWifiApMode = false;
 static bool s_ntpConfigured = false;
@@ -2098,6 +2099,7 @@ static void persistConfigToPrefs() {
     if (s_cfg.webCfgPass[0]) p.putString("webPass", s_cfg.webCfgPass);
     p.putString("nodeLong", s_cfg.nodeLong);
     p.putString("nodeShort", s_cfg.nodeShort);
+    p.putUChar("modemPreset", s_cfg.modemPreset);
     p.putFloat("loraFreq", s_cfg.loraFreq);
     p.putFloat("loraBw", s_cfg.loraBw);
     p.putUChar("loraSf", s_cfg.loraSf);
@@ -2212,6 +2214,8 @@ static void loadConfigFromPrefs() {
     if (u) s_cfg.loraPower = u;
     u = prefs.getUChar("loraHopLim", 0);
     if (u) s_cfg.loraHopLimit = u;
+    u = prefs.getUChar("modemPreset", PRESET_COUNT);
+    if (u < PRESET_COUNT) s_cfg.modemPreset = u;
 
     if (prefs.isKey("gpsEnabled")) s_cfg.gpsEnabled = prefs.getBool("gpsEnabled");
     int32_t i = prefs.getInt("latI", 0);
@@ -2369,6 +2373,9 @@ static void loadConfigFromPrefs() {
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
 
     prefs.end();
+
+    // Re-derive freq/BW/SF/CR from region + preset so they're always consistent.
+    applyPresetParams(s_cfg);
 }
 
 static void loadChannelsFromPrefs() {
@@ -2510,6 +2517,15 @@ static void recomputeChannelHashes() {
         const char *name = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
         CHANNEL_KEYS[i].hash = computeChannelHash(name, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
     }
+}
+
+// Keeps channel 0's name in sync with the active modem preset.
+static void syncPrimaryChannelName() {
+    uint8_t pi = s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0;
+    const char *pname = kPresets[pi].channelName;
+    strncpy(CHANNEL_KEYS[0].name_buf, pname, sizeof(CHANNEL_KEYS[0].name_buf) - 1);
+    CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
+    CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
 }
 
 static void formatReplyPreview(const char *src, char *dst, size_t dstLen) {
@@ -3180,6 +3196,8 @@ static void refreshCfgModal() {
     snprintf(info[infoCount++], sizeof(info[0]), "PKI key: %s", hasPubKey ? "present" : "missing");
     snprintf(info[infoCount++], sizeof(info[0]), "Long: %s", s_cfg.nodeLong);
     snprintf(info[infoCount++], sizeof(info[0]), "Short: %s", s_cfg.nodeShort);
+    snprintf(info[infoCount++], sizeof(info[0]), "Preset: %s",
+             kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name);
     snprintf(info[infoCount++], sizeof(info[0]), "Freq: %.3f MHz", s_cfg.loraFreq);
     snprintf(info[infoCount++], sizeof(info[0]), "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     snprintf(info[infoCount++], sizeof(info[0]), "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
@@ -9287,6 +9305,7 @@ static void onWebCfgSaved() {
     }
 
     persistConfigToPrefs();
+    syncPrimaryChannelName();
     persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
     applyUiThemePalette();
@@ -9307,6 +9326,11 @@ static void onWebCfgSaved() {
     s_ntpConfigured = false;
     s_ntpServerActive[0] = '\0';
     s_ntpLastConfigureMs = 0;
+
+    if (s_radioReady) {
+        Radio.reconfigure(s_cfg.loraFreq, s_cfg.loraBw,
+                          s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
+    }
 
     if (!cfgExport(s_cfg)) {
         Serial.println("[cfg] web save export failed");
@@ -12657,9 +12681,21 @@ void setup() {
     Channels.init();
     Channels.beginPersistence();
     Channels.loadPersisted();
+    syncPrimaryChannelName();
+    recomputeChannelHashes();
     s_radioReady = Radio.init();
     if (!s_radioReady) {
         Channels.addMessage(0, "", "[radio] init failed", TFT_RED);
+    } else {
+        // init() uses compile-time defaults; apply the loaded config values.
+        if (fabsf(s_cfg.loraFreq - MESH_FREQ) > 0.001f ||
+            fabsf(s_cfg.loraBw   - MESH_BW)   > 0.001f ||
+            s_cfg.loraSf    != MESH_SF    ||
+            s_cfg.loraCr    != MESH_CR    ||
+            s_cfg.loraPower != MESH_POWER) {
+            Radio.reconfigure(s_cfg.loraFreq, s_cfg.loraBw,
+                              s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
+        }
     }
 
     buildUi();
@@ -12693,6 +12729,18 @@ void loop() {
         meshChanged = pollMeshRx();
     }
     gpsLoop();
+    // Periodically copy live GPS fix into s_cfg so it's available as a
+    // "last known position" fallback when GPS is off or has lost lock.
+    if (gpsIsEnabled() && gpsHasFix()) {
+        uint32_t intervalMs = s_cfg.gpsPollIntervalS > 0
+            ? s_cfg.gpsPollIntervalS * 1000UL : 60000UL;
+        if ((uint32_t)(now - s_lastGpsSampleMs) >= intervalMs) {
+            s_cfg.latI = gpsLatI();
+            s_cfg.lonI = gpsLonI();
+            s_cfg.alt  = (int32_t)gpsAltM();
+            s_lastGpsSampleMs = now;
+        }
+    }
     serviceNodeInfoAnnounce(now);
     serviceTelemetryAnnounce(now);
     serviceNeighborInfoAnnounce(now);

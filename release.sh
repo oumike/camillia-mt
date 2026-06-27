@@ -9,6 +9,23 @@ RELEASE_ENVS=(
     heltec-v4-vertical
 )
 
+# Lookups are functions rather than associative arrays so the script runs on
+# macOS's stock bash 3.2 (which lacks `declare -A`).
+env_flash_size() {
+    case "$1" in
+        cardputer-cap) echo "8MB" ;;
+        *)             echo "16MB" ;;
+    esac
+}
+
+env_out_name() {
+    case "$1" in
+        heltec-v4)          echo "heltec" ;;
+        heltec-v4-vertical) echo "heltec-vertical" ;;
+        *)                  echo "$1" ;;
+    esac
+}
+
 has_env() {
     local env_name="$1"
     grep -q "^\[env:${env_name}\]" platformio.ini
@@ -53,6 +70,7 @@ delete_existing_release_and_tags() {
     fi
 }
 
+# ── Version prompt ────────────────────────────────────────────────────────────
 CURRENT=$(cat VERSION 2>/dev/null | tr -d '\n')
 PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
 echo "Current version: ${CURRENT:-unknown}"
@@ -67,16 +85,40 @@ fi
 
 TAG="v$VERSION"
 
-# Recreate existing release/tag when rerunning a version
+# ── Preflight checks ──────────────────────────────────────────────────────────
+if ! command -v gh >/dev/null 2>&1; then
+    echo "Error: GitHub CLI (gh) is required. Install from https://cli.github.com/ and run: gh auth login" >&2
+    exit 1
+fi
+
+BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+    -name boot_app0.bin 2>/dev/null | head -1)
+if [[ -z "$BOOT_APP0" ]]; then
+    echo "Error: boot_app0.bin not found in PlatformIO packages." >&2
+    echo "Run 'pio run' at least once to download the framework." >&2
+    exit 1
+fi
+
+if python -m esptool version >/dev/null 2>&1; then
+    ESPTOOL="python -m esptool"
+elif command -v esptool.py >/dev/null 2>&1; then
+    ESPTOOL="esptool.py"
+else
+    echo "Error: esptool not found. Run: pip install esptool" >&2
+    exit 1
+fi
+
+# ── Clean up any existing release/tag for this version ───────────────────────
 if remote_tag_exists "$TAG" || git tag | grep -q "^${TAG}$"; then
     delete_existing_release_and_tags "$TAG"
 fi
 
-# Update VERSION file
+# ── Update VERSION file ───────────────────────────────────────────────────────
 echo "$TAG" > VERSION
 echo "Updated VERSION to $TAG"
 
-# Build firmware
+# ── Build firmware ────────────────────────────────────────────────────────────
+echo ""
 echo "Building firmware..."
 BUILD_ARGS=()
 for env_name in "${RELEASE_ENVS[@]}"; do
@@ -96,20 +138,57 @@ echo "Running full clean for release environments..."
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
 
-# Commit and push all changes
+# ── Commit, push, and tag ─────────────────────────────────────────────────────
 git add -A
 git commit -m "Release $TAG"
 git push
 
 echo "Changes committed and pushed."
 
-# Remove stale local tag if present
 if git tag | grep -q "^$TAG$"; then
     git tag -d "$TAG"
 fi
-
 git tag "$TAG"
 git push origin "$TAG"
 
-echo "Tag $TAG pushed. GitHub Actions will build and create the draft release."
-echo "https://github.com/oumike/camillia-mt/actions"
+echo "Tag $TAG pushed."
+
+# ── Merge factory images ──────────────────────────────────────────────────────
+echo ""
+echo "Merging factory images..."
+rm -rf dist
+mkdir -p dist
+
+for env_name in "${RELEASE_ENVS[@]}"; do
+    if ! has_env "$env_name"; then continue; fi
+    out_name="$(env_out_name "$env_name")"
+    flash_size="$(env_flash_size "$env_name")"
+    d=".pio/build/${env_name}"
+    out="dist/camillia-mt-${out_name}-${TAG}.bin"
+    echo "  ${env_name} (${flash_size}) -> ${out}"
+    $ESPTOOL --chip esp32s3 merge_bin \
+        -o "${out}" \
+        --flash_mode dio \
+        --flash_freq 80m \
+        --flash_size "${flash_size}" \
+        0x0     "${d}/bootloader.bin" \
+        0x8000  "${d}/partitions.bin" \
+        0xe000  "${BOOT_APP0}" \
+        0x10000 "${d}/firmware.bin"
+    cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${TAG}.elf"
+done
+
+ls -lh dist/
+
+# ── Create GitHub release ─────────────────────────────────────────────────────
+echo ""
+echo "Creating GitHub release $TAG..."
+gh release create "$TAG" \
+    --title "$TAG" \
+    --generate-notes \
+    dist/*.bin \
+    dist/*.elf
+
+echo ""
+echo "Release $TAG published."
+gh release view "$TAG" --json url -q .url

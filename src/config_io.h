@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "config.h"
 #include "mesh_proto.h"
+#include "mesh_channel_plan.h"
 
 enum UiThemeFamily : uint8_t {
     UI_THEME_CAMELLIA = 0,
@@ -34,6 +35,7 @@ struct RhinoConfig {
     int32_t latI, lonI, alt;      // manual / last-known position (fallback)
     float   loraFreq, loraBw;
     uint8_t loraSf, loraCr, loraPower, loraHopLimit;
+    uint8_t modemPreset;   // ModemPreset enum; drives loraBw/loraSf/loraCr on boot
     uint8_t  deviceRole;          // 0=CLIENT … 10=TAK_TRACKER
     uint8_t  rebroadcastMode;     // 0=ALL, 1=ALL_SKIP_DECODING, 2=LOCAL_ONLY, 3=KNOWN_ONLY
     bool     okToMqtt;            // set Data.bitfield OK_TO_MQTT bit on outgoing packets
@@ -107,6 +109,10 @@ struct RhinoConfig {
     bool     debugMessages;
     bool     debugGps;
 };
+
+// Derives loraFreq/loraBw/loraSf/loraCr from cfg.region and cfg.modemPreset.
+// Call after any config load to ensure radio params are consistent.
+void applyPresetParams(RhinoConfig &cfg);
 
 // Initialise from compile-time defaults. Call once before sdBegin().
 void cfgInitDefaults(RhinoConfig &cfg);

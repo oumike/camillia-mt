@@ -74,6 +74,10 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 - [x] Re-enable web config session authentication
 - [x] Gate web config auto-start behind onboarding/settings/button
 - [x] Themes
+- [x] Traceroute (RouteDiscovery request + hop rendering)
+- [x] Request NodeInfo from a peer (nodes-action menu)
+- [x] Request Position from a peer (nodes-action menu)
+- [x] Date markers in chat + DM history
 
 
 ### In Progress
@@ -85,6 +89,36 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 - [ ] Persistent message history across reboots (write to SD)
 - [ ] Position sharing (configurable interval, manual override)
 - [ ] Theme builder through web config
+
+#### Meshtastic parity — high impact
+
+- [ ] BLE + phone client API (`ToRadio` / `FromRadio` protobuf framing for Android/iOS/web apps)
+- [ ] PKI / Curve25519 per-node E2E DMs (X25519 + HKDF + AES-CTR; PKI channel 8; pubkey in NodeInfo)
+- [ ] Waypoints (sharable map pins broadcast across the mesh)
+- [ ] OTA firmware updates (DFU over BLE or HTTPS)
+- [ ] Admin messages (remote config / reboot / shutdown over the mesh, secured via admin key)
+
+#### Meshtastic parity — medium impact
+
+- [ ] Modulation presets (LongFast, LongModerate, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo)
+- [ ] Region-aware frequency slot picker (channel-slot → MHz mapping)
+- [ ] Multi-channel RX audit (decode all configured channel PSKs concurrently)
+- [ ] Ham radio mode (disable encryption, set callsign, allow higher TX power per local regs)
+- [ ] Traffic management (dedup, rate limiting, role-aware policing)
+- [ ] Additional device roles (Router_Late, Repeater, ClientHidden, ClientMute, Tracker, Sensor, TAK, TAK_Tracker, Lost_and_Found)
+- [ ] Power saving / deep sleep wiring (`isPowerSaving` / `lsSecs` / `minWakeSecs` → `esp_*_sleep_*`)
+- [ ] Store & Forward server side (record-and-replay for offline peers)
+
+#### Meshtastic parity — modules
+
+- [ ] External Notification module (LED / buzzer / vibration on RX)
+- [ ] Detection Sensor module (watch GPIO; broadcast on edge)
+- [ ] Range Test module (periodic test packet + GPS for distance/SNR logging)
+- [ ] Serial Module (UART passthrough — bridge external devices into the mesh)
+- [ ] Remote Hardware module (read/write GPIO on a remote node over mesh)
+- [ ] Audio module (Codec2 voice messages over mesh)
+- [ ] Paxcounter module (anonymous BLE/WiFi people-counter)
+- [ ] Ambient Lighting module (NCP5623 RGB LED control)
 
 ### Thinking About
 - [ ] Wireless MQTT uplink/downlink support (may keep radio-only by default)

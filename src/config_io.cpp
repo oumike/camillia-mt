@@ -1,4 +1,5 @@
 #include "config_io.h"
+#include "mesh_channel_plan.h"
 #include "base64_util.h"
 #include "utf8_utils.h"
 #include <SD.h>
@@ -10,6 +11,103 @@
 #include <string.h>
 #include <ctype.h>
 
+// ── Channel plan tables ──────────────────────────────────────────────────────
+const PresetParams kPresets[PRESET_COUNT] = {
+    //  human label        channel name   bw      sf  cr
+    {"Long Fast",     "LongFast",    250.0f, 11, 5},
+    {"Long Moderate", "LongMod",     125.0f, 11, 8},
+    {"Long Slow",     "LongSlow",    125.0f, 12, 8},
+    {"Long Turbo",    "LongTurbo",   500.0f, 11, 8},
+    {"Medium Fast",   "MediumFast",  250.0f,  9, 5},
+    {"Medium Slow",   "MediumSlow",  250.0f, 10, 5},
+    {"Short Fast",    "ShortFast",   250.0f,  7, 5},
+    {"Short Slow",    "ShortSlow",   250.0f,  8, 5},
+    {"Short Turbo",   "ShortTurbo",  500.0f,  7, 5},
+};
+
+// Band edges (freqStart, freqEnd in MHz) mirror Meshtastic's RegionInfo table;
+// power is the SX1262 hardware-capped TX ceiling (dBm), <= the regulatory limit.
+const RegionPlan kRegions[] = {
+    //  code       freqStart  freqEnd   power
+    {"US",      902.0f,   928.0f,   22},
+    {"EU_433",  433.0f,   434.0f,   10},
+    {"EU_868",  869.4f,   869.65f,  22},
+    {"CN",      470.0f,   510.0f,   19},
+    {"JP",      920.5f,   923.5f,   13},
+    {"ANZ",     915.0f,   928.0f,   22},
+    {"ANZ_433", 433.05f,  434.79f,  14},
+    {"RU",      868.7f,   869.2f,   20},
+    {"KR",      920.0f,   923.0f,   22},
+    {"TW",      920.0f,   925.0f,   22},
+    {"IN",      865.0f,   867.0f,   22},
+    {"NZ_865",  864.0f,   868.0f,   22},
+    {"TH",      920.0f,   925.0f,   16},
+    {"UA_433",  433.0f,   434.7f,   10},
+    {"UA_868",  868.0f,   868.6f,   14},
+    {"MY_433",  433.0f,   435.0f,   20},
+    {"MY_919",  919.0f,   924.0f,   22},
+    {"SG_923",  917.0f,   925.0f,   20},
+    {"PH_433",  433.0f,   434.7f,   10},
+    {"PH_868",  868.0f,   869.4f,   14},
+    {"PH_915",  915.0f,   918.0f,   22},
+    {"KZ_433",  433.075f, 434.775f, 10},
+    {"KZ_863",  863.0f,   868.0f,   22},
+    {"NP_865",  865.0f,   868.0f,   22},
+    {"BR_902",  902.0f,   907.5f,   22},
+    {"LORA_24", 2400.0f,  2483.5f,  10},
+};
+const uint8_t kRegionCount = (uint8_t)(sizeof(kRegions) / sizeof(kRegions[0]));
+
+uint8_t presetFromName(const char *name) {
+    if (!name) return PRESET_LONG_FAST;
+    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+        if (strcmp(kPresets[i].name, name) == 0) return i;
+    }
+    return PRESET_LONG_FAST;
+}
+
+// djb2 string hash — the function Meshtastic uses to pick a frequency slot.
+static uint32_t meshNameHash(const char *s) {
+    uint32_t h = 5381;
+    for (; s && *s; s++) h = (h * 33u) + (uint8_t)*s;
+    return h;
+}
+
+static const RegionPlan *regionLookup(const char *code) {
+    if (code) {
+        for (uint8_t i = 0; i < kRegionCount; i++) {
+            if (strcmp(kRegions[i].code, code) == 0) return &kRegions[i];
+        }
+    }
+    return nullptr;
+}
+
+float regionSlotFreq(const char *code, float bwKhz, const char *channelName) {
+    const RegionPlan *r = regionLookup(code);
+    if (!r || bwKhz <= 0.0f) return MESH_FREQ;
+    float bwMhz = bwKhz / 1000.0f;
+    uint32_t numChannels = (uint32_t)((r->freqEnd - r->freqStart) / bwMhz);
+    if (numChannels == 0) numChannels = 1;
+    uint32_t slot = meshNameHash(channelName) % numChannels;
+    return r->freqStart + (bwMhz / 2.0f) + (slot * bwMhz);
+}
+
+uint8_t regionPower(const char *code) {
+    const RegionPlan *r = regionLookup(code);
+    return r ? r->power : MESH_POWER;
+}
+
+void applyPresetParams(RhinoConfig &cfg) {
+    if (cfg.modemPreset >= PRESET_COUNT) cfg.modemPreset = PRESET_LONG_FAST;
+    const PresetParams &p = kPresets[cfg.modemPreset];
+    cfg.loraBw = p.bw;
+    cfg.loraSf = p.sf;
+    cfg.loraCr = p.cr;
+    // Operating frequency is the name-hashed channel slot, like Meshtastic.
+    cfg.loraFreq = regionSlotFreq(cfg.region, p.bw, p.channelName);
+}
+
+// ── Storage paths ─────────────────────────────────────────────────────────────
 static const char *kPath = "/camillia/config.yaml";
 static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
@@ -229,6 +327,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.latI         = MY_LAT_I;
     cfg.lonI         = MY_LON_I;
     cfg.alt          = MY_ALT;
+    cfg.modemPreset  = PRESET_LONG_FAST;
     cfg.loraFreq     = MESH_FREQ;
     cfg.loraBw       = MESH_BW;
     cfg.loraSf       = MESH_SF;
@@ -457,6 +556,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    codingRate: %d\n",     cfg.loraCr);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    freq_mhz: %.3f\n",     cfg.loraFreq);     out += tmp;
     snprintf(tmp, sizeof(tmp), "    hopLimit: %d\n",       cfg.loraHopLimit); out += tmp;
+    out += "    modemPreset: ";
+    out += kPresets[cfg.modemPreset < PRESET_COUNT ? cfg.modemPreset : 0].name;
+    out += "\n";
     out += "    region: "; out += cfg.region; out += "\n";
     snprintf(tmp, sizeof(tmp), "    spreadFactor: %d\n",   cfg.loraSf);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
@@ -653,12 +755,13 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     }
                 } else if (!strcmp(section, "lora")) {
                     // Legacy format
-                    if      (!strcmp(key, "freq"))      cfg.loraFreq     = atof(val);
-                    else if (!strcmp(key, "bw"))        cfg.loraBw       = atof(val);
-                    else if (!strcmp(key, "sf"))        cfg.loraSf       = (uint8_t)atoi(val);
-                    else if (!strcmp(key, "cr"))        cfg.loraCr       = (uint8_t)atoi(val);
-                    else if (!strcmp(key, "power"))     cfg.loraPower    = (uint8_t)atoi(val);
-                    else if (!strcmp(key, "hop_limit")) cfg.loraHopLimit = (uint8_t)atoi(val);
+                    if      (!strcmp(key, "freq"))         cfg.loraFreq     = atof(val);
+                    else if (!strcmp(key, "bw"))           cfg.loraBw       = atof(val);
+                    else if (!strcmp(key, "sf"))           cfg.loraSf       = (uint8_t)atoi(val);
+                    else if (!strcmp(key, "cr"))           cfg.loraCr       = (uint8_t)atoi(val);
+                    else if (!strcmp(key, "power"))        cfg.loraPower    = (uint8_t)atoi(val);
+                    else if (!strcmp(key, "hop_limit"))    cfg.loraHopLimit = (uint8_t)atoi(val);
+                    else if (!strcmp(key, "modem_preset")) cfg.modemPreset  = presetFromName(val);
                 }
             }
         } else if (indent == 4) {
@@ -687,6 +790,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);
                 else if (!strcmp(key, "region"))       strncpy(cfg.region, val, sizeof(cfg.region) - 1);
+                else if (!strcmp(key, "modemPreset"))  cfg.modemPreset  = presetFromName(val);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "device")) {
                 if      (!strcmp(key, "role"))
                     cfg.deviceRole = findName(val, kRoleNames, kNumRoles);
@@ -779,6 +883,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
 #if !HAS_ENV_SENSOR_TELEMETRY
     cfg.telEnvEnabled = false;
 #endif
+    // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
+    // advisory and must not override the name-hashed channel slot.
+    applyPresetParams(cfg);
     return true;
 }
 

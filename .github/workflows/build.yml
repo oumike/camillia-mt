@@ -2,9 +2,7 @@ name: Build
 
 on:
   push:
-    tags:     [ 'v*.*.*' ]      # Tag build — creates a draft release
-  release:
-    types: [published]
+    tags:     [ 'v*.*.*' ]      # Tag build — verifies release artifacts
 
 jobs:
   build:
@@ -102,14 +100,3 @@ jobs:
           cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
           cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
 
-      # ── Draft release with all firmware artifacts attached ────
-      - name: Create draft release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          files: |
-            dist/*.bin
-            dist/*.elf
-            dist/*.map
