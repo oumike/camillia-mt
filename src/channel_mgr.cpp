@@ -763,6 +763,17 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     (void)unusedCompat;
     if (!Radio.isReady()) return false;
 
+    // Rate-limit broadcast NODEINFO to at most once per 15s. The periodic
+    // announce, request replies, and manual sends all funnel through here, so
+    // this is the single chokepoint that keeps a device from flooding the mesh.
+    // Unicast replies to a specific requester are not throttled.
+    bool isUnicast = (toNodeId != 0xFFFFFFFF);
+    static uint32_t sLastNodeInfoBroadcastMs = 0;
+    if (!isUnicast && sLastNodeInfoBroadcastMs != 0 &&
+        (uint32_t)(millis() - sLastNodeInfoBroadcastMs) < 15000UL) {
+        return false;
+    }
+
     // Build a MAC address consistent with myNodeId.
     // Meshtastic derives nodeId from mac[2..5], so those bytes must match.
     // Keep the real OUI in bytes [0..1] and pack the node ID into [2..5].
@@ -778,7 +789,6 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
 
     // Never set want_response on broadcast NODEINFO — that would trigger
     // a reply storm. For unicast, allow requesting peer NODEINFO.
-    bool isUnicast = (toNodeId != 0xFFFFFFFF);
     bool reqReply = isUnicast && wantResponse;
     uint8_t proto[256], cipher[256];
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
@@ -808,6 +818,9 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
+    // Start the 15s broadcast window only once a broadcast actually goes out,
+    // so a failed transmit doesn't lock out the next attempt.
+    if (ok && !isUnicast) sLastNodeInfoBroadcastMs = millis();
     {
         char dst[16];
         liveNodeLabel(toNodeId, dst, sizeof(dst), true);

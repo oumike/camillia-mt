@@ -129,7 +129,15 @@ static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
+// Yes/No confirmation dialog layered over the CFG modal for destructive actions.
+static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
+static lv_obj_t *s_cfgConfirmModal = nullptr;
+static int s_cfgConfirmPendingAction = -1;
 static lv_obj_t *s_legendModal = nullptr;
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+// (I)nformation popup over the CFG modal — pager shows this in a side panel.
+static lv_obj_t *s_nodeInfoModal = nullptr;
+#endif
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
 
@@ -408,6 +416,31 @@ static inline const char *modalCloseKeyLabel() {
     return kModalCloseUsesEscape ? "Esc" : "Bksp";
 }
 
+// Configures a vertical scroll container that locks to its content edges:
+// disabling SCROLL_ELASTIC removes the rubber-band overscroll so a touch drag
+// (or momentum fling) can't pull the first/last item away from the edge into
+// empty space. Use everywhere we'd otherwise call lv_obj_set_scroll_dir(VER).
+static void setupVScroll(lv_obj_t *obj) {
+    if (!obj) return;
+    lv_obj_set_scroll_dir(obj, LV_DIR_VER);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
+}
+
+// Scrolls a list vertically by dy, clamped to the remaining scroll range so the
+// first/last item stays pinned to the edge. lv_obj_scroll_by(LV_ANIM_OFF) is
+// unbounded in LVGL 8.3 and will otherwise scroll past the content into empty
+// space. Positive dy reveals content above; negative dy reveals content below.
+static void scrollListClamped(lv_obj_t *obj, lv_coord_t dy) {
+    if (!obj || dy == 0) return;
+    lv_coord_t top = lv_obj_get_scroll_top(obj);        // room to scroll up (dy>0)
+    lv_coord_t bottom = lv_obj_get_scroll_bottom(obj);  // room to scroll down (dy<0)
+    if (top < 0) top = 0;
+    if (bottom < 0) bottom = 0;
+    if (dy > top) dy = top;
+    if (dy < -bottom) dy = -bottom;
+    if (dy != 0) lv_obj_scroll_by(obj, 0, dy, LV_ANIM_OFF);
+}
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
     if (k == '`' || k == '~') return KEY_ESCAPE;
@@ -459,7 +492,14 @@ static void refreshCfgModal();
 static void openCfgModal();
 static void closeCfgModal();
 static void activateCfgSelection();
+static void performCfgAction(int actionId);
+static void openCfgConfirmModal(int actionId);
+static void closeCfgConfirmModal();
 static void onCfgActionRowPressed(lv_event_t *e);
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+static void openNodeInfoModal();
+static void closeNodeInfoModal();
+#endif
 static void openLegendModal();
 static void closeLegendModal();
 static void onLegendClosePressed(lv_event_t *e);
@@ -1868,7 +1908,9 @@ static const char *cfgDeviceRoleName(uint8_t role) {
 }
 
 static bool cfgActionNeedsConfirm(int actionId) {
-    return actionId == CFG_ACTION_IMPORT
+    return actionId == CFG_ACTION_EXPORT
+        || actionId == CFG_ACTION_IMPORT
+    || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
 }
@@ -3082,6 +3124,28 @@ static void refreshCfgPanelFocusStyles() {
 #endif
 }
 
+// Fills info[] with the current node's identity/radio details and returns the
+// line count. Shared by the pager's always-on info panel and the (I)nformation
+// popup on the other builds, so the two never drift apart.
+static int buildDeviceInfoLines(char info[][96], int maxLines) {
+    int n = 0;
+    bool hasPubKey = false;
+    for (int i = 0; i < 32; i++) {
+        if (myPubKey[i] != 0) { hasPubKey = true; break; }
+    }
+    if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
+    if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
+    if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
+    if (n < maxLines) snprintf(info[n++], 96, "Long: %s", s_cfg.nodeLong);
+    if (n < maxLines) snprintf(info[n++], 96, "Short: %s", s_cfg.nodeShort);
+    if (n < maxLines) snprintf(info[n++], 96, "Preset: %s",
+                               kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name);
+    if (n < maxLines) snprintf(info[n++], 96, "Freq: %.3f MHz", s_cfg.loraFreq);
+    if (n < maxLines) snprintf(info[n++], 96, "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
+    if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
+    return n;
+}
+
 static void refreshCfgModal() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (!s_cfgModal || !s_cfgActionList || !s_cfgInfoList || !s_cfgHeaderStatus) return;
@@ -3181,26 +3245,7 @@ static void refreshCfgModal() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     static constexpr int kCfgInfoMaxLines = 10;
     char info[kCfgInfoMaxLines][96] = {};
-    int infoCount = 0;
-
-    bool hasPubKey = false;
-    for (int i = 0; i < 32; i++) {
-        if (myPubKey[i] != 0) {
-            hasPubKey = true;
-            break;
-        }
-    }
-
-    snprintf(info[infoCount++], sizeof(info[0]), "Node ID: !%08lx", (unsigned long)s_myNodeId);
-    snprintf(info[infoCount++], sizeof(info[0]), "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
-    snprintf(info[infoCount++], sizeof(info[0]), "PKI key: %s", hasPubKey ? "present" : "missing");
-    snprintf(info[infoCount++], sizeof(info[0]), "Long: %s", s_cfg.nodeLong);
-    snprintf(info[infoCount++], sizeof(info[0]), "Short: %s", s_cfg.nodeShort);
-    snprintf(info[infoCount++], sizeof(info[0]), "Preset: %s",
-             kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name);
-    snprintf(info[infoCount++], sizeof(info[0]), "Freq: %.3f MHz", s_cfg.loraFreq);
-    snprintf(info[infoCount++], sizeof(info[0]), "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
-    snprintf(info[infoCount++], sizeof(info[0]), "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
+    int infoCount = buildDeviceInfoLines(info, kCfgInfoMaxLines);
 
     lv_obj_t *infoHeader = lv_label_create(s_cfgInfoList);
     lv_obj_set_width(infoHeader, lv_pct(100));
@@ -3242,6 +3287,10 @@ static void onCfgActionRowPressed(lv_event_t *e) {
 }
 
 static void closeCfgModal() {
+    closeCfgConfirmModal();
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+    closeNodeInfoModal();
+#endif
     if (s_cfgModal) {
         lv_obj_del(s_cfgModal);
     }
@@ -3252,6 +3301,70 @@ static void closeCfgModal() {
     s_cfgAwaitEnterRelease = false;
     s_cfgInfoPanelFocused = false;
 }
+
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+static void closeNodeInfoModal() {
+    if (s_nodeInfoModal) {
+        lv_obj_del(s_nodeInfoModal);
+    }
+    s_nodeInfoModal = nullptr;
+}
+
+// Shows the current node's identity/radio details in a dismissible popup,
+// layered over the CFG modal. Any key (or the close key) dismisses it.
+static void openNodeInfoModal() {
+    if (!s_rootScreen || s_nodeInfoModal) return;
+
+    char info[10][96] = {};
+    int infoCount = buildDeviceInfoLines(info, 10);
+
+    int modalW = lv_disp_get_hor_res(NULL) - 24;
+    if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
+
+#if defined(DEVICE_TDECK)
+    const lv_font_t *bodyFont = &lv_font_montserrat_12;
+#else
+    const lv_font_t *bodyFont = &lv_font_montserrat_10;
+#endif
+
+    s_nodeInfoModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_nodeInfoModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_nodeInfoModal, lv_disp_get_ver_res(NULL) - 16, 0);
+    lv_obj_align(s_nodeInfoModal, LV_ALIGN_CENTER, 0, 0);
+    setupVScroll(s_nodeInfoModal);
+    lv_obj_set_scrollbar_mode(s_nodeInfoModal, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_nodeInfoModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_nodeInfoModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodeInfoModal, 1, 0);
+    lv_obj_set_style_border_color(s_nodeInfoModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_nodeInfoModal, 6, 0);
+    lv_obj_set_style_pad_row(s_nodeInfoModal, 3, 0);
+    lv_obj_set_flex_flow(s_nodeInfoModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodeInfoModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_nodeInfoModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "Device Info");
+
+    for (int i = 0; i < infoCount; i++) {
+        lv_obj_t *row = lv_label_create(s_nodeInfoModal);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, bodyFont, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, info[i]);
+    }
+
+    lv_obj_t *hint = lv_label_create(s_nodeInfoModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, bodyFont, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_pad_top(hint, 3, 0);
+    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+}
+#endif
 
 static void closeLegendModal() {
     if (s_legendModal) {
@@ -6115,6 +6228,11 @@ static void refreshLiveView(bool force) {
         lv_label_set_text(empty, "No live traffic yet");
     }
 
+    // Flush the flex layout so scroll extents are accurate before positioning;
+    // otherwise scroll_to_y bounds against stale geometry and can leave the top
+    // row not flush with the edge.
+    lv_obj_update_layout(s_liveList);
+
     if (stickToTop) {
         lv_obj_scroll_to_y(s_liveList, 0, LV_ANIM_OFF);
     } else {
@@ -6217,7 +6335,7 @@ static void openLiveModal() {
     lv_obj_set_width(s_liveList, lv_pct(100));
     lv_obj_set_flex_grow(s_liveList, 1);
     lv_obj_add_flag(s_liveList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_liveList, LV_DIR_VER);
+    setupVScroll(s_liveList);
     lv_obj_set_scrollbar_mode(s_liveList, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
     lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
@@ -7074,7 +7192,7 @@ static void openDmNodePicker() {
     lv_obj_set_width(s_dmNodePickerList, lv_pct(100));
     lv_obj_set_flex_grow(s_dmNodePickerList, 1);
     lv_obj_add_flag(s_dmNodePickerList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_dmNodePickerList, LV_DIR_VER);
+    setupVScroll(s_dmNodePickerList);
     lv_obj_set_scrollbar_mode(s_dmNodePickerList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(s_dmNodePickerList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_dmNodePickerList, 0, 0);
@@ -7529,7 +7647,7 @@ static void openDmModal() {
     lv_obj_set_width(s_dmConvList, lv_pct(100));
     lv_obj_set_flex_grow(s_dmConvList, 1);
     lv_obj_add_flag(s_dmConvList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_dmConvList, LV_DIR_VER);
+    setupVScroll(s_dmConvList);
     lv_obj_set_scrollbar_mode(s_dmConvList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(s_dmConvList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_dmConvList, 0, 0);
@@ -7570,7 +7688,7 @@ static void openDmModal() {
     lv_obj_set_width(s_dmMsgList, lv_pct(100));
     lv_obj_set_flex_grow(s_dmMsgList, 1);
     lv_obj_add_flag(s_dmMsgList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_dmMsgList, LV_DIR_VER);
+    setupVScroll(s_dmMsgList);
     lv_obj_set_scrollbar_mode(s_dmMsgList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(s_dmMsgList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_dmMsgList, 0, 0);
@@ -7726,7 +7844,7 @@ static void openNodesModal() {
     lv_obj_set_width(left, leftW);
     lv_obj_set_height(left, lv_pct(100));
     lv_obj_add_flag(left, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(left, LV_DIR_VER);
+    setupVScroll(left);
     lv_obj_set_scrollbar_mode(left, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(left, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(left, LV_OPA_40, 0);
@@ -7784,7 +7902,7 @@ static void openNodesModal() {
     s_nodesList = lv_obj_create(right);
     lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_nodesList, LV_DIR_VER);
+    setupVScroll(s_nodesList);
     lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_opa(s_nodesList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_nodesList, 0, 0);
@@ -7858,7 +7976,7 @@ static void openLegendModal() {
     lv_obj_align(s_legendModal, LV_ALIGN_CENTER, 0, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_add_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_legendModal, LV_DIR_VER);
+    setupVScroll(s_legendModal);
     lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_AUTO);
 #else
     lv_obj_clear_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
@@ -8115,7 +8233,7 @@ static void openCfgModal() {
     lv_obj_set_width(s_cfgActionList, lv_pct(58));
     lv_obj_set_height(s_cfgActionList, lv_pct(100));
     lv_obj_add_flag(s_cfgActionList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_cfgActionList, LV_DIR_VER);
+    setupVScroll(s_cfgActionList);
     lv_obj_set_scrollbar_mode(s_cfgActionList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_cfgActionList, LV_OPA_50, 0);
@@ -8135,7 +8253,7 @@ static void openCfgModal() {
     lv_obj_set_width(s_cfgInfoList, lv_pct(42));
     lv_obj_set_height(s_cfgInfoList, lv_pct(100));
     lv_obj_add_flag(s_cfgInfoList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_cfgInfoList, LV_DIR_VER);
+    setupVScroll(s_cfgInfoList);
     lv_obj_set_scrollbar_mode(s_cfgInfoList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_cfgInfoList, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_cfgInfoList, LV_OPA_50, 0);
@@ -8155,7 +8273,7 @@ static void openCfgModal() {
     lv_obj_set_width(s_cfgActionList, lv_pct(100));
     lv_obj_set_flex_grow(s_cfgActionList, 1);
     lv_obj_add_flag(s_cfgActionList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_cfgActionList, LV_DIR_VER);
+    setupVScroll(s_cfgActionList);
     lv_obj_set_scrollbar_mode(s_cfgActionList, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_cfgActionList, LV_OPA_50, 0);
@@ -8184,11 +8302,11 @@ static void openCfgModal() {
 #endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text_fmt(hint, "Wheel = Scroll focused panel   Click wheel = Swap panel   %s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "(I) = Info panel   Wheel = Scroll   Click wheel = Swap   Bksp = Back/Close");
 #elif defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Run   (I)nformation   %s = Close", modalCloseKeyLabel());
 #else
-    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   %s = Close", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   (I)nformation   %s = Close", modalCloseKeyLabel());
 #endif
 #endif
 
@@ -8211,22 +8329,17 @@ static void activateCfgSelection() {
     }
 
     if (cfgActionNeedsConfirm(actionId)) {
-        uint32_t now = millis();
-        bool confirmExpired = (s_cfgConfirmMs == 0) || (uint32_t)(now - s_cfgConfirmMs) > 3000;
-        if (s_cfgConfirmAction != actionId || confirmExpired) {
-            char actionText[80];
-            s_cfgConfirmAction = actionId;
-            s_cfgConfirmMs = now;
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Confirm: %s (Enter again)",
-                     cfgActionLabel(actionId, actionText, sizeof(actionText)));
-            if (s_cfgDebugLog) {
-                Serial.printf("[lvgl-cfg] confirm-wait action=%d label=\"%s\"\n", actionId, actionText);
-            }
-            refreshCfgModal();
-            return;
-        }
+        openCfgConfirmModal(actionId);
+        return;
     }
 
+    performCfgAction(actionId);
+}
+
+// Executes a CFG action immediately. Confirmable actions reach here only after
+// the user answers Yes in the confirmation dialog; others come straight from
+// activateCfgSelection.
+static void performCfgAction(int actionId) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
 
@@ -8421,6 +8534,140 @@ static void activateCfgSelection() {
     refreshCfgModal();
 }
 
+static void closeCfgConfirmModal() {
+    if (s_cfgConfirmBackdrop) {
+        lv_obj_del(s_cfgConfirmBackdrop);
+    } else if (s_cfgConfirmModal) {
+        lv_obj_del(s_cfgConfirmModal);
+    }
+    s_cfgConfirmBackdrop = nullptr;
+    s_cfgConfirmModal = nullptr;
+    s_cfgConfirmPendingAction = -1;
+}
+
+// Yes: run the pending action. No/cancel: just close the dialog, returning to
+// the CFG screen underneath.
+static void cfgConfirmAccept() {
+    int action = s_cfgConfirmPendingAction;
+    closeCfgConfirmModal();
+    if (action >= 0) performCfgAction(action);
+}
+
+static void cfgConfirmReject() {
+    closeCfgConfirmModal();
+    refreshCfgModal();
+}
+
+static void onCfgConfirmYesPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgConfirmAccept();
+}
+
+static void onCfgConfirmNoPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgConfirmReject();
+}
+
+static void openCfgConfirmModal(int actionId) {
+    if (!s_rootScreen || s_cfgConfirmModal || s_cfgConfirmBackdrop) return;
+    s_cfgConfirmPendingAction = actionId;
+
+    char actionText[80];
+    cfgActionLabel(actionId, actionText, sizeof(actionText));
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = lv_disp_get_hor_res(NULL) - 40;
+    if (modalW < 160) modalW = lv_disp_get_hor_res(NULL) - 8;
+    if (modalW > 300) modalW = 300;
+
+    // Full-screen backdrop makes the dialog truly modal for touch builds.
+    s_cfgConfirmBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgConfirmBackdrop, w, h);
+    lv_obj_align(s_cfgConfirmBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgConfirmBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgConfirmBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgConfirmBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgConfirmBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgConfirmBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgConfirmBackdrop, 0, 0);
+
+    s_cfgConfirmModal = lv_obj_create(s_cfgConfirmBackdrop);
+    lv_obj_set_size(s_cfgConfirmModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgConfirmModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgConfirmModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgConfirmModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgConfirmModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgConfirmModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgConfirmModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgConfirmModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgConfirmModal, 10, 0);
+    lv_obj_set_style_pad_row(s_cfgConfirmModal, 10, 0);
+    lv_obj_set_flex_flow(s_cfgConfirmModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgConfirmModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgConfirmBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgConfirmModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Confirm?");
+
+    lv_obj_t *actionBox = lv_obj_create(s_cfgConfirmModal);
+    lv_obj_set_width(actionBox, lv_pct(100));
+    lv_obj_set_height(actionBox, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(actionBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(actionBox, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(actionBox, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(actionBox, 1, 0);
+    lv_obj_set_style_border_color(actionBox, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_left(actionBox, 6, 0);
+    lv_obj_set_style_pad_right(actionBox, 6, 0);
+    lv_obj_set_style_pad_top(actionBox, 4, 0);
+    lv_obj_set_style_pad_bottom(actionBox, 4, 0);
+
+    lv_obj_t *q = lv_label_create(actionBox);
+    lv_obj_set_width(q, lv_pct(100));
+    lv_obj_set_style_text_font(q, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(q, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(q, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(q, "Action: %s", actionText);
+
+    lv_obj_t *btnRow = lv_obj_create(s_cfgConfirmModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 14, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeConfirmBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+                             lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 36);
+        lv_obj_set_style_min_width(btn, 84, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+        return btn;
+    };
+    makeConfirmBtn(btnRow, "(N)o", 0x6B3030, onCfgConfirmNoPressed);
+    makeConfirmBtn(btnRow, "(Y)es", 0x2F6B30, onCfgConfirmYesPressed);
+}
+
 static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
@@ -8476,6 +8723,17 @@ static void pumpKeyboardInput() {
 
         const bool invertScrollNav = kPagerWheelChatNav && !navFromJk;
 
+        // The CFG confirmation dialog is modal: only Y/N (and a close key, which
+        // cancels) are honored — every other shortcut is swallowed while it's up.
+        if (s_cfgConfirmModal) {
+            if (k == 'y' || k == 'Y') {
+                cfgConfirmAccept();
+            } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
+                cfgConfirmReject();
+            }
+            continue;
+        }
+
         if (s_tracerouteModal) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             if (k == KEY_ESCAPE || isBackspaceKey(k)) {
@@ -8486,6 +8744,14 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+        // The (I)nformation popup layers over the CFG modal; any key dismisses it.
+        if (s_nodeInfoModal) {
+            closeNodeInfoModal();
+            continue;
+        }
+#endif
 
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
@@ -8512,11 +8778,33 @@ static void pumpKeyboardInput() {
                 }
                 continue;
             }
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            // With the info panel focused, Backspace returns to the action panel
+            // rather than closing the modal (must precede the close-key check,
+            // since Backspace is the pager's close key).
+            if (s_cfgInfoPanelFocused && isBackspaceKey(k)) {
+                s_cfgInfoPanelFocused = false;
+                refreshCfgPanelFocusStyles();
+                continue;
+            }
+#endif
             if (isModalCloseKey(k)) {
                 closeCfgModal();
                 continue;
             }
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+            if (k == 'i' || k == 'I') {
+                openNodeInfoModal();
+                continue;
+            }
+#endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
+            // (I) focuses the info panel for scrolling; the roller still swaps.
+            if ((k == 'i' || k == 'I') && s_cfgInfoList) {
+                s_cfgInfoPanelFocused = true;
+                refreshCfgPanelFocusStyles();
+                continue;
+            }
             if (k == KEY_ROLLER && s_cfgInfoList) {
                 s_cfgInfoPanelFocused = !s_cfgInfoPanelFocused;
                 refreshCfgPanelFocusStyles();
@@ -8527,8 +8815,8 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
                 if (s_cfgInfoPanelFocused && s_cfgInfoList) {
                     const int scrollStep = 18;
-                    const int delta = kPagerWheelChatNav ? scrollStep : -scrollStep;
-                    lv_obj_scroll_by(s_cfgInfoList, 0, delta, LV_ANIM_OFF);
+                    const int delta = kPagerWheelChatNav ? -scrollStep : scrollStep;
+                    scrollListClamped(s_cfgInfoList, delta);
                     continue;
                 }
 #endif
@@ -8557,8 +8845,8 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
                 if (s_cfgInfoPanelFocused && s_cfgInfoList) {
                     const int scrollStep = 18;
-                    const int delta = kPagerWheelChatNav ? -scrollStep : scrollStep;
-                    lv_obj_scroll_by(s_cfgInfoList, 0, delta, LV_ANIM_OFF);
+                    const int delta = kPagerWheelChatNav ? scrollStep : -scrollStep;
+                    scrollListClamped(s_cfgInfoList, delta);
                     continue;
                 }
 #endif
@@ -8756,7 +9044,7 @@ static void pumpKeyboardInput() {
                     const int delta = (k == KEY_SCROLL_UP)
                         ? (invertScrollNav ? scrollStep : -scrollStep)
                         : (invertScrollNav ? -scrollStep : scrollStep);
-                    lv_obj_scroll_by(s_dmMsgList, 0, delta, LV_ANIM_OFF);
+                    scrollListClamped(s_dmMsgList, delta);
                     continue;
                 }
 
@@ -8948,11 +9236,11 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_SCROLL_UP && s_liveList) {
-                lv_obj_scroll_by(s_liveList, 0, -18, LV_ANIM_OFF);
+                scrollListClamped(s_liveList, -18);
                 continue;
             }
             if (k == KEY_SCROLL_DN && s_liveList) {
-                lv_obj_scroll_by(s_liveList, 0, 18, LV_ANIM_OFF);
+                scrollListClamped(s_liveList, 18);
                 continue;
             }
             continue;
@@ -8961,11 +9249,11 @@ static void pumpKeyboardInput() {
         if (s_legendModal) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             if (k == KEY_SCROLL_UP) {
-                lv_obj_scroll_by(s_legendModal, 0, 18, LV_ANIM_OFF);
+                scrollListClamped(s_legendModal, 18);
                 continue;
             }
             if (k == KEY_SCROLL_DN) {
-                lv_obj_scroll_by(s_legendModal, 0, -18, LV_ANIM_OFF);
+                scrollListClamped(s_legendModal, -18);
                 continue;
             }
 #endif
@@ -11982,7 +12270,7 @@ static void buildUi() {
     lv_obj_align(s_chatList, LV_ALIGN_TOP_LEFT, 0, 0);
 #endif
     lv_obj_add_flag(s_chatList, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(s_chatList, LV_DIR_VER);
+    setupVScroll(s_chatList);
     lv_obj_set_scrollbar_mode(s_chatList, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_style_bg_opa(s_chatList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chatList, 0, 0);
@@ -12011,7 +12299,7 @@ static void buildUi() {
         lv_obj_set_size(s_channelList, dropdownW, dropdownH);
         lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + 4, chatY + 4);
         lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_scroll_dir(s_channelList, LV_DIR_VER);
+        setupVScroll(s_channelList);
         lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
         lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
