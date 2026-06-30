@@ -883,6 +883,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
 #if !HAS_ENV_SENSOR_TELEMETRY
     cfg.telEnvEnabled = false;
 #endif
+    // Only client roles are supported; coerce anything else from imported YAML.
+    cfg.deviceRole = cfgCoerceClientRole(cfg.deviceRole);
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);

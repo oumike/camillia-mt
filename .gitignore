@@ -6,3 +6,4 @@
 .claude
 builds
 resume-claude.sh
+dist/

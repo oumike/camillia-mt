@@ -5,6 +5,7 @@
 #include "channel_mgr.h"
 #include "config_io.h"
 #include "hal/display.h"
+#include "hal/xl9555.h"
 #include "live_util.h"
 #include "mesh_proto.h"
 #include "mesh_radio.h"
@@ -26,6 +27,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <esp_mac.h>
+#include <esp_random.h>
 #include <nvs_flash.h>
 #include <SD.h>
 #include <Curve25519.h>
@@ -125,6 +127,7 @@ static lv_obj_t *s_rootScreen = nullptr;
 static lv_obj_t *s_composeModal = nullptr;
 static lv_obj_t *s_composeInput = nullptr;
 static lv_obj_t *s_composeKeyboard = nullptr;
+static lv_obj_t *s_composeCharCount = nullptr;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
@@ -401,6 +404,9 @@ struct SeenPkt {
 static SeenPkt s_seenPkts[kRxDedupSize] = {};
 static int s_seenHead = 0;
 
+// Count of packets we have relayed onto the mesh this boot (managed flood).
+static uint32_t s_rebroadcastCount = 0;
+
 static inline bool isBackspaceKey(char k) {
     return k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD;
 }
@@ -484,6 +490,8 @@ static void onChatNewMessagePressed(lv_event_t *e);
 static void onComposeKeyboardEvent(lv_event_t *e);
 static void onComposeSendPressed(lv_event_t *e);
 static void onComposeCancelPressed(lv_event_t *e);
+static void onComposeInputChanged(lv_event_t *e);
+static void updateComposeCharCount();
 static void refreshChatComposeButtonState();
 static void onChatMessagePressed(lv_event_t *e);
 static void recomputeChannelHashes();
@@ -1029,6 +1037,19 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
     sPagerAudioVolume = volume;
 }
 
+// Gate the speaker power amp (XL9555 AMP_EN). The amp is left OFF while idle so
+// it can't turn power-supply transients (e.g. LoRa TX current spikes) into
+// random clicks; it is powered only for the duration of an actual sound.
+static int sPagerExpAddr = -2;  // -2 = not yet probed
+static void pagerAudioSetAmp(bool on) {
+    if (sPagerExpAddr == -2) sPagerExpAddr = xl9555FindAddr();
+    if (sPagerExpAddr < 0) return;
+    uint8_t out0, out1, cfg0, cfg1;
+    if (!xl9555ReadAll((uint8_t)sPagerExpAddr, out0, out1, cfg0, cfg1)) return;
+    xl9555SetOutput(XL9555_PIN_AMP_EN, on, out0, out1, cfg0, cfg1);
+    (void)xl9555WriteAll((uint8_t)sPagerExpAddr, out0, out1, cfg0, cfg1);
+}
+
 static bool pagerAudioSelectCommFormat(i2s_config_t &cfg) {
 #if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 4)
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
@@ -1127,7 +1148,10 @@ static bool pagerAudioEnsureReady() {
 
     sPagerAudioVolume = 0xFF;
     pagerAudioApplyVolume(kPagerAudioVolIdle);
-    sPagerAudioBoard.setMute(false);
+    // Stay muted while idle: an unmuted DAC sitting between sounds emits random
+    // DC-offset clicks/snaps. We unmute only while a tone is actually playing.
+    sPagerAudioBoard.setMute(true);
+    pagerAudioSetAmp(false);  // amp powered only during playback (see pagerAudioSetAmp)
 
     if (!pagerAudioInitI2S()) {
         sPagerAudioReady = false;
@@ -1140,15 +1164,19 @@ static bool pagerAudioEnsureReady() {
 }
 
 static inline void pagerAudioStartPlayback() {
-    sPagerAudioBoard.setMute(false);
+    // Power the speaker amp and let the class-D output stage settle before audio.
+    pagerAudioSetAmp(true);
+    delay(8);
+    // Raise the gain while still muted so the analog volume step is inaudible.
     pagerAudioApplyVolume(kPagerAudioVolActive);
-    delay(2);
     i2s_zero_dma_buffer(kPagerI2SPort);
     // Prime codec/I2S with a short silent pre-roll so the first note isn't clipped.
     int16_t preRoll[256] = {0};
     size_t preRollWritten = 0;
     (void)i2s_write(kPagerI2SPort, preRoll, sizeof(preRoll),
                     &preRollWritten, 10 / portTICK_PERIOD_MS);
+    // Unmute only once a clean stream of silence is already flowing → click-free.
+    sPagerAudioBoard.setMute(false);
 }
 
 static inline void pagerAudioStopPlayback() {
@@ -1156,8 +1184,12 @@ static inline void pagerAudioStopPlayback() {
     int16_t tail[1024] = {0};
     size_t tailWritten = 0;
     (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
+    // Mute while the output is silent, then drop the gain (now inaudible) and
+    // leave the DAC muted for idle so it can't emit stray clicks between sounds.
+    sPagerAudioBoard.setMute(true);
     i2s_zero_dma_buffer(kPagerI2SPort);
     pagerAudioApplyVolume(kPagerAudioVolIdle);
+    pagerAudioSetAmp(false);  // power down the amp for idle → no idle snaps
 }
 
 static void pagerAudioWriteSilence(uint16_t durationMs) {
@@ -2268,7 +2300,7 @@ static void loadConfigFromPrefs() {
     if (i >= 0) s_cfg.alt = i;
 
     uint8_t ro = prefs.getUChar("devRole", 0xFF);
-    if (ro != 0xFF) s_cfg.deviceRole = ro;
+    if (ro != 0xFF) s_cfg.deviceRole = cfgCoerceClientRole(ro);
     ro = prefs.getUChar("rebroadcast", 0xFF);
     if (ro != 0xFF) s_cfg.rebroadcastMode = ro;
 
@@ -2742,6 +2774,7 @@ static void closeComposePrompt() {
     s_composeModal = nullptr;
     s_composeInput = nullptr;
     s_composeKeyboard = nullptr;
+    s_composeCharCount = nullptr;
     s_composeTarget = COMPOSE_TARGET_CHANNEL;
     s_composeDmNodeId = 0;
     s_composeReplyPacketId = 0;
@@ -2848,6 +2881,13 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_one_line(s_composeInput, true);
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_composeCharCount = lv_label_create(s_composeModal);
+    lv_obj_set_width(s_composeCharCount, lv_pct(100));
+    lv_obj_set_style_text_font(s_composeCharCount, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_composeCharCount, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *row = lv_obj_create(s_composeModal);
     lv_obj_set_width(row, lv_pct(100));
@@ -2989,6 +3029,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -3014,7 +3055,17 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_width(hint, modalW - 8);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
 #endif
+
+    // Live "x of 200" countdown overlaid at the very bottom-right, sharing the
+    // bottom line with the hint legend (which is left-aligned).
+    s_composeCharCount = lv_label_create(s_composeModal);
+    lv_obj_add_flag(s_composeCharCount, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_style_text_font(s_composeCharCount, composeBodyFont, 0);
+    lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, -composeModalBottomPad);
 #endif
+
+    updateComposeCharCount();
 }
 
 static void onComposeKeyboardEvent(lv_event_t *e) {
@@ -3034,6 +3085,22 @@ static void onComposeSendPressed(lv_event_t *e) {
 static void onComposeCancelPressed(lv_event_t *e) {
     LV_UNUSED(e);
     closeComposePrompt();
+}
+
+// Live "x of 200" character countdown shown at the bottom-right of the
+// composing panel. Counts UTF-8 characters so it matches the textarea's
+// max-length enforcement (which also counts characters, not bytes).
+static void updateComposeCharCount() {
+    if (!s_composeCharCount || !s_composeInput) return;
+    const char *txt = lv_textarea_get_text(s_composeInput);
+    uint32_t used = (txt && txt[0]) ? _lv_txt_get_encoded_length(txt) : 0;
+    lv_label_set_text_fmt(s_composeCharCount, "%u of %d",
+                          (unsigned)used, (int)MESH_TEXT_MAX_LEN);
+}
+
+static void onComposeInputChanged(lv_event_t *e) {
+    LV_UNUSED(e);
+    updateComposeCharCount();
 }
 
 static void openComposePromptForDm(uint32_t nodeId) {
@@ -3143,6 +3210,7 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) snprintf(info[n++], 96, "Freq: %.3f MHz", s_cfg.loraFreq);
     if (n < maxLines) snprintf(info[n++], 96, "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
+    if (n < maxLines) snprintf(info[n++], 96, "Relayed: %lu", (unsigned long)s_rebroadcastCount);
     return n;
 }
 
@@ -11133,6 +11201,62 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     return Radio.transmit(frame, sizeof(hdr) + protoLen);
 }
 
+// ── Managed flood rebroadcasting ──────────────────────────────────────────────
+// Stock Meshtastic: every role rebroadcasts except CLIENT_MUTE / CLIENT_HIDDEN.
+static bool roleRebroadcasts(uint8_t role) {
+    return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
+}
+
+// Apply the configured rebroadcastMode filter to a received packet.
+static bool rebroadcastModeAllows(const MeshPacket &pkt) {
+    switch (s_cfg.rebroadcastMode) {
+        case 2: // LOCAL_ONLY — only packets we decrypted on a known channel
+            return pkt.decrypted && pkt.chanIdx >= 0;
+        case 3: // KNOWN_ONLY — only from nodes already in our DB
+            return Nodes.find(pkt.hdr.from) != nullptr;
+        case 4: // CORE_PORTNUMS_ONLY — only decoded core portnums
+            if (!pkt.decrypted) return false;
+            switch (pkt.portnum) {
+                case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
+                case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
+                case TRACEROUTE_APP: return true;
+                default: return false;
+            }
+        default: // ALL / ALL_SKIP_DECODING — relay raw regardless of decode
+            return true;
+    }
+}
+
+// Re-transmit a freshly received packet verbatim (hop limit decremented) so it
+// propagates across the mesh. Caller guarantees the packet is new (passed
+// isDuplicate) and not from us. The original on-air payload is relayed as-is
+// from pkt.rawCipher — no re-encryption.
+static void maybeRebroadcastPacket(const MeshPacket &pkt) {
+    if (!Radio.isReady() || s_myNodeId == 0) return;
+    if (!roleRebroadcasts(s_cfg.deviceRole)) return;
+
+    uint8_t hopLimit = pkt.hdr.flags & 0x07;
+    if (hopLimit == 0) return;               // out of hops
+    if (pkt.hdr.to == s_myNodeId) return;    // we're the endpoint; broadcasts/others relay
+    if (pkt.rawLen == 0) return;             // no stored on-air payload to relay
+    if (!rebroadcastModeAllows(pkt)) return;
+
+    MeshHdr hdr = pkt.hdr;
+    hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(pkt.rawCipher)];
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), pkt.rawCipher, pkt.rawLen);
+
+    delay(20 + (esp_random() % 131));        // 20–150 ms contention jitter
+
+    if (Radio.transmit(frame, sizeof(hdr) + pkt.rawLen)) s_rebroadcastCount++;
+    debugLogMessages("[fwd] from=%08lx id=%08lx hop %u->%u %s\n",
+                     (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id,
+                     hopLimit, hopLimit - 1, portnumName(pkt.portnum));
+}
+
 static bool processMeshPacket(const MeshPacket &rxPkt) {
     MeshPacket pkt = rxPkt;
 
@@ -11168,6 +11292,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
         }
     }
+
+    // Managed flood: relay new traffic onward before handling it locally.
+    maybeRebroadcastPacket(pkt);
 
     bool wantsAck = ((pkt.hdr.flags & (1 << 3)) != 0);
     bool addressedToMe = (pkt.hdr.to == s_myNodeId)

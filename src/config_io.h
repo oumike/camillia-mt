@@ -110,6 +110,14 @@ struct RhinoConfig {
     bool     debugGps;
 };
 
+// Only client device roles are supported on this firmware. Values are the
+// canonical Meshtastic enum positions so they stay wire-compatible.
+//   0 = CLIENT, 1 = CLIENT_MUTE, 8 = CLIENT_HIDDEN
+// Any other role is coerced to CLIENT.
+static inline uint8_t cfgCoerceClientRole(uint8_t role) {
+    return (role == 1 || role == 8) ? role : 0;
+}
+
 // Derives loraFreq/loraBw/loraSf/loraCr from cfg.region and cfg.modemPreset.
 // Call after any config load to ensure radio params are consistent.
 void applyPresetParams(RhinoConfig &cfg);

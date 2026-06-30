@@ -43,7 +43,10 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
     } else {
         // Standard polarity: drive all rail enables high, SD pull-down as input.
         xl9555SetOutput(XL9555_PIN_DRV_EN,  true, out0, out1, cfg0, cfg1);
-        xl9555SetOutput(XL9555_PIN_AMP_EN,  true, out0, out1, cfg0, cfg1);
+        // Speaker amp stays OFF at boot; the audio layer powers it only while a
+        // sound plays, so an idle amp can't emit random clicks (e.g. from LoRa
+        // TX current transients coupling into the always-on amp).
+        xl9555SetOutput(XL9555_PIN_AMP_EN,  false, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_KB_RST,  true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_LORA_EN, true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_GPS_EN,  true, out0, out1, cfg0, cfg1);
@@ -74,6 +77,36 @@ volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
 static uint32_t sLastRxDoneMs = 0;
+
+// ── Airtime accounting (rolling 1-hour window, one bucket per minute) ─────────
+// Feeds DeviceMetrics channel_utilization / air_util_tx telemetry. busyMs counts
+// both our transmissions and packets we heard; txMs counts only our TX.
+namespace {
+struct AirBucket { uint32_t minute; uint32_t txMs; uint32_t busyMs; };
+constexpr int kAirBuckets = 60;
+AirBucket sAir[kAirBuckets] = {};
+
+void airNote(uint32_t toaMs, bool isTx) {
+    if (toaMs == 0) return;
+    uint32_t m = millis() / 60000UL;
+    AirBucket &b = sAir[m % kAirBuckets];
+    if (b.minute != m) { b.minute = m; b.txMs = 0; b.busyMs = 0; }
+    b.busyMs += toaMs;
+    if (isTx) b.txMs += toaMs;
+}
+
+float airPct(bool txOnly) {
+    uint32_t m = millis() / 60000UL;
+    uint64_t sum = 0;
+    for (int i = 0; i < kAirBuckets; i++) {
+        // Only count buckets that fall inside the last hour.
+        if ((uint32_t)(m - sAir[i].minute) < (uint32_t)kAirBuckets)
+            sum += txOnly ? sAir[i].txMs : sAir[i].busyMs;
+    }
+    float pct = (float)((double)sum * 100.0 / 3600000.0);  // window = 1 hour in ms
+    return (pct > 100.0f) ? 100.0f : pct;
+}
+} // namespace
 
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
@@ -217,6 +250,8 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
         Serial.println();
     }
 
+    airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), false);  // heard packet → channel busy
+
     pkt.rssi  = _radio.getRSSI();
     pkt.snr   = _radio.getSNR();
     pkt.rxMs  = millis();
@@ -326,10 +361,16 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
         Serial.printf("[radio] TX state=%d (%s)\n", state,
                       state == RADIOLIB_ERR_NONE ? "OK" : "FAIL");
     }
+    if (state == RADIOLIB_ERR_NONE) {
+        airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), true);
+    }
     _rxFlag = false;    // discard TX_DONE ISR trigger
     _radio.startReceive();
     return state == RADIOLIB_ERR_NONE;
 }
+
+float MeshRadio::channelUtilPercent() { return airPct(false); }
+float MeshRadio::airUtilTxPercent()   { return airPct(true); }
 
 void MeshRadio::setRxPaused(bool paused) {
     if (!_ready) return;

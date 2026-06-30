@@ -25,6 +25,12 @@ public:
 
     bool isReady() const { return _ready; }
 
+    // Airtime telemetry over a rolling 1-hour window (DeviceMetrics).
+    // channelUtil = % of the hour the channel was busy (our TX + heard RX);
+    // airUtilTx   = % of the hour spent transmitting.
+    float channelUtilPercent();
+    float airUtilTxPercent();
+
 private:
     bool    _ready = false;
 #if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)

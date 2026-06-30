@@ -637,12 +637,22 @@ bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId) {
     return ok;
 }
 
+// Current Unix epoch for Telemetry.time, or 0 when the wall clock isn't synced
+// (matches the >= 1700000000 validity convention used for chat timestamps).
+static uint32_t telemetryEpochNow() {
+    time_t now = time(nullptr);
+    return (now >= 1700000000) ? (uint32_t)now : 0;
+}
+
 bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
     uint8_t proto[80], cipher[80];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryDevice(batteryReadPercent(), batteryReadVoltage(),
+                                            Radio.channelUtilPercent(), Radio.airUtilTxPercent(),
+                                            (uint32_t)(millis() / 1000UL),
+                                            telemetryEpochNow(),
                                             proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
@@ -681,6 +691,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
     uint8_t proto[96], cipher[96];
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeTelemetryEnvironment(temperatureC, humidityPct, pressureHpa,
+                                                 telemetryEpochNow(),
                                                  proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 

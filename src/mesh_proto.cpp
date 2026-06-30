@@ -714,10 +714,12 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
 }
 
 size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
+                             float chUtil, float airUtilTx, uint32_t uptimeS,
+                             uint32_t timeEpoch,
                              uint8_t *buf, size_t bufLen,
                              uint32_t bitfield) {
     // Telemetry.oneof variant field 2 = DeviceMetrics
-    uint8_t dev[16];
+    uint8_t dev[32];
     size_t d = 0;
 
     // DeviceMetrics.battery_level = field 1, varint
@@ -730,8 +732,31 @@ size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
     memcpy(dev + d, &voltage, 4);
     d += 4;
 
-    uint8_t telem[24];
+    // DeviceMetrics.channel_utilization = field 3, fixed32 float
+    if (d + 5 > sizeof(dev)) return 0;
+    dev[d++] = (3 << 3) | 5;
+    memcpy(dev + d, &chUtil, 4);
+    d += 4;
+
+    // DeviceMetrics.air_util_tx = field 4, fixed32 float
+    if (d + 5 > sizeof(dev)) return 0;
+    dev[d++] = (4 << 3) | 5;
+    memcpy(dev + d, &airUtilTx, 4);
+    d += 4;
+
+    // DeviceMetrics.uptime_seconds = field 5, varint
+    if (d + 6 > sizeof(dev)) return 0;
+    d += pbWriteVarint(dev + d, (5 << 3) | 0);
+    d += pbWriteVarint(dev + d, uptimeS);
+
+    uint8_t telem[40];
     size_t t = 0;
+
+    // Telemetry.time = field 1, varint (Unix seconds); omitted when unknown.
+    if (timeEpoch) {
+        t += pbWriteVarint(telem + t, (1 << 3) | 0);
+        t += pbWriteVarint(telem + t, timeEpoch);
+    }
 
     // Telemetry.device_metrics = field 2, length-delimited
     t += pbWriteVarint(telem + t, (2 << 3) | 2);
@@ -760,6 +785,7 @@ size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
 }
 
 size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float pressureHpa,
+                                  uint32_t timeEpoch,
                                   uint8_t *buf, size_t bufLen,
                                   uint32_t bitfield) {
     // Telemetry.oneof variant field 3 = EnvironmentMetrics
@@ -781,8 +807,14 @@ size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float p
     if (!writeFloatField(2, humidityPct)) return 0;
     if (!writeFloatField(3, pressureHpa)) return 0;
 
-    uint8_t telem[32];
+    uint8_t telem[40];
     size_t t = 0;
+
+    // Telemetry.time = field 1, varint (Unix seconds); omitted when unknown.
+    if (timeEpoch) {
+        t += pbWriteVarint(telem + t, (1 << 3) | 0);
+        t += pbWriteVarint(telem + t, timeEpoch);
+    }
 
     // Telemetry.environment_metrics = field 3, length-delimited
     t += pbWriteVarint(telem + t, (3 << 3) | 2);

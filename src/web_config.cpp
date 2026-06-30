@@ -444,7 +444,7 @@ static const char kHead[] =
     "<title>Camillia MT</title>"
     "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
     "<style>"
-        ":root{--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
+        ":root{color-scheme:dark;--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
         "--text:#f4f6fb;--text-dim:#b0b8c8;--accent:#d7869d;--accent-ink:#ffffff}"
         "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:620px;"
         "margin:1.5em auto;padding:0 1em 2em;background:linear-gradient(180deg,var(--bg),var(--panel));"
@@ -455,6 +455,7 @@ static const char kHead[] =
     "input[type=text],input[type=number],input[type=password],select"
             "{width:100%;padding:.45em;box-sizing:border-box;border:1px solid var(--line);border-radius:5px;"
             "background:var(--panel-2);color:var(--text)}"
+        "option{background:var(--panel-2);color:var(--text)}"
         "input[readonly]{background:var(--panel);color:var(--text-dim)}"
         "button{margin-top:1.2em;padding:.55em 1.8em;background:var(--accent);color:var(--accent-ink);"
                      "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
@@ -534,8 +535,9 @@ static const char kHead[] =
     "summary::-webkit-details-marker{display:none}"
     "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
     "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
-    ".ch-row{display:grid;grid-template-columns:1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
+    ".ch-row{display:grid;grid-template-columns:auto 1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
     ".ch-row label{margin:0;font-size:.85em}"
+    ".ch-clear{margin:0;padding:.45em .7em;font-size:.85em;background:#c0392b;color:#fff}"
         "@media (max-width:560px){.row2{grid-template-columns:1fr}}"
     "</style></head><body>";
 
@@ -830,12 +832,12 @@ static void sendConfigPage(const char *msg = "") {
     html += "<details open><summary>Device</summary>";
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
+    // Only client roles are offered; values are the canonical Meshtastic enum
+    // positions (kept intact for wire compatibility and rebroadcast gating).
     static const struct { uint8_t v; const char *l; } kRoles[] = {
-        {0,"CLIENT"},{1,"CLIENT_MUTE"},{2,"ROUTER"},{3,"ROUTER_CLIENT"},
-        {4,"REPEATER"},{5,"TRACKER"},{6,"SENSOR"},{7,"TAK"},
-        {8,"CLIENT_HIDDEN"},{9,"LOST_AND_FOUND"},{10,"TAK_TRACKER"}
+        {0,"CLIENT"},{1,"CLIENT_MUTE"},{8,"CLIENT_HIDDEN"}
     };
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < (int)(sizeof(kRoles) / sizeof(kRoles[0])); i++) {
         snprintf(tmp, sizeof(tmp), "%d", kRoles[i].v);
         html += "<option value='"; html += tmp; html += "'";
         if (gCfg->deviceRole == kRoles[i].v) html += " selected";
@@ -919,6 +921,10 @@ static void sendConfigPage(const char *msg = "") {
         const ChannelKey &ch = CHANNEL_KEYS[i];
         base64Encode(ch.key, ch.keyLen, b64buf);
         html += "<div class='ch-row'>";
+        // Clear button — blanks this channel's name + key inputs (client-side).
+        html += "<button type='button' class='ch-clear' "
+                "onclick=\"this.closest('.ch-row').querySelectorAll('input')"
+                ".forEach(function(el){el.value=''})\">Clear</button>";
         // Name
         snprintf(tmp, sizeof(tmp), "ch%d_name", i);
         html += "<label>"; snprintf(tmp+20, 20, "%d", i); html += "Ch "; html += (tmp+20);
@@ -1025,14 +1031,14 @@ static void sendConfigPage(const char *msg = "") {
             "</script>";
     html += "<div class='row2' style='align-items:center'>"
             "<label>Frequency<span id='d-freq' style='display:inline-block;padding:.25em .5em;"
-            "background:#333;border-radius:4px;min-width:8em;text-align:center'>—</span></label>"
+            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:8em;text-align:center'>—</span></label>"
             "<label>Bandwidth<span id='d-bw' style='display:inline-block;padding:.25em .5em;"
-            "background:#333;border-radius:4px;min-width:6em;text-align:center'>—</span></label>"
+            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:6em;text-align:center'>—</span></label>"
             "</div><div class='row2' style='align-items:center'>"
             "<label>Spreading Factor<span id='d-sf' style='display:inline-block;padding:.25em .5em;"
-            "background:#333;border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
             "<label>Coding Rate<span id='d-cr' style='display:inline-block;padding:.25em .5em;"
-            "background:#333;border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
             "</div><div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
     html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
@@ -1137,6 +1143,7 @@ static void sendConfigPage(const char *msg = "") {
               "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
               "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
               "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
+              "r.colorScheme=(parseInt(k,10)%2)?'light':'dark';"  // odd preset = light
             "}"
             "document.getElementById('sel-theme-preset').addEventListener('change',apply);"
             "apply();"
@@ -2058,7 +2065,7 @@ static void handlePostSave() {
     // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
 
     // Device
-    gCfg->deviceRole        = (uint8_t)constrain(server.arg("role").toInt(),        0, 10);
+    gCfg->deviceRole        = cfgCoerceClientRole((uint8_t)server.arg("role").toInt());
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
     gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
     gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());

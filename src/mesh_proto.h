@@ -204,11 +204,18 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
                       uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // Encode TELEMETRY_APP Data messages.
+// timeEpoch sets Telemetry.time (field 1, Unix seconds); pass 0 to omit it when
+// the wall clock is not yet synced.
+// DeviceMetrics: battery_level(1), voltage(2), channel_utilization(3),
+// air_util_tx(4), uptime_seconds(5).
 size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
+                             float chUtil, float airUtilTx, uint32_t uptimeS,
+                             uint32_t timeEpoch,
                              uint8_t *buf, size_t bufLen,
                              uint32_t bitfield = 0);
 
 size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float pressureHpa,
+                                  uint32_t timeEpoch,
                                   uint8_t *buf, size_t bufLen,
                                   uint32_t bitfield = 0);
 
