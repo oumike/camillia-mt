@@ -552,7 +552,7 @@ static size_t pbWriteVarint(uint8_t *buf, uint64_t val) {
 }
 
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
-                         uint32_t bitfield, uint32_t replyId) {
+                         uint32_t bitfield, uint32_t replyId, uint32_t emoji) {
     size_t n = 0;
     size_t textLen = strlen(text);
     if (textLen > MESH_TEXT_MAX_LEN) return 0;
@@ -572,6 +572,12 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
         memcpy(buf + n, &replyId, 4);
         n += 4;
     }
+    // field 8 (emoji), varint — non-zero marks this message as a tapback reaction
+    if (emoji) {
+        if (n + 6 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (8 << 3) | 0);
+        n += pbWriteVarint(buf + n, emoji);
+    }
     // field 9 (bitfield), varint — only written when non-zero (e.g. OK_TO_MQTT bit)
     if (bitfield) {
         n += pbWriteVarint(buf + n, (9 << 3) | 0);
@@ -583,8 +589,8 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
 size_t encodeTextMessageUnicast(const char *text,
                                 uint32_t fromNode, uint32_t toNode,
                                 uint8_t *buf, size_t bufLen,
-                                uint32_t replyId) {
-    size_t n = encodeTextMessage(text, buf, bufLen, 0, replyId);
+                                uint32_t replyId, uint32_t emoji) {
+    size_t n = encodeTextMessage(text, buf, bufLen, 0, replyId, emoji);
     if (n == 0) return 0;
     if (n + 10 > bufLen) return 0;
 

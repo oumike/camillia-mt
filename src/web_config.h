@@ -42,6 +42,18 @@ bool webCfgTelemetryRequested();
 // Sends device telemetry and environment telemetry when available.
 void webCfgQueueTelemetry();
 
+// ── Chat tab send bridge ──────────────────────────────────────────
+// The Chat tab's POST handler queues a single pending send here; the main loop
+// drains it (it owns the node id and the LoRa TX path). isDm selects the DM vs
+// channel path; targetId is a node id (DM) or channel index (channel). emoji
+// non-zero marks a tapback reaction.
+void webCfgQueueChatSend(bool isDm, uint32_t targetId, const char *text,
+                         uint32_t replyId, uint32_t emoji);
+// If a chat send is pending, copy it out (clearing the slot) and return true.
+bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
+                        char *text, size_t textLen,
+                        uint32_t &replyId, uint32_t &emoji);
+
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
 

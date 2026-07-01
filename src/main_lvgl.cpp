@@ -11376,7 +11376,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                    TFT_WHITE,
                                    !viewingDm,
                                    chanIdx,
-                                   0);
+                                   pkt.hdr.id);  // retain sender pid for web reply/tapback targeting
                     if (viewingDm) {
                         DMs.markRead(pkt.hdr.from);
                     }
@@ -11662,6 +11662,28 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
         default:
             return false;
+    }
+}
+
+// Drain a pending Chat-tab send (queued by the web server) on the main loop,
+// where we own the node id and the LoRa TX path.
+static void serviceWebChatSend() {
+    bool isDm = false;
+    uint32_t target = 0, replyId = 0, emoji = 0;
+    char text[MESH_TEXT_MAX_LEN + 1];
+    if (!webCfgTakeChatSend(isDm, target, text, sizeof(text), replyId, emoji)) return;
+    if (!text[0]) return;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0) return;
+
+    if (isDm) {
+        DMs.sendDm(s_myNodeId, target, text, replyId, emoji);
+        refreshDmModal(true);
+    } else {
+        int ch = (int)target;
+        if (ch < 0 || ch >= MESH_CHANNELS) ch = s_activeChannel;
+        Channels.sendText(s_myNodeId, text, s_cfg.okToMqtt, ch, replyId, emoji);
+        refreshChatView(true);
     }
 }
 
@@ -13167,6 +13189,7 @@ void loop() {
     lv_timer_handler();
     if (webCfgRunning()) {
         webCfgLoop();
+        serviceWebChatSend();
     }
     bool meshChanged = false;
     if (s_radioReady) {

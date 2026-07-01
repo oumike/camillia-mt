@@ -475,7 +475,7 @@ bool ChannelMgr::expireAcks() {
 }
 
 bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
-                          int chanIdx, uint32_t replyId) {
+                          int chanIdx, uint32_t replyId, uint32_t emoji) {
     if (!Radio.isReady()) {
         addLiveTxLine("T TXT B NR", TFT_RED);
         return false;
@@ -489,7 +489,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     uint8_t  proto[256], cipher[256];
 
     uint32_t bitfield = okToMqtt ? 0x01 : 0;
-    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield, replyId);
+    size_t protoLen = encodeTextMessage(text, proto, sizeof(proto), bitfield, replyId, emoji);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[txChan];

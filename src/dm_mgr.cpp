@@ -250,7 +250,8 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
 }
 
 // ── sendDm ────────────────────────────────────────────────────
-bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
+bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
+                   uint32_t replyId, uint32_t emoji) {
     debugLogMessages("[dm] sendDm called: to=!%08X  text='%.30s'\n", toNodeId, text);
 
     if (!Radio.isReady()) {
@@ -289,7 +290,8 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text) {
     // Nodes.getByRank() sorts in place; reacquire a stable pointer after remap.
     NodeEntry *node = Nodes.find(resolvedToNodeId);
 
-    size_t protoLen = encodeTextMessageUnicast(text, myNodeId, resolvedToNodeId, proto, sizeof(proto));
+    size_t protoLen = encodeTextMessageUnicast(text, myNodeId, resolvedToNodeId, proto, sizeof(proto),
+                                               replyId, emoji);
     debugLogMessages("[dm] protoLen=%u\n", (unsigned)protoLen);
     if (protoLen == 0) {
         debugLogMessages("[dm] sendDm FAIL: encode failed\n");

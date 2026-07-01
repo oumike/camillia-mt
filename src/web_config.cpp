@@ -43,6 +43,13 @@ static WebCfgSaveCb   gOnSave          = nullptr;
 static WebCfgScreenshotPngCb gOnScreenshotPng = nullptr;
 static volatile bool  gAnnounceReq     = false;
 static volatile bool  gTelemetryReq    = false;
+// Chat tab: single pending send drained by the main loop.
+static volatile bool  gChatSendReq     = false;
+static bool           gChatSendIsDm    = false;
+static uint32_t       gChatSendTarget  = 0;
+static uint32_t       gChatSendReplyId = 0;
+static uint32_t       gChatSendEmoji   = 0;
+static char           gChatSendText[MESH_TEXT_MAX_LEN + 1] = "";
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
@@ -486,6 +493,18 @@ static const char kHead[] =
         ".map-legend{display:flex;justify-content:space-between;font-size:.8em;color:var(--text-dim);margin-top:.35em;gap:.5em}"
         ".node-list{margin-top:.8em;display:grid;grid-template-columns:1fr;gap:.5em}"
         ".node-card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.55em .7em}"
+        ".chat-feed{margin-top:.6em;height:360px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:.5em;display:flex;flex-direction:column;gap:.4em}"
+        ".chat-msg{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.4em .55em;max-width:88%}"
+        ".chat-msg.mine{align-self:flex-end;background:var(--panel-2);border-color:var(--accent)}"
+        ".chat-body{font-size:.9em;white-space:pre-wrap;word-break:break-word}"
+        ".chat-actions{margin-top:.3em;display:flex;flex-wrap:wrap;gap:.25em;align-items:center}"
+        ".chat-tap{margin:0;padding:.1em .4em;font-size:.95em;line-height:1.2;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:999px;cursor:pointer}"
+        ".chat-mini{margin:0;padding:.1em .5em;font-size:.8em;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px;cursor:pointer}"
+        ".chat-reply{margin-top:.5em;display:flex;align-items:center;gap:.5em;font-size:.82em;color:var(--text-dim);border-left:3px solid var(--accent);padding:.2em .5em;background:var(--panel)}"
+        ".chat-reply span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+        ".chat-compose{margin-top:.5em;display:flex;gap:.5em}"
+        ".chat-compose input{flex:1}"
+        ".chat-compose button{margin:0}"
         ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
         ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
         ".node-meta b{color:var(--text)}"
@@ -818,6 +837,7 @@ static void sendConfigPage(const char *msg = "") {
             "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
             "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Map</button>"
             "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
@@ -1403,6 +1423,24 @@ static void sendConfigPage(const char *msg = "") {
               "</div>"
             "</div>";
 
+    html += "</div><div class='tab-panel' id='tab-chat'>";
+    html += "<h3 style='margin-top:1.2em'>Chat</h3>";
+    html += "<label style='display:inline-flex;align-items:center;gap:.4em;margin:.2em 0'>"
+            "<input type='checkbox' id='chat-live' checked onchange='chatLiveToggle()' style='width:auto'>"
+            " Live updates</label>";
+    html += "<p class='gps-hint'>Live channel and direct-message conversations. "
+            "Send, reply, and react to messages over the mesh. Uncheck <b>Live updates</b> "
+            "to stop background polling.</p>";
+    html += "<label>Conversation<select id='chat-target' onchange='chatTargetChanged()'>"
+            "<option value=''>-- select --</option></select></label>";
+    html += "<div id='chat-feed' class='chat-feed'></div>";
+    html += "<div id='chat-reply-bar' class='chat-reply' style='display:none'>"
+            "<span id='chat-reply-text'></span>"
+            "<button type='button' class='chat-mini' onclick='chatCancelReply()'>&times;</button></div>";
+    html += "<div class='chat-compose'>"
+            "<input type='text' id='chat-input' maxlength='200' placeholder='Message...' "
+            "onkeydown='if(event.key===\"Enter\"){event.preventDefault();chatSend();}'>"
+            "<button type='button' onclick='chatSend()'>Send</button></div>";
     html += "</div><div class='tab-panel' id='tab-map'>";
     html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
@@ -1978,20 +2016,108 @@ static void sendConfigPage(const char *msg = "") {
                             "info.innerHTML=d.innerHTML;"
                             "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
                         "}"
+                        // ── Chat tab ─────────────────────────────────────────
+                        "var CHAT_TAPS=['\\uD83D\\uDC4D','\\uD83D\\uDC4E','\\u203C\\uFE0F','\\u2753','\\uD83D\\uDE02','\\uD83D\\uDE22'];"
+                        "var chatIsDm=false;var chatId='';var chatCursor=-1;var chatLines=[];"
+                        "var chatReplyPid=0;var chatPreview={};var chatTimer=null;var chatTargetsTimer=null;"
+                        "function chatEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
+                        "function chatTargetChanged(){"
+                            "var sel=document.getElementById('chat-target');var v=sel?sel.value:'';"
+                            "chatLines=[];chatCursor=-1;chatReplyPid=0;chatPreview={};"
+                            "chatCancelReply();"
+                            "var feed=document.getElementById('chat-feed');if(feed)feed.innerHTML='';"
+                            "if(v===''){chatId='';return;}"
+                            "chatIsDm=(v.charAt(0)==='d');chatId=v.substring(2);"
+                            "pollChat();"
+                        "}"
+                        "function loadChatTargets(){"
+                            "fetch('/chat-targets',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){"
+                                "var sel=document.getElementById('chat-target');if(!sel)return;"
+                                "if(document.activeElement===sel)return;"   // don't rebuild while the user is choosing
+                                "var cur=sel.value;var h='<option value=\"\">-- select --</option>';"
+                                "if(d.channels&&d.channels.length){h+='<optgroup label=\"Channels\">';"
+                                    "d.channels.forEach(function(c){h+='<option value=\"c:'+c.id+'\">'+chatEsc(c.name)+'</option>';});h+='</optgroup>';}"
+                                "if(d.dms&&d.dms.length){h+='<optgroup label=\"Direct Messages\">';"
+                                    "d.dms.forEach(function(c){h+='<option value=\"d:'+c.id+'\">'+chatEsc(c.name)+'</option>';});h+='</optgroup>';}"
+                                "sel.innerHTML=h;if(cur)sel.value=cur;"
+                            "}).catch(function(){});"
+                        "}"
+                        "function pollChat(){"
+                            "if(chatId==='')return;"
+                            "var q=chatIsDm?('dm='+encodeURIComponent(chatId)):('ch='+encodeURIComponent(chatId));"
+                            "var url='/chat-data?'+q+(chatCursor>=0?('&after='+chatCursor):'');"
+                            "fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){"
+                                "if(!d||!d.lines)return;"
+                                "for(var i=0;i<d.lines.length;i++)chatLines.push(d.lines[i]);"
+                                "if(typeof d.total==='number')chatCursor=d.total-1;"
+                                "chatRender();"
+                            "}).catch(function(){});"
+                        "}"
+                        "function chatBubble(pid,mine,txt){"
+                            "if(pid!==0)chatPreview[pid]=txt;"
+                            "var s='<div class=\"chat-msg'+(mine?' mine':'')+'\"><div class=\"chat-body\">'+chatEsc(txt)+'</div>';"
+                            // No reply/tapback on our own messages.
+                            "if(pid!==0&&!mine){s+='<div class=\"chat-actions\">';"
+                                "s+='<button type=\"button\" class=\"chat-mini\" onclick=\"chatReply('+pid+')\">Reply</button>';"
+                                "for(var k=0;k<CHAT_TAPS.length;k++)s+='<button type=\"button\" class=\"chat-tap\" onclick=\"chatTapback('+pid+','+k+')\">'+CHAT_TAPS[k]+'</button>';"
+                                "s+='</div>';}"
+                            "return s+'</div>';"
+                        "}"
+                        "function chatRender(){"
+                            "var feed=document.getElementById('chat-feed');if(!feed)return;"
+                            // Don't rebuild the feed while the user is composing — reassigning
+                            // innerHTML blurs the focused input / drops the mobile keyboard.
+                            "var ae=document.activeElement;if(ae&&ae.id==='chat-input')return;"
+                            "var atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<40;"
+                            "var h='';var i=0;var L=chatLines;"
+                            "while(i<L.length){var pid=L[i].pid,mine=!!L[i].mine,txt=L[i].t;var j=i+1;"
+                                "if(pid!==0){while(j<L.length&&L[j].pid===pid){var seg=L[j].t.replace(/^\\s{1,2}/,'');if(seg)txt+=' '+seg;j++;}}"
+                                "h+=chatBubble(pid,mine,txt);i=j;}"
+                            "feed.innerHTML=h;if(atBottom)feed.scrollTop=feed.scrollHeight;"
+                        "}"
+                        "function chatReply(pid){"
+                            "chatReplyPid=pid;var bar=document.getElementById('chat-reply-bar');"
+                            "var t=document.getElementById('chat-reply-text');"
+                            "if(t)t.textContent='Replying: '+String(chatPreview[pid]||'').substring(0,60);"
+                            "if(bar)bar.style.display='flex';"
+                            "var inp=document.getElementById('chat-input');if(inp){inp.scrollIntoView({block:'nearest'});inp.focus();}"
+                        "}"
+                        "function chatCancelReply(){chatReplyPid=0;var bar=document.getElementById('chat-reply-bar');if(bar)bar.style.display='none';}"
+                        "function chatPost(text,reply,emoji){"
+                            "if(chatId==='')return;"
+                            "var body='dm='+(chatIsDm?'1':'0')+'&id='+encodeURIComponent(chatId)+'&text='+encodeURIComponent(text)+'&reply='+(reply||0)+'&emoji='+(emoji||0);"
+                            "fetch('/chat-send',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body})"
+                                ".then(function(){setTimeout(pollChat,600);}).catch(function(){});"
+                        "}"
+                        "function chatTapback(pid,idx){chatPost(CHAT_TAPS[idx],pid,1);}"
+                        "function chatSend(){"
+                            "var inp=document.getElementById('chat-input');if(!inp)return;var t=inp.value.trim();if(!t)return;"
+                            "chatPost(t,chatReplyPid,0);inp.value='';chatCancelReply();"
+                        "}"
+                        "function chatLiveOn(){var c=document.getElementById('chat-live');return c?c.checked:true;}"
+                        "function chatStartTimers(){if(!chatTimer)chatTimer=setInterval(pollChat,2000);if(!chatTargetsTimer)chatTargetsTimer=setInterval(loadChatTargets,5000);}"
+                        "function chatStopTimers(){if(chatTimer){clearInterval(chatTimer);chatTimer=null;}if(chatTargetsTimer){clearInterval(chatTargetsTimer);chatTargetsTimer=null;}}"
+                        "function chatLiveToggle(){if(chatLiveOn()){loadChatTargets();if(chatId!=='')pollChat();chatStartTimers();}else{chatStopTimers();}}"
+                        "function startChatPolling(){loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
+                        "function stopChatPolling(){chatStopTimers();}"
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isUtil=(tab==='utils');"
                             "var isLive=(tab==='live');"
+                            "var isChat=(tab==='chat');"
                             "var isMap=(tab==='map');"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-live').classList.toggle('active',isLive);"
+                            "document.getElementById('tab-chat').classList.toggle('active',isChat);"
                             "document.getElementById('tab-map').classList.toggle('active',isMap);"
                             "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
+                            "document.getElementById('tab-btn-chat').classList.toggle('active',isChat);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
+                            "if(isChat)startChatPolling();else stopChatPolling();"
                             "if(isMap){"
                                 "ensureNodeMap();"
                                 "var _s=document.getElementById('node-select');"
@@ -2410,6 +2536,142 @@ static void handleGetLiveData() {
     server.send(200, "application/json", out);
 }
 
+// ── Chat tab endpoints ────────────────────────────────────────────
+// Lists selectable chat targets: enabled channels + known DM conversations.
+static void handleGetChatTargets() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    String out;
+    out.reserve(1024);
+    out += "{\"channels\":[";
+    bool first = true;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        const ChannelKey &ck = CHANNEL_KEYS[i];
+        if (ck.role == 2) continue;   // DISABLED
+        const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+        if (!nm || !nm[0]) continue;
+        if (!first) out += ",";
+        first = false;
+        out += "{\"id\":";
+        out += String(i);
+        out += ",\"name\":\"";
+        appendJsonEscaped(out, nm);
+        out += "\"}";
+    }
+    out += "],\"dms\":[";
+    first = true;
+    int dn = DMs.count();
+    for (int i = 0; i < dn; i++) {
+        DmConv *c = DMs.getByRank(i);
+        if (!c || c->nodeId == 0) continue;
+        char idhex[12];
+        snprintf(idhex, sizeof(idhex), "%08X", c->nodeId);
+        if (!first) out += ",";
+        first = false;
+        out += "{\"id\":\"";
+        out += idhex;
+        out += "\",\"name\":\"";
+        appendJsonEscaped(out, c->shortName[0] ? c->shortName : idhex);
+        out += "\"}";
+    }
+    out += "]}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", out);
+}
+
+// Live message feed for one target (channel ch=N or DM dm=<hex nodeId>).
+// Mirrors handleGetLiveData: {total, from, lines:[{i, pid, mine, ack, t}]}.
+static void handleGetChatData() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    int after = server.hasArg("after") ? server.arg("after").toInt() : -1;
+
+    const bool isDm = server.hasArg("dm");
+    DisplayLine *chLines = nullptr;
+    DmLine *dmLines = nullptr;
+    int count = 0, cap = 0;
+    if (isDm) {
+        uint32_t nodeId = (uint32_t)strtoul(server.arg("dm").c_str(), nullptr, 16);
+        DmConv *c = DMs.find(nodeId);
+        if (c && c->lines) { dmLines = c->lines; count = c->count; cap = MAX_DM_LINES; }
+    } else {
+        int ch = server.hasArg("ch") ? server.arg("ch").toInt() : 0;
+        if (ch >= 0 && ch < MESH_CHANNELS) {
+            Channel &c = Channels.get(ch);
+            if (c.lines) { chLines = c.lines; count = c.count; cap = MAX_MSG_LINES; }
+        }
+    }
+
+    int oldest = (cap > 0) ? max(0, count - cap) : 0;
+    int from = (after >= 0) ? (after + 1) : (count - 60);
+    if (from < oldest) from = oldest;
+    if (from < 0) from = 0;
+    if (from > count) from = count;
+
+    String out;
+    out.reserve(6144);
+    out += "{\"total\":";
+    out += String(count);
+    out += ",\"from\":";
+    out += String(from);
+    out += ",\"lines\":[";
+    bool first = true;
+    for (int i = from; i < count; i++) {
+        const char *t;
+        uint32_t pid;
+        uint8_t ack;
+        if (isDm) {
+            const DmLine &dl = dmLines[i % cap];
+            t = dl.text; pid = dl.packetId; ack = (uint8_t)dl.ack;
+        } else {
+            const DisplayLine &dl = chLines[i % cap];
+            t = dl.text; pid = dl.packetId; ack = (uint8_t)dl.ack;
+        }
+        if (!first) out += ",";
+        first = false;
+        out += "{\"i\":";
+        out += String(i);
+        out += ",\"pid\":";
+        out += String(pid);
+        out += ",\"mine\":";
+        out += (ack != 0 ? "1" : "0");
+        out += ",\"ack\":";
+        out += String((int)ack);
+        out += ",\"t\":\"";
+        appendJsonEscaped(out, t);
+        out += "\"}";
+    }
+    out += "]}";
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "application/json", out);
+}
+
+// Queue a chat send (message / reply / tapback) for the main loop to transmit.
+static void handlePostChatSend() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    String text = server.arg("text");
+    if (text.length() == 0) {
+        server.send(400, "application/json", "{\"error\":\"empty\"}");
+        return;
+    }
+    bool isDm = server.arg("dm").toInt() != 0;
+    uint32_t replyId = server.hasArg("reply")
+        ? (uint32_t)strtoul(server.arg("reply").c_str(), nullptr, 10) : 0;
+    uint32_t emoji = (server.arg("emoji").toInt() != 0) ? 1 : 0;
+    uint32_t target = isDm
+        ? (uint32_t)strtoul(server.arg("id").c_str(), nullptr, 16)
+        : (uint32_t)server.arg("id").toInt();
+    webCfgQueueChatSend(isDm, target, text.c_str(), replyId, emoji);
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
 // Returns JSON snapshots of the four live-chart series so the web UI can
 // render the same channel-utilization and SNR/RSSI charts that the on-device
 // live feed exposes via the u/s keyboard shortcuts.
@@ -2736,6 +2998,9 @@ static void registerCommonRoutes() {
     server.on("/save",              HTTP_POST, handlePostSave);
     server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     server.on("/live-data",         HTTP_GET,  handleGetLiveData);
+    server.on("/chat-targets",      HTTP_GET,  handleGetChatTargets);
+    server.on("/chat-data",         HTTP_GET,  handleGetChatData);
+    server.on("/chat-send",         HTTP_POST, handlePostChatSend);
     server.on("/chart-data",        HTTP_GET,  handleGetChartData);
     server.on("/release-check",     HTTP_GET,  handleGetReleaseCheck);
     server.on("/logout",            HTTP_GET,  handleGetLogout);
@@ -2910,4 +3175,27 @@ bool webCfgTelemetryRequested() {
 
 void webCfgQueueTelemetry() {
     gTelemetryReq = true;
+}
+
+void webCfgQueueChatSend(bool isDm, uint32_t targetId, const char *text,
+                         uint32_t replyId, uint32_t emoji) {
+    gChatSendIsDm    = isDm;
+    gChatSendTarget  = targetId;
+    gChatSendReplyId = replyId;
+    gChatSendEmoji   = emoji;
+    strlcpy(gChatSendText, text ? text : "", sizeof(gChatSendText));
+    gChatSendReq     = true;
+}
+
+bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
+                        char *text, size_t textLen,
+                        uint32_t &replyId, uint32_t &emoji) {
+    if (!gChatSendReq) return false;
+    gChatSendReq = false;
+    isDm     = gChatSendIsDm;
+    targetId = gChatSendTarget;
+    replyId  = gChatSendReplyId;
+    emoji    = gChatSendEmoji;
+    if (text && textLen) strlcpy(text, gChatSendText, textLen);
+    return true;
 }

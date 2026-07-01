@@ -63,7 +63,10 @@ public:
                     uint32_t packetId = 0);
 
     // Build and transmit a unicast DM. Adds outgoing message to conversation.
-    bool sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text);
+    // replyId: optional Data.reply_id (message being replied to).
+    // emoji: non-zero marks this as a tapback reaction.
+    bool sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
+                uint32_t replyId = 0, uint32_t emoji = 0);
 
     // Apply routing ACK/NAK result to the matching DM TX context.
     // Returns true when requestId matched a tracked DM transmit.

@@ -60,7 +60,7 @@ public:
     // Build and transmit a text message on a mesh channel.
     // chanIdx: 0..MESH_CHANNELS-1, or -1 to use current active channel.
     bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false,
-                  int chanIdx = -1, uint32_t replyId = 0);
+                  int chanIdx = -1, uint32_t replyId = 0, uint32_t emoji = 0);
 
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).
