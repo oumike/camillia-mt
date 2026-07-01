@@ -37,6 +37,8 @@
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
 #include <driver/i2s.h>
 #endif
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #ifdef KEY_BACKSPACE
 #undef KEY_BACKSPACE
@@ -13118,6 +13120,33 @@ void setup() {
     Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
 }
 
+// ── Light-sleep power management (opt-in via isPowerSaving) ───────────────────
+// While the screen is asleep we duty-cycle the CPU with short light-sleep naps
+// instead of busy-waiting. The SX1262 stays in RX and wakes us instantly via its
+// DIO1 line, so messages are still received; otherwise a ~200 ms timer wake keeps
+// input polling and scheduled TX responsive. lsSecs/minWakeSecs are reserved for
+// a future deeper-sleep tier and intentionally unused here.
+static bool powerSaveShouldNap() {
+    return s_cfg.isPowerSaving
+        && s_screenAsleep                 // only after screen-off inactivity
+        && !webCfgRunning()               // never while the web-config server is up
+        && WiFi.getMode() == WIFI_OFF;    // light sleep + active Wi-Fi don't mix
+}
+
+static void enterLightNap() {
+    static constexpr uint32_t kNapMs = 200;   // input latency ceiling while asleep
+#if defined(LORA_DIO1) && (LORA_DIO1 >= 0)
+    // SX1262 holds DIO1 high on RX-done → wake immediately on an incoming packet.
+    gpio_wakeup_enable((gpio_num_t)LORA_DIO1, GPIO_INTR_HIGH_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+#endif
+    esp_sleep_enable_timer_wakeup((uint64_t)kNapMs * 1000ULL);
+    esp_light_sleep_start();
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO && s_radioReady) {
+        Radio.wakeRxCheck();              // service the packet on the next poll
+    }
+}
+
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -13170,8 +13199,9 @@ void loop() {
     }
 
     if (s_screenAsleep) {
-        delay(5);
-        return;
+        if (powerSaveShouldNap()) enterLightNap();
+        else delay(5);
+        return;   // loop re-enters and polls input/RX/announces on wake
     }
 
     refreshChannelGlow(false);

@@ -624,7 +624,8 @@ static void sendConfigPage(const char *msg = "") {
     else snprintf(gpsChip, sizeof(gpsChip), "GPS SEARCH %u", (unsigned)gpsSat);
     int mapPointCount = 0;
     String mapPoints = "[";
-    String nodeCards = "";
+    String nodeOptions = "";   // <option> per node for the Nodes Seen dropdown
+    String nodeDetails = "";   // hidden per-node info panels (shown on selection)
     uint32_t nowMs = millis();
     auto unzz = [](uint32_t v) -> int32_t {
         return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
@@ -754,35 +755,59 @@ static void sendConfigPage(const char *msg = "") {
             snprintf(linkBuf, sizeof(linkBuf), "unknown");
         }
 
-        nodeCards += "<div class='node-card'>";
-        nodeCards += "<div class='node-title'>";
-        nodeCards += shortName;
-        nodeCards += " -- ";
-        nodeCards += longName;
-        nodeCards += "</div>";
-        nodeCards += "<div class='node-meta'><b>ID:</b> ";
-        nodeCards += idBuf;
-        nodeCards += "  <b>Channel:</b> ";
-        nodeCards += chanName;
-        nodeCards += "  <b>Last Heard:</b> ";
-        nodeCards += heardBuf;
-        nodeCards += "</div>";
-        nodeCards += "<div class='node-meta'><b>Location:</b> ";
-        nodeCards += locBuf;
-        nodeCards += "</div>";
-        nodeCards += "<div class='node-meta'><b>Position Pkt:</b> ";
-        nodeCards += posSeenBuf;
-        nodeCards += "  <b>State:</b> ";
-        nodeCards += posStateBuf;
-        nodeCards += "  <b>Raw:</b> ";
-        nodeCards += rawPosBuf;
-        nodeCards += "</div>";
-        nodeCards += "<div class='node-meta'><b>Telemetry:</b> ";
-        nodeCards += telemBuf;
-        nodeCards += "  <b>Link:</b> ";
-        nodeCards += linkBuf;
-        nodeCards += "</div>";
-        nodeCards += "</div>";
+        // Dropdown option (value = node index).
+        nodeOptions += "<option value='";
+        nodeOptions += String(i);
+        nodeOptions += "'>";
+        nodeOptions += shortName;
+        nodeOptions += " -- ";
+        nodeOptions += longName;
+        nodeOptions += "</option>";
+
+        // Hidden detail panel for this node; shown in #node-info on selection.
+        // Location goes into data attributes so the mini-map can pin it.
+        char latAttr[24], lonAttr[24];
+        snprintf(latAttr, sizeof(latAttr), "%.7f", lat);
+        snprintf(lonAttr, sizeof(lonAttr), "%.7f", lon);
+        nodeDetails += "<div class='node-detail' id='nd-";
+        nodeDetails += String(i);
+        nodeDetails += "' data-loc='";
+        nodeDetails += hasLocation ? "1" : "0";
+        nodeDetails += "' data-lat='";
+        nodeDetails += latAttr;
+        nodeDetails += "' data-lon='";
+        nodeDetails += lonAttr;
+        nodeDetails += "'>";
+        nodeDetails += "<div class='node-card'>";
+        nodeDetails += "<div class='node-title'>";
+        nodeDetails += shortName;
+        nodeDetails += " -- ";
+        nodeDetails += longName;
+        nodeDetails += "</div>";
+        nodeDetails += "<div class='node-meta'><b>ID:</b> ";
+        nodeDetails += idBuf;
+        nodeDetails += "  <b>Channel:</b> ";
+        nodeDetails += chanName;
+        nodeDetails += "  <b>Last Heard:</b> ";
+        nodeDetails += heardBuf;
+        nodeDetails += "</div>";
+        nodeDetails += "<div class='node-meta'><b>Location:</b> ";
+        nodeDetails += locBuf;
+        nodeDetails += "</div>";
+        nodeDetails += "<div class='node-meta'><b>Position Pkt:</b> ";
+        nodeDetails += posSeenBuf;
+        nodeDetails += "  <b>State:</b> ";
+        nodeDetails += posStateBuf;
+        nodeDetails += "  <b>Raw:</b> ";
+        nodeDetails += rawPosBuf;
+        nodeDetails += "</div>";
+        nodeDetails += "<div class='node-meta'><b>Telemetry:</b> ";
+        nodeDetails += telemBuf;
+        nodeDetails += "  <b>Link:</b> ";
+        nodeDetails += linkBuf;
+        nodeDetails += "</div>";
+        nodeDetails += "</div>";   // .node-card
+        nodeDetails += "</div>";   // .node-detail
     }
     mapPoints += "]";
     html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
@@ -1073,15 +1098,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Compass North Top<select name='compass_north'>"
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->compassNorthTop) html += " selected"; html += ">No</option>"
-            "</select></label>";
-    html += "<label>Flip Screen<select name='flip_screen'>"
-            "<option value='1'"; if ( gCfg->flipScreen) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->flipScreen) html += " selected"; html += ">No</option>"
             "</select></label></div>";
-        html += "<label>Splash Melody<select name='splash_melody'>"
-            "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
-            "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
-            "</select></label>";
         html += "<label>Theme<select name='ui_theme_preset' id='sel-theme-preset'>"
             "<option value='0'"; if (themePreset == 0) html += " selected"; html += ">Camillia Dark</option>"
             "<option value='1'"; if (themePreset == 1) html += " selected"; html += ">Camillia Light</option>"
@@ -1240,6 +1257,10 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
             "</select></label>";
 #endif
+    html += "<label>Splash Melody<select name='splash_melody'>"
+            "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
     html += "</details>";
     sendChunk(html);
 
@@ -1403,11 +1424,21 @@ static void sendConfigPage(const char *msg = "") {
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
     html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
-    html += "<p class='gps-hint'>Device and location details for discovered nodes.</p>";
-    html += "<div class='node-list'>";
-    if (nodeCards.length() > 0) html += nodeCards;
-    else html += "<div class='node-card'><div class='node-meta'>No nodes discovered yet.</div></div>";
-    html += "</div>";
+    if (nodeOptions.length() > 0) {
+        html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
+        html += "<select id='node-select' onchange='selectNode()'>";
+        html += "<option value=''>-- select a node --</option>";
+        html += nodeOptions;
+        html += "</select>";
+        html += "<div id='node-info' style='margin-top:.6em'></div>";
+        html += "<div class='map-wrap' style='margin-top:.6em'>"
+                "<div id='node-mini-map' class='map-canvas' style='height:220px'></div></div>";
+        html += "<div id='node-detail-store' style='display:none'>";
+        html += nodeDetails;
+        html += "</div>";
+    } else {
+        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
+    }
     html += "<script>var NODE_HEAT_POINTS=";
     html += mapPoints;
     html += ";var NODE_ME_POINT=";
@@ -1912,6 +1943,41 @@ static void sendConfigPage(const char *msg = "") {
                             "if(nodeHeatOn){nodeMap.removeLayer(nodeHeatLayer);nodeHeatOn=false;if(hb){hb.textContent='Heat: Off';hb.classList.remove('active');}}"
                             "else{nodeHeatLayer.addTo(nodeMap);nodeHeatOn=true;if(hb){hb.textContent='Heat: On';hb.classList.add('active');}}"
                         "}"
+                        "var nodeMini=null;var nodeMiniMarker=null;"
+                        "function ensureNodeMini(){"
+                            "var el=document.getElementById('node-mini-map');"
+                            "if(!el)return null;"
+                            "if(!window.L){el.innerHTML='<div style=\"padding:1em;color:#ffd0d0\">Map library unavailable. Check internet access.</div>';return null;}"
+                            "if(nodeMini){nodeMini.invalidateSize();return nodeMini;}"
+                            "nodeMini=L.map('node-mini-map',{zoomControl:true,minZoom:2,maxZoom:19});"
+                            "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(nodeMini);"
+                            "return nodeMini;"
+                        "}"
+                        "function showNodeMini(hasLoc,lat,lon){"
+                            "var m=ensureNodeMini();"
+                            "if(!m)return;"
+                            "if(nodeMiniMarker){m.removeLayer(nodeMiniMarker);nodeMiniMarker=null;}"
+                            "if(hasLoc&&isFinite(lat)&&isFinite(lon)){"
+                                "m.setView([lat,lon],12);"
+                                "nodeMiniMarker=L.marker([lat,lon]).addTo(m);"
+                            "}else{"
+                                // No node position: show a regional map (this device's area if known).
+                                "var me=window.NODE_ME_POINT;"
+                                "if(me&&isFinite(me.lat)&&isFinite(me.lon))m.setView([me.lat,me.lon],7);"
+                                "else m.setView([39.5,-98.35],4);"
+                            "}"
+                            "setTimeout(function(){m.invalidateSize();},50);"
+                        "}"
+                        "function selectNode(){"
+                            "var sel=document.getElementById('node-select');"
+                            "var info=document.getElementById('node-info');"
+                            "if(!sel||!info)return;"
+                            "if(sel.value===''){info.innerHTML='';return;}"
+                            "var d=document.getElementById('nd-'+sel.value);"
+                            "if(!d){info.innerHTML='';return;}"
+                            "info.innerHTML=d.innerHTML;"
+                            "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
+                        "}"
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isUtil=(tab==='utils');"
@@ -1926,7 +1992,12 @@ static void sendConfigPage(const char *msg = "") {
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
-                            "if(isMap){ensureNodeMap();setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();},0);}"
+                            "if(isMap){"
+                                "ensureNodeMap();"
+                                "var _s=document.getElementById('node-select');"
+                                "if(document.getElementById('node-mini-map')){if(_s&&_s.value!==''){selectNode();}else{showNodeMini(false);}}"
+                                "setTimeout(function(){if(nodeMap)nodeMap.invalidateSize();if(nodeMini)nodeMini.invalidateSize();},0);"
+                            "}"
                         "}"
                         "window.addEventListener('resize',function(){"
                             "var mapTab=document.getElementById('tab-map');"
@@ -2168,7 +2239,6 @@ static void handlePostSave() {
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
-    gCfg->flipScreen      = server.arg("flip_screen").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.
     if (server.hasArg("chat_space")) {

@@ -31,6 +31,10 @@ public:
     float channelUtilPercent();
     float airUtilTxPercent();
 
+    // Force the next pollRx() to read the radio, even if the DIO1 edge ISR did
+    // not run (e.g. the CPU came out of light sleep on the DIO1 level wake).
+    void wakeRxCheck() { _rxFlag = true; }
+
 private:
     bool    _ready = false;
 #if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
