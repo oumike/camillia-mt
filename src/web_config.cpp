@@ -838,7 +838,7 @@ static void sendConfigPage(const char *msg = "") {
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
             "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
             "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Map</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
             "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
@@ -1431,6 +1431,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<p class='gps-hint'>Live channel and direct-message conversations. "
             "Send, reply, and react to messages over the mesh. Uncheck <b>Live updates</b> "
             "to stop background polling.</p>";
+    html += "<div id='chat-body'>";
     html += "<label>Conversation<select id='chat-target' onchange='chatTargetChanged()'>"
             "<option value=''>-- select --</option></select></label>";
     html += "<div id='chat-feed' class='chat-feed'></div>";
@@ -1441,6 +1442,7 @@ static void sendConfigPage(const char *msg = "") {
             "<input type='text' id='chat-input' maxlength='200' placeholder='Message...' "
             "onkeydown='if(event.key===\"Enter\"){event.preventDefault();chatSend();}'>"
             "<button type='button' onclick='chatSend()'>Send</button></div>";
+    html += "</div>";  // #chat-body
     html += "</div><div class='tab-panel' id='tab-map'>";
     html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
@@ -2097,8 +2099,9 @@ static void sendConfigPage(const char *msg = "") {
                         "function chatLiveOn(){var c=document.getElementById('chat-live');return c?c.checked:true;}"
                         "function chatStartTimers(){if(!chatTimer)chatTimer=setInterval(pollChat,2000);if(!chatTargetsTimer)chatTargetsTimer=setInterval(loadChatTargets,5000);}"
                         "function chatStopTimers(){if(chatTimer){clearInterval(chatTimer);chatTimer=null;}if(chatTargetsTimer){clearInterval(chatTargetsTimer);chatTargetsTimer=null;}}"
-                        "function chatLiveToggle(){if(chatLiveOn()){loadChatTargets();if(chatId!=='')pollChat();chatStartTimers();}else{chatStopTimers();}}"
-                        "function startChatPolling(){loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
+                        "function chatBodySync(){var b=document.getElementById('chat-body');if(b)b.style.display=chatLiveOn()?'':'none';}"
+                        "function chatLiveToggle(){chatBodySync();if(chatLiveOn()){loadChatTargets();if(chatId!=='')pollChat();chatStartTimers();}else{chatStopTimers();}}"
+                        "function startChatPolling(){chatBodySync();loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
                         "function stopChatPolling(){chatStopTimers();}"
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"

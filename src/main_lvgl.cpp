@@ -13211,21 +13211,6 @@ static void enterLightNap() {
     }
 }
 
-// Diagnostic: flag any loop section that blocks long enough to overflow the
-// keyboard's small buffer and drop keystrokes. Self-silencing — it prints only
-// when a section actually stalls, so it can be left compiled in cheaply.
-#ifndef LOOP_STALL_LOG_US
-#define LOOP_STALL_LOG_US 25000UL
-#endif
-#define TIME_SECTION(label, stmt) do {                                  \
-        uint32_t _t0 = micros();                                        \
-        stmt;                                                           \
-        uint32_t _dt = micros() - _t0;                                  \
-        if (_dt > LOOP_STALL_LOG_US)                                    \
-            Serial.printf("[loop-stall] %-10s %lu us\n",                \
-                          label, (unsigned long)_dt);                   \
-    } while (0)
-
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -13241,19 +13226,19 @@ void loop() {
 
     serviceSerialCommands();
     bootstrapStateMapsIfMissing();
-    TIME_SECTION("keyboard", pumpKeyboardInput());
+    pumpKeyboardInput();
     processPendingThemeRebuild();
-    TIME_SECTION("lvgl", lv_timer_handler());
+    lv_timer_handler();
     if (webCfgRunning()) {
         webCfgLoop();
         serviceWebChatSend();
     }
     bool meshChanged = false;
     if (s_radioReady) {
-        TIME_SECTION("meshRx", meshChanged = pollMeshRx());
+        meshChanged = pollMeshRx();
         servicePendingRebroadcast(now);
     }
-    TIME_SECTION("gps", gpsLoop());
+    gpsLoop();
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {
@@ -13266,11 +13251,9 @@ void loop() {
             s_lastGpsSampleMs = now;
         }
     }
-    TIME_SECTION("announce", {
-        serviceNodeInfoAnnounce(now);
-        serviceTelemetryAnnounce(now);
-        serviceNeighborInfoAnnounce(now);
-    });
+    serviceNodeInfoAnnounce(now);
+    serviceTelemetryAnnounce(now);
+    serviceNeighborInfoAnnounce(now);
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0
@@ -13287,16 +13270,14 @@ void loop() {
         return;   // loop re-enters and polls input/RX/announces on wake
     }
 
-    TIME_SECTION("refresh", {
-        refreshChannelGlow(false);
-        refreshHeaderTime(false);
-        refreshHeaderStatus(false);
-        refreshChatView(meshChanged);
-        refreshLiveView(meshChanged);
-        refreshChUtilChart(meshChanged);
-        refreshSnrRssiChart(meshChanged);
-        refreshDmModal(meshChanged);
-    });
+    refreshChannelGlow(false);
+    refreshHeaderTime(false);
+    refreshHeaderStatus(false);
+    refreshChatView(meshChanged);
+    refreshLiveView(meshChanged);
+    refreshChUtilChart(meshChanged);
+    refreshSnrRssiChart(meshChanged);
+    refreshDmModal(meshChanged);
     delay(5);
 }
 
