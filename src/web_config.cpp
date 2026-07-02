@@ -3132,6 +3132,11 @@ void webCfgEnd() {
     gOnScreenshotPng = nullptr;
     gAnnounceReq = false;
     gTelemetryReq = false;
+    // Cancel any chat send the web UI queued but that the main loop hasn't
+    // drained yet — serviceWebChatSend() only runs while the server is up, so a
+    // leftover request would otherwise fire the next time it's started.
+    gChatSendReq   = false;
+    gChatSendText[0] = '\0';
     running     = false;
     gOnboarding = false;
     Serial.println("[web] stopped");

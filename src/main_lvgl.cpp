@@ -11229,6 +11229,28 @@ static bool rebroadcastModeAllows(const MeshPacket &pkt) {
     }
 }
 
+// Deferred rebroadcast queue. Relaying nodes wait out a short random
+// contention-jitter window before re-transmitting so multiple relays don't all
+// key up simultaneously and collide on-air. This wait MUST NOT be a blocking
+// delay() on the main loop — that starves lv_timer_handler() and makes the whole
+// UI sluggish (every relayed packet froze the screen for up to 150 ms). Instead
+// we stash the framed packet with a send-after deadline and transmit it from
+// servicePendingRebroadcast() once the jitter window elapses.
+struct PendingRebroadcast {
+    uint8_t  frame[sizeof(MeshHdr) + sizeof(((MeshPacket *)nullptr)->rawCipher)];
+    size_t   len;
+    uint32_t sendAtMs;
+    bool     active;
+};
+static constexpr uint8_t kMaxPendingRebroadcast = 8;
+static PendingRebroadcast s_pendingRebroadcast[kMaxPendingRebroadcast];
+
+static PendingRebroadcast *allocPendingRebroadcast() {
+    for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++)
+        if (!s_pendingRebroadcast[i].active) return &s_pendingRebroadcast[i];
+    return nullptr;
+}
+
 // Re-transmit a freshly received packet verbatim (hop limit decremented) so it
 // propagates across the mesh. Caller guarantees the packet is new (passed
 // isDuplicate) and not from us. The original on-air payload is relayed as-is
@@ -11247,16 +11269,36 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
     hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
-    uint8_t frame[sizeof(MeshHdr) + sizeof(pkt.rawCipher)];
-    memcpy(frame, &hdr, sizeof(hdr));
-    memcpy(frame + sizeof(hdr), pkt.rawCipher, pkt.rawLen);
+    PendingRebroadcast *slot = allocPendingRebroadcast();
+    if (!slot) {                             // queue full: drop rather than block
+        debugLogMessages("[fwd] drop (queue full) id=%08lx\n",
+                         (unsigned long)pkt.hdr.id);
+        return;
+    }
+    memcpy(slot->frame, &hdr, sizeof(hdr));
+    memcpy(slot->frame + sizeof(hdr), pkt.rawCipher, pkt.rawLen);
+    slot->len      = sizeof(hdr) + pkt.rawLen;
+    slot->sendAtMs = millis() + 20 + (esp_random() % 131);  // 20–150 ms jitter
+    slot->active   = true;
 
-    delay(20 + (esp_random() % 131));        // 20–150 ms contention jitter
-
-    if (Radio.transmit(frame, sizeof(hdr) + pkt.rawLen)) s_rebroadcastCount++;
-    debugLogMessages("[fwd] from=%08lx id=%08lx hop %u->%u %s\n",
+    debugLogMessages("[fwd] queued from=%08lx id=%08lx hop %u->%u %s\n",
                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id,
                      hopLimit, hopLimit - 1, portnumName(pkt.portnum));
+}
+
+// Transmit at most one queued rebroadcast whose contention-jitter deadline has
+// passed. One TX per loop bounds how long a burst of relays can block the loop
+// (Radio.transmit() blocks for the packet airtime); remaining slots go out on
+// subsequent iterations a few ms later, which also spreads them out on-air.
+static void servicePendingRebroadcast(uint32_t now) {
+    if (!Radio.isReady()) return;
+    for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++) {
+        PendingRebroadcast &p = s_pendingRebroadcast[i];
+        if (!p.active || (int32_t)(now - p.sendAtMs) < 0) continue;
+        p.active = false;
+        if (Radio.transmit(p.frame, p.len)) s_rebroadcastCount++;
+        return;
+    }
 }
 
 static bool processMeshPacket(const MeshPacket &rxPkt) {
@@ -13169,6 +13211,21 @@ static void enterLightNap() {
     }
 }
 
+// Diagnostic: flag any loop section that blocks long enough to overflow the
+// keyboard's small buffer and drop keystrokes. Self-silencing — it prints only
+// when a section actually stalls, so it can be left compiled in cheaply.
+#ifndef LOOP_STALL_LOG_US
+#define LOOP_STALL_LOG_US 25000UL
+#endif
+#define TIME_SECTION(label, stmt) do {                                  \
+        uint32_t _t0 = micros();                                        \
+        stmt;                                                           \
+        uint32_t _dt = micros() - _t0;                                  \
+        if (_dt > LOOP_STALL_LOG_US)                                    \
+            Serial.printf("[loop-stall] %-10s %lu us\n",                \
+                          label, (unsigned long)_dt);                   \
+    } while (0)
+
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -13184,18 +13241,19 @@ void loop() {
 
     serviceSerialCommands();
     bootstrapStateMapsIfMissing();
-    pumpKeyboardInput();
+    TIME_SECTION("keyboard", pumpKeyboardInput());
     processPendingThemeRebuild();
-    lv_timer_handler();
+    TIME_SECTION("lvgl", lv_timer_handler());
     if (webCfgRunning()) {
         webCfgLoop();
         serviceWebChatSend();
     }
     bool meshChanged = false;
     if (s_radioReady) {
-        meshChanged = pollMeshRx();
+        TIME_SECTION("meshRx", meshChanged = pollMeshRx());
+        servicePendingRebroadcast(now);
     }
-    gpsLoop();
+    TIME_SECTION("gps", gpsLoop());
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {
@@ -13208,9 +13266,11 @@ void loop() {
             s_lastGpsSampleMs = now;
         }
     }
-    serviceNodeInfoAnnounce(now);
-    serviceTelemetryAnnounce(now);
-    serviceNeighborInfoAnnounce(now);
+    TIME_SECTION("announce", {
+        serviceNodeInfoAnnounce(now);
+        serviceTelemetryAnnounce(now);
+        serviceNeighborInfoAnnounce(now);
+    });
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0
@@ -13227,14 +13287,16 @@ void loop() {
         return;   // loop re-enters and polls input/RX/announces on wake
     }
 
-    refreshChannelGlow(false);
-    refreshHeaderTime(false);
-    refreshHeaderStatus(false);
-    refreshChatView(meshChanged);
-    refreshLiveView(meshChanged);
-    refreshChUtilChart(meshChanged);
-    refreshSnrRssiChart(meshChanged);
-    refreshDmModal(meshChanged);
+    TIME_SECTION("refresh", {
+        refreshChannelGlow(false);
+        refreshHeaderTime(false);
+        refreshHeaderStatus(false);
+        refreshChatView(meshChanged);
+        refreshLiveView(meshChanged);
+        refreshChUtilChart(meshChanged);
+        refreshSnrRssiChart(meshChanged);
+        refreshDmModal(meshChanged);
+    });
     delay(5);
 }
 
