@@ -448,7 +448,7 @@ static const char kHead[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>Camillia MT</title>"
+    "<title>Camillia for Meshtastic</title>"
     "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
     "<style>"
         ":root{color-scheme:dark;--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
@@ -829,7 +829,7 @@ static void sendConfigPage(const char *msg = "") {
         nodeDetails += "</div>";   // .node-detail
     }
     mapPoints += "]";
-    html += "<h2>Camillia MT <a class='logout' href='/logout'>Logout</a></h2>";
+    html += "<h2>Camillia for Meshtastic <a class='logout' href='/logout'>Logout</a></h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
 

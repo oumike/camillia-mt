@@ -145,6 +145,17 @@
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR
 #define MY_DBG_GPS          MY_DEBUG_MONITOR
 
+// ── Boot splash typography tuning ─────────────────────────────
+// These scales are applied with LovyanGFX setTextSize() on top of the
+// selected splash fonts. Keep near 1.0 for best bitmap-font sharpness.
+#define MY_SPLASH_TITLE_SCALE      0.82f
+#define MY_SPLASH_SUBTITLE_SCALE   0.72f
+#define MY_SPLASH_TITLE_Y_OFFSET      0
+#define MY_SPLASH_SUBTITLE_GAP_TRIM   0
+
+// Pager-specific splash title scale (Orbitron_Light_32)
+#define MY_SPLASH_PAGER_TITLE_SCALE 1.18f
+
 // ── Display UI zones (font0 = 6×8 px) ───────────────────────
 #if DEVICE_UI_VERTICAL
 #define LCD_W           DEVICE_LCD_PORTRAIT_W

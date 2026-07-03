@@ -19,6 +19,7 @@
 #include "web_config.h"
 #include "debug_flags.h"
 #include "utf8_utils.h"
+#include "fonts/roboto_splash_fonts.h"
 #include <WiFi.h>
 #include <Preferences.h>
 #include <WiFiClientSecure.h>
@@ -8871,7 +8872,7 @@ static void renderOnboardingStage() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Welcome to Camillia MT");
+    lv_label_set_text(title, "Welcome to Camillia for Meshtastic");
 
     lv_obj_t *body = lv_label_create(s_onboardingModal);
     lv_obj_set_width(body, lv_pct(100));
@@ -10623,14 +10624,23 @@ static void drawBootSplash() {
         return (uint16_t)((r << 11) | (g << 5) | b);
     };
 
-    const uint16_t bgTop = s_ui.splashTop;
-    const uint16_t bgBottom = s_ui.splashBottom;
-    const uint16_t cardBg = s_ui.splashCardBg;
-    const uint16_t cardEdge = s_ui.splashCardEdge;
-    const uint16_t cardEdgeHi = s_ui.splashCardEdgeHi;
-    const uint16_t titleCol = s_ui.splashTitle;
-    const uint16_t subCol = s_ui.splashSub;
-    const uint16_t dimCol = s_ui.splashDim;
+    // Splash is intentionally fixed to Camillia Dark, independent of UI theme selection.
+    const UiThemePresetLite &splashPreset = kUiThemePresets[0]; // Camillia Dark
+    const uint16_t splashBgMain = splashPreset.bgMain;
+    const uint16_t splashPanelBg = splashPreset.panelBg;
+    const uint16_t splashPanelAlt = splashPreset.panelAlt;
+    const uint16_t splashAccent = splashPreset.accent;
+    const uint16_t splashTextMain = rgb565(0xF3, 0xF6, 0xFA);
+    const uint16_t splashTextDim = rgb565(0xB7, 0xC0, 0xCC);
+
+    const uint16_t bgTop = blend565(splashBgMain, splashPanelBg, 96);
+    const uint16_t bgBottom = splashBgMain;
+    const uint16_t cardBg = splashPanelBg;
+    const uint16_t cardEdge = blend565(splashPanelBg, splashAccent, 66);
+    const uint16_t cardEdgeHi = blend565(splashPanelAlt, splashAccent, 92);
+    const uint16_t titleCol = splashTextMain;
+    const uint16_t subCol = splashTextDim;
+    const uint16_t dimCol = blend565(splashTextDim, splashPanelBg, 72);
 
     for (int y = 0; y < screenH; y++) {
         uint8_t t = (uint8_t)((255UL * y) / max(1, screenH - 1));
@@ -10647,7 +10657,6 @@ static void drawBootSplash() {
     displayDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
     displayDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
 
-    const char *firmwareName = "CAMILLIA MT";
     const char *version = APP_VERSION;
 
     char nodeLine[72];
@@ -10656,11 +10665,28 @@ static void drawBootSplash() {
     snprintf(nodeLine, sizeof(nodeLine), "%s (%s)", nodeLong, nodeShort);
 
 #if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
-    displayDev().setFont(&fonts::Orbitron_Light_32);
-    displayDev().setTextSize(0.82f);
+    // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
+    int splashContentBottom = cardY + 40;
     displayDev().setTextColor(titleCol, cardBg);
-    int fwW = displayDev().textWidth(firmwareName);
-    displayDev().drawString(firmwareName, cardX + max(0, (cardW - fwW) / 2), cardY + 10);
+
+    auto drawCentered = [&](const char *text, int y) {
+        int w = displayDev().textWidth(text);
+        displayDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
+    };
+
+    // Large brand name on top (Roboto Bold 26pt).
+    displayDev().setFont(&Roboto_Bold26pt7b);
+    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
+    drawCentered("Camillia", brandY);
+    const int brandCap = max(8, displayDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
+
+    // "for Meshtastic" underneath (Roboto Medium 14pt).
+    displayDev().setFont(&Roboto_Medium14pt7b);
+    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    const int subY = brandY + brandCap;
+    drawCentered("for Meshtastic", subY);
+    splashContentBottom = subY + displayDev().fontHeight();
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
@@ -10824,15 +10850,37 @@ static void drawBootSplash() {
         return out;
     };
 
-    displayDev().setFont(&fonts::Orbitron_Light_32);
-    displayDev().setTextSize(1.18f);
-    displayDev().setTextColor(titleCol, cardBg);
-    int fwW = displayDev().textWidth(firmwareName);
+    // Match pager splash typography to the Roboto title/subtitle treatment,
+    // but keep both phrases on a single centered line.
     const int titleY = cardY + 14;
-    displayDev().drawString(firmwareName, leftX + max(0, (leftW - fwW) / 2), titleY);
+    const int titleGap = 8;
 
-    int titleH = displayDev().fontHeight();
-    const int flowerAreaTop = titleY + titleH + 10;
+    displayDev().setFont(&Roboto_Bold26pt7b);
+    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    const int camilliaW = displayDev().textWidth("Camillia");
+    const int camilliaH = displayDev().fontHeight();
+
+    displayDev().setFont(&Roboto_Medium14pt7b);
+    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    const int meshW = displayDev().textWidth("for Meshtastic");
+    const int meshH = displayDev().fontHeight();
+
+    const int lineW = camilliaW + titleGap + meshW;
+    const int lineX = leftX + max(0, (leftW - lineW) / 2);
+    const int meshY = titleY + 3;
+
+    displayDev().setFont(&Roboto_Bold26pt7b);
+    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    displayDev().setTextColor(titleCol, cardBg);
+    displayDev().drawString("Camillia", lineX, titleY);
+
+    displayDev().setFont(&Roboto_Medium14pt7b);
+    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    displayDev().setTextColor(subCol, cardBg);
+    displayDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
+
+    const int titleBlockBottom = max(titleY + camilliaH, meshY + meshH);
+    const int flowerAreaTop = titleBlockBottom + 8;
     const int flowerAreaBottom = cardY + cardH - 14;
     float pagerFlowerScale = min((float)(flowerAreaBottom - flowerAreaTop) / 76.0f,
                                  (float)(leftW - 16) / 70.0f);
@@ -10842,7 +10890,7 @@ static void drawBootSplash() {
                      (flowerAreaTop + flowerAreaBottom) / 2,
                      pagerFlowerScale);
 
-    const int rightInfoTop = titleY + titleH + 6;
+    const int rightInfoTop = titleBlockBottom + 6;
     const int dividerTop = rightInfoTop;
     const int dividerBottom = cardY + cardH - 16;
     const int dividerH = max(8, dividerBottom - dividerTop);
@@ -10865,8 +10913,11 @@ static void drawBootSplash() {
     const int versionY = dividerBottom - displayDev().fontHeight();
     displayDev().drawString(verText.c_str(), rightX, versionY);
 #else
+    // Center the flower in the space between the title block and the footer text.
+    const int flowerBandTop = splashContentBottom;
+    const int flowerBandBottom = cardY + cardH - 40;
     drawCamelliaMark(cardX + (cardW / 2),
-                     cardY + (cardH / 2) - 6,
+                     (flowerBandTop + flowerBandBottom) / 2,
                      flowerScale);
 
     displayDev().setFont(&fonts::DejaVu12);

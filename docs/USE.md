@@ -1,4 +1,4 @@
-# Camillia MT Use Guide
+# Camillia for Meshtastic Use Guide
 
 This guide reflects current firmware navigation and controls.
 
