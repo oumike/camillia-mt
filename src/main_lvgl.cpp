@@ -11,6 +11,7 @@
 #include "mesh_radio.h"
 #include "node_db.h"
 #include "dm_mgr.h"
+#include "ignore_list.h"
 #include "battery_util.h"
 #include "env_sensor.h"
 #include "gps.h"
@@ -117,6 +118,9 @@ static lv_obj_t *s_chatHeaderBar = nullptr;
 static lv_obj_t *s_chatHeaderTime = nullptr;
 static lv_obj_t *s_chatHeaderGps = nullptr;
 static lv_obj_t *s_chatHeaderWifi = nullptr;
+// Blinking envelope icon shown left of the wifi icon whenever any DM
+// conversation has unread messages the user has not opened yet.
+static lv_obj_t *s_chatDmAlert = nullptr;
 static lv_obj_t *s_chatHeaderBattText = nullptr;
 static lv_obj_t *s_chatHeaderBattBar = nullptr;
 static lv_obj_t *s_chatPanel = nullptr;
@@ -138,6 +142,27 @@ static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
 static int s_cfgConfirmPendingAction = -1;
+
+// First-boot onboarding modal — shown once after a fresh flash (no NVS state).
+// Stage 0: (only if SD config present) ask whether to import it.
+// Stage 1: prompt for the node's long name.
+// Stage 2: prompt for the node's short name (pre-filled from long name).
+static lv_obj_t *s_onboardingBackdrop = nullptr;
+static lv_obj_t *s_onboardingModal = nullptr;
+static lv_obj_t *s_onboardingInput = nullptr;
+static lv_obj_t *s_onboardingKeyboard = nullptr;
+static lv_obj_t *s_onboardingStatus = nullptr;
+enum OnboardingStage : uint8_t {
+    ONBOARD_STAGE_ASK_IMPORT  = 0,
+    ONBOARD_STAGE_ENTER_LONG  = 1,
+    ONBOARD_STAGE_ENTER_SHORT = 2,
+};
+static uint8_t s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+static bool s_onboardingSdConfigPresent = false;
+static bool s_firstBoot = false;
+// Long name buffered while the user is still on the short-name sub-stage,
+// so we don't touch s_cfg.nodeLong until both fields are confirmed.
+static char s_onboardingLongScratch[sizeof(RhinoConfig::nodeLong)] = {0};
 static lv_obj_t *s_legendModal = nullptr;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
@@ -244,11 +269,19 @@ static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
 static bool s_nodesFilterOpen = false;
-static constexpr int kNodesActionCount = 5;
+// Node Actions modal: 6 actions arranged 2-per-row. Each entry has a single-key
+// keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
+static constexpr int kNodesActionCount = 6;
 static lv_obj_t *s_nodesActionModal = nullptr;
 static lv_obj_t *s_nodesActionRows[kNodesActionCount] = {};
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
+// Action ordering (also referenced by executeNodesActionSelection):
+//   0=Traceroute, 1=Send DM, 2=Favorite toggle, 3=Request Info,
+//   4=Request Position, 5=Ignore toggle.
+static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
+    'T', 'D', 'F', 'I', 'P', 'G'
+};
 static lv_obj_t *s_tracerouteBackdrop = nullptr;
 static lv_obj_t *s_tracerouteModal = nullptr;
 static lv_obj_t *s_tracerouteStatusLabel = nullptr;
@@ -480,6 +513,7 @@ static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
                                   int *displayOrder, int &displayCount);
 static void refreshHeaderTime(bool force = false);
 static void refreshHeaderStatus(bool force = false);
+static void refreshDmAlertIndicator();
 static void layoutHeaderInlineItems();
 static void refreshChannelGlow(bool force = false);
 static void pumpKeyboardInput();
@@ -620,6 +654,13 @@ static void scheduleThemeRebuild(bool reopenCfg);
 static void processPendingThemeRebuild();
 static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection);
 static void applyChannelButtonTheme();
+
+static void openOnboardingModal();
+static void closeOnboardingModal();
+static void renderOnboardingStage();
+static void onboardingAcceptImport();
+static void onboardingDeclineImport();
+static void onboardingCommitName();
 
 static void stateMapBootstrapRestoreWifi() {
 #if HAS_SD_CARD
@@ -2256,7 +2297,19 @@ static void persistChannelsToPrefs() {
 
 static void loadConfigFromPrefs() {
     Preferences prefs;
-    if (!prefs.begin("camillia", true)) return;
+    if (!prefs.begin("camillia", true)) {
+        // Read-only open fails when the namespace has never been written
+        // (i.e. a freshly flashed device with a blank NVS partition). Treat
+        // that as first boot so onboarding fires before anything else opens
+        // the namespace read-write and creates it.
+        s_firstBoot = true;
+        return;
+    }
+
+    // First-boot detection: a freshly-flashed device has no persisted node
+    // identity. The presence of a saved nodeLong key is our marker that
+    // onboarding has already been completed at least once.
+    s_firstBoot = !prefs.isKey("nodeLong");
 
     auto getStringIfKey = [&](const char *key) -> String {
         return prefs.isKey(key) ? prefs.getString(key, "") : String();
@@ -6128,6 +6181,22 @@ static void executeNodesActionSelection() {
         }
         return;
     }
+
+    if (s_nodesActionSelection == 5) {
+        uint32_t nodeId = s_nodesActionNodeId;
+        if (Ignored.contains(nodeId)) {
+            Ignored.remove(nodeId);
+        } else {
+            Ignored.add(nodeId);
+        }
+        closeNodesActionMenu();
+        // Force a repaint of any visible chat/DM views so filtering state is
+        // reflected immediately (existing already-buffered lines stay put).
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshChatView(true);
+        return;
+    }
 }
 
 static void onNodesActionRowPressed(lv_event_t *e) {
@@ -6150,12 +6219,14 @@ static void openNodesActionMenu() {
     s_nodesActionNodeId = selected->nodeId;
     s_nodesActionSelection = 0;
 
-    const int modalW = min(190, lv_disp_get_hor_res(NULL) - 14);
-    const int modalH = min(190, lv_disp_get_ver_res(NULL) - 10);
+    const int modalW = min(230, lv_disp_get_hor_res(NULL) - 14);
+    const int modalMaxH = lv_disp_get_ver_res(NULL) - 10;
 
     lv_obj_t *actionParent = s_rootScreen ? s_rootScreen : s_nodesModal;
     s_nodesActionModal = lv_obj_create(actionParent);
-    lv_obj_set_size(s_nodesActionModal, modalW, modalH);
+    lv_obj_set_width(s_nodesActionModal, modalW);
+    lv_obj_set_height(s_nodesActionModal, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_nodesActionModal, modalMaxH, 0);
     lv_obj_align(s_nodesActionModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_nodesActionModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_nodesActionModal, lv_color_hex(0x0E285B), 0);
@@ -6165,7 +6236,8 @@ static void openNodesActionMenu() {
     lv_obj_set_style_pad_all(s_nodesActionModal, 4, 0);
     lv_obj_set_style_pad_row(s_nodesActionModal, 4, 0);
     lv_obj_set_flex_flow(s_nodesActionModal, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(s_nodesActionModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_align(s_nodesActionModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
     lv_obj_move_foreground(s_nodesActionModal);
 
     lv_obj_t *title = lv_label_create(s_nodesActionModal);
@@ -6175,21 +6247,41 @@ static void openNodesActionMenu() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Node Actions");
 
+    // Buttons arranged 2-per-row. Each label embeds its keyboard shortcut in
+    // parens using the (T)raceroute inline style so touch and keyboard builds
+    // share the exact same labels.
     const bool selectedIsFavorite = selected->favorite;
+    const bool selectedIsIgnored = Ignored.contains(selected->nodeId);
     const char *kActionLabels[kNodesActionCount] = {
-        "Traceroute",
-        "Send DM",
-        selectedIsFavorite ? "Remove Favorite" : "Add Favorite",
-        "Request Info",
-        "Request Position"
+        "(T)raceroute",
+        "Sen(d) DM",
+        selectedIsFavorite ? "Un(f)avorite" : "(F)avorite",
+        "Request (I)nfo",
+        "Request (P)osition",
+        selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                     ? lv_color_hex(0x13233D)
                                     : lv_color_hex(0xD9E8FF);
+
+    lv_obj_t *grid = lv_obj_create(s_nodesActionModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, 4, 0);
+    lv_obj_set_style_pad_column(grid, 4, 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
     for (int i = 0; i < kNodesActionCount; i++) {
-        lv_obj_t *row = lv_btn_create(s_nodesActionModal);
+        lv_obj_t *row = lv_btn_create(grid);
         s_nodesActionRows[i] = row;
-        lv_obj_set_width(row, lv_pct(100));
+        // pct(49) leaves a small gutter for pad_column between the two columns.
+        lv_obj_set_width(row, lv_pct(49));
         lv_obj_set_height(row, 26);
         lv_obj_set_style_radius(row, 4, 0);
         lv_obj_set_style_pad_left(row, 4, 0);
@@ -8738,6 +8830,314 @@ static void openCfgConfirmModal(int actionId) {
     makeConfirmBtn(btnRow, "(Y)es", 0x2F6B30, onCfgConfirmYesPressed);
 }
 
+// ── First-boot onboarding ─────────────────────────────────────────────────
+// Shown once from setup() on freshly flashed devices. If a config exists on
+// the SD card the user is offered an import; otherwise (or if declined) we
+// prompt for a node name and persist it. Blocks all other UI input while up.
+
+static void onboardingDeriveShortFromLong(const char *longName, char *shortOut, size_t shortLen) {
+    if (!shortOut || shortLen == 0) return;
+    shortOut[0] = '\0';
+    if (!longName) return;
+    size_t o = 0;
+    const size_t cap = shortLen - 1;
+    for (const char *p = longName; *p && o < cap; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c > 0x20 && c < 0x7F) shortOut[o++] = (char)c;
+    }
+    shortOut[o] = '\0';
+    if (o == 0) {
+        utf8util::copyTruncate(shortOut, shortLen, MY_SHORT_NAME);
+    }
+}
+
+static void onboardingSetStatus(const char *msg) {
+    if (!s_onboardingStatus) return;
+    lv_label_set_text(s_onboardingStatus, msg ? msg : "");
+}
+
+static void renderOnboardingStage() {
+    if (!s_onboardingModal) return;
+
+    // Wipe children and rebuild for the current stage. Keep the modal
+    // container itself so its geometry/layout stays consistent.
+    lv_obj_clean(s_onboardingModal);
+    s_onboardingInput = nullptr;
+    s_onboardingKeyboard = nullptr;
+    s_onboardingStatus = nullptr;
+
+    lv_obj_t *title = lv_label_create(s_onboardingModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Welcome to Camillia MT");
+
+    lv_obj_t *body = lv_label_create(s_onboardingModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+
+    if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
+        lv_label_set_text(body,
+                          "A saved config was found on the SD card.\n"
+                          "Import it now?");
+
+        lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
+        lv_obj_set_width(btnRow, lv_pct(100));
+        lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btnRow, 0, 0);
+        lv_obj_set_style_pad_all(btnRow, 0, 0);
+        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+                          lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_height(btn, 36);
+            lv_obj_set_style_min_width(btn, 84, 0);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+            return btn;
+        };
+        makeBtn(btnRow, "(N)o",  0x6B3030,
+                [](lv_event_t *) { onboardingDeclineImport(); });
+        makeBtn(btnRow, "(Y)es", 0x2F6B30,
+                [](lv_event_t *) { onboardingAcceptImport(); });
+    } else {
+        const bool isShortStage = (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT);
+
+        if (isShortStage) {
+            char summary[96];
+            snprintf(summary, sizeof(summary),
+                     "Long name: %s\nEnter a short name (up to 4 chars).",
+                     s_onboardingLongScratch);
+            lv_label_set_text(body, summary);
+        } else {
+            lv_label_set_text(body, "Enter this node's long name.");
+        }
+
+        s_onboardingInput = lv_textarea_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingInput, lv_pct(100));
+        lv_obj_set_height(s_onboardingInput, 34);
+        lv_obj_set_style_text_font(s_onboardingInput, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(s_onboardingInput, lv_color_hex(0xE8F1FF), 0);
+        lv_obj_set_style_bg_color(s_onboardingInput, lv_color_hex(0x102B61), 0);
+        lv_obj_set_style_bg_opa(s_onboardingInput, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_onboardingInput, 1, 0);
+        lv_obj_set_style_border_color(s_onboardingInput, lv_color_hex(0x4C76BA), 0);
+        lv_textarea_set_one_line(s_onboardingInput, true);
+        if (isShortStage) {
+            char derived[sizeof(s_cfg.nodeShort)];
+            onboardingDeriveShortFromLong(s_onboardingLongScratch, derived, sizeof(derived));
+            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeShort) - 1);
+            lv_textarea_set_placeholder_text(s_onboardingInput, "Short name");
+            lv_textarea_set_text(s_onboardingInput, derived);
+        } else {
+            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeLong) - 1);
+            lv_textarea_set_placeholder_text(s_onboardingInput, "Long name");
+            lv_textarea_set_text(s_onboardingInput, s_onboardingLongScratch);
+        }
+        lv_textarea_set_cursor_pos(s_onboardingInput, LV_TEXTAREA_CURSOR_LAST);
+
+        s_onboardingStatus = lv_label_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingStatus, lv_pct(100));
+        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_onboardingStatus,
+                          isShortStage ? "Enter=Save    Bksp(empty)=Back"
+                                       : "Enter=Next");
+
+        lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
+        lv_obj_set_width(btnRow, lv_pct(100));
+        lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btnRow, 0, 0);
+        lv_obj_set_style_pad_all(btnRow, 0, 0);
+        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+                          lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_height(btn, 36);
+            lv_obj_set_style_min_width(btn, 100, 0);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+            return btn;
+        };
+
+        if (isShortStage) {
+            makeBtn(btnRow, "Back", 0x3C4A66,
+                    [](lv_event_t *) {
+                        s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+                        renderOnboardingStage();
+                    });
+        }
+        makeBtn(btnRow, isShortStage ? "Save" : "Next", 0x2F6B30,
+                [](lv_event_t *) { onboardingCommitName(); });
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        s_onboardingKeyboard = lv_keyboard_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingKeyboard, lv_pct(100));
+        lv_obj_set_flex_grow(s_onboardingKeyboard, 1);
+        lv_keyboard_set_mode(s_onboardingKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+        lv_keyboard_set_textarea(s_onboardingKeyboard, s_onboardingInput);
+        lv_obj_add_event_cb(s_onboardingKeyboard,
+                            [](lv_event_t *e) {
+                                lv_event_code_t c = lv_event_get_code(e);
+                                if (c == LV_EVENT_READY) onboardingCommitName();
+                            },
+                            LV_EVENT_READY, nullptr);
+#endif
+    }
+}
+
+static void openOnboardingModal() {
+    if (!s_rootScreen || s_onboardingModal || s_onboardingBackdrop) return;
+
+    s_onboardingSdConfigPresent = cfgSdConfigExists();
+    s_onboardingStage = s_onboardingSdConfigPresent
+                            ? ONBOARD_STAGE_ASK_IMPORT
+                            : ONBOARD_STAGE_ENTER_LONG;
+    s_onboardingLongScratch[0] = '\0';
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 20;
+    if (modalW < 180) modalW = w - 4;
+    if (modalW > 320) modalW = 320;
+    int modalH = h - 20;
+    if (modalH < 140) modalH = h - 4;
+
+    s_onboardingBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_onboardingBackdrop, w, h);
+    lv_obj_align(s_onboardingBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_onboardingBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_onboardingBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_onboardingBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_onboardingBackdrop, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_onboardingBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_onboardingBackdrop, 0, 0);
+
+    s_onboardingModal = lv_obj_create(s_onboardingBackdrop);
+    lv_obj_set_size(s_onboardingModal, modalW, modalH);
+    lv_obj_align(s_onboardingModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_onboardingModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_onboardingModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_onboardingModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_onboardingModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_onboardingModal, 1, 0);
+    lv_obj_set_style_border_color(s_onboardingModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_onboardingModal, 10, 0);
+    lv_obj_set_style_pad_row(s_onboardingModal, 8, 0);
+    lv_obj_set_flex_flow(s_onboardingModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_onboardingModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_onboardingBackdrop);
+
+    renderOnboardingStage();
+}
+
+static void closeOnboardingModal() {
+    if (s_onboardingBackdrop) {
+        lv_obj_del(s_onboardingBackdrop);
+    } else if (s_onboardingModal) {
+        lv_obj_del(s_onboardingModal);
+    }
+    s_onboardingBackdrop = nullptr;
+    s_onboardingModal = nullptr;
+    s_onboardingInput = nullptr;
+    s_onboardingKeyboard = nullptr;
+    s_onboardingStatus = nullptr;
+}
+
+static void onboardingAcceptImport() {
+    Serial.println("[onboarding] importing SD config");
+    bool ok = cfgImport(s_cfg);
+    if (!ok) {
+        Serial.println("[onboarding] import failed; falling back to name entry");
+        s_onboardingSdConfigPresent = false;
+        s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+        renderOnboardingStage();
+        onboardingSetStatus("Import failed - enter a name");
+        return;
+    }
+    persistConfigToPrefs();
+    Serial.println("[onboarding] imported OK - rebooting");
+    lv_timer_handler();
+    delay(500);
+    ESP.restart();
+}
+
+static void onboardingDeclineImport() {
+    s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+    renderOnboardingStage();
+}
+
+static void onboardingCommitName() {
+    if (!s_onboardingInput) return;
+    const char *typed = lv_textarea_get_text(s_onboardingInput);
+    String name = typed ? String(typed) : String();
+    name.trim();
+    if (name.length() == 0) {
+        onboardingSetStatus(s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT
+                                ? "Short name cannot be empty"
+                                : "Long name cannot be empty");
+        return;
+    }
+
+    if (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG) {
+        utf8util::copyTruncate(s_onboardingLongScratch, sizeof(s_onboardingLongScratch),
+                               name.c_str());
+        s_onboardingStage = ONBOARD_STAGE_ENTER_SHORT;
+        renderOnboardingStage();
+        return;
+    }
+
+    // Short-name stage: commit both fields.
+    utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong),
+                           s_onboardingLongScratch);
+    utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), name.c_str());
+
+    Serial.printf("[onboarding] saved nodeLong=\"%s\" nodeShort=\"%s\"\n",
+                  s_cfg.nodeLong, s_cfg.nodeShort);
+
+    persistConfigToPrefs();
+    s_firstBoot = false;
+    s_onboardingLongScratch[0] = '\0';
+    closeOnboardingModal();
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    refreshHeaderTime(true);
+    refreshHeaderStatus(true);
+    refreshChatView(true);
+}
+
 static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
@@ -8776,7 +9176,10 @@ static void pumpKeyboardInput() {
         }
         s_lastActivityMs = millis();
 
-        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen);
+        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen)
+                             || (s_onboardingModal
+                                 && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
+                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
         bool navFromJk = false;
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -8792,6 +9195,39 @@ static void pumpKeyboardInput() {
 #endif
 
         const bool invertScrollNav = kPagerWheelChatNav && !navFromJk;
+
+        // First-boot onboarding is fully modal: swallow every other UI key
+        // while it's up so the user can't wander into the main app before
+        // supplying a node identity.
+        if (s_onboardingModal) {
+            if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
+                if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
+                    onboardingAcceptImport();
+                } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
+                    onboardingDeclineImport();
+                }
+            } else {  // ONBOARD_STAGE_ENTER_LONG / ONBOARD_STAGE_ENTER_SHORT
+                if (k == KEY_ENTER) {
+                    onboardingCommitName();
+                } else if (isBackspaceKey(k)) {
+                    if (s_onboardingInput && k == KEY_BACKSPACE) {
+                        const char *cur = lv_textarea_get_text(s_onboardingInput);
+                        if ((!cur || !cur[0])
+                            && s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT) {
+                            // Empty short field + Bksp → jump back to long name.
+                            s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+                            renderOnboardingStage();
+                        } else {
+                            lv_textarea_del_char(s_onboardingInput);
+                        }
+                    }
+                } else if (k >= 0x20 && k < 0x7F && s_onboardingInput) {
+                    char one[2] = {k, '\0'};
+                    lv_textarea_add_text(s_onboardingInput, one);
+                }
+            }
+            continue;
+        }
 
         // The CFG confirmation dialog is modal: only Y/N (and a close key, which
         // cancels) are honored — every other shortcut is swallowed while it's up.
@@ -9206,6 +9642,20 @@ static void pumpKeyboardInput() {
                 if (k == KEY_ENTER) {
                     executeNodesActionSelection();
                     continue;
+                }
+
+                // Single-key shortcuts (T/D/F/I/P/X) select and execute the
+                // corresponding action, mirroring the (X) hints in the labels.
+                if (k >= 0x20 && k < 0x7F) {
+                    char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
+                    for (int i = 0; i < kNodesActionCount; i++) {
+                        if (kNodesActionShortcuts[i] == up) {
+                            s_nodesActionSelection = i;
+                            refreshNodesActionMenuSelection();
+                            executeNodesActionSelection();
+                            break;
+                        }
+                    }
                 }
                 continue;
             }
@@ -11099,6 +11549,17 @@ static void refreshHeaderStatus(bool force) {
             lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
         }
     }
+    if (s_chatDmAlert && lv_obj_is_valid(s_chatDmAlert)
+        && lv_obj_get_parent(s_chatDmAlert) == wifiParent) {
+        // Bottom shortcut bar packs icons from the right edge, so DM sits
+        // left of wifi. The Heltec top bar packs from the left, so DM sits
+        // right of wifi (between wifi and the battery indicator).
+        if (wifiParent == s_chatShortcutBar) {
+            lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+        } else {
+            lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+        }
+    }
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     layoutHeaderInlineItems();
 #endif
@@ -11109,6 +11570,31 @@ static void refreshHeaderStatus(bool force) {
     s_lastGpsSats = gpsSatCount;
     s_lastWifiConnected = wifiConnected;
     s_lastWifiApMode = wifiApMode;
+}
+
+// Envelope icon left of the wifi icon that blinks whenever any DM
+// conversation has unread messages. Cleared as soon as the user opens the
+// conversation (DMs.markRead runs).
+static void refreshDmAlertIndicator() {
+    if (!s_chatDmAlert || !lv_obj_is_valid(s_chatDmAlert)) return;
+
+    const bool hasUnread = DMs.hasUnread();
+    if (!hasUnread) {
+        if (!lv_obj_has_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
+
+    // 500 ms on / 500 ms off blink; derived from the free-running millis()
+    // counter so we don't need to persist a phase across calls.
+    const bool visible = ((millis() / 500UL) & 1UL) == 0UL;
+    const bool currentlyHidden = lv_obj_has_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+    if (visible && currentlyHidden) {
+        lv_obj_clear_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+    } else if (!visible && !currentlyHidden) {
+        lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
@@ -11387,6 +11873,18 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
                 bool isDirectToMe = (pkt.hdr.to == s_myNodeId)
                                  || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
+
+                // Suppress chat/DM display for user-ignored senders. We still
+                // ACK direct-to-me messages so the sender's radio stops
+                // retrying, and NodeDB/Live traffic summaries still get the
+                // update via the callers above and appendLiveRxSummary below.
+                if (Ignored.contains(pkt.hdr.from)) {
+                    if (wantsAck && isDirectToMe) {
+                        (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+                    }
+                    appendLiveRxSummary(pkt, chanIdx, "T");
+                    return false;
+                }
 
                 if (isDirectToMe) {
                     NodeEntry *sender = Nodes.find(pkt.hdr.from);
@@ -12429,8 +12927,18 @@ static void buildUi() {
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     lv_obj_set_style_text_font(s_chatHeaderWifi, headerIconFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+
+    s_chatDmAlert = lv_label_create(s_chatHeaderBar);
+    lv_obj_set_style_text_font(s_chatDmAlert, headerIconFont, 0);
+    lv_obj_set_style_text_color(s_chatDmAlert, lv_color_hex(0xF4D35E), 0);
+    lv_label_set_text(s_chatDmAlert, LV_SYMBOL_ENVELOPE);
+    // Heltec top-bar order is selector → gps → wifi → …; sit the envelope
+    // immediately right of the wifi icon so it doesn't overlap gps.
+    lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
+    lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
 #else
     s_chatHeaderWifi = nullptr;
+    s_chatDmAlert = nullptr;
 #endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     layoutHeaderInlineItems();
@@ -12576,6 +13084,13 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_chatHeaderWifi, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+
+    s_chatDmAlert = lv_label_create(s_chatShortcutBar);
+    lv_obj_set_style_text_font(s_chatDmAlert, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chatDmAlert, lv_color_hex(0xF4D35E), 0);
+    lv_label_set_text(s_chatDmAlert, LV_SYMBOL_ENVELOPE);
+    lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+    lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
 #endif
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -12732,6 +13247,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_chatHeaderTime = nullptr;
     s_chatHeaderGps = nullptr;
     s_chatHeaderWifi = nullptr;
+    s_chatDmAlert = nullptr;
     s_chatHeaderBattText = nullptr;
     s_chatHeaderBattBar = nullptr;
     s_chatPanel = nullptr;
@@ -13159,6 +13675,7 @@ void setup() {
     gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
     DMs.init();
+    Ignored.init();
     Channels.init();
     Channels.beginPersistence();
     Channels.loadPersisted();
@@ -13181,6 +13698,20 @@ void setup() {
 
     buildUi();
     s_lastActivityMs = millis();
+#if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
+    // Non-vertical Heltec has a wide/short layout where the onboarding modal's
+    // multi-line text is awkward to read. Skip onboarding on this build for
+    // now — the user can still configure via web config / SD import.
+    if (s_firstBoot) {
+        Serial.println("[onboarding] skipped (heltec non-vertical build)");
+        s_firstBoot = false;
+    }
+#else
+    if (s_firstBoot) {
+        Serial.println("[onboarding] first boot detected - showing setup modal");
+        openOnboardingModal();
+    }
+#endif
     Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
 }
 
@@ -13273,6 +13804,7 @@ void loop() {
     refreshChannelGlow(false);
     refreshHeaderTime(false);
     refreshHeaderStatus(false);
+    refreshDmAlertIndicator();
     refreshChatView(meshChanged);
     refreshLiveView(meshChanged);
     refreshChUtilChart(meshChanged);

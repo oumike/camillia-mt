@@ -141,3 +141,7 @@ bool cfgExport(const RhinoConfig &cfg);
 // Read /camillia/config.yaml.
 // Updates CHANNEL_KEYS[] and fills cfg. Returns true on success.
 bool cfgImport(RhinoConfig &cfg);
+
+// Returns true if /camillia/config.yaml is present on the SD card. Mounts
+// the card if needed; returns false if SD is unavailable.
+bool cfgSdConfigExists();

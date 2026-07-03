@@ -2,6 +2,7 @@
 #include "mesh_channel_plan.h"
 #include "base64_util.h"
 #include "utf8_utils.h"
+#include "ignore_list.h"
 #include <SD.h>
 #include <Preferences.h>
 #include <SPI.h>
@@ -616,6 +617,17 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
     }
+
+    // User-managed list of ignored node IDs. Emitted as a comma-separated
+    // hex list on one line so the parser can pick it up as a plain scalar.
+    // Format: "ignored_nodes: aabbccdd,11223344" (empty when list is empty).
+    out += "ignored_nodes: ";
+    for (int i = 0; i < Ignored.count(); i++) {
+        if (i > 0) out += ",";
+        snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)Ignored.at(i));
+        out += tmp;
+    }
+    out += "\n";
 }
 
 // ── YAML parse (from memory buffer) ──────────────────────────
@@ -720,6 +732,27 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         : MSG_ALERT_SOUND_OFF;
                 } else if (!strcmp(key, "splash_melody_enabled")) {
                     cfg.splashMelodyEnabled = parseBoolValue(val);
+                }
+                else if (!strcmp(key, "ignored_nodes")) {
+                    // Comma-separated 8-hex-digit node IDs (empty allowed).
+                    // Tokens may optionally include a leading '!' or "0x".
+                    uint32_t ids[IgnoreList::kMax];
+                    int n = 0;
+                    const char *cur = val;
+                    while (*cur && n < IgnoreList::kMax) {
+                        while (*cur == ' ' || *cur == ',') cur++;
+                        if (!*cur) break;
+                        if (*cur == '!') cur++;
+                        if (cur[0] == '0' && (cur[1] == 'x' || cur[1] == 'X')) cur += 2;
+                        char *endp = nullptr;
+                        unsigned long v = strtoul(cur, &endp, 16);
+                        if (endp == cur) break;
+                        if (v != 0 && v != 0xFFFFFFFFUL) {
+                            ids[n++] = (uint32_t)v;
+                        }
+                        cur = endp;
+                    }
+                    Ignored.replace(ids, n);
                 }
             }
         } else if (indent == 2) {
@@ -915,4 +948,9 @@ bool cfgImport(RhinoConfig &cfg) {
     bool ok = cfgImportFromBuf(content.c_str(), content.length(), cfg);
     if (ok) Serial.printf("[cfg] imported from %s\n", kPath);
     return ok;
+}
+
+bool cfgSdConfigExists() {
+    if (!ensureSdMounted()) return false;
+    return SD.exists(kPath);
 }
