@@ -10696,11 +10696,9 @@ static void drawBootSplash() {
 #endif
 
     auto drawCamelliaMark = [&](int cx, int cy, float scale) {
-        const uint16_t SHADOW       = 0x18E4;
         const uint16_t PETAL_OUTER  = 0xF9CF;
         const uint16_t PETAL_MID    = 0xFADF;
         const uint16_t PETAL_INNER  = 0xFF7D;
-        const uint16_t PETAL_HILITE = 0xFFDF;
         const uint16_t PETAL_EDGE   = 0xD8A7;
         const uint16_t CENTER       = 0xFD20;
         const uint16_t CENTER_DOT   = 0xFEA0;
@@ -10713,9 +10711,6 @@ static void drawBootSplash() {
             return (result < minValue) ? minValue : result;
         };
 
-        const int shadowDx = scaled(1.0f);
-        const int shadowDy = scaled(4.0f);
-        const int shadowR = scaled(34.0f, 1);
         const int petalOuterOrbitX = scaled(23.0f, 1);
         const int petalOuterOrbitY = scaled(18.0f, 1);
         const int petalMidOrbitX = scaled(13.0f, 1);
@@ -10724,14 +10719,7 @@ static void drawBootSplash() {
         const int petalInnerOrbitY = scaled(5.0f, 1);
         const int petalOuterR0 = scaled(11.0f, 1);
         const int petalOuterR1 = scaled(12.0f, 1);
-        const int petalHiliteOuterDx = scaled(2.0f);
-        const int petalHiliteOuterDy = scaled(2.0f);
-        const int petalHiliteOuterR0 = scaled(7.0f, 1);
-        const int petalHiliteOuterR1 = scaled(8.0f, 1);
         const int petalMidR = scaled(9.0f, 1);
-        const int petalMidHiliteDx = scaled(1.0f);
-        const int petalMidHiliteDy = scaled(1.0f);
-        const int petalMidHiliteR = scaled(5.0f, 1);
         const int petalInnerR = scaled(6.0f, 1);
         const int centerR = scaled(6.0f, 1);
         const int centerDotOrbit = scaled(4.0f, 1);
@@ -10750,16 +10738,12 @@ static void drawBootSplash() {
         const int leafInnerYRight = scaled(31.0f, 1);
         const int leafInnerR = scaled(6.0f, 1);
 
-        displayDev().fillCircle(cx + shadowDx, cy + shadowDy, shadowR, SHADOW);
-
         for (int i = 0; i < 10; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
             int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
             int pr = (i & 1) ? petalOuterR1 : petalOuterR0;
-            int hiliteR = (i & 1) ? petalHiliteOuterR1 : petalHiliteOuterR0;
             displayDev().fillCircle(px, py, pr, PETAL_OUTER);
-            displayDev().fillCircle(px - petalHiliteOuterDx, py - petalHiliteOuterDy, hiliteR, PETAL_HILITE);
             displayDev().drawCircle(px, py, pr, PETAL_EDGE);
         }
 
@@ -10768,7 +10752,6 @@ static void drawBootSplash() {
             int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
             displayDev().fillCircle(px, py, petalMidR, PETAL_MID);
-            displayDev().fillCircle(px - petalMidHiliteDx, py - petalMidHiliteDy, petalMidHiliteR, PETAL_HILITE);
             displayDev().drawCircle(px, py, petalMidR, PETAL_EDGE);
         }
 
