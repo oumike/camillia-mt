@@ -148,22 +148,37 @@ static int s_cfgConfirmPendingAction = -1;
 // Stage 0: (only if SD config present) ask whether to import it.
 // Stage 1: prompt for the node's long name.
 // Stage 2: prompt for the node's short name (pre-filled from long name).
+// Stage 3: pick the radio region/preset (US default).
+// Stage 4: pick the device role (CLIENT_MUTE default).
+// Stage 5/6: optional WiFi SSID then password, then commit everything + reboot.
 static lv_obj_t *s_onboardingBackdrop = nullptr;
 static lv_obj_t *s_onboardingModal = nullptr;
 static lv_obj_t *s_onboardingInput = nullptr;
 static lv_obj_t *s_onboardingKeyboard = nullptr;
 static lv_obj_t *s_onboardingStatus = nullptr;
+static lv_obj_t *s_onboardingPickLabel = nullptr;  // value shown on region/role picker stages
 enum OnboardingStage : uint8_t {
-    ONBOARD_STAGE_ASK_IMPORT  = 0,
-    ONBOARD_STAGE_ENTER_LONG  = 1,
-    ONBOARD_STAGE_ENTER_SHORT = 2,
+    ONBOARD_STAGE_ASK_IMPORT      = 0,
+    ONBOARD_STAGE_ENTER_LONG      = 1,
+    ONBOARD_STAGE_ENTER_SHORT     = 2,
+    ONBOARD_STAGE_SELECT_REGION   = 3,
+    ONBOARD_STAGE_SELECT_ROLE     = 4,
+    ONBOARD_STAGE_ENTER_WIFI_SSID = 5,
+    ONBOARD_STAGE_ENTER_WIFI_PASS = 6,
 };
 static uint8_t s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
 static bool s_onboardingSdConfigPresent = false;
 static bool s_firstBoot = false;
-// Long name buffered while the user is still on the short-name sub-stage,
-// so we don't touch s_cfg.nodeLong until both fields are confirmed.
+// Node name / region / role / WiFi are buffered in scratch while the user steps
+// through the wizard, so s_cfg isn't touched until everything is confirmed at
+// the final stage (which then persists and reboots).
 static char s_onboardingLongScratch[sizeof(RhinoConfig::nodeLong)] = {0};
+static char s_onboardingShortScratch[sizeof(RhinoConfig::nodeShort)] = {0};
+static char s_onboardingRegionScratch[sizeof(RhinoConfig::region)] = {0};
+static uint8_t s_onboardingRoleScratch = 1;  // CLIENT_MUTE
+static char s_onboardingWifiSsidScratch[sizeof(RhinoConfig::wifiSsid)] = {0};
+static char s_onboardingWifiPassScratch[sizeof(RhinoConfig::wifiPass)] = {0};
+static int s_onboardingPickIndex = 0;  // current option index on region/role stages
 static lv_obj_t *s_legendModal = nullptr;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
@@ -662,6 +677,10 @@ static void renderOnboardingStage();
 static void onboardingAcceptImport();
 static void onboardingDeclineImport();
 static void onboardingCommitName();
+static void onboardingFinalize();
+static void onboardingPickerStep(int delta);
+static void onboardingPickerAdvance();
+static void onboardingPickerBack();
 
 static void stateMapBootstrapRestoreWifi() {
 #if HAS_SD_CARD
@@ -8509,6 +8528,7 @@ static void performCfgAction(int actionId) {
     switch (actionId) {
         case CFG_ACTION_WEBCFG: {
             if (s_webCfgEnabled) {
+                Serial.println("[web] CFG action: disable web config");
                 s_webCfgEnabled = false;
                 persistWebCfgEnabled();
                 if (webCfgRunning()) {
@@ -8516,6 +8536,7 @@ static void performCfgAction(int actionId) {
                 }
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config disabled");
             } else {
+                Serial.println("[web] CFG action: enable web config");
                 s_webCfgEnabled = true;
                 persistWebCfgEnabled();
 
@@ -8531,7 +8552,9 @@ static void performCfgAction(int actionId) {
                         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web: %s", webCfgIP());
                     }
                 } else {
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config enabled (start failed)");
+                    s_webCfgEnabled = false;
+                    persistWebCfgEnabled();
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config start failed");
                 }
             }
         } break;
@@ -8857,6 +8880,51 @@ static void onboardingSetStatus(const char *msg) {
     lv_label_set_text(s_onboardingStatus, msg ? msg : "");
 }
 
+// Roles offered during onboarding. Only client roles are supported by this
+// firmware (see cfgCoerceClientRole); values are the canonical Meshtastic enum
+// positions so they stay wire-compatible.
+struct OnboardRoleOption { uint8_t value; const char *label; };
+static const OnboardRoleOption kOnboardRoles[] = {
+    {0, "CLIENT"},
+    {1, "CLIENT_MUTE"},
+    {8, "CLIENT_HIDDEN"},
+};
+static const int kOnboardRoleCount =
+    (int)(sizeof(kOnboardRoles) / sizeof(kOnboardRoles[0]));
+
+// Map a region code / role value back to its option index, falling back to the
+// onboarding default (US / CLIENT_MUTE) when the value isn't recognised.
+static int onboardingRegionIndex(const char *code) {
+    if (code && code[0]) {
+        for (uint8_t i = 0; i < kRegionCount; i++) {
+            if (strcmp(kRegions[i].code, code) == 0) return (int)i;
+        }
+    }
+    return 0;  // kRegions[0] is "US"
+}
+
+static int onboardingRoleIndex(uint8_t value) {
+    for (int i = 0; i < kOnboardRoleCount; i++) {
+        if (kOnboardRoles[i].value == value) return i;
+    }
+    return 1;  // CLIENT_MUTE
+}
+
+// Count of options on the active picker stage.
+static int onboardingPickerCount() {
+    return (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION)
+               ? (int)kRegionCount
+               : kOnboardRoleCount;
+}
+
+// Text label for the currently selected picker option.
+static const char *onboardingPickerCurrentText() {
+    if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION) {
+        return kRegions[s_onboardingPickIndex].code;
+    }
+    return kOnboardRoles[s_onboardingPickIndex].label;
+}
+
 static void renderOnboardingStage() {
     if (!s_onboardingModal) return;
 
@@ -8866,6 +8934,7 @@ static void renderOnboardingStage() {
     s_onboardingInput = nullptr;
     s_onboardingKeyboard = nullptr;
     s_onboardingStatus = nullptr;
+    s_onboardingPickLabel = nullptr;
 
     lv_obj_t *title = lv_label_create(s_onboardingModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -8918,14 +8987,115 @@ static void renderOnboardingStage() {
                 [](lv_event_t *) { onboardingDeclineImport(); });
         makeBtn(btnRow, "(Y)es", 0x2F6B30,
                 [](lv_event_t *) { onboardingAcceptImport(); });
+    } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION
+               || s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
+        // Region / role picker: a single value shown between < / > steppers so
+        // touch users can change it, while the roller / j-k cycle it and Enter
+        // advances. No text entry on these stages.
+        const bool isRegion = (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION);
+        lv_label_set_text(body,
+                          isRegion ? "Select your radio region/preset."
+                                   : "Select this node's role.");
+
+        lv_obj_t *pickRow = lv_obj_create(s_onboardingModal);
+        lv_obj_set_width(pickRow, lv_pct(100));
+        lv_obj_set_height(pickRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(pickRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(pickRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(pickRow, 0, 0);
+        lv_obj_set_style_pad_all(pickRow, 0, 0);
+        lv_obj_set_style_pad_column(pickRow, 10, 0);
+        lv_obj_set_flex_flow(pickRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(pickRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto makeStepBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_size(btn, 40, 36);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x3C4A66), 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+            return btn;
+        };
+        makeStepBtn(pickRow, LV_SYMBOL_LEFT,
+                    [](lv_event_t *) { onboardingPickerStep(-1); });
+
+        s_onboardingPickLabel = lv_label_create(pickRow);
+        lv_obj_set_flex_grow(s_onboardingPickLabel, 1);
+        lv_obj_set_style_text_font(s_onboardingPickLabel, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(s_onboardingPickLabel, lv_color_hex(0xE8F1FF), 0);
+        lv_obj_set_style_text_align(s_onboardingPickLabel, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_onboardingPickLabel, onboardingPickerCurrentText());
+
+        makeStepBtn(pickRow, LV_SYMBOL_RIGHT,
+                    [](lv_event_t *) { onboardingPickerStep(1); });
+
+        s_onboardingStatus = lv_label_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingStatus, lv_pct(100));
+        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_onboardingStatus, "Wheel/j-k=Change   Enter=Next");
+
+        lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
+        lv_obj_set_width(btnRow, lv_pct(100));
+        lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btnRow, 0, 0);
+        lv_obj_set_style_pad_all(btnRow, 0, 0);
+        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+                          lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_height(btn, 36);
+            lv_obj_set_style_min_width(btn, 100, 0);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+            return btn;
+        };
+        makeBtn(btnRow, "Back", 0x3C4A66,
+                [](lv_event_t *) { onboardingPickerBack(); });
+        makeBtn(btnRow, "Next", 0x2F6B30,
+                [](lv_event_t *) { onboardingPickerAdvance(); });
     } else {
         const bool isShortStage = (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT);
+        const bool isWifiSsid   = (s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID);
+        const bool isWifiPass   = (s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS);
+        const bool isWifi       = isWifiSsid || isWifiPass;
 
         if (isShortStage) {
             char summary[96];
             snprintf(summary, sizeof(summary),
                      "Long name: %s\nEnter a short name (up to 4 chars).",
                      s_onboardingLongScratch);
+            lv_label_set_text(body, summary);
+        } else if (isWifiSsid) {
+            lv_label_set_text(body,
+                              "Connect to WiFi? Enter a network name,\n"
+                              "or Skip to finish.");
+        } else if (isWifiPass) {
+            char summary[96];
+            snprintf(summary, sizeof(summary),
+                     "Network: %s\nEnter the WiFi password.",
+                     s_onboardingWifiSsidScratch);
             lv_label_set_text(body, summary);
         } else {
             lv_label_set_text(body, "Enter this node's long name.");
@@ -8946,7 +9116,17 @@ static void renderOnboardingStage() {
             onboardingDeriveShortFromLong(s_onboardingLongScratch, derived, sizeof(derived));
             lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeShort) - 1);
             lv_textarea_set_placeholder_text(s_onboardingInput, "Short name");
-            lv_textarea_set_text(s_onboardingInput, derived);
+            lv_textarea_set_text(s_onboardingInput,
+                                 s_onboardingShortScratch[0] ? s_onboardingShortScratch
+                                                             : derived);
+        } else if (isWifiSsid) {
+            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.wifiSsid) - 1);
+            lv_textarea_set_placeholder_text(s_onboardingInput, "WiFi SSID");
+            lv_textarea_set_text(s_onboardingInput, s_onboardingWifiSsidScratch);
+        } else if (isWifiPass) {
+            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.wifiPass) - 1);
+            lv_textarea_set_placeholder_text(s_onboardingInput, "Password (blank if open)");
+            lv_textarea_set_text(s_onboardingInput, s_onboardingWifiPassScratch);
         } else {
             lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeLong) - 1);
             lv_textarea_set_placeholder_text(s_onboardingInput, "Long name");
@@ -8959,9 +9139,11 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(s_onboardingStatus,
-                          isShortStage ? "Enter=Save    Bksp(empty)=Back"
-                                       : "Enter=Next");
+        const char *statusHint = "Enter=Next";
+        if (isShortStage)      statusHint = "Enter=Next    Bksp(empty)=Back";
+        else if (isWifiSsid)   statusHint = "Enter=Next    Bksp(empty)=Back";
+        else if (isWifiPass)   statusHint = "Enter=Finish & reboot    Bksp(empty)=Back";
+        lv_label_set_text(s_onboardingStatus, statusHint);
 
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
@@ -8998,8 +9180,28 @@ static void renderOnboardingStage() {
                         s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
                         renderOnboardingStage();
                     });
+        } else if (isWifiSsid) {
+            makeBtn(btnRow, "Back", 0x3C4A66,
+                    [](lv_event_t *) {
+                        s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
+                        s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
+                        renderOnboardingStage();
+                    });
+            makeBtn(btnRow, "Skip", 0x6B5A30,
+                    [](lv_event_t *) {
+                        s_onboardingWifiSsidScratch[0] = '\0';
+                        s_onboardingWifiPassScratch[0] = '\0';
+                        onboardingFinalize();
+                    });
+        } else if (isWifiPass) {
+            makeBtn(btnRow, "Back", 0x3C4A66,
+                    [](lv_event_t *) {
+                        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
+                        renderOnboardingStage();
+                    });
         }
-        makeBtn(btnRow, isShortStage ? "Save" : "Next", 0x2F6B30,
+        const char *nextLabel = isWifiPass ? "Finish" : "Next";
+        makeBtn(btnRow, nextLabel, 0x2F6B30,
                 [](lv_event_t *) { onboardingCommitName(); });
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -9026,6 +9228,14 @@ static void openOnboardingModal() {
                             ? ONBOARD_STAGE_ASK_IMPORT
                             : ONBOARD_STAGE_ENTER_LONG;
     s_onboardingLongScratch[0] = '\0';
+    s_onboardingShortScratch[0] = '\0';
+    // Onboarding defaults: US region, CLIENT_MUTE role, no WiFi.
+    utf8util::copyTruncate(s_onboardingRegionScratch, sizeof(s_onboardingRegionScratch),
+                           MY_REGION);
+    s_onboardingRoleScratch = 1;  // CLIENT_MUTE
+    s_onboardingWifiSsidScratch[0] = '\0';
+    s_onboardingWifiPassScratch[0] = '\0';
+    s_onboardingPickIndex = 0;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -9075,6 +9285,7 @@ static void closeOnboardingModal() {
     s_onboardingInput = nullptr;
     s_onboardingKeyboard = nullptr;
     s_onboardingStatus = nullptr;
+    s_onboardingPickLabel = nullptr;
 }
 
 static void onboardingAcceptImport() {
@@ -9100,43 +9311,129 @@ static void onboardingDeclineImport() {
     renderOnboardingStage();
 }
 
+// Advances the text-entry stages (long/short name, WiFi SSID/password). Each
+// field is buffered into scratch; nothing touches s_cfg until onboardingFinalize.
 static void onboardingCommitName() {
     if (!s_onboardingInput) return;
     const char *typed = lv_textarea_get_text(s_onboardingInput);
     String name = typed ? String(typed) : String();
     name.trim();
-    if (name.length() == 0) {
-        onboardingSetStatus(s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT
-                                ? "Short name cannot be empty"
-                                : "Long name cannot be empty");
-        return;
-    }
 
-    if (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG) {
+    switch (s_onboardingStage) {
+    case ONBOARD_STAGE_ENTER_LONG:
+        if (name.length() == 0) {
+            onboardingSetStatus("Long name cannot be empty");
+            return;
+        }
         utf8util::copyTruncate(s_onboardingLongScratch, sizeof(s_onboardingLongScratch),
                                name.c_str());
         s_onboardingStage = ONBOARD_STAGE_ENTER_SHORT;
         renderOnboardingStage();
         return;
+
+    case ONBOARD_STAGE_ENTER_SHORT:
+        if (name.length() == 0) {
+            onboardingSetStatus("Short name cannot be empty");
+            return;
+        }
+        utf8util::copyTruncate(s_onboardingShortScratch, sizeof(s_onboardingShortScratch),
+                               name.c_str());
+        s_onboardingStage = ONBOARD_STAGE_SELECT_REGION;
+        s_onboardingPickIndex = onboardingRegionIndex(s_onboardingRegionScratch);
+        renderOnboardingStage();
+        return;
+
+    case ONBOARD_STAGE_ENTER_WIFI_SSID:
+        // Empty SSID means the user doesn't want WiFi — treat as Skip.
+        if (name.length() == 0) {
+            s_onboardingWifiSsidScratch[0] = '\0';
+            s_onboardingWifiPassScratch[0] = '\0';
+            onboardingFinalize();
+            return;
+        }
+        utf8util::copyTruncate(s_onboardingWifiSsidScratch,
+                               sizeof(s_onboardingWifiSsidScratch), name.c_str());
+        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_PASS;
+        renderOnboardingStage();
+        return;
+
+    case ONBOARD_STAGE_ENTER_WIFI_PASS:
+        // A WiFi password may legitimately be empty (open network); store the
+        // raw text so leading/trailing characters aren't stripped.
+        utf8util::copyTruncate(s_onboardingWifiPassScratch,
+                               sizeof(s_onboardingWifiPassScratch), typed ? typed : "");
+        onboardingFinalize();
+        return;
+
+    default:
+        return;
     }
+}
 
-    // Short-name stage: commit both fields.
-    utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong),
-                           s_onboardingLongScratch);
-    utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), name.c_str());
+// Cycle the current region/role picker option by delta (wraps around).
+static void onboardingPickerStep(int delta) {
+    if (s_onboardingStage != ONBOARD_STAGE_SELECT_REGION
+        && s_onboardingStage != ONBOARD_STAGE_SELECT_ROLE) {
+        return;
+    }
+    const int count = onboardingPickerCount();
+    if (count <= 0) return;
+    s_onboardingPickIndex = ((s_onboardingPickIndex + delta) % count + count) % count;
+    if (s_onboardingPickLabel) {
+        lv_label_set_text(s_onboardingPickLabel, onboardingPickerCurrentText());
+    }
+}
 
-    Serial.printf("[onboarding] saved nodeLong=\"%s\" nodeShort=\"%s\"\n",
-                  s_cfg.nodeLong, s_cfg.nodeShort);
+// Commit the current picker selection and move to the next stage.
+static void onboardingPickerAdvance() {
+    if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION) {
+        utf8util::copyTruncate(s_onboardingRegionScratch, sizeof(s_onboardingRegionScratch),
+                               kRegions[s_onboardingPickIndex].code);
+        s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
+        s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
+        renderOnboardingStage();
+    } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
+        s_onboardingRoleScratch = kOnboardRoles[s_onboardingPickIndex].value;
+        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
+        renderOnboardingStage();
+    }
+}
+
+// Step a picker stage back to the previous stage.
+static void onboardingPickerBack() {
+    if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION) {
+        s_onboardingStage = ONBOARD_STAGE_ENTER_SHORT;
+        renderOnboardingStage();
+    } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
+        s_onboardingStage = ONBOARD_STAGE_SELECT_REGION;
+        s_onboardingPickIndex = onboardingRegionIndex(s_onboardingRegionScratch);
+        renderOnboardingStage();
+    }
+}
+
+// Commit every onboarding selection into the live config, persist it, and
+// reboot so the radio (region/preset), role, and WiFi come up with the choices.
+static void onboardingFinalize() {
+    utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), s_onboardingLongScratch);
+    utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), s_onboardingShortScratch);
+    utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), s_onboardingRegionScratch);
+    s_cfg.deviceRole = cfgCoerceClientRole(s_onboardingRoleScratch);
+    utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_onboardingWifiSsidScratch);
+    utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), s_onboardingWifiPassScratch);
+    // Re-derive loraFreq/BW/SF/CR from the chosen region + current preset.
+    applyPresetParams(s_cfg);
+    s_firstBoot = false;
+
+    Serial.printf("[onboarding] saved nodeLong=\"%s\" nodeShort=\"%s\" region=\"%s\" "
+                  "role=%u wifi=\"%s\"\n",
+                  s_cfg.nodeLong, s_cfg.nodeShort, s_cfg.region, s_cfg.deviceRole,
+                  s_cfg.wifiSsid);
 
     persistConfigToPrefs();
-    s_firstBoot = false;
-    s_onboardingLongScratch[0] = '\0';
-    closeOnboardingModal();
-    s_lastRenderedChannel = -1;
-    s_lastRenderedCount = -1;
-    refreshHeaderTime(true);
-    refreshHeaderStatus(true);
-    refreshChatView(true);
+    Serial.println("[onboarding] complete - rebooting");
+    lv_timer_handler();
+    delay(500);
+    ESP.restart();
 }
 
 static void pumpKeyboardInput() {
@@ -9180,7 +9477,9 @@ static void pumpKeyboardInput() {
         bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
-                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
+                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT
+                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID
+                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS));
         bool navFromJk = false;
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -9207,16 +9506,40 @@ static void pumpKeyboardInput() {
                 } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
                     onboardingDeclineImport();
                 }
-            } else {  // ONBOARD_STAGE_ENTER_LONG / ONBOARD_STAGE_ENTER_SHORT
+            } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION
+                       || s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
+                // Region / role picker: wheel or j/k cycle, Enter/click advances,
+                // a close key steps back.
+                if (k == KEY_ENTER || k == KEY_ROLLER) {
+                    onboardingPickerAdvance();
+                } else if (k == KEY_SCROLL_UP) {
+                    onboardingPickerStep(-1);
+                } else if (k == KEY_SCROLL_DN) {
+                    onboardingPickerStep(1);
+                } else if (isModalCloseKey(k)) {
+                    onboardingPickerBack();
+                }
+            } else {  // text stages: LONG / SHORT / WIFI_SSID / WIFI_PASS
                 if (k == KEY_ENTER) {
                     onboardingCommitName();
                 } else if (isBackspaceKey(k)) {
                     if (s_onboardingInput && k == KEY_BACKSPACE) {
                         const char *cur = lv_textarea_get_text(s_onboardingInput);
-                        if ((!cur || !cur[0])
+                        const bool emptyField = (!cur || !cur[0]);
+                        // Backspace on an empty field steps back to the prior stage.
+                        if (emptyField
                             && s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT) {
-                            // Empty short field + Bksp → jump back to long name.
                             s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
+                            renderOnboardingStage();
+                        } else if (emptyField
+                                   && s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID) {
+                            s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
+                            s_onboardingPickIndex =
+                                onboardingRoleIndex(s_onboardingRoleScratch);
+                            renderOnboardingStage();
+                        } else if (emptyField
+                                   && s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS) {
+                            s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
                             renderOnboardingStage();
                         } else {
                             lv_textarea_del_char(s_onboardingInput);
@@ -10403,6 +10726,8 @@ static void startWebConfigAuto() {
 #endif
     if (!ok) {
         Serial.println("[web] auto start failed");
+        s_webCfgEnabled = false;
+        persistWebCfgEnabled();
         return;
     }
 

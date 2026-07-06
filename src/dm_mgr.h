@@ -3,13 +3,17 @@
 #include <Arduino.h>
 #include "config.h"
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define MAX_DM_CONVS    10
+#else
 #define MAX_DM_CONVS    16
+#endif
 // One DmLine holds one full logical message (prefix + body). The UI label uses
 // LVGL's wrap mode to break the text to the actual pane pixel width, so we no
 // longer pre-wrap to a character grid (which produced awkward, mismatched
 // breaks against the real font width).
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define MAX_DM_LINES    24   // RAM-limited (no PSRAM)
+#define MAX_DM_LINES    16   // RAM-limited (no PSRAM)
 #define DM_LINE_LEN    200
 #else
 #define MAX_DM_LINES    60   // PSRAM-backed; covers typical DM history

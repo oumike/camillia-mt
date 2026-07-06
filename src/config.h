@@ -273,7 +273,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define CHAN_ANN          9   // Live feed tab       (virtual, local-only)
 #define MAX_CHANNELS     10   // MESH_CHANNELS + DM + ANN
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define MAX_MSG_LINES   100   // DRAM-sized history for Cardputer
+#define MAX_MSG_LINES    64   // DRAM-sized history for Cardputer (leave headroom for Wi-Fi/tasks)
 #else
 #define MAX_MSG_LINES   400   // display lines per channel
 #endif

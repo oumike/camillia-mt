@@ -97,6 +97,27 @@ static void queueReleaseCheckNow() {
     gReleaseCheckState = RELEASE_CHECK_PENDING;
 }
 
+static void logWifiHeapDiag(const char *tag) {
+    size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    size_t free8 = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    Serial.printf("[web] %s [heap int free=%u largest=%u 8bit=%u]\n",
+                  tag ? tag : "wifi",
+                  (unsigned)freeInt,
+                  (unsigned)largestInt,
+                  (unsigned)free8);
+}
+
+static bool ensureWifiMode(wifi_mode_t mode, const char *stageTag) {
+    if (WiFi.getMode() == mode) return true;
+    if (WiFi.mode(mode)) return true;
+    Serial.printf("[web] WiFi.mode(%d) failed at %s\n",
+                  (int)mode,
+                  stageTag ? stageTag : "startup");
+    logWifiHeapDiag("wifi mode failure");
+    return false;
+}
+
 static void runQueuedReleaseCheck() {
     if (gReleaseCheckState != RELEASE_CHECK_PENDING) return;
 
@@ -3056,55 +3077,63 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
 
-    if (savedSsid.isEmpty()) {
-        // ── Onboarding mode: create an AP with full config ────
-        gOnboarding = true;
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP("camillia-mt");
-        delay(100);
+    auto startApMode = [&](const char *modeTag, bool onboarding) {
+        gOnboarding = onboarding;
+        WiFi.disconnect(false);
+        if (!ensureWifiMode(WIFI_AP, modeTag)) return false;
+        delay(120);
+        if (!WiFi.softAP("camillia-mt")) {
+            Serial.printf("[web] %s start failed\n", onboarding ? "onboarding AP" : "AP fallback");
+            logWifiHeapDiag(onboarding ? "onboarding AP start failed" : "AP fallback start failed");
+            return false;
+        }
+        delay(250);
         WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-        // Serve both the onboarding WiFi page and full config
-        server.on("/setup",   HTTP_GET,  handleGetOnboard);
-        server.on("/onboard", HTTP_POST, handlePostOnboard);
+        if (onboarding) {
+            // Serve both the onboarding WiFi page and full config.
+            server.on("/setup",   HTTP_GET,  handleGetOnboard);
+            server.on("/onboard", HTTP_POST, handlePostOnboard);
+        }
         registerCommonRoutes();
         server.begin();
         running = true;
-        Serial.printf("[web] onboarding AP at http://%s/\n", ipBuf);
+        Serial.printf("[web] %s at http://%s/\n",
+                      onboarding ? "onboarding AP" : "AP fallback",
+                      ipBuf);
         return true;
+    };
+
+    if (savedSsid.isEmpty()) {
+        // ── Onboarding mode: create an AP with full config ────
+        return startApMode("onboarding AP", true);
     }
 
     // ── Normal mode: connect to saved WiFi ────────────────────
     gOnboarding = false;
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    if (!ensureWifiMode(WIFI_STA, "STA connect")) {
+        Serial.println("[web] STA mode failed — using AP fallback");
+        return startApMode("AP fallback", false);
+    }
+    wl_status_t beginStatus = WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
+        Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
+        logWifiHeapDiag("STA begin failed");
+        return startApMode("AP fallback", false);
+    }
     Serial.printf("[web] connecting to \"%s\" ...\n", savedSsid.c_str());
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
+        wl_status_t st = WiFi.status();
+        if (st == WL_NO_SHIELD) {
+            Serial.println("[web] WiFi stack unavailable during STA connect");
+            logWifiHeapDiag("STA connect unavailable");
+            return startApMode("AP fallback", false);
+        }
         if (millis() - start >= kConnectTimeout) {
             Serial.println("[web] STA connect timeout — falling back to AP mode");
-            WiFi.disconnect(false);
-#ifdef WIFI_AP_STA
-            WiFi.mode(WIFI_AP_STA);
-#else
-            WiFi.mode(WIFI_AP);
-#endif
-            delay(120);
-            if (!WiFi.softAP("camillia-mt")) {
-                // Retry with AP-only mode if AP+STA bring-up fails.
-                WiFi.mode(WIFI_AP);
-                delay(120);
-                WiFi.softAP("camillia-mt");
-            }
-            delay(500);
-            WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
-
-            registerCommonRoutes();
-            server.begin();
-            running = true;
-            Serial.printf("[web] AP fallback at http://%s/\n", ipBuf);
-            return true;
+            return startApMode("AP fallback", false);
         }
         delay(100);
     }

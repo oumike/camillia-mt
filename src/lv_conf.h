@@ -5,7 +5,11 @@
 #define LV_COLOR_16_SWAP 0
 
 #define LV_MEM_CUSTOM 0
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define LV_MEM_SIZE (96U * 1024U)
+#else
 #define LV_MEM_SIZE (128U * 1024U)
+#endif
 
 #define LV_USE_LOG 0
 
