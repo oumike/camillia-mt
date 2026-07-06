@@ -612,7 +612,21 @@ static const int kTzCount = (int)(sizeof(kTzOptions) / sizeof(kTzOptions[0]));
 // ── Login page ────────────────────────────────────────────────
 
 static void sendLoginPage(const char *err = "") {
+    logWifiHeapDiag("serving login page");
+
+    // kHead is a ~4 KB flash constant. On the no-PSRAM Cardputer, building it
+    // into a String needs a contiguous DRAM block the fragmented heap often
+    // can't provide (the "broken login" symptom). Stream it straight from
+    // flash via chunked transfer so no large contiguous allocation is needed;
+    // only the small form body is built in RAM.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    server.sendContent_P(kHead);
+    String html;
+#else
     String html = kHead;
+#endif
     html +=
         "<h2>Camillia MT</h2>"
         "<form method='POST' action='/login'>"
@@ -625,7 +639,12 @@ static void sendLoginPage(const char *err = "") {
         html += "</p>";
     }
     html += "</form></body></html>";
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    server.sendContent(html);
+    server.sendContent("");   // terminate chunked response
+#else
     server.send(200, "text/html", html);
+#endif
 }
 
 // ── Config page ───────────────────────────────────────────────
@@ -644,7 +663,14 @@ static void sendConfigPage(const char *msg = "") {
     server.send(200, "text/html", "");
 
     char tmp[96];
+    // Stream the ~4 KB kHead constant straight from flash on Cardputer (no
+    // PSRAM) so it never needs a contiguous DRAM allocation; see sendLoginPage.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    server.sendContent_P(kHead);
+    String html;
+#else
     String html = kHead;
+#endif
     uint8_t themeBase = (uint8_t)constrain((int)gCfg->uiTheme, 0, UI_THEME_COUNT - 1);
     uint8_t themePreset = (uint8_t)(themeBase * 2 + (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0));
     int totalNodes = Nodes.count();
@@ -663,9 +689,15 @@ static void sendConfigPage(const char *msg = "") {
     else if (!gpsNmea) snprintf(gpsChip, sizeof(gpsChip), "GPS NO DATA");
     else snprintf(gpsChip, sizeof(gpsChip), "GPS SEARCH %u", (unsigned)gpsSat);
     int mapPointCount = 0;
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Boards with PSRAM accumulate the node lists in RAM then emit them below.
+    // The Cardputer (no PSRAM) can't hold these — with 64 nodes they run to
+    // ~30 KB — so it streams each list directly to the client instead (see the
+    // streamNode* lambdas and the emit points further down).
     String mapPoints = "[";
     String nodeOptions = "";   // <option> per node for the Nodes Seen dropdown
     String nodeDetails = "";   // hidden per-node info panels (shown on selection)
+#endif
     uint32_t nowMs = millis();
     auto unzz = [](uint32_t v) -> int32_t {
         return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
@@ -694,6 +726,203 @@ static void sendConfigPage(const char *msg = "") {
         return true;
     };
     const bool useImperialUnits = (gCfg && gCfg->displayUnits != 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // No PSRAM: only the map-point count is needed up front (for the header);
+    // the option/detail/point lists are streamed at the emit points below.
+    for (int i = 0; i < totalNodes; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (!n) continue;
+        float lat = 0.0f, lon = 0.0f;
+        if (extractNodeCoords(n, lat, lon)) mapPointCount++;
+    }
+
+    // Stream the "Nodes Seen" <option> list directly to the client, batching
+    // into ~1 KB chunks so no large contiguous String is ever allocated.
+    auto streamNodeOptions = [&]() {
+        String buf;
+        for (int i = 0; i < totalNodes; i++) {
+            NodeEntry *n = Nodes.getByRank(i);
+            if (!n) continue;
+            const char *shortName = n->shortName[0] ? n->shortName : "----";
+            const char *longName  = n->longName[0]  ? n->longName  : "(unnamed)";
+            buf += "<option value='";
+            buf += String(i);
+            buf += "'>";
+            buf += shortName;
+            buf += " -- ";
+            buf += longName;
+            buf += "</option>";
+            if (buf.length() > 1024) sendChunk(buf);
+        }
+        if (buf.length()) sendChunk(buf);
+    };
+
+    // Stream the JSON array of map points ([{lat,lon},...]) in ~1 KB chunks.
+    auto streamMapPoints = [&]() {
+        String buf = "[";
+        int cnt = 0;
+        char t[64];
+        for (int i = 0; i < totalNodes; i++) {
+            NodeEntry *n = Nodes.getByRank(i);
+            if (!n) continue;
+            float lat = 0.0f, lon = 0.0f;
+            if (!extractNodeCoords(n, lat, lon)) continue;
+            if (cnt > 0) buf += ",";
+            snprintf(t, sizeof(t), "{\"lat\":%.7f,\"lon\":%.7f}", lat, lon);
+            buf += t;
+            cnt++;
+            if (buf.length() > 1024) sendChunk(buf);
+        }
+        buf += "]";
+        sendChunk(buf);
+    };
+
+    // Stream the per-node detail panels in ~1 KB chunks. Mirrors the PSRAM
+    // accumulation path below; keep the two in sync if you change the markup.
+    auto streamNodeDetails = [&]() {
+        String buf;
+        char tmp[96];
+        for (int i = 0; i < totalNodes; i++) {
+            NodeEntry *n = Nodes.getByRank(i);
+            if (!n) continue;
+
+            float lat = 0.0f, lon = 0.0f;
+            bool hasLocation = extractNodeCoords(n, lat, lon);
+
+            char idBuf[16];
+            snprintf(idBuf, sizeof(idBuf), "!%08X", n->nodeId);
+            const char *shortName = n->shortName[0] ? n->shortName : "----";
+            const char *longName  = n->longName[0]  ? n->longName  : "(unnamed)";
+            const char *chanName = "-";
+            if (n->chanIdx >= 0 && n->chanIdx < MAX_CHANNELS) {
+                const ChannelKey &ck = CHANNEL_KEYS[n->chanIdx];
+                const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+                if (nm && nm[0]) chanName = nm;
+            }
+
+            char heardBuf[40];
+            if (n->lastHeardMs == 0 || nowMs < n->lastHeardMs) {
+                snprintf(heardBuf, sizeof(heardBuf), "unknown");
+            } else {
+                snprintf(heardBuf, sizeof(heardBuf), "%lus ago",
+                         (unsigned long)((nowMs - n->lastHeardMs) / 1000UL));
+            }
+
+            char locBuf[96];
+            if (hasLocation) {
+                snprintf(locBuf, sizeof(locBuf), "%.6f, %.6f (alt %dm)", lat, lon, (int)n->alt);
+            } else {
+                snprintf(locBuf, sizeof(locBuf), "unknown");
+            }
+
+            char posSeenBuf[40];
+            if (n->lastPosMs == 0 || nowMs < n->lastPosMs) {
+                snprintf(posSeenBuf, sizeof(posSeenBuf), "never");
+            } else {
+                snprintf(posSeenBuf, sizeof(posSeenBuf), "%lus ago",
+                         (unsigned long)((nowMs - n->lastPosMs) / 1000UL));
+            }
+
+            char posStateBuf[48];
+            if (n->lastPosMs == 0) {
+                snprintf(posStateBuf, sizeof(posStateBuf), "no POSITION packets");
+            } else if (n->hasPosition) {
+                snprintf(posStateBuf, sizeof(posStateBuf), "position valid");
+            } else {
+                snprintf(posStateBuf, sizeof(posStateBuf), "packet seen, no fix");
+            }
+
+            char rawPosBuf[64];
+            snprintf(rawPosBuf, sizeof(rawPosBuf), "%ld, %ld", (long)n->latI, (long)n->lonI);
+
+            char telemBuf[180];
+            if (n->hasTelemetry) {
+                telemBuf[0] = '\0';
+                if (n->hasDeviceTelemetry) {
+                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                             "%.0f%% / %.2fV", n->battPct, n->voltage);
+                }
+                if (n->hasEnvironmentTelemetry) {
+                    if (telemBuf[0]) {
+                        snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf), " | ");
+                    }
+                    if (useImperialUnits) {
+                        float tempF = n->temperatureC * (9.0f / 5.0f) + 32.0f;
+                        float pressureInHg = n->pressureHpa * 0.0295299831f;
+                        snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                                 "%.1fF %.1f%% %.2finHg",
+                                 (double)tempF,
+                                 (double)n->humidityPct,
+                                 (double)pressureInHg);
+                    } else {
+                        snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
+                                 "%.1fC %.1f%% %.1fhPa",
+                                 (double)n->temperatureC,
+                                 (double)n->humidityPct,
+                                 (double)n->pressureHpa);
+                    }
+                }
+                if (!telemBuf[0]) {
+                    snprintf(telemBuf, sizeof(telemBuf), "none");
+                }
+            } else {
+                snprintf(telemBuf, sizeof(telemBuf), "none");
+            }
+
+            char linkBuf[72];
+            if (n->lastHeardMs != 0) {
+                snprintf(linkBuf, sizeof(linkBuf), "SNR %.1f dB, hops %u", n->snr, (unsigned)n->hops);
+            } else {
+                snprintf(linkBuf, sizeof(linkBuf), "unknown");
+            }
+
+            char latAttr[24], lonAttr[24];
+            snprintf(latAttr, sizeof(latAttr), "%.7f", lat);
+            snprintf(lonAttr, sizeof(lonAttr), "%.7f", lon);
+            buf += "<div class='node-detail' id='nd-";
+            buf += String(i);
+            buf += "' data-loc='";
+            buf += hasLocation ? "1" : "0";
+            buf += "' data-lat='";
+            buf += latAttr;
+            buf += "' data-lon='";
+            buf += lonAttr;
+            buf += "'>";
+            buf += "<div class='node-card'>";
+            buf += "<div class='node-title'>";
+            buf += shortName;
+            buf += " -- ";
+            buf += longName;
+            buf += "</div>";
+            buf += "<div class='node-meta'><b>ID:</b> ";
+            buf += idBuf;
+            buf += "  <b>Channel:</b> ";
+            buf += chanName;
+            buf += "  <b>Last Heard:</b> ";
+            buf += heardBuf;
+            buf += "</div>";
+            buf += "<div class='node-meta'><b>Location:</b> ";
+            buf += locBuf;
+            buf += "</div>";
+            buf += "<div class='node-meta'><b>Position Pkt:</b> ";
+            buf += posSeenBuf;
+            buf += "  <b>State:</b> ";
+            buf += posStateBuf;
+            buf += "  <b>Raw:</b> ";
+            buf += rawPosBuf;
+            buf += "</div>";
+            buf += "<div class='node-meta'><b>Telemetry:</b> ";
+            buf += telemBuf;
+            buf += "  <b>Link:</b> ";
+            buf += linkBuf;
+            buf += "</div>";
+            buf += "</div>";   // .node-card
+            buf += "</div>";   // .node-detail
+            if (buf.length() > 1024) sendChunk(buf);
+        }
+        if (buf.length()) sendChunk(buf);
+    };
+#else
     for (int i = 0; i < totalNodes; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         if (!n) continue;
@@ -850,6 +1079,7 @@ static void sendConfigPage(const char *msg = "") {
         nodeDetails += "</div>";   // .node-detail
     }
     mapPoints += "]";
+#endif  // !DEVICE_CARDPUTER_LORA_HAT
     html += "<h2>Camillia for Meshtastic <a class='logout' href='/logout'>Logout</a></h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
@@ -858,7 +1088,9 @@ static void sendConfigPage(const char *msg = "") {
             "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
             "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
             "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
+#endif
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
             "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
@@ -1444,6 +1676,10 @@ static void sendConfigPage(const char *msg = "") {
               "</div>"
             "</div>";
 
+    // Chat tab is omitted on the no-PSRAM Cardputer: its chat/DM buffers are
+    // freed while web config runs (see webCfgBegin), so the tab would show
+    // nothing, and dropping it trims the page and the polling load.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "</div><div class='tab-panel' id='tab-chat'>";
     html += "<h3 style='margin-top:1.2em'>Chat</h3>";
     html += "<label style='display:inline-flex;align-items:center;gap:.4em;margin:.2em 0'>"
@@ -1464,6 +1700,7 @@ static void sendConfigPage(const char *msg = "") {
             "onkeydown='if(event.key===\"Enter\"){event.preventDefault();chatSend();}'>"
             "<button type='button' onclick='chatSend()'>Send</button></div>";
     html += "</div>";  // #chat-body
+#endif
     html += "</div><div class='tab-panel' id='tab-map'>";
     html += "<h3 style='margin-top:1.2em'>Node Heatmap</h3>";
     html += "<p class='gps-hint'>Positioned nodes: ";
@@ -1485,6 +1722,29 @@ static void sendConfigPage(const char *msg = "") {
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
     html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (totalNodes > 0) {
+        html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
+        html += "<select id='node-select' onchange='selectNode()'>";
+        html += "<option value=''>-- select a node --</option>";
+        sendChunk(html);            // flush before streaming the option list
+        streamNodeOptions();
+        html += "</select>";
+        html += "<div id='node-info' style='margin-top:.6em'></div>";
+        html += "<div class='map-wrap' style='margin-top:.6em'>"
+                "<div id='node-mini-map' class='map-canvas' style='height:220px'></div></div>";
+        html += "<div id='node-detail-store' style='display:none'>";
+        sendChunk(html);            // flush before streaming the detail panels
+        streamNodeDetails();
+        html += "</div>";
+    } else {
+        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
+    }
+    html += "<script>var NODE_HEAT_POINTS=";
+    sendChunk(html);                // flush before streaming the points array
+    streamMapPoints();
+    html += ";var NODE_ME_POINT=";
+#else
     if (nodeOptions.length() > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
         html += "<select id='node-select' onchange='selectNode()'>";
@@ -1503,6 +1763,7 @@ static void sendConfigPage(const char *msg = "") {
     html += "<script>var NODE_HEAT_POINTS=";
     html += mapPoints;
     html += ";var NODE_ME_POINT=";
+#endif
     if (mapHasMe) {
         snprintf(tmp, sizeof(tmp), "{lat:%.7f,lon:%.7f}", mapMeLat, mapMeLon);
         html += tmp;
@@ -2039,7 +2300,8 @@ static void sendConfigPage(const char *msg = "") {
                             "info.innerHTML=d.innerHTML;"
                             "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
                         "}"
-                        // ── Chat tab ─────────────────────────────────────────
+                        // ── Chat tab (omitted on Cardputer — no PSRAM) ────────
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
                         "var CHAT_TAPS=['\\uD83D\\uDC4D','\\uD83D\\uDC4E','\\u203C\\uFE0F','\\u2753','\\uD83D\\uDE02','\\uD83D\\uDE22'];"
                         "var chatIsDm=false;var chatId='';var chatCursor=-1;var chatLines=[];"
                         "var chatReplyPid=0;var chatPreview={};var chatTimer=null;var chatTargetsTimer=null;"
@@ -2124,24 +2386,27 @@ static void sendConfigPage(const char *msg = "") {
                         "function chatLiveToggle(){chatBodySync();if(chatLiveOn()){loadChatTargets();if(chatId!=='')pollChat();chatStartTimers();}else{chatStopTimers();}}"
                         "function startChatPolling(){chatBodySync();loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
                         "function stopChatPolling(){chatStopTimers();}"
+#endif
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isUtil=(tab==='utils');"
                             "var isLive=(tab==='live');"
-                            "var isChat=(tab==='chat');"
                             "var isMap=(tab==='map');"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-chat').classList.toggle('active',isChat);"
                             "document.getElementById('tab-map').classList.toggle('active',isMap);"
                             "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
-                            "document.getElementById('tab-btn-chat').classList.toggle('active',isChat);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                            "var isChat=(tab==='chat');"
+                            "document.getElementById('tab-chat').classList.toggle('active',isChat);"
+                            "document.getElementById('tab-btn-chat').classList.toggle('active',isChat);"
                             "if(isChat)startChatPolling();else stopChatPolling();"
+#endif
                             "if(isMap){"
                                 "ensureNodeMap();"
                                 "var _s=document.getElementById('node-select');"
@@ -2163,7 +2428,15 @@ static void sendConfigPage(const char *msg = "") {
 // ── Onboarding (WiFi setup) ───────────────────────────────────
 
 static void sendOnboardingPage(const char *err = "") {
+    // Stream kHead from flash on Cardputer (no PSRAM); see sendLoginPage.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    server.sendContent_P(kHead);
+    String html;
+#else
     String html = kHead;
+#endif
     html +=
         "<h2>Camillia-MT Setup</h2>"
         "<p style='color:#555;font-size:.95em'>"
@@ -2182,7 +2455,12 @@ static void sendOnboardingPage(const char *err = "") {
         html += "</p>";
     }
     html += "</form></body></html>";
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    server.sendContent(html);
+    server.sendContent("");   // terminate chunked response
+#else
     server.send(200, "text/html", html);
+#endif
 }
 
 static void handleGetOnboard() {
@@ -2561,6 +2839,9 @@ static void handleGetLiveData() {
 }
 
 // ── Chat tab endpoints ────────────────────────────────────────────
+// Omitted on the Cardputer (no PSRAM): the web Chat tab is removed there, so
+// these handlers and their routes aren't registered.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
 // Lists selectable chat targets: enabled channels + known DM conversations.
 static void handleGetChatTargets() {
     if (!isLoggedIn()) {
@@ -2695,6 +2976,7 @@ static void handlePostChatSend() {
     webCfgQueueChatSend(isDm, target, text.c_str(), replyId, emoji);
     server.send(200, "application/json", "{\"ok\":true}");
 }
+#endif  // !DEVICE_CARDPUTER_LORA_HAT
 
 // Returns JSON snapshots of the four live-chart series so the web UI can
 // render the same channel-utilization and SNR/RSSI charts that the on-device
@@ -3022,9 +3304,11 @@ static void registerCommonRoutes() {
     server.on("/save",              HTTP_POST, handlePostSave);
     server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     server.on("/live-data",         HTTP_GET,  handleGetLiveData);
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     server.on("/chat-targets",      HTTP_GET,  handleGetChatTargets);
     server.on("/chat-data",         HTTP_GET,  handleGetChatData);
     server.on("/chat-send",         HTTP_POST, handlePostChatSend);
+#endif
     server.on("/chart-data",        HTTP_GET,  handleGetChartData);
     server.on("/release-check",     HTTP_GET,  handleGetReleaseCheck);
     server.on("/logout",            HTTP_GET,  handleGetLogout);
@@ -3038,11 +3322,37 @@ static void registerCommonRoutes() {
     server.on("/clear-messages",    HTTP_POST, handlePostClearMessages);
     server.on("/clear-nodes",       HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset",     HTTP_POST, handlePostFactoryReset);
+    // Log any unmatched request so we can see exactly what a failing tab hits
+    // (the default handler only prints a generic "request handler not found").
+    server.onNotFound([]() {
+        Serial.printf("[web] 404 %s %s\n",
+                      (server.method() == HTTP_GET) ? "GET" : "POST",
+                      server.uri().c_str());
+        server.send(404, "text/plain", "Not found");
+    });
 }
 
 bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
                  WebCfgScreenshotPngCb onScreenshotPng) {
     if (running) return true;
+
+    // Baseline internal-heap snapshot before WiFi/LWIP allocate anything.
+    // On the no-PSRAM Cardputer this is the key margin to watch: compare it
+    // against the "server up" snapshot below to see how much WiFi consumed.
+    logWifiHeapDiag("web start (pre-WiFi)");
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // No PSRAM: the chat/DM line buffers sit in the same DRAM the Wi-Fi stack
+    // and page rendering need. Free them for the duration of the web session
+    // (restored in webCfgEnd(); the post-save reboot reallocates fresh anyway).
+    {
+        size_t reclaimed = Channels.releaseBuffers();
+        DMs.clearAll(false);   // free DM line buffers, keep SD-persisted history
+        Serial.printf("[web] cardputer: reclaimed %u bytes of chat buffers\n",
+                      (unsigned)reclaimed);
+        logWifiHeapDiag("after chat reclaim");
+    }
+#endif
 
     gCfg    = cfg;
     gOnSave = onSave;
@@ -3101,6 +3411,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         Serial.printf("[web] %s at http://%s/\n",
                       onboarding ? "onboarding AP" : "AP fallback",
                       ipBuf);
+        logWifiHeapDiag("server up (AP)");
         return true;
     };
 
@@ -3144,6 +3455,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
+    logWifiHeapDiag("server up (STA)");
     return true;
 }
 
@@ -3158,6 +3470,17 @@ void webCfgEnd() {
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Wi-Fi is down and its DRAM is back; reallocate the chat/DM buffers that
+    // webCfgBegin() released and reload persisted history. Reset DM state
+    // first so any conversation that arrived mid-session (and was persisted)
+    // isn't double-loaded — loadAll() appends rather than replacing.
+    Channels.restoreBuffers();
+    DMs.clearAll(false);
+    DMs.loadAll();
+#endif
+
     ipBuf[0]    = '\0';
     gCfg        = nullptr;
     gOnSave     = nullptr;

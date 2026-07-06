@@ -95,6 +95,13 @@ public:
     // Clear all channel messages in memory and optionally remove persisted logs.
     void clearAllMessages(bool clearPersisted = true);
 
+    // Cardputer (no PSRAM): free all channel line buffers to reclaim DRAM for
+    // the Wi-Fi stack while web config runs; restoreBuffers() reallocates them
+    // and reloads persisted history. releaseBuffers() returns bytes freed.
+    // Safe to leave freed: addMessage()/getLine() no-op when lines == nullptr.
+    size_t releaseBuffers();
+    void   restoreBuffers();
+
     // SD-backed persistence for mesh chat channels (0..MESH_CHANNELS-1).
     void beginPersistence();
     void loadPersisted();

@@ -9300,6 +9300,12 @@ static void onboardingAcceptImport() {
         return;
     }
     persistConfigToPrefs();
+    // cfgImport() also populated the CHANNEL_KEYS[] plan, but persistConfigToPrefs()
+    // only saves the RhinoConfig fields — not the channel plan. Persist the
+    // channels too (mirroring onWebCfgSaved) so imported channels survive the
+    // reboot; otherwise the user had to re-import after boot to restore them.
+    syncPrimaryChannelName();
+    persistChannelsToPrefs();
     Serial.println("[onboarding] imported OK - rebooting");
     lv_timer_handler();
     delay(500);
@@ -14028,7 +14034,14 @@ void setup() {
     syncWifiCredsToPrefs();
     applyTimezoneFromConfig();
     bootTimeNtpSync();
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // On PSRAM boards the chat buffers live in PSRAM, so starting web config
+    // here (before Channels.init()) costs nothing. The no-PSRAM Cardputer must
+    // wait until those DRAM buffers exist so webCfgBegin()'s reclaim can free
+    // them for Wi-Fi — it starts at the end of setup() instead. Starting here
+    // would reclaim 0 bytes and then get starved when the buffers allocate.
     startWebConfigAuto();
+#endif
     bootstrapStateMapsIfMissing();
     batteryInitAdc();
     gpsSetEnabled(s_cfg.gpsEnabled);
@@ -14072,6 +14085,13 @@ void setup() {
     }
 #endif
     Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer (no PSRAM): auto-start web config only now that the node DB,
+    // chat/DM buffers, radio, and UI are all allocated — this mirrors the
+    // healthy manual-enable path, so webCfgBegin()'s reclaim frees the ~35 KB
+    // of chat buffers and Wi-Fi keeps enough DRAM to serve pages.
+    startWebConfigAuto();
+#endif
 }
 
 // ── Light-sleep power management (opt-in via isPowerSaving) ───────────────────

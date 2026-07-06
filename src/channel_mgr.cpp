@@ -110,6 +110,36 @@ void ChannelMgr::clearAllMessages(bool clearPersisted) {
 #endif
 }
 
+size_t ChannelMgr::releaseBuffers() {
+    size_t freed = 0;
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        if (_chans[i].lines) {
+            free(_chans[i].lines);
+            _chans[i].lines = nullptr;
+            freed += MAX_MSG_LINES * sizeof(DisplayLine);
+        }
+        _chans[i].count     = 0;
+        _chans[i].scrollOff = 0;
+        _chans[i].unread    = false;
+        _chans[i].active    = false;
+    }
+    // Pending ACK entries point at line slots we just freed; drop them.
+    memset(_pending, 0, sizeof(_pending));
+    return freed;
+}
+
+void ChannelMgr::restoreBuffers() {
+    for (int i = 0; i < MAX_CHANNELS; i++) {
+        if (_chans[i].lines) continue;
+        _chans[i].lines     = allocChannelLines();
+        _chans[i].active    = (_chans[i].lines != nullptr);
+        _chans[i].count     = 0;
+        _chans[i].scrollOff = 0;
+    }
+    // Repopulate scrollback from SD if persistence is available (no-op otherwise).
+    loadPersisted();
+}
+
 void ChannelMgr::nextChannel() { setActive((_active + 1) % MAX_CHANNELS); }
 void ChannelMgr::prevChannel() { setActive((_active + MAX_CHANNELS - 1) % MAX_CHANNELS); }
 
