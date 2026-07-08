@@ -1,4 +1,5 @@
 #include "dm_mgr.h"
+#include "live_feed.h"
 #include "live_util.h"
 #include "mesh_radio.h"
 #include "mesh_proto.h"
@@ -24,12 +25,6 @@ static void *allocDmStorage(size_t bytes) {
     if (storage) return storage;
     return malloc(bytes);
 #endif
-}
-
-static void addLiveDmLine(const char *text, uint16_t color = TFT_DARKGREY) {
-    char prefix[12];
-    liveBuildPrefix(prefix, sizeof(prefix));
-    Channels.addMessage(CHAN_ANN, prefix, text, color);
 }
 
 // ── init ──────────────────────────────────────────────────────
@@ -256,7 +251,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
 
     if (!Radio.isReady()) {
         debugLogMessages("[dm] sendDm FAIL: radio not ready\n");
-        addLiveDmLine("T DM ER radio", TFT_RED);
+        liveFeedAddLine("T DM ER radio", TFT_RED);
         return false;
     }
 
@@ -318,7 +313,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
                      node ? "found" : "null", node ? (int)node->hasPubKey : -1);
     if (!node || !node->hasPubKey) {
         debugLogMessages("[dm] sendDm FAIL: recipient pubkey missing\n");
-        addLiveDmLine("T DM ER noPK", TFT_RED);
+        liveFeedAddLine("T DM ER noPK", TFT_RED);
 
         static uint32_t sLastNodeInfoReqNode = 0;
         static uint32_t sLastNodeInfoReqMs = 0;
@@ -341,7 +336,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
     debugLogMessages("[dm] using PKI path\n");
     if (!encryptPki(packetId, myNodeId, node->pubKey, proto, protoLen, cipher)) {
         debugLogMessages("[dm] sendDm FAIL: PKI encrypt failed\n");
-        addLiveDmLine("T DM ER pki", TFT_RED);
+        liveFeedAddLine("T DM ER pki", TFT_RED);
         return false;
     }
     usedPki = true;
@@ -355,7 +350,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
 
     if (!Radio.transmit(frame, sizeof(MeshHdr) + payloadLen)) {
         debugLogMessages("[dm] sendDm FAIL: radio TX failed\n");
-        addLiveDmLine("T DM ER tx", TFT_RED);
+        liveFeedAddLine("T DM ER tx", TFT_RED);
         return false;
     }
 
@@ -388,7 +383,7 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
             snprintf(live, sizeof(live), "T DM CHAN %s %08X c%d h%02X t%08X",
                      who, packetId, usedChanIdx, usedHash, resolvedToNodeId);
         }
-        addLiveDmLine(live, TFT_WHITE);
+        liveFeedAddLine(live, TFT_WHITE);
     }
 
     // Add outgoing message to local conversation (not marked unread)

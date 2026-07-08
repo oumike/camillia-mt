@@ -1,4 +1,5 @@
 #include "channel_mgr.h"
+#include "live_feed.h"
 #include "live_util.h"
 #include "mesh_radio.h"
 #include "hal/display.h"
@@ -14,6 +15,12 @@
 namespace {
 constexpr const char *kChanPersistDir = "/camillia/channels";
 constexpr int kPersistMaxLines = 100;
+constexpr int kLiveHistoryMaxLines = 50;
+
+static int channelHistoryLimit(int chanIdx) {
+    if (chanIdx == CHAN_LIVE) return kLiveHistoryMaxLines;
+    return MAX_MSG_LINES;
+}
 
 static void channelPersistPath(int chanIdx, char *out, size_t outLen) {
     snprintf(out, outLen, "%s/ch%d.log", kChanPersistDir, chanIdx);
@@ -49,12 +56,6 @@ static DisplayLine *allocChannelLines() {
     Serial.println("[chanmgr] PSRAM alloc failed, falling back to DRAM");
     return (DisplayLine *)malloc(MAX_MSG_LINES * sizeof(DisplayLine));
 #endif
-}
-
-static void addLiveTxLine(const char *text, uint16_t color = TFT_DARKGREY) {
-    char prefix[12];
-    liveBuildPrefix(prefix, sizeof(prefix));
-    Channels.addMessage(CHAN_ANN, prefix, text, color);
 }
 
 void ChannelMgr::init() {
@@ -433,7 +434,7 @@ const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {
     int total = ch.count;
     if (total == 0) return nullptr;
     // row 0 = newest visible line at the top; larger rows are older lines.
-    int stored = (total < MAX_MSG_LINES) ? total : MAX_MSG_LINES;
+    int stored = min(total, min(MAX_MSG_LINES, channelHistoryLimit(chanIdx)));
     int oldest = total - stored;
     int newest = total - 1 - ch.scrollOff;
     if (newest < oldest) return nullptr;
@@ -507,7 +508,7 @@ bool ChannelMgr::expireAcks() {
 bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
                           int chanIdx, uint32_t replyId, uint32_t emoji) {
     if (!Radio.isReady()) {
-        addLiveTxLine("T TXT B NR", TFT_RED);
+        liveFeedAddLine("T TXT B NR", TFT_RED);
         return false;
     }
 
@@ -551,7 +552,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     snprintf(prefix, sizeof(prefix), "%s<me> ", timePrefix);
 
     if (!Radio.transmit(frame, frameLen)) {
-        addLiveTxLine("T TXT B ER", TFT_RED);
+        liveFeedAddLine("T TXT B ER", TFT_RED);
         addMessage(txChan, prefix, text, TFT_RED, packetId);
         Channel &ch = _chans[txChan];
         for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
@@ -575,7 +576,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
         char live[56];
         snprintf(live, sizeof(live), "T TXT B c%d %08X",
                  txChan, packetId);
-        addLiveTxLine(live, TFT_WHITE);
+        liveFeedAddLine(live, TFT_WHITE);
     }
 
     // Add to display first so ACK updates always have a visible line to target.
@@ -624,7 +625,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
         char live[56];
         snprintf(live, sizeof(live), "T POS B %08X %s",
                  packetId, ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }
@@ -662,7 +663,7 @@ bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId) {
         char live[64];
         snprintf(live, sizeof(live), "T POS U %s %08X %s",
                  dst, packetId, ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }
@@ -708,7 +709,7 @@ bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
         char live[56];
         snprintf(live, sizeof(live), "T TEL D %08X %s",
                  packetId, ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }
@@ -747,7 +748,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
         char live[56];
         snprintf(live, sizeof(live), "T TEL E %08X %s",
                  packetId, ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }
@@ -792,7 +793,7 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
         char live[64];
         snprintf(live, sizeof(live), "T NBR B %08X %s",
                  packetId, ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }
@@ -870,7 +871,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                  isUnicast ? "U" : "B",
                  dst,
                  ok ? "OK" : "ER");
-        addLiveTxLine(live, ok ? TFT_DARKGREY : TFT_RED);
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
 }

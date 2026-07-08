@@ -270,8 +270,9 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 // ── Message storage ───────────────────────────────────────────
 #define MESH_CHANNELS     8   // number of actual LoRa channels (0-7)
 #define CHAN_DM           8   // Direct Messages tab (virtual, local-only)
-#define CHAN_ANN          9   // Live feed tab       (virtual, local-only)
-#define MAX_CHANNELS     10   // MESH_CHANNELS + DM + ANN
+#define CHAN_LIVE         9   // Live feed tab       (virtual, local-only; telemetry/routing/etc.)
+#define CHAN_ANN   CHAN_LIVE  // Deprecated alias (kept for compatibility during refactors)
+#define MAX_CHANNELS     10   // MESH_CHANNELS + DM + LIVE
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #define MAX_MSG_LINES    64   // DRAM-sized history for Cardputer (leave headroom for Wi-Fi/tasks)
 #else

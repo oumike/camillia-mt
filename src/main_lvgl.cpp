@@ -7,6 +7,7 @@
 #include "hal/display.h"
 #include "hal/xl9555.h"
 #include "live_util.h"
+#include "live_feed.h"
 #include "mesh_proto.h"
 #include "mesh_radio.h"
 #include "node_db.h"
@@ -483,6 +484,21 @@ static void setupVScroll(lv_obj_t *obj) {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
 }
 
+static inline bool lvObjValid(lv_obj_t *obj) {
+    return obj && lv_obj_is_valid(obj);
+}
+
+static inline bool lvObjAlive(lv_obj_t *obj) {
+    return lvObjValid(obj) && (lv_obj_get_disp(obj) != nullptr);
+}
+
+static inline void lvObjDeleteSafe(lv_obj_t *&obj) {
+    if (lvObjValid(obj)) {
+        lv_obj_del(obj);
+    }
+    obj = nullptr;
+}
+
 // Scrolls a list vertically by dy, clamped to the remaining scroll range so the
 // first/last item stays pinned to the edge. lv_obj_scroll_by(LV_ANIM_OFF) is
 // unbounded in LVGL 8.3 and will otherwise scroll past the content into empty
@@ -565,6 +581,7 @@ static void closeLegendModal();
 static void onLegendClosePressed(lv_event_t *e);
 static void openLiveModal();
 static void closeLiveModal();
+static void logLvglMemDiag(const char *tag);
 static void onHeltecBottomNavPressed(lv_event_t *e);
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget);
 static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget);
@@ -2843,10 +2860,7 @@ static void pagerExitChatCursorMode(bool clearSelection) {
 }
 
 static void closeComposePrompt() {
-    if (s_composeModal) {
-        lv_obj_del(s_composeModal);
-    }
-    s_composeModal = nullptr;
+    lvObjDeleteSafe(s_composeModal);
     s_composeInput = nullptr;
     s_composeKeyboard = nullptr;
     s_composeCharCount = nullptr;
@@ -3434,10 +3448,7 @@ static void closeCfgModal() {
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     closeNodeInfoModal();
 #endif
-    if (s_cfgModal) {
-        lv_obj_del(s_cfgModal);
-    }
-    s_cfgModal = nullptr;
+    lvObjDeleteSafe(s_cfgModal);
     s_cfgActionList = nullptr;
     s_cfgInfoList = nullptr;
     s_cfgHeaderStatus = nullptr;
@@ -3447,10 +3458,7 @@ static void closeCfgModal() {
 
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 static void closeNodeInfoModal() {
-    if (s_nodeInfoModal) {
-        lv_obj_del(s_nodeInfoModal);
-    }
-    s_nodeInfoModal = nullptr;
+    lvObjDeleteSafe(s_nodeInfoModal);
 }
 
 // Shows the current node's identity/radio details in a dismissible popup,
@@ -3510,10 +3518,7 @@ static void openNodeInfoModal() {
 #endif
 
 static void closeLegendModal() {
-    if (s_legendModal) {
-        lv_obj_del(s_legendModal);
-    }
-    s_legendModal = nullptr;
+    lvObjDeleteSafe(s_legendModal);
     refreshChatComposeButtonState();
 }
 
@@ -4140,10 +4145,7 @@ static void closeSnrRssiChartModal() {
 
 static void closeDmModal() {
     closeDmNodePicker();
-    if (s_dmModal) {
-        lv_obj_del(s_dmModal);
-    }
-    s_dmModal = nullptr;
+    lvObjDeleteSafe(s_dmModal);
     s_dmConvPanel = nullptr;
     s_dmConvList = nullptr;
     s_dmMsgPanel = nullptr;
@@ -4170,14 +4172,11 @@ static void closeDmModal() {
 static void closeNodesModal() {
     closeNodesFilterDialog();
     closeNodesActionMenu();
-    if (s_nodesModal) {
-        lv_obj_del(s_nodesModal);
-    }
+    lvObjDeleteSafe(s_nodesModal);
     nodesPanelWifiRestore();
     s_nodesMapSelectionNodeId = 0;
     s_nodesMapSelectionSinceMs = 0;
     s_nodesMapLastPrimePollMs = 0;
-    s_nodesModal = nullptr;
     s_nodesInfoPanel = nullptr;
     s_nodesDetail = nullptr;
     s_nodesDetailExtra = nullptr;
@@ -4332,10 +4331,7 @@ static void applyNodesFilterText(const char *text) {
 }
 
 static void closeNodesFilterDialog() {
-    if (s_nodesFilterDialog) {
-        lv_obj_del(s_nodesFilterDialog);
-    }
-    s_nodesFilterDialog = nullptr;
+    lvObjDeleteSafe(s_nodesFilterDialog);
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
 }
@@ -5374,7 +5370,12 @@ static void clearNodeDbOnSd() {
 }
 
 static void refreshNodesListRows() {
-    if (!s_nodesList) return;
+    if (!lvObjAlive(s_nodesList)) {
+        s_nodesList = nullptr;
+        s_nodesListRowCount = 0;
+        memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
+        return;
+    }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *nodesListFont = &lv_font_montserrat_12;
@@ -5507,7 +5508,11 @@ static void refreshNodesListSelection() {
 }
 
 static void refreshNodesDetails() {
-    if (!s_nodesDetail) return;
+    if (!lvObjAlive(s_nodesDetail)) {
+        s_nodesDetail = nullptr;
+        s_nodesDetailExtra = nullptr;
+        return;
+    }
 
     const NodeEntry *selectedNode = currentNodesSelection();
     if (!selectedNode) {
@@ -5667,10 +5672,7 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
 }
 
 static void closeTracerouteProgressModal() {
-    if (s_tracerouteBackdrop) {
-        lv_obj_del(s_tracerouteBackdrop);
-    }
-    s_tracerouteBackdrop = nullptr;
+    lvObjDeleteSafe(s_tracerouteBackdrop);
     s_tracerouteModal = nullptr;
     s_tracerouteStatusLabel = nullptr;
     s_tracerouteResultsBox = nullptr;
@@ -6081,7 +6083,7 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
     char status[72];
     snprintf(status, sizeof(status), "T TRC U %s %08lX %s",
              dst, (unsigned long)packetId, ok ? "OK" : "ER");
-    Channels.addMessage(CHAN_ANN, prefix, status, ok ? TFT_DARKGREY : TFT_RED, 0, false);
+    liveFeedAddPrefixed(prefix, status, ok ? TFT_DARKGREY : TFT_RED, 0, false);
     tracerouteProgressSetTxResult(ok);
     return ok;
 }
@@ -6105,10 +6107,7 @@ static void refreshNodesActionMenuSelection() {
 }
 
 static void closeNodesActionMenu() {
-    if (s_nodesActionModal) {
-        lv_obj_del(s_nodesActionModal);
-    }
-    s_nodesActionModal = nullptr;
+    lvObjDeleteSafe(s_nodesActionModal);
     s_nodesActionSelection = 0;
     s_nodesActionNodeId = 0;
     memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
@@ -6348,7 +6347,7 @@ static void refreshLiveView(bool force) {
     const lv_font_t *liveBodyFont = &lv_font_montserrat_10;
 #endif
 
-    const Channel &ch = Channels.get(CHAN_ANN);
+    const Channel &ch = Channels.get(CHAN_LIVE);
     if (!force && s_lastRenderedLiveCount == ch.count && s_lastRenderedLiveScrollOff == ch.scrollOff) {
         return;
     }
@@ -6360,8 +6359,20 @@ static void refreshLiveView(bool force) {
 
     int rowCount = 0;
     for (int row = 0; row < MAX_MSG_LINES; row++) {
-        const DisplayLine *dl = Channels.getLine(CHAN_ANN, row);
+        const DisplayLine *dl = Channels.getLine(CHAN_LIVE, row);
         if (!dl) break;
+
+        // Each wrapped label costs a few hundred bytes from LVGL's fixed
+        // LV_MEM_SIZE pool. If the pool can't satisfy lv_label_create(), LVGL
+        // fires LV_ASSERT_MALLOC and the default handler resets the device —
+        // this is the live-screen crash seen after long uptime once the pool
+        // is full/fragmented. Stop early and render what fits instead.
+        lv_mem_monitor_t liveMem;
+        lv_mem_monitor(&liveMem);
+        if (liveMem.free_biggest_size < 3072) {
+            logLvglMemDiag("live render stopped (low LVGL mem)");
+            break;
+        }
         rowCount++;
 
         lv_obj_t *msg = lv_label_create(s_liveList);
@@ -6428,17 +6439,50 @@ static void refreshLiveView(bool force) {
     s_lastRenderedLiveScrollOff = ch.scrollOff;
 }
 
+// Report the LVGL heap pool (a fixed LV_MEM_SIZE arena, not the system heap).
+// Fragmentation/exhaustion of this pool after long uptime is the prime suspect
+// for the live-screen crash seen across all boards.
+static void logLvglMemDiag(const char *tag) {
+    lv_mem_monitor_t m;
+    lv_mem_monitor(&m);
+    Serial.printf("[lvgl] %s pool used=%u%% free=%u biggest=%u frag=%u%%\n",
+                  tag ? tag : "mem",
+                  (unsigned)m.used_pct,
+                  (unsigned)m.free_size,
+                  (unsigned)m.free_biggest_size,
+                  (unsigned)m.frag_pct);
+}
+
 static void openLiveModal() {
+    if (s_liveModal && !lvObjAlive(s_liveModal)) {
+        s_liveModal = nullptr;
+        s_liveList = nullptr;
+    }
     if (!s_rootScreen || s_liveModal) return;
+    logLvglMemDiag("openLiveModal");
     if (s_composeModal) closeComposePrompt();
     closeDmModal();
     closeNodesModal();
     closeCfgModal();
     closeLegendModal();
 
-    Channels.get(CHAN_ANN).scrollOff = 0;
+    Channels.get(CHAN_LIVE).scrollOff = 0;
     s_lastRenderedLiveCount = -1;
     s_lastRenderedLiveScrollOff = -1;
+
+    // If the LVGL pool is too full to safely build the modal frame + list,
+    // abort instead of crashing inside lv_obj_create (LV_ASSERT_MALLOC resets
+    // the device). The closes above already freed any other open modals, so
+    // this only trips when memory is genuinely too low. The per-line guard in
+    // refreshLiveView handles running low partway through rendering.
+    {
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 6144) {
+            logLvglMemDiag("openLiveModal aborted (low LVGL mem)");
+            return;
+        }
+    }
 
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
@@ -7239,7 +7283,10 @@ static void activateDmNodePickerSelection() {
 
 static void refreshDmNodePicker(bool force) {
     LV_UNUSED(force);
-    if (!s_dmNodePickerModal || !s_dmNodePickerList) return;
+    if (!lvObjAlive(s_dmNodePickerModal) || !lvObjAlive(s_dmNodePickerList)) {
+        closeDmNodePicker();
+        return;
+    }
 
     const lv_color_t dmPickerTextColor =
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF);
@@ -7406,10 +7453,7 @@ static void openDmNodePicker() {
 }
 
 static void closeDmNodePicker() {
-    if (s_dmNodePickerModal) {
-        lv_obj_del(s_dmNodePickerModal);
-    }
-    s_dmNodePickerModal = nullptr;
+    lvObjDeleteSafe(s_dmNodePickerModal);
     s_dmNodePickerList = nullptr;
     s_dmNodePickerTitle = nullptr;
     s_dmNodePickerHint = nullptr;
@@ -7425,7 +7469,17 @@ static void closeDmNodePicker() {
 }
 
 static void refreshDmModal(bool force) {
-    if (!s_dmModal || !s_dmConvList || !s_dmMsgList) return;
+    if (!lvObjAlive(s_dmModal)
+        || !lvObjAlive(s_dmConvList)
+        || !lvObjAlive(s_dmMsgList)) {
+        s_dmModal = nullptr;
+        s_dmConvPanel = nullptr;
+        s_dmConvList = nullptr;
+        s_dmMsgPanel = nullptr;
+        s_dmMsgList = nullptr;
+        s_dmHintLabel = nullptr;
+        return;
+    }
 
     uint32_t now = millis();
     bool hadDeletePending = (s_dmDeletePendingNodeId != 0);
@@ -7746,6 +7800,14 @@ static void refreshDmModal(bool force) {
 }
 
 static void openDmModal() {
+    if (s_dmModal && !lvObjAlive(s_dmModal)) {
+        s_dmModal = nullptr;
+        s_dmConvPanel = nullptr;
+        s_dmConvList = nullptr;
+        s_dmMsgPanel = nullptr;
+        s_dmMsgList = nullptr;
+        s_dmHintLabel = nullptr;
+    }
     if (!s_rootScreen || s_dmModal) return;
     if (s_composeModal) closeComposePrompt();
     closeLiveModal();
@@ -7922,6 +7984,20 @@ static void openDmModal() {
 }
 
 static void openNodesModal() {
+    if (s_nodesModal && !lvObjAlive(s_nodesModal)) {
+        s_nodesModal = nullptr;
+        s_nodesInfoPanel = nullptr;
+        s_nodesDetail = nullptr;
+        s_nodesDetailExtra = nullptr;
+        s_nodesMapPanel = nullptr;
+        s_nodesMapTitle = nullptr;
+        s_nodesMapCoords = nullptr;
+        s_nodesMapMarker = nullptr;
+        s_nodesMapTileLayer = nullptr;
+        s_nodesMapImage = nullptr;
+        s_nodesList = nullptr;
+        s_nodesHintLabel = nullptr;
+    }
     if (!s_rootScreen || s_nodesModal) return;
     if (s_composeModal) closeComposePrompt();
     closeDmModal();
@@ -8127,6 +8203,9 @@ static void openNodesModal() {
 }
 
 static void openLegendModal() {
+    if (s_legendModal && !lvObjAlive(s_legendModal)) {
+        s_legendModal = nullptr;
+    }
     if (!s_rootScreen || s_legendModal) return;
     closeDmModal();
 
@@ -8323,6 +8402,12 @@ static void openLegendModal() {
 }
 
 static void openCfgModal() {
+    if (s_cfgModal && !lvObjAlive(s_cfgModal)) {
+        s_cfgModal = nullptr;
+        s_cfgActionList = nullptr;
+        s_cfgInfoList = nullptr;
+        s_cfgHeaderStatus = nullptr;
+    }
     if (!s_rootScreen || s_cfgModal) return;
     if (s_composeModal) closeComposePrompt();
     closeDmModal();
@@ -8721,9 +8806,9 @@ static void performCfgAction(int actionId) {
 }
 
 static void closeCfgConfirmModal() {
-    if (s_cfgConfirmBackdrop) {
+    if (lvObjValid(s_cfgConfirmBackdrop)) {
         lv_obj_del(s_cfgConfirmBackdrop);
-    } else if (s_cfgConfirmModal) {
+    } else if (lvObjValid(s_cfgConfirmModal)) {
         lv_obj_del(s_cfgConfirmModal);
     }
     s_cfgConfirmBackdrop = nullptr;
@@ -8925,8 +9010,67 @@ static const char *onboardingPickerCurrentText() {
     return kOnboardRoles[s_onboardingPickIndex].label;
 }
 
+static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int screenH,
+                                               int &modalW, int &modalH) {
+    modalW = screenW - 20;
+    if (modalW < 180) modalW = screenW - 4;
+    if (modalW > 320) modalW = 320;
+
+    modalH = screenH - 20;
+    if (modalH < 140) modalH = screenH - 4;
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (stage == ONBOARD_STAGE_ASK_IMPORT) {
+        // Cardputer import prompt is keyboard-only and titleless, so keep the
+        // modal tight to maximize visible context around it.
+        modalW = screenW - 12;
+        if (modalW < 180) modalW = screenW - 4;
+        if (modalW > 228) modalW = 228;
+
+        modalH = screenH - 50;
+        if (modalH < 74) modalH = screenH - 6;
+        if (modalH > 84) modalH = 84;
+    } else {
+        // Cardputer onboarding stages are keyboard-only and titleless,
+        // so shrink overall height to avoid bottom clipping.
+        modalW = screenW - 14;
+        if (modalW < 180) modalW = screenW - 4;
+        if (modalW > 228) modalW = 228;
+
+        modalH = screenH - 44;
+        if (modalH < 84) modalH = screenH - 6;
+        if (modalH > 92) modalH = 92;
+    }
+#else
+    LV_UNUSED(stage);
+#endif
+}
+
 static void renderOnboardingStage() {
     if (!s_onboardingModal) return;
+
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    int modalW = 0;
+    int modalH = 0;
+    onboardingComputeModalSizeForStage(s_onboardingStage, screenW, screenH, modalW, modalH);
+    lv_obj_set_size(s_onboardingModal, modalW, modalH);
+    lv_obj_align(s_onboardingModal, LV_ALIGN_CENTER, 0, 0);
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const bool compactOnboarding = true;
+    const bool compactImportStage = (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT);
+#else
+    const bool compactOnboarding = false;
+    const bool compactImportStage = false;
+#endif
+
+    lv_obj_set_style_pad_all(s_onboardingModal,
+                             compactImportStage ? 6 : (compactOnboarding ? 8 : 10),
+                             0);
+    lv_obj_set_style_pad_row(s_onboardingModal,
+                             compactImportStage ? 4 : (compactOnboarding ? 6 : 8),
+                             0);
 
     // Wipe children and rebuild for the current stage. Keep the modal
     // container itself so its geometry/layout stays consistent.
@@ -8936,24 +9080,53 @@ static void renderOnboardingStage() {
     s_onboardingStatus = nullptr;
     s_onboardingPickLabel = nullptr;
 
+    const lv_font_t *onboardingBodyFont =
+        compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12;
+    const lv_font_t *onboardingPickerFont =
+        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16;
+    const lv_font_t *onboardingInputFont =
+        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_14;
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_font_t *onboardingButtonFont =
+        compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12;
+    const int onboardingButtonH = compactOnboarding ? 30 : 36;
+    const int onboardingButtonMinW = compactOnboarding ? 86 : 100;
+    const int onboardingStepBtnW = compactOnboarding ? 34 : 40;
+    const int onboardingStepBtnH = compactOnboarding ? 30 : 36;
+#endif
+    const int onboardingInputH = compactOnboarding ? 30 : 34;
+
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_font_t *onboardingTitleFont =
+        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16;
     lv_obj_t *title = lv_label_create(s_onboardingModal);
     lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(title, onboardingTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Welcome to Camillia for Meshtastic");
+#endif
 
     lv_obj_t *body = lv_label_create(s_onboardingModal);
     lv_obj_set_width(body, lv_pct(100));
-    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(body, onboardingBodyFont, 0);
     lv_obj_set_style_text_color(body, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
 
     if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
         lv_label_set_text(body,
-                          "A saved config was found on the SD card.\n"
+                          "A saved config was found on SD.\n"
                           "Import it now?");
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        s_onboardingStatus = lv_label_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingStatus, lv_pct(100));
+        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(s_onboardingStatus, "Y/Enter=Import   N/Bksp=Skip");
+#else
 
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
@@ -8962,31 +9135,43 @@ static void renderOnboardingStage() {
         lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btnRow, 0, 0);
         lv_obj_set_style_pad_all(btnRow, 0, 0);
-        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_style_pad_column(btnRow,
+                        compactImportStage ? 8 : (compactOnboarding ? 10 : 14),
+                        0);
         lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
+        const int importBtnH = compactImportStage ? 30 : onboardingButtonH;
+        const int importBtnMinW = compactImportStage ? 72 : (compactOnboarding ? 80 : 84);
+        const lv_font_t *importBtnFont = onboardingButtonFont;
+
         auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
-                          lv_event_cb_t cb) {
+                  lv_event_cb_t cb,
+                  int height,
+                  int minWidth,
+                  const lv_font_t *font) {
             lv_obj_t *btn = lv_btn_create(parent);
-            lv_obj_set_height(btn, 36);
-            lv_obj_set_style_min_width(btn, 84, 0);
+            lv_obj_set_height(btn, height);
+            lv_obj_set_style_min_width(btn, minWidth, 0);
             lv_obj_set_style_radius(btn, 4, 0);
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_font(lbl, font, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, text);
             lv_obj_center(lbl);
             return btn;
         };
         makeBtn(btnRow, "(N)o",  0x6B3030,
-                [](lv_event_t *) { onboardingDeclineImport(); });
+            [](lv_event_t *) { onboardingDeclineImport(); },
+            importBtnH, importBtnMinW, importBtnFont);
         makeBtn(btnRow, "(Y)es", 0x2F6B30,
-                [](lv_event_t *) { onboardingAcceptImport(); });
+            [](lv_event_t *) { onboardingAcceptImport(); },
+            importBtnH, importBtnMinW, importBtnFont);
+    #endif
     } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION
                || s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
         // Region / role picker: a single value shown between < / > steppers so
@@ -9004,20 +9189,21 @@ static void renderOnboardingStage() {
         lv_obj_set_style_bg_opa(pickRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(pickRow, 0, 0);
         lv_obj_set_style_pad_all(pickRow, 0, 0);
-        lv_obj_set_style_pad_column(pickRow, 10, 0);
+        lv_obj_set_style_pad_column(pickRow, compactOnboarding ? 6 : 10, 0);
         lv_obj_set_flex_flow(pickRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(pickRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeStepBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+        auto makeStepBtn = [=](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
-            lv_obj_set_size(btn, 40, 36);
+            lv_obj_set_size(btn, onboardingStepBtnW, onboardingStepBtnH);
             lv_obj_set_style_radius(btn, 4, 0);
             lv_obj_set_style_bg_color(btn, lv_color_hex(0x3C4A66), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+            lv_obj_set_style_text_font(lbl, onboardingPickerFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, text);
             lv_obj_center(lbl);
@@ -9025,24 +9211,35 @@ static void renderOnboardingStage() {
         };
         makeStepBtn(pickRow, LV_SYMBOL_LEFT,
                     [](lv_event_t *) { onboardingPickerStep(-1); });
+        #endif
 
         s_onboardingPickLabel = lv_label_create(pickRow);
-        lv_obj_set_flex_grow(s_onboardingPickLabel, 1);
-        lv_obj_set_style_text_font(s_onboardingPickLabel, &lv_font_montserrat_16, 0);
+            lv_obj_set_width(s_onboardingPickLabel, lv_pct(100));
+        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+            lv_obj_set_flex_grow(s_onboardingPickLabel, 1);
+        #endif
+        lv_obj_set_style_text_font(s_onboardingPickLabel, onboardingPickerFont, 0);
         lv_obj_set_style_text_color(s_onboardingPickLabel, lv_color_hex(0xE8F1FF), 0);
         lv_obj_set_style_text_align(s_onboardingPickLabel, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(s_onboardingPickLabel, onboardingPickerCurrentText());
 
+        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
         makeStepBtn(pickRow, LV_SYMBOL_RIGHT,
                     [](lv_event_t *) { onboardingPickerStep(1); });
+        #endif
 
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
         lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+        #if defined(DEVICE_CARDPUTER_LORA_HAT)
+            lv_label_set_text(s_onboardingStatus, "j/k=Change   Enter=Next   Bksp=Back");
+        #else
         lv_label_set_text(s_onboardingStatus, "Wheel/j-k=Change   Enter=Next");
+        #endif
 
+        #if !defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
         lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -9050,22 +9247,22 @@ static void renderOnboardingStage() {
         lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btnRow, 0, 0);
         lv_obj_set_style_pad_all(btnRow, 0, 0);
-        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_style_pad_column(btnRow, compactOnboarding ? 10 : 14, 0);
         lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
                           lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
-            lv_obj_set_height(btn, 36);
-            lv_obj_set_style_min_width(btn, 100, 0);
+            lv_obj_set_height(btn, onboardingButtonH);
+            lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
             lv_obj_set_style_radius(btn, 4, 0);
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, text);
             lv_obj_center(lbl);
@@ -9075,6 +9272,7 @@ static void renderOnboardingStage() {
                 [](lv_event_t *) { onboardingPickerBack(); });
         makeBtn(btnRow, "Next", 0x2F6B30,
                 [](lv_event_t *) { onboardingPickerAdvance(); });
+    #endif
     } else {
         const bool isShortStage = (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT);
         const bool isWifiSsid   = (s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID);
@@ -9103,8 +9301,8 @@ static void renderOnboardingStage() {
 
         s_onboardingInput = lv_textarea_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingInput, lv_pct(100));
-        lv_obj_set_height(s_onboardingInput, 34);
-        lv_obj_set_style_text_font(s_onboardingInput, &lv_font_montserrat_14, 0);
+        lv_obj_set_height(s_onboardingInput, onboardingInputH);
+        lv_obj_set_style_text_font(s_onboardingInput, onboardingInputFont, 0);
         lv_obj_set_style_text_color(s_onboardingInput, lv_color_hex(0xE8F1FF), 0);
         lv_obj_set_style_bg_color(s_onboardingInput, lv_color_hex(0x102B61), 0);
         lv_obj_set_style_bg_opa(s_onboardingInput, LV_OPA_COVER, 0);
@@ -9139,12 +9337,20 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+        const char *statusHint = "Enter=Next";
+        if (isShortStage)      statusHint = "Enter=Next   Bksp(empty)=Back";
+        else if (isWifiSsid)   statusHint = "Enter=Next (empty=Skip)   Bksp(empty)=Back";
+        else if (isWifiPass)   statusHint = "Enter=Finish & reboot   Bksp(empty)=Back";
+    #else
         const char *statusHint = "Enter=Next";
         if (isShortStage)      statusHint = "Enter=Next    Bksp(empty)=Back";
         else if (isWifiSsid)   statusHint = "Enter=Next    Bksp(empty)=Back";
         else if (isWifiPass)   statusHint = "Enter=Finish & reboot    Bksp(empty)=Back";
+    #endif
         lv_label_set_text(s_onboardingStatus, statusHint);
 
+    #if !defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
         lv_obj_set_width(btnRow, lv_pct(100));
         lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -9152,22 +9358,22 @@ static void renderOnboardingStage() {
         lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(btnRow, 0, 0);
         lv_obj_set_style_pad_all(btnRow, 0, 0);
-        lv_obj_set_style_pad_column(btnRow, 14, 0);
+        lv_obj_set_style_pad_column(btnRow, compactOnboarding ? 10 : 14, 0);
         lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
 
-        auto makeBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
                           lv_event_cb_t cb) {
             lv_obj_t *btn = lv_btn_create(parent);
-            lv_obj_set_height(btn, 36);
-            lv_obj_set_style_min_width(btn, 100, 0);
+            lv_obj_set_height(btn, onboardingButtonH);
+            lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
             lv_obj_set_style_radius(btn, 4, 0);
             lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
             lv_obj_set_style_shadow_width(btn, 0, 0);
             lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
             lv_obj_t *lbl = lv_label_create(btn);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
             lv_label_set_text(lbl, text);
             lv_obj_center(lbl);
@@ -9203,6 +9409,7 @@ static void renderOnboardingStage() {
         const char *nextLabel = isWifiPass ? "Finish" : "Next";
         makeBtn(btnRow, nextLabel, 0x2F6B30,
                 [](lv_event_t *) { onboardingCommitName(); });
+    #endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
         s_onboardingKeyboard = lv_keyboard_create(s_onboardingModal);
@@ -9239,11 +9446,9 @@ static void openOnboardingModal() {
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
-    int modalW = w - 20;
-    if (modalW < 180) modalW = w - 4;
-    if (modalW > 320) modalW = 320;
-    int modalH = h - 20;
-    if (modalH < 140) modalH = h - 4;
+    int modalW = 0;
+    int modalH = 0;
+    onboardingComputeModalSizeForStage(s_onboardingStage, w, h, modalW, modalH);
 
     s_onboardingBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_onboardingBackdrop, w, h);
@@ -9275,9 +9480,9 @@ static void openOnboardingModal() {
 }
 
 static void closeOnboardingModal() {
-    if (s_onboardingBackdrop) {
+    if (lvObjValid(s_onboardingBackdrop)) {
         lv_obj_del(s_onboardingBackdrop);
-    } else if (s_onboardingModal) {
+    } else if (lvObjValid(s_onboardingModal)) {
         lv_obj_del(s_onboardingModal);
     }
     s_onboardingBackdrop = nullptr;
@@ -10071,7 +10276,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == 'c' || k == 'C') {
-                Channels.clearChannel(CHAN_ANN);
+                Channels.clearChannel(CHAN_LIVE);
                 s_lastRenderedLiveCount = -1;
                 s_lastRenderedLiveScrollOff = -1;
                 refreshLiveView(true);
@@ -10470,9 +10675,8 @@ static void onWebCfgSaved() {
                           s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
     }
 
-    if (!cfgExport(s_cfg)) {
-        Serial.println("[cfg] web save export failed");
-    }
+    // Keep export an explicit user action. Auto-export after onboarding/web-save
+    // can overwrite or churn SD config unexpectedly.
 
     if ((prevTheme != s_appliedUiTheme || prevMode != s_appliedUiMode) && s_rootScreen) {
         scheduleThemeRebuild(s_cfgModal != nullptr);
@@ -12008,7 +12212,7 @@ static void appendLiveRxSummary(const MeshPacket &pkt, int chanIdx, const char *
              liveDestTag(pkt.hdr.to),
              (portTag && portTag[0]) ? portTag : "D",
              chanIdx);
-    Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
+    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
 static void appendLiveRxEncrypted(const MeshPacket &pkt) {
@@ -12019,7 +12223,7 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
     snprintf(line, sizeof(line), "R %s ENC h%02X", who, pkt.hdr.channel);
-    Channels.addMessage(CHAN_ANN, timePrefix, line, TFT_DARKGREY, 0, false);
+    liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
 static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t errorReason) {
@@ -12693,7 +12897,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         } else {
             scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
             if (forceAnnounce) {
-                Channels.addMessage(CHAN_ANN, "", "[position] skip: no fix/fallback", TFT_DARKGREY, 0, false);
+                liveFeedAddPrefixed("", "[position] skip: no fix/fallback", TFT_DARKGREY, 0, false);
             }
         }
     }
@@ -13595,10 +13799,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     closeLegendModal();
     closeCfgModal();
 
-    if (s_rootScreen) {
-        lv_obj_del(s_rootScreen);
-        s_rootScreen = nullptr;
-    }
+    lvObjDeleteSafe(s_rootScreen);
 
     memset(s_channelBtns, 0, sizeof(s_channelBtns));
     memset(s_channelLabels, 0, sizeof(s_channelLabels));

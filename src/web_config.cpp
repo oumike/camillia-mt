@@ -2803,8 +2803,8 @@ static void handleGetLiveData() {
     int after = -1;
     if (server.hasArg("after")) after = server.arg("after").toInt();
 
-    Channel &ann = Channels.get(CHAN_ANN);
-    int total = ann.count;
+    Channel &liveChan = Channels.get(CHAN_LIVE);
+    int total = liveChan.count;
     int oldest = max(0, total - MAX_MSG_LINES);
     int from = (after >= 0) ? (after + 1) : (total - 40);
     if (from < oldest) from = oldest;
@@ -2819,10 +2819,10 @@ static void handleGetLiveData() {
     out += String(from);
     out += ",\"lines\":[";
 
-    if (ann.lines) {
+    if (liveChan.lines) {
         bool first = true;
         for (int i = from; i < total; i++) {
-            const DisplayLine &dl = ann.lines[i % MAX_MSG_LINES];
+            const DisplayLine &dl = liveChan.lines[i % MAX_MSG_LINES];
             if (!first) out += ",";
             first = false;
             out += "{\"i\":";
