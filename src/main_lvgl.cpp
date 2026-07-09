@@ -445,8 +445,8 @@ static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static bool s_cardputerMainChatPanelFocused = false;
-static int s_cardputerDropdownSelection = -1;
 #endif
+static int s_cardputerDropdownSelection = -1;
 
 static constexpr int kRxDedupSize = 32;
 struct SeenPkt {
@@ -10341,6 +10341,82 @@ static void pumpKeyboardInput() {
         }
 
         if (!s_composeModal) {
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+            if (isChannelDropdownVisible()) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                // Cardputer directional labels: '/' is right, ',' is left.
+                if (k == '/') k = KEY_NEXT_CHAN;
+                else if (k == ',') k = KEY_PREV_CHAN;
+#endif
+
+                if (k == KEY_NEXT_CHAN || k == KEY_PREV_CHAN
+                    || k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                    int next = s_cardputerDropdownSelection;
+                    if (next < 0 || next >= MESH_CHANNELS) next = s_activeChannel;
+
+                    if (k == KEY_NEXT_CHAN) {
+                        next += 1;
+                    } else if (k == KEY_PREV_CHAN) {
+                        next -= 1;
+                    } else {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                        // Keep Cardputer selector movement aligned with existing channel-selector behavior.
+                        if (navFromJk || invertScrollNav) {
+                            next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                        } else {
+                            next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                        }
+#else
+                        // Mirror existing main-screen channel stepping directions.
+                        if (navFromJk) {
+                            next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                        } else {
+                            next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                        }
+#endif
+                    }
+
+                    if (next < 0) next = MESH_CHANNELS - 1;
+                    if (next >= MESH_CHANNELS) next = 0;
+
+                    s_cardputerDropdownSelection = next;
+                    if (s_channelBtns[next]) {
+                        lv_obj_scroll_to_view(s_channelBtns[next], LV_ANIM_OFF);
+                    }
+                    refreshChannelSelectorLabel();
+                    refreshChannelGlow(true);
+                    continue;
+                }
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                if ((k == KEY_ENTER || k == KEY_FN_ENTER)
+                    && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+#else
+                if (k == KEY_ENTER
+                    && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+#endif
+                    int chosen = s_cardputerDropdownSelection;
+                    if (chosen < 0 || chosen >= MESH_CHANNELS) chosen = s_activeChannel;
+                    setActiveChannel(chosen);
+                    setChannelDropdownVisible(false);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                    s_cardputerMainChatPanelFocused = true;
+                    // Return to plain chat focus after channel selection.
+                    s_pagerChatCursorMode = false;
+                    refreshChatView(true);
+#endif
+                    refreshChannelGlow(true);
+                    continue;
+                }
+
+                if (isModalCloseKey(k) || k == 'h' || k == 'H') {
+                    setChannelDropdownVisible(false);
+                    refreshChannelGlow(true);
+                    continue;
+                }
+            }
+#endif
+
             if (kUseScrollKeysForMainNav) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                 // Cardputer directional labels: '/' is right, ',' is left.
@@ -10519,7 +10595,12 @@ static void pumpKeyboardInput() {
             } else if (k == 'n' || k == 'N') {
                 openNodesModal();
             } else if (k == 'h' || k == 'H') {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
                 openLegendModal();
+#else
+                setChannelDropdownVisible(!isChannelDropdownVisible());
+                refreshChannelGlow(true);
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             } else if ((k == KEY_ENTER || k == KEY_FN_ENTER)
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
@@ -11475,9 +11556,8 @@ static void refreshChannelGlow(bool force) {
 
         bool active = (i == s_activeChannel);
         bool animate = s_channelNeedsAttention[i] && !active;
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
-        bool dropdownCursor = (!s_cardputerMainChatPanelFocused
-                       && isChannelDropdownVisible()
+    #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+        bool dropdownCursor = (isChannelDropdownVisible()
                        && s_cardputerDropdownSelection == i);
     #else
         bool dropdownCursor = false;
@@ -11587,12 +11667,21 @@ static void refreshChannelGlow(bool force) {
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, pulseOpa, 0);
 #endif
         } else {
-            lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
-            lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
-            lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_outline_width(s_channelSelectorBtn, 0, 0);
-            lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
+            const bool lightMode = (s_cfg.uiMode == UI_MODE_LIGHT);
+            const lv_color_t selectorIdleBorder =
+                lvColorFrom565(blend565(s_ui.panelAlt, s_ui.accent, lightMode ? 96 : 120));
+            const lv_color_t selectorIdleOutline =
+                lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, lightMode ? 88 : 112));
+            lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
+            lv_obj_set_style_border_color(s_channelSelectorBtn, selectorIdleBorder, 0);
+            lv_obj_set_style_outline_color(s_channelSelectorBtn, selectorIdleOutline, 0);
+            lv_obj_set_style_outline_pad(s_channelSelectorBtn, 0, 0);
+            lv_obj_set_style_outline_width(s_channelSelectorBtn, 1, 0);
+            lv_obj_set_style_outline_opa(s_channelSelectorBtn, lightMode ? LV_OPA_40 : LV_OPA_50, 0);
+            lv_obj_set_style_shadow_color(s_channelSelectorBtn, lv_color_hex(0x4EC9FF), 0);
+            lv_obj_set_style_shadow_spread(s_channelSelectorBtn, 1, 0);
+            lv_obj_set_style_shadow_width(s_channelSelectorBtn, 4, 0);
+            lv_obj_set_style_shadow_opa(s_channelSelectorBtn, lightMode ? LV_OPA_20 : LV_OPA_30, 0);
         }
     }
 }
@@ -11625,13 +11714,28 @@ static void applyChannelButtonTheme() {
     }
 
     if (s_channelSelectorBtn) {
+        const bool lightMode = (s_cfg.uiMode == UI_MODE_LIGHT);
+        const lv_color_t selectorBaseBorder =
+            lvColorFrom565(blend565(s_ui.panelAlt, s_ui.accent, lightMode ? 96 : 120));
+        const lv_color_t selectorBaseOutline =
+            lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, lightMode ? 88 : 112));
         lv_obj_set_style_bg_color(
             s_channelSelectorBtn,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x102750),
+            lightMode
+                ? lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, 78))
+                : lv_color_hex(0x15356B),
             0);
-        lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_70, 0);
-        lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
-        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
+        lv_obj_set_style_bg_opa(s_channelSelectorBtn, lightMode ? LV_OPA_90 : LV_OPA_80, 0);
+        lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
+        lv_obj_set_style_border_color(s_channelSelectorBtn, selectorBaseBorder, 0);
+        lv_obj_set_style_outline_color(s_channelSelectorBtn, selectorBaseOutline, 0);
+        lv_obj_set_style_outline_pad(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_outline_width(s_channelSelectorBtn, 1, 0);
+        lv_obj_set_style_outline_opa(s_channelSelectorBtn, lightMode ? LV_OPA_40 : LV_OPA_50, 0);
+        lv_obj_set_style_shadow_color(s_channelSelectorBtn, lv_color_hex(0x4EC9FF), 0);
+        lv_obj_set_style_shadow_spread(s_channelSelectorBtn, 1, 0);
+        lv_obj_set_style_shadow_width(s_channelSelectorBtn, 4, 0);
+        lv_obj_set_style_shadow_opa(s_channelSelectorBtn, lightMode ? LV_OPA_20 : LV_OPA_30, 0);
     }
     if (s_channelSelectorLabel) {
         lv_obj_set_style_text_color(
@@ -11655,6 +11759,8 @@ static void setActiveChannel(int channelIdx) {
     s_pagerChatCursorDisplayIndex = -1;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerMainChatPanelFocused = false;
+#endif
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerDropdownSelection = channelIdx;
 #endif
     s_selectedMsgReplyPacketId = 0;
@@ -11693,9 +11799,8 @@ static void refreshChannelSelectorLabel() {
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    if (!s_cardputerMainChatPanelFocused
-        && isChannelDropdownVisible()
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
         && s_cardputerDropdownSelection < MESH_CHANNELS) {
         name = channelName(s_cardputerDropdownSelection);
@@ -11745,17 +11850,22 @@ static void refreshChannelSelectorLabel() {
         const lv_coord_t selectorEdgePad = 6;
         const lv_coord_t selectorAntiClip = 2;
 
-        // Keep selector width fixed: size it once from channel 0 label and never resize on channel changes.
+        // Keep selector width fixed: size it once from the widest channel label and never resize on channel changes.
         if (s_channelSelectorFixedBtnW <= 0) {
-            const char *firstChannelName = channelName(0);
-            if (!firstChannelName || !firstChannelName[0]) firstChannelName = "Channel";
+            lv_coord_t textW = 0;
+            for (int i = 0; i < MESH_CHANNELS; i++) {
+                const char *candidate = channelName(i);
+                if (!candidate || !candidate[0]) candidate = "Channel";
 
-            lv_label_set_text(s_channelSelectorLabel, firstChannelName);
-            lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_CLIP);
-            lv_obj_set_width(s_channelSelectorLabel, LV_SIZE_CONTENT);
-            lv_obj_update_layout(s_channelSelectorLabel);
+                lv_label_set_text(s_channelSelectorLabel, candidate);
+                lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_CLIP);
+                lv_obj_set_width(s_channelSelectorLabel, LV_SIZE_CONTENT);
+                lv_obj_update_layout(s_channelSelectorLabel);
 
-            lv_coord_t textW = lv_obj_get_width(s_channelSelectorLabel);
+                lv_coord_t candidateW = lv_obj_get_width(s_channelSelectorLabel);
+                if (candidateW > textW) textW = candidateW;
+            }
+
             // Measure button width from text + equal edge padding (+ optional caret room).
             lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
 #if defined(DEVICE_TDECK)
@@ -11768,7 +11878,18 @@ static void refreshChannelSelectorLabel() {
 
             lv_obj_t *header = lv_obj_get_parent(s_channelSelectorBtn);
             if (header) {
-                lv_coord_t maxW = lv_obj_get_width(header) - 110;
+                lv_coord_t maxW = lv_obj_get_width(header) / 2;
+
+                // Keep selector from colliding with centered clock text.
+                if (s_chatHeaderTime && lv_obj_get_parent(s_chatHeaderTime) == header) {
+                    lv_obj_update_layout(header);
+                    lv_obj_update_layout(s_chatHeaderTime);
+                    lv_coord_t selectorLeft = lv_obj_get_x(s_channelSelectorBtn);
+                    lv_coord_t clockLeft = lv_obj_get_x(s_chatHeaderTime);
+                    lv_coord_t maxBeforeClock = clockLeft - selectorLeft - 6;
+                    if (maxBeforeClock > 0 && maxBeforeClock < maxW) maxW = maxBeforeClock;
+                }
+
                 if (maxW > 0 && desiredW > maxW) desiredW = maxW;
             }
             if (desiredW < 44) desiredW = 44;
@@ -11808,7 +11929,7 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         lv_obj_clear_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_channelList);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
         }
@@ -11819,7 +11940,7 @@ static void setChannelDropdownVisible(bool visible) {
 #endif
     } else {
         lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
         s_cardputerDropdownSelection = -1;
 #endif
     }
@@ -12014,9 +12135,10 @@ static void layoutHeaderInlineItems() {
     lv_coord_t slotEnd = battLeft - 2;
 
     if (slotEnd <= slotStart || timeW <= 0) {
-        lv_obj_align_to(s_chatHeaderTime, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 6, headerTextYOffset);
+        lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
     } else {
-        lv_coord_t x = slotStart + (slotEnd - slotStart - timeW) / 2;
+        lv_coord_t headerW = lv_obj_get_width(s_chatHeaderBar);
+        lv_coord_t x = (headerW - timeW) / 2;
         if (x < slotStart) x = slotStart;
         lv_coord_t maxX = slotEnd - timeW;
         if (x > maxX) x = maxX;
@@ -13639,9 +13761,11 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(s_chatShortcutText, "(H)elp");
+    lv_label_set_text(s_chatShortcutText, "C(h)annels");
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive");
 #else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive   (H)elp");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)annels   (D)M   (N)odes   (L)ive");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
