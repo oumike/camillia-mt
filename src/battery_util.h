@@ -7,5 +7,5 @@ void batteryInitAdc();
 // Read local battery voltage in volts.
 float batteryReadVoltage();
 
-// Read local battery percentage mapped to BATT_VMIN..BATT_VMAX.
+// Read local battery percentage mapped from voltage via Li-ion SOC curve.
 uint8_t batteryReadPercent();

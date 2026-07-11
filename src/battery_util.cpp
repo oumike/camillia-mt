@@ -125,10 +125,37 @@ struct BatteryFilterState {
 static BatteryFilterState sBatteryFilter = {};
 
 static int batteryVoltageToPct(float vbat) {
+    // Use a Li-ion OCV curve rather than a linear 3.0V..4.2V ramp so
+    // displayed SOC better matches real runtime across all battery builds.
+    struct CurvePt {
+        float v;
+        uint8_t pct;
+    };
+    static const CurvePt kLiIonCurve[] = {
+        {4.20f, 100}, {4.15f, 95}, {4.11f, 90}, {4.08f, 85},
+        {4.02f, 75},  {3.98f, 65}, {3.95f, 55}, {3.91f, 45},
+        {3.87f, 35},  {3.85f, 30}, {3.84f, 25}, {3.82f, 20},
+        {3.80f, 15},  {3.79f, 10}, {3.77f, 5},  {3.73f, 2},
+        {3.70f, 0},
+    };
+
     if (vbat <= 0.0f) return 0;
-    float pctf = (vbat - BATT_VMIN) / (BATT_VMAX - BATT_VMIN) * 100.0f;
-    int pct = (int)(pctf + 0.5f);
-    return clampPct(pct);
+    if (vbat >= kLiIonCurve[0].v) return 100;
+    const int last = (int)(sizeof(kLiIonCurve) / sizeof(kLiIonCurve[0])) - 1;
+    if (vbat <= kLiIonCurve[last].v) return 0;
+
+    for (int i = 0; i < last; i++) {
+        const CurvePt &hi = kLiIonCurve[i];
+        const CurvePt &lo = kLiIonCurve[i + 1];
+        if (vbat <= hi.v && vbat >= lo.v) {
+            float span = hi.v - lo.v;
+            if (span <= 0.0001f) return (int)lo.pct;
+            float t = (vbat - lo.v) / span;
+            float pctf = lo.pct + (hi.pct - lo.pct) * t;
+            return clampPct((int)(pctf + 0.5f));
+        }
+    }
+    return 0;
 }
 
 static void batteryResetFilter() {
