@@ -2,7 +2,7 @@
 
 Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
-**Website:** <https://www.sumat.org/camillia>
+**Website:** <https://camillia.sumat.org/>
 
 ## Table of Contents
 
