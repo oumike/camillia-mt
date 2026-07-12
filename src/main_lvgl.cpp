@@ -18,6 +18,7 @@
 #include "gps.h"
 #include "keyboard.h"
 #include "web_config.h"
+#include "ota_update.h"
 #include "debug_flags.h"
 #include "utf8_utils.h"
 #include "fonts/roboto_splash_fonts.h"
@@ -318,6 +319,8 @@ static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
 static int s_cfgActions[20] = {};
 static char s_cfgStatus[96] = "";
+static bool s_cfgOtaInstallArmed = false;
+static char s_cfgOtaLatestTag[48] = "";
 static int s_cfgConfirmAction = -1;
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
@@ -957,6 +960,7 @@ enum CfgActionId {
     CFG_ACTION_SNF_CLIENT,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
+    CFG_ACTION_OTA_UPDATE,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
@@ -1985,6 +1989,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
+            break;
+        case CFG_ACTION_OTA_UPDATE:
+            if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
+                snprintf(buf, bufLen, "Firmware Update: Install %s", s_cfgOtaLatestTag);
+            } else {
+                snprintf(buf, bufLen, "Firmware Update: Check");
+            }
             break;
         case CFG_ACTION_CLEAR_MSGS:
             snprintf(buf, bufLen, "Clear Messages");
@@ -3260,6 +3271,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
@@ -8417,6 +8429,8 @@ static void openCfgModal() {
     initCfgActions();
     s_cfgSelection = 0;
     s_cfgStatus[0] = '\0';
+    s_cfgOtaInstallArmed = false;
+    s_cfgOtaLatestTag[0] = '\0';
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
     s_cfgLastActivateMs = 0;
@@ -8761,6 +8775,68 @@ static void performCfgAction(int actionId) {
             persistSplashMelodySetting();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Splash melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
+
+        case CFG_ACTION_OTA_UPDATE: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_UPDATE");
+
+            if (!s_cfgOtaInstallArmed) {
+                OtaCheckResult check = {};
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Checking latest firmware...");
+                refreshCfgModal();
+
+                bool ok = otaCheckLatestRelease(check);
+                if (!ok || !check.ok) {
+                    s_cfgOtaInstallArmed = false;
+                    s_cfgOtaLatestTag[0] = '\0';
+                    snprintf(s_cfgStatus,
+                             sizeof(s_cfgStatus),
+                             "OTA check failed: %.58s",
+                             check.error[0] ? check.error : "unknown");
+                    break;
+                }
+
+                strncpy(s_cfgOtaLatestTag, check.latestTag, sizeof(s_cfgOtaLatestTag) - 1);
+                s_cfgOtaLatestTag[sizeof(s_cfgOtaLatestTag) - 1] = '\0';
+
+                if (check.updateAvailable) {
+                    s_cfgOtaInstallArmed = true;
+                    snprintf(s_cfgStatus,
+                             sizeof(s_cfgStatus),
+                             "Update found: %.28s (Enter=Install)",
+                             s_cfgOtaLatestTag[0] ? s_cfgOtaLatestTag : "latest");
+                } else {
+                    s_cfgOtaInstallArmed = false;
+                    snprintf(s_cfgStatus,
+                             sizeof(s_cfgStatus),
+                             "Already up to date (%s)",
+                             check.latestTag[0] ? check.latestTag : APP_VERSION);
+                }
+            } else {
+                char err[160] = {};
+                const char *targetTag = s_cfgOtaLatestTag[0] ? s_cfgOtaLatestTag : nullptr;
+
+                snprintf(s_cfgStatus,
+                         sizeof(s_cfgStatus),
+                         "Installing %.28s...",
+                         targetTag ? targetTag : "latest");
+                refreshCfgModal();
+
+                bool ok = otaInstallLatestRelease(targetTag, err, sizeof(err));
+                if (ok) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "OTA installed - rebooting...");
+                    refreshCfgModal();
+                    delay(700);
+                    ESP.restart();
+                } else {
+                    s_cfgOtaInstallArmed = false;
+                    s_cfgOtaLatestTag[0] = '\0';
+                    snprintf(s_cfgStatus,
+                             sizeof(s_cfgStatus),
+                             "OTA failed: %.64s",
+                             err[0] ? err : "unknown");
+                }
+            }
+        } break;
 
         case CFG_ACTION_CLEAR_MSGS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_MSGS");

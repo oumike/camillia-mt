@@ -165,6 +165,7 @@ for env_name in "${RELEASE_ENVS[@]}"; do
     flash_size="$(env_flash_size "$env_name")"
     d=".pio/build/${env_name}"
     out="dist/camillia-mt-${out_name}-${TAG}.bin"
+    ota_out="dist/camillia-mt-${out_name}-${TAG}-ota.bin"
     echo "  ${env_name} (${flash_size}) -> ${out}"
     $ESPTOOL --chip esp32s3 merge_bin \
         -o "${out}" \
@@ -175,6 +176,7 @@ for env_name in "${RELEASE_ENVS[@]}"; do
         0x8000  "${d}/partitions.bin" \
         0xe000  "${BOOT_APP0}" \
         0x10000 "${d}/firmware.bin"
+    cp "${d}/firmware.bin" "${ota_out}"
     cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${TAG}.elf"
 done
 

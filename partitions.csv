@@ -1,7 +1,9 @@
 # Name,   Type, SubType, Offset,   Size,    Flags
-# App at 0x10000 (default upload address). NVS after app = 64KB.
+# Dual-slot OTA layout (fits 8MB+ flashes):
+#   app0/app1 are equal-size slots for safe in-field updates.
+#   SPIFFS is intentionally omitted (unused in this project).
 otadata,  data, ota,     0x9000,   0x2000,
-app0,     app,  ota_0,   0x10000,  0x300000,
-nvs,      data, nvs,     0x310000, 0x10000,
-spiffs,   data, spiffs,  0x320000, 0xC0000,
-coredump, data, coredump,0x3F0000, 0x10000,
+app0,     app,  ota_0,   0x10000,  0x320000,
+app1,     app,  ota_1,   0x330000, 0x320000,
+nvs,      data, nvs,     0x650000, 0x10000,
+coredump, data, coredump,0x660000, 0x10000,
