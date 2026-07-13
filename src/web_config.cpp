@@ -22,6 +22,9 @@
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 static const uint32_t kReleaseCheckTimeoutMs = 7000;
+static const uint32_t kWebTlsMinInternalFree = 70000;
+static const uint32_t kWebTlsMinLargestBlock = 52000;
+static const bool kWebDeviceReleaseCheckEnabled = false;
 static const char    *kLatestReleaseApiUrl = "https://api.github.com/repos/oumike/camillia-mt/releases/latest";
 static const char    *kLatestVersionRawUrl = "https://raw.githubusercontent.com/oumike/camillia-mt/main/VERSION";
 static const char    *kLatestReleasePageUrl = "https://github.com/oumike/camillia-mt/releases/latest";
@@ -58,6 +61,7 @@ static uint32_t       gRebootAtMs      = 0;
 
 static int compareVersionTags(const char *a, const char *b);
 static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut);
+static void logWebHttpsDiag(const char *stage, const char *url = nullptr);
 
 enum ReleaseCheckState : uint8_t {
     RELEASE_CHECK_IDLE = 0,
@@ -121,8 +125,20 @@ static bool ensureWifiMode(wifi_mode_t mode, const char *stageTag) {
 static void runQueuedReleaseCheck() {
     if (gReleaseCheckState != RELEASE_CHECK_PENDING) return;
 
+    if (!kWebDeviceReleaseCheckEnabled) {
+        gReleaseCheckState = RELEASE_CHECK_DONE_ERR;
+        gReleaseCheckStartedAtMs = millis();
+        gReleaseCheckFinishedAtMs = gReleaseCheckStartedAtMs;
+        strncpy(gReleaseCheckErr,
+                "Device-side release check disabled on this build",
+                sizeof(gReleaseCheckErr) - 1);
+        gReleaseCheckErr[sizeof(gReleaseCheckErr) - 1] = '\0';
+        return;
+    }
+
     gReleaseCheckState = RELEASE_CHECK_RUNNING;
     gReleaseCheckStartedAtMs = millis();
+    logWebHttpsDiag("release-check-start");
 
     String latest;
     String url;
@@ -136,6 +152,7 @@ static void runQueuedReleaseCheck() {
         strncpy(gReleaseCheckUrl, url.c_str(), sizeof(gReleaseCheckUrl) - 1);
         gReleaseCheckUrl[sizeof(gReleaseCheckUrl) - 1] = '\0';
         gReleaseCheckState = RELEASE_CHECK_DONE_OK;
+        Serial.printf("[web-https] release-check-ok latest=%s\n", gReleaseCheckLatest);
     } else {
         strncpy(gReleaseCheckErr, err.c_str(), sizeof(gReleaseCheckErr) - 1);
         gReleaseCheckErr[sizeof(gReleaseCheckErr) - 1] = '\0';
@@ -147,6 +164,7 @@ static void runQueuedReleaseCheck() {
         strncat(gReleaseCheckErr, memDiag,
                 sizeof(gReleaseCheckErr) - strlen(gReleaseCheckErr) - 1);
         gReleaseCheckState = RELEASE_CHECK_DONE_ERR;
+        Serial.printf("[web-https] release-check-fail err=%s\n", gReleaseCheckErr);
     }
 
     gReleaseCheckFinishedAtMs = millis();
@@ -243,6 +261,54 @@ static void scheduleReboot(uint32_t delayMs) {
 static bool monitorDebugEnabled() {
     if (!gCfg) return false;
     return gCfg->debugAcks || gCfg->debugMessages || gCfg->debugGps;
+}
+
+static void logWebHttpsDiag(const char *stage, const char *url) {
+    size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (url && url[0]) {
+        Serial.printf("[web-https] %s url=%s [heap int free=%u largest=%u]\n",
+                      stage ? stage : "event",
+                      url,
+                      (unsigned)freeInt,
+                      (unsigned)largestInt);
+    } else {
+        Serial.printf("[web-https] %s [heap int free=%u largest=%u]\n",
+                      stage ? stage : "event",
+                      (unsigned)freeInt,
+                      (unsigned)largestInt);
+    }
+}
+
+static void preferExternalHeapForWebHttps() {
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+    static bool enabled = false;
+    if (!enabled) {
+        // Route generic heap allocations to PSRAM first, preserving internal
+        // contiguous blocks needed by mbedTLS/esp-sha during handshake.
+        heap_caps_malloc_extmem_enable(0);
+        enabled = true;
+    }
+#endif
+}
+
+static bool webHasHeapForTls(String &errOut) {
+    size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (freeInt >= kWebTlsMinInternalFree && largestInt >= kWebTlsMinLargestBlock) {
+        errOut = "";
+        return true;
+    }
+
+    char buf[128];
+    snprintf(buf,
+             sizeof(buf),
+             "TLS skipped (low heap): int_free=%u largest=%u",
+             (unsigned)freeInt,
+             (unsigned)largestInt);
+    errOut = buf;
+    logWebHttpsDiag("tls-skip-low-heap");
+    return false;
 }
 
 static void setMonitorDebugEnabled(bool enabled) {
@@ -369,11 +435,19 @@ static bool fetchLatestTagFromVersionFile(String &tagOut, String &errOut) {
     tagOut = "";
     errOut = "";
 
+    preferExternalHeapForWebHttps();
+    if (!webHasHeapForTls(errOut)) {
+        Serial.printf("[web-https] version-skip err=%s\n", errOut.c_str());
+        return false;
+    }
+    logWebHttpsDiag("version-begin", kLatestVersionRawUrl);
+
     WiFiClientSecure rawClient;
     rawClient.setInsecure();
 
     HTTPClient raw;
     if (!raw.begin(rawClient, kLatestVersionRawUrl)) {
+        logWebHttpsDiag("version-begin-failed", kLatestVersionRawUrl);
         errOut = "Failed to start VERSION request";
         return false;
     }
@@ -382,6 +456,7 @@ static bool fetchLatestTagFromVersionFile(String &tagOut, String &errOut) {
     raw.addHeader("User-Agent", "camillia-mt-webcfg");
 
     int rawCode = raw.GET();
+    Serial.printf("[web-https] version-http code=%d\n", rawCode);
     if (rawCode <= 0) {
         errOut = "VERSION network error";
         raw.end();
@@ -410,6 +485,12 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
     urlOut = "";
     errOut = "";
 
+    preferExternalHeapForWebHttps();
+    if (!webHasHeapForTls(errOut)) {
+        Serial.printf("[web-https] api-skip err=%s\n", errOut.c_str());
+        return false;
+    }
+
     if (WiFi.status() != WL_CONNECTED) {
         errOut = "WiFi not connected";
         return false;
@@ -417,10 +498,12 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
 
     WiFiClientSecure client;
     client.setInsecure();
+    logWebHttpsDiag("api-begin", kLatestReleaseApiUrl);
 
     String apiErr;
     HTTPClient http;
     if (!http.begin(client, kLatestReleaseApiUrl)) {
+        logWebHttpsDiag("api-begin-failed", kLatestReleaseApiUrl);
         apiErr = "Failed to start HTTPS request";
     } else {
         http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
@@ -428,6 +511,7 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
         http.addHeader("Accept", "application/vnd.github+json");
 
         int code = http.GET();
+        Serial.printf("[web-https] api-http code=%d\n", code);
         if (code <= 0) {
             apiErr = "Network error";
         } else if (code != 200) {
@@ -1869,7 +1953,6 @@ static void sendConfigPage(const char *msg = "") {
                             "var btn=document.getElementById('check-release-btn');"
                             "if(btn)btn.disabled=true;"
                             "var done=function(){if(btn)btn.disabled=false;};"
-                            "var deadline=Date.now()+35000;"
                             "setReleaseCheckResult('Checking latest release...','#b0b8c8');"
                             "var cur='" APP_VERSION "';"
                             "var releaseUrl='https://github.com/oumike/camillia-mt/releases/latest';"
@@ -1912,9 +1995,11 @@ static void sendConfigPage(const char *msg = "") {
                                     "setReleaseCheckResult('You are up to date ('+cur+'). Latest: '+latest+'.','#8ef2b8');"
                                     "done();"
                                 "})"
-                                ".catch(function(){"
-                                    "setReleaseCheckResult('Checking latest release on device...','#b0b8c8');"
-                                    "pollDeviceReleaseCheck(deadline,done);"
+                                ".catch(function(err){"
+                                    "var msg=(err&&err.message)?err.message:'network error';"
+                                    "if(msg==='timeout')msg='request timed out';"
+                                    "setReleaseCheckResult('Release check failed in browser: '+msg,'#ff9f9f');"
+                                    "done();"
                                 "});"
                         "}"
                         "function liveSplitTimestamp(t){"
@@ -3052,7 +3137,19 @@ static void handleGetReleaseCheck() {
     if (startNow) {
         if (gReleaseCheckState != RELEASE_CHECK_RUNNING &&
             gReleaseCheckState != RELEASE_CHECK_PENDING) {
-            queueReleaseCheckNow();
+            if (kWebDeviceReleaseCheckEnabled) {
+                Serial.println("[web-https] release-check queued by client");
+                queueReleaseCheckNow();
+            } else {
+                clearReleaseCheckResult();
+                gReleaseCheckState = RELEASE_CHECK_DONE_ERR;
+                gReleaseCheckStartedAtMs = millis();
+                gReleaseCheckFinishedAtMs = gReleaseCheckStartedAtMs;
+                strncpy(gReleaseCheckErr,
+                        "Device-side release check disabled on this build",
+                        sizeof(gReleaseCheckErr) - 1);
+                gReleaseCheckErr[sizeof(gReleaseCheckErr) - 1] = '\0';
+            }
         }
     }
 
@@ -3310,7 +3407,6 @@ static void registerCommonRoutes() {
     server.on("/chat-send",         HTTP_POST, handlePostChatSend);
 #endif
     server.on("/chart-data",        HTTP_GET,  handleGetChartData);
-    server.on("/release-check",     HTTP_GET,  handleGetReleaseCheck);
     server.on("/logout",            HTTP_GET,  handleGetLogout);
     server.on("/announce",          HTTP_POST, handlePostAnnounce);
     server.on("/telemetry",         HTTP_POST, handlePostTelemetry);
@@ -3505,7 +3601,6 @@ void webCfgLoop() {
     if (!running) return;
 
     server.handleClient();
-    runQueuedReleaseCheck();
     if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
         gRebootPending = false;
         server.stop();

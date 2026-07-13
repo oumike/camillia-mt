@@ -10,6 +10,14 @@ struct OtaCheckResult {
     char error[160];
 };
 
+typedef void (*OtaInstallProgressCb)(size_t writtenBytes, size_t totalBytes);
+
+// Allows OTA networking only when explicitly enabled by the caller.
+void otaSetNetworkAllowed(bool allowed);
+
+// True when OTA check treats latest fetched release as update-available.
+bool otaTreatLatestAsUpdateForTestingEnabled();
+
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 
@@ -18,4 +26,7 @@ bool otaCheckLatestRelease(OtaCheckResult &out);
 
 // Downloads and installs the latest release binary for this device target.
 // If tag is null/empty, it fetches the latest release tag first.
-bool otaInstallLatestRelease(const char *tag, char *errOut, size_t errLen);
+bool otaInstallLatestRelease(const char *tag,
+                             char *errOut,
+                             size_t errLen,
+                             OtaInstallProgressCb progressCb = nullptr);

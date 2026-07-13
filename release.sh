@@ -167,11 +167,11 @@ for env_name in "${RELEASE_ENVS[@]}"; do
     out="dist/camillia-mt-${out_name}-${TAG}.bin"
     ota_out="dist/camillia-mt-${out_name}-${TAG}-ota.bin"
     echo "  ${env_name} (${flash_size}) -> ${out}"
-    $ESPTOOL --chip esp32s3 merge_bin \
+    $ESPTOOL --chip esp32s3 merge-bin \
         -o "${out}" \
-        --flash_mode dio \
-        --flash_freq 80m \
-        --flash_size "${flash_size}" \
+        --flash-mode dio \
+        --flash-freq 80m \
+        --flash-size "${flash_size}" \
         0x0     "${d}/bootloader.bin" \
         0x8000  "${d}/partitions.bin" \
         0xe000  "${BOOT_APP0}" \

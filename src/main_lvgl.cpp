@@ -32,6 +32,7 @@
 #include <ctype.h>
 #include <esp_mac.h>
 #include <esp_random.h>
+#include <esp_heap_caps.h>
 #include <nvs_flash.h>
 #include <SD.h>
 #include <Curve25519.h>
@@ -145,6 +146,10 @@ static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
 static int s_cfgConfirmPendingAction = -1;
+// Readable action-result popup over CFG; replaces truncated header notices.
+static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
+static lv_obj_t *s_cfgActionMsgModal = nullptr;
+static uint32_t s_cfgActionMsgOpenedMs = 0;
 
 // First-boot onboarding modal — shown once after a fresh flash (no NVS state).
 // Stage 0: (only if SD config present) ask whether to import it.
@@ -329,6 +334,7 @@ static uint32_t s_cfgEnterLockUntilMs = 0;
 static bool s_cfgAwaitEnterRelease = false;
 static bool s_cfgInfoPanelFocused = false;
 static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
+static char s_otaWorkerBootNotice[160] = "";
 static uint32_t s_selectedMsgReplyPacketId = 0;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static constexpr size_t kReplyPreviewTextMax = 128;
@@ -420,6 +426,21 @@ static int s_stateMapBootstrapFailed = 0;
 static uint32_t s_stateMapOnDemandLastTryMs = 0;
 static char s_stateMapOnDemandLastCode[3] = "";
 static constexpr bool kStateMapsEnabled = false;
+static constexpr uint32_t kRuntimeTlsMinInternalFree = 70000;
+static constexpr uint32_t kRuntimeTlsMinLargestBlock = 52000;
+
+static bool runtimeHttpsHeapOkay(const char *tag) {
+    size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (freeInt >= kRuntimeTlsMinInternalFree && largestInt >= kRuntimeTlsMinLargestBlock) {
+        return true;
+    }
+    Serial.printf("[https] skip %s (low heap int_free=%u largest=%u)\n",
+                  tag ? tag : "request",
+                  (unsigned)freeInt,
+                  (unsigned)largestInt);
+    return false;
+}
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr bool kPagerWheelChatNav = true;
 static constexpr bool kUseScrollKeysForMainNav = true;
@@ -574,6 +595,9 @@ static void activateCfgSelection();
 static void performCfgAction(int actionId);
 static void openCfgConfirmModal(int actionId);
 static void closeCfgConfirmModal();
+static void openCfgActionMessageModal(const char *msg);
+static void closeCfgActionMessageModal();
+static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 static void openNodeInfoModal();
@@ -659,8 +683,17 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void serviceNeighborInfoAnnounce(uint32_t nowMs);
 static void applyTimezoneFromConfig();
+static void setOtaWorkerBootNotice(const char *msg);
 static void syncWifiCredsToPrefs();
 static void persistWebCfgEnabled();
+static void requestSkipWebAutoStartOnce();
+static bool consumeSkipWebAutoStartOnce();
+static bool requestOtaWorkerModeOnce();
+static bool isOtaWorkerModeRequestedRtc();
+static bool consumeOtaWorkerModeRtcOnce();
+static bool isOtaWorkerModeRequestedOnce();
+static bool consumeOtaWorkerModeOnce();
+static bool runOtaWorkerModeIfRequested();
 static bool nodesPanelCanDownloadTiles();
 static void nodesPanelWifiEnter();
 static void nodesPanelWifiRestore();
@@ -2033,6 +2066,7 @@ static const char *cfgDeviceRoleName(uint8_t role) {
 static bool cfgActionNeedsConfirm(int actionId) {
     return actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
+        || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
@@ -2063,6 +2097,328 @@ static void persistWebCfgEnabled() {
     if (!p.begin("camillia", false)) return;
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
+}
+
+// NVS keys are limited to 15 chars on ESP32.
+static constexpr const char *kPrefSkipWebAutoOnce = "skipWebAuto1";
+static constexpr const char *kPrefOtaWorkerOnce = "otaWorker1";
+static constexpr uint32_t kOtaWorkerRtcMagic = 0x4F544131UL;  // "OTA1"
+RTC_DATA_ATTR static uint32_t s_otaWorkerRtcFlag = 0;
+
+static void setOtaWorkerBootNotice(const char *msg) {
+    if (!msg) msg = "";
+    strncpy(s_otaWorkerBootNotice, msg, sizeof(s_otaWorkerBootNotice) - 1);
+    s_otaWorkerBootNotice[sizeof(s_otaWorkerBootNotice) - 1] = '\0';
+}
+
+static void requestSkipWebAutoStartOnce() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    p.putBool(kPrefSkipWebAutoOnce, true);
+    p.end();
+}
+
+static bool consumeSkipWebAutoStartOnce() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return false;
+    bool skip = p.getBool(kPrefSkipWebAutoOnce, false);
+    if (skip) {
+        p.putBool(kPrefSkipWebAutoOnce, false);
+    }
+    p.end();
+    return skip;
+}
+
+static bool requestOtaWorkerModeOnce() {
+    // RTC survives software reboot and gives us a second, low-friction path
+    // when NVS writes are temporarily unreliable.
+    s_otaWorkerRtcFlag = kOtaWorkerRtcMagic;
+
+    Preferences p;
+    if (!p.begin("camillia", false)) return true;
+    p.putBool(kPrefOtaWorkerOnce, true);
+    p.end();
+
+    Preferences v;
+    if (!v.begin("camillia", true)) return true;
+    bool verify = v.getBool(kPrefOtaWorkerOnce, false);
+    v.end();
+    return verify || (s_otaWorkerRtcFlag == kOtaWorkerRtcMagic);
+}
+
+static bool isOtaWorkerModeRequestedRtc() {
+    return s_otaWorkerRtcFlag == kOtaWorkerRtcMagic;
+}
+
+static bool consumeOtaWorkerModeRtcOnce() {
+    bool run = (s_otaWorkerRtcFlag == kOtaWorkerRtcMagic);
+    if (run) {
+        s_otaWorkerRtcFlag = 0;
+    }
+    return run;
+}
+
+static bool isOtaWorkerModeRequestedOnce() {
+    Preferences p;
+    if (!p.begin("camillia", true)) return false;
+    bool run = p.getBool(kPrefOtaWorkerOnce, false);
+    p.end();
+    return run;
+}
+
+static bool consumeOtaWorkerModeOnce() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return false;
+    bool run = p.getBool(kPrefOtaWorkerOnce, false);
+    if (run) {
+        p.putBool(kPrefOtaWorkerOnce, false);
+    }
+    p.end();
+    return run;
+}
+
+static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) {
+    displayDev().fillScreen(TFT_BLACK);
+    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
+    displayDev().setTextSize(1);
+    displayDev().setFont(&fonts::DejaVu12);
+
+    int y = 22;
+    if (line1 && line1[0]) {
+        displayDev().drawString(line1, 8, y);
+        y += 22;
+    }
+    if (line2 && line2[0]) {
+        displayDev().drawString(line2, 8, y);
+    }
+}
+
+static void otaWorkerDrawProgress(const char *title,
+                                  const char *detail,
+                                  size_t written,
+                                  size_t total,
+                                  bool stalled) {
+    displayDev().fillScreen(TFT_BLACK);
+    displayDev().setTextSize(1);
+    displayDev().setFont(&fonts::DejaVu12);
+
+    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
+    if (title && title[0]) displayDev().drawString(title, 8, 14);
+
+    const int barX = 8;
+    const int barY = 52;
+    const int barW = max(120, (int)displayDev().width() - 16);
+    const int barH = 18;
+    displayDev().drawRect(barX, barY, barW, barH, TFT_WHITE);
+
+    int fillW = 0;
+    int pct = 0;
+    if (total > 0) {
+        pct = (int)((written * 100UL) / total);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        fillW = (barW - 2) * pct / 100;
+    }
+
+    if (fillW > 0) {
+        uint16_t fillColor = stalled ? TFT_ORANGE : TFT_GREEN;
+        displayDev().fillRect(barX + 1, barY + 1, fillW, barH - 2, fillColor);
+    }
+
+    char pctBuf[24];
+    if (total > 0) snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
+    else snprintf(pctBuf, sizeof(pctBuf), "working...");
+    displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
+    displayDev().drawString(pctBuf, 8, 78);
+
+    char bytesBuf[64];
+    if (total > 0) {
+        snprintf(bytesBuf,
+                 sizeof(bytesBuf),
+                 "%lu / %lu KB",
+                 (unsigned long)(written / 1024UL),
+                 (unsigned long)(total / 1024UL));
+    } else {
+        snprintf(bytesBuf,
+                 sizeof(bytesBuf),
+                 "%lu KB downloaded",
+                 (unsigned long)(written / 1024UL));
+    }
+    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
+    displayDev().drawString(bytesBuf, 8, 102);
+
+    if (detail && detail[0]) {
+        displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
+        displayDev().drawString(detail, 8, 126);
+    }
+}
+
+static bool otaWorkerEnsureWifiConnected() {
+    if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
+        return true;
+    }
+    if (!s_cfg.wifiSsid[0]) {
+        return false;
+    }
+
+    wifi_mode_t mode = WiFi.getMode();
+    switch (mode) {
+        case WIFI_OFF:
+            WiFi.mode(WIFI_STA);
+            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            break;
+        case WIFI_STA:
+            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            break;
+#ifdef WIFI_AP_STA
+        case WIFI_AP:
+            WiFi.mode(WIFI_AP_STA);
+            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            break;
+#endif
+        case WIFI_AP_STA:
+            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            break;
+        default:
+            break;
+    }
+
+    uint32_t startMs = millis();
+    while ((millis() - startMs) < 12000UL) {
+        if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
+            return true;
+        }
+        delay(120);
+    }
+
+    return (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP);
+}
+
+static bool runOtaWorkerModeIfRequested() {
+    bool rtcRequested = consumeOtaWorkerModeRtcOnce();
+    bool nvsRequested = consumeOtaWorkerModeOnce();
+    if (!(rtcRequested || nvsRequested)) return false;
+
+    otaSetNetworkAllowed(true);
+
+    Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
+                  rtcRequested ? 1 : 0,
+                  nvsRequested ? 1 : 0);
+    otaWorkerDrawStatus("OTA minimal mode", "Preparing network...");
+
+    if (!otaWorkerEnsureWifiConnected()) {
+        Serial.println("[ota-worker] wifi unavailable");
+        otaWorkerDrawStatus("OTA minimal mode", "WiFi not connected");
+        delay(1800);
+        otaSetNetworkAllowed(false);
+        return true;
+    }
+
+    otaWorkerDrawStatus("OTA minimal mode", "Checking latest release...");
+    OtaCheckResult check = {};
+    if (!otaCheckLatestRelease(check) || !check.ok) {
+        Serial.printf("[ota-worker] check failed: %s\n", check.error);
+        otaWorkerDrawStatus("OTA check failed", check.error[0] ? check.error : "unknown");
+        char notice[sizeof(s_otaWorkerBootNotice)] = {};
+        snprintf(notice,
+                 sizeof(notice),
+                 "OTA check failed: %s",
+                 check.error[0] ? check.error : "unknown");
+        setOtaWorkerBootNotice(notice);
+        delay(1800);
+        otaSetNetworkAllowed(false);
+        return true;
+    }
+
+    if (!check.updateAvailable) {
+        Serial.printf("[ota-worker] up to date: %s\n", check.latestTag);
+        otaWorkerDrawStatus("Already up to date",
+                            check.latestTag[0] ? check.latestTag : APP_VERSION);
+        char notice[sizeof(s_otaWorkerBootNotice)] = {};
+        snprintf(notice,
+                 sizeof(notice),
+                 "Firmware already up to date (%s)",
+                 check.latestTag[0] ? check.latestTag : APP_VERSION);
+        setOtaWorkerBootNotice(notice);
+        delay(1400);
+        otaSetNetworkAllowed(false);
+        return true;
+    }
+
+    otaWorkerDrawStatus("Installing update", check.latestTag[0] ? check.latestTag : "latest");
+    static volatile size_t s_otaWorkerBytesWritten = 0;
+    static volatile size_t s_otaWorkerBytesTotal = 0;
+    static volatile uint32_t s_otaWorkerLastProgressMs = 0;
+    static volatile size_t s_otaWorkerLastAdvancedBytes = 0;
+    static uint32_t s_otaWorkerLastDrawMs = 0;
+    auto onOtaProgress = [](size_t written, size_t total) {
+        const uint32_t now = millis();
+        if (written != s_otaWorkerLastAdvancedBytes) {
+            s_otaWorkerLastAdvancedBytes = written;
+            s_otaWorkerLastProgressMs = now;
+        }
+        s_otaWorkerBytesWritten = written;
+        s_otaWorkerBytesTotal = total;
+
+        const bool stalled = (s_otaWorkerLastProgressMs != 0)
+                          && ((uint32_t)(now - s_otaWorkerLastProgressMs) > 3000UL);
+        if ((uint32_t)(now - s_otaWorkerLastDrawMs) >= 180UL || stalled) {
+            otaWorkerDrawProgress("Installing update",
+                                  stalled ? "No progress for 3s..." : "Downloading...",
+                                  written,
+                                  total,
+                                  stalled);
+            s_otaWorkerLastDrawMs = now;
+        }
+    };
+
+    s_otaWorkerBytesWritten = 0;
+    s_otaWorkerBytesTotal = 0;
+    s_otaWorkerLastAdvancedBytes = 0;
+    s_otaWorkerLastProgressMs = millis();
+    s_otaWorkerLastDrawMs = 0;
+    otaWorkerDrawProgress("Installing update",
+                          "Starting download...",
+                          0,
+                          0,
+                          false);
+
+    char err[160] = {};
+    if (otaInstallLatestRelease(check.latestTag[0] ? check.latestTag : nullptr,
+                                err,
+                                sizeof(err),
+                                onOtaProgress)) {
+        Serial.println("[ota-worker] install complete, rebooting");
+        otaWorkerDrawStatus("OTA installed", "Rebooting...");
+        delay(700);
+        otaSetNetworkAllowed(false);
+        ESP.restart();
+        return true;
+    }
+
+    // Final refresh with last known transfer counters for context on failure.
+    {
+        size_t curW = (size_t)s_otaWorkerBytesWritten;
+        size_t curT = (size_t)s_otaWorkerBytesTotal;
+        otaWorkerDrawProgress("OTA install failed",
+                              err[0] ? err : "unknown",
+                              curW,
+                              curT,
+                              true);
+    }
+
+    Serial.printf("[ota-worker] install failed: %s\n", err);
+    {
+        char notice[sizeof(s_otaWorkerBootNotice)] = {};
+        snprintf(notice,
+                 sizeof(notice),
+                 "OTA install failed: %s",
+                 err[0] ? err : "unknown");
+        setOtaWorkerBootNotice(notice);
+    }
+    delay(2200);
+    otaSetNetworkAllowed(false);
+    return true;
 }
 
 static void setPagerKeyboardBacklight(bool on) {
@@ -3342,7 +3698,7 @@ static void refreshCfgModal() {
     if (s_cfgSelection < 0) s_cfgSelection = 0;
     if (s_cfgSelection >= s_cfgActionCount) s_cfgSelection = s_cfgActionCount - 1;
 
-    lv_label_set_text(s_cfgHeaderStatus, s_cfgStatus[0] ? s_cfgStatus : "Ready");
+    lv_label_set_text(s_cfgHeaderStatus, "Ready");
 
     lv_obj_clean(s_cfgActionList);
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -3457,6 +3813,7 @@ static void onCfgActionRowPressed(lv_event_t *e) {
 
 static void closeCfgModal() {
     closeCfgConfirmModal();
+    closeCfgActionMessageModal();
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     closeNodeInfoModal();
 #endif
@@ -3466,6 +3823,138 @@ static void closeCfgModal() {
     s_cfgHeaderStatus = nullptr;
     s_cfgAwaitEnterRelease = false;
     s_cfgInfoPanelFocused = false;
+}
+
+static void closeCfgActionMessageModal() {
+    if (lvObjValid(s_cfgActionMsgBackdrop)) {
+        lv_obj_del(s_cfgActionMsgBackdrop);
+    } else if (lvObjValid(s_cfgActionMsgModal)) {
+        lv_obj_del(s_cfgActionMsgModal);
+    }
+    s_cfgActionMsgBackdrop = nullptr;
+    s_cfgActionMsgModal = nullptr;
+    s_cfgActionMsgOpenedMs = 0;
+}
+
+static void onCfgActionMessageBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) == s_cfgActionMsgBackdrop) {
+        closeCfgActionMessageModal();
+    }
+}
+
+static void openCfgActionMessageModal(const char *msg) {
+    if (!s_rootScreen) return;
+
+    const char *displayMsg = msg;
+    while (displayMsg && *displayMsg && isspace((unsigned char)*displayMsg)) {
+        displayMsg++;
+    }
+    if (!displayMsg || !displayMsg[0]) {
+        displayMsg = "No result details available.";
+    }
+
+    Serial.printf("[lvgl-cfg] popup: %s\n", displayMsg);
+
+    closeCfgActionMessageModal();
+
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    int modalW = screenW - 28;
+    if (modalW < 180) modalW = screenW - 8;
+    if (modalW > 320) modalW = 320;
+    lv_coord_t contentW = (lv_coord_t)(modalW - 18);
+    if (contentW < 64) contentW = 64;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyPanelBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
+    const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const lv_color_t hintTextColor = lightUi ? lv_color_hex(0x35567E) : lv_color_hex(0xA7C7FF);
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *bodyFont = &lv_font_montserrat_14;
+#elif defined(DEVICE_TDECK)
+    const lv_font_t *bodyFont = &lv_font_montserrat_14;
+#else
+    const lv_font_t *bodyFont = &lv_font_montserrat_10;
+#endif
+
+    s_cfgActionMsgBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgActionMsgBackdrop, screenW, screenH);
+    lv_obj_align(s_cfgActionMsgBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgActionMsgBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgActionMsgBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgActionMsgBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgActionMsgBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgActionMsgBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgActionMsgBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgActionMsgBackdrop,
+                        onCfgActionMessageBackdropPressed,
+                        LV_EVENT_CLICKED,
+                        nullptr);
+
+    s_cfgActionMsgModal = lv_obj_create(s_cfgActionMsgBackdrop);
+    lv_obj_set_size(s_cfgActionMsgModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgActionMsgModal, screenH - 14, 0);
+    lv_obj_align(s_cfgActionMsgModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_cfgActionMsgModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgActionMsgModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_cfgActionMsgModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgActionMsgModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgActionMsgModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_cfgActionMsgModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgActionMsgModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgActionMsgModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgActionMsgModal,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_cfgActionMsgModal);
+    lv_obj_set_width(title, contentW);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, titleTextColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Action Result");
+
+    lv_obj_t *bodyPanel = lv_obj_create(s_cfgActionMsgModal);
+    lv_obj_set_width(bodyPanel, contentW);
+    lv_coord_t bodyPanelH = (lv_coord_t)(screenH / 3);
+    if (bodyPanelH < 44) bodyPanelH = 44;
+    if (bodyPanelH > 96) bodyPanelH = 96;
+    lv_obj_set_height(bodyPanel, bodyPanelH);
+    lv_obj_add_flag(bodyPanel, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(bodyPanel);
+    lv_obj_set_scrollbar_mode(bodyPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(bodyPanel, bodyPanelBg, 0);
+    lv_obj_set_style_bg_opa(bodyPanel, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(bodyPanel, 1, 0);
+    lv_obj_set_style_border_color(bodyPanel, modalBorder, 0);
+    lv_obj_set_style_pad_left(bodyPanel, 6, 0);
+    lv_obj_set_style_pad_right(bodyPanel, 6, 0);
+    lv_obj_set_style_pad_top(bodyPanel, 4, 0);
+    lv_obj_set_style_pad_bottom(bodyPanel, 4, 0);
+
+    lv_obj_t *body = lv_label_create(bodyPanel);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, bodyFont, 0);
+    lv_obj_set_style_text_color(body, bodyTextColor, 0);
+    lv_obj_set_style_text_opa(body, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body, displayMsg);
+
+    lv_obj_t *hint = lv_label_create(s_cfgActionMsgModal);
+    lv_obj_set_width(hint, contentW);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintTextColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+
+    lv_obj_move_foreground(s_cfgActionMsgBackdrop);
+    s_cfgActionMsgOpenedMs = millis();
 }
 
 #if !defined(DEVICE_TLORA_PAGER_TFT)
@@ -4859,6 +5348,11 @@ static bool nodesDownloadStateMap(const UsStateMapSpec &s,
         url += String(kStateMapImageH);
         url += "&maptype=mapnik";
 
+        if (!runtimeHttpsHeapOkay("state-map static")) {
+            return false;
+        }
+        Serial.printf("[https] state-map static begin url=%s\n", url.c_str());
+
         WiFiClientSecure client;
         client.setInsecure();
         client.setTimeout(5000);
@@ -4867,6 +5361,7 @@ static bool nodesDownloadStateMap(const UsStateMapSpec &s,
         if (http.begin(client, url)) {
             http.addHeader("User-Agent", "camillia-mt/1.0");
             int code = http.GET();
+            Serial.printf("[https] state-map static http=%d\n", code);
             if (code == HTTP_CODE_OK) {
                 if (SD.exists(path.c_str())) SD.remove(path.c_str());
                 File out = SD.open(path.c_str(), FILE_WRITE);
@@ -4941,6 +5436,11 @@ static bool nodesDownloadStateMap(const UsStateMapSpec &s,
     tileUrl += String(ty);
     tileUrl += ".png";
 
+    if (!runtimeHttpsHeapOkay("state-map tile")) {
+        return false;
+    }
+    Serial.printf("[https] state-map tile begin url=%s\n", tileUrl.c_str());
+
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(5000);
@@ -4949,6 +5449,7 @@ static bool nodesDownloadStateMap(const UsStateMapSpec &s,
     if (!http.begin(client, tileUrl)) return false;
     http.addHeader("User-Agent", "camillia-mt/1.0");
     int code = http.GET();
+    Serial.printf("[https] state-map tile http=%d\n", code);
     if (code != HTTP_CODE_OK) {
         http.end();
         return false;
@@ -8576,19 +9077,16 @@ static void openCfgModal() {
 #else
     lv_obj_t *hint = lv_label_create(s_cfgModal);
     lv_obj_set_width(hint, lv_pct(100));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_pad_top(hint, 0, 0);
+    lv_obj_set_style_pad_bottom(hint, 0, 0);
 #if defined(DEVICE_TDECK)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
 #endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text_fmt(hint, "(I) = Info panel   Wheel = Scroll   Click wheel = Swap   Bksp = Back/Close");
-#elif defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "Up/Down/J/K = Select   Enter = Run   (I)nformation   %s = Close", modalCloseKeyLabel());
-#else
-    lv_label_set_text_fmt(hint, "Up/Down = Select   Enter = Run   (I)nformation   %s = Close", modalCloseKeyLabel());
-#endif
+    lv_label_set_text(hint, "To close hit backspace.  (I)nformation");
 #endif
 
     refreshCfgModal();
@@ -8623,9 +9121,11 @@ static void activateCfgSelection() {
 static void performCfgAction(int actionId) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
+    bool showActionPopup = true;
 
     switch (actionId) {
         case CFG_ACTION_WEBCFG: {
+            showActionPopup = false;
             if (s_webCfgEnabled) {
                 Serial.println("[web] CFG action: disable web config");
                 s_webCfgEnabled = false;
@@ -8712,6 +9212,7 @@ static void performCfgAction(int actionId) {
             applyUiThemePalette();
             scheduleThemeRebuild(true);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s", uiThemePresetNameFromCfg());
+            openCfgActionMessageModal(s_cfgStatus);
             // Do not rebuild/clean cfg rows in this same input cycle.
             // The deferred theme rebuild will recreate the modal safely.
             return;
@@ -8778,64 +9279,31 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_OTA_UPDATE: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_UPDATE");
-
-            if (!s_cfgOtaInstallArmed) {
-                OtaCheckResult check = {};
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Checking latest firmware...");
-                refreshCfgModal();
-
-                bool ok = otaCheckLatestRelease(check);
-                if (!ok || !check.ok) {
-                    s_cfgOtaInstallArmed = false;
-                    s_cfgOtaLatestTag[0] = '\0';
-                    snprintf(s_cfgStatus,
-                             sizeof(s_cfgStatus),
-                             "OTA check failed: %.58s",
-                             check.error[0] ? check.error : "unknown");
-                    break;
-                }
-
-                strncpy(s_cfgOtaLatestTag, check.latestTag, sizeof(s_cfgOtaLatestTag) - 1);
-                s_cfgOtaLatestTag[sizeof(s_cfgOtaLatestTag) - 1] = '\0';
-
-                if (check.updateAvailable) {
-                    s_cfgOtaInstallArmed = true;
-                    snprintf(s_cfgStatus,
-                             sizeof(s_cfgStatus),
-                             "Update found: %.28s (Enter=Install)",
-                             s_cfgOtaLatestTag[0] ? s_cfgOtaLatestTag : "latest");
-                } else {
-                    s_cfgOtaInstallArmed = false;
-                    snprintf(s_cfgStatus,
-                             sizeof(s_cfgStatus),
-                             "Already up to date (%s)",
-                             check.latestTag[0] ? check.latestTag : APP_VERSION);
-                }
-            } else {
-                char err[160] = {};
-                const char *targetTag = s_cfgOtaLatestTag[0] ? s_cfgOtaLatestTag : nullptr;
-
+            Serial.println("[ota-worker] firmware update action requested");
+            s_cfgOtaInstallArmed = false;
+            s_cfgOtaLatestTag[0] = '\0';
+            bool flagSaved = requestOtaWorkerModeOnce();
+            bool nvsVisible = isOtaWorkerModeRequestedOnce();
+            bool rtcVisible = isOtaWorkerModeRequestedRtc();
+            bool flagVisible = nvsVisible || rtcVisible;
+            Serial.printf("[ota-worker] request flag saved=%d visible=%d (nvs=%d rtc=%d)\n",
+                          flagSaved ? 1 : 0,
+                          flagVisible ? 1 : 0,
+                          nvsVisible ? 1 : 0,
+                          rtcVisible ? 1 : 0);
+            if (!(flagSaved && flagVisible)) {
                 snprintf(s_cfgStatus,
                          sizeof(s_cfgStatus),
-                         "Installing %.28s...",
-                         targetTag ? targetTag : "latest");
-                refreshCfgModal();
-
-                bool ok = otaInstallLatestRelease(targetTag, err, sizeof(err));
-                if (ok) {
-                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "OTA installed - rebooting...");
-                    refreshCfgModal();
-                    delay(700);
-                    ESP.restart();
-                } else {
-                    s_cfgOtaInstallArmed = false;
-                    s_cfgOtaLatestTag[0] = '\0';
-                    snprintf(s_cfgStatus,
-                             sizeof(s_cfgStatus),
-                             "OTA failed: %.64s",
-                             err[0] ? err : "unknown");
-                }
+                         "OTA request failed (NVS write). Retry.");
+                break;
             }
+            snprintf(s_cfgStatus,
+                     sizeof(s_cfgStatus),
+                     "Rebooting into OTA minimal mode...");
+            refreshCfgModal();
+            openCfgActionMessageModal(s_cfgStatus);
+            delay(800);
+            ESP.restart();
         } break;
 
         case CFG_ACTION_CLEAR_MSGS:
@@ -8878,6 +9346,9 @@ static void performCfgAction(int actionId) {
             break;
     }
 
+    if (showActionPopup && s_cfgStatus[0]) {
+        openCfgActionMessageModal(s_cfgStatus);
+    }
     refreshCfgModal();
 }
 
@@ -8896,6 +9367,9 @@ static void closeCfgConfirmModal() {
 // the CFG screen underneath.
 static void cfgConfirmAccept() {
     int action = s_cfgConfirmPendingAction;
+    if (action == CFG_ACTION_OTA_UPDATE) {
+        Serial.println("[ota-worker] confirm accepted for firmware update");
+    }
     closeCfgConfirmModal();
     if (action >= 0) performCfgAction(action);
 }
@@ -8928,6 +9402,16 @@ static void openCfgConfirmModal(int actionId) {
     if (modalW < 160) modalW = lv_disp_get_hor_res(NULL) - 8;
     if (modalW > 300) modalW = 300;
 
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t actionBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
+    const lv_color_t actionTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
+    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
+    const lv_color_t btnTextColor = lv_color_hex(0xFFFFFF);
+
     // Full-screen backdrop makes the dialog truly modal for touch builds.
     s_cfgConfirmBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_cfgConfirmBackdrop, w, h);
@@ -8944,10 +9428,10 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_align(s_cfgConfirmModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_cfgConfirmModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_cfgConfirmModal, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_cfgConfirmModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_color(s_cfgConfirmModal, modalBg, 0);
     lv_obj_set_style_bg_opa(s_cfgConfirmModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_cfgConfirmModal, 1, 0);
-    lv_obj_set_style_border_color(s_cfgConfirmModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_border_color(s_cfgConfirmModal, modalBorder, 0);
     lv_obj_set_style_pad_all(s_cfgConfirmModal, 10, 0);
     lv_obj_set_style_pad_row(s_cfgConfirmModal, 10, 0);
     lv_obj_set_flex_flow(s_cfgConfirmModal, LV_FLEX_FLOW_COLUMN);
@@ -8958,7 +9442,7 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_t *title = lv_label_create(s_cfgConfirmModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Confirm?");
 
@@ -8966,10 +9450,10 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_set_width(actionBox, lv_pct(100));
     lv_obj_set_height(actionBox, LV_SIZE_CONTENT);
     lv_obj_clear_flag(actionBox, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(actionBox, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_color(actionBox, actionBg, 0);
     lv_obj_set_style_bg_opa(actionBox, LV_OPA_60, 0);
     lv_obj_set_style_border_width(actionBox, 1, 0);
-    lv_obj_set_style_border_color(actionBox, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_border_color(actionBox, modalBorder, 0);
     lv_obj_set_style_pad_left(actionBox, 6, 0);
     lv_obj_set_style_pad_right(actionBox, 6, 0);
     lv_obj_set_style_pad_top(actionBox, 4, 0);
@@ -8978,7 +9462,7 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_t *q = lv_label_create(actionBox);
     lv_obj_set_width(q, lv_pct(100));
     lv_obj_set_style_text_font(q, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(q, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(q, actionTextColor, 0);
     lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(q, LV_LABEL_LONG_WRAP);
     lv_label_set_text_fmt(q, "Action: %s", actionText);
@@ -8995,24 +9479,27 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeConfirmBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+    auto makeConfirmBtn = [](lv_obj_t *parent,
+                             const char *text,
+                             uint32_t bgColor,
+                             lv_color_t txtColor,
                              lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_height(btn, 36);
         lv_obj_set_style_min_width(btn, 84, 0);
         lv_obj_set_style_radius(btn, 4, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(lbl, txtColor, 0);
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
     };
-    makeConfirmBtn(btnRow, "(N)o", 0x6B3030, onCfgConfirmNoPressed);
-    makeConfirmBtn(btnRow, "(Y)es", 0x2F6B30, onCfgConfirmYesPressed);
+    makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
+    makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
 }
 
 // ── First-boot onboarding ─────────────────────────────────────────────────
@@ -9840,10 +10327,10 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // The CFG confirmation dialog is modal: only Y/N (and a close key, which
-        // cancels) are honored — every other shortcut is swallowed while it's up.
+        // The CFG confirmation dialog is modal: Y or Enter confirms, N/close
+        // cancels, and every other shortcut is swallowed while it's up.
         if (s_cfgConfirmModal) {
-            if (k == 'y' || k == 'Y') {
+            if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
                 cfgConfirmAccept();
             } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
                 cfgConfirmReject();
@@ -9869,6 +10356,17 @@ static void pumpKeyboardInput() {
             continue;
         }
 #endif
+
+        // Action-result popup over CFG is modal; any key dismisses it.
+        if (s_cfgActionMsgModal) {
+            uint32_t nowMs = millis();
+            // Ignore immediate key repeats from the Enter that triggered the action.
+            if ((uint32_t)(nowMs - s_cfgActionMsgOpenedMs) < 300UL) {
+                continue;
+            }
+            closeCfgActionMessageModal();
+            continue;
+        }
 
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
@@ -9992,6 +10490,7 @@ static void pumpKeyboardInput() {
                 uint32_t now = millis();
                 if ((uint32_t)(now - s_cfgLastScrollMs) < 180) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Selection settling - press Enter again");
+                    openCfgActionMessageModal(s_cfgStatus);
                     if (s_cfgDebugLog) {
                         Serial.printf("[lvgl-cfg] enter-block settle dt=%lu\n", (unsigned long)(now - s_cfgLastScrollMs));
                     }
@@ -12158,6 +12657,13 @@ static void loadConfigFromSd() {
     }
     loadChannelsFromPrefs();
     applyUiThemePalette();
+    myDeviceRole = s_cfg.deviceRole;
+}
+
+static void loadConfigForOtaWorker() {
+    cfgInitDefaults(s_cfg);
+    myDeviceRole = s_cfg.deviceRole;
+    loadConfigFromPrefs();
     myDeviceRole = s_cfg.deviceRole;
 }
 
@@ -14364,6 +14870,9 @@ static void serviceSerialCommands() {
 void setup() {
     Serial.begin(115200);
     delay(120);
+    Serial.printf("[build] version=%s ota_test_latest=%d tls_wraps=1\n",
+                  APP_VERSION,
+                  otaTreatLatestAsUpdateForTestingEnabled() ? 1 : 0);
 
     // Match baseline firmware board-power bring-up so keyboard/touch I2C devices are powered.
 #if (BOARD_POWERON >= 0)
@@ -14398,6 +14907,26 @@ void setup() {
     s_keyboard.begin();
 #endif
     setPagerKeyboardBacklight(true);
+
+    // Explicitly disable OTA-only TLS networking on every boot before any
+    // runtime subsystems start. OTA worker flow enables it only when needed.
+    otaSetNetworkAllowed(false);
+
+    // Keep OTA worker boot as lean as possible: avoid LVGL/splash/radio/UI setup
+    // so HTTPS has maximum contiguous internal heap for TLS.
+    bool rtcPending = isOtaWorkerModeRequestedRtc();
+    bool nvsPending = isOtaWorkerModeRequestedOnce();
+    if (rtcPending || nvsPending) {
+        Serial.printf("[ota-worker] pending before init (rtc=%d nvs=%d)\n",
+                      rtcPending ? 1 : 0,
+                      nvsPending ? 1 : 0);
+        loadConfigForOtaWorker();
+        if (runOtaWorkerModeIfRequested()) {
+            Serial.println("[ota-worker] minimal flow finished; continuing normal boot");
+        } else {
+            Serial.println("[ota-worker] requested but could not start, continuing normal boot");
+        }
+    }
 
     lv_init();
     nodesMapInitFsDriver();
@@ -14435,13 +14964,18 @@ void setup() {
     syncWifiCredsToPrefs();
     applyTimezoneFromConfig();
     bootTimeNtpSync();
+    const bool otaWorkerHandled = runOtaWorkerModeIfRequested();
+    const bool skipWebAutoStartOnce = consumeSkipWebAutoStartOnce();
+    if (skipWebAutoStartOnce || otaWorkerHandled) {
+        Serial.println("[web] auto start skipped once for OTA low-memory retry");
+    }
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     // On PSRAM boards the chat buffers live in PSRAM, so starting web config
     // here (before Channels.init()) costs nothing. The no-PSRAM Cardputer must
     // wait until those DRAM buffers exist so webCfgBegin()'s reclaim can free
     // them for Wi-Fi — it starts at the end of setup() instead. Starting here
     // would reclaim 0 bytes and then get starved when the buffers allocate.
-    startWebConfigAuto();
+    if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
     bootstrapStateMapsIfMissing();
     batteryInitAdc();
@@ -14470,6 +15004,10 @@ void setup() {
     }
 
     buildUi();
+    if (s_otaWorkerBootNotice[0]) {
+        openCfgActionMessageModal(s_otaWorkerBootNotice);
+        s_otaWorkerBootNotice[0] = '\0';
+    }
     s_lastActivityMs = millis();
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
     // Non-vertical Heltec has a wide/short layout where the onboarding modal's
@@ -14491,7 +15029,7 @@ void setup() {
     // chat/DM buffers, radio, and UI are all allocated — this mirrors the
     // healthy manual-enable path, so webCfgBegin()'s reclaim frees the ~35 KB
     // of chat buffers and Wi-Fi keeps enough DRAM to serve pages.
-    startWebConfigAuto();
+    if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
 }
 
