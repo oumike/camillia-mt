@@ -165,7 +165,7 @@ constexpr const char *kReleaseDownloadBaseUrl = "https://github.com/oumike/camil
 
 // Temporary behavior for OTA testing: any successfully-fetched latest release
 // is treated as installable even when equal to current APP_VERSION.
-constexpr bool kTreatLatestAsUpdateForTesting = true;
+constexpr bool kTreatLatestAsUpdateForTesting = false;
 
 template <typename T>
 class HasSetBufferSizes {
@@ -550,10 +550,6 @@ static bool setErr(char *errOut, size_t errLen, const char *msg) {
 void otaSetNetworkAllowed(bool allowed) {
     g_otaNetworkGate = allowed ? kOtaNetworkGateMagic : 0;
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
-}
-
-bool otaTreatLatestAsUpdateForTestingEnabled() {
-    return kTreatLatestAsUpdateForTesting;
 }
 
 const char *otaCurrentDeviceAssetSlug() {

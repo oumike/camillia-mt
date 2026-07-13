@@ -15,9 +15,6 @@ typedef void (*OtaInstallProgressCb)(size_t writtenBytes, size_t totalBytes);
 // Allows OTA networking only when explicitly enabled by the caller.
 void otaSetNetworkAllowed(bool allowed);
 
-// True when OTA check treats latest fetched release as update-available.
-bool otaTreatLatestAsUpdateForTestingEnabled();
-
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 

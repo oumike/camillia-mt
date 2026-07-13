@@ -3657,6 +3657,7 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     for (int i = 0; i < 32; i++) {
         if (myPubKey[i] != 0) { hasPubKey = true; break; }
     }
+    if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
     if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
     if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
     if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
@@ -3768,7 +3769,7 @@ static void refreshCfgModal() {
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    static constexpr int kCfgInfoMaxLines = 10;
+    static constexpr int kCfgInfoMaxLines = 12;
     char info[kCfgInfoMaxLines][96] = {};
     int infoCount = buildDeviceInfoLines(info, kCfgInfoMaxLines);
 
@@ -3967,8 +3968,8 @@ static void closeNodeInfoModal() {
 static void openNodeInfoModal() {
     if (!s_rootScreen || s_nodeInfoModal) return;
 
-    char info[10][96] = {};
-    int infoCount = buildDeviceInfoLines(info, 10);
+    char info[12][96] = {};
+    int infoCount = buildDeviceInfoLines(info, 12);
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
@@ -14870,9 +14871,6 @@ static void serviceSerialCommands() {
 void setup() {
     Serial.begin(115200);
     delay(120);
-    Serial.printf("[build] version=%s ota_test_latest=%d tls_wraps=1\n",
-                  APP_VERSION,
-                  otaTreatLatestAsUpdateForTestingEnabled() ? 1 : 0);
 
     // Match baseline firmware board-power bring-up so keyboard/touch I2C devices are powered.
 #if (BOARD_POWERON >= 0)
