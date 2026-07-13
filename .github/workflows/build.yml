@@ -74,6 +74,13 @@ jobs:
           merge_env heltec-v4          16MB "dist/camillia-mt-heltec-${TAG}.bin"
           merge_env heltec-v4-vertical 16MB "dist/camillia-mt-heltec-vertical-${TAG}.bin"
 
+          # OTA expects app-only binaries named camillia-mt-<slug>-<tag>-ota.bin
+          cp .pio/build/tdeck/firmware.bin              "dist/camillia-mt-tdeck-${TAG}-ota.bin"
+          cp .pio/build/tlora-pager-tft/firmware.bin    "dist/camillia-mt-tlora-pager-tft-${TAG}-ota.bin"
+          cp .pio/build/cardputer-cap/firmware.bin      "dist/camillia-mt-cardputer-cap-${TAG}-ota.bin"
+          cp .pio/build/heltec-v4/firmware.bin          "dist/camillia-mt-heltec-${TAG}-ota.bin"
+          cp .pio/build/heltec-v4-vertical/firmware.bin "dist/camillia-mt-heltec-vertical-${TAG}-ota.bin"
+
           ls -l dist/
 
       # ── Rename ELF/map artifacts to include tag version ───────
@@ -99,4 +106,14 @@ jobs:
 
           cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
           cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.bin
+            dist/*.elf
+            dist/*.map
+          fail_on_unmatched_files: true
 
