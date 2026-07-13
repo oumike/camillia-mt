@@ -3657,7 +3657,6 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     for (int i = 0; i < 32; i++) {
         if (myPubKey[i] != 0) { hasPubKey = true; break; }
     }
-    if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
     if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
     if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
     if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
@@ -3785,6 +3784,19 @@ static void refreshCfgModal() {
     lv_obj_set_style_pad_bottom(infoHeader, 3, 0);
     lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
     lv_label_set_text(infoHeader, "Device Info");
+
+    lv_obj_t *fwRow = lv_label_create(s_cfgInfoList);
+    lv_obj_set_width(fwRow, lv_pct(100));
+    lv_obj_set_style_text_font(fwRow, cfgRowFont, 0);
+    lv_obj_set_style_text_color(fwRow, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_bg_opa(fwRow, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(fwRow, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_pad_left(fwRow, 4, 0);
+    lv_obj_set_style_pad_right(fwRow, 4, 0);
+    lv_obj_set_style_pad_top(fwRow, cfgPadTop, 0);
+    lv_obj_set_style_pad_bottom(fwRow, cfgPadBottom, 0);
+    lv_label_set_long_mode(fwRow, LV_LABEL_LONG_DOT);
+    lv_label_set_text_fmt(fwRow, "Firmware: %s", APP_VERSION);
 
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_cfgInfoList);
@@ -4000,6 +4012,13 @@ static void openNodeInfoModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Device Info");
+
+    lv_obj_t *fwRow = lv_label_create(s_nodeInfoModal);
+    lv_obj_set_width(fwRow, lv_pct(100));
+    lv_obj_set_style_text_font(fwRow, bodyFont, 0);
+    lv_obj_set_style_text_color(fwRow, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(fwRow, LV_LABEL_LONG_DOT);
+    lv_label_set_text_fmt(fwRow, "Firmware: %s", APP_VERSION);
 
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_nodeInfoModal);
@@ -12696,32 +12715,36 @@ static void layoutHeaderInlineItems() {
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, headerTextYOffset);
 
-    // Keep time centered between the left-side cluster and battery percentage.
-    lv_obj_update_layout(s_chatHeaderBar);
-    lv_coord_t selectorRight = lv_obj_get_x(s_channelSelectorBtn) + lv_obj_get_width(s_channelSelectorBtn);
-    lv_coord_t battLeft = lv_obj_get_x(s_chatHeaderBattText);
-    lv_coord_t timeW = lv_obj_get_width(s_chatHeaderTime);
-    lv_coord_t slotStart = selectorRight + 4;
+    // Keep optional status icons near the battery cluster so clock centering
+    // depends only on selector (left) and battery info (right).
+    if (s_chatHeaderGps && s_chatHeaderWifi
+        && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar
+        && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
+        lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderBattText, LV_ALIGN_OUT_LEFT_MID, -6, 0);
+        lv_obj_align_to(s_chatHeaderGps, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 
-    // If GPS/WiFi remain in the header, reserve that area to avoid overlap with time.
-    if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
-        lv_obj_align_to(s_chatHeaderGps, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 5, headerTextYOffset);
-        lv_coord_t statusRight = lv_obj_get_x(s_chatHeaderGps) + lv_obj_get_width(s_chatHeaderGps);
-        if (s_chatHeaderWifi && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
-            lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, headerTextYOffset);
-            lv_coord_t wifiRight = lv_obj_get_x(s_chatHeaderWifi) + lv_obj_get_width(s_chatHeaderWifi);
-            if (wifiRight > statusRight) statusRight = wifiRight;
+        if (s_chatDmAlert && lv_obj_is_valid(s_chatDmAlert)
+            && lv_obj_get_parent(s_chatDmAlert) == s_chatHeaderBar) {
+            lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
         }
-        slotStart = statusRight + 2;
     }
 
+    // Keep time centered between selector button and battery info.
+    lv_obj_update_layout(s_chatHeaderBar);
+    lv_area_t selectorArea;
+    lv_area_t battTextArea;
+    lv_obj_get_coords(s_channelSelectorBtn, &selectorArea);
+    lv_obj_get_coords(s_chatHeaderBattText, &battTextArea);
+    lv_coord_t selectorRight = selectorArea.x2 + 1;
+    lv_coord_t battLeft = battTextArea.x1;
+    lv_coord_t timeW = lv_obj_get_width(s_chatHeaderTime);
+    lv_coord_t slotStart = selectorRight + 4;
     lv_coord_t slotEnd = battLeft - 2;
 
     if (slotEnd <= slotStart || timeW <= 0) {
         lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
     } else {
-        lv_coord_t headerW = lv_obj_get_width(s_chatHeaderBar);
-        lv_coord_t x = (headerW - timeW) / 2;
+        lv_coord_t x = ((slotStart + slotEnd) - timeW) / 2;
         if (x < slotStart) x = slotStart;
         lv_coord_t maxX = slotEnd - timeW;
         if (x > maxX) x = maxX;
