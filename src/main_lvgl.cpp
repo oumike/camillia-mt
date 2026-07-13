@@ -99,7 +99,13 @@ uint8_t myDeviceRole = 0;
 
 static constexpr uint16_t kMaxHorRes =
     (DEVICE_LCD_LANDSCAPE_W > DEVICE_LCD_PORTRAIT_W) ? DEVICE_LCD_LANDSCAPE_W : DEVICE_LCD_PORTRAIT_W;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// Pager OTA needs contiguous internal heap for TLS. A smaller LVGL draw buffer
+// frees internal RAM while keeping UI rendering stable.
+static constexpr uint16_t kDrawBufLines = 12;
+#else
 static constexpr uint16_t kDrawBufLines = 40;
+#endif
 static lv_color_t s_drawBufMem[kMaxHorRes * kDrawBufLines];
 static lv_disp_draw_buf_t s_drawBuf;
 #if defined(DEVICE_TDECK)
@@ -599,6 +605,9 @@ static void openCfgActionMessageModal(const char *msg);
 static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onCfgHeaderInfoPressed(lv_event_t *e);
+#endif
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 static void openNodeInfoModal();
 static void closeNodeInfoModal();
@@ -2027,7 +2036,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
                 snprintf(buf, bufLen, "Firmware Update: Install %s", s_cfgOtaLatestTag);
             } else {
-                snprintf(buf, bufLen, "Firmware Update: Check");
+                snprintf(buf, bufLen, "Firmware Update Check");
             }
             break;
         case CFG_ACTION_CLEAR_MSGS:
@@ -2177,7 +2186,10 @@ static bool consumeOtaWorkerModeOnce() {
     return run;
 }
 
+static bool s_otaWorkerUiReady = true;
+
 static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) {
+    if (!s_otaWorkerUiReady) return;
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
     displayDev().setTextSize(1);
@@ -2198,6 +2210,7 @@ static void otaWorkerDrawProgress(const char *title,
                                   size_t written,
                                   size_t total,
                                   bool stalled) {
+    if (!s_otaWorkerUiReady) return;
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextSize(1);
     displayDev().setFont(&fonts::DejaVu12);
@@ -2294,10 +2307,62 @@ static bool otaWorkerEnsureWifiConnected() {
     return (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP);
 }
 
+static bool otaWorkerErrIsTlsLowMem(const char *err) {
+    return err && strstr(err, "TLS init failed (low memory)") != nullptr;
+}
+
+static void otaWorkerLogHeap(const char *tag) {
+    const uint32_t freeInt = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const uint32_t largestInt = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("[ota-worker] %s heap int_free=%lu largest=%lu\n",
+                  tag ? tag : "heap",
+                  (unsigned long)freeInt,
+                  (unsigned long)largestInt);
+}
+
+static bool otaWorkerReconnectWifiForLowMemRetry() {
+    if (!s_cfg.wifiSsid[0]) return false;
+
+    Serial.println("[ota-worker] low-mem retry: cycling WiFi stack");
+    otaWorkerLogHeap("before wifi recycle");
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(180);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+
+    uint32_t startMs = millis();
+    while ((millis() - startMs) < 12000UL) {
+        if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
+            otaWorkerLogHeap("after wifi recycle");
+            return true;
+        }
+        delay(120);
+    }
+
+    otaWorkerLogHeap("wifi recycle failed");
+    return false;
+}
+
 static bool runOtaWorkerModeIfRequested() {
-    bool rtcRequested = consumeOtaWorkerModeRtcOnce();
-    bool nvsRequested = consumeOtaWorkerModeOnce();
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (isOtaWorkerModeRequestedRtc() || isOtaWorkerModeRequestedOnce()) {
+        (void)consumeOtaWorkerModeRtcOnce();
+        (void)consumeOtaWorkerModeOnce();
+        otaSetNetworkAllowed(false);
+        Serial.println("[ota-worker] disabled on cardputer build");
+    }
+    return false;
+#else
+    bool rtcRequested = isOtaWorkerModeRequestedRtc();
+    bool nvsRequested = isOtaWorkerModeRequestedOnce();
     if (!(rtcRequested || nvsRequested)) return false;
+
+    auto clearWorkerRequestFlags = []() {
+        (void)consumeOtaWorkerModeRtcOnce();
+        (void)consumeOtaWorkerModeOnce();
+    };
 
     otaSetNetworkAllowed(true);
 
@@ -2309,14 +2374,25 @@ static bool runOtaWorkerModeIfRequested() {
     if (!otaWorkerEnsureWifiConnected()) {
         Serial.println("[ota-worker] wifi unavailable");
         otaWorkerDrawStatus("OTA minimal mode", "WiFi not connected");
+        setOtaWorkerBootNotice("OTA check failed: WiFi not connected");
         delay(1800);
         otaSetNetworkAllowed(false);
+        clearWorkerRequestFlags();
         return true;
     }
 
     otaWorkerDrawStatus("OTA minimal mode", "Checking latest release...");
     OtaCheckResult check = {};
-    if (!otaCheckLatestRelease(check) || !check.ok) {
+    bool checkOk = otaCheckLatestRelease(check) && check.ok;
+    if (!checkOk && otaWorkerErrIsTlsLowMem(check.error)) {
+        Serial.println("[ota-worker] low-mem TLS on check; retrying after WiFi recycle");
+        otaWorkerDrawStatus("OTA minimal mode", "Retrying check...");
+        if (otaWorkerReconnectWifiForLowMemRetry()) {
+            memset(&check, 0, sizeof(check));
+            checkOk = otaCheckLatestRelease(check) && check.ok;
+        }
+    }
+    if (!checkOk) {
         Serial.printf("[ota-worker] check failed: %s\n", check.error);
         otaWorkerDrawStatus("OTA check failed", check.error[0] ? check.error : "unknown");
         char notice[sizeof(s_otaWorkerBootNotice)] = {};
@@ -2327,6 +2403,7 @@ static bool runOtaWorkerModeIfRequested() {
         setOtaWorkerBootNotice(notice);
         delay(1800);
         otaSetNetworkAllowed(false);
+        clearWorkerRequestFlags();
         return true;
     }
 
@@ -2342,6 +2419,7 @@ static bool runOtaWorkerModeIfRequested() {
         setOtaWorkerBootNotice(notice);
         delay(1400);
         otaSetNetworkAllowed(false);
+        clearWorkerRequestFlags();
         return true;
     }
 
@@ -2384,14 +2462,32 @@ static bool runOtaWorkerModeIfRequested() {
                           false);
 
     char err[160] = {};
-    if (otaInstallLatestRelease(check.latestTag[0] ? check.latestTag : nullptr,
-                                err,
-                                sizeof(err),
-                                onOtaProgress)) {
+    bool installOk = otaInstallLatestRelease(check.latestTag[0] ? check.latestTag : nullptr,
+                                             err,
+                                             sizeof(err),
+                                             onOtaProgress);
+    if (!installOk && otaWorkerErrIsTlsLowMem(err)) {
+        Serial.println("[ota-worker] low-mem TLS on install; retrying after WiFi recycle");
+        otaWorkerDrawProgress("Installing update",
+                              "Retrying download...",
+                              (size_t)s_otaWorkerBytesWritten,
+                              (size_t)s_otaWorkerBytesTotal,
+                              true);
+        if (otaWorkerReconnectWifiForLowMemRetry()) {
+            err[0] = '\0';
+            installOk = otaInstallLatestRelease(check.latestTag[0] ? check.latestTag : nullptr,
+                                                err,
+                                                sizeof(err),
+                                                onOtaProgress);
+        }
+    }
+
+    if (installOk) {
         Serial.println("[ota-worker] install complete, rebooting");
         otaWorkerDrawStatus("OTA installed", "Rebooting...");
         delay(700);
         otaSetNetworkAllowed(false);
+        clearWorkerRequestFlags();
         ESP.restart();
         return true;
     }
@@ -2418,7 +2514,9 @@ static bool runOtaWorkerModeIfRequested() {
     }
     delay(2200);
     otaSetNetworkAllowed(false);
+    clearWorkerRequestFlags();
     return true;
+#endif
 }
 
 static void setPagerKeyboardBacklight(bool on) {
@@ -3615,6 +3713,9 @@ static void initCfgActions() {
     s_cfgActionCount = 0;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
+#endif
 #if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
@@ -3627,7 +3728,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
@@ -3657,6 +3757,7 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     for (int i = 0; i < 32; i++) {
         if (myPubKey[i] != 0) { hasPubKey = true; break; }
     }
+    if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
     if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
     if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
     if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
@@ -3785,19 +3886,6 @@ static void refreshCfgModal() {
     lv_label_set_long_mode(infoHeader, LV_LABEL_LONG_DOT);
     lv_label_set_text(infoHeader, "Device Info");
 
-    lv_obj_t *fwRow = lv_label_create(s_cfgInfoList);
-    lv_obj_set_width(fwRow, lv_pct(100));
-    lv_obj_set_style_text_font(fwRow, cfgRowFont, 0);
-    lv_obj_set_style_text_color(fwRow, lv_color_hex(0xD9E8FF), 0);
-    lv_obj_set_style_bg_opa(fwRow, LV_OPA_30, 0);
-    lv_obj_set_style_bg_color(fwRow, lv_color_hex(0x123266), 0);
-    lv_obj_set_style_pad_left(fwRow, 4, 0);
-    lv_obj_set_style_pad_right(fwRow, 4, 0);
-    lv_obj_set_style_pad_top(fwRow, cfgPadTop, 0);
-    lv_obj_set_style_pad_bottom(fwRow, cfgPadBottom, 0);
-    lv_label_set_long_mode(fwRow, LV_LABEL_LONG_DOT);
-    lv_label_set_text_fmt(fwRow, "Firmware: %s", APP_VERSION);
-
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_cfgInfoList);
         lv_obj_set_width(row, lv_pct(100));
@@ -3823,6 +3911,13 @@ static void onCfgActionRowPressed(lv_event_t *e) {
     s_cfgConfirmMs = 0;
     refreshCfgModal();
 }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onCfgHeaderInfoPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    openNodeInfoModal();
+}
+#endif
 
 static void closeCfgModal() {
     closeCfgConfirmModal();
@@ -4013,13 +4108,6 @@ static void openNodeInfoModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Device Info");
 
-    lv_obj_t *fwRow = lv_label_create(s_nodeInfoModal);
-    lv_obj_set_width(fwRow, lv_pct(100));
-    lv_obj_set_style_text_font(fwRow, bodyFont, 0);
-    lv_obj_set_style_text_color(fwRow, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(fwRow, LV_LABEL_LONG_DOT);
-    lv_label_set_text_fmt(fwRow, "Firmware: %s", APP_VERSION);
-
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_nodeInfoModal);
         lv_obj_set_width(row, lv_pct(100));
@@ -4034,7 +4122,13 @@ static void openNodeInfoModal() {
     lv_obj_set_style_text_font(hint, bodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_pad_top(hint, 3, 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_label_set_text_fmt(hint,
+                          "Up/Down/J/K = Scroll   %s = Close",
+                          modalCloseKeyLabel());
+#else
     lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+#endif
 }
 #endif
 
@@ -9006,7 +9100,11 @@ static void openCfgModal() {
     lv_label_set_text(title, "Configuration");
 
     s_cfgHeaderStatus = lv_label_create(header);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_width(s_cfgHeaderStatus, lv_pct(40));
+#else
     lv_obj_set_width(s_cfgHeaderStatus, lv_pct(58));
+#endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
 #elif defined(DEVICE_TDECK)
@@ -9018,6 +9116,25 @@ static void openCfgModal() {
     lv_obj_set_style_text_color(s_cfgHeaderStatus, lv_color_hex(0x79DDB8), 0);
     lv_label_set_long_mode(s_cfgHeaderStatus, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_cfgHeaderStatus, "Ready");
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *infoBtn = lv_btn_create(header);
+    lv_obj_set_height(infoBtn, 22);
+    lv_obj_set_style_min_width(infoBtn, 48, 0);
+    lv_obj_set_style_radius(infoBtn, 4, 0);
+    lv_obj_set_style_shadow_width(infoBtn, 0, 0);
+    lv_obj_set_style_bg_color(infoBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(infoBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(infoBtn, 1, 0);
+    lv_obj_set_style_border_color(infoBtn, lv_color_hex(0x335D9D), 0);
+    lv_obj_add_event_cb(infoBtn, onCfgHeaderInfoPressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *infoLbl = lv_label_create(infoBtn);
+    lv_obj_set_style_text_font(infoLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(infoLbl, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(infoLbl, "Info");
+    lv_obj_center(infoLbl);
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_t *cfgColumns = lv_obj_create(s_cfgModal);
@@ -9302,6 +9419,21 @@ static void performCfgAction(int actionId) {
             Serial.println("[ota-worker] firmware update action requested");
             s_cfgOtaInstallArmed = false;
             s_cfgOtaLatestTag[0] = '\0';
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            snprintf(s_cfgStatus,
+                     sizeof(s_cfgStatus),
+                     "OTA disabled on Cardputer build");
+            break;
+#endif
+
+            bool webWasRunning = webCfgRunning();
+            if (webWasRunning) {
+                Serial.println("[ota-worker] stopping web config to free heap before TLS");
+                webCfgEnd();
+                delay(120);
+            }
+
             bool flagSaved = requestOtaWorkerModeOnce();
             bool nvsVisible = isOtaWorkerModeRequestedOnce();
             bool rtcVisible = isOtaWorkerModeRequestedRtc();
@@ -9317,6 +9449,21 @@ static void performCfgAction(int actionId) {
                          "OTA request failed (NVS write). Retry.");
                 break;
             }
+
+            Serial.println("[ota-worker] attempting immediate worker run");
+            if (runOtaWorkerModeIfRequested()) {
+                if (s_otaWorkerBootNotice[0]) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", s_otaWorkerBootNotice);
+                } else {
+                    snprintf(s_cfgStatus,
+                             sizeof(s_cfgStatus),
+                             "OTA worker completed. Check status.");
+                }
+                break;
+            }
+
+            Serial.println("[ota-worker] immediate worker did not start; falling back to reboot handoff");
+            requestSkipWebAutoStartOnce();
             snprintf(s_cfgStatus,
                      sizeof(s_cfgStatus),
                      "Rebooting into OTA minimal mode...");
@@ -10370,10 +10517,26 @@ static void pumpKeyboardInput() {
         }
 
 #if !defined(DEVICE_TLORA_PAGER_TFT)
-        // The (I)nformation popup layers over the CFG modal; any key dismisses it.
+        // The (I)nformation popup layers over the CFG modal.
+        // Cardputer: allow j/k and up/down scroll inside the modal.
         if (s_nodeInfoModal) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            if (k == KEY_SCROLL_UP) {
+                scrollListClamped(s_nodeInfoModal, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN) {
+                scrollListClamped(s_nodeInfoModal, -18);
+                continue;
+            }
+            if (isModalCloseKey(k) || k == 'i' || k == 'I') {
+                closeNodeInfoModal();
+            }
+            continue;
+#else
             closeNodeInfoModal();
             continue;
+#endif
         }
 #endif
 
@@ -12737,9 +12900,19 @@ static void layoutHeaderInlineItems() {
     lv_obj_get_coords(s_chatHeaderBattText, &battTextArea);
     lv_coord_t selectorRight = selectorArea.x2 + 1;
     lv_coord_t battLeft = battTextArea.x1;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_coord_t rightBoundLeft = battLeft;
+    if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
+        lv_area_t gpsArea;
+        lv_obj_get_coords(s_chatHeaderGps, &gpsArea);
+        rightBoundLeft = gpsArea.x1;
+    }
+#else
+    lv_coord_t rightBoundLeft = battLeft;
+#endif
     lv_coord_t timeW = lv_obj_get_width(s_chatHeaderTime);
     lv_coord_t slotStart = selectorRight + 4;
-    lv_coord_t slotEnd = battLeft - 2;
+    lv_coord_t slotEnd = rightBoundLeft - 2;
 
     if (slotEnd <= slotStart || timeW <= 0) {
         lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
@@ -14914,6 +15087,41 @@ void setup() {
             (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
 
+    // Explicitly disable OTA-only TLS networking on every boot before any
+    // runtime subsystems start. OTA worker flow enables it only when needed.
+    otaSetNetworkAllowed(false);
+
+    bool bootOtaRtc = isOtaWorkerModeRequestedRtc();
+    bool bootOtaNvs = isOtaWorkerModeRequestedOnce();
+    Serial.printf("[ota-worker] boot flags (rtc=%d nvs=%d fw=%s)\n",
+                  bootOtaRtc ? 1 : 0,
+                  bootOtaNvs ? 1 : 0,
+                  APP_VERSION);
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Pager-specific memory guard: run OTA worker before display/keyboard init
+    // so TLS gets the largest contiguous internal heap.
+    s_otaWorkerUiReady = false;
+    {
+        bool rtcPending = isOtaWorkerModeRequestedRtc();
+        bool nvsPending = isOtaWorkerModeRequestedOnce();
+        Serial.printf("[ota-worker] pre-display flags (rtc=%d nvs=%d)\n",
+                      rtcPending ? 1 : 0,
+                      nvsPending ? 1 : 0);
+        if (rtcPending || nvsPending) {
+            Serial.printf("[ota-worker] pending before display init (rtc=%d nvs=%d)\n",
+                          rtcPending ? 1 : 0,
+                          nvsPending ? 1 : 0);
+            loadConfigForOtaWorker();
+            if (runOtaWorkerModeIfRequested()) {
+                Serial.println("[ota-worker] minimal flow finished pre-display init");
+            } else {
+                Serial.println("[ota-worker] requested pre-display init but could not start");
+            }
+        }
+    }
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer display is owned by M5Cardputer.Display after keyboard begin.
     s_keyboard.begin();
@@ -14928,15 +15136,15 @@ void setup() {
     s_keyboard.begin();
 #endif
     setPagerKeyboardBacklight(true);
-
-    // Explicitly disable OTA-only TLS networking on every boot before any
-    // runtime subsystems start. OTA worker flow enables it only when needed.
-    otaSetNetworkAllowed(false);
+    s_otaWorkerUiReady = true;
 
     // Keep OTA worker boot as lean as possible: avoid LVGL/splash/radio/UI setup
     // so HTTPS has maximum contiguous internal heap for TLS.
     bool rtcPending = isOtaWorkerModeRequestedRtc();
     bool nvsPending = isOtaWorkerModeRequestedOnce();
+    Serial.printf("[ota-worker] pre-lvgl flags (rtc=%d nvs=%d)\n",
+                  rtcPending ? 1 : 0,
+                  nvsPending ? 1 : 0);
     if (rtcPending || nvsPending) {
         Serial.printf("[ota-worker] pending before init (rtc=%d nvs=%d)\n",
                       rtcPending ? 1 : 0,

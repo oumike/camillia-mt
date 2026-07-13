@@ -81,6 +81,59 @@ extern "C" int __wrap__ZN16WiFiClientSecure7connectEPKcti(
     return __real__ZN16WiFiClientSecure7connectEPKcti(self, host, port, timeout);
 }
 
+extern "C" int __real__ZN16WiFiClientSecure7connectE9IPAddresst(
+    WiFiClientSecure *self,
+    IPAddress ip,
+    uint16_t port);
+
+extern "C" int __wrap__ZN16WiFiClientSecure7connectE9IPAddresst(
+    WiFiClientSecure *self,
+    IPAddress ip,
+    uint16_t port) {
+    if (!otaNetworkGateIsAllowed()) {
+        const uint32_t freeInt = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const uint32_t largestInt = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        String ipStr = ip.toString();
+        Serial.printf("[tls-guard] blocked connect(ip,port) ip=%s port=%u int_free=%lu largest=%lu\n",
+                      ipStr.c_str(),
+                      (unsigned)port,
+                      (unsigned long)freeInt,
+                      (unsigned long)largestInt);
+        (void)self;
+        return 0;
+    }
+
+    return __real__ZN16WiFiClientSecure7connectE9IPAddresst(self, ip, port);
+}
+
+extern "C" int __real__ZN16WiFiClientSecure7connectE9IPAddressti(
+    WiFiClientSecure *self,
+    IPAddress ip,
+    uint16_t port,
+    int timeout);
+
+extern "C" int __wrap__ZN16WiFiClientSecure7connectE9IPAddressti(
+    WiFiClientSecure *self,
+    IPAddress ip,
+    uint16_t port,
+    int timeout) {
+    if (!otaNetworkGateIsAllowed()) {
+        const uint32_t freeInt = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const uint32_t largestInt = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        String ipStr = ip.toString();
+        Serial.printf("[tls-guard] blocked connect(ip,port,timeout) ip=%s port=%u timeout=%d int_free=%lu largest=%lu\n",
+                      ipStr.c_str(),
+                      (unsigned)port,
+                      timeout,
+                      (unsigned long)freeInt,
+                      (unsigned long)largestInt);
+        (void)self;
+        return 0;
+    }
+
+    return __real__ZN16WiFiClientSecure7connectE9IPAddressti(self, ip, port, timeout);
+}
+
 extern "C" int __real__Z16start_ssl_clientP17sslclient_contextRK9IPAddressjPKciS5_bS5_S5_S5_S5_bPS5_(
     sslclient_context *ssl_client,
     const IPAddress &ip,
@@ -155,8 +208,13 @@ extern "C" int __wrap__Z16start_ssl_clientP17sslclient_contextRK9IPAddressjPKciS
 
 namespace {
 constexpr uint32_t kReleaseCheckTimeoutMs = 12000;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+constexpr int kTlsRxBufBytes = 512;
+constexpr int kTlsTxBufBytes = 512;
+#else
 constexpr int kTlsRxBufBytes = 1024;
 constexpr int kTlsTxBufBytes = 512;
+#endif
 constexpr const char *kLatestReleaseApiUrl = "https://api.github.com/repos/oumike/camillia-mt/releases/latest";
 constexpr const char *kLatestVersionRawUrl = "https://raw.githubusercontent.com/oumike/camillia-mt/main/VERSION";
 constexpr const char *kLatestVersionGithubUrl = "https://github.com/oumike/camillia-mt/raw/main/VERSION";
