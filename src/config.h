@@ -109,6 +109,8 @@
 #define MY_MQTT_ROOT        "msh/US"
 #define MY_MQTT_ENCRYPT     1
 #define MY_MQTT_MAP_RPT     0
+#define MY_MQTT_PORT        8883   // 8883 = TLS (default), 1883 = plaintext
+#define MY_MQTT_TLS         1      // connect via WiFiClientSecure when set
 
 // ── Power defaults ─────────────────────────────────────────────
 #define MY_POWER_SAVING     0

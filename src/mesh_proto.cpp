@@ -983,6 +983,164 @@ size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
     return n;
 }
 
+// ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
+// Inner MeshPacket field numbers (Meshtastic mesh.proto).
+enum : uint32_t {
+    MP_FROM = 1, MP_TO = 2, MP_CHANNEL = 3, MP_ENCRYPTED = 5, MP_ID = 6,
+    MP_RX_TIME = 7, MP_RX_SNR = 8, MP_HOP_LIMIT = 9, MP_WANT_ACK = 10,
+    MP_RX_RSSI = 12, MP_VIA_MQTT = 14, MP_HOP_START = 15,
+    MP_NEXT_HOP = 18, MP_RELAY_NODE = 19,
+};
+
+static size_t pbWriteFixed32(uint8_t *buf, uint32_t field, uint32_t v) {
+    size_t n = pbWriteVarint(buf, (field << 3) | 5);
+    memcpy(buf + n, &v, 4);
+    return n + 4;
+}
+
+static size_t pbWriteTaggedVarint(uint8_t *buf, uint32_t field, uint64_t v) {
+    size_t n = pbWriteVarint(buf, (field << 3) | 0);
+    return n + pbWriteVarint(buf + n, v);
+}
+
+size_t encodeServiceEnvelope(const MeshHdr &hdr,
+                             const uint8_t *cipher, size_t cipherLen,
+                             float rxSnr, int32_t rxRssi, uint32_t rxTime,
+                             const char *channelName, const char *gatewayId,
+                             uint8_t *out, size_t outLen) {
+    // Build the inner MeshPacket first, then wrap it in the ServiceEnvelope.
+    uint8_t mp[320];
+    size_t m = 0;
+
+    m += pbWriteFixed32(mp + m, MP_FROM, hdr.from);
+    m += pbWriteFixed32(mp + m, MP_TO, hdr.to);
+    m += pbWriteTaggedVarint(mp + m, MP_CHANNEL, hdr.channel);
+
+    // encrypted payload (field 5, length-delimited)
+    m += pbWriteVarint(mp + m, (MP_ENCRYPTED << 3) | 2);
+    m += pbWriteVarint(mp + m, cipherLen);
+    if (m + cipherLen + 32 > sizeof(mp)) return 0;
+    memcpy(mp + m, cipher, cipherLen); m += cipherLen;
+
+    m += pbWriteFixed32(mp + m, MP_ID, hdr.id);
+    if (rxTime) m += pbWriteFixed32(mp + m, MP_RX_TIME, rxTime);
+
+    // rx_snr (field 8, float / fixed32)
+    uint32_t snrBits; memcpy(&snrBits, &rxSnr, 4);
+    m += pbWriteFixed32(mp + m, MP_RX_SNR, snrBits);
+
+    m += pbWriteTaggedVarint(mp + m, MP_HOP_LIMIT, hdr.flags & 0x07);
+    if (hdr.flags & 0x08) m += pbWriteTaggedVarint(mp + m, MP_WANT_ACK, 1);
+    // rx_rssi is a protobuf int32: sign-extend to 64 bits for the varint.
+    if (rxRssi) m += pbWriteTaggedVarint(mp + m, MP_RX_RSSI, (uint64_t)(int64_t)rxRssi);
+    if (hdr.flags & 0x10) m += pbWriteTaggedVarint(mp + m, MP_VIA_MQTT, 1);
+    m += pbWriteTaggedVarint(mp + m, MP_HOP_START, (hdr.flags >> 5) & 0x07);
+    if (hdr.next_hop)   m += pbWriteTaggedVarint(mp + m, MP_NEXT_HOP, hdr.next_hop);
+    if (hdr.relay_node) m += pbWriteTaggedVarint(mp + m, MP_RELAY_NODE, hdr.relay_node);
+
+    // ServiceEnvelope: packet(1, message), channel_id(2, string), gateway_id(3, string)
+    size_t chanLen = channelName ? strlen(channelName) : 0;
+    size_t gwLen   = gatewayId ? strlen(gatewayId) : 0;
+    size_t n = 0;
+    n += pbWriteVarint(out + n, (1 << 3) | 2);
+    n += pbWriteVarint(out + n, m);
+    if (n + m + chanLen + gwLen + 8 > outLen) return 0;
+    memcpy(out + n, mp, m); n += m;
+
+    n += pbWriteVarint(out + n, (2 << 3) | 2);
+    n += pbWriteVarint(out + n, chanLen);
+    memcpy(out + n, channelName, chanLen); n += chanLen;
+
+    n += pbWriteVarint(out + n, (3 << 3) | 2);
+    n += pbWriteVarint(out + n, gwLen);
+    memcpy(out + n, gatewayId, gwLen); n += gwLen;
+
+    return n;
+}
+
+// Parse the inner MeshPacket bytes into an on-air header + ciphertext.
+static bool decodeMeshPacketInner(const uint8_t *buf, size_t len,
+                                  MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
+                                  size_t &cipherLen) {
+    memset(&hdr, 0, sizeof(hdr));
+    cipherLen = 0;
+    uint32_t hopLimit = 0, hopStart = 0, wantAck = 0;
+    bool haveCipher = false;
+    size_t i = 0;
+    while (i < len) {
+        uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
+        uint32_t field = tag >> 3, wtype = tag & 7;
+        if (wtype == 0) {              // varint
+            uint64_t v; i = pbReadVarint(buf, len, i, v); if (!i) break;
+            switch (field) {
+                case MP_CHANNEL:    hdr.channel   = (uint8_t)v; break;
+                case MP_HOP_LIMIT:  hopLimit      = (uint32_t)v; break;
+                case MP_WANT_ACK:   wantAck       = v ? 1 : 0; break;
+                case MP_HOP_START:  hopStart      = (uint32_t)v; break;
+                case MP_NEXT_HOP:   hdr.next_hop  = (uint8_t)v; break;
+                case MP_RELAY_NODE: hdr.relay_node = (uint8_t)v; break;
+                default: break;
+            }
+        } else if (wtype == 5) {       // fixed32
+            if (i + 4 > len) break;
+            uint32_t v; memcpy(&v, buf + i, 4); i += 4;
+            switch (field) {
+                case MP_FROM: hdr.from = v; break;
+                case MP_TO:   hdr.to   = v; break;
+                case MP_ID:   hdr.id   = v; break;
+                default: break;
+            }
+        } else if (wtype == 2) {       // length-delimited
+            uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
+            if (i + sz > len) break;
+            if (field == MP_ENCRYPTED) {
+                if (sz > cipherCap) return false;
+                memcpy(cipher, buf + i, sz);
+                cipherLen = (size_t)sz;
+                haveCipher = true;
+            }
+            i += sz;
+        } else {
+            i = pbSkip(buf, len, i, wtype);
+            if (!i) break;
+        }
+    }
+    if (!haveCipher) return false;
+    // Reassemble on-air flags, forcing via_mqtt on for downlinked packets.
+    hdr.flags = (uint8_t)((hopLimit & 0x07) | (wantAck << 3) | 0x10 |
+                          ((hopStart & 0x07) << 5));
+    return true;
+}
+
+bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
+                           MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
+                           size_t &cipherLen,
+                           char *channelName, size_t channelNameCap) {
+    if (channelName && channelNameCap) channelName[0] = '\0';
+    const uint8_t *packetPtr = nullptr; size_t packetLen = 0;
+    size_t i = 0;
+    while (i < len) {
+        uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
+        uint32_t field = tag >> 3, wtype = tag & 7;
+        if (wtype == 2) {
+            uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
+            if (i + sz > len) break;
+            if (field == 1) { packetPtr = buf + i; packetLen = (size_t)sz; }
+            else if (field == 2 && channelName && channelNameCap) {
+                size_t copy = sz < channelNameCap - 1 ? (size_t)sz : channelNameCap - 1;
+                memcpy(channelName, buf + i, copy);
+                channelName[copy] = '\0';
+            }
+            i += sz;
+        } else {
+            i = pbSkip(buf, len, i, wtype);
+            if (!i) break;
+        }
+    }
+    if (!packetPtr) return false;
+    return decodeMeshPacketInner(packetPtr, packetLen, hdr, cipher, cipherCap, cipherLen);
+}
+
 const char *portnumName(uint32_t p) {
     switch (p) {
         case TEXT_MESSAGE_APP:  return "TEXT";

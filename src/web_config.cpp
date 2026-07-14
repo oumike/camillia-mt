@@ -1439,7 +1439,47 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
     sendChunk(html);
 
-    // MQTT controls are intentionally omitted from web config.
+    // ── MQTT ──────────────────────────────────────────────────
+    html += "<details><summary>MQTT</summary>";
+    // Marker so the POST handler can apply checkbox state (unchecked boxes send
+    // nothing) only when this section was actually rendered.
+    html += "<input type='hidden' name='mqtt_present' value='1'>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_en' value='1'";
+    if (gCfg->mqttEnabled) html += " checked";
+    html += "> Enable MQTT bridge</label>";
+    html += "<label>Broker<input name='mqtt_server' type='text' maxlength='63' value='";
+    html += gCfg->mqttServer;
+    html += "'></label>";
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%u", (unsigned)gCfg->mqttPort);
+    html += "<label>Port<input name='mqtt_port' type='number' min='1' max='65535' value='";
+    html += tmp; html += "'></label>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_tls' value='1'";
+    if (gCfg->mqttTls) html += " checked";
+    html += "> Use TLS</label></div>";
+    html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
+    html += gCfg->mqttUser;
+    html += "'></label>"
+            "<label>Password<input name='mqtt_pass' type='password' maxlength='47' value='";
+    html += gCfg->mqttPass;
+    html += "'></label>";
+    html += "<label>Root topic<input name='mqtt_root' type='text' maxlength='47' value='";
+    html += gCfg->mqttRoot;
+    html += "'></label>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_encrypt' value='1'";
+    if (gCfg->mqttEncryption) html += " checked";
+    html += "> Encrypt payloads (publish ciphertext to /2/e/)</label>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='mqtt_map_report' value='1'";
+    if (gCfg->mqttMapReport) html += " checked";
+    html += "> Map reporting</label>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.4em 0 0'>"
+            "Requires WiFi credentials above. Default broker: mqtt.meshtastic.org:8883.</p>";
+    html += "</details>";
+    sendChunk(html);
 
     // ── Display ───────────────────────────────────────────────
     html += "<details><summary>Display</summary>";
@@ -2721,10 +2761,9 @@ static void handlePostSave() {
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
 
-    // Network / MQTT (only apply when fields are present; UI currently hides these controls)
-    if (server.hasArg("mqtt_en")) {
-        gCfg->mqttEnabled = server.arg("mqtt_en").toInt() != 0;
-    }
+    // Network / MQTT. Text fields apply whenever present; checkbox state is only
+    // meaningful when the MQTT section was rendered (mqtt_present marker), since
+    // an unchecked box submits no value at all.
     if (server.hasArg("mqtt_server")) {
         strncpy(gCfg->mqttServer, server.arg("mqtt_server").c_str(), sizeof(gCfg->mqttServer) - 1);
         gCfg->mqttServer[sizeof(gCfg->mqttServer) - 1] = '\0';
@@ -2741,10 +2780,14 @@ static void handlePostSave() {
         strncpy(gCfg->mqttRoot, server.arg("mqtt_root").c_str(), sizeof(gCfg->mqttRoot) - 1);
         gCfg->mqttRoot[sizeof(gCfg->mqttRoot) - 1] = '\0';
     }
-    if (server.hasArg("mqtt_encrypt")) {
-        gCfg->mqttEncryption = (server.arg("mqtt_encrypt") == "1");
+    if (server.hasArg("mqtt_port")) {
+        long port = server.arg("mqtt_port").toInt();
+        if (port >= 1 && port <= 65535) gCfg->mqttPort = (uint16_t)port;
     }
-    if (server.hasArg("mqtt_map_report")) {
+    if (server.hasArg("mqtt_present")) {
+        gCfg->mqttEnabled    = (server.arg("mqtt_en")         == "1");
+        gCfg->mqttTls        = (server.arg("mqtt_tls")        == "1");
+        gCfg->mqttEncryption = (server.arg("mqtt_encrypt")    == "1");
         gCfg->mqttMapReport  = (server.arg("mqtt_map_report") == "1");
     }
 

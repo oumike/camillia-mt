@@ -10,6 +10,7 @@
 #include "live_feed.h"
 #include "mesh_proto.h"
 #include "mesh_radio.h"
+#include "mqtt_bridge.h"
 #include "node_db.h"
 #include "dm_mgr.h"
 #include "ignore_list.h"
@@ -2757,6 +2758,8 @@ static void persistConfigToPrefs() {
     p.putString("mqttRoot", s_cfg.mqttRoot);
     p.putBool("mqttEncrypt", s_cfg.mqttEncryption);
     p.putBool("mqttMapRpt", s_cfg.mqttMapReport);
+    p.putUShort("mqttPort", s_cfg.mqttPort);
+    p.putBool("mqttTls", s_cfg.mqttTls);
     p.putBool("isPwrSaving", s_cfg.isPowerSaving);
     p.putULong("lsSecs", s_cfg.lsSecs);
     p.putULong("minWakeSecs", s_cfg.minWakeSecs);
@@ -2939,6 +2942,8 @@ static void loadConfigFromPrefs() {
     }
     if (prefs.isKey("mqttEncrypt")) s_cfg.mqttEncryption = prefs.getBool("mqttEncrypt");
     if (prefs.isKey("mqttMapRpt")) s_cfg.mqttMapReport = prefs.getBool("mqttMapRpt");
+    if (prefs.isKey("mqttPort")) s_cfg.mqttPort = prefs.getUShort("mqttPort");
+    if (prefs.isKey("mqttTls")) s_cfg.mqttTls = prefs.getBool("mqttTls");
 
     if (prefs.isKey("isPwrSaving")) s_cfg.isPowerSaving = prefs.getBool("isPwrSaving");
     ul = prefs.getULong("lsSecs", 0);
@@ -13296,6 +13301,13 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // Managed flood: relay new traffic onward before handling it locally.
     maybeRebroadcastPacket(pkt);
 
+    // Native MQTT uplink: mirror packets heard on a known, named channel up to
+    // the broker (encrypted ServiceEnvelope). No-op unless the bridge is connected.
+    if (pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS &&
+        CHANNEL_KEYS[pkt.chanIdx].name[0]) {
+        mqttBridgePublish(pkt, CHANNEL_KEYS[pkt.chanIdx].name);
+    }
+
     bool wantsAck = ((pkt.hdr.flags & (1 << 3)) != 0);
     bool addressedToMe = (pkt.hdr.to == s_myNodeId)
                       || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
@@ -15190,6 +15202,7 @@ void setup() {
     playSplashStartupRiff();
     recomputeChannelHashes();
     deriveNodeId();
+    mqttBridgeBegin(&s_cfg, s_myNodeId);
     syncWifiCredsToPrefs();
     applyTimezoneFromConfig();
     bootTimeNtpSync();
@@ -15316,6 +15329,7 @@ void loop() {
         meshChanged = pollMeshRx();
         servicePendingRebroadcast(now);
     }
+    mqttBridgeLoop(now);
     gpsLoop();
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.

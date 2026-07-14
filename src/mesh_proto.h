@@ -242,5 +242,34 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = 
 // Used to ask a specific peer to reply with their current Position.
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen);
 
+// ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
+// Meshtastic MQTT does not carry the packed 16-byte on-air header. It publishes
+// a ServiceEnvelope { packet: MeshPacket, channel_id: string, gateway_id: string }
+// where the inner MeshPacket is the protobuf form. These helpers convert between
+// a decoded MeshPacket (as produced by the radio RX path) and that wire form.
+//
+// Encrypted mode (`msh/.../2/e/`): the inner MeshPacket carries the ciphertext
+// verbatim in its `encrypted` field (no re-encryption), so the caller must have
+// preserved pkt.rawCipher/pkt.rawLen.
+
+// Encode a ServiceEnvelope for the given packet. channelName is the human channel
+// name (ServiceEnvelope.channel_id); gatewayId is our node id as "!aabbccdd".
+// cipher/cipherLen is the raw on-air ciphertext to place in MeshPacket.encrypted.
+// rxTime is Unix seconds (0 to omit). Returns encoded length, or 0 on overflow.
+size_t encodeServiceEnvelope(const MeshHdr &hdr,
+                             const uint8_t *cipher, size_t cipherLen,
+                             float rxSnr, int32_t rxRssi, uint32_t rxTime,
+                             const char *channelName, const char *gatewayId,
+                             uint8_t *out, size_t outLen);
+
+// Decode a ServiceEnvelope received from MQTT. Reconstructs the on-air header
+// (with the via_mqtt flag forced on) and copies MeshPacket.encrypted into
+// cipher[cipherCap]. channelName (may be nullptr) receives ServiceEnvelope
+// .channel_id. Returns false if no encrypted payload was present or on overflow.
+bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
+                           MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
+                           size_t &cipherLen,
+                           char *channelName, size_t channelNameCap);
+
 // ── Port name helper ──────────────────────────────────────────
 const char *portnumName(uint32_t p);

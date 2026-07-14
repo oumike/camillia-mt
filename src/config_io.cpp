@@ -374,6 +374,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.mqttRoot[sizeof(cfg.mqttRoot) - 1] = '\0';
     cfg.mqttEncryption     = MY_MQTT_ENCRYPT;
     cfg.mqttMapReport      = MY_MQTT_MAP_RPT;
+    cfg.mqttPort           = MY_MQTT_PORT;
+    cfg.mqttTls            = MY_MQTT_TLS;
     cfg.isPowerSaving      = MY_POWER_SAVING;
     cfg.lsSecs             = MY_LS_SECS;
     cfg.minWakeSecs        = MY_MIN_WAKE_SECS;
