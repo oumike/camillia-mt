@@ -610,6 +610,10 @@ void otaSetNetworkAllowed(bool allowed) {
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
 }
 
+void otaPreferExternalHeap() {
+    preferExternalHeapForOta();
+}
+
 const char *otaCurrentDeviceAssetSlug() {
 #if defined(DEVICE_TDECK)
     return "tdeck";

@@ -1,4 +1,5 @@
 #include "channel_mgr.h"
+#include "mqtt_bridge.h"
 #include "live_feed.h"
 #include "live_util.h"
 #include "mesh_radio.h"
@@ -561,6 +562,12 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
             }
         }
         return false;
+    }
+
+    // Mirror our own outgoing message to MQTT when this channel is uplink-enabled
+    // (published once here, not on the reliability retry below).
+    if (okToMqtt && CHANNEL_KEYS[txChan].uplinkEnabled) {
+        mqttBridgePublishRaw(hdr, cipher, protoLen, txName);
     }
 
     // Reliability nudge for broadcast text: send one additional copy with the

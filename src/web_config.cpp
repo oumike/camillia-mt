@@ -1297,7 +1297,12 @@ static void sendConfigPage(const char *msg = "") {
     // ── Channels ──────────────────────────────────────────────
     html += "<details><summary>Channels</summary>";
     html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
-            "Hash is recomputed automatically on save.</p>";
+            "Hash is recomputed automatically on save. "
+            "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
+            "MQTT traffic for it onto LoRa.</p>";
+    // Marker so the POST handler applies per-channel checkbox state (an unchecked
+    // box submits nothing) only when this section was rendered.
+    html += "<input type='hidden' name='ch_flags' value='1'>";
     char b64buf[48];
     for (int i = 0; i < MESH_CHANNELS; i++) {
         const ChannelKey &ch = CHANNEL_KEYS[i];
@@ -1328,6 +1333,17 @@ static void sendConfigPage(const char *msg = "") {
             html += ">"; html += roles[r]; html += "</option>";
         }
         html += "</select></label>";
+        // Uplink / Downlink toggles
+        snprintf(tmp, sizeof(tmp), "ch%d_up", i);
+        html += "<label style='display:flex;align-items:center;gap:.4em'>"
+                "<input type='checkbox' name='"; html += tmp; html += "' value='1'";
+        if (ch.uplinkEnabled) html += " checked";
+        html += "> Uplink</label>";
+        snprintf(tmp, sizeof(tmp), "ch%d_down", i);
+        html += "<label style='display:flex;align-items:center;gap:.4em'>"
+                "<input type='checkbox' name='"; html += tmp; html += "' value='1'";
+        if (ch.downlinkEnabled) html += " checked";
+        html += "> Downlink</label>";
         html += "</div>";
     }
     html += "</details>";
@@ -2742,6 +2758,14 @@ static void handlePostSave() {
         }
         snprintf(field, sizeof(field), "ch%d_role", i);
         CHANNEL_KEYS[i].role = (uint8_t)constrain(server.arg(field).toInt(), 0, 2);
+        // MQTT uplink/downlink — apply only when the channels section was rendered
+        // (unchecked boxes submit nothing, so we can't distinguish off from absent).
+        if (server.hasArg("ch_flags")) {
+            snprintf(field, sizeof(field), "ch%d_up", i);
+            CHANNEL_KEYS[i].uplinkEnabled = (server.arg(field) == "1");
+            snprintf(field, sizeof(field), "ch%d_down", i);
+            CHANNEL_KEYS[i].downlinkEnabled = (server.arg(field) == "1");
+        }
         // Recompute on-air hash from current name + key
         const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
         CHANNEL_KEYS[i].hash = computeChannelHash(nm2, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);

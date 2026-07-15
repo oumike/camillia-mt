@@ -346,6 +346,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.region[sizeof(cfg.region) - 1] = '\0';
     strncpy(cfg.tzDef, MY_TZ_DEF, sizeof(cfg.tzDef) - 1);
     cfg.tzDef[sizeof(cfg.tzDef) - 1] = '\0';
+    cfg.wifiEnabled        = MY_WIFI_ENABLED;
     cfg.wifiSsid[0]        = '\0';
     cfg.wifiPass[0]        = '\0';
     strncpy(cfg.webCfgPass, "admin", sizeof(cfg.webCfgPass) - 1);
@@ -588,9 +589,18 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "module_config:\n";
     out += "  storeForward:\n";
     snprintf(tmp, sizeof(tmp), "    client_enabled: %s\n", cfg.snfClientEnabled ? "true" : "false"); out += tmp;
-    // MQTT subsection intentionally limited to the two cross-build routing
-    // flags. Broker credentials/address are excluded from export.
+    // MQTT subsection: include full bridge settings so export/import round-trips
+    // all MQTT behavior and connectivity fields.
     out += "  mqtt:\n";
+    snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.mqttEnabled ? "true" : "false"); out += tmp;
+    out += "    address: "; out += cfg.mqttServer; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    port: %u\n", (unsigned)cfg.mqttPort); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    tlsEnabled: %s\n", cfg.mqttTls ? "true" : "false"); out += tmp;
+    out += "    username: "; out += cfg.mqttUser; out += "\n";
+    out += "    password: "; out += cfg.mqttPass; out += "\n";
+    out += "    root: "; out += cfg.mqttRoot; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    encryptionEnabled: %s\n", cfg.mqttEncryption ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n", cfg.mqttMapReport ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
     out += "  telemetry:\n";
@@ -616,6 +626,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         out += "  - name: "; out += nm; out += "\n";
         out += "    role: "; out += roleStr; out += "\n";
         out += "    key: "; out += b64buf; out += "\n";
+        snprintf(tmp, sizeof(tmp), "    uplink: %s\n", ch.uplinkEnabled ? "true" : "false");
+        out += tmp;
+        snprintf(tmp, sizeof(tmp), "    downlink: %s\n", ch.downlinkEnabled ? "true" : "false");
+        out += tmp;
         snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
     }
@@ -815,6 +829,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].hash = (uint8_t)strtol(val, nullptr, 16);
                 } else if (!strcmp(key, "role")) {
                     CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;
+                } else if (!strcmp(key, "uplink")) {
+                    CHANNEL_KEYS[chanIdx].uplinkEnabled = parseBoolValue(val);
+                } else if (!strcmp(key, "downlink")) {
+                    CHANNEL_KEYS[chanIdx].downlinkEnabled = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
                 // Meshtastic CLI format
@@ -881,9 +899,14 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "minWakeSecs"))   cfg.minWakeSecs   = (uint32_t)atol(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mqtt")) {
                 if      (!strcmp(key, "address"))            strncpy(cfg.mqttServer,  val, sizeof(cfg.mqttServer)  - 1);
-                else if (!strcmp(key, "enabled"))            cfg.mqttEnabled    = (!strcmp(val,"true"));
-                else if (!strcmp(key, "encryptionEnabled"))  cfg.mqttEncryption = (!strcmp(val,"true"));
-                else if (!strcmp(key, "mapReportingEnabled"))cfg.mqttMapReport  = (!strcmp(val,"true"));
+                else if (!strcmp(key, "enabled"))            cfg.mqttEnabled    = parseBoolValue(val);
+                else if (!strcmp(key, "port")) {
+                    long p = atol(val);
+                    if (p >= 1 && p <= 65535) cfg.mqttPort = (uint16_t)p;
+                }
+                else if (!strcmp(key, "tlsEnabled") || !strcmp(key, "tls")) cfg.mqttTls = parseBoolValue(val);
+                else if (!strcmp(key, "encryptionEnabled"))  cfg.mqttEncryption = parseBoolValue(val);
+                else if (!strcmp(key, "mapReportingEnabled"))cfg.mqttMapReport  = parseBoolValue(val);
                 else if (!strcmp(key, "password"))           strncpy(cfg.mqttPass,    val, sizeof(cfg.mqttPass)    - 1);
                 else if (!strcmp(key, "root"))               strncpy(cfg.mqttRoot,    val, sizeof(cfg.mqttRoot)    - 1);
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);

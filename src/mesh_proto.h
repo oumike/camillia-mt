@@ -15,6 +15,8 @@ struct ChannelKey {
     uint8_t     hash;         // XOR(name_bytes) ^ XOR(expanded_key_bytes)
     char        name_buf[16]; // mutable storage for imported names (zero at static init)
     uint8_t role;             // 0=PRIMARY, 1=SECONDARY, 2=DISABLED
+    bool    uplinkEnabled;    // publish packets heard on this channel to MQTT
+    bool    downlinkEnabled;  // re-inject MQTT traffic for this channel onto LoRa
 };
 
 // Inline definitions so the table lives in mesh_proto.cpp (extern declared below)

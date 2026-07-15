@@ -49,6 +49,7 @@ struct RhinoConfig {
     char     tzDef[48];
 
     // WiFi (web config)
+    bool     wifiEnabled;        // master switch; gates web config + MQTT bridge
     char     wifiSsid[64];
     char     wifiPass[64];
     char     webCfgPass[64];

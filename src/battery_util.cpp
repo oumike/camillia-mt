@@ -97,6 +97,21 @@ static float batteryReadPagerBqVolts() {
 } // namespace
 #endif
 
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#include <M5Unified.h>
+namespace {
+// The Cardputer's battery divider sits on ADC1_GPIO10, which M5Unified claims via
+// the ESP-IDF adc_oneshot driver during M5Cardputer.begin(). Reading that same pin
+// with Arduino's legacy analogRead returns 0 once the oneshot driver owns ADC1, so
+// defer to M5Unified's calibrated reading (millivolts, already divider-scaled).
+static float batteryReadCardputerVolts() {
+    int mv = M5.Power.getBatteryVoltage();
+    if (mv <= 0) return 0.0f;
+    return mv / 1000.0f;
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && (BATT_SENSE_ENABLE_PIN >= 0)
 static int  sHeltecSenseLevel = BATT_SENSE_ENABLE_LEVEL;
 static bool sHeltecSenseLocked = false;
@@ -238,7 +253,9 @@ void batteryInitAdc() {
     pinMode(BATT_SENSE_ENABLE_PIN, OUTPUT);
     digitalWrite(BATT_SENSE_ENABLE_PIN, BATT_SENSE_ENABLE_LEVEL);
 #endif
-#if (BATT_ADC_PIN >= 0)
+#if (BATT_ADC_PIN >= 0) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer battery is read via M5Unified (adc_oneshot); leave the legacy
+    // Arduino ADC driver off GPIO10 so it doesn't fight for ADC1.
     analogSetPinAttenuation(BATT_ADC_PIN, ADC_11db);   // 0-3.3V ADC input range
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && (BATT_SENSE_ENABLE_PIN >= 0)
@@ -268,7 +285,9 @@ static float batteryReadVoltageRaw() {
     return 0.0f;
 #endif
 #else
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return batteryReadCardputerVolts();
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
     float vadc =
 #if (BATT_SENSE_ENABLE_PIN >= 0)
         batteryReadHeltecAdcVolts();

@@ -101,6 +101,7 @@
 #define MY_BT_PIN           123456
 
 // ── Network defaults ───────────────────────────────────────────
+#define MY_WIFI_ENABLED     1      // master WiFi switch (gates web config + MQTT)
 #define MY_NTP_SERVER       "meshtastic.pool.ntp.org"
 #define MY_MQTT_ENABLED     0
 #define MY_MQTT_SERVER      "mqtt.meshtastic.org"
