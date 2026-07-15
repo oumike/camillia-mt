@@ -228,6 +228,10 @@ bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_
 }
 
 bool MeshRadio::pollRx(MeshPacket &pkt) {
+#if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
+    (void)pkt;
+    return false;   // TEMP: LoRa RX disabled for MQTT-only testing
+#endif
     if (!_rxFlag) return false;
     _rxFlag = false;
 
@@ -304,6 +308,12 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 }
 
 bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
+#if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
+    // TEMP: LoRa TX disabled for MQTT-only testing. Report success so senders
+    // still run their MQTT uplink and local-display paths.
+    (void)buf; (void)len;
+    return true;
+#endif
     if (kVerboseRadioIo) {
         // Dump header bytes for wire-format verification
         Serial.printf("[radio] TX hdr: ");

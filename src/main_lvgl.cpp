@@ -10,6 +10,7 @@
 #include "live_feed.h"
 #include "mesh_proto.h"
 #include "mesh_radio.h"
+#include "mqtt_bridge.h"
 #include "node_db.h"
 #include "dm_mgr.h"
 #include "ignore_list.h"
@@ -991,6 +992,7 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
+    CFG_ACTION_WIFI_TOGGLE,
     CFG_ACTION_GPS_TOGGLE,
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
@@ -1000,6 +1002,7 @@ enum CfgActionId {
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_SNF_CLIENT,
+    CFG_ACTION_MQTT_TOGGLE,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -1986,11 +1989,29 @@ static lv_color_t themedColorHex(uint32_t rgb) {
 static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     if (!buf || bufLen == 0) return "";
     switch (actionId) {
+        case CFG_ACTION_WIFI_TOGGLE:
+            if (!s_cfg.wifiEnabled) {
+                snprintf(buf, bufLen, "WiFi: Off");
+            } else if ((uint32_t)WiFi.localIP() != 0) {
+                // Real STA/network address (MQTT etc.), shown regardless of web config.
+                snprintf(buf, bufLen, "WiFi: On (%s)", WiFi.localIP().toString().c_str());
+            } else if (webCfgRunning()) {
+                snprintf(buf, bufLen, "WiFi: On (%s)", webCfgIP());  // AP fallback
+            } else if (!s_cfg.wifiSsid[0]) {
+                snprintf(buf, bufLen, "WiFi: On (AP MODE ONLY)");
+            } else {
+                snprintf(buf, bufLen, "WiFi: On (connecting)");
+            }
+            break;
         case CFG_ACTION_WEBCFG:
-            if (!s_webCfgEnabled) {
+            if (!s_cfg.wifiEnabled) {
+                snprintf(buf, bufLen, "Web Config: Off (WiFi off)");
+            } else if (s_cfg.mqttEnabled) {
+                snprintf(buf, bufLen, "Web Config: Off (MQTT on)");
+            } else if (!s_webCfgEnabled) {
                 snprintf(buf, bufLen, "Web Config: Disabled");
             } else if (webCfgRunning()) {
-                snprintf(buf, bufLen, "Web Config: On (%s)", webCfgIP());
+                snprintf(buf, bufLen, "Web Config: On");
             } else {
                 snprintf(buf, bufLen, "Web Config: Enabled");
             }
@@ -2026,6 +2047,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_SNF_CLIENT:
             snprintf(buf, bufLen, "Store&Fwd Client: %s", s_cfg.snfClientEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_MQTT_TOGGLE:
+            if (!s_cfg.wifiEnabled) {
+                snprintf(buf, bufLen, "MQTT Bridge: Off (WiFi off)");
+            } else {
+                snprintf(buf, bufLen, "MQTT Bridge: %s", s_cfg.mqttEnabled ? "On" : "Off");
+            }
+            break;
         case CFG_ACTION_MSG_ALERT:
             snprintf(buf, bufLen, "Notification Sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
             break;
@@ -2053,6 +2081,17 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
     }
     return buf;
+}
+
+// A CFG row is greyed out and non-interactive when its precondition is unmet:
+// both network consumers require WiFi, and the web-config portal is locked off
+// while the MQTT bridge is on (they don't run together).
+static bool cfgActionDisabled(int actionId) {
+    switch (actionId) {
+        case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
+        case CFG_ACTION_WEBCFG:      return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
+        default:                     return false;
+    }
 }
 
 static const char *cfgDeviceRoleName(uint8_t role) {
@@ -2343,6 +2382,24 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
 
     otaWorkerLogHeap("wifi recycle failed");
     return false;
+}
+
+// Keeps the station link associated whenever the WiFi master switch is on and
+// credentials exist, so the device always holds an IP — independent of the web
+// config portal or the MQTT bridge. Non-blocking: kicks WiFi.begin() at most once
+// per interval and returns immediately. Coexists with the AP (AP_STA) so the web
+// portal keeps working alongside it.
+static uint32_t s_wifiStaKickMs = 0;
+static void serviceWifiStation(uint32_t now) {
+    if (!s_cfg.wifiEnabled || !s_cfg.wifiSsid[0]) return;
+    if (WiFi.status() == WL_CONNECTED) return;
+    if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < 10000UL) return;
+    s_wifiStaKickMs = now;
+
+    wifi_mode_t mode = WiFi.getMode();
+    if (mode == WIFI_AP)       WiFi.mode(WIFI_AP_STA);
+    else if (mode == WIFI_OFF) WiFi.mode(WIFI_STA);
+    WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
 }
 
 static bool runOtaWorkerModeIfRequested() {
@@ -2750,6 +2807,7 @@ static void persistConfigToPrefs() {
     p.putBool("btEnabled", s_cfg.btEnabled);
     p.putUChar("btMode", s_cfg.btMode);
     p.putULong("btFixedPin", s_cfg.btFixedPin);
+    p.putBool("wifiEnabled", s_cfg.wifiEnabled);
     p.putBool("mqttEnabled", s_cfg.mqttEnabled);
     p.putString("mqttServer", s_cfg.mqttServer);
     p.putString("mqttUser", s_cfg.mqttUser);
@@ -2757,6 +2815,8 @@ static void persistConfigToPrefs() {
     p.putString("mqttRoot", s_cfg.mqttRoot);
     p.putBool("mqttEncrypt", s_cfg.mqttEncryption);
     p.putBool("mqttMapRpt", s_cfg.mqttMapReport);
+    p.putUShort("mqttPort", s_cfg.mqttPort);
+    p.putBool("mqttTls", s_cfg.mqttTls);
     p.putBool("isPwrSaving", s_cfg.isPowerSaving);
     p.putULong("lsSecs", s_cfg.lsSecs);
     p.putULong("minWakeSecs", s_cfg.minWakeSecs);
@@ -2792,6 +2852,10 @@ static void persistChannelsToPrefs() {
         cp.putBytes(key, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
         snprintf(key, sizeof(key), "r%d", i);
         cp.putUChar(key, CHANNEL_KEYS[i].role);
+        snprintf(key, sizeof(key), "u%d", i);
+        cp.putBool(key, CHANNEL_KEYS[i].uplinkEnabled);
+        snprintf(key, sizeof(key), "d%d", i);
+        cp.putBool(key, CHANNEL_KEYS[i].downlinkEnabled);
     }
 
     cp.end();
@@ -2916,6 +2980,7 @@ static void loadConfigFromPrefs() {
     ul = prefs.getULong("btFixedPin", 0);
     if (ul) s_cfg.btFixedPin = ul;
 
+    s_cfg.wifiEnabled = prefs.getBool("wifiEnabled", s_cfg.wifiEnabled);
     if (prefs.isKey("mqttEnabled")) s_cfg.mqttEnabled = prefs.getBool("mqttEnabled");
     String mqttServer = getStringIfKey("mqttServer");
     if (mqttServer.length()) {
@@ -2939,6 +3004,8 @@ static void loadConfigFromPrefs() {
     }
     if (prefs.isKey("mqttEncrypt")) s_cfg.mqttEncryption = prefs.getBool("mqttEncrypt");
     if (prefs.isKey("mqttMapRpt")) s_cfg.mqttMapReport = prefs.getBool("mqttMapRpt");
+    if (prefs.isKey("mqttPort")) s_cfg.mqttPort = prefs.getUShort("mqttPort");
+    if (prefs.isKey("mqttTls")) s_cfg.mqttTls = prefs.getBool("mqttTls");
 
     if (prefs.isKey("isPwrSaving")) s_cfg.isPowerSaving = prefs.getBool("isPwrSaving");
     ul = prefs.getULong("lsSecs", 0);
@@ -3003,6 +3070,17 @@ static void loadConfigFromPrefs() {
     }
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
 
+    // Enforce network-option invariants regardless of how the flags were set
+    // (on-device toggles or web config): MQTT needs WiFi, and the MQTT bridge and
+    // the web-config portal are mutually exclusive.
+    if (!s_cfg.wifiEnabled) {
+        s_cfg.mqttEnabled = false;
+        s_webCfgEnabled   = false;
+    }
+    if (s_cfg.mqttEnabled) {
+        s_webCfgEnabled = false;
+    }
+
     prefs.end();
 
     // Re-derive freq/BW/SF/CR from region + preset so they're always consistent.
@@ -3043,6 +3121,11 @@ static void loadChannelsFromPrefs() {
             uint8_t role = cp.getUChar(key, 0xFF);
             if (role != 0xFF) CHANNEL_KEYS[i].role = role;
         }
+
+        snprintf(key, sizeof(key), "u%d", i);
+        if (cp.isKey(key)) CHANNEL_KEYS[i].uplinkEnabled = cp.getBool(key);
+        snprintf(key, sizeof(key), "d%d", i);
+        if (cp.isKey(key)) CHANNEL_KEYS[i].downlinkEnabled = cp.getBool(key);
     }
 
     cp.end();
@@ -3711,7 +3794,9 @@ static void sendComposeMessage() {
 
 static void initCfgActions() {
     s_cfgActionCount = 0;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
@@ -3824,12 +3909,13 @@ static void refreshCfgModal() {
 
     for (int i = 0; i < s_cfgActionCount; i++) {
         const int actionId = s_cfgActions[i];
+        const bool disabled = cfgActionDisabled(actionId);
         char rowText[80];
 
         lv_obj_t *row = lv_label_create(s_cfgActionList);
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_style_text_font(row, cfgRowFont, 0);
-        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(disabled ? 0x5A6B85 : 0xD9E8FF), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_left(row, 4, 0);
         lv_obj_set_style_pad_right(row, 4, 0);
@@ -3839,15 +3925,25 @@ static void refreshCfgModal() {
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_outline_width(row, 0, 0);
         lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(row,
-                    onCfgActionRowPressed,
-                    LV_EVENT_CLICKED,
-                    (void *)(intptr_t)i);
+        // Greyed rows are non-interactive on touch; keyboard activation is gated
+        // separately in activateCfgSelection().
+        if (!disabled) {
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(row,
+                        onCfgActionRowPressed,
+                        LV_EVENT_CLICKED,
+                        (void *)(intptr_t)i);
+        }
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, cfgActionLabel(actionId, rowText, sizeof(rowText)));
 
-        if (i == s_cfgSelection) {
+        if (disabled) {
+            // muted; keep the alternating-row hint but no selection emphasis
+            if (i & 1) {
+                lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
+                lv_obj_set_style_bg_opa(row, LV_OPA_20, 0);
+            }
+        } else if (i == s_cfgSelection) {
             lv_obj_set_style_bg_color(row, selectionBgColor, 0);
             lv_obj_set_style_bg_opa(row, selectionBgOpa, 0);
             lv_obj_set_style_text_color(row, selectionTextColor, 0);
@@ -9232,6 +9328,14 @@ static void openCfgModal() {
 static void activateCfgSelection() {
     if (s_cfgActionCount <= 0 || s_cfgSelection < 0 || s_cfgSelection >= s_cfgActionCount) return;
     const int actionId = s_cfgActions[s_cfgSelection];
+    if (cfgActionDisabled(actionId)) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
+                 (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled)
+                     ? "Web Config locked while MQTT is on"
+                     : "Enable WiFi first");
+        openCfgActionMessageModal(s_cfgStatus);
+        return;
+    }
     if (s_cfgDebugLog) {
         char actionText[80];
         Serial.printf("[lvgl-cfg] activate sel=%d action=%d label=\"%s\" confirmAction=%d dtConfirm=%lu dtAct=%lu dtScroll=%lu\n",
@@ -9268,8 +9372,9 @@ static void performCfgAction(int actionId) {
                 s_webCfgEnabled = false;
                 persistWebCfgEnabled();
                 if (webCfgRunning()) {
-                    webCfgEnd();
+                    webCfgEnd();   // tears the radio down; re-associate STA now
                 }
+                s_wifiStaKickMs = 0;   // reconnect station immediately for the IP
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config disabled");
             } else {
                 Serial.println("[web] CFG action: enable web config");
@@ -9397,6 +9502,41 @@ static void performCfgAction(int actionId) {
                      sizeof(s_cfgStatus),
                      "Store&Fwd Client: %s",
                      s_cfg.snfClientEnabled ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_WIFI_TOGGLE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec WIFI_TOGGLE");
+            s_cfg.wifiEnabled = !s_cfg.wifiEnabled;
+            s_wifiStaKickMs = 0;   // (re)associate station promptly on enable
+            if (!s_cfg.wifiEnabled) {
+                // Master off: stop both consumers and drop the radio.
+                s_cfg.mqttEnabled = false;
+                if (s_webCfgEnabled) {
+                    s_webCfgEnabled = false;
+                    persistWebCfgEnabled();
+                }
+                if (webCfgRunning()) webCfgEnd();
+                mqttBridgeConfigChanged();
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+            }
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     "WiFi %s", s_cfg.wifiEnabled ? "on" : "off");
+            break;
+
+        case CFG_ACTION_MQTT_TOGGLE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MQTT_TOGGLE");
+            s_cfg.mqttEnabled = !s_cfg.mqttEnabled;
+            persistConfigToPrefs();
+            // Reboot so the change applies cleanly; the load-time invariant also
+            // enforces MQTT/web-config mutual exclusion on the way back up.
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     "MQTT Bridge: %s - rebooting...", s_cfg.mqttEnabled ? "On" : "Off");
+            refreshCfgModal();
+            lv_timer_handler();
+            delay(1000);
+            ESP.restart();
             break;
 
         case CFG_ACTION_MSG_ALERT:
@@ -13265,6 +13405,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // Match v1 behavior: ignore reflected copies of our own transmitted packets.
     if (s_myNodeId != 0 && pkt.hdr.from == s_myNodeId) return false;
 
+    // User preference: drop packets that arrived from MQTT before any handling
+    // (display, rebroadcast, or node-state updates).
+    if (s_cfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return false;
+
     Nodes.updateFromPacket(pkt);
 
     // Live SNR/RSSI sparkline samples (one per received packet).
@@ -13295,6 +13439,16 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
     // Managed flood: relay new traffic onward before handling it locally.
     maybeRebroadcastPacket(pkt);
+
+    // Native MQTT uplink: mirror packets heard on a known, named, uplink-enabled
+    // channel up to the broker. Never re-publish packets that arrived via MQTT
+    // (via_mqtt flag) — that would form an MQTT→RF→MQTT loop with downlink.
+    if (pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS &&
+        !(pkt.hdr.flags & 0x10) &&
+        CHANNEL_KEYS[pkt.chanIdx].name[0] &&
+        CHANNEL_KEYS[pkt.chanIdx].uplinkEnabled) {
+        mqttBridgePublish(pkt, CHANNEL_KEYS[pkt.chanIdx].name);
+    }
 
     bool wantsAck = ((pkt.hdr.flags & (1 << 3)) != 0);
     bool addressedToMe = (pkt.hdr.to == s_myNodeId)
@@ -13709,6 +13863,74 @@ static bool pollMeshRx() {
     }
 
     return changed;
+}
+
+// Set by the MQTT downlink inject when it produces a UI-visible change; consumed
+// in loop() so the same refresh path as RX packets runs this iteration.
+static bool s_mqttDownlinkUiDirty = false;
+
+// Downlink sink: a ServiceEnvelope arrived from the broker. Reconstruct a
+// received-style packet and run it through the normal RX pipeline so it displays
+// and (for router roles) rebroadcasts onto LoRa — gated by the channel's
+// downlink flag. Called from mqttBridgeLoop() on the main loop.
+static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
+                               size_t cipherLen, const char *chanName) {
+    // Loop guard: ignore our own packets echoed back by the broker. The dedup
+    // check (against RF-heard copies and duplicate MQTT copies) is left to
+    // processMeshPacket() below — isDuplicate() records as a side effect, so
+    // calling it here would make that check drop the packet.
+    if (s_myNodeId != 0 && hdr.from == s_myNodeId) {
+        Serial.println("[mqtt] downlink drop: own packet echoed back");
+        return;
+    }
+
+    // Resolve the channel by name; require it to exist locally with downlink on.
+    int idx = -1;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (CHANNEL_KEYS[i].name[0] && chanName &&
+            strcmp(CHANNEL_KEYS[i].name, chanName) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+        Serial.printf("[mqtt] downlink drop: no local channel named '%s'\n",
+                      chanName ? chanName : "(null)");
+        return;
+    }
+    if (!CHANNEL_KEYS[idx].downlinkEnabled) {
+        Serial.printf("[mqtt] downlink drop: channel '%s' has downlink disabled\n",
+                      CHANNEL_KEYS[idx].name);
+        return;
+    }
+    Serial.printf("[mqtt] downlink inject: channel='%s' from=%08lx\n",
+                  CHANNEL_KEYS[idx].name, (unsigned long)hdr.from);
+
+    // Reconstruct the decoded packet the same way MeshRadio::pollRx() does, then
+    // hand it to the shared RX handler (decrypt/display + rebroadcast).
+    MeshPacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.hdr      = hdr;               // via_mqtt already forced on by the decoder
+    pkt.rxMs     = millis();
+    pkt.chanIdx  = -1;
+    pkt.decrypted = false;
+    if (cipherLen > 0 && cipherLen <= sizeof(pkt.rawCipher) && hdr.channel != 0) {
+        memcpy(pkt.rawCipher, cipher, cipherLen);
+        pkt.rawLen = cipherLen;
+        uint8_t plain[256];
+        pkt.chanIdx = decryptPacket(pkt.hdr, cipher, plain, cipherLen);
+        pkt.decrypted = (pkt.chanIdx >= 0);
+        if (pkt.decrypted) {
+            const uint8_t *payPtr; size_t payLen;
+            decodeData(plain, cipherLen, pkt.portnum, payPtr, payLen,
+                       pkt.requestId, pkt.wantResponse,
+                       &pkt.dataDest, &pkt.hasDataDest,
+                       &pkt.dataSource, &pkt.hasDataSource);
+            if (payPtr && payLen <= sizeof(pkt.payload)) {
+                memcpy(pkt.payload, payPtr, payLen);
+                pkt.payloadLen = payLen;
+            }
+        }
+    }
+
+    if (processMeshPacket(pkt)) s_mqttDownlinkUiDirty = true;
 }
 
 static uint32_t announceIntervalMs(uint32_t intervalS) {
@@ -15190,6 +15412,8 @@ void setup() {
     playSplashStartupRiff();
     recomputeChannelHashes();
     deriveNodeId();
+    mqttBridgeBegin(&s_cfg, s_myNodeId);
+    mqttBridgeSetInject(mqttDownlinkInject);
     syncWifiCredsToPrefs();
     applyTimezoneFromConfig();
     bootTimeNtpSync();
@@ -15218,6 +15442,10 @@ void setup() {
     syncPrimaryChannelName();
     recomputeChannelHashes();
     s_radioReady = Radio.init();
+#if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
+    Serial.println("[radio] *** LORA_TEST_MQTT_ONLY: LoRa TX/RX DISABLED (MQTT-only test build) ***");
+    Channels.addMessage(0, "", "[TEST] LoRa disabled - MQTT only", TFT_ORANGE);
+#endif
     if (!s_radioReady) {
         Channels.addMessage(0, "", "[radio] init failed", TFT_RED);
     } else {
@@ -15316,6 +15544,9 @@ void loop() {
         meshChanged = pollMeshRx();
         servicePendingRebroadcast(now);
     }
+    serviceWifiStation(now);
+    mqttBridgeLoop(now);
+    if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
     gpsLoop();
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.

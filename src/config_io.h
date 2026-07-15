@@ -49,6 +49,7 @@ struct RhinoConfig {
     char     tzDef[48];
 
     // WiFi (web config)
+    bool     wifiEnabled;        // master switch; gates web config + MQTT bridge
     char     wifiSsid[64];
     char     wifiPass[64];
     char     webCfgPass[64];
@@ -77,6 +78,8 @@ struct RhinoConfig {
     char     mqttRoot[48];
     bool     mqttEncryption;
     bool     mqttMapReport;
+    uint16_t mqttPort;           // broker TCP port (8883 TLS, 1883 plaintext)
+    bool     mqttTls;            // connect via WiFiClientSecure when set
 
     // Power
     bool     isPowerSaving;
