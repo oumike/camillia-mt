@@ -312,6 +312,14 @@ static uint32_t s_nodesActionNodeId = 0;
 static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     'T', 'D', 'F', 'I', 'P', 'G'
 };
+
+// Channel Actions modal: overlay opened with (A) from the main screen. Acts on
+// the active channel. Currently a single (M)ute/Un(m)ute toggle, activatable by
+// touch or keyboard.
+static lv_obj_t *s_channelActionsModal = nullptr;
+static lv_obj_t *s_channelActionsMuteBtn = nullptr;
+static lv_obj_t *s_channelActionsMuteLabel = nullptr;
+static int s_channelActionsChanIdx = -1;
 static lv_obj_t *s_tracerouteBackdrop = nullptr;
 static lv_obj_t *s_tracerouteModal = nullptr;
 static lv_obj_t *s_tracerouteStatusLabel = nullptr;
@@ -372,6 +380,7 @@ enum HeltecNavTarget : uint8_t {
     HELTEC_NAV_DM,
     HELTEC_NAV_NODES,
     HELTEC_NAV_LIVE,
+    HELTEC_NAV_ACTIONS,
     HELTEC_NAV_LEGEND,
 };
 
@@ -618,6 +627,12 @@ static void closeLegendModal();
 static void onLegendClosePressed(lv_event_t *e);
 static void openLiveModal();
 static void closeLiveModal();
+static inline bool channelIsMuted(int chanIdx);
+static void openChannelActionsModal();
+static void closeChannelActionsModal();
+static void refreshChannelActionsModal();
+static void toggleActiveChannelMute();
+static void onChannelActionMutePressed(lv_event_t *e);
 static void logLvglMemDiag(const char *tag);
 static void onHeltecBottomNavPressed(lv_event_t *e);
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget);
@@ -2856,6 +2871,8 @@ static void persistChannelsToPrefs() {
         cp.putBool(key, CHANNEL_KEYS[i].uplinkEnabled);
         snprintf(key, sizeof(key), "d%d", i);
         cp.putBool(key, CHANNEL_KEYS[i].downlinkEnabled);
+        snprintf(key, sizeof(key), "m%d", i);
+        cp.putBool(key, CHANNEL_KEYS[i].muted);
     }
 
     cp.end();
@@ -3126,6 +3143,8 @@ static void loadChannelsFromPrefs() {
         if (cp.isKey(key)) CHANNEL_KEYS[i].uplinkEnabled = cp.getBool(key);
         snprintf(key, sizeof(key), "d%d", i);
         if (cp.isKey(key)) CHANNEL_KEYS[i].downlinkEnabled = cp.getBool(key);
+        snprintf(key, sizeof(key), "m%d", i);
+        if (cp.isKey(key)) CHANNEL_KEYS[i].muted = cp.getBool(key);
     }
 
     cp.end();
@@ -4258,6 +4277,10 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_liveModal) closeLiveModal();
             else openLiveModal();
             break;
+        case HELTEC_NAV_ACTIONS:
+            if (s_channelActionsModal) closeChannelActionsModal();
+            else openChannelActionsModal();
+            break;
         case HELTEC_NAV_LEGEND:
             if (s_legendModal) closeLegendModal();
             else openLegendModal();
@@ -4291,12 +4314,14 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
+        {"Act", HELTEC_NAV_ACTIONS},
         {"Help", HELTEC_NAV_LEGEND},
 #else
         {"Config", HELTEC_NAV_CFG},
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
+        {"Actions", HELTEC_NAV_ACTIONS},
         {"Help", HELTEC_NAV_LEGEND},
 #endif
     };
@@ -7046,6 +7071,145 @@ static void openNodesActionMenu() {
     refreshNodesActionMenuSelection();
 }
 
+// ── Channel Actions modal ─────────────────────────────────────
+static void refreshChannelActionsModal() {
+    if (!s_channelActionsMuteLabel || !s_channelActionsMuteBtn) return;
+    const bool muted = channelIsMuted(s_channelActionsChanIdx);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(s_channelActionsMuteLabel, muted ? "Unmute" : "Mute");
+#else
+    lv_label_set_text(s_channelActionsMuteLabel, muted ? "Un(m)ute" : "(M)ute");
+#endif
+
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t activeBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    // Muted state gets a warmer tint so the toggle reads at a glance.
+    const lv_color_t mutedBg  = isLight ? lv_color_hex(0xF3E0C4) : lv_color_hex(0x6E4A18);
+    lv_obj_set_style_bg_color(s_channelActionsMuteBtn, muted ? mutedBg : activeBg, 0);
+    lv_obj_set_style_bg_opa(s_channelActionsMuteBtn, LV_OPA_COVER, 0);
+}
+
+static void toggleActiveChannelMute() {
+    if (s_channelActionsChanIdx < 0 || s_channelActionsChanIdx >= MESH_CHANNELS) return;
+    ChannelKey &ch = CHANNEL_KEYS[s_channelActionsChanIdx];
+    ch.muted = !ch.muted;
+    persistChannelsToPrefs();
+    // Clear any pending attention glow the moment a channel is muted.
+    if (ch.muted) s_channelNeedsAttention[s_channelActionsChanIdx] = false;
+    refreshChannelActionsModal();
+    refreshChannelGlow(true);
+}
+
+static void onChannelActionMutePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    toggleActiveChannelMute();
+}
+
+static void onChannelActionClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeChannelActionsModal();
+}
+
+static void closeChannelActionsModal() {
+    lvObjDeleteSafe(s_channelActionsModal);
+    s_channelActionsModal = nullptr;
+    s_channelActionsMuteBtn = nullptr;
+    s_channelActionsMuteLabel = nullptr;
+    s_channelActionsChanIdx = -1;
+}
+
+static void openChannelActionsModal() {
+    if (s_channelActionsModal) closeChannelActionsModal();
+    if (s_activeChannel < 0 || s_activeChannel >= MESH_CHANNELS) return;
+    // On Heltec the bottom nav is embedded in every full-screen modal, so this
+    // can be tapped from within one. Close any sibling first, matching how the
+    // other nav targets behave. No-ops on keyboard boards opened from home.
+    if (s_composeModal) closeComposePrompt();
+    closeDmModal();
+    closeNodesModal();
+    closeCfgModal();
+    closeLiveModal();
+    closeLegendModal();
+    s_channelActionsChanIdx = s_activeChannel;
+
+    const int modalW = min(220, lv_disp_get_hor_res(NULL) - 14);
+    lv_obj_t *parent = s_rootScreen ? s_rootScreen : lv_scr_act();
+    s_channelActionsModal = lv_obj_create(parent);
+    lv_obj_set_width(s_channelActionsModal, modalW);
+    lv_obj_set_height(s_channelActionsModal, LV_SIZE_CONTENT);
+    lv_obj_align(s_channelActionsModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_channelActionsModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_channelActionsModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_channelActionsModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_channelActionsModal, 1, 0);
+    lv_obj_set_style_border_color(s_channelActionsModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_channelActionsModal, 6, 0);
+    lv_obj_set_style_pad_row(s_channelActionsModal, 6, 0);
+    lv_obj_set_flex_flow(s_channelActionsModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_channelActionsModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_channelActionsModal);
+
+    const char *chName = CHANNEL_KEYS[s_channelActionsChanIdx].name_buf[0]
+                             ? CHANNEL_KEYS[s_channelActionsChanIdx].name_buf
+                             : CHANNEL_KEYS[s_channelActionsChanIdx].name;
+
+    lv_obj_t *title = lv_label_create(s_channelActionsModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_label_set_text_fmt(title, "Channel Actions\n%s",
+                          (chName && chName[0]) ? chName : "(unnamed)");
+
+    lv_obj_t *btn = lv_btn_create(s_channelActionsModal);
+    s_channelActionsMuteBtn = btn;
+    lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_height(btn, 30);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_all(btn, 2, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_add_event_cb(btn, onChannelActionMutePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    s_channelActionsMuteLabel = lbl;
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
+    lv_obj_center(lbl);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only board: provide an explicit Close button instead of a keyboard hint.
+    lv_obj_t *closeBtn = lv_btn_create(s_channelActionsModal);
+    lv_obj_set_width(closeBtn, lv_pct(100));
+    lv_obj_set_height(closeBtn, 30);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 2, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(closeBtn, onChannelActionClosePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(closeLbl,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#else
+    lv_obj_t *hint = lv_label_create(s_channelActionsModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+#endif
+
+    refreshChannelActionsModal();
+}
+
 static void refreshLiveView(bool force) {
     if (!s_liveModal || !s_liveList) return;
     if (!lv_obj_is_valid(s_liveModal) || !lv_obj_is_valid(s_liveList)) {
@@ -7188,6 +7352,7 @@ static void openLiveModal() {
     closeNodesModal();
     closeCfgModal();
     closeLegendModal();
+    closeChannelActionsModal();
 
     Channels.get(CHAN_LIVE).scrollOff = 0;
     s_lastRenderedLiveCount = -1;
@@ -8537,6 +8702,7 @@ static void openDmModal() {
     closeNodesModal();
     closeCfgModal();
     closeLegendModal();
+    closeChannelActionsModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
@@ -8727,6 +8893,7 @@ static void openNodesModal() {
     closeLiveModal();
     closeCfgModal();
     closeLegendModal();
+    closeChannelActionsModal();
 
     snapshotNodesForModal();
 
@@ -9136,6 +9303,7 @@ static void openCfgModal() {
     closeDmModal();
     closeNodesModal();
     closeLegendModal();
+    closeChannelActionsModal();
 
     initCfgActions();
     s_cfgSelection = 0;
@@ -11238,6 +11406,18 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        if (s_channelActionsModal) {
+            if (isModalCloseKey(k)) {
+                closeChannelActionsModal();
+                continue;
+            }
+            if (k == 'm' || k == 'M' || k == KEY_ENTER) {
+                toggleActiveChannelMute();
+                continue;
+            }
+            continue;
+        }
+
         if (!s_composeModal) {
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
             if (isChannelDropdownVisible()) {
@@ -11486,6 +11666,8 @@ static void pumpKeyboardInput() {
 
             if (k == 'l' || k == 'L') {
                 openLiveModal();
+            } else if (k == 'a' || k == 'A') {
+                openChannelActionsModal();
             } else if (k == 'd' || k == 'D') {
                 openDmModal();
             } else if (k == 'c' || k == 'C') {
@@ -13207,6 +13389,12 @@ static void refreshDmAlertIndicator() {
     }
 }
 
+// True when the given real channel has been muted via Channel Actions. Muted
+// channels still buffer incoming messages, but raise no visual or audio alert.
+static inline bool channelIsMuted(int chanIdx) {
+    return chanIdx >= 0 && chanIdx < MESH_CHANNELS && CHANNEL_KEYS[chanIdx].muted;
+}
+
 static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
     char timePrefix[12];
     char sender[16];
@@ -13227,7 +13415,8 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
 #endif
 
     Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false);
-    if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel) {
+    if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel
+        && !channelIsMuted(chanIdx)) {
         s_channelNeedsAttention[chanIdx] = true;
     }
 }
@@ -13548,7 +13737,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt);
                 }
 
-                triggerMessageAlert();
+                if (isDirectToMe || !channelIsMuted(chanIdx)) {
+                    triggerMessageAlert();
+                }
                 if (wantsAck && isDirectToMe) {
                     (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
                 }
@@ -13670,7 +13861,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                         appendRxText(chanIdx, pkt.hdr.from, prefixedBuf, pkt.hdr.id, viaMqtt);
                     }
 
-                    triggerMessageAlert();
+                    if (isDirectToMe || !channelIsMuted(chanIdx)) {
+                        triggerMessageAlert();
+                    }
                     appendLiveRxSummary(pkt, chanIdx, "F");
                     return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);
                 }
@@ -14762,11 +14955,11 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(s_chatShortcutText, "C(h)annels");
+    lv_label_set_text(s_chatShortcutText, "C(h)annels   (A)ctions");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive   (A)ctions");
 #else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)annels   (D)M   (N)odes   (L)ive");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   (L)ive   (A)ct");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
@@ -14918,6 +15111,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     }
 
     closeComposePrompt();
+    closeChannelActionsModal();
     closeDmModal();
     closeLiveModal();
     closeNodesModal();

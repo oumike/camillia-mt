@@ -17,6 +17,7 @@ struct ChannelKey {
     uint8_t role;             // 0=PRIMARY, 1=SECONDARY, 2=DISABLED
     bool    uplinkEnabled;    // publish packets heard on this channel to MQTT
     bool    downlinkEnabled;  // re-inject MQTT traffic for this channel onto LoRa
+    bool    muted;            // suppress visual + audio notifications for this channel
 };
 
 // Inline definitions so the table lives in mesh_proto.cpp (extern declared below)

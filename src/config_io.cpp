@@ -630,6 +630,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    downlink: %s\n", ch.downlinkEnabled ? "true" : "false");
         out += tmp;
+        snprintf(tmp, sizeof(tmp), "    mute: %s\n", ch.muted ? "true" : "false");
+        out += tmp;
         snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
     }
@@ -833,6 +835,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].uplinkEnabled = parseBoolValue(val);
                 } else if (!strcmp(key, "downlink")) {
                     CHANNEL_KEYS[chanIdx].downlinkEnabled = parseBoolValue(val);
+                } else if (!strcmp(key, "mute")) {
+                    CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
                 // Meshtastic CLI format
