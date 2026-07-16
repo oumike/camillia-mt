@@ -83,10 +83,10 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 - [x] Persistent message history across reboots
 - [x] Position sharing (configurable interval, manual override)
 - [x] Re-enable web config session authentication
+- [x] Wireless MQTT uplink/downlink support (may keep radio-only by default)
 
 
 ### In Progress
-- [ ] Wireless MQTT uplink/downlink support (may keep radio-only by default)
 
 
 ### Planned

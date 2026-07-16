@@ -11664,6 +11664,24 @@ static void pumpKeyboardInput() {
                 }
             }
 
+#if defined(DEVICE_TDECK)
+            // T-Deck has no scroll wheel, so j/k (and trackball scroll, which
+            // shares KEY_SCROLL_UP/DN) both activate and drive the chat cursor
+            // directly, rather than switching channels like the Pager's wheel.
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                if (!s_pagerChatCursorMode) {
+                    s_pagerChatCursorMode = true;
+                    if (!pagerSelectChatCursorIndex(-1)) {
+                        s_pagerChatCursorMode = false;
+                    }
+                } else {
+                    int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                    pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
+                }
+                continue;
+            }
+#endif
+
             if (k == 'l' || k == 'L') {
                 openLiveModal();
             } else if (k == 'a' || k == 'A') {
@@ -11709,7 +11727,9 @@ static void pumpKeyboardInput() {
                 }
 #endif
             } else if (k == KEY_BACKSPACE) {
-                if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
+                if (s_pagerChatCursorMode) {
+                    pagerExitChatCursorMode(true);
+                } else if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
                     s_selectedMsgReplyPacketId = 0;
                     s_selectedMsgText[0] = '\0';
                     s_lastRenderedChannel = -1;
