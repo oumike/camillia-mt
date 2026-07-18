@@ -178,6 +178,9 @@ static const char *currentWebCfgPassword() {
 }
 
 static bool isLoggedIn() {
+    // When authentication is disabled the web config is open — treat every
+    // request as authenticated so all gated handlers pass through.
+    if (gCfg && !gCfg->webCfgAuthEnabled) return true;
     if (!sessionToken[0]) return false;
     String cookie = server.header("Cookie");
     String needle = String("sess=") + sessionToken;
@@ -1164,7 +1167,10 @@ static void sendConfigPage(const char *msg = "") {
     }
     mapPoints += "]";
 #endif  // !DEVICE_CARDPUTER_LORA_HAT
-    html += "<h2>Camillia for Meshtastic <a class='logout' href='/logout'>Logout</a></h2>";
+    html += "<h2>Camillia for Meshtastic";
+    if (gCfg && gCfg->webCfgAuthEnabled)
+        html += " <a class='logout' href='/logout'>Logout</a>";
+    html += "</h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
 
@@ -1203,10 +1209,22 @@ static void sendConfigPage(const char *msg = "") {
     html += "</details>";
 
         html += "<details><summary>Web Config Access</summary>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+                "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
+                " onchange=\"document.getElementById('web-auth-creds').style.display="
+                "this.checked?'':'none'\"";
+        if (gCfg->webCfgAuthEnabled) html += " checked";
+        html += "> Require login (authentication)</label>";
+        html += "<p class='gps-hint'>When disabled, the web config is reachable without a "
+                "username or password. Only leave this off on trusted networks.</p>";
+        html += "<div id='web-auth-creds'";
+        if (!gCfg->webCfgAuthEnabled) html += " style='display:none'";
+        html += ">";
         html += "<label>Username<input type='text' value='admin' readonly></label>";
         html += "<label>Password (leave blank to keep current)"
             "<input name='web_pass' type='password' maxlength='63' autocomplete='new-password'"
             " placeholder='Enter new password'></label>";
+        html += "</div>";
         html += "</details>";
     sendChunk(html);
 
@@ -2690,6 +2708,8 @@ static void handlePostSave() {
     utf8util::copyTruncate(gCfg->nodeShort, sizeof(gCfg->nodeShort), shrt.c_str());
 
     // Web config auth (username is fixed to admin)
+    // Unchecked checkboxes are not submitted, so absence means "disabled".
+    gCfg->webCfgAuthEnabled = server.hasArg("web_auth");
     String webPass = server.arg("web_pass");
     if (webPass.length() > 0) {
         strncpy(gCfg->webCfgPass, webPass.c_str(), sizeof(gCfg->webCfgPass) - 1);
@@ -2914,6 +2934,7 @@ static void handlePostSave() {
         Preferences prefs;
         prefs.begin("camillia", false);
         if (gCfg->webCfgPass[0]) prefs.putString("webPass", gCfg->webCfgPass);
+        prefs.putBool("webCfgAuth", gCfg->webCfgAuthEnabled);
         if (gCfg->wifiSsid[0]) prefs.putString("wifiSsid", gCfg->wifiSsid);
         if (gCfg->wifiPass[0]) prefs.putString("wifiPass", gCfg->wifiPass);
         prefs.end();

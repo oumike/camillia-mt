@@ -2788,6 +2788,7 @@ static void persistConfigToPrefs() {
     if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
     if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
     if (s_cfg.webCfgPass[0]) p.putString("webPass", s_cfg.webCfgPass);
+    p.putBool("webCfgAuth", s_cfg.webCfgAuthEnabled);
     p.putString("nodeLong", s_cfg.nodeLong);
     p.putString("nodeShort", s_cfg.nodeShort);
     p.putUChar("modemPreset", s_cfg.modemPreset);
@@ -3085,6 +3086,7 @@ static void loadConfigFromPrefs() {
         strncpy(s_cfg.wifiPass, wifiPass.c_str(), sizeof(s_cfg.wifiPass) - 1);
         s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
     }
+    s_cfg.webCfgAuthEnabled = prefs.getBool("webCfgAuth", s_cfg.webCfgAuthEnabled);
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
 
     // Enforce network-option invariants regardless of how the flags were set

@@ -349,6 +349,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.wifiEnabled        = MY_WIFI_ENABLED;
     cfg.wifiSsid[0]        = '\0';
     cfg.wifiPass[0]        = '\0';
+    cfg.webCfgAuthEnabled  = false;  // authentication disabled by default
     strncpy(cfg.webCfgPass, "admin", sizeof(cfg.webCfgPass) - 1);
     cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
@@ -519,6 +520,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
     out += "webcfg_user: "; out += kWebCfgUser; out += "\n";
+    snprintf(tmp, sizeof(tmp), "webcfg_auth_enabled: %s\n", cfg.webCfgAuthEnabled ? "true" : "false"); out += tmp;
     out += "webcfg_pass: "; out += cfg.webCfgPass; out += "\n";
     bool debugMonitor = cfg.debugAcks || cfg.debugMessages || cfg.debugGps;
     snprintf(tmp, sizeof(tmp), "debug_monitor: %s\n", debugMonitor ? "true" : "false"); out += tmp;
@@ -724,6 +726,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "webcfg_user")) {
                     // Username is currently fixed to admin; accept key for compatibility.
+                }
+                else if (!strcmp(key, "webcfg_auth_enabled")) {
+                    cfg.webCfgAuthEnabled = parseBoolValue(val);
                 }
                 else if (!strcmp(key, "webcfg_pass")) {
                     strncpy(cfg.webCfgPass, val, sizeof(cfg.webCfgPass) - 1);

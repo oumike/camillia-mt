@@ -52,6 +52,7 @@ struct RhinoConfig {
     bool     wifiEnabled;        // master switch; gates web config + MQTT bridge
     char     wifiSsid[64];
     char     wifiPass[64];
+    bool     webCfgAuthEnabled;  // require login for web config; off by default
     char     webCfgPass[64];
 
     // Display
