@@ -583,6 +583,9 @@ static void insertChatDateMarker(lv_obj_t *parent, uint32_t epoch,
 static void collectChatRows(const DisplayLine **rows, int &rowCount);
 static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
                                   int *displayOrder, int &displayCount);
+static void buildChatCursorOrder(const DisplayLine *const *rows,
+                                 const int *displayOrder, int displayCount,
+                                 int *cursorOrder, int &cursorCount);
 static void refreshHeaderTime(bool force = false);
 static void refreshHeaderStatus(bool force = false);
 static void refreshDmAlertIndicator();
@@ -3408,6 +3411,41 @@ static void buildChatDisplayOrder(const DisplayLine *const *rows, int rowCount,
     }
 }
 
+// Build cursor anchors so chat keyboard navigation moves by logical message,
+// not by individual wrapped line rows.
+static void buildChatCursorOrder(const DisplayLine *const *rows,
+                                 const int *displayOrder, int displayCount,
+                                 int *cursorOrder, int &cursorCount) {
+    cursorCount = 0;
+    if (!rows || !displayOrder || !cursorOrder || displayCount <= 0) return;
+
+    for (int n = 0; n < displayCount && cursorCount < MAX_MSG_LINES;) {
+        int anchor = displayOrder[n];
+        if (!rows[anchor]) {
+            n++;
+            continue;
+        }
+        cursorOrder[cursorCount++] = anchor;
+
+        uint32_t packetId = rows[anchor]->packetId;
+        n++;
+        while (n < displayCount) {
+            int j = displayOrder[n];
+            if (!rows[j]) break;
+
+            if (packetId != 0) {
+                if (rows[j]->packetId != packetId) break;
+                n++;
+                continue;
+            }
+
+            const char *t = rows[j]->text;
+            if (!(t[0] == ' ' && t[1] == ' ')) break;
+            n++;
+        }
+    }
+}
+
 static bool pagerSelectChatCursorIndex(int displayIndex) {
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
@@ -3417,7 +3455,11 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
     int displayCount = 0;
     buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
 
-    if (displayCount <= 0) {
+    int cursorOrder[MAX_MSG_LINES] = {};
+    int cursorCount = 0;
+    buildChatCursorOrder(rows, displayOrder, displayCount, cursorOrder, cursorCount);
+
+    if (cursorCount <= 0) {
         s_pagerChatCursorDisplayIndex = -1;
         s_selectedMsgReplyPacketId = 0;
         s_selectedMsgText[0] = '\0';
@@ -3425,11 +3467,11 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
         return false;
     }
 
-    if (displayIndex < 0) displayIndex = displayCount - 1;
-    if (displayIndex >= displayCount) displayIndex = displayCount - 1;
+    if (displayIndex < 0) displayIndex = cursorCount - 1;
+    if (displayIndex >= cursorCount) displayIndex = cursorCount - 1;
 
     s_pagerChatCursorDisplayIndex = displayIndex;
-    int rowIdx = displayOrder[displayIndex];
+    int rowIdx = cursorOrder[displayIndex];
     uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, rowIdx);
     const char *txt = rows[rowIdx] ? rows[rowIdx]->text : "";
     setSelectedReplyContext(replyPacketId, txt);
