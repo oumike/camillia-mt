@@ -337,7 +337,7 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-static int s_cfgActions[20] = {};
+static int s_cfgActions[24] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -1013,6 +1013,8 @@ enum CfgActionId {
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
     CFG_ACTION_UNITS,
+    CFG_ACTION_CHAT_STYLE,
+    CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
@@ -2050,6 +2052,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_UNITS:
             snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
             break;
+        case CFG_ACTION_CHAT_STYLE:
+            snprintf(buf, bufLen, "Chat Style: %s",
+                     s_cfg.chatStyle == CHAT_STYLE_BUBBLES ? "Bubbles" : "Classic");
+            break;
+        case CFG_ACTION_CHAT_COLORS:
+            snprintf(buf, bufLen, "Chat Colors: %s",
+                     s_cfg.chatColorsEnabled ? "On" : "Off");
+            break;
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
@@ -2130,6 +2140,7 @@ static bool cfgActionNeedsConfirm(int actionId) {
     return actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
+        || actionId == CFG_ACTION_CHAT_STYLE
     || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
@@ -2814,6 +2825,8 @@ static void persistConfigToPrefs() {
     p.putString("ntpServer", s_cfg.ntpServer);
     p.putULong("screenOnSecs", s_cfg.screenOnSecs);
     p.putUChar("dispUnits", s_cfg.displayUnits);
+    p.putUChar("chatStyle", s_cfg.chatStyle);
+    p.putBool("chatColors", s_cfg.chatColorsEnabled);
     p.putBool("compassNorth", s_cfg.compassNorthTop);
     p.putBool("flipScreen", s_cfg.flipScreen);
     p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
@@ -2979,6 +2992,13 @@ static void loadConfigFromPrefs() {
 
     ro = prefs.getUChar("dispUnits", 0xFF);
     if (ro != 0xFF) s_cfg.displayUnits = ro;
+    ro = prefs.getUChar("chatStyle", 0xFF);
+    if (ro != 0xFF && ro <= CHAT_STYLE_BUBBLES) s_cfg.chatStyle = ro;
+    if (prefs.isKey("chatColors")) s_cfg.chatColorsEnabled = prefs.getBool("chatColors");
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer is Classic-only regardless of what NVS or an imported config holds.
+    s_cfg.chatStyle = CHAT_STYLE_CLASSIC;
+#endif
     if (prefs.isKey("compassNorth")) s_cfg.compassNorthTop = prefs.getBool("compassNorth");
     if (prefs.isKey("flipScreen")) s_cfg.flipScreen = prefs.getBool("flipScreen");
     if (prefs.isKey("splashMelody")) s_cfg.splashMelodyEnabled = prefs.getBool("splashMelody");
@@ -3819,6 +3839,14 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
+#if defined(DEVICE_TLORA_PAGER_TFT) || !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Keep Chat Style near the top so it's visible without deep scrolling on
+    // compact config layouts (notably the Pager's split action/info screen).
+    // Cardputer remains Classic-only due its 240x135 display constraints.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
+#endif
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
@@ -3826,7 +3854,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
@@ -9639,6 +9666,31 @@ static void performCfgAction(int actionId) {
                      s_cfg.displayUnits ? "Imperial" : "Metric");
             break;
 
+        case CFG_ACTION_CHAT_STYLE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_STYLE");
+            s_cfg.chatStyle = (uint8_t)(s_cfg.chatStyle == CHAT_STYLE_BUBBLES
+                                            ? CHAT_STYLE_CLASSIC : CHAT_STYLE_BUBBLES);
+            persistConfigToPrefs();
+            // Applied at boot; reboot so the chat view rebuilds in the new style.
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s - rebooting...",
+                     s_cfg.chatStyle == CHAT_STYLE_BUBBLES ? "Bubbles" : "Classic");
+            refreshCfgModal();
+            lv_timer_handler();
+            delay(1000);
+            ESP.restart();
+            break;
+
+        case CFG_ACTION_CHAT_COLORS:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
+            s_cfg.chatColorsEnabled = !s_cfg.chatColorsEnabled;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Colors: %s",
+                     s_cfg.chatColorsEnabled ? "On" : "Off");
+            s_lastRenderedChannel = -1;
+            s_lastRenderedCount = -1;
+            refreshChatView(true);
+            break;
+
         case CFG_ACTION_ANNOUNCE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ANNOUNCE");
             webCfgQueueAnnounce();
@@ -9870,8 +9922,13 @@ static void openCfgConfirmModal(int actionId) {
     if (!s_rootScreen || s_cfgConfirmModal || s_cfgConfirmBackdrop) return;
     s_cfgConfirmPendingAction = actionId;
 
-    char actionText[80];
-    cfgActionLabel(actionId, actionText, sizeof(actionText));
+    char actionText[96];
+    if (actionId == CFG_ACTION_CHAT_STYLE) {
+        const char *nextStyle = (s_cfg.chatStyle == CHAT_STYLE_BUBBLES) ? "Classic" : "Bubbles";
+        snprintf(actionText, sizeof(actionText), "Switch Chat Style to %s? Reboot required.", nextStyle);
+    } else {
+        cfgActionLabel(actionId, actionText, sizeof(actionText));
+    }
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -9921,7 +9978,8 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Confirm?");
+    lv_label_set_text(title,
+                      actionId == CFG_ACTION_CHAT_STYLE ? "Confirm Chat Style" : "Confirm?");
 
     lv_obj_t *actionBox = lv_obj_create(s_cfgConfirmModal);
     lv_obj_set_width(actionBox, lv_pct(100));
@@ -9942,7 +10000,11 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_set_style_text_color(q, actionTextColor, 0);
     lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(q, LV_LABEL_LONG_WRAP);
-    lv_label_set_text_fmt(q, "Action: %s", actionText);
+    if (actionId == CFG_ACTION_CHAT_STYLE) {
+        lv_label_set_text(q, actionText);
+    } else {
+        lv_label_set_text_fmt(q, "Action: %s", actionText);
+    }
 
     lv_obj_t *btnRow = lv_obj_create(s_cfgConfirmModal);
     lv_obj_set_width(btnRow, lv_pct(100));
@@ -11618,7 +11680,11 @@ static void pumpKeyboardInput() {
                                 s_pagerChatCursorMode = false;
                             }
                         } else {
-                            int delta = (k == KEY_SCROLL_UP) ? -1 : 1;
+                            // Keep keyboard j/k direction consistent with chat-list
+                            // expectations while preserving non-keyboard scroll behavior.
+                            int delta;
+                            if (navFromJk) delta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                            else           delta = (k == KEY_SCROLL_UP) ? -1 : 1;
                             pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + delta);
                         }
                         refreshChannelGlow(true);
@@ -11627,7 +11693,9 @@ static void pumpKeyboardInput() {
 
 #else
                     if (s_pagerChatCursorMode) {
-                        int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                        int navDelta;
+                        if (navFromJk) navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
+                        else           navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                         pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
                     } else if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
                         // Channel list uses reversed j/k semantics by request.
@@ -11677,7 +11745,9 @@ static void pumpKeyboardInput() {
                         s_pagerChatCursorMode = false;
                     }
                 } else {
-                    int navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
+                    int navDelta;
+                    if (navFromJk) navDelta = (k == KEY_SCROLL_UP) ? -1 : 1;
+                    else           navDelta = (k == KEY_SCROLL_UP) ? 1 : -1;
                     pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + navDelta);
                 }
                 continue;
@@ -13436,7 +13506,7 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
 #endif
 
-    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false);
+    Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode);
     if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel
         && !channelIsMuted(chanIdx)) {
         s_channelNeedsAttention[chanIdx] = true;
@@ -14428,6 +14498,218 @@ static void insertChatDateMarker(lv_obj_t *parent, uint32_t epoch,
     lv_obj_set_style_bg_opa(right, LV_OPA_70, 0);
 }
 
+// ── Bubble chat style helpers ────────────────────────────────────────────────
+// Stable per-node bubble color: a curated categorical palette indexed by a hash
+// of the node id, so a given node always maps to the same color across reboots.
+static uint16_t nodeBubbleColor565(uint32_t nodeId) {
+    static const uint8_t pal[][3] = {
+        { 41,128,185}, { 39,174, 96}, {142, 68,173}, {211, 84,  0},
+        { 22,160,133}, {192, 57, 43}, {127,140,141}, {212, 84,140},
+        {243,156, 18}, { 52, 73, 94},
+    };
+    const int n = (int)(sizeof(pal) / sizeof(pal[0]));
+    uint32_t h = nodeId * 2654435761u;
+    const uint8_t *c = pal[(h >> 24) % n];
+    return rgb565(c[0], c[1], c[2]);
+}
+
+// Pick black or white body text for legibility on a given bubble background,
+// by luminance — keeps text readable in both light and dark themes since the
+// bubble color (not the theme) drives contrast.
+static lv_color_t bubbleTextColor(uint16_t bg565) {
+    uint8_t r = (uint8_t)(((bg565 >> 11) & 0x1F) << 3);
+    uint8_t g = (uint8_t)(((bg565 >>  5) & 0x3F) << 2);
+    uint8_t b = (uint8_t)((bg565 & 0x1F) << 3);
+    uint32_t lum = (299u * r + 587u * g + 114u * b) / 1000u;
+    return lum > 145 ? lv_color_hex(0x101010) : lv_color_hex(0xF2F5FF);
+}
+
+// A chat message's prefix ("<icon>  HH:MM [name] " for received, "HH:MM<me> "
+// for our own) is stripped for bubble rendering — the sender is shown as a name
+// tag and color instead. Only the leading prefix window is scanned so body text
+// containing "] " or "> " isn't cut.
+static const char *chatStripPrefix(const char *line) {
+    const int kWindow = 28;
+    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
+        if ((p[0] == ']' || p[0] == '>') && p[1] == ' ') return p + 2;
+    }
+    return line;
+}
+
+// Create one message bubble (row wrapper + colored container + optional name tag
+// + body) in the chat list. Right-aligned + accent for our own messages,
+// left-aligned + node color for others. Updates the scroll anchor pointers.
+static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
+                           const char *nameTag, const char *body,
+                           DisplayLine::AckState ackState,
+                           uint32_t replyPacketId, bool isSelected,
+                           lv_obj_t **outLast, lv_obj_t **outSelected) {
+    lv_obj_t *rowW = lv_obj_create(list);
+    lv_obj_remove_style_all(rowW);
+    lv_obj_set_width(rowW, lv_pct(100));
+    lv_obj_set_height(rowW, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_top(rowW, 1, 0);
+    lv_obj_set_style_pad_bottom(rowW, 1, 0);
+    lv_obj_set_flex_flow(rowW, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(rowW, isMe ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    uint16_t bg565;
+    if (s_cfg.chatColorsEnabled) {
+        bg565 = isMe ? userMessageAccentColor565()
+                     : (sender ? nodeBubbleColor565(sender) : rgb565(90, 99, 120));
+    } else {
+        // Keep bubble structure but neutralize per-node color coding.
+        if (s_cfg.uiMode == UI_MODE_LIGHT) {
+            bg565 = isMe ? rgb565(0xC6, 0xCF, 0xE2) : rgb565(0xD7, 0xDF, 0xEF);
+        } else {
+            bg565 = isMe ? rgb565(0x52, 0x5D, 0x72) : rgb565(0x43, 0x4D, 0x62);
+        }
+    }
+    if (isMe && s_cfg.chatColorsEnabled) {
+        switch (ackState) {
+            case DisplayLine::ACKED:
+                bg565 = rgb565(0x2D, 0x7D, 0x46);
+                break;
+            case DisplayLine::NAKED:
+            case DisplayLine::TX_FAILED:
+                bg565 = rgb565(0xA8, 0x38, 0x3A);
+                break;
+            default:
+                break;
+        }
+    }
+    lv_color_t txt = bubbleTextColor(bg565);
+
+    lv_obj_t *b = lv_obj_create(rowW);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_width(b, LV_SIZE_CONTENT);
+    lv_obj_set_height(b, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(b, lv_pct(94), 0);
+    lv_obj_set_style_radius(b, 8, 0);
+    lv_obj_set_style_bg_color(b, tftColorToLv(bg565), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(b, 4, 0);
+    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(b, 1, 0);
+
+    if (nameTag && nameTag[0]) {
+        lv_obj_t *nm = lv_label_create(b);
+        lv_obj_set_style_text_font(nm, kChannelChatFont, 0);
+        lv_obj_set_style_text_color(nm, txt, 0);
+        lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
+        lv_label_set_text(nm, nameTag);
+    }
+
+    const char *stateTag = nullptr;
+    if (isMe) {
+        switch (ackState) {
+            case DisplayLine::ACKED:
+            case DisplayLine::ACKED_RELAY:
+                stateTag = "ME (SENT)";
+                break;
+            default:
+                stateTag = "ME";
+                break;
+        }
+    }
+    if (stateTag) {
+        lv_obj_t *st = lv_label_create(b);
+        lv_obj_set_style_text_font(st, kChannelChatFont, 0);
+        lv_obj_set_style_text_color(st, txt, 0);
+        lv_obj_set_style_text_opa(st, LV_OPA_70, 0);
+        lv_label_set_text(st, stateTag);
+    }
+
+    lv_obj_t *bl = lv_label_create(b);
+    lv_obj_set_style_text_font(bl, kChannelChatFont, 0);
+    lv_obj_set_style_text_color(bl, txt, 0);
+    lv_label_set_long_mode(bl, LV_LABEL_LONG_CLIP);  // body carries explicit '\n'
+    lv_obj_set_width(bl, LV_SIZE_CONTENT);
+    setLabelTextEmojiSafe(bl, body);
+
+    if (isSelected) {
+        const bool lightTheme = (s_cfg.uiMode == UI_MODE_LIGHT);
+        lv_obj_set_style_outline_width(b, lightTheme ? 3 : 2, 0);
+        lv_obj_set_style_outline_color(
+            b,
+            lightTheme ? lv_color_hex(0x13233D) : lv_color_hex(0xFFFFFF),
+            0);
+        lv_obj_set_style_outline_opa(b, lightTheme ? LV_OPA_COVER : LV_OPA_80, 0);
+        if (outSelected) *outSelected = rowW;
+    }
+
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(b, onChatMessagePressed, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)replyPacketId);
+
+    if (outLast) *outLast = rowW;
+}
+
+// Render the chat rows as per-node colored bubbles (Bubbles chat style).
+static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
+                                   const int *displayOrder, int displayCount,
+                                   lv_obj_t **lastMsgObj, lv_obj_t **selectedMsgObj) {
+    uint32_t lastDateBucket = 0;
+    int n = 0;
+    while (n < displayCount) {
+        int i = displayOrder[n];
+
+        uint32_t curBucket = chatDateBucket(rows[i]->epoch);
+        if (curBucket != 0 && curBucket != lastDateBucket) {
+            insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
+            lastDateBucket = curBucket;
+        }
+
+        uint32_t sender = rows[i]->senderNodeId;
+        bool isMe = (s_myNodeId != 0 && sender == s_myNodeId);
+        uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
+
+        // Reconstruct the message body from its wrapped lines: strip the first
+        // line's prefix, join continuation lines (leading indent removed) with
+        // newlines so the existing wrap becomes the bubble's line breaks.
+        char body[320];
+        size_t bl = 0;
+        const char *b0 = chatStripPrefix(rows[i]->text);
+        bl += (size_t)snprintf(body + bl, sizeof(body) - bl, "%s", b0);
+        n++;
+        while (n < displayCount) {
+            int j = displayOrder[n];
+            const char *t = rows[j]->text;
+            if (!(t[0] == ' ' && t[1] == ' ')) break;   // not a continuation line
+            const char *c = t;
+            while (*c == ' ') c++;
+            if (bl < sizeof(body) - 1)
+                bl += (size_t)snprintf(body + bl, sizeof(body) - bl, "\n%s", c);
+            n++;
+        }
+
+        // Sender name tag for others (from NodeDB; fall back to hex id).
+        char nameBuf[24];
+        const char *nameTag = nullptr;
+        if (!isMe && sender != 0) {
+            NodeEntry *ne = Nodes.find(sender);
+            if (ne && ne->shortName[0]) {
+                nameTag = ne->shortName;
+            } else {
+                snprintf(nameBuf, sizeof(nameBuf), "%04X", (unsigned)(sender & 0xFFFF));
+                nameTag = nameBuf;
+            }
+        }
+
+        bool isSelected = false;
+        if (s_selectedMsgReplyPacketId != 0) {
+            isSelected = (replyPacketId == s_selectedMsgReplyPacketId);
+        } else {
+            isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
+        }
+
+        chatMakeBubble(s_chatList, sender, isMe, nameTag, body,
+                       rows[i]->ack,
+                       replyPacketId, isSelected, lastMsgObj, selectedMsgObj);
+    }
+}
+
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
@@ -14458,108 +14740,125 @@ static void refreshChatView(bool force) {
         int displayOrder[MAX_MSG_LINES] = {};
         int displayCount = 0;
         buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
+        bool useBubbleStyle = (s_cfg.chatStyle == CHAT_STYLE_BUBBLES
+                               && s_activeChannel >= 0
+                               && s_activeChannel < MESH_CHANNELS);
+        if (useBubbleStyle) {
+            refreshChatViewBubbles(rows, rowCount, displayOrder, displayCount,
+                                   &lastMsgObj, &selectedMsgObj);
+        } else {
+            uint32_t lastDateBucket = 0;
+            for (int n = 0; n < displayCount; n++) {
+                int i = displayOrder[n];
 
-        uint32_t lastDateBucket = 0;
-        for (int n = 0; n < displayCount; n++) {
-            int i = displayOrder[n];
+                const char *lineText = rows[i]->text;
+                bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
 
-            const char *lineText = rows[i]->text;
-            bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
-
-            // Insert a date marker before the first line of any message that
-            // lands on a new local calendar day. Continuation lines from a
-            // wrapped multi-line message keep the same epoch and are skipped.
-            if (!isContinuationLine) {
-                uint32_t curBucket = chatDateBucket(rows[i]->epoch);
-                if (curBucket != 0 && curBucket != lastDateBucket) {
-                    insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
-                    lastDateBucket = curBucket;
+                // Insert a date marker before the first line of any message that
+                // lands on a new local calendar day. Continuation lines from a
+                // wrapped multi-line message keep the same epoch and are skipped.
+                if (!isContinuationLine) {
+                    uint32_t curBucket = chatDateBucket(rows[i]->epoch);
+                    if (curBucket != 0 && curBucket != lastDateBucket) {
+                        insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
+                        lastDateBucket = curBucket;
+                    }
                 }
-            }
 
-            lv_obj_t *msg = lv_label_create(s_chatList);
-            lastMsgObj = msg;
-            lv_obj_set_width(msg, lv_pct(100));
-            lv_obj_set_style_text_font(msg, kChannelChatFont, 0);
-            lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+                lv_obj_t *msg = lv_label_create(s_chatList);
+                lastMsgObj = msg;
+                lv_obj_set_width(msg, lv_pct(100));
+                lv_obj_set_style_text_font(msg, kChannelChatFont, 0);
+                lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #if defined(DEVICE_TDECK)
-            lv_obj_set_style_pad_left(msg, 1, 0);
-            lv_obj_set_style_pad_right(msg, 0, 0);
+                lv_obj_set_style_pad_left(msg, 1, 0);
+                lv_obj_set_style_pad_right(msg, 0, 0);
 #else
-            lv_obj_set_style_pad_left(msg, 2, 0);
-            lv_obj_set_style_pad_right(msg, 4, 0);
+                lv_obj_set_style_pad_left(msg, 2, 0);
+                lv_obj_set_style_pad_right(msg, 4, 0);
 #endif
-            lv_obj_set_style_pad_top(msg, 0, 0);
-            lv_obj_set_style_pad_bottom(msg, 0, 0);
+                lv_obj_set_style_pad_top(msg, 0, 0);
+                lv_obj_set_style_pad_bottom(msg, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
-            lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
+                lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
 #else
-            lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+                lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 #endif
 
-            uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
-            const char *ackSuffix = nullptr;
-            if (rows[i]->packetId) {
-                switch (rows[i]->ack) {
-                    case DisplayLine::ACKED:
-                        textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
-                        if (!isContinuationLine) ackSuffix = " [ACK]";
-                        break;
-                    case DisplayLine::ACKED_RELAY:
-                        textColor565 = userMessageAccentColor565();
-                        break;
-                    case DisplayLine::NAKED:
-                    case DisplayLine::TX_FAILED:
-                        textColor565 = TFT_RED;
-                        break;
-                    default:
-                        break;
+                uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
+                if (s_cfg.chatColorsEnabled
+                    && s_activeChannel >= 0
+                    && s_activeChannel < MESH_CHANNELS) {
+                    uint32_t sender = rows[i]->senderNodeId;
+                    if (sender != 0) {
+                        textColor565 = (s_myNodeId != 0 && sender == s_myNodeId)
+                            ? userMessageAccentColor565()
+                            : nodeBubbleColor565(sender);
+                    }
                 }
-            }
+                const char *ackSuffix = nullptr;
+                if (rows[i]->packetId) {
+                    switch (rows[i]->ack) {
+                        case DisplayLine::ACKED:
+                            textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
+                            if (!isContinuationLine) ackSuffix = " [ACK]";
+                            break;
+                        case DisplayLine::ACKED_RELAY:
+                            textColor565 = userMessageAccentColor565();
+                            break;
+                        case DisplayLine::NAKED:
+                        case DisplayLine::TX_FAILED:
+                            textColor565 = TFT_RED;
+                            break;
+                        default:
+                            break;
+                    }
+                }
 
-            lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
-            char rendered[MSG_CHARS + 16];
-            if (ackSuffix) {
-                snprintf(rendered, sizeof(rendered), "%s%s", lineText, ackSuffix);
-            } else {
-                snprintf(rendered, sizeof(rendered), "%s", lineText);
-            }
-            setLabelTextEmojiSafe(msg, rendered);
+                lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
+                char rendered[MSG_CHARS + 16];
+                if (ackSuffix) {
+                    snprintf(rendered, sizeof(rendered), "%s%s", lineText, ackSuffix);
+                } else {
+                    snprintf(rendered, sizeof(rendered), "%s", lineText);
+                }
+                setLabelTextEmojiSafe(msg, rendered);
 
-            uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
+                uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 
-            bool isSelected = false;
-            if (s_selectedMsgReplyPacketId != 0) {
-                // Highlight the whole wrapped message group, not just the tapped row.
-                isSelected = (replyPacketId == s_selectedMsgReplyPacketId);
-            } else {
-                isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
-            }
-            if (isSelected) {
-                lv_obj_set_style_bg_color(msg, lv_color_hex(0x2A4E8F), 0);
-                lv_obj_set_style_bg_opa(msg, LV_OPA_70, 0);
-                selectedMsgObj = msg;
-            }
+                bool isSelected = false;
+                if (s_selectedMsgReplyPacketId != 0) {
+                    // Highlight the whole wrapped message group, not just the tapped row.
+                    isSelected = (replyPacketId == s_selectedMsgReplyPacketId);
+                } else {
+                    isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
+                }
+                if (isSelected) {
+                    lv_obj_set_style_bg_color(msg, lv_color_hex(0x2A4E8F), 0);
+                    lv_obj_set_style_bg_opa(msg, LV_OPA_70, 0);
+                    selectedMsgObj = msg;
+                }
 
-            lv_obj_add_flag(msg, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_event_cb(msg, onChatMessagePressed,
-                                LV_EVENT_CLICKED,
-                                (void *)(uintptr_t)replyPacketId);
+                lv_obj_add_flag(msg, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_add_event_cb(msg, onChatMessagePressed,
+                                    LV_EVENT_CLICKED,
+                                    (void *)(uintptr_t)replyPacketId);
 
-            bool nextIsDifferentMessage = false;
-            if (n + 1 < displayCount) {
-                int nextI = displayOrder[n + 1];
-                uint32_t curId = rows[i]->packetId;
-                uint32_t nextId = rows[nextI]->packetId;
-                nextIsDifferentMessage = (curId == 0 || nextId == 0 || curId != nextId);
-            }
+                bool nextIsDifferentMessage = false;
+                if (n + 1 < displayCount) {
+                    int nextI = displayOrder[n + 1];
+                    uint32_t curId = rows[i]->packetId;
+                    uint32_t nextId = rows[nextI]->packetId;
+                    nextIsDifferentMessage = (curId == 0 || nextId == 0 || curId != nextId);
+                }
 
-            if (nextIsDifferentMessage) {
-                lv_obj_t *sep = lv_obj_create(s_chatList);
-                lv_obj_remove_style_all(sep);
-                lv_obj_set_size(sep, lv_pct(100), 1);
-                lv_obj_set_style_bg_color(sep, lv_color_hex(0x3F669F), 0);
-                lv_obj_set_style_bg_opa(sep, LV_OPA_70, 0);
+                if (nextIsDifferentMessage) {
+                    lv_obj_t *sep = lv_obj_create(s_chatList);
+                    lv_obj_remove_style_all(sep);
+                    lv_obj_set_size(sep, lv_pct(100), 1);
+                    lv_obj_set_style_bg_color(sep, lv_color_hex(0x3F669F), 0);
+                    lv_obj_set_style_bg_opa(sep, LV_OPA_70, 0);
+                }
             }
         }
     }

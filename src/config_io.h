@@ -64,6 +64,8 @@ struct RhinoConfig {
     uint8_t  msgAlertSound;      // 0=DEFAULT, 1=CHIRPY, 2=BASS, 3=OFF
     uint8_t  uiTheme;            // UiThemeFamily
     uint8_t  uiMode;             // UiThemeMode
+    uint8_t  chatStyle;          // 0=CLASSIC, 1=BUBBLES (applied at boot; needs reboot)
+    bool     chatColorsEnabled;  // classic mode: use per-node text colors
 
     // Bluetooth
     bool     btEnabled;

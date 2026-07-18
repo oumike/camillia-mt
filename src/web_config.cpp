@@ -1525,6 +1525,15 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
             "</select></label></div>";
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Chat style is Classic-only on the Cardputer (screen too small for bubbles),
+    // so the option is hidden there. Changing it requires a reboot.
+    html += "<div class='row2'>";
+    html += "<label>Chat Style (requires reboot)<select name='chat_style'>"
+            "<option value='0'"; if (gCfg->chatStyle != CHAT_STYLE_BUBBLES) html += " selected"; html += ">Classic</option>"
+            "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>"
+            "</select></label></div>";
+#endif
     html += "<div class='row2'>";
     html += "<label>Compass North Top<select name='compass_north'>"
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
@@ -2838,6 +2847,12 @@ static void handlePostSave() {
     // Display
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    if (server.hasArg("chat_style")) {
+        gCfg->chatStyle = server.arg("chat_style").toInt() != 0
+                              ? CHAT_STYLE_BUBBLES : CHAT_STYLE_CLASSIC;
+    }
+#endif
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.

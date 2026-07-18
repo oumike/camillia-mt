@@ -10,6 +10,7 @@ struct DisplayLine {
     uint32_t packetId;    // 0 = not a sent message
     enum AckState : uint8_t { NONE, PENDING, ACKED, ACKED_RELAY, NAKED, TX_FAILED } ack;
     uint32_t epoch;       // wall-clock seconds when this line was added (0 = unknown)
+    uint32_t senderNodeId; // originating node; own node = me, 0 = local/system line
 };
 
 struct Channel {
@@ -46,7 +47,7 @@ public:
     // Returns the line index of the first added line.
     int addMessage(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId = 0,
-                   bool trackAck = false);
+                   bool trackAck = false, uint32_t senderNodeId = 0);
 
     void setAckState(uint32_t packetId, DisplayLine::AckState state);
     // Determine ACKED vs ACKED_RELAY by comparing fromNodeId to stored destNodeId
@@ -116,10 +117,10 @@ private:
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId, bool trackAck,
-                   uint32_t epoch);
+                   uint32_t epoch, uint32_t senderNodeId);
     void _pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                    uint32_t packetId, DisplayLine::AckState ack,
-                   uint32_t epoch);
+                   uint32_t epoch, uint32_t senderNodeId);
     void _persistChannel(int chanIdx, const Channel &ch);
 };
 

@@ -95,6 +95,12 @@
 #define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL
 #define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
 
+// Chat rendering style (applied at boot; change requires a reboot)
+#define CHAT_STYLE_CLASSIC  0      // legacy flat colored text lines
+#define CHAT_STYLE_BUBBLES  1      // per-node colored message bubbles
+#define MY_CHAT_STYLE       CHAT_STYLE_CLASSIC
+#define MY_CHAT_COLORS_EN   1      // classic mode: per-node text colors
+
 // ── Bluetooth defaults ─────────────────────────────────────────
 #define MY_BT_ENABLED       1
 #define MY_BT_MODE          0      // RANDOM_PIN

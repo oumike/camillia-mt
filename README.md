@@ -114,7 +114,7 @@ This firmware is Meshtastic-compatible and links against, or interoperates
 with, portions of the Meshtastic project (also GPLv3), so it is distributed
 under the same license. There is **no warranty**; see the full license text
 for details. The full license text accompanies this source distribution in
-[LICENSE.md](LICENSE.md); you can also obtain a copy at
+[docs/LICENSE.md](docs/LICENSE.md); you can also obtain a copy at
 <https://www.gnu.org/licenses/gpl-3.0.html>.
 
 Third-party libraries used by this project (e.g. LVGL, RadioLib, Arduino-ESP32,

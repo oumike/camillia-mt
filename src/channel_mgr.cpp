@@ -147,15 +147,16 @@ void ChannelMgr::prevChannel() { setActive((_active + MAX_CHANNELS - 1) % MAX_CH
 
 void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t color,
                             uint32_t packetId, DisplayLine::AckState ack,
-                            uint32_t epoch) {
+                            uint32_t epoch, uint32_t senderNodeId) {
     if (!ch.lines) return;
     int idx = ch.count % MAX_MSG_LINES;
     DisplayLine &dl = ch.lines[idx];
     utf8util::copyTruncate(dl.text, sizeof(dl.text), text);
-    dl.color    = color;
-    dl.packetId = packetId;
-    dl.ack      = ack;
-    dl.epoch    = epoch;
+    dl.color        = color;
+    dl.packetId     = packetId;
+    dl.ack          = ack;
+    dl.epoch        = epoch;
+    dl.senderNodeId = senderNodeId;
     ch.count++;
 
     if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
@@ -164,7 +165,8 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
 }
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
-                            uint16_t color, uint32_t packetId, bool trackAck) {
+                            uint16_t color, uint32_t packetId, bool trackAck,
+                            uint32_t senderNodeId) {
     if (chanIdx < 0 || chanIdx >= MAX_CHANNELS) return -1;
     if (!_chans[chanIdx].lines) return -1;
     int firstLine = _chans[chanIdx].count;
@@ -172,14 +174,14 @@ int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
     // line shares the same date for chat date markers.
     time_t nowEpoch = time(nullptr);
     uint32_t epoch = (nowEpoch >= 1700000000) ? (uint32_t)nowEpoch : 0;
-    _wordWrap(chanIdx, prefix, text, color, packetId, trackAck, epoch);
+    _wordWrap(chanIdx, prefix, text, color, packetId, trackAck, epoch, senderNodeId);
     if (chanIdx != _active) _chans[chanIdx].unread = true;
     return firstLine;
 }
 
 void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
                              uint16_t color, uint32_t packetId, bool trackAck,
-                             uint32_t epoch) {
+                             uint32_t epoch, uint32_t senderNodeId) {
     Channel &ch = _chans[chanIdx];
     if (!ch.lines) return;
     char line[MSG_CHARS + 1];
@@ -205,7 +207,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         DisplayLine::AckState ack = (packetId && trackAck)
             ? DisplayLine::PENDING
             : DisplayLine::NONE;
-        _pushLine(chanIdx, ch, line, color, packetId, ack, epoch);
+        _pushLine(chanIdx, ch, line, color, packetId, ack, epoch, senderNodeId);
         return;
     }
 
@@ -277,7 +279,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
         DisplayLine::AckState ack = (logicalFirst && packetId && trackAck)
             ? DisplayLine::PENDING
             : DisplayLine::NONE;
-        _pushLine(chanIdx, ch, line, color, packetId, ack, epoch);
+        _pushLine(chanIdx, ch, line, color, packetId, ack, epoch, senderNodeId);
     }
 }
 
@@ -324,11 +326,12 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
             if (text[i] == '\n' || text[i] == '\r') text[i] = ' ';
         }
 
-        f.printf("%04X|%08lX|%u|%08lX|%s\n",
+        f.printf("%04X|%08lX|%u|%08lX|%08lX|%s\n",
                  (unsigned)dl.color,
                  (unsigned long)dl.packetId,
                  (unsigned)dl.ack,
                  (unsigned long)dl.epoch,
+                 (unsigned long)dl.senderNodeId,
                  text);
     }
     f.close();
@@ -391,7 +394,7 @@ void ChannelMgr::loadPersisted() {
                 const char *text = rest;
                 if (!text[0]) continue;
                 _pushLine(chanIdx, _chans[chanIdx], text, color, 0,
-                          DisplayLine::NONE, 0);
+                          DisplayLine::NONE, 0, 0);
                 continue;
             }
 
@@ -404,22 +407,32 @@ void ChannelMgr::loadPersisted() {
             uint8_t ackRaw = (uint8_t)strtoul(sep2 + 1, nullptr, 10);
             if (ackRaw > DisplayLine::TX_FAILED) ackRaw = DisplayLine::NONE;
 
-            // Format may be either:
-            //   color|packetId|ack|text             (legacy, no epoch)
-            //   color|packetId|ack|epoch|text       (current)
+            // Format may be any of:
+            //   color|packetId|ack|text                    (legacy, no epoch)
+            //   color|packetId|ack|epoch|text              (no sender)
+            //   color|packetId|ack|epoch|sender|text       (current)
             const char *rest2 = sep3 + 1;
             uint32_t epoch = 0;
+            uint32_t senderNodeId = 0;
             const char *text = rest2;
             char *sep4 = strchr((char *)rest2, '|');
             if (sep4) {
                 *sep4 = '\0';
                 epoch = (uint32_t)strtoul(rest2, nullptr, 16);
-                text = sep4 + 1;
+                const char *afterEpoch = sep4 + 1;
+                char *sep5 = strchr((char *)afterEpoch, '|');
+                if (sep5) {
+                    *sep5 = '\0';
+                    senderNodeId = (uint32_t)strtoul(afterEpoch, nullptr, 16);
+                    text = sep5 + 1;
+                } else {
+                    text = afterEpoch;
+                }
             }
             if (!text[0]) continue;
 
             _pushLine(chanIdx, _chans[chanIdx], text, color,
-                      packetId, (DisplayLine::AckState)ackRaw, epoch);
+                      packetId, (DisplayLine::AckState)ackRaw, epoch, senderNodeId);
         }
 
         f.close();
@@ -554,7 +567,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     if (!Radio.transmit(frame, frameLen)) {
         liveFeedAddLine("T TXT B ER", TFT_RED);
-        addMessage(txChan, prefix, text, TFT_RED, packetId);
+        addMessage(txChan, prefix, text, TFT_RED, packetId, false, myNodeId);
         Channel &ch = _chans[txChan];
         for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
             if (ch.lines[j].packetId == packetId) {
@@ -587,7 +600,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     }
 
     // Add to display first so ACK updates always have a visible line to target.
-    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true);
+    int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true, myNodeId);
 
     // Register ACK tracking
     for (int i = 0; i < MAX_PENDING_ACK; i++) {

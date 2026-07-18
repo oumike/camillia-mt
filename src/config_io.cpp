@@ -360,6 +360,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.msgAlertSound      = MY_MSG_ALERT_SOUND;
     cfg.uiTheme            = MY_UI_THEME;
     cfg.uiMode             = MY_UI_MODE;
+    cfg.chatStyle          = MY_CHAT_STYLE;
+    cfg.chatColorsEnabled  = MY_CHAT_COLORS_EN;
     cfg.btEnabled          = MY_BT_ENABLED;
     cfg.btMode             = MY_BT_MODE;
     cfg.btFixedPin         = MY_BT_PIN;
@@ -556,6 +558,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    themeMode: ";
     out += (cfg.uiMode < kNumThemeModes) ? kThemeModeNames[cfg.uiMode] : kThemeModeNames[0];
     out += "\n";
+    out += "    chatStyle: "; out += (cfg.chatStyle == CHAT_STYLE_BUBBLES ? "BUBBLES" : "CLASSIC"); out += "\n";
+    snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
     // lora
     out += "  lora:\n";
     snprintf(tmp, sizeof(tmp), "    bandwidth: %.0f\n",    cfg.loraBw);       out += tmp;
@@ -899,6 +903,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.uiMode = (uint8_t)constrain(atoi(val), 0, 1);
                     else
                         cfg.uiMode = findName(val, kThemeModeNames, kNumThemeModes);
+                }
+                else if (!strcmp(key, "chatStyle")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.chatStyle = (uint8_t)constrain(atoi(val), 0, 1);
+                    else
+                        cfg.chatStyle = !strcmp(val, "BUBBLES") ? CHAT_STYLE_BUBBLES : CHAT_STYLE_CLASSIC;
+                }
+                else if (!strcmp(key, "chatColors")) {
+                    cfg.chatColorsEnabled = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
