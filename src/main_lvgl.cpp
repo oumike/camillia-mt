@@ -14679,6 +14679,13 @@ static void buildUi() {
     lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
 
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
+    // Clock gets a larger font than the other header items so the time reads at a glance.
+    // Cardputer keeps the original clock size to fit its narrow header.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    const lv_font_t *clockTextFont = headerTextFont;
+#else
+    const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
+#endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
@@ -14793,7 +14800,7 @@ static void buildUi() {
 
     s_chatHeaderTime = lv_label_create(s_chatHeaderBar);
     lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_text_font(s_chatHeaderTime, headerTextFont, 0);
+    lv_obj_set_style_text_font(s_chatHeaderTime, clockTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
