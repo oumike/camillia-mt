@@ -149,6 +149,20 @@ static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
+// WiFi picker modal layered over CFG for selecting preferred known network.
+static lv_obj_t *s_cfgWifiBackdrop = nullptr;
+static lv_obj_t *s_cfgWifiModal = nullptr;
+static lv_obj_t *s_cfgWifiList = nullptr;
+static lv_obj_t *s_cfgWifiScanBackdrop = nullptr;
+static lv_obj_t *s_cfgWifiScanModal = nullptr;
+static lv_obj_t *s_cfgWifiScanList = nullptr;
+static lv_obj_t *s_cfgWifiScanStatus = nullptr;
+static lv_obj_t *s_cfgWifiPassBackdrop = nullptr;
+static lv_obj_t *s_cfgWifiPassModal = nullptr;
+static lv_obj_t *s_cfgWifiPassInput = nullptr;
+static lv_obj_t *s_cfgWifiPassKeyboard = nullptr;
+static lv_obj_t *s_cfgWifiPassStatus = nullptr;
+static bool s_cfgWifiPickerOnboardingMode = false;
 // Yes/No confirmation dialog layered over the CFG modal for destructive actions.
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
@@ -158,13 +172,41 @@ static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
 static lv_obj_t *s_cfgActionMsgModal = nullptr;
 static uint32_t s_cfgActionMsgOpenedMs = 0;
 
+struct KnownWifiEntry {
+    char ssid[sizeof(RhinoConfig::wifiSsid)];
+    char pass[sizeof(RhinoConfig::wifiPass)];
+};
+
+struct ScannedWifiEntry {
+    char ssid[33];
+    int32_t rssi;
+    bool secure;
+};
+
+static constexpr int kKnownWifiExtraCount = 5;
+static constexpr int kKnownWifiMaxCount = 1 + kKnownWifiExtraCount;
+static constexpr int kScannedWifiMaxCount = 20;
+
+static KnownWifiEntry s_cfgKnownWifi[kKnownWifiMaxCount] = {};
+static int s_cfgKnownWifiCount = 0;
+static int s_cfgWifiSelection = 0;
+static int s_cfgWifiScanSelection = 0;
+static bool s_wifiUsingKnownOverride = false;
+static KnownWifiEntry s_cfgKnownWifiAdded[kKnownWifiExtraCount] = {};
+static int s_cfgKnownWifiAddedCount = 0;
+static ScannedWifiEntry s_cfgScannedWifi[kScannedWifiMaxCount] = {};
+static int s_cfgScannedWifiCount = 0;
+static char s_cfgWifiPassTargetSsid[33] = {};
+static char s_wifiSelectedSsid[sizeof(RhinoConfig::wifiSsid)] = {};
+static char s_wifiSelectedPass[sizeof(RhinoConfig::wifiPass)] = {};
+
 // First-boot onboarding modal — shown once after a fresh flash (no NVS state).
 // Stage 0: (only if SD config present) ask whether to import it.
 // Stage 1: prompt for the node's long name.
 // Stage 2: prompt for the node's short name (pre-filled from long name).
 // Stage 3: pick the radio region/preset (US default).
 // Stage 4: pick the device role (CLIENT_MUTE default).
-// Stage 5/6: optional WiFi SSID then password, then commit everything + reboot.
+// Stage 5: optional WiFi chooser, then commit everything + reboot.
 static lv_obj_t *s_onboardingBackdrop = nullptr;
 static lv_obj_t *s_onboardingModal = nullptr;
 static lv_obj_t *s_onboardingInput = nullptr;
@@ -177,8 +219,7 @@ enum OnboardingStage : uint8_t {
     ONBOARD_STAGE_ENTER_SHORT     = 2,
     ONBOARD_STAGE_SELECT_REGION   = 3,
     ONBOARD_STAGE_SELECT_ROLE     = 4,
-    ONBOARD_STAGE_ENTER_WIFI_SSID = 5,
-    ONBOARD_STAGE_ENTER_WIFI_PASS = 6,
+    ONBOARD_STAGE_CHOOSE_WIFI     = 5,
 };
 static uint8_t s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
 static bool s_onboardingSdConfigPresent = false;
@@ -618,6 +659,18 @@ static void openCfgActionMessageModal(const char *msg);
 static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
+static void openCfgWifiPickerModal(bool forOnboarding = false);
+static void closeCfgWifiPickerModal();
+static void refreshCfgWifiPickerModal();
+static void onCfgWifiRowPressed(lv_event_t *e);
+static void onCfgWifiBackdropPressed(lv_event_t *e);
+static void applyCfgWifiSelection(int idx);
+static void openCfgWifiScanModal();
+static void closeCfgWifiScanModal();
+static void refreshCfgWifiScanModal(bool runScan);
+static void openCfgWifiPassModal(int scanIdx);
+static void closeCfgWifiPassModal();
+static void cfgWifiConnectFromPassModal();
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 static void onCfgHeaderInfoPressed(lv_event_t *e);
 #endif
@@ -762,6 +815,7 @@ static void onboardingFinalize();
 static void onboardingPickerStep(int delta);
 static void onboardingPickerAdvance();
 static void onboardingPickerBack();
+static void onboardingSetStatus(const char *msg);
 
 static void stateMapBootstrapRestoreWifi() {
 #if HAS_SD_CARD
@@ -1011,6 +1065,7 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
     CFG_ACTION_WIFI_TOGGLE,
+    CFG_ACTION_CHOOSE_WIFI,
     CFG_ACTION_GPS_TOGGLE,
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
@@ -2006,6 +2061,104 @@ static lv_color_t themedColorHex(uint32_t rgb) {
 
 #define lv_color_hex(rgb) themedColorHex((uint32_t)(rgb))
 
+static void populateKnownWifiEntries() {
+    s_cfgKnownWifiCount = 0;
+
+    // Slot 0 mirrors configured credentials from web/onboarding config.
+    if (s_cfgKnownWifiCount < kKnownWifiMaxCount) {
+        KnownWifiEntry &entry = s_cfgKnownWifi[s_cfgKnownWifiCount++];
+        memset(&entry, 0, sizeof(entry));
+        strncpy(entry.ssid, s_cfg.wifiSsid, sizeof(entry.ssid) - 1);
+        strncpy(entry.pass, s_cfg.wifiPass, sizeof(entry.pass) - 1);
+    }
+
+    // Add known networks created by successful scan/connect attempts.
+    for (int i = 0; i < s_cfgKnownWifiAddedCount && s_cfgKnownWifiCount < kKnownWifiMaxCount; i++) {
+        KnownWifiEntry &entry = s_cfgKnownWifi[s_cfgKnownWifiCount++];
+        entry = s_cfgKnownWifiAdded[i];
+    }
+
+    // Keep picker selection anchored to the currently active network source.
+    int selected = 0;
+    if (s_wifiUsingKnownOverride && s_wifiSelectedSsid[0]) {
+        for (int i = 0; i < s_cfgKnownWifiCount; i++) {
+            if (strncmp(s_cfgKnownWifi[i].ssid, s_wifiSelectedSsid,
+                        sizeof(s_cfgKnownWifi[i].ssid)) == 0) {
+                selected = i;
+                break;
+            }
+        }
+    }
+    s_cfgWifiSelection = selected;
+}
+
+static void addTempKnownWifi(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0]) return;
+
+    // Configured network remains in slot 0; no need to duplicate it.
+    if (strncmp(ssid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid)) == 0) {
+        return;
+    }
+
+    for (int i = 0; i < s_cfgKnownWifiAddedCount; i++) {
+        if (strncmp(s_cfgKnownWifiAdded[i].ssid,
+                    ssid,
+                    sizeof(s_cfgKnownWifiAdded[i].ssid)) == 0) {
+            strncpy(s_cfgKnownWifiAdded[i].pass,
+                    pass ? pass : "",
+                    sizeof(s_cfgKnownWifiAdded[i].pass) - 1);
+            return;
+        }
+    }
+
+    KnownWifiEntry newEntry = {};
+    strncpy(newEntry.ssid, ssid, sizeof(newEntry.ssid) - 1);
+    strncpy(newEntry.pass, pass ? pass : "", sizeof(newEntry.pass) - 1);
+
+    if (s_cfgKnownWifiAddedCount < kKnownWifiExtraCount) {
+        s_cfgKnownWifiAdded[s_cfgKnownWifiAddedCount++] = newEntry;
+        return;
+    }
+
+    // Keep a rolling window of known scanned networks.
+    for (int i = 1; i < kKnownWifiExtraCount; i++) {
+        s_cfgKnownWifiAdded[i - 1] = s_cfgKnownWifiAdded[i];
+    }
+    s_cfgKnownWifiAdded[kKnownWifiExtraCount - 1] = newEntry;
+}
+
+static void wifiGetActiveCreds(const char **ssidOut, const char **passOut) {
+    const char *ssid = s_cfg.wifiSsid;
+    const char *pass = s_cfg.wifiPass;
+    if (s_wifiUsingKnownOverride && s_wifiSelectedSsid[0]) {
+        ssid = s_wifiSelectedSsid;
+        pass = s_wifiSelectedPass;
+    }
+    if (ssidOut) *ssidOut = ssid;
+    if (passOut) *passOut = pass;
+}
+
+static bool wifiHasActiveCreds() {
+    const char *ssid = nullptr;
+    wifiGetActiveCreds(&ssid, nullptr);
+    return ssid && ssid[0];
+}
+
+static const char *wifiActiveSsid() {
+    const char *ssid = nullptr;
+    wifiGetActiveCreds(&ssid, nullptr);
+    return (ssid && ssid[0]) ? ssid : "";
+}
+
+static bool wifiBeginActiveKnown() {
+    const char *ssid = nullptr;
+    const char *pass = nullptr;
+    wifiGetActiveCreds(&ssid, &pass);
+    if (!ssid || !ssid[0]) return false;
+    WiFi.begin(ssid, pass ? pass : "");
+    return true;
+}
+
 static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
     if (!buf || bufLen == 0) return "";
     switch (actionId) {
@@ -2017,10 +2170,19 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "WiFi: On (%s)", WiFi.localIP().toString().c_str());
             } else if (webCfgRunning()) {
                 snprintf(buf, bufLen, "WiFi: On (%s)", webCfgIP());  // AP fallback
-            } else if (!s_cfg.wifiSsid[0]) {
+            } else if (!wifiHasActiveCreds()) {
                 snprintf(buf, bufLen, "WiFi: On (AP MODE ONLY)");
             } else {
-                snprintf(buf, bufLen, "WiFi: On (connecting)");
+                snprintf(buf, bufLen, "WiFi: On (connecting %s)", wifiActiveSsid());
+            }
+            break;
+        case CFG_ACTION_CHOOSE_WIFI:
+            if (s_wifiUsingKnownOverride && s_wifiSelectedSsid[0]) {
+                snprintf(buf, bufLen, "Choose WiFi: %s", s_wifiSelectedSsid);
+            } else if (s_cfg.wifiSsid[0]) {
+                snprintf(buf, bufLen, "Choose WiFi: %s", s_cfg.wifiSsid);
+            } else {
+                snprintf(buf, bufLen, "Choose WiFi: Configured (none)");
             }
             break;
         case CFG_ACTION_WEBCFG:
@@ -2338,7 +2500,7 @@ static bool otaWorkerEnsureWifiConnected() {
     if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
         return true;
     }
-    if (!s_cfg.wifiSsid[0]) {
+    if (!wifiHasActiveCreds()) {
         return false;
     }
 
@@ -2346,19 +2508,19 @@ static bool otaWorkerEnsureWifiConnected() {
     switch (mode) {
         case WIFI_OFF:
             WiFi.mode(WIFI_STA);
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             break;
         case WIFI_STA:
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             break;
 #ifdef WIFI_AP_STA
         case WIFI_AP:
             WiFi.mode(WIFI_AP_STA);
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             break;
 #endif
         case WIFI_AP_STA:
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             break;
         default:
             break;
@@ -2389,7 +2551,7 @@ static void otaWorkerLogHeap(const char *tag) {
 }
 
 static bool otaWorkerReconnectWifiForLowMemRetry() {
-    if (!s_cfg.wifiSsid[0]) return false;
+    if (!wifiHasActiveCreds()) return false;
 
     Serial.println("[ota-worker] low-mem retry: cycling WiFi stack");
     otaWorkerLogHeap("before wifi recycle");
@@ -2398,7 +2560,7 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
     delay(180);
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+    wifiBeginActiveKnown();
 
     uint32_t startMs = millis();
     while ((millis() - startMs) < 12000UL) {
@@ -2420,7 +2582,7 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
 // portal keeps working alongside it.
 static uint32_t s_wifiStaKickMs = 0;
 static void serviceWifiStation(uint32_t now) {
-    if (!s_cfg.wifiEnabled || !s_cfg.wifiSsid[0]) return;
+    if (!s_cfg.wifiEnabled || !wifiHasActiveCreds()) return;
     if (WiFi.status() == WL_CONNECTED) return;
     if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < 10000UL) return;
     s_wifiStaKickMs = now;
@@ -2428,7 +2590,7 @@ static void serviceWifiStation(uint32_t now) {
     wifi_mode_t mode = WiFi.getMode();
     if (mode == WIFI_AP)       WiFi.mode(WIFI_AP_STA);
     else if (mode == WIFI_OFF) WiFi.mode(WIFI_STA);
-    WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+    wifiBeginActiveKnown();
 }
 
 static bool runOtaWorkerModeIfRequested() {
@@ -3878,6 +4040,7 @@ static void sendComposeMessage() {
 static void initCfgActions() {
     s_cfgActionCount = 0;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
@@ -4105,7 +4268,737 @@ static void onCfgHeaderInfoPressed(lv_event_t *e) {
 }
 #endif
 
+static void onCfgWifiRowPressed(lv_event_t *e);
+static void onCfgWifiBackdropPressed(lv_event_t *e);
+static void onCfgWifiScanRowPressed(lv_event_t *e);
+
+static void closeCfgWifiPassModal() {
+    if (lvObjValid(s_cfgWifiPassBackdrop)) {
+        lv_obj_del(s_cfgWifiPassBackdrop);
+    } else if (lvObjValid(s_cfgWifiPassModal)) {
+        lv_obj_del(s_cfgWifiPassModal);
+    }
+    s_cfgWifiPassBackdrop = nullptr;
+    s_cfgWifiPassModal = nullptr;
+    s_cfgWifiPassInput = nullptr;
+    s_cfgWifiPassKeyboard = nullptr;
+    s_cfgWifiPassStatus = nullptr;
+    s_cfgWifiPassTargetSsid[0] = '\0';
+}
+
+static void closeCfgWifiScanModal() {
+    closeCfgWifiPassModal();
+    if (lvObjValid(s_cfgWifiScanBackdrop)) {
+        lv_obj_del(s_cfgWifiScanBackdrop);
+    } else if (lvObjValid(s_cfgWifiScanModal)) {
+        lv_obj_del(s_cfgWifiScanModal);
+    }
+    s_cfgWifiScanBackdrop = nullptr;
+    s_cfgWifiScanModal = nullptr;
+    s_cfgWifiScanList = nullptr;
+    s_cfgWifiScanStatus = nullptr;
+}
+
+static void closeCfgWifiPickerModal() {
+    closeCfgWifiScanModal();
+    if (lvObjValid(s_cfgWifiBackdrop)) {
+        lv_obj_del(s_cfgWifiBackdrop);
+    } else if (lvObjValid(s_cfgWifiModal)) {
+        lv_obj_del(s_cfgWifiModal);
+    }
+    s_cfgWifiBackdrop = nullptr;
+    s_cfgWifiModal = nullptr;
+    s_cfgWifiList = nullptr;
+    s_cfgWifiPickerOnboardingMode = false;
+}
+
+static void refreshCfgWifiPickerModal() {
+    if (!s_cfgWifiModal || !s_cfgWifiList) return;
+
+    lv_obj_clean(s_cfgWifiList);
+    for (int i = 0; i < s_cfgKnownWifiCount; i++) {
+        const KnownWifiEntry &entry = s_cfgKnownWifi[i];
+        char rowText[96];
+        if (i == 0 && entry.ssid[0]) {
+            snprintf(rowText, sizeof(rowText), "Configured: %s", entry.ssid);
+        } else if (i == 0) {
+            snprintf(rowText, sizeof(rowText), "Configured: (not set)");
+        } else if (entry.ssid[0]) {
+            snprintf(rowText, sizeof(rowText), "Known: %s", entry.ssid);
+        } else {
+            snprintf(rowText, sizeof(rowText), "Known: (empty)");
+        }
+
+        lv_obj_t *row = lv_label_create(s_cfgWifiList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_pad_left(row, 6, 0);
+        lv_obj_set_style_pad_right(row, 6, 0);
+        lv_obj_set_style_pad_top(row, 4, 0);
+        lv_obj_set_style_pad_bottom(row, 4, 0);
+        lv_obj_set_style_radius(row, 3, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex((i & 1) ? 0x123266 : 0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, rowText);
+
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, onCfgWifiRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        if (i == s_cfgWifiSelection) {
+            lv_obj_set_style_bg_color(row, lvColorFrom565(s_ui.selectBg), 0);
+            lv_obj_set_style_bg_opa(row, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80, 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+            lv_obj_set_style_border_color(row, lv_color_hex(0xE8F1FF), 0);
+            lv_obj_set_style_text_color(row,
+                                        (s_cfg.uiMode == UI_MODE_LIGHT)
+                                            ? lv_color_hex(0x000000)
+                                            : lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        }
+    }
+}
+
+static void applyCfgWifiSelection(int idx) {
+    if (idx < 0 || idx >= s_cfgKnownWifiCount) return;
+
+    const KnownWifiEntry &entry = s_cfgKnownWifi[idx];
+    if (idx == 0) {
+        if (!entry.ssid[0]) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Configured WiFi is empty");
+            return;
+        }
+        s_wifiUsingKnownOverride = false;
+        memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+        memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+    } else {
+        s_wifiUsingKnownOverride = true;
+        strncpy(s_wifiSelectedSsid, entry.ssid, sizeof(s_wifiSelectedSsid) - 1);
+        strncpy(s_wifiSelectedPass, entry.pass, sizeof(s_wifiSelectedPass) - 1);
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+    }
+
+    s_cfgWifiSelection = idx;
+    s_wifiStaKickMs = 0;
+    if (s_cfg.wifiEnabled && wifiHasActiveCreds()) {
+        WiFi.disconnect(false);
+    }
+}
+
+static void onCfgWifiRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
+    applyCfgWifiSelection(idx);
+    if (fromOnboarding) {
+        const char *activeSsid = nullptr;
+        const char *activePass = nullptr;
+        wifiGetActiveCreds(&activeSsid, &activePass);
+        utf8util::copyTruncate(s_onboardingWifiSsidScratch,
+                               sizeof(s_onboardingWifiSsidScratch),
+                               activeSsid ? activeSsid : "");
+        utf8util::copyTruncate(s_onboardingWifiPassScratch,
+                               sizeof(s_onboardingWifiPassScratch),
+                               activePass ? activePass : "");
+    }
+    closeCfgWifiPickerModal();
+    if (fromOnboarding || s_onboardingModal) {
+        renderOnboardingStage();
+        if (s_cfgStatus[0]) onboardingSetStatus(s_cfgStatus);
+    } else {
+        refreshCfgModal();
+        if (s_cfgStatus[0]) {
+            openCfgActionMessageModal(s_cfgStatus);
+        }
+    }
+}
+
+static void onCfgWifiBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgWifiBackdrop) return;
+    const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
+    closeCfgWifiPickerModal();
+    if (fromOnboarding || s_onboardingModal) renderOnboardingStage();
+    else refreshCfgModal();
+}
+
+static void onCfgWifiOpenScanPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    openCfgWifiScanModal();
+}
+
+static void onCfgWifiCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
+    closeCfgWifiPickerModal();
+    if (fromOnboarding || s_onboardingModal) renderOnboardingStage();
+    else refreshCfgModal();
+}
+
+static void onCfgWifiScanBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgWifiScanBackdrop) return;
+    closeCfgWifiScanModal();
+    if (s_cfgWifiModal) refreshCfgWifiPickerModal();
+}
+
+static void refreshCfgWifiScanModal(bool runScan) {
+    if (!s_cfgWifiScanModal || !s_cfgWifiScanList) return;
+
+    if (runScan) {
+        s_cfgScannedWifiCount = 0;
+        s_cfgWifiScanSelection = 0;
+        if (s_cfgWifiScanStatus) {
+            lv_label_set_text(s_cfgWifiScanStatus, "Scanning WiFi networks...");
+        }
+        lv_timer_handler();
+
+        wifi_mode_t mode = WiFi.getMode();
+        if (mode == WIFI_OFF) {
+            WiFi.mode(WIFI_STA);
+        } else if (mode == WIFI_AP) {
+            WiFi.mode(WIFI_AP_STA);
+        }
+
+        int found = WiFi.scanNetworks();
+        if (found > 0) {
+            for (int i = 0; i < found && s_cfgScannedWifiCount < kScannedWifiMaxCount; i++) {
+                String ssid = WiFi.SSID(i);
+                if (!ssid.length()) continue;
+
+                bool seen = false;
+                for (int j = 0; j < s_cfgScannedWifiCount; j++) {
+                    if (ssid.equals(s_cfgScannedWifi[j].ssid)) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) continue;
+
+                ScannedWifiEntry &entry = s_cfgScannedWifi[s_cfgScannedWifiCount++];
+                memset(&entry, 0, sizeof(entry));
+                strncpy(entry.ssid, ssid.c_str(), sizeof(entry.ssid) - 1);
+                entry.rssi = WiFi.RSSI(i);
+                entry.secure = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+            }
+            if (s_cfgWifiScanStatus) {
+                char status[64];
+                snprintf(status, sizeof(status), "Found %d network(s)", s_cfgScannedWifiCount);
+                lv_label_set_text(s_cfgWifiScanStatus, status);
+            }
+        } else if (s_cfgWifiScanStatus) {
+            lv_label_set_text(s_cfgWifiScanStatus, "No networks found");
+        }
+        WiFi.scanDelete();
+    }
+
+    lv_obj_clean(s_cfgWifiScanList);
+    for (int i = 0; i < s_cfgScannedWifiCount; i++) {
+        const ScannedWifiEntry &entry = s_cfgScannedWifi[i];
+        char rowText[120];
+        snprintf(rowText,
+                 sizeof(rowText),
+                 "%s  %ld dBm%s",
+                 entry.ssid,
+                 (long)entry.rssi,
+                 entry.secure ? "  lock" : "  open");
+
+        lv_obj_t *row = lv_label_create(s_cfgWifiScanList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_pad_left(row, 6, 0);
+        lv_obj_set_style_pad_right(row, 6, 0);
+        lv_obj_set_style_pad_top(row, 4, 0);
+        lv_obj_set_style_pad_bottom(row, 4, 0);
+        lv_obj_set_style_radius(row, 3, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex((i & 1) ? 0x123266 : 0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, rowText);
+
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, onCfgWifiScanRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        if (i == s_cfgWifiScanSelection) {
+            lv_obj_set_style_bg_color(row, lvColorFrom565(s_ui.selectBg), 0);
+            lv_obj_set_style_bg_opa(row, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80, 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+            lv_obj_set_style_border_color(row, lv_color_hex(0xE8F1FF), 0);
+            lv_obj_set_style_text_color(row,
+                                        (s_cfg.uiMode == UI_MODE_LIGHT)
+                                            ? lv_color_hex(0x000000)
+                                            : lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        }
+    }
+}
+
+static void onCfgWifiScanRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_cfgWifiScanSelection = idx;
+    refreshCfgWifiScanModal(false);
+    openCfgWifiPassModal(idx);
+}
+
+static void onCfgWifiScanCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeCfgWifiScanModal();
+    if (s_cfgWifiModal) refreshCfgWifiPickerModal();
+}
+
+static void onCfgWifiScanRescanPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    refreshCfgWifiScanModal(true);
+}
+
+static void onCfgWifiScanConnectPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (s_cfgWifiScanSelection >= 0 && s_cfgWifiScanSelection < s_cfgScannedWifiCount) {
+        openCfgWifiPassModal(s_cfgWifiScanSelection);
+    }
+}
+
+static void onCfgWifiPassBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgWifiPassBackdrop) return;
+    closeCfgWifiPassModal();
+    refreshCfgWifiScanModal(false);
+}
+
+static void onCfgWifiPassCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeCfgWifiPassModal();
+    refreshCfgWifiScanModal(false);
+}
+
+static void cfgWifiConnectFromPassModal() {
+    if (!s_cfgWifiPassInput || !s_cfgWifiPassTargetSsid[0]) return;
+
+    const char *pass = lv_textarea_get_text(s_cfgWifiPassInput);
+    if (!pass) pass = "";
+
+    if (s_cfgWifiPassStatus) {
+        lv_label_set_text_fmt(s_cfgWifiPassStatus, "Connecting to %s...", s_cfgWifiPassTargetSsid);
+        lv_timer_handler();
+    }
+
+    wifi_mode_t mode = WiFi.getMode();
+    if (mode == WIFI_OFF) {
+        WiFi.mode(WIFI_STA);
+    } else if (mode == WIFI_AP) {
+        WiFi.mode(WIFI_AP_STA);
+    }
+
+    WiFi.disconnect(false);
+    WiFi.begin(s_cfgWifiPassTargetSsid, pass);
+
+    bool connected = false;
+    uint32_t startMs = millis();
+    while ((millis() - startMs) < 12000UL) {
+        if (WiFi.status() == WL_CONNECTED && WiFi.getMode() != WIFI_AP) {
+            connected = true;
+            break;
+        }
+        lv_timer_handler();
+        delay(120);
+    }
+
+    if (connected) {
+        addTempKnownWifi(s_cfgWifiPassTargetSsid, pass);
+        if (strncmp(s_cfgWifiPassTargetSsid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid)) == 0) {
+            s_wifiUsingKnownOverride = false;
+            memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+            memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+        } else {
+            s_wifiUsingKnownOverride = true;
+            strncpy(s_wifiSelectedSsid, s_cfgWifiPassTargetSsid, sizeof(s_wifiSelectedSsid) - 1);
+            strncpy(s_wifiSelectedPass, pass, sizeof(s_wifiSelectedPass) - 1);
+        }
+        s_wifiStaKickMs = 0;
+
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi connected: %s", s_cfgWifiPassTargetSsid);
+        if (s_cfgWifiPickerOnboardingMode) {
+            utf8util::copyTruncate(s_onboardingWifiSsidScratch,
+                                   sizeof(s_onboardingWifiSsidScratch),
+                                   s_cfgWifiPassTargetSsid);
+            utf8util::copyTruncate(s_onboardingWifiPassScratch,
+                                   sizeof(s_onboardingWifiPassScratch),
+                                   pass ? pass : "");
+            closeCfgWifiPassModal();
+            closeCfgWifiScanModal();
+            closeCfgWifiPickerModal();
+            renderOnboardingStage();
+            onboardingSetStatus(s_cfgStatus);
+            return;
+        }
+        closeCfgWifiPassModal();
+        closeCfgWifiScanModal();
+        populateKnownWifiEntries();
+        refreshCfgWifiPickerModal();
+        openCfgActionMessageModal(s_cfgStatus);
+        return;
+    }
+
+    if (s_cfgWifiScanStatus) {
+        lv_label_set_text_fmt(s_cfgWifiScanStatus,
+                              "Connection failed: %s",
+                              s_cfgWifiPassTargetSsid);
+    }
+    closeCfgWifiPassModal();
+    refreshCfgWifiScanModal(false);
+}
+
+static void onCfgWifiPassConnectPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgWifiConnectFromPassModal();
+}
+
+static void openCfgWifiPassModal(int scanIdx) {
+    if (!s_rootScreen) return;
+    if (scanIdx < 0 || scanIdx >= s_cfgScannedWifiCount) return;
+
+    closeCfgWifiPassModal();
+
+    const ScannedWifiEntry &entry = s_cfgScannedWifi[scanIdx];
+    strncpy(s_cfgWifiPassTargetSsid, entry.ssid, sizeof(s_cfgWifiPassTargetSsid) - 1);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 320) modalW = 320;
+
+    s_cfgWifiPassBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgWifiPassBackdrop, w, h);
+    lv_obj_align(s_cfgWifiPassBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiPassBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiPassBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiPassBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiPassBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgWifiPassBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgWifiPassBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgWifiPassBackdrop, onCfgWifiPassBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgWifiPassModal = lv_obj_create(s_cfgWifiPassBackdrop);
+    lv_obj_set_size(s_cfgWifiPassModal,
+                    modalW,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                    h - 18
+#else
+                    LV_SIZE_CONTENT
+#endif
+    );
+    lv_obj_align(s_cfgWifiPassModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiPassModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiPassModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiPassModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgWifiPassModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiPassModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgWifiPassModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiPassModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgWifiPassModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiPassModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_cfgWifiPassBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgWifiPassModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(title, "Connect: %s", s_cfgWifiPassTargetSsid);
+
+    s_cfgWifiPassInput = lv_textarea_create(s_cfgWifiPassModal);
+    lv_obj_set_width(s_cfgWifiPassInput, lv_pct(100));
+    lv_obj_set_height(s_cfgWifiPassInput, 42);
+    lv_obj_set_style_text_font(s_cfgWifiPassInput, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_cfgWifiPassInput, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(s_cfgWifiPassInput, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiPassInput, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgWifiPassInput, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiPassInput, lv_color_hex(0x4C76BA), 0);
+    lv_textarea_set_one_line(s_cfgWifiPassInput, true);
+    lv_textarea_set_max_length(s_cfgWifiPassInput, 63);
+    lv_textarea_set_password_mode(s_cfgWifiPassInput, false);
+    lv_textarea_set_placeholder_text(s_cfgWifiPassInput,
+                                     entry.secure ? "WiFi password" : "Open network (leave blank)");
+
+    s_cfgWifiPassStatus = lv_label_create(s_cfgWifiPassModal);
+    lv_obj_set_width(s_cfgWifiPassStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgWifiPassStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgWifiPassStatus, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgWifiPassStatus, LV_TEXT_ALIGN_LEFT, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(s_cfgWifiPassStatus, "Enter password, then tap Connect");
+#else
+    lv_label_set_text(s_cfgWifiPassStatus, "Enter=Connect  Backspace=Back");
+#endif
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *btnRow = lv_obj_create(s_cfgWifiPassModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *cancelBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(cancelBtn, 1);
+    lv_obj_set_height(cancelBtn, lv_pct(100));
+    lv_obj_add_event_cb(cancelBtn, onCfgWifiPassCancelPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
+    lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(cancelLbl, "Cancel");
+    lv_obj_center(cancelLbl);
+
+    lv_obj_t *connectBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(connectBtn, 1);
+    lv_obj_set_height(connectBtn, lv_pct(100));
+    lv_obj_add_event_cb(connectBtn, onCfgWifiPassConnectPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *connectLbl = lv_label_create(connectBtn);
+    lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(connectLbl, "Connect");
+    lv_obj_center(connectLbl);
+
+    s_cfgWifiPassKeyboard = lv_keyboard_create(s_cfgWifiPassModal);
+    lv_obj_set_width(s_cfgWifiPassKeyboard, lv_pct(100));
+    lv_obj_set_flex_grow(s_cfgWifiPassKeyboard, 1);
+    lv_keyboard_set_textarea(s_cfgWifiPassKeyboard, s_cfgWifiPassInput);
+#endif
+}
+
+static void openCfgWifiScanModal() {
+    if (!s_rootScreen || s_cfgWifiScanModal || s_cfgWifiScanBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 340) modalW = 340;
+
+    s_cfgWifiScanBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgWifiScanBackdrop, w, h);
+    lv_obj_align(s_cfgWifiScanBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiScanBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiScanBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiScanBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiScanBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgWifiScanBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgWifiScanBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgWifiScanBackdrop, onCfgWifiScanBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgWifiScanModal = lv_obj_create(s_cfgWifiScanBackdrop);
+    lv_obj_set_size(s_cfgWifiScanModal, modalW, (h > 120) ? (h - 20) : LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgWifiScanModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiScanModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiScanModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiScanModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiScanModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgWifiScanModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiScanModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgWifiScanModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiScanModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgWifiScanModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiScanModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_cfgWifiScanBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgWifiScanModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Scan Networks");
+
+    s_cfgWifiScanStatus = lv_label_create(s_cfgWifiScanModal);
+    lv_obj_set_width(s_cfgWifiScanStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgWifiScanStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgWifiScanStatus, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgWifiScanStatus, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_cfgWifiScanStatus,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Pick a network, then Connect"
+#else
+                      "Enter=Connect  N=Rescan  Backspace=Back"
+#endif
+    );
+
+    s_cfgWifiScanList = lv_obj_create(s_cfgWifiScanModal);
+    lv_obj_set_width(s_cfgWifiScanList, lv_pct(100));
+    lv_obj_set_flex_grow(s_cfgWifiScanList, 1);
+    lv_obj_add_flag(s_cfgWifiScanList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_cfgWifiScanList);
+    lv_obj_set_scrollbar_mode(s_cfgWifiScanList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_cfgWifiScanList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiScanList, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgWifiScanList, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiScanList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_cfgWifiScanList, 2, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiScanList, 2, 0);
+    lv_obj_set_flex_flow(s_cfgWifiScanList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiScanList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *btnRow = lv_obj_create(s_cfgWifiScanModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *cancelBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(cancelBtn, 1);
+    lv_obj_set_height(cancelBtn, lv_pct(100));
+    lv_obj_add_event_cb(cancelBtn, onCfgWifiScanCancelPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
+    lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(cancelLbl, "Cancel");
+    lv_obj_center(cancelLbl);
+
+    lv_obj_t *rescanBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(rescanBtn, 1);
+    lv_obj_set_height(rescanBtn, lv_pct(100));
+    lv_obj_add_event_cb(rescanBtn, onCfgWifiScanRescanPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *rescanLbl = lv_label_create(rescanBtn);
+    lv_obj_set_style_text_font(rescanLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(rescanLbl, "Rescan");
+    lv_obj_center(rescanLbl);
+
+    lv_obj_t *connectBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(connectBtn, 1);
+    lv_obj_set_height(connectBtn, lv_pct(100));
+    lv_obj_add_event_cb(connectBtn, onCfgWifiScanConnectPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *connectLbl = lv_label_create(connectBtn);
+    lv_obj_set_style_text_font(connectLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(connectLbl, "Connect");
+    lv_obj_center(connectLbl);
+#endif
+
+    refreshCfgWifiScanModal(true);
+}
+
+static void openCfgWifiPickerModal(bool forOnboarding) {
+    if (!s_rootScreen || s_cfgWifiModal || s_cfgWifiBackdrop) return;
+    s_cfgWifiPickerOnboardingMode = forOnboarding;
+    populateKnownWifiEntries();
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 340) modalW = 340;
+
+    s_cfgWifiBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgWifiBackdrop, w, h);
+    lv_obj_align(s_cfgWifiBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgWifiBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgWifiBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgWifiBackdrop, onCfgWifiBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgWifiModal = lv_obj_create(s_cfgWifiBackdrop);
+    lv_obj_set_size(s_cfgWifiModal, modalW, (h > 120) ? (h - 20) : LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgWifiModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgWifiModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgWifiModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgWifiModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_cfgWifiBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgWifiModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Choose WiFi");
+
+    lv_obj_t *hint = lv_label_create(s_cfgWifiModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Pick known WiFi or tap New"
+#else
+                      "Enter=Select  N=New  Backspace=Cancel"
+#endif
+    );
+
+    s_cfgWifiList = lv_obj_create(s_cfgWifiModal);
+    lv_obj_set_width(s_cfgWifiList, lv_pct(100));
+    lv_obj_set_flex_grow(s_cfgWifiList, 1);
+    lv_obj_add_flag(s_cfgWifiList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_cfgWifiList);
+    lv_obj_set_scrollbar_mode(s_cfgWifiList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_cfgWifiList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiList, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgWifiList, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_cfgWifiList, 2, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiList, 2, 0);
+    lv_obj_set_flex_flow(s_cfgWifiList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *btnRow = lv_obj_create(s_cfgWifiModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *cancelBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(cancelBtn, 1);
+    lv_obj_set_height(cancelBtn, lv_pct(100));
+    lv_obj_add_event_cb(cancelBtn, onCfgWifiCancelPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
+    lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(cancelLbl, "Cancel");
+    lv_obj_center(cancelLbl);
+
+    lv_obj_t *newBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(newBtn, 1);
+    lv_obj_set_height(newBtn, lv_pct(100));
+    lv_obj_add_event_cb(newBtn, onCfgWifiOpenScanPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *newLbl = lv_label_create(newBtn);
+    lv_obj_set_style_text_font(newLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(newLbl, "New");
+    lv_obj_center(newLbl);
+#endif
+
+    refreshCfgWifiPickerModal();
+}
+
 static void closeCfgModal() {
+    closeCfgWifiPickerModal();
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
 #if !defined(DEVICE_TLORA_PAGER_TFT)
@@ -5255,27 +6148,27 @@ static void nodesPanelWifiEnter() {
     s_nodesWifiPrevConnected = (WiFi.status() == WL_CONNECTED);
 
     if (s_nodesWifiPrevConnected) return;
-    if (!s_cfg.wifiSsid[0]) return;
+    if (!wifiHasActiveCreds()) return;
 
     switch (s_nodesWifiPrevMode) {
         case WIFI_OFF:
             WiFi.mode(WIFI_STA);
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             s_nodesWifiStateChanged = true;
             break;
         case WIFI_STA:
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             s_nodesWifiStateChanged = true;
             break;
 #ifdef WIFI_AP_STA
         case WIFI_AP:
             WiFi.mode(WIFI_AP_STA);
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             s_nodesWifiStateChanged = true;
             break;
 #endif
         case WIFI_AP_STA:
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             s_nodesWifiStateChanged = true;
             break;
         default:
@@ -5806,7 +6699,7 @@ static void bootstrapStateMapsIfMissing() {
         return;
     }
 
-    if (!s_cfg.wifiSsid[0]) {
+    if (!wifiHasActiveCreds()) {
         if (!s_stateMapBootstrapTried) {
             s_stateMapBootstrapTried = true;
             Serial.println("[map] state-map bootstrap skipped (no Wi-Fi credentials)");
@@ -5839,7 +6732,7 @@ static void bootstrapStateMapsIfMissing() {
             } else {
                 WiFi.mode(WIFI_STA);
             }
-            WiFi.begin(s_cfg.wifiSsid, s_cfg.wifiPass);
+            wifiBeginActiveKnown();
             s_stateMapBootstrapWifiTouched = true;
             s_stateMapBootstrapConnectStartMs = millis();
         }
@@ -9789,6 +10682,12 @@ static void performCfgAction(int actionId) {
                      "WiFi %s", s_cfg.wifiEnabled ? "on" : "off");
             break;
 
+        case CFG_ACTION_CHOOSE_WIFI:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHOOSE_WIFI");
+            showActionPopup = false;
+            openCfgWifiPickerModal();
+            break;
+
         case CFG_ACTION_MQTT_TOGGLE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MQTT_TOGGLE");
             s_cfg.mqttEnabled = !s_cfg.mqttEnabled;
@@ -10379,6 +11278,8 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
         #if defined(DEVICE_CARDPUTER_LORA_HAT)
             lv_label_set_text(s_onboardingStatus, "j/k=Change   Enter=Next   Bksp=Back");
+        #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_label_set_text(s_onboardingStatus, "Use arrows to choose, then tap Next");
         #else
         lv_label_set_text(s_onboardingStatus, "Wheel/j-k=Change   Enter=Next");
         #endif
@@ -10417,27 +11318,80 @@ static void renderOnboardingStage() {
         makeBtn(btnRow, "Next", 0x2F6B30,
                 [](lv_event_t *) { onboardingPickerAdvance(); });
     #endif
+    } else if (s_onboardingStage == ONBOARD_STAGE_CHOOSE_WIFI) {
+        char summary[160];
+        if (s_onboardingWifiSsidScratch[0]) {
+            snprintf(summary,
+                     sizeof(summary),
+                     "Optional WiFi setup.\nSelected: %s\nChoose a different network or finish.",
+                     s_onboardingWifiSsidScratch);
+        } else {
+            snprintf(summary,
+                     sizeof(summary),
+                     "Optional WiFi setup.\nNo network selected.\nChoose WiFi now or finish without WiFi.");
+        }
+        lv_label_set_text(body, summary);
+
+        s_onboardingStatus = lv_label_create(s_onboardingModal);
+        lv_obj_set_width(s_onboardingStatus, lv_pct(100));
+        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_label_set_text(s_onboardingStatus, "N=Choose WiFi   Enter=Finish   Bksp=Back");
+#else
+        lv_label_set_text(s_onboardingStatus, "Choose WiFi or Finish");
+#endif
+
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_obj_t *btnRow = lv_obj_create(s_onboardingModal);
+        lv_obj_set_width(btnRow, lv_pct(100));
+        lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btnRow, 0, 0);
+        lv_obj_set_style_pad_all(btnRow, 0, 0);
+        lv_obj_set_style_pad_column(btnRow, compactOnboarding ? 8 : 10, 0);
+        lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        auto makeBtn = [=](lv_obj_t *parent, const char *text, uint32_t color,
+                          lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_height(btn, onboardingButtonH);
+            lv_obj_set_style_min_width(btn, onboardingButtonMinW, 0);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, onboardingButtonFont, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+            return btn;
+        };
+
+        makeBtn(btnRow, "Back", 0x3C4A66,
+                [](lv_event_t *) {
+                    s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
+                    s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
+                    renderOnboardingStage();
+                });
+        makeBtn(btnRow, "Choose WiFi", 0x3C4A66,
+                [](lv_event_t *) { openCfgWifiPickerModal(true); });
+        makeBtn(btnRow, "Finish", 0x2F6B30,
+                [](lv_event_t *) { onboardingFinalize(); });
+#endif
     } else {
         const bool isShortStage = (s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT);
-        const bool isWifiSsid   = (s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID);
-        const bool isWifiPass   = (s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS);
-        const bool isWifi       = isWifiSsid || isWifiPass;
 
         if (isShortStage) {
             char summary[96];
             snprintf(summary, sizeof(summary),
                      "Long name: %s\nEnter a short name (up to 4 chars).",
                      s_onboardingLongScratch);
-            lv_label_set_text(body, summary);
-        } else if (isWifiSsid) {
-            lv_label_set_text(body,
-                              "Connect to WiFi? Enter a network name,\n"
-                              "or Skip to finish.");
-        } else if (isWifiPass) {
-            char summary[96];
-            snprintf(summary, sizeof(summary),
-                     "Network: %s\nEnter the WiFi password.",
-                     s_onboardingWifiSsidScratch);
             lv_label_set_text(body, summary);
         } else {
             lv_label_set_text(body, "Enter this node's long name.");
@@ -10461,14 +11415,6 @@ static void renderOnboardingStage() {
             lv_textarea_set_text(s_onboardingInput,
                                  s_onboardingShortScratch[0] ? s_onboardingShortScratch
                                                              : derived);
-        } else if (isWifiSsid) {
-            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.wifiSsid) - 1);
-            lv_textarea_set_placeholder_text(s_onboardingInput, "WiFi SSID");
-            lv_textarea_set_text(s_onboardingInput, s_onboardingWifiSsidScratch);
-        } else if (isWifiPass) {
-            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.wifiPass) - 1);
-            lv_textarea_set_placeholder_text(s_onboardingInput, "Password (blank if open)");
-            lv_textarea_set_text(s_onboardingInput, s_onboardingWifiPassScratch);
         } else {
             lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeLong) - 1);
             lv_textarea_set_placeholder_text(s_onboardingInput, "Long name");
@@ -10484,13 +11430,13 @@ static void renderOnboardingStage() {
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         const char *statusHint = "Enter=Next";
         if (isShortStage)      statusHint = "Enter=Next   Bksp(empty)=Back";
-        else if (isWifiSsid)   statusHint = "Enter=Next (empty=Skip)   Bksp(empty)=Back";
-        else if (isWifiPass)   statusHint = "Enter=Finish & reboot   Bksp(empty)=Back";
+    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+        const char *statusHint = isShortStage
+                                     ? "Tap Next to continue, or Back"
+                                     : "Tap Next to continue";
     #else
         const char *statusHint = "Enter=Next";
         if (isShortStage)      statusHint = "Enter=Next    Bksp(empty)=Back";
-        else if (isWifiSsid)   statusHint = "Enter=Next    Bksp(empty)=Back";
-        else if (isWifiPass)   statusHint = "Enter=Finish & reboot    Bksp(empty)=Back";
     #endif
         lv_label_set_text(s_onboardingStatus, statusHint);
 
@@ -10530,27 +11476,8 @@ static void renderOnboardingStage() {
                         s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
                         renderOnboardingStage();
                     });
-        } else if (isWifiSsid) {
-            makeBtn(btnRow, "Back", 0x3C4A66,
-                    [](lv_event_t *) {
-                        s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
-                        s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
-                        renderOnboardingStage();
-                    });
-            makeBtn(btnRow, "Skip", 0x6B5A30,
-                    [](lv_event_t *) {
-                        s_onboardingWifiSsidScratch[0] = '\0';
-                        s_onboardingWifiPassScratch[0] = '\0';
-                        onboardingFinalize();
-                    });
-        } else if (isWifiPass) {
-            makeBtn(btnRow, "Back", 0x3C4A66,
-                    [](lv_event_t *) {
-                        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
-                        renderOnboardingStage();
-                    });
         }
-        const char *nextLabel = isWifiPass ? "Finish" : "Next";
+        const char *nextLabel = "Next";
         makeBtn(btnRow, nextLabel, 0x2F6B30,
                 [](lv_event_t *) { onboardingCommitName(); });
     #endif
@@ -10666,8 +11593,7 @@ static void onboardingDeclineImport() {
     renderOnboardingStage();
 }
 
-// Advances the text-entry stages (long/short name, WiFi SSID/password). Each
-// field is buffered into scratch; nothing touches s_cfg until onboardingFinalize.
+// Advances onboarding text-entry stages (long/short name).
 static void onboardingCommitName() {
     if (!s_onboardingInput) return;
     const char *typed = lv_textarea_get_text(s_onboardingInput);
@@ -10696,28 +11622,6 @@ static void onboardingCommitName() {
         s_onboardingStage = ONBOARD_STAGE_SELECT_REGION;
         s_onboardingPickIndex = onboardingRegionIndex(s_onboardingRegionScratch);
         renderOnboardingStage();
-        return;
-
-    case ONBOARD_STAGE_ENTER_WIFI_SSID:
-        // Empty SSID means the user doesn't want WiFi — treat as Skip.
-        if (name.length() == 0) {
-            s_onboardingWifiSsidScratch[0] = '\0';
-            s_onboardingWifiPassScratch[0] = '\0';
-            onboardingFinalize();
-            return;
-        }
-        utf8util::copyTruncate(s_onboardingWifiSsidScratch,
-                               sizeof(s_onboardingWifiSsidScratch), name.c_str());
-        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_PASS;
-        renderOnboardingStage();
-        return;
-
-    case ONBOARD_STAGE_ENTER_WIFI_PASS:
-        // A WiFi password may legitimately be empty (open network); store the
-        // raw text so leading/trailing characters aren't stripped.
-        utf8util::copyTruncate(s_onboardingWifiPassScratch,
-                               sizeof(s_onboardingWifiPassScratch), typed ? typed : "");
-        onboardingFinalize();
         return;
 
     default:
@@ -10749,7 +11653,7 @@ static void onboardingPickerAdvance() {
         renderOnboardingStage();
     } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
         s_onboardingRoleScratch = kOnboardRoles[s_onboardingPickIndex].value;
-        s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
+        s_onboardingStage = ONBOARD_STAGE_CHOOSE_WIFI;
         renderOnboardingStage();
     }
 }
@@ -10832,9 +11736,7 @@ static void pumpKeyboardInput() {
         bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
-                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT
-                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID
-                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS));
+                                     || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
         bool navFromJk = false;
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -10854,7 +11756,7 @@ static void pumpKeyboardInput() {
         // First-boot onboarding is fully modal: swallow every other UI key
         // while it's up so the user can't wander into the main app before
         // supplying a node identity.
-        if (s_onboardingModal) {
+        if (s_onboardingModal && !s_cfgWifiModal && !s_cfgWifiScanModal && !s_cfgWifiPassModal) {
             if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
                 if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
                     onboardingAcceptImport();
@@ -10874,7 +11776,17 @@ static void pumpKeyboardInput() {
                 } else if (isModalCloseKey(k)) {
                     onboardingPickerBack();
                 }
-            } else {  // text stages: LONG / SHORT / WIFI_SSID / WIFI_PASS
+            } else if (s_onboardingStage == ONBOARD_STAGE_CHOOSE_WIFI) {
+                if (k == 'n' || k == 'N' || k == KEY_ROLLER) {
+                    openCfgWifiPickerModal(true);
+                } else if (k == KEY_ENTER) {
+                    onboardingFinalize();
+                } else if (isModalCloseKey(k)) {
+                    s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
+                    s_onboardingPickIndex = onboardingRoleIndex(s_onboardingRoleScratch);
+                    renderOnboardingStage();
+                }
+            } else {  // text stages: LONG / SHORT
                 if (k == KEY_ENTER) {
                     onboardingCommitName();
                 } else if (isBackspaceKey(k)) {
@@ -10885,16 +11797,6 @@ static void pumpKeyboardInput() {
                         if (emptyField
                             && s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT) {
                             s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
-                            renderOnboardingStage();
-                        } else if (emptyField
-                                   && s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_SSID) {
-                            s_onboardingStage = ONBOARD_STAGE_SELECT_ROLE;
-                            s_onboardingPickIndex =
-                                onboardingRoleIndex(s_onboardingRoleScratch);
-                            renderOnboardingStage();
-                        } else if (emptyField
-                                   && s_onboardingStage == ONBOARD_STAGE_ENTER_WIFI_PASS) {
-                            s_onboardingStage = ONBOARD_STAGE_ENTER_WIFI_SSID;
                             renderOnboardingStage();
                         } else {
                             lv_textarea_del_char(s_onboardingInput);
@@ -10926,6 +11828,144 @@ static void pumpKeyboardInput() {
             if (isModalCloseKey(k)) {
 #endif
                 closeTracerouteProgressModal();
+            }
+            continue;
+        }
+
+        if (s_cfgWifiPassModal) {
+            if (k == KEY_ENTER) {
+                cfgWifiConnectFromPassModal();
+                continue;
+            }
+            if (isBackspaceKey(k)) {
+                if (s_cfgWifiPassInput && k == KEY_BACKSPACE) {
+                    const char *cur = lv_textarea_get_text(s_cfgWifiPassInput);
+                    if (!cur || !cur[0]) {
+                        closeCfgWifiPassModal();
+                        refreshCfgWifiScanModal(false);
+                    } else {
+                        lv_textarea_del_char(s_cfgWifiPassInput);
+                    }
+                }
+                continue;
+            }
+            if (isModalCloseKey(k)) {
+                closeCfgWifiPassModal();
+                refreshCfgWifiScanModal(false);
+                continue;
+            }
+            if (k >= 0x20 && k < 0x7F && s_cfgWifiPassInput) {
+                char one[2] = {k, '\0'};
+                lv_textarea_add_text(s_cfgWifiPassInput, one);
+                continue;
+            }
+            continue;
+        }
+
+        if (s_cfgWifiScanModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgWifiScanModal();
+                if (s_cfgWifiModal) refreshCfgWifiPickerModal();
+                continue;
+            }
+            if (k == 'n' || k == 'N') {
+                refreshCfgWifiScanModal(true);
+                continue;
+            }
+            if (k == KEY_SCROLL_UP) {
+                if (invertScrollNav) {
+                    if (s_cfgWifiScanSelection + 1 < s_cfgScannedWifiCount) {
+                        s_cfgWifiScanSelection++;
+                        refreshCfgWifiScanModal(false);
+                    }
+                } else if (s_cfgWifiScanSelection > 0) {
+                    s_cfgWifiScanSelection--;
+                    refreshCfgWifiScanModal(false);
+                }
+                continue;
+            }
+            if (k == KEY_SCROLL_DN) {
+                if (invertScrollNav) {
+                    if (s_cfgWifiScanSelection > 0) {
+                        s_cfgWifiScanSelection--;
+                        refreshCfgWifiScanModal(false);
+                    }
+                } else if (s_cfgWifiScanSelection + 1 < s_cfgScannedWifiCount) {
+                    s_cfgWifiScanSelection++;
+                    refreshCfgWifiScanModal(false);
+                }
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                if (s_cfgWifiScanSelection >= 0 && s_cfgWifiScanSelection < s_cfgScannedWifiCount) {
+                    openCfgWifiPassModal(s_cfgWifiScanSelection);
+                }
+                continue;
+            }
+            continue;
+        }
+
+        if (s_cfgWifiModal) {
+            if (isModalCloseKey(k)) {
+                const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
+                closeCfgWifiPickerModal();
+                if (fromOnboarding || s_onboardingModal) renderOnboardingStage();
+                else refreshCfgModal();
+                continue;
+            }
+            if (k == 'n' || k == 'N') {
+                openCfgWifiScanModal();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP) {
+                if (invertScrollNav) {
+                    if (s_cfgWifiSelection + 1 < s_cfgKnownWifiCount) {
+                        s_cfgWifiSelection++;
+                        refreshCfgWifiPickerModal();
+                    }
+                } else if (s_cfgWifiSelection > 0) {
+                    s_cfgWifiSelection--;
+                    refreshCfgWifiPickerModal();
+                }
+                continue;
+            }
+            if (k == KEY_SCROLL_DN) {
+                if (invertScrollNav) {
+                    if (s_cfgWifiSelection > 0) {
+                        s_cfgWifiSelection--;
+                        refreshCfgWifiPickerModal();
+                    }
+                } else if (s_cfgWifiSelection + 1 < s_cfgKnownWifiCount) {
+                    s_cfgWifiSelection++;
+                    refreshCfgWifiPickerModal();
+                }
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
+                applyCfgWifiSelection(s_cfgWifiSelection);
+                if (fromOnboarding) {
+                    const char *activeSsid = nullptr;
+                    const char *activePass = nullptr;
+                    wifiGetActiveCreds(&activeSsid, &activePass);
+                    utf8util::copyTruncate(s_onboardingWifiSsidScratch,
+                                           sizeof(s_onboardingWifiSsidScratch),
+                                           activeSsid ? activeSsid : "");
+                    utf8util::copyTruncate(s_onboardingWifiPassScratch,
+                                           sizeof(s_onboardingWifiPassScratch),
+                                           activePass ? activePass : "");
+                }
+                closeCfgWifiPickerModal();
+                if (fromOnboarding || s_onboardingModal) {
+                    renderOnboardingStage();
+                    if (s_cfgStatus[0]) onboardingSetStatus(s_cfgStatus);
+                } else {
+                    refreshCfgModal();
+                    if (s_cfgStatus[0]) {
+                        openCfgActionMessageModal(s_cfgStatus);
+                    }
+                }
+                continue;
             }
             continue;
         }
