@@ -12,6 +12,7 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 - [Build and Flash](#build-and-flash)
 - [First-Time Setup](#first-time-setup)
 - [Configuration](#configuration)
+- [Releases](#releases)
 - [Roadmap](#roadmap)
 - [Use of AI](#use-of-ai)
 - [License](#license)
@@ -60,6 +61,37 @@ Connect to the `camillia-mt` Wi-Fi access point and navigate to `http://192.168.
 ### SD card
 
 Export or import a full YAML configuration file via the **CFG** tab. The file is read from and written to `/camillia/config.yaml` on the microSD card.
+
+## Releases
+
+Releases are cut with [`release.sh`](release.sh), which builds every device
+profile, merges factory images, tags the commit, and publishes a GitHub release
+with the `.bin`/`.elf` assets.
+
+### Stable
+
+```bash
+./release.sh        # prompts for a version, e.g. 3.2.0
+```
+
+Publishes a normal release. On-device OTA and the website's **Stable** flasher
+channel both track GitHub's *latest* release, so this is what most users get.
+
+### Alpha (prerelease)
+
+```bash
+git checkout alpha
+./release.sh --alpha    # prompts: New alpha version [v3.2.0-alpha.1]
+```
+
+`--alpha` must be run from the **`alpha`** branch (it aborts otherwise). It tags
+`v<next-patch>-alpha.N` — auto-incrementing `N` — and publishes a GitHub
+*prerelease*. Because GitHub excludes prereleases from *latest*, alpha builds are
+invisible to on-device OTA and to the Stable flasher; they only appear when the
+website flasher's **Channel** selector is set to **Alpha (bleeding-edge)**.
+
+Alphas are disposable test builds — use them for validating changes before
+stamping a real release.
 
 ## Roadmap
 

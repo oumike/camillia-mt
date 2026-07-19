@@ -530,6 +530,19 @@ static int compareVersionTags(const char *a, const char *b) {
     }
 }
 
+// A release tag is a prerelease when it carries a SemVer prerelease suffix,
+// i.e. anything after a '-' (e.g. "v3.1.2-alpha.1"). Devices must never
+// auto-update onto a prerelease — even when already running one — so these are
+// never treated as an available update. Old-style suffixes without a hyphen
+// (e.g. "v2.9.4a") are NOT prereleases and remain updatable.
+static bool isPrereleaseTag(const char *tag) {
+    if (!tag) return false;
+    for (const char *p = tag; *p; ++p) {
+        if (*p == '-') return true;
+    }
+    return false;
+}
+
 static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     tagOut = "";
     errOut = "";
@@ -654,7 +667,13 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
     copyStringToBuf(out.latestTag, sizeof(out.latestTag), latestTag.c_str());
     buildAssetUrl(out.latestTag, out.downloadUrl, sizeof(out.downloadUrl));
 
-    if (kTreatLatestAsUpdateForTesting) {
+    if (isPrereleaseTag(out.latestTag)) {
+        // Never auto-update onto an alpha/prerelease. /releases/latest already
+        // excludes prereleases, but the release-page and raw-VERSION fallbacks
+        // could theoretically surface one, so guard here too.
+        Serial.printf("[ota] ignoring prerelease tag: %s\n", out.latestTag);
+        out.updateAvailable = false;
+    } else if (kTreatLatestAsUpdateForTesting) {
         out.updateAvailable = true;
     } else {
         out.updateAvailable = (compareVersionTags(APP_VERSION, out.latestTag) < 0);
@@ -692,6 +711,12 @@ bool otaInstallLatestRelease(const char *tag,
             return setErr(errOut, errLen, err.c_str());
         }
         copyStringToBuf(tagBuf, sizeof(tagBuf), latestTag.c_str());
+    }
+
+    // Hard stop: never install a prerelease (alpha) build via the update path,
+    // regardless of how the tag was supplied.
+    if (isPrereleaseTag(tagBuf)) {
+        return setErr(errOut, errLen, "Refusing to install prerelease (alpha) build");
     }
 
     char url[256] = {};
