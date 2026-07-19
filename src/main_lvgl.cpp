@@ -7099,7 +7099,9 @@ static void refreshNodesListRows() {
 
     if (s_nodesTitleLabel) {
         int nodeCount = s_nodesSnapshotCount;
-        if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
+        if (s_nodesFilterOpen) {
+            // Brackets appear as soon as the filter is armed (even empty) so the
+            // user has a visual cue that filtering is on; text fills in as typed.
             char titleText[64];
             snprintf(titleText, sizeof(titleText), "NODES [%s] (%d)",
                      s_nodesFilter, nodeCount);
@@ -7115,7 +7117,7 @@ static void refreshNodesListRows() {
         if (s_nodesFilterOpen) {
 #if defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Type=Filter  Up/Down/J/K=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
+                                  "Type=Filter  J/K=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
                                   modalCloseKeyLabel());
 #else
             lv_label_set_text_fmt(s_nodesHintLabel,
@@ -7125,11 +7127,11 @@ static void refreshNodesListRows() {
         } else {
 #if defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Up/Down/J/K=Select  Enter=Actions  Type=Filter  %s=Back",
+                                  "J/K=Select  Enter=Actions  Space=Filter  %s=Back",
                                   modalCloseKeyLabel());
 #else
             lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Up/Down=Select  Enter=Actions  Type=Filter  %s=Back",
+                                  "Up/Down=Select  Enter=Actions  Space=Filter  %s=Back",
                                   modalCloseKeyLabel());
 #endif
         }
@@ -9631,7 +9633,7 @@ static void refreshDmModal(bool force) {
         } else {
 #if defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down/J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+                                  "J/K = Select   Enter = Compose/Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
@@ -9809,7 +9811,7 @@ static void openDmModal() {
         0);
 #if defined(DEVICE_TDECK)
     lv_label_set_text_fmt(hint,
-                          "Up/Down/J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+                          "J/K = Select   Enter = Compose/Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text_fmt(hint,
                           "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
@@ -10049,7 +10051,7 @@ static void openNodesModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "Up/Down/J/K=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "J/K=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(hint, "Up/Down=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
 #endif
@@ -12321,7 +12323,7 @@ static void pumpKeyboardInput() {
                 }
                 continue;
             }
-            if (k == KEY_ENTER) {
+            if (k == KEY_ENTER || k == ' ') {
                 activateDmSelection();
                 continue;
             }
@@ -12420,8 +12422,21 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if (k >= 0x20 && k < 0x7F) {
-                if (!s_nodesFilterOpen) s_nodesFilterOpen = true;
+            // The filter is entered explicitly with the spacebar; the space
+            // itself is never added to the filter text. Letters no longer
+            // start the filter on their own — they only append once it's open.
+            if (k == ' ') {
+                if (!s_nodesFilterOpen) {
+                    s_nodesFilterOpen = true;
+                    nodesApplyFilter();
+                    refreshNodesListRows();
+                    refreshNodesListSelection();
+                    refreshNodesDetails();
+                }
+                continue;
+            }
+
+            if (k > 0x20 && k < 0x7F && s_nodesFilterOpen) {
                 if (s_nodesFilterLen < kNodesFilterMax) {
                     s_nodesFilter[s_nodesFilterLen++] = k;
                     s_nodesFilter[s_nodesFilterLen] = '\0';
@@ -12854,10 +12869,11 @@ static void pumpKeyboardInput() {
                 refreshChannelGlow(true);
 #endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-            } else if ((k == KEY_ENTER || k == KEY_FN_ENTER)
+            } else if ((k == KEY_ENTER || k == KEY_FN_ENTER || k == ' ')
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #else
-            } else if (k == KEY_ENTER && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+            } else if ((k == KEY_ENTER || k == ' ')
+                       && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
 #endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                 if (!s_cardputerMainChatPanelFocused) {

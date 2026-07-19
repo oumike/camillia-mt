@@ -18,6 +18,8 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - L opens Live
 - A opens Channel Actions
 - Enter opens compose (or reply compose when a chat row is selected)
+- Space also opens compose in chat, mirroring Enter (in the DM list it advances the
+  same as Enter: focus a conversation, then open its compose)
 - Live modal shortcuts: C clears the log, U opens channel-util chart, S opens SNR/RSSI chart
 
 ### LilyGo T-Deck (tdeck)
@@ -95,8 +97,19 @@ Config includes Web Config controls, export and import, theme toggles, announce,
 Nodes shows discovered nodes and detail fields, including map position details.
 
 - Open from the main screen (N on keyboard builds, Nodes bottom-nav button on Heltec)
-- Navigate rows with Up and Down input
+- Navigate rows with Up and Down input (T-Deck uses J/K, since it has no Up/Down buttons)
+- Enter opens the actions menu for the selected node
 - Close with the device close key
+
+### Filtering nodes
+
+- Space starts the filter. Filter brackets `[ ]` appear in the header as a visual
+  cue that filtering is on, even before you type anything
+- Once the filter is armed, type to narrow the list; the text shows inside the
+  brackets (`NODES [text] (count)`)
+- Typing a letter on its own no longer starts the filter — only Space does
+- Backspace edits the filter text; backspacing past the last character closes the
+  filter and clears the brackets
 
 ![Node details screen](screenshots/RiCa_screen_20260609_110407.png)
 
@@ -108,6 +121,7 @@ Direct messaging:
 - Pressing Enter on New DM opens node picker
 - Enter on a conversation focuses message panel
 - Enter again in focused message panel opens compose for that DM
+- Space works the same as Enter for each of the steps above
 
 ![Node select](screenshots/RiCa_screen_20260609_112419.png)
 ![Message view](screenshots/RiCa_screen_20260609_113850.png)
