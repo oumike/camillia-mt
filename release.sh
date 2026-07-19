@@ -222,6 +222,40 @@ if [[ ${#BUILD_ARGS[@]} -eq 0 ]]; then
     exit 1
 fi
 
+# ── OTA image signing key ─────────────────────────────────────────────────────
+# Signed OTA images let the device verify authenticity over plain HTTP (no TLS).
+# The private key is gitignored and must be backed up; the matching public key is
+# baked into the firmware via src/ota_signing_pubkey.h, regenerated here so the
+# build always embeds the key that will sign these images.
+SIGNING_KEY="ota_signing_key.pem"
+PUBKEY_HEADER="src/ota_signing_pubkey.h"
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "Error: openssl is required to sign OTA images. Install it and retry." >&2
+    exit 1
+fi
+if [[ ! -f "$SIGNING_KEY" ]]; then
+    echo ""
+    echo "!! No OTA signing key found — generating a new ECDSA P-256 key at:"
+    echo "!!     $SIGNING_KEY"
+    echo "!! BACK THIS UP SECURELY and never commit it. If you lose it, every"
+    echo "!! existing device will reject all future updates (you'd have to reflash"
+    echo "!! over USB to ship a new key)."
+    echo ""
+    openssl ecparam -name prime256v1 -genkey -noout -out "$SIGNING_KEY"
+    chmod 600 "$SIGNING_KEY"
+fi
+# Bake the matching public key into the firmware before building.
+{
+    echo '// AUTO-GENERATED from ota_signing_key.pem by release.sh. Do not edit by hand.'
+    echo '// ECDSA P-256 public key used to verify signed OTA images (see ota_update.cpp).'
+    echo '#pragma once'
+    echo ''
+    echo 'static const char OTA_SIGNING_PUBKEY_PEM[] ='
+    openssl ec -in "$SIGNING_KEY" -pubout 2>/dev/null | sed 's/.*/    "&\\n"/'
+    echo '    ;'
+} > "$PUBKEY_HEADER"
+echo "Regenerated $PUBKEY_HEADER from $SIGNING_KEY"
+
 # Alpha builds are throwaway test cuts — skip the full clean for a faster
 # turnaround. Stable releases always start from a clean tree.
 if [[ "$ALPHA" == true ]]; then
@@ -279,6 +313,11 @@ for env_name in "${RELEASE_ENVS[@]}"; do
         0x10000 "${d}/firmware.bin"
     cp "${d}/firmware.bin" "${ota_out}"
     cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${TAG}.elf"
+    # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
+    # verifies this against the baked-in public key before committing the update,
+    # which is what makes plain-HTTP (TLS-free) OTA safe.
+    openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
+    echo "    signed -> ${ota_out}.sig"
 done
 
 ls -lh dist/
@@ -294,13 +333,15 @@ if [[ "$ALPHA" == true ]]; then
         --prerelease \
         --generate-notes \
         dist/*.bin \
-        dist/*.elf
+        dist/*.elf \
+        dist/*.sig
 else
     gh release create "$TAG" \
         --title "$TAG" \
         --generate-notes \
         dist/*.bin \
-        dist/*.elf
+        dist/*.elf \
+        dist/*.sig
 fi
 
 echo ""

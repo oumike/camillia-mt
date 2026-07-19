@@ -101,13 +101,20 @@ uint8_t myDeviceRole = 0;
 static constexpr uint16_t kMaxHorRes =
     (DEVICE_LCD_LANDSCAPE_W > DEVICE_LCD_PORTRAIT_W) ? DEVICE_LCD_LANDSCAPE_W : DEVICE_LCD_PORTRAIT_W;
 #if defined(DEVICE_TLORA_PAGER_TFT)
-// Pager OTA needs contiguous internal heap for TLS. A smaller LVGL draw buffer
-// frees internal RAM while keeping UI rendering stable.
-static constexpr uint16_t kDrawBufLines = 12;
+// Larger draw buffer -> fewer blocking SPI flushes per redraw (222px / 32 ~= 7
+// stripes instead of ~19), which removes the visible top-to-bottom "painting"
+// on modal opens. It costs ~19KB more internal RAM, but the buffer is now
+// allocated dynamically on the normal-UI path only (see setup): OTA worker mode
+// runs and reboots before that allocation, so during the TLS handshake this
+// buffer occupies zero bytes and OTA actually gets MORE contiguous internal
+// heap than the old static 12-line buffer left it.
+static constexpr uint16_t kDrawBufLines = 32;
 #else
 static constexpr uint16_t kDrawBufLines = 40;
 #endif
-static lv_color_t s_drawBufMem[kMaxHorRes * kDrawBufLines];
+// Allocated at UI init (heap_caps, internal RAM) rather than a static array so
+// the OTA worker path can complete without it ever being reserved.
+static lv_color_t *s_drawBufMem = nullptr;
 static lv_disp_draw_buf_t s_drawBuf;
 #if defined(DEVICE_TDECK)
 static uint16_t *s_screenshotCaptureFrame = nullptr;
@@ -242,6 +249,25 @@ static lv_obj_t *s_nodeInfoModal = nullptr;
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
 
+// Hidden "system stats" screen: pressing (I) five times in a row on the CFG
+// screen reveals a live CPU/memory readout. Layered over the CFG modal; any
+// key dismisses it.
+static lv_obj_t *s_sysStatsModal = nullptr;
+// Column body labels: [0]=CPU, [1]=MEMORY, [2]=STORAGE. On narrow screens only
+// [0] is created and holds all sections in one scrollable list.
+static lv_obj_t *s_sysStatsCols[3] = {nullptr, nullptr, nullptr};
+static uint32_t  s_sysStatsOpenedMs = 0;
+static uint32_t  s_sysStatsLastRefreshMs = 0;
+// (I)-key streak state for the easter egg (reset by any other key / a pause).
+static uint8_t   s_cfgInfoKeyStreak = 0;
+static uint32_t  s_cfgInfoKeyLastMs = 0;
+// Loop-iteration rate, sampled once per second as a lightweight CPU-activity
+// proxy (there is no direct CPU-load counter under Arduino).
+static uint32_t  s_loopIterations = 0;
+static uint32_t  s_loopRateAnchorMs = 0;
+static uint32_t  s_loopRateAnchorCount = 0;
+static uint32_t  s_loopsPerSec = 0;
+
 // Live chart history (channel utilization + SNR/RSSI sparkline data).
 struct ChartHist {
     static constexpr int CAP = 60;
@@ -374,6 +400,9 @@ static bool s_tracerouteAwaitingReply = false;
 static int s_activeChannel = 0;
 static int s_lastRenderedChannel = -1;
 static int s_lastRenderedCount = -1;
+// Signature of the last-rendered chat content; lets refreshChatView skip the
+// costly teardown/rebuild when a mesh event didn't actually change the view.
+static uint32_t s_lastChatSignature = 0;
 static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
@@ -683,6 +712,10 @@ static void closeLegendModal();
 static void onLegendClosePressed(lv_event_t *e);
 static void openLiveModal();
 static void closeLiveModal();
+static void openSysStatsModal();
+static void closeSysStatsModal();
+static void refreshSysStatsModal(bool force);
+static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_t sz);
 static inline bool channelIsMuted(int chanIdx);
 static void openChannelActionsModal();
 static void closeChannelActionsModal();
@@ -2613,6 +2646,8 @@ static bool runOtaWorkerModeIfRequested() {
     };
 
     otaSetNetworkAllowed(true);
+    // Apply the configured OTA proxy base (empty -> built-in HTTPS GitHub path).
+    otaSetBaseUrl(s_cfg.otaBaseUrl);
 
     Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
                   rtcRequested ? 1 : 0,
@@ -2988,6 +3023,7 @@ static void persistConfigToPrefs() {
     p.putString("region", s_cfg.region);
     p.putString("tzDef", s_cfg.tzDef);
     p.putString("ntpServer", s_cfg.ntpServer);
+    p.putString("otaBaseUrl", s_cfg.otaBaseUrl);
     p.putULong("screenOnSecs", s_cfg.screenOnSecs);
     p.putUChar("dispUnits", s_cfg.displayUnits);
     p.putUChar("chatStyle", s_cfg.chatStyle);
@@ -3150,6 +3186,12 @@ static void loadConfigFromPrefs() {
     if (ntp.length()) {
         strncpy(s_cfg.ntpServer, ntp.c_str(), sizeof(s_cfg.ntpServer) - 1);
         s_cfg.ntpServer[sizeof(s_cfg.ntpServer) - 1] = '\0';
+    }
+
+    if (prefs.isKey("otaBaseUrl")) {
+        String ob = getStringIfKey("otaBaseUrl");
+        strncpy(s_cfg.otaBaseUrl, ob.c_str(), sizeof(s_cfg.otaBaseUrl) - 1);
+        s_cfg.otaBaseUrl[sizeof(s_cfg.otaBaseUrl) - 1] = '\0';
     }
 
     ul = prefs.getULong("screenOnSecs", 0);
@@ -5001,6 +5043,7 @@ static void closeCfgModal() {
     closeCfgWifiPickerModal();
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
+    closeSysStatsModal();
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     closeNodeInfoModal();
 #endif
@@ -5210,6 +5253,220 @@ static void openNodeInfoModal() {
 #endif
 }
 #endif
+
+// ── Hidden system-stats screen (CPU / memory) ────────────────────────────────
+// Builds three ready-to-display section bodies. Kept as separate strings so a
+// wide screen can lay them out side by side and a narrow one can stack them.
+static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_t sz) {
+    const uint32_t heapTotal = ESP.getHeapSize();
+    const uint32_t heapFree  = ESP.getFreeHeap();
+    const uint32_t heapUsed  = (heapTotal > heapFree) ? (heapTotal - heapFree) : 0;
+    const uint32_t heapPct   = heapTotal ? (uint32_t)((uint64_t)heapUsed * 100 / heapTotal) : 0;
+    const uint32_t psramTotal = ESP.getPsramSize();
+    const uint32_t psramFree  = ESP.getFreePsram();
+    const uint32_t upSec = millis() / 1000UL;
+
+    snprintf(cpuOut, sz,
+             "%s x%u\n"
+             "Clock: %u MHz\n"
+             "Revision: %u\n"
+             "Uptime: %luh %02lum %02lus\n"
+             "Loop rate: %lu /s",
+             ESP.getChipModel(), (unsigned)ESP.getChipCores(),
+             (unsigned)ESP.getCpuFreqMHz(),
+             (unsigned)ESP.getChipRevision(),
+             (unsigned long)(upSec / 3600UL),
+             (unsigned long)((upSec / 60UL) % 60UL),
+             (unsigned long)(upSec % 60UL),
+             (unsigned long)s_loopsPerSec);
+
+    snprintf(memOut, sz,
+             "Used: %lu KB (%lu%%)\n"
+             "Total: %lu KB\n"
+             "Free: %lu KB\n"
+             "Min free: %lu KB\n"
+             "Max block: %lu KB",
+             (unsigned long)(heapUsed / 1024UL), (unsigned long)heapPct,
+             (unsigned long)(heapTotal / 1024UL),
+             (unsigned long)(heapFree / 1024UL),
+             (unsigned long)(ESP.getMinFreeHeap() / 1024UL),
+             (unsigned long)(ESP.getMaxAllocHeap() / 1024UL));
+
+    if (psramTotal > 0) {
+        snprintf(stoOut, sz,
+                 "PSRAM free: %lu KB\n"
+                 "PSRAM total: %lu KB\n"
+                 "Flash: %lu KB\n"
+                 "Sketch: %lu KB\n"
+                 "App free: %lu KB",
+                 (unsigned long)(psramFree / 1024UL),
+                 (unsigned long)(psramTotal / 1024UL),
+                 (unsigned long)(ESP.getFlashChipSize() / 1024UL),
+                 (unsigned long)(ESP.getSketchSize() / 1024UL),
+                 (unsigned long)(ESP.getFreeSketchSpace() / 1024UL));
+    } else {
+        snprintf(stoOut, sz,
+                 "PSRAM: none\n"
+                 "Flash: %lu KB\n"
+                 "Sketch: %lu KB\n"
+                 "App free: %lu KB",
+                 (unsigned long)(ESP.getFlashChipSize() / 1024UL),
+                 (unsigned long)(ESP.getSketchSize() / 1024UL),
+                 (unsigned long)(ESP.getFreeSketchSpace() / 1024UL));
+    }
+}
+
+static void closeSysStatsModal() {
+    lvObjDeleteSafe(s_sysStatsModal);
+    s_sysStatsCols[0] = s_sysStatsCols[1] = s_sysStatsCols[2] = nullptr;
+    s_sysStatsOpenedMs = 0;
+    s_sysStatsLastRefreshMs = 0;
+    s_cfgInfoKeyStreak = 0;
+}
+
+static void refreshSysStatsModal(bool force) {
+    if (!s_sysStatsModal || !s_sysStatsCols[0]) return;
+    if (!lvObjValid(s_sysStatsCols[0])) { s_sysStatsCols[0] = nullptr; return; }
+    uint32_t now = millis();
+    if (!force && (uint32_t)(now - s_sysStatsLastRefreshMs) < 500UL) return;
+    s_sysStatsLastRefreshMs = now;
+
+    char cpu[128], mem[128], sto[160];
+    buildSysStatsColumns(cpu, mem, sto, sizeof(cpu));
+
+    if (s_sysStatsCols[1] && s_sysStatsCols[2]) {
+        // Wide layout: one label per section.
+        lv_label_set_text(s_sysStatsCols[0], cpu);
+        lv_label_set_text(s_sysStatsCols[1], mem);
+        lv_label_set_text(s_sysStatsCols[2], sto);
+    } else {
+        // Narrow layout: everything stacked in the single scrollable label.
+        char body[448];
+        snprintf(body, sizeof(body),
+                 "CPU\n%s\n\nMEMORY\n%s\n\nSTORAGE\n%s", cpu, mem, sto);
+        lv_label_set_text(s_sysStatsCols[0], body);
+    }
+}
+
+// Builds one titled "card" column inside a flex-row parent and returns its
+// body label (the part refreshSysStatsModal updates).
+static lv_obj_t *makeSysStatsColumn(lv_obj_t *parent, const char *header,
+                                    const lv_font_t *headFont, const lv_font_t *bodyFont) {
+    lv_obj_t *col = lv_obj_create(parent);
+    lv_obj_set_height(col, lv_pct(100));
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(col, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(col, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(col, 1, 0);
+    lv_obj_set_style_border_color(col, lv_color_hex(0x2C5A9E), 0);
+    lv_obj_set_style_radius(col, 4, 0);
+    lv_obj_set_style_pad_all(col, 5, 0);
+    lv_obj_set_style_pad_row(col, 3, 0);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *head = lv_label_create(col);
+    lv_obj_set_width(head, lv_pct(100));
+    lv_obj_set_style_text_font(head, headFont, 0);
+    lv_obj_set_style_text_color(head, lv_color_hex(0x6BF0DC), 0);
+    lv_label_set_text(head, header);
+
+    lv_obj_t *body = lv_label_create(col);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, bodyFont, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xD9F7F0), 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body, "");
+    return body;
+}
+
+static void openSysStatsModal() {
+    if (!s_rootScreen || s_sysStatsModal) return;
+
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    // Wide screens (pager 480, T-Deck 320) get the full-width 3-column layout;
+    // narrow screens fall back to a single stacked, scrollable list.
+    const bool wide = screenW >= 300;
+
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+    const lv_font_t *bodyFont = &lv_font_montserrat_12;
+#else
+    const lv_font_t *bodyFont = &lv_font_montserrat_10;
+#endif
+    const lv_font_t *headFont = &lv_font_montserrat_12;
+
+    s_sysStatsModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_sysStatsModal, screenW - 8, screenH - 8);
+    lv_obj_align(s_sysStatsModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_sysStatsModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Distinct teal accent so the hidden screen reads as "not a normal modal".
+    lv_obj_set_style_bg_color(s_sysStatsModal, lv_color_hex(0x0B1E45), 0);
+    lv_obj_set_style_bg_opa(s_sysStatsModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_sysStatsModal, 1, 0);
+    lv_obj_set_style_border_color(s_sysStatsModal, lv_color_hex(0x39E0C8), 0);
+    lv_obj_set_style_pad_all(s_sysStatsModal, 6, 0);
+    lv_obj_set_style_pad_row(s_sysStatsModal, 4, 0);
+    lv_obj_set_flex_flow(s_sysStatsModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_sysStatsModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_sysStatsModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x6BF0DC), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "System Stats");
+
+    if (wide) {
+        // A flex-row band that grows to fill the space between title and hint,
+        // holding three equal-width section cards.
+        lv_obj_t *cols = lv_obj_create(s_sysStatsModal);
+        lv_obj_set_width(cols, lv_pct(100));
+        lv_obj_set_flex_grow(cols, 1);
+        lv_obj_clear_flag(cols, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(cols, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cols, 0, 0);
+        lv_obj_set_style_pad_all(cols, 0, 0);
+        lv_obj_set_style_pad_column(cols, 6, 0);
+        lv_obj_set_flex_flow(cols, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cols, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+        s_sysStatsCols[0] = makeSysStatsColumn(cols, "CPU", headFont, bodyFont);
+        s_sysStatsCols[1] = makeSysStatsColumn(cols, "MEMORY", headFont, bodyFont);
+        s_sysStatsCols[2] = makeSysStatsColumn(cols, "STORAGE", headFont, bodyFont);
+    } else {
+        lv_obj_t *panel = lv_obj_create(s_sysStatsModal);
+        lv_obj_set_width(panel, lv_pct(100));
+        lv_obj_set_flex_grow(panel, 1);
+        setupVScroll(panel);
+        lv_obj_set_scrollbar_mode(panel, LV_SCROLLBAR_MODE_AUTO);
+        lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(panel, 0, 0);
+        lv_obj_set_style_pad_all(panel, 0, 0);
+
+        s_sysStatsCols[0] = lv_label_create(panel);
+        lv_obj_set_width(s_sysStatsCols[0], lv_pct(100));
+        lv_obj_set_style_text_font(s_sysStatsCols[0], bodyFont, 0);
+        lv_obj_set_style_text_color(s_sysStatsCols[0], lv_color_hex(0xD9F7F0), 0);
+        lv_label_set_long_mode(s_sysStatsCols[0], LV_LABEL_LONG_WRAP);
+        lv_label_set_text(s_sysStatsCols[0], "");
+        s_sysStatsCols[1] = nullptr;
+        s_sysStatsCols[2] = nullptr;
+    }
+
+    lv_obj_t *hint = lv_label_create(s_sysStatsModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x7FD8CC), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+
+    s_sysStatsOpenedMs = millis();
+    lv_obj_move_foreground(s_sysStatsModal);
+    refreshSysStatsModal(true);
+    Serial.println("[lvgl-cfg] system-stats easter egg opened");
+}
 
 static void closeLegendModal() {
     lvObjDeleteSafe(s_legendModal);
@@ -11972,6 +12229,43 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // ── Hidden system-stats easter egg ───────────────────────────────────
+        // Five (I) presses in a row while the Config screen is up reveal a live
+        // CPU/memory readout. Detected here, above the CFG/info dispatch, so it
+        // works regardless of what (I) does per-build (focus info vs. popup).
+        {
+            const bool cfgContext = s_cfgModal
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+                                    || s_nodeInfoModal
+#endif
+                                    ;
+            if (cfgContext && !s_sysStatsModal) {
+                if (k == 'i' || k == 'I') {
+                    uint32_t nowI = millis();
+                    if ((uint32_t)(nowI - s_cfgInfoKeyLastMs) > 1500UL) {
+                        s_cfgInfoKeyStreak = 0;
+                    }
+                    s_cfgInfoKeyLastMs = nowI;
+                    if (++s_cfgInfoKeyStreak >= 5) {
+                        s_cfgInfoKeyStreak = 0;
+                        openSysStatsModal();
+                        continue;
+                    }
+                } else {
+                    s_cfgInfoKeyStreak = 0;
+                }
+            }
+        }
+
+        // The hidden stats screen is modal: any key dismisses it (after a brief
+        // guard so the key-repeat from the 5th (I) doesn't close it instantly).
+        if (s_sysStatsModal) {
+            if ((uint32_t)(millis() - s_sysStatsOpenedMs) >= 300UL) {
+                closeSysStatsModal();
+            }
+            continue;
+        }
+
 #if !defined(DEVICE_TLORA_PAGER_TFT)
         // The (I)nformation popup layers over the CFG modal.
         // Cardputer: allow j/k and up/down scroll inside the modal.
@@ -15808,19 +16102,50 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
     }
 }
 
+// FNV-1a rolling hash over everything that changes the rendered chat: per-row
+// identity/ack/text plus the global toggles that restyle every row. Used to
+// skip the expensive rebuild when an incoming mesh packet (telemetry, position,
+// other-channel traffic, an unchanged ACK) leaves the visible view identical —
+// which is what made the heavier Bubbles style feel sluggish on busy meshes.
+static uint32_t chatRenderSignature(const DisplayLine *const *rows, int rowCount) {
+    uint32_t h = 2166136261u;
+    auto mix = [&](uint32_t v) { h = (h ^ v) * 16777619u; };
+    mix((uint32_t)rowCount);
+    for (int i = 0; i < rowCount; i++) {
+        const DisplayLine *d = rows[i];
+        mix(d->packetId);
+        mix((uint32_t)d->ack);
+        mix(d->senderNodeId);
+        mix(d->epoch);
+        for (const char *p = d->text; *p; p++) mix((uint8_t)*p);
+    }
+    mix(s_selectedMsgReplyPacketId);
+    for (const char *p = s_selectedMsgText; *p; p++) mix((uint8_t)*p);
+    mix((uint32_t)s_cfg.chatStyle);
+    mix((uint32_t)s_cfg.chatColorsEnabled);
+    mix((uint32_t)s_cfg.uiMode);
+    mix((uint32_t)(s_pagerChatCursorMode ? 1u : 0u));
+    mix((uint32_t)s_pagerChatCursorDisplayIndex);
+    return h;
+}
+
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
     refreshChatComposeButtonState();
 
     const Channel &ch = Channels.get(s_activeChannel);
-    if (!force && s_lastRenderedChannel == s_activeChannel && s_lastRenderedCount == ch.count) {
-        return;
-    }
 
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
     collectChatRows(rows, rowCount);
+
+    const uint32_t sig = chatRenderSignature(rows, rowCount);
+    if (!force
+        && s_activeChannel == s_lastRenderedChannel
+        && sig == s_lastChatSignature) {
+        return;
+    }
 
     const bool stickToBottom = force || (lv_obj_get_scroll_bottom(s_chatList) <= 6);
     const int32_t prevScrollY = lv_obj_get_scroll_y(s_chatList);
@@ -15980,6 +16305,7 @@ static void refreshChatView(bool force) {
 
     s_lastRenderedChannel = s_activeChannel;
     s_lastRenderedCount = ch.count;
+    s_lastChatSignature = sig;
 }
 
 static void buildUi() {
@@ -17001,7 +17327,30 @@ void setup() {
 
     lv_init();
     nodesMapInitFsDriver();
-    lv_disp_draw_buf_init(&s_drawBuf, s_drawBufMem, nullptr, kMaxHorRes * kDrawBufLines);
+    // Allocate the LVGL draw buffer here, on the normal-UI path only. The OTA
+    // worker path returns/reboots before reaching this point, so the buffer is
+    // never allocated during a firmware update — leaving the full contiguous
+    // internal heap for the TLS handshake. Prefer internal RAM (fast to render
+    // and flush); fall back to PSRAM, then a minimal buffer, rather than crash.
+    const size_t kDrawBufPx = (size_t)kMaxHorRes * (size_t)kDrawBufLines;
+    s_drawBufMem = (lv_color_t *)heap_caps_malloc(kDrawBufPx * sizeof(lv_color_t),
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t drawBufPx = kDrawBufPx;
+    if (!s_drawBufMem) {
+        Serial.println("[lvgl] draw buffer internal alloc failed; trying PSRAM");
+        s_drawBufMem = (lv_color_t *)heap_caps_malloc(kDrawBufPx * sizeof(lv_color_t),
+                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!s_drawBufMem) {
+        // Last resort: a small internal buffer keeps the UI alive (stripey but
+        // functional) instead of a null-buffer crash.
+        drawBufPx = (size_t)kMaxHorRes * 8u;
+        s_drawBufMem = (lv_color_t *)heap_caps_malloc(drawBufPx * sizeof(lv_color_t),
+                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        Serial.printf("[lvgl] FATAL-ish: fell back to %u-line draw buffer\n",
+                      (unsigned)(drawBufPx / kMaxHorRes));
+    }
+    lv_disp_draw_buf_init(&s_drawBuf, s_drawBufMem, nullptr, drawBufPx);
 
     static lv_disp_drv_t dispDrv;
     lv_disp_drv_init(&dispDrv);
@@ -17141,6 +17490,19 @@ void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
     uint32_t now = millis();
+
+    // Sample loop-iteration rate once per second as a lightweight CPU-activity
+    // proxy for the hidden system-stats screen (no direct CPU-load counter
+    // exists under Arduino). Counted before the early returns below so every
+    // iteration is included.
+    s_loopIterations++;
+    if (s_loopRateAnchorMs == 0) s_loopRateAnchorMs = now;
+    if ((uint32_t)(now - s_loopRateAnchorMs) >= 1000UL) {
+        s_loopsPerSec = s_loopIterations - s_loopRateAnchorCount;
+        s_loopRateAnchorCount = s_loopIterations;
+        s_loopRateAnchorMs = now;
+    }
+
     if (serviceTdeckTrackballSleepHold(now)) {
         delay(5);
         return;
@@ -17159,6 +17521,7 @@ void loop() {
         webCfgLoop();
         serviceWebChatSend();
     }
+    if (s_sysStatsModal) refreshSysStatsModal(false);
     bool meshChanged = false;
     if (s_radioReady) {
         meshChanged = pollMeshRx();
@@ -17203,7 +17566,10 @@ void loop() {
     refreshHeaderTime(false);
     refreshHeaderStatus(false);
     refreshDmAlertIndicator();
-    refreshChatView(meshChanged);
+    // Not forced: the content signature inside refreshChatView decides whether a
+    // rebuild is actually needed, so mesh packets that don't change the visible
+    // chat no longer trigger a full (bubble) teardown/rebuild every time.
+    refreshChatView(false);
     refreshLiveView(meshChanged);
     refreshChUtilChart(meshChanged);
     refreshSnrRssiChart(meshChanged);

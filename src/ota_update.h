@@ -15,6 +15,12 @@ typedef void (*OtaInstallProgressCb)(size_t writtenBytes, size_t totalBytes);
 // Allows OTA networking only when explicitly enabled by the caller.
 void otaSetNetworkAllowed(bool allowed);
 
+// Optional plain-HTTP OTA proxy base (e.g. "http://ota.example.com"). When an
+// http:// base is set, the update check and download run without TLS and the
+// image is verified against the baked-in signing key before commit. Pass "" or
+// nullptr to use the built-in HTTPS GitHub path.
+void otaSetBaseUrl(const char *baseUrl);
+
 // Route generic heap allocations to PSRAM (one-time, permanent) so contiguous
 // internal DRAM stays free for TLS handshake buffers (esp-sha). Shared by OTA and
 // the MQTT bridge — both need a TLS handshake to succeed under memory pressure.

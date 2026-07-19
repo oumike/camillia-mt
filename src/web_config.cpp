@@ -1300,6 +1300,10 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>NTP Server<input name='ntp_server' type='text' maxlength='47' value='";
     html += gCfg->ntpServer;
     html += "' placeholder='pool.ntp.org'></label>";
+    html += "<label>OTA Base URL<input name='ota_base_url' type='text' maxlength='95' value='";
+    html += gCfg->otaBaseUrl;
+    html += "' placeholder='(blank = GitHub over HTTPS)'></label>";
+    html += "<p class='gps-hint'>Optional. Point at a plain-HTTP signed-firmware proxy (e.g. http://ota.example.com) to update without TLS. Leave blank to use the built-in HTTPS path.</p>";
     html += "</div>";
     html += "</details>";
     sendChunk(html);
@@ -1768,14 +1772,14 @@ static void sendConfigPage(const char *msg = "") {
 
     html +=
         "<h3 style='margin-top:.8em'>Software Update</h3>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .45em'>Current firmware: <b>";
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
     html += APP_VERSION;
     html +=
-        "</b></p>"
-        "<button type='button' id='check-release-btn'"
-        " style='background:#1f7a8c;margin-top:.1em'"
-        " onclick='checkLatestRelease()'>Check for New Release</button>"
-        "<p id='release-check-result' style='font-size:.82em;color:#888;margin:.45em 0 1em'></p>";
+        "</b></p>";
+    // Update-available check intentionally removed for now. The check plumbing
+    // (queueReleaseCheckNow / runQueuedReleaseCheck / the /release-check route
+    // and its client JS) remains dormant behind kWebDeviceReleaseCheckEnabled and
+    // is no longer reachable from the UI.
 
     html +=
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
@@ -2770,6 +2774,12 @@ static void handlePostSave() {
     if (!gCfg->ntpServer[0]) {
         strncpy(gCfg->ntpServer, MY_NTP_SERVER, sizeof(gCfg->ntpServer) - 1);
         gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
+    }
+    if (server.hasArg("ota_base_url")) {
+        String ob = server.arg("ota_base_url");
+        ob.trim();
+        strncpy(gCfg->otaBaseUrl, ob.c_str(), sizeof(gCfg->otaBaseUrl) - 1);
+        gCfg->otaBaseUrl[sizeof(gCfg->otaBaseUrl) - 1] = '\0';
     }
 
     // Position

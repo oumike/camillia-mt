@@ -11,6 +11,10 @@
 #include <ctype.h>
 #include <string.h>
 #include <type_traits>
+#include "mbedtls/sha256.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/md.h"
+#include "ota_signing_pubkey.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "unknown"
@@ -18,6 +22,18 @@
 
 static volatile uint32_t g_otaNetworkGate = 0;
 static constexpr uint32_t kOtaNetworkGateMagic = 0x4F544131UL; // "OTA1"
+
+// Optional plain-HTTP OTA proxy base (e.g. "http://ota.example.com"). When set,
+// the check/download run over HTTP with no TLS, and the downloaded image is
+// verified against the baked-in ECDSA public key before it is committed. Empty
+// -> the built-in HTTPS GitHub path.
+static char s_otaBaseUrl[96] = {};
+
+// True when a usable http:// base is configured (https bases fall through to the
+// existing TLS path, so only plain http counts as "TLS-free").
+static bool otaUsingHttpBase() {
+    return strncmp(s_otaBaseUrl, "http://", 7) == 0;
+}
 
 static inline bool otaNetworkGateIsAllowed() {
     return g_otaNetworkGate == kOtaNetworkGateMagic;
@@ -367,12 +383,20 @@ static bool httpGetString(const char *url,
     if (statusOut) *statusOut = 0;
     if (locationOut) *locationOut = "";
 
-    WiFiClientSecure client;
-    configureTlsClient(client);
-
+    // http:// -> plain WiFiClient (no TLS, tiny footprint); anything else -> TLS.
+    const bool useTls = (strncmp(url, "http://", 7) != 0);
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
     HTTPClient http;
-    if (!http.begin(client, url)) {
-        errOut = "Failed to start HTTPS request";
+    bool begun;
+    if (useTls) {
+        configureTlsClient(secureClient);
+        begun = http.begin(secureClient, url);
+    } else {
+        begun = http.begin(plainClient, url);
+    }
+    if (!begun) {
+        errOut = "Failed to start request";
         return false;
     }
 
@@ -552,6 +576,23 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
         return false;
     }
 
+    // TLS-free path: the proxy's /firmware/latest relays GitHub's release API,
+    // so the same tag_name parser works. No HTTPS fallbacks here — the whole
+    // point is to avoid TLS.
+    if (otaUsingHttpBase()) {
+        char url[160];
+        snprintf(url, sizeof(url), "%s/firmware/latest", s_otaBaseUrl);
+        String body, err;
+        if (httpGetString(url, body, err, true, nullptr, nullptr,
+                          "application/vnd.github+json")
+            && extractJsonStringField(body, "tag_name", tagOut)
+            && tagOut.length() > 0) {
+            return true;
+        }
+        errOut = err.length() ? err : String("Release tag not found (proxy)");
+        return false;
+    }
+
     String apiErr;
     String apiBody;
     if (httpGetString(kLatestReleaseApiUrl,
@@ -603,6 +644,13 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
 static void buildAssetUrl(const char *tag, char *outUrl, size_t outLen) {
     if (!outUrl || outLen == 0) return;
     const char *useTag = (tag && tag[0]) ? tag : "";
+    if (otaUsingHttpBase()) {
+        // Proxy layout: {base}/firmware/<tag>/<asset>
+        snprintf(outUrl, outLen,
+                 "%s/firmware/%s/camillia-mt-%s-%s-ota.bin",
+                 s_otaBaseUrl, useTag, otaCurrentDeviceAssetSlug(), useTag);
+        return;
+    }
     snprintf(outUrl,
              outLen,
              "%s%s/camillia-mt-%s-%s-ota.bin",
@@ -610,6 +658,85 @@ static void buildAssetUrl(const char *tag, char *outUrl, size_t outLen) {
              useTag,
              otaCurrentDeviceAssetSlug(),
              useTag);
+}
+
+// Fetch a small binary body (the detached signature) into buf. Uses plain HTTP
+// or TLS based on the URL scheme, mirroring httpGetString.
+static bool httpGetBytes(const char *url, uint8_t *buf, size_t cap,
+                         size_t &outLen, String &errOut) {
+    outLen = 0;
+    errOut = "";
+    const bool useTls = (strncmp(url, "http://", 7) != 0);
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
+    HTTPClient http;
+    bool begun;
+    if (useTls) {
+        configureTlsClient(secureClient);
+        begun = http.begin(secureClient, url);
+    } else {
+        begun = http.begin(plainClient, url);
+    }
+    if (!begun) { errOut = "sig request start failed"; return false; }
+
+    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+    http.addHeader("User-Agent", "camillia-mt-ota");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        errOut = String("signature HTTP ") + String(code);
+        http.end();
+        return false;
+    }
+
+    int total = http.getSize();
+    if (total > 0 && (size_t)total > cap) {
+        errOut = "signature too large";
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    uint32_t lastMs = millis();
+    while (stream && http.connected() && (total < 0 || outLen < (size_t)total)) {
+        size_t avail = stream->available();
+        if (avail == 0) {
+            if (millis() - lastMs > 5000) break;
+            delay(5);
+            continue;
+        }
+        if (avail > cap - outLen) avail = cap - outLen;
+        int n = stream->readBytes(buf + outLen, avail);
+        if (n > 0) { outLen += (size_t)n; lastMs = millis(); }
+        if (outLen >= cap) break;
+    }
+    http.end();
+    if (outLen == 0) { errOut = "empty signature"; return false; }
+    return true;
+}
+
+// Verify a detached ECDSA-P256 signature (DER) over a SHA-256 digest using the
+// public key baked into the firmware. Fail-closed: any error returns false.
+static bool verifyOtaSignature(const uint8_t *hash, const uint8_t *sig, size_t sigLen) {
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    int rc = mbedtls_pk_parse_public_key(
+        &pk,
+        (const unsigned char *)OTA_SIGNING_PUBKEY_PEM,
+        strlen(OTA_SIGNING_PUBKEY_PEM) + 1);
+    if (rc != 0) {
+        Serial.printf("[ota] signing pubkey parse failed: -0x%04x\n", (unsigned)-rc);
+        mbedtls_pk_free(&pk);
+        return false;
+    }
+    rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, 32, sig, sigLen);
+    mbedtls_pk_free(&pk);
+    if (rc != 0) {
+        Serial.printf("[ota] signature verification failed: -0x%04x\n", (unsigned)-rc);
+        return false;
+    }
+    return true;
 }
 
 static bool setErr(char *errOut, size_t errLen, const char *msg) {
@@ -621,6 +748,18 @@ static bool setErr(char *errOut, size_t errLen, const char *msg) {
 void otaSetNetworkAllowed(bool allowed) {
     g_otaNetworkGate = allowed ? kOtaNetworkGateMagic : 0;
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
+}
+
+void otaSetBaseUrl(const char *baseUrl) {
+    if (!baseUrl) baseUrl = "";
+    strncpy(s_otaBaseUrl, baseUrl, sizeof(s_otaBaseUrl) - 1);
+    s_otaBaseUrl[sizeof(s_otaBaseUrl) - 1] = '\0';
+    // Drop a trailing slash so URL building can assume none.
+    size_t n = strlen(s_otaBaseUrl);
+    while (n > 0 && s_otaBaseUrl[n - 1] == '/') s_otaBaseUrl[--n] = '\0';
+    Serial.printf("[ota] base url=%s (transport=%s)\n",
+                  s_otaBaseUrl[0] ? s_otaBaseUrl : "(default GitHub)",
+                  otaUsingHttpBase() ? "http/no-tls" : "https");
 }
 
 void otaPreferExternalHeap() {
@@ -722,11 +861,35 @@ bool otaInstallLatestRelease(const char *tag,
     char url[256] = {};
     buildAssetUrl(tagBuf, url, sizeof(url));
 
-    WiFiClientSecure client;
-    configureTlsClient(client);
+    // Fetch the detached signature up front so a missing/short signature aborts
+    // before we touch the OTA partition. Fail-closed: no valid signature later
+    // means the image is never committed.
+    char sigUrl[288] = {};
+    snprintf(sigUrl, sizeof(sigUrl), "%s.sig", url);
+    uint8_t sigBuf[96];
+    size_t sigLen = 0;
+    {
+        String sigErr;
+        if (!httpGetBytes(sigUrl, sigBuf, sizeof(sigBuf), sigLen, sigErr)) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "OTA signature fetch failed: %s", sigErr.c_str());
+            return setErr(errOut, errLen, msg);
+        }
+    }
 
+    // http:// -> plain WiFiClient (no TLS); anything else -> TLS.
+    const bool useTls = (strncmp(url, "http://", 7) != 0);
+    WiFiClientSecure secureClient;
+    WiFiClient plainClient;
     HTTPClient http;
-    if (!http.begin(client, url)) {
+    bool begun;
+    if (useTls) {
+        configureTlsClient(secureClient);
+        begun = http.begin(secureClient, url);
+    } else {
+        begun = http.begin(plainClient, url);
+    }
+    if (!begun) {
         return setErr(errOut, errLen, "Failed to start OTA download");
     }
 
@@ -762,6 +925,12 @@ bool otaInstallLatestRelease(const char *tag,
     }
 
     WiFiClient &stream = http.getStream();
+
+    // Hash the image as it streams so we can verify the signature over the whole
+    // file without buffering it.
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);   // 0 = SHA-256
 
     constexpr size_t kChunkSize = 1024;
     constexpr uint32_t kDownloadStallTimeoutMs = 15000;
@@ -801,10 +970,12 @@ bool otaInstallLatestRelease(const char *tag,
 
         size_t wr = Update.write(chunk, (size_t)n);
         if (wr != (size_t)n) {
+            mbedtls_sha256_free(&sha);
             Update.abort();
             http.end();
             return setErr(errOut, errLen, "OTA write failed");
         }
+        mbedtls_sha256_update(&sha, chunk, (size_t)n);
 
         written += wr;
         lastProgressMs = millis();
@@ -814,9 +985,22 @@ bool otaInstallLatestRelease(const char *tag,
     }
 
     if (contentLen > 0 && written != (size_t)contentLen) {
+        mbedtls_sha256_free(&sha);
         Update.abort();
         http.end();
         return setErr(errOut, errLen, "OTA write incomplete");
+    }
+
+    // Verify the signature over the downloaded image BEFORE committing the boot
+    // partition. This is what makes the TLS-free download safe: a tampered or
+    // corrupt image fails here and is never booted.
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    if (!verifyOtaSignature(digest, sigBuf, sigLen)) {
+        Update.abort();
+        http.end();
+        return setErr(errOut, errLen, "OTA signature verification failed");
     }
 
     if (!Update.end()) {
