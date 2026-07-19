@@ -60,6 +60,7 @@ static bool           gRebootPending   = false;
 static uint32_t       gRebootAtMs      = 0;
 
 static int compareVersionTags(const char *a, const char *b);
+static bool isPrereleaseTag(const char *tag);
 static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut);
 static void logWebHttpsDiag(const char *stage, const char *url = nullptr);
 
@@ -146,7 +147,12 @@ static void runQueuedReleaseCheck() {
     bool ok = fetchLatestReleaseInfo(latest, url, err);
 
     if (ok) {
-        gReleaseCheckUpdateAvailable = compareVersionTags(APP_VERSION, latest.c_str()) < 0;
+        // Never advertise a prerelease (alpha) as an available update, even if
+        // the resolved tag somehow is one. /releases/latest excludes them, but
+        // guard here too so the web UI never nudges onto an alpha build.
+        gReleaseCheckUpdateAvailable =
+            !isPrereleaseTag(latest.c_str())
+            && compareVersionTags(APP_VERSION, latest.c_str()) < 0;
         strncpy(gReleaseCheckLatest, latest.c_str(), sizeof(gReleaseCheckLatest) - 1);
         gReleaseCheckLatest[sizeof(gReleaseCheckLatest) - 1] = '\0';
         strncpy(gReleaseCheckUrl, url.c_str(), sizeof(gReleaseCheckUrl) - 1);
@@ -383,6 +389,17 @@ static bool extractJsonStringField(const String &json, const char *key, String &
         value += c;
     }
 
+    return false;
+}
+
+// A tag is a prerelease when it carries a SemVer prerelease suffix (anything
+// after a '-', e.g. "v3.1.2-alpha.1"). We never surface these as an available
+// update, so devices are never nudged onto an alpha build.
+static bool isPrereleaseTag(const char *tag) {
+    if (!tag) return false;
+    for (const char *p = tag; *p; ++p) {
+        if (*p == '-') return true;
+    }
     return false;
 }
 
