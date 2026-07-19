@@ -3667,6 +3667,13 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
 
+    // Disable STA modem power-save for the web session. The default
+    // WIFI_PS_MIN_MODEM buffers our inbound packets until the AP's next DTIM
+    // beacon (~100-300ms), which the synchronous WebServer turns into stalls,
+    // retransmits, and browser timeouts. webCfgEnd() powers the radio off, so
+    // this only stays in effect while web config is up.
+    WiFi.setSleep(false);
+
     registerCommonRoutes();
     server.begin();
     running = true;

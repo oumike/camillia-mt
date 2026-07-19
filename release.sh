@@ -222,8 +222,14 @@ if [[ ${#BUILD_ARGS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-echo "Running full clean for release environments..."
-~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+# Alpha builds are throwaway test cuts — skip the full clean for a faster
+# turnaround. Stable releases always start from a clean tree.
+if [[ "$ALPHA" == true ]]; then
+    echo "Alpha release: skipping full clean (incremental build)..."
+else
+    echo "Running full clean for release environments..."
+    ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+fi
 
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
