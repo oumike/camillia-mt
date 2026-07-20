@@ -2,15 +2,25 @@ name: Build
 
 on:
   push:
-    tags:     [ 'v*.*.*' ]      # Tag build — verifies release artifacts
+    tags:     [ 'v*.*.*' ]      # Tag build — compile-only verification gate
+
+# IMPORTANT: this workflow must NOT publish release assets.
+#
+# release.sh is the single source of truth for published artifacts: it builds,
+# merges the factory images, copies the app-only OTA images, and signs each
+# -ota.bin with the private ECDSA key (which lives only on the release machine,
+# never in CI). It then uploads every .bin/.elf/.sig via `gh release create`.
+#
+# If CI also published dist/*.bin, its independently-built binaries would
+# overwrite the exact bytes release.sh signed — while the detached .sig stayed
+# put — so the on-device signature check would reject every OTA image. CI has
+# no signing key, so it can never produce a matching pair. This job therefore
+# only compiles every environment to catch build breakage on a clean checkout.
 
 jobs:
   build:
     name: PlatformIO build
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
@@ -24,7 +34,7 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio esptool
 
-      - name: Build firmware
+      - name: Build firmware (verify all environments compile)
         run: |
           pio run -e tdeck
           pio run -e tlora-pager-tft
@@ -32,88 +42,18 @@ jobs:
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
 
-      # ── Merge bootloader + partitions + app into a single factory image ──
-      # PlatformIO's per-env firmware.bin is app-only (loads at 0x10000), so
-      # writing it at 0x0 clobbers the bootloader and bricks the device with
-      # "Invalid image block, can't boot." We publish a merged image instead
-      # so both flash.sh and the web flasher can safely write at 0x0.
-      - name: Merge factory images
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          set -e
-          TAG=${GITHUB_REF_NAME}
-          mkdir -p dist
-
-          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
-            -name boot_app0.bin | head -1)
-          if [ -z "$BOOT_APP0" ]; then
-            echo "boot_app0.bin not found" >&2
-            exit 1
-          fi
-
-          merge_env() {
-            local env="$1"
-            local size="$2"
-            local out="$3"
-            local d=".pio/build/${env}"
-            echo "Merging ${env} (flash size ${size}) -> ${out}"
-            python -m esptool --chip esp32s3 merge-bin \
-              -o "${out}" \
-              --flash-mode dio \
-              --flash-freq 80m \
-              --flash-size "${size}" \
-              0x0     "${d}/bootloader.bin" \
-              0x8000  "${d}/partitions.bin" \
-              0xe000  "${BOOT_APP0}" \
-              0x10000 "${d}/firmware.bin"
-          }
-
-          merge_env tdeck              16MB "dist/camillia-mt-tdeck-${TAG}.bin"
-          merge_env tlora-pager-tft    16MB "dist/camillia-mt-tlora-pager-tft-${TAG}.bin"
-          merge_env cardputer-cap      8MB  "dist/camillia-mt-cardputer-cap-${TAG}.bin"
-          merge_env heltec-v4          16MB "dist/camillia-mt-heltec-${TAG}.bin"
-          merge_env heltec-v4-vertical 16MB "dist/camillia-mt-heltec-vertical-${TAG}.bin"
-
-          # OTA expects app-only binaries named camillia-mt-<slug>-<tag>-ota.bin
-          cp .pio/build/tdeck/firmware.bin              "dist/camillia-mt-tdeck-${TAG}-ota.bin"
-          cp .pio/build/tlora-pager-tft/firmware.bin    "dist/camillia-mt-tlora-pager-tft-${TAG}-ota.bin"
-          cp .pio/build/cardputer-cap/firmware.bin      "dist/camillia-mt-cardputer-cap-${TAG}-ota.bin"
-          cp .pio/build/heltec-v4/firmware.bin          "dist/camillia-mt-heltec-${TAG}-ota.bin"
-          cp .pio/build/heltec-v4-vertical/firmware.bin "dist/camillia-mt-heltec-vertical-${TAG}-ota.bin"
-
-          ls -l dist/
-
-      # ── Rename ELF/map artifacts to include tag version ───────
-      # The merged .bin files are produced by the "Merge factory images" step;
-      # here we only attach symbol/map files for debugging.
-      - name: Collect debug artifacts
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG=${GITHUB_REF_NAME}
-          mkdir -p dist
-
-          cp .pio/build/tdeck/firmware.elf  dist/camillia-mt-tdeck-${TAG}.elf
-          cp .pio/build/tdeck/firmware.map  dist/camillia-mt-tdeck-${TAG}.map 2>/dev/null || true
-
-          cp .pio/build/tlora-pager-tft/firmware.elf  dist/camillia-mt-tlora-pager-tft-${TAG}.elf
-          cp .pio/build/tlora-pager-tft/firmware.map  dist/camillia-mt-tlora-pager-tft-${TAG}.map 2>/dev/null || true
-
-          cp .pio/build/cardputer-cap/firmware.elf  dist/camillia-mt-cardputer-cap-${TAG}.elf
-          cp .pio/build/cardputer-cap/firmware.map  dist/camillia-mt-cardputer-cap-${TAG}.map 2>/dev/null || true
-
-          cp .pio/build/heltec-v4/firmware.elf  dist/camillia-mt-heltec-${TAG}.elf
-          cp .pio/build/heltec-v4/firmware.map  dist/camillia-mt-heltec-${TAG}.map 2>/dev/null || true
-
-          cp .pio/build/heltec-v4-vertical/firmware.elf  dist/camillia-mt-heltec-vertical-${TAG}.elf
-          cp .pio/build/heltec-v4-vertical/firmware.map  dist/camillia-mt-heltec-vertical-${TAG}.map 2>/dev/null || true
-
-      - name: Publish release assets
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      # Archive debug symbols as workflow artifacts instead of bloating the
+      # public release with ~35MB ELF files per environment. NOTE: these come
+      # from THIS CI build, which is not guaranteed byte-identical to the
+      # release.sh-built (and signed) binaries actually shipped, so addresses
+      # may drift. For exact crash symbolication use the dist/*.elf produced on
+      # the machine that ran release.sh.
+      - name: Archive debug symbols (ELF/MAP)
+        uses: actions/upload-artifact@v4
         with:
-          files: |
-            dist/*.bin
-            dist/*.elf
-            dist/*.map
-          fail_on_unmatched_files: true
-
+          name: debug-symbols-${{ github.ref_name }}
+          path: |
+            .pio/build/*/firmware.elf
+            .pio/build/*/firmware.map
+          if-no-files-found: warn
+          retention-days: 90

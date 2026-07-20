@@ -328,19 +328,21 @@ echo "Creating GitHub release $TAG..."
 if [[ "$ALPHA" == true ]]; then
     # --prerelease keeps alphas out of GitHub's /releases/latest, so on-device
     # OTA checks and the website's stable flasher never see them.
+    # Publish only the flashable images and their signatures. ELF/MAP symbol
+    # files are intentionally NOT uploaded (they bloat releases by ~35MB each);
+    # the matching symbols stay in dist/ locally and are archived by CI as
+    # workflow artifacts. See .github/workflows/build.yml.
     gh release create "$TAG" \
         --title "$TAG (alpha)" \
         --prerelease \
         --generate-notes \
         dist/*.bin \
-        dist/*.elf \
         dist/*.sig
 else
     gh release create "$TAG" \
         --title "$TAG" \
         --generate-notes \
         dist/*.bin \
-        dist/*.elf \
         dist/*.sig
 fi
 
