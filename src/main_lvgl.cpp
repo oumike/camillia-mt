@@ -178,6 +178,11 @@ static int s_cfgConfirmPendingAction = -1;
 static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
 static lv_obj_t *s_cfgActionMsgModal = nullptr;
 static uint32_t s_cfgActionMsgOpenedMs = 0;
+// Own-message color picker (16 basic swatches), reachable from the CFG screen.
+static lv_obj_t *s_cfgColorBackdrop = nullptr;
+static lv_obj_t *s_cfgColorModal = nullptr;
+static lv_obj_t *s_cfgColorGrid = nullptr;
+static int s_cfgColorSelection = 0;
 
 struct KnownWifiEntry {
     char ssid[sizeof(RhinoConfig::wifiSsid)];
@@ -688,6 +693,12 @@ static void openCfgActionMessageModal(const char *msg);
 static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
+static void openCfgColorPickerModal();
+static void closeCfgColorPickerModal();
+static void refreshCfgColorPickerModal();
+static void applyCfgColorSelection(int idx);
+static void onCfgColorRowPressed(lv_event_t *e);
+static void onCfgColorBackdropPressed(lv_event_t *e);
 static void openCfgWifiPickerModal(bool forOnboarding = false);
 static void closeCfgWifiPickerModal();
 static void refreshCfgWifiPickerModal();
@@ -1103,6 +1114,7 @@ enum CfgActionId {
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
+    CFG_ACTION_OWNER_COLOR,
     CFG_ACTION_UNITS,
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_COLORS,
@@ -1202,6 +1214,36 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
 
 static constexpr int kUiThemePresetCount =
     (int)(sizeof(kUiThemePresets) / sizeof(kUiThemePresets[0]));
+
+// 16 basic colors offered when the user picks the color their own messages
+// render in. Stored as an index (RhinoConfig::userMsgColor); 0xFF means "use
+// the adaptive theme default" (classic yellow / light-mode amber).
+struct UserMsgColorOption {
+    uint16_t color;      // rgb565
+    const char *name;
+};
+
+static constexpr UserMsgColorOption kUserMsgColors[] = {
+    {rgb565(0xFF, 0xFF, 0xFF), "White"},
+    {rgb565(0xC0, 0xC0, 0xC0), "Silver"},
+    {rgb565(0xFF, 0x3B, 0x30), "Red"},
+    {rgb565(0xFF, 0x95, 0x00), "Orange"},
+    {rgb565(0xFF, 0xE0, 0x00), "Yellow"},
+    {rgb565(0x7C, 0xFC, 0x00), "Lime"},
+    {rgb565(0x34, 0xC7, 0x59), "Green"},
+    {rgb565(0x30, 0xD0, 0xC0), "Teal"},
+    {rgb565(0x00, 0xE5, 0xFF), "Cyan"},
+    {rgb565(0x5A, 0xC8, 0xFA), "Sky"},
+    {rgb565(0x3B, 0x82, 0xF6), "Blue"},
+    {rgb565(0x5E, 0x5C, 0xE6), "Indigo"},
+    {rgb565(0xAF, 0x52, 0xDE), "Purple"},
+    {rgb565(0xFF, 0x2D, 0x95), "Magenta"},
+    {rgb565(0xFF, 0x6F, 0xB5), "Pink"},
+    {rgb565(0xB5, 0x65, 0x1D), "Brown"},
+};
+
+static constexpr int kUserMsgColorCount =
+    (int)(sizeof(kUserMsgColors) / sizeof(kUserMsgColors[0]));
 
 struct UiPalette {
     uint16_t bgMain;
@@ -2247,6 +2289,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_THEME:
             snprintf(buf, bufLen, "Theme: %s", uiThemePresetNameFromCfg());
             break;
+        case CFG_ACTION_OWNER_COLOR:
+            snprintf(buf, bufLen, "My Message Color: %s",
+                     (s_cfg.userMsgColor < kUserMsgColorCount)
+                         ? kUserMsgColors[s_cfg.userMsgColor].name
+                         : "Default");
+            break;
         case CFG_ACTION_UNITS:
             snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
             break;
@@ -3025,6 +3073,7 @@ static void persistConfigToPrefs() {
     p.putUChar("dispUnits", s_cfg.displayUnits);
     p.putUChar("chatStyle", s_cfg.chatStyle);
     p.putBool("chatColors", s_cfg.chatColorsEnabled);
+    p.putUChar("userMsgColor", s_cfg.userMsgColor);
     p.putBool("compassNorth", s_cfg.compassNorthTop);
     p.putBool("flipScreen", s_cfg.flipScreen);
     p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
@@ -3193,6 +3242,10 @@ static void loadConfigFromPrefs() {
     ro = prefs.getUChar("chatStyle", 0xFF);
     if (ro != 0xFF && ro <= CHAT_STYLE_BUBBLES) s_cfg.chatStyle = ro;
     if (prefs.isKey("chatColors")) s_cfg.chatColorsEnabled = prefs.getBool("chatColors");
+    if (prefs.isKey("userMsgColor")) {
+        uint8_t umc = prefs.getUChar("userMsgColor", 0xFF);
+        s_cfg.userMsgColor = (umc <= 15) ? umc : 0xFF;
+    }
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer is Classic-only regardless of what NVS or an imported config holds.
     s_cfg.chatStyle = CHAT_STYLE_CLASSIC;
@@ -4085,6 +4138,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
@@ -4420,6 +4474,190 @@ static void applyCfgWifiSelection(int idx) {
     if (s_cfg.wifiEnabled && wifiHasActiveCreds()) {
         WiFi.disconnect(false);
     }
+}
+
+// ── Own-message color picker ─────────────────────────────────────────────
+// A "Reset to Default" cell followed by a 4-wide grid of the 16 basic colors
+// in kUserMsgColors[]. Navigation index 0 is the reset cell (restores the
+// adaptive yellow default, s_cfg.userMsgColor = 0xFF); indices 1..N map to the
+// palette entries. The chosen value drives userMessageAccentColor565(), which
+// colors only the local user's own messages. Selecting reboots so the change
+// applies uniformly across every already-rendered view.
+static constexpr int kUserMsgColorNavCount = kUserMsgColorCount + 1;  // +1 reset cell
+
+static void closeCfgColorPickerModal() {
+    if (lvObjValid(s_cfgColorBackdrop)) {
+        lv_obj_del(s_cfgColorBackdrop);
+    } else if (lvObjValid(s_cfgColorModal)) {
+        lv_obj_del(s_cfgColorModal);
+    }
+    s_cfgColorBackdrop = nullptr;
+    s_cfgColorModal = nullptr;
+    s_cfgColorGrid = nullptr;
+}
+
+static void refreshCfgColorPickerModal() {
+    if (!s_cfgColorModal || !s_cfgColorGrid) return;
+
+    lv_obj_clean(s_cfgColorGrid);
+
+    // Nav index 0: full-width "Reset to Default" cell (adaptive yellow default).
+    {
+        const bool sel = (s_cfgColorSelection == 0);
+        lv_obj_t *reset = lv_obj_create(s_cfgColorGrid);
+        lv_obj_remove_style_all(reset);
+        lv_obj_set_size(reset, 44 * 4 + 6 * 3, 26);
+        lv_obj_clear_flag(reset, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(reset, 5, 0);
+        lv_obj_set_style_bg_color(reset, lvColorFrom565(TFT_YELLOW), 0);
+        lv_obj_set_style_bg_opa(reset, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(reset, sel ? 3 : 1, 0);
+        lv_obj_set_style_border_color(reset,
+                                      sel ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x2A3550),
+                                      0);
+        lv_obj_add_flag(reset, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(reset, onCfgColorRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)0);
+        lv_obj_t *lbl = lv_label_create(reset);
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x1A1A1A), 0);
+        lv_label_set_text(lbl, "Reset to Default");
+        if (sel) lv_obj_scroll_to_view(reset, LV_ANIM_OFF);
+    }
+
+    for (int i = 0; i < kUserMsgColorCount; i++) {
+        const int nav = i + 1;
+        lv_obj_t *sw = lv_obj_create(s_cfgColorGrid);
+        lv_obj_remove_style_all(sw);
+        lv_obj_set_size(sw, 44, 30);
+        lv_obj_clear_flag(sw, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(sw, 5, 0);
+        lv_obj_set_style_bg_color(sw, lvColorFrom565(kUserMsgColors[i].color), 0);
+        lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, 0);
+        const bool sel = (nav == s_cfgColorSelection);
+        lv_obj_set_style_border_width(sw, sel ? 3 : 1, 0);
+        lv_obj_set_style_border_color(sw,
+                                      sel ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x2A3550),
+                                      0);
+        lv_obj_add_flag(sw, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(sw, onCfgColorRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)nav);
+        if (sel) lv_obj_scroll_to_view(sw, LV_ANIM_OFF);
+    }
+}
+
+// navIdx: 0 = reset to adaptive default (0xFF); 1..N = palette entry (navIdx-1).
+static void applyCfgColorSelection(int navIdx) {
+    if (navIdx < 0 || navIdx >= kUserMsgColorNavCount) return;
+    const char *name;
+    if (navIdx == 0) {
+        s_cfg.userMsgColor = 0xFF;
+        name = "Default";
+    } else {
+        s_cfg.userMsgColor = (uint8_t)(navIdx - 1);
+        name = kUserMsgColors[navIdx - 1].name;
+    }
+    persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "My Message Color: %s - rebooting...", name);
+    closeCfgColorPickerModal();
+    refreshCfgModal();
+    lv_timer_handler();
+    delay(1000);
+    ESP.restart();
+}
+
+static void onCfgColorRowPressed(lv_event_t *e) {
+    int navIdx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_cfgColorSelection = navIdx;
+    applyCfgColorSelection(navIdx);
+}
+
+static void onCfgColorBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgColorBackdrop) return;
+    closeCfgColorPickerModal();
+    refreshCfgModal();
+}
+
+static void openCfgColorPickerModal() {
+    if (!s_rootScreen || s_cfgColorModal || s_cfgColorBackdrop) return;
+
+    s_cfgColorSelection = (s_cfg.userMsgColor < kUserMsgColorCount)
+                              ? (s_cfg.userMsgColor + 1) : 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgColorBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgColorBackdrop, w, h);
+    lv_obj_align(s_cfgColorBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgColorBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgColorBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgColorBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgColorBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgColorBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgColorBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgColorBackdrop, onCfgColorBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgColorModal = lv_obj_create(s_cfgColorBackdrop);
+    lv_obj_set_size(s_cfgColorModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgColorModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgColorModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgColorModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgColorModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgColorModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgColorModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgColorModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgColorModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgColorModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgColorModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgColorModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgColorModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgColorBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgColorModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "My Message Color");
+
+    lv_obj_t *hint = lv_label_create(s_cfgColorModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a color to apply"
+#else
+                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+#endif
+    );
+
+    s_cfgColorGrid = lv_obj_create(s_cfgColorModal);
+    // 4 swatches (44px) + 3 gaps (6px) per row → keep the grid 4-wide. On short
+    // screens (e.g. Cardputer 135px tall) cap the height and let it scroll so
+    // the highlighted swatch is always brought into view.
+    lv_obj_set_width(s_cfgColorGrid, 44 * 4 + 6 * 3);
+    const int gridMaxH = (h > 60) ? (h - 60) : LV_SIZE_CONTENT;
+    lv_obj_set_height(s_cfgColorGrid, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgColorGrid, gridMaxH, 0);
+    lv_obj_add_flag(s_cfgColorGrid, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_cfgColorGrid);
+    lv_obj_set_scrollbar_mode(s_cfgColorGrid, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_cfgColorGrid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_cfgColorGrid, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgColorGrid, 0, 0);
+    lv_obj_set_style_pad_row(s_cfgColorGrid, 6, 0);
+    lv_obj_set_style_pad_column(s_cfgColorGrid, 6, 0);
+    lv_obj_set_flex_flow(s_cfgColorGrid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(s_cfgColorGrid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    refreshCfgColorPickerModal();
 }
 
 static void onCfgWifiRowPressed(lv_event_t *e) {
@@ -5943,8 +6181,12 @@ static LiveTrafficClass classifyLiveTraffic(const DisplayLine &dl) {
 }
 
 static inline uint16_t userMessageAccentColor565() {
-    // Keep classic yellow in dark mode, but use darker amber in light mode
-    // for readable contrast against bright backgrounds.
+    // User-chosen override from the config color picker takes precedence.
+    if (s_cfg.userMsgColor < kUserMsgColorCount) {
+        return kUserMsgColors[s_cfg.userMsgColor].color;
+    }
+    // Default: keep classic yellow in dark mode, but use darker amber in light
+    // mode for readable contrast against bright backgrounds.
     return (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x7A, 0x4C, 0x00) : TFT_YELLOW;
 }
 
@@ -10842,6 +11084,12 @@ static void performCfgAction(int actionId) {
             return;
         } break;
 
+        case CFG_ACTION_OWNER_COLOR:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OWNER_COLOR");
+            showActionPopup = false;
+            openCfgColorPickerModal();
+            break;
+
         case CFG_ACTION_UNITS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
             s_cfg.displayUnits = (uint8_t)(s_cfg.displayUnits ? 0 : 1);
@@ -12078,6 +12326,36 @@ static void pumpKeyboardInput() {
             if (isModalCloseKey(k)) {
 #endif
                 closeTracerouteProgressModal();
+            }
+            continue;
+        }
+
+        // Own-message color picker: arrows/scroll move through the 16-swatch
+        // grid (one step, or a whole row via page/channel keys), Enter applies
+        // and reboots, a close key cancels.
+        if (s_cfgColorModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgColorPickerModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyCfgColorSelection(s_cfgColorSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)          delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN)     delta = invertScrollNav ? -1 : 1;
+            else if (k == KEY_PAGE_UP || k == KEY_PREV_CHAN) delta = -4;
+            else if (k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) delta = 4;
+            if (delta != 0) {
+                int next = s_cfgColorSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= kUserMsgColorNavCount) next = kUserMsgColorNavCount - 1;
+                if (next != s_cfgColorSelection) {
+                    s_cfgColorSelection = next;
+                    refreshCfgColorPickerModal();
+                }
             }
             continue;
         }

@@ -66,6 +66,8 @@ struct RhinoConfig {
     uint8_t  uiMode;             // UiThemeMode
     uint8_t  chatStyle;          // 0=CLASSIC, 1=BUBBLES (applied at boot; needs reboot)
     bool     chatColorsEnabled;  // classic mode: use per-node text colors
+    uint8_t  userMsgColor;       // own-message color: 0..15 = basic palette index,
+                                 // 0xFF = adaptive default (theme yellow/amber)
 
     // Bluetooth
     bool     btEnabled;

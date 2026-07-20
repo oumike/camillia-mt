@@ -100,6 +100,7 @@
 #define CHAT_STYLE_BUBBLES  1      // per-node colored message bubbles
 #define MY_CHAT_STYLE       CHAT_STYLE_CLASSIC
 #define MY_CHAT_COLORS_EN   1      // classic mode: per-node text colors
+#define MY_USER_MSG_COLOR   0xFF   // own-message color: 0..15 palette index, 0xFF=adaptive default
 
 // ── Bluetooth defaults ─────────────────────────────────────────
 #define MY_BT_ENABLED       1

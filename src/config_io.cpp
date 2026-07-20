@@ -362,6 +362,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.uiMode             = MY_UI_MODE;
     cfg.chatStyle          = MY_CHAT_STYLE;
     cfg.chatColorsEnabled  = MY_CHAT_COLORS_EN;
+    cfg.userMsgColor       = MY_USER_MSG_COLOR;
     cfg.btEnabled          = MY_BT_ENABLED;
     cfg.btMode             = MY_BT_MODE;
     cfg.btFixedPin         = MY_BT_PIN;
@@ -560,6 +561,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     out += "    chatStyle: "; out += (cfg.chatStyle == CHAT_STYLE_BUBBLES ? "BUBBLES" : "CLASSIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
+    out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
+    if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
+    else { out += "default"; }
+    out += "\n";
     // lora
     out += "  lora:\n";
     snprintf(tmp, sizeof(tmp), "    bandwidth: %.0f\n",    cfg.loraBw);       out += tmp;
@@ -912,6 +917,16 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);
+                }
+                else if (!strcmp(key, "userMsgColor")) {
+                    // Numeric 0..15 selects a palette color; anything else
+                    // (e.g. "default", "-1") means the adaptive yellow default.
+                    if (isdigit((unsigned char)val[0])) {
+                        int idx = atoi(val);
+                        cfg.userMsgColor = (idx >= 0 && idx <= 15) ? (uint8_t)idx : 0xFF;
+                    } else {
+                        cfg.userMsgColor = 0xFF;
+                    }
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
