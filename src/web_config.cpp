@@ -1768,14 +1768,14 @@ static void sendConfigPage(const char *msg = "") {
 
     html +=
         "<h3 style='margin-top:.8em'>Software Update</h3>"
-        "<p style='font-size:.82em;color:#888;margin:.3em 0 .45em'>Current firmware: <b>";
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
     html += APP_VERSION;
     html +=
-        "</b></p>"
-        "<button type='button' id='check-release-btn'"
-        " style='background:#1f7a8c;margin-top:.1em'"
-        " onclick='checkLatestRelease()'>Check for New Release</button>"
-        "<p id='release-check-result' style='font-size:.82em;color:#888;margin:.45em 0 1em'></p>";
+        "</b></p>";
+    // Update-available check intentionally removed for now. The check plumbing
+    // (queueReleaseCheckNow / runQueuedReleaseCheck / the /release-check route
+    // and its client JS) remains dormant behind kWebDeviceReleaseCheckEnabled and
+    // is no longer reachable from the UI.
 
     html +=
         "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
@@ -3666,6 +3666,13 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     }
 
     WiFi.localIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+
+    // Disable STA modem power-save for the web session. The default
+    // WIFI_PS_MIN_MODEM buffers our inbound packets until the AP's next DTIM
+    // beacon (~100-300ms), which the synchronous WebServer turns into stalls,
+    // retransmits, and browser timeouts. webCfgEnd() powers the radio off, so
+    // this only stays in effect while web config is up.
+    WiFi.setSleep(false);
 
     registerCommonRoutes();
     server.begin();

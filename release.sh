@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Branch that alpha (prerelease) builds must be cut from. Alphas are disposable
+# test builds; keeping them on a dedicated branch keeps main's history clean.
+ALPHA_BRANCH="alpha"
+
 RELEASE_ENVS=(
     tdeck
     tlora-pager-tft
@@ -34,6 +38,49 @@ has_env() {
 remote_tag_exists() {
     local tag="$1"
     git ls-remote --tags origin | grep -q "refs/tags/${tag}$"
+}
+
+# Bump the patch component of an X.Y.Z version. Input may carry a leading "v"
+# and/or a prerelease suffix (e.g. v3.1.2-alpha.4); both are stripped first.
+# Echoes the bumped X.Y.Z (no "v"), or an empty string if the shape isn't X.Y.Z.
+next_patch_version() {
+    local v="${1#v}"
+    v="${v%%-*}"
+    local major minor patch rest
+    IFS='.' read -r major minor patch rest <<< "$v"
+    if [[ -z "$major" || -z "$minor" || -z "$patch" || -n "$rest" \
+          || ! "$patch" =~ ^[0-9]+$ ]]; then
+        echo ""
+        return
+    fi
+    echo "${major}.${minor}.$((patch + 1))"
+}
+
+# Base X.Y.Z that alphas should target. If we're already mid-alpha-cycle
+# (VERSION is vX.Y.Z-alpha.N) keep that X.Y.Z so successive alphas iterate the
+# same patch; otherwise (coming from a stable vX.Y.Z) bump to the next patch.
+alpha_base_version() {
+    local v="${1#v}"
+    if [[ "$v" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-alpha\.[0-9]+$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    else
+        next_patch_version "$1"
+    fi
+}
+
+# Next available alpha tag for a base version (e.g. base "3.1.2" -> the highest
+# existing v3.1.2-alpha.N across local and remote tags, plus one).
+next_alpha_tag() {
+    local base="$1"
+    local max=0 n
+    while IFS= read -r t; do
+        n="${t#v${base}-alpha.}"
+        if [[ "$n" =~ ^[0-9]+$ ]] && (( n > max )); then max="$n"; fi
+    done < <(
+        { git tag; git ls-remote --tags origin 2>/dev/null | sed 's#.*refs/tags/##'; } \
+            | grep -E "^v${base}-alpha\.[0-9]+$" | sort -u
+    )
+    echo "v${base}-alpha.$((max + 1))"
 }
 
 delete_existing_release_and_tags() {
@@ -70,20 +117,63 @@ delete_existing_release_and_tags() {
     fi
 }
 
+# ── Parse flags ───────────────────────────────────────────────────────────────
+ALPHA=false
+for arg in "$@"; do
+    case "$arg" in
+        --alpha) ALPHA=true ;;
+        -h|--help)
+            echo "Usage: $0 [--alpha]"
+            echo "  --alpha   Cut a prerelease (alpha) build. Must be run from the"
+            echo "            '$ALPHA_BRANCH' branch. Tags v<next-patch>-alpha.N and"
+            echo "            publishes a GitHub prerelease (excluded from OTA/latest)."
+            exit 0
+            ;;
+        *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
+    esac
+done
+
+# ── Alpha branch guard ────────────────────────────────────────────────────────
+if [[ "$ALPHA" == true ]]; then
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ "$CURRENT_BRANCH" != "$ALPHA_BRANCH" ]]; then
+        echo "Error: --alpha releases must be cut from the '$ALPHA_BRANCH' branch." >&2
+        echo "Current branch is '${CURRENT_BRANCH:-unknown}'." >&2
+        echo "Switch with: git checkout $ALPHA_BRANCH" >&2
+        exit 1
+    fi
+fi
+
 # ── Version prompt ────────────────────────────────────────────────────────────
 CURRENT=$(cat VERSION 2>/dev/null | tr -d '\n')
 PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
 echo "Current version: ${CURRENT:-unknown}"
 echo "Latest git tag:  $PREV_TAG"
 echo ""
-read -rp "New version (e.g. 1.0.0): " VERSION
 
-if [[ -z "$VERSION" ]]; then
-    echo "No version entered. Aborting."
-    exit 1
+if [[ "$ALPHA" == true ]]; then
+    BASE=$(alpha_base_version "$CURRENT")
+    if [[ -z "$BASE" ]]; then
+        echo "Could not derive the next patch version from '$CURRENT'."
+        read -rp "Base version for this alpha (e.g. 3.1.2): " BASE
+        BASE="${BASE#v}"
+        if [[ -z "$BASE" ]]; then
+            echo "No base version entered. Aborting."
+            exit 1
+        fi
+    fi
+    DEFAULT_TAG=$(next_alpha_tag "$BASE")
+    read -rp "New alpha version [${DEFAULT_TAG}]: " TAG
+    TAG="${TAG:-$DEFAULT_TAG}"
+    [[ "$TAG" == v* ]] || TAG="v$TAG"
+else
+    read -rp "New version (e.g. 1.0.0): " VERSION
+    if [[ -z "$VERSION" ]]; then
+        echo "No version entered. Aborting."
+        exit 1
+    fi
+    TAG="v$VERSION"
 fi
-
-TAG="v$VERSION"
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
 if ! command -v gh >/dev/null 2>&1; then
@@ -132,16 +222,61 @@ if [[ ${#BUILD_ARGS[@]} -eq 0 ]]; then
     exit 1
 fi
 
-echo "Running full clean for release environments..."
-~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+# ── OTA image signing key ─────────────────────────────────────────────────────
+# Signed OTA images let the device verify authenticity over plain HTTP (no TLS).
+# The private key is gitignored and must be backed up; the matching public key is
+# baked into the firmware via src/ota_signing_pubkey.h, regenerated here so the
+# build always embeds the key that will sign these images.
+SIGNING_KEY="ota_signing_key.pem"
+PUBKEY_HEADER="src/ota_signing_pubkey.h"
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "Error: openssl is required to sign OTA images. Install it and retry." >&2
+    exit 1
+fi
+if [[ ! -f "$SIGNING_KEY" ]]; then
+    echo ""
+    echo "!! No OTA signing key found — generating a new ECDSA P-256 key at:"
+    echo "!!     $SIGNING_KEY"
+    echo "!! BACK THIS UP SECURELY and never commit it. If you lose it, every"
+    echo "!! existing device will reject all future updates (you'd have to reflash"
+    echo "!! over USB to ship a new key)."
+    echo ""
+    openssl ecparam -name prime256v1 -genkey -noout -out "$SIGNING_KEY"
+    chmod 600 "$SIGNING_KEY"
+fi
+# Bake the matching public key into the firmware before building.
+{
+    echo '// AUTO-GENERATED from ota_signing_key.pem by release.sh. Do not edit by hand.'
+    echo '// ECDSA P-256 public key used to verify signed OTA images (see ota_update.cpp).'
+    echo '#pragma once'
+    echo ''
+    echo 'static const char OTA_SIGNING_PUBKEY_PEM[] ='
+    openssl ec -in "$SIGNING_KEY" -pubout 2>/dev/null | sed 's/.*/    "&\\n"/'
+    echo '    ;'
+} > "$PUBKEY_HEADER"
+echo "Regenerated $PUBKEY_HEADER from $SIGNING_KEY"
+
+# Alpha builds are throwaway test cuts — skip the full clean for a faster
+# turnaround. Stable releases always start from a clean tree.
+if [[ "$ALPHA" == true ]]; then
+    echo "Alpha release: skipping full clean (incremental build)..."
+else
+    echo "Running full clean for release environments..."
+    ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+fi
 
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
 
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
 git add -A
-git commit -m "Release $TAG"
-git push
+if [[ "$ALPHA" == true ]]; then
+    git commit -m "Alpha release $TAG"
+    git push origin "$ALPHA_BRANCH"
+else
+    git commit -m "Release $TAG"
+    git push
+fi
 
 echo "Changes committed and pushed."
 
@@ -178,6 +313,11 @@ for env_name in "${RELEASE_ENVS[@]}"; do
         0x10000 "${d}/firmware.bin"
     cp "${d}/firmware.bin" "${ota_out}"
     cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${TAG}.elf"
+    # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
+    # verifies this against the baked-in public key before committing the update,
+    # which is what makes plain-HTTP (TLS-free) OTA safe.
+    openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
+    echo "    signed -> ${ota_out}.sig"
 done
 
 ls -lh dist/
@@ -185,11 +325,24 @@ ls -lh dist/
 # ── Create GitHub release ─────────────────────────────────────────────────────
 echo ""
 echo "Creating GitHub release $TAG..."
-gh release create "$TAG" \
-    --title "$TAG" \
-    --generate-notes \
-    dist/*.bin \
-    dist/*.elf
+if [[ "$ALPHA" == true ]]; then
+    # --prerelease keeps alphas out of GitHub's /releases/latest, so on-device
+    # OTA checks and the website's stable flasher never see them.
+    gh release create "$TAG" \
+        --title "$TAG (alpha)" \
+        --prerelease \
+        --generate-notes \
+        dist/*.bin \
+        dist/*.elf \
+        dist/*.sig
+else
+    gh release create "$TAG" \
+        --title "$TAG" \
+        --generate-notes \
+        dist/*.bin \
+        dist/*.elf \
+        dist/*.sig
+fi
 
 echo ""
 echo "Release $TAG published."
