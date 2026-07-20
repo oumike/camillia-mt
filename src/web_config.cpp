@@ -1300,10 +1300,6 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>NTP Server<input name='ntp_server' type='text' maxlength='47' value='";
     html += gCfg->ntpServer;
     html += "' placeholder='pool.ntp.org'></label>";
-    html += "<label>OTA Base URL<input name='ota_base_url' type='text' maxlength='95' value='";
-    html += gCfg->otaBaseUrl;
-    html += "' placeholder='(blank = GitHub over HTTPS)'></label>";
-    html += "<p class='gps-hint'>Optional. Point at a plain-HTTP signed-firmware proxy (e.g. http://ota.example.com) to update without TLS. Leave blank to use the built-in HTTPS path.</p>";
     html += "</div>";
     html += "</details>";
     sendChunk(html);
@@ -2774,12 +2770,6 @@ static void handlePostSave() {
     if (!gCfg->ntpServer[0]) {
         strncpy(gCfg->ntpServer, MY_NTP_SERVER, sizeof(gCfg->ntpServer) - 1);
         gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
-    }
-    if (server.hasArg("ota_base_url")) {
-        String ob = server.arg("ota_base_url");
-        ob.trim();
-        strncpy(gCfg->otaBaseUrl, ob.c_str(), sizeof(gCfg->otaBaseUrl) - 1);
-        gCfg->otaBaseUrl[sizeof(gCfg->otaBaseUrl) - 1] = '\0';
     }
 
     // Position

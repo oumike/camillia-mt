@@ -367,7 +367,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.btFixedPin         = MY_BT_PIN;
     strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
     cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
-    cfg.otaBaseUrl[0]      = '\0';   // empty -> built-in HTTPS GitHub OTA path
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
     cfg.mqttServer[sizeof(cfg.mqttServer) - 1] = '\0';
@@ -576,7 +575,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
-    out += "    otaBaseUrl: "; out += cfg.otaBaseUrl; out += "\n";
     // position
     out += "  position:\n";
     snprintf(tmp, sizeof(tmp), "    fixedPosition: %s\n", cfg.gpsEnabled ? "false" : "true"); out += tmp;
@@ -916,8 +914,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.chatColorsEnabled = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
-                if      (!strcmp(key, "ntpServer"))  strncpy(cfg.ntpServer,  val, sizeof(cfg.ntpServer)  - 1);
-                else if (!strcmp(key, "otaBaseUrl")) strncpy(cfg.otaBaseUrl, val, sizeof(cfg.otaBaseUrl) - 1);
+                if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {
                 if      (!strcmp(key, "isPowerSaving")) cfg.isPowerSaving = (!strcmp(val,"true"));
                 else if (!strcmp(key, "lsSecs"))        cfg.lsSecs        = (uint32_t)atol(val);

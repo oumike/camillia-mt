@@ -23,14 +23,13 @@
 static volatile uint32_t g_otaNetworkGate = 0;
 static constexpr uint32_t kOtaNetworkGateMagic = 0x4F544131UL; // "OTA1"
 
-// Optional plain-HTTP OTA proxy base (e.g. "http://ota.example.com"). When set,
-// the check/download run over HTTP with no TLS, and the downloaded image is
-// verified against the baked-in ECDSA public key before it is committed. Empty
-// -> the built-in HTTPS GitHub path.
-static char s_otaBaseUrl[96] = {};
+// Hardcoded OTA proxy base — intentionally NOT user-configurable, so the update
+// source can't be repointed from the UI/config. The check/download run over this
+// endpoint with no TLS, and the image is verified against the baked-in ECDSA
+// public key before commit. To change it, edit here and reflash. Must be http://
+// for the TLS-free path (an https value would fall back to the built-in TLS path).
+static const char s_otaBaseUrl[] = "http://ota.camillia.sumat.org";
 
-// True when a usable http:// base is configured (https bases fall through to the
-// existing TLS path, so only plain http counts as "TLS-free").
 static bool otaUsingHttpBase() {
     return strncmp(s_otaBaseUrl, "http://", 7) == 0;
 }
@@ -748,18 +747,6 @@ static bool setErr(char *errOut, size_t errLen, const char *msg) {
 void otaSetNetworkAllowed(bool allowed) {
     g_otaNetworkGate = allowed ? kOtaNetworkGateMagic : 0;
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
-}
-
-void otaSetBaseUrl(const char *baseUrl) {
-    if (!baseUrl) baseUrl = "";
-    strncpy(s_otaBaseUrl, baseUrl, sizeof(s_otaBaseUrl) - 1);
-    s_otaBaseUrl[sizeof(s_otaBaseUrl) - 1] = '\0';
-    // Drop a trailing slash so URL building can assume none.
-    size_t n = strlen(s_otaBaseUrl);
-    while (n > 0 && s_otaBaseUrl[n - 1] == '/') s_otaBaseUrl[--n] = '\0';
-    Serial.printf("[ota] base url=%s (transport=%s)\n",
-                  s_otaBaseUrl[0] ? s_otaBaseUrl : "(default GitHub)",
-                  otaUsingHttpBase() ? "http/no-tls" : "https");
 }
 
 void otaPreferExternalHeap() {

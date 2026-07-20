@@ -2646,8 +2646,6 @@ static bool runOtaWorkerModeIfRequested() {
     };
 
     otaSetNetworkAllowed(true);
-    // Apply the configured OTA proxy base (empty -> built-in HTTPS GitHub path).
-    otaSetBaseUrl(s_cfg.otaBaseUrl);
 
     Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
                   rtcRequested ? 1 : 0,
@@ -3023,7 +3021,6 @@ static void persistConfigToPrefs() {
     p.putString("region", s_cfg.region);
     p.putString("tzDef", s_cfg.tzDef);
     p.putString("ntpServer", s_cfg.ntpServer);
-    p.putString("otaBaseUrl", s_cfg.otaBaseUrl);
     p.putULong("screenOnSecs", s_cfg.screenOnSecs);
     p.putUChar("dispUnits", s_cfg.displayUnits);
     p.putUChar("chatStyle", s_cfg.chatStyle);
@@ -3186,12 +3183,6 @@ static void loadConfigFromPrefs() {
     if (ntp.length()) {
         strncpy(s_cfg.ntpServer, ntp.c_str(), sizeof(s_cfg.ntpServer) - 1);
         s_cfg.ntpServer[sizeof(s_cfg.ntpServer) - 1] = '\0';
-    }
-
-    if (prefs.isKey("otaBaseUrl")) {
-        String ob = getStringIfKey("otaBaseUrl");
-        strncpy(s_cfg.otaBaseUrl, ob.c_str(), sizeof(s_cfg.otaBaseUrl) - 1);
-        s_cfg.otaBaseUrl[sizeof(s_cfg.otaBaseUrl) - 1] = '\0';
     }
 
     ul = prefs.getULong("screenOnSecs", 0);

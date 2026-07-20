@@ -83,9 +83,6 @@ struct RhinoConfig {
     bool     mqttMapReport;
     uint16_t mqttPort;           // broker TCP port (8883 TLS, 1883 plaintext)
     bool     mqttTls;            // connect via WiFiClientSecure when set
-    // Optional base URL for TLS-free signed OTA (e.g. "http://ota.example.com").
-    // Empty -> use the built-in HTTPS GitHub path. See ota_update.cpp.
-    char     otaBaseUrl[96];
 
     // Power
     bool     isPowerSaving;
