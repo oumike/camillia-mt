@@ -117,8 +117,14 @@
 #define MY_MQTT_ROOT        "msh/US"
 #define MY_MQTT_ENCRYPT     1
 #define MY_MQTT_MAP_RPT     0
-#define MY_MQTT_PORT        8883   // 8883 = TLS (default), 1883 = plaintext
-#define MY_MQTT_TLS         1      // connect via WiFiClientSecure when set
+// Default to plaintext MQTT. A TLS handshake needs ~40KB of contiguous internal
+// heap, which is the scarcest resource on these boards; both mqtt.meshtastic.org
+// and mqtt.michmesh.net serve plaintext on 1883 with the same credentials.
+// Channel payloads stay end-to-end encrypted with the channel key either way, so
+// what TLS would add here is only transport-level metadata privacy on a public
+// broker. Set 8883/1 to opt back into TLS (also togglable in web config).
+#define MY_MQTT_PORT        1883   // 1883 = plaintext (default), 8883 = TLS
+#define MY_MQTT_TLS         0      // connect via WiFiClientSecure when set
 
 // ── Power defaults ─────────────────────────────────────────────
 #define MY_POWER_SAVING     0

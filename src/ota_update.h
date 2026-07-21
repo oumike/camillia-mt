@@ -15,11 +15,6 @@ typedef void (*OtaInstallProgressCb)(size_t writtenBytes, size_t totalBytes);
 // Allows OTA networking only when explicitly enabled by the caller.
 void otaSetNetworkAllowed(bool allowed);
 
-// Route generic heap allocations to PSRAM (one-time, permanent) so contiguous
-// internal DRAM stays free for TLS handshake buffers (esp-sha). Shared by OTA and
-// the MQTT bridge — both need a TLS handshake to succeed under memory pressure.
-void otaPreferExternalHeap();
-
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 

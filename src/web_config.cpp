@@ -6,7 +6,6 @@
 #include "dm_mgr.h"
 #include <WiFi.h>
 #include <WebServer.h>
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <nvs_flash.h>
@@ -451,119 +450,14 @@ static void trimAsciiWhitespace(String &s) {
     s = s.substring(start, end);
 }
 
-static bool fetchLatestTagFromVersionFile(String &tagOut, String &errOut) {
-    tagOut = "";
-    errOut = "";
-
-    preferExternalHeapForWebHttps();
-    if (!webHasHeapForTls(errOut)) {
-        Serial.printf("[web-https] version-skip err=%s\n", errOut.c_str());
-        return false;
-    }
-    logWebHttpsDiag("version-begin", kLatestVersionRawUrl);
-
-    WiFiClientSecure rawClient;
-    rawClient.setInsecure();
-
-    HTTPClient raw;
-    if (!raw.begin(rawClient, kLatestVersionRawUrl)) {
-        logWebHttpsDiag("version-begin-failed", kLatestVersionRawUrl);
-        errOut = "Failed to start VERSION request";
-        return false;
-    }
-
-    raw.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
-    raw.addHeader("User-Agent", "camillia-mt-webcfg");
-
-    int rawCode = raw.GET();
-    Serial.printf("[web-https] version-http code=%d\n", rawCode);
-    if (rawCode <= 0) {
-        errOut = "VERSION network error";
-        raw.end();
-        return false;
-    }
-    if (rawCode != 200) {
-        errOut = String("VERSION HTTP ") + String(rawCode);
-        raw.end();
-        return false;
-    }
-
-    tagOut = raw.getString();
-    raw.end();
-    trimAsciiWhitespace(tagOut);
-
-    if (tagOut.length() == 0) {
-        errOut = "VERSION file empty";
-        return false;
-    }
-
-    return true;
-}
-
+// The on-device release check is disabled (kWebDeviceReleaseCheckEnabled) and
+// its UI was removed, so these HTTPS fetches were unreachable. They were the
+// last TLS users in this file; removed so WiFiClientSecure can be dropped from
+// the firmware entirely.
 static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOut) {
     tagOut = "";
-    urlOut = "";
-    errOut = "";
-
-    preferExternalHeapForWebHttps();
-    if (!webHasHeapForTls(errOut)) {
-        Serial.printf("[web-https] api-skip err=%s\n", errOut.c_str());
-        return false;
-    }
-
-    if (WiFi.status() != WL_CONNECTED) {
-        errOut = "WiFi not connected";
-        return false;
-    }
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    logWebHttpsDiag("api-begin", kLatestReleaseApiUrl);
-
-    String apiErr;
-    HTTPClient http;
-    if (!http.begin(client, kLatestReleaseApiUrl)) {
-        logWebHttpsDiag("api-begin-failed", kLatestReleaseApiUrl);
-        apiErr = "Failed to start HTTPS request";
-    } else {
-        http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
-        http.addHeader("User-Agent", "camillia-mt-webcfg");
-        http.addHeader("Accept", "application/vnd.github+json");
-
-        int code = http.GET();
-        Serial.printf("[web-https] api-http code=%d\n", code);
-        if (code <= 0) {
-            apiErr = "Network error";
-        } else if (code != 200) {
-            apiErr = String("Release API HTTP ") + String(code);
-        } else {
-            String body = http.getString();
-            if (extractJsonStringField(body, "tag_name", tagOut) && tagOut.length() > 0) {
-                (void)extractJsonStringField(body, "html_url", urlOut);
-                if (urlOut.length() == 0) urlOut = kLatestReleasePageUrl;
-                http.end();
-                return true;
-            }
-            apiErr = "Release tag not found";
-        }
-        http.end();
-    }
-
-    String versionErr;
-    if (fetchLatestTagFromVersionFile(tagOut, versionErr)) {
-        urlOut = kLatestReleasePageUrl;
-        return true;
-    }
-
-    if (apiErr.length() && versionErr.length()) {
-        errOut = apiErr + "; fallback failed (" + versionErr + ")";
-    } else if (apiErr.length()) {
-        errOut = apiErr;
-    } else {
-        errOut = versionErr;
-    }
-
     urlOut = kLatestReleasePageUrl;
+    errOut = "Release check disabled (no TLS in firmware)";
     return false;
 }
 
@@ -1506,10 +1400,13 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%u", (unsigned)gCfg->mqttPort);
     html += "<label>Port<input name='mqtt_port' type='number' min='1' max='65535' value='";
     html += tmp; html += "'></label>";
-    html += "<label style='display:flex;align-items:center;gap:.5em'>"
-            "<input type='checkbox' name='mqtt_tls' value='1'";
-    if (gCfg->mqttTls) html += " checked";
-    html += "> Use TLS</label></div>";
+    // No TLS checkbox: this firmware has no TLS client, so MQTT is always
+    // plaintext (use port 1883). Channel payloads remain end-to-end encrypted
+    // with the channel key regardless of transport.
+    html += "</div>";
+    html += "<p class='gps-hint'>MQTT is plaintext only (port 1883) — this "
+            "firmware has no TLS client. Channel payloads stay encrypted with "
+            "your channel key.</p>";
     html += "<label>Username<input name='mqtt_user' type='text' maxlength='31' value='";
     html += gCfg->mqttUser;
     html += "'></label>"
@@ -2856,7 +2753,9 @@ static void handlePostSave() {
     }
     if (server.hasArg("mqtt_present")) {
         gCfg->mqttEnabled    = (server.arg("mqtt_en")         == "1");
-        gCfg->mqttTls        = (server.arg("mqtt_tls")        == "1");
+        // No TLS client in this firmware; clear any stale flag from an older
+        // config so nothing implies MQTT is running over TLS.
+        gCfg->mqttTls        = false;
         gCfg->mqttEncryption = (server.arg("mqtt_encrypt")    == "1");
         gCfg->mqttMapReport  = (server.arg("mqtt_map_report") == "1");
     }

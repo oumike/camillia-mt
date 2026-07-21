@@ -1,9 +1,7 @@
 #include "mqtt_bridge.h"
-#include "ota_update.h"   // otaSetNetworkAllowed(): shared TLS connect gate
 #include "debug_flags.h"
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 
 // ── Tunables ──────────────────────────────────────────────────
@@ -11,15 +9,20 @@ namespace {
 constexpr uint32_t kMinBackoffMs        = 2000;    // first reconnect delay
 constexpr uint32_t kMaxBackoffMs        = 60000;   // cap between reconnect tries
 constexpr int      kMqttBufferBytes     = 512;     // whole MQTT packet (topic+payload)
+// PubSubClient::connect() is blocking and defaults to MQTT_SOCKET_TIMEOUT (15s).
+// A stuck connect therefore freezes the whole UI, so cap it much lower.
+constexpr uint16_t kConnectTimeoutSecs  = 5;
+constexpr uint16_t kTlsPort             = 8883;    // legacy; no TLS client here
+constexpr uint16_t kPlainPort           = 1883;
 
 const RhinoConfig *s_cfg      = nullptr;
 uint32_t           s_myNodeId = 0;
 MqttInjectFn       s_inject   = nullptr;
 
 WiFiClient       s_plain;
-WiFiClientSecure s_secure;
 PubSubClient     s_mqtt;
 
+uint16_t s_activePort     = 0;    // port actually used (may differ from cfg)
 uint32_t s_lastAttemptMs  = 0;
 uint32_t s_backoffMs      = kMinBackoffMs;
 bool     s_configured     = false;   // transport/server pushed into s_mqtt
@@ -44,13 +47,25 @@ void onMessage(char *topic, uint8_t *payload, unsigned int len) {
 }
 
 void applyTransport() {
-    if (s_cfg->mqttTls) {
-        s_secure.setInsecure();
-        s_mqtt.setClient(s_secure);
-    } else {
-        s_mqtt.setClient(s_plain);
+    // Plaintext only. TLS was removed from this firmware: the handshake needs
+    // ~40KB of contiguous internal heap, which these boards can't reliably spare,
+    // and channel payloads are already end-to-end encrypted with the channel key.
+    s_mqtt.setClient(s_plain);
+
+    // Configs saved before TLS was removed still hold 8883. Connecting in the
+    // clear to a TLS port gets no CONNACK, and the blocking connect() then stalls
+    // the main loop for its whole timeout — which presents as the firmware
+    // hanging. Migrate to the plaintext port rather than stalling.
+    s_activePort = s_cfg->mqttPort;
+    if (s_activePort == kTlsPort) {
+        debugLogMessages("[mqtt] port %u is TLS-only; using %u (no TLS in firmware)\n",
+                         (unsigned)kTlsPort, (unsigned)kPlainPort);
+        s_activePort = kPlainPort;
     }
-    s_mqtt.setServer(s_cfg->mqttServer, s_cfg->mqttPort);
+
+    s_mqtt.setServer(s_cfg->mqttServer, s_activePort);
+    // Bound the blocking connect so a bad endpoint can't freeze the UI.
+    s_mqtt.setSocketTimeout(kConnectTimeoutSecs);
     s_mqtt.setBufferSize(kMqttBufferBytes);
     s_mqtt.setCallback(onMessage);
     s_configured = true;
@@ -62,23 +77,13 @@ void attemptConnect(uint32_t now) {
     char clientId[16];
     gatewayId(clientId, sizeof(clientId));
 
-    // Under memory pressure the TLS handshake fails to allocate its internal
-    // esp-sha buffer; route generic heap to PSRAM first to keep contiguous
-    // internal DRAM free (same fix OTA uses).
-    if (s_cfg->mqttTls) otaPreferExternalHeap();
-
-    // The WiFiClientSecure::connect wrappers are gated (see ota_update.cpp). Open
-    // the gate only for the duration of the handshake; established sessions send
-    // and receive without going back through connect().
-    otaSetNetworkAllowed(true);
     bool ok = s_mqtt.connect(clientId,
                              s_cfg->mqttUser[0] ? s_cfg->mqttUser : nullptr,
                              s_cfg->mqttPass[0] ? s_cfg->mqttPass : nullptr);
-    otaSetNetworkAllowed(false);
 
     if (ok) {
         s_backoffMs = kMinBackoffMs;
-        debugLogMessages("[mqtt] connected %s:%u\n", s_cfg->mqttServer, s_cfg->mqttPort);
+        debugLogMessages("[mqtt] connected %s:%u\n", s_cfg->mqttServer, (unsigned)s_activePort);
         if (s_inject) {
             char topic[80];
             snprintf(topic, sizeof(topic), "%s/2/e/#", s_cfg->mqttRoot);

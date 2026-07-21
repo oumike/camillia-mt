@@ -6,6 +6,10 @@ This guide reflects current firmware navigation and controls.
 
 The main screen is channel chat. Use it to read traffic, select reply targets, and start compose.
 
+Typical flow on keyboard builds: pick a channel, press **Enter** to move the
+cursor into that channel's messages, scroll to a message to select it, then press
+**Space** to compose (a reply if a row is selected, otherwise a new message).
+
 ## Keyboard shortcuts by build
 
 ### Shared shortcuts (keyboard builds)
@@ -17,9 +21,12 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - N opens Nodes
 - L opens Live
 - A opens Channel Actions
-- Enter opens compose (or reply compose when a chat row is selected)
-- Space also opens compose in chat, mirroring Enter (in the DM list it advances the
-  same as Enter: focus a conversation, then open its compose)
+- **Space opens compose** — a new message, or a reply when a chat row is
+  selected. Space replaced Enter for this on both the chat and DM screens.
+- **Enter moves the cursor into the messages** — on chat it drops into the
+  selected channel's messages; in the DM list it focuses the conversation's
+  messages. Enter never opens compose.
+- Note: inside the compose box, Enter still **sends** the message.
 - Live modal shortcuts: C clears the log, U opens channel-util chart, S opens SNR/RSSI chart
 
 ### LilyGo T-Deck (tdeck)
@@ -36,7 +43,7 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 
 - H toggles the channel selector
 - Wheel Up/Down on main chat switches channels
-- Wheel Click enters/exits chat row cursor mode
+- Wheel Click enters/exits chat row cursor mode (Enter does the same thing)
 - In chat row cursor mode, Wheel Up/Down moves the selected chat row
 - Backspace exits chat row cursor mode
 - Config modal: I focuses the info panel; Wheel Click swaps focus between actions/info
@@ -52,7 +59,8 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - Navigation: semicolon (Up), period (Down)
 - Arrow keys map to the same directional actions
 - Esc closes modals and exits chat-focus modes
-- Enter confirms actions; Fn+Enter is also accepted for compose/reply flow
+- Enter confirms actions and moves the cursor into the channel's messages;
+  Space opens compose, and Fn+Enter is also accepted for the compose/reply flow
 - DM delete trigger on selected conversation: Fn+Backspace
 - Compose close behavior: Esc closes compose (Backspace only deletes characters)
 
@@ -63,6 +71,8 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 - Primary usage is touch (no dedicated hardware keyboard shortcuts)
 - Bottom touch nav: Config, DM, Nodes, Live, Help
 - DM delete trigger: long-press a conversation row
+- The Space/Enter remap above does **not** apply here: this build is touch-first,
+  so Enter keeps its original "new message" behavior
 
 ![Chat screen](screenshots/RiCa_screen_20260609_110546.png)
 ![Chat screen 2](screenshots/RiCa_screen_20260609_110604.png)
@@ -89,6 +99,17 @@ Config includes Web Config controls, export and import, theme toggles, announce,
 - Enter runs the selected action
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
+
+### Chat style
+
+Config has a **Chat Style** action that toggles between:
+
+- **Classic** — one flat, colored text line per message
+- **Bubbles** — per-message rounded bubbles; your messages are right-aligned in
+  the accent color (turning green on ACK, red on failure), other nodes' are
+  left-aligned in a stable per-node color with a short-name tag
+
+The style applies to both **channel chat and Direct Messages**.
 
 ![Config screen](screenshots/RiCa_screen_20260609_110933.png)
 
@@ -119,9 +140,11 @@ Direct messaging:
 
 - Open from the main screen (D on keyboard builds, DM bottom-nav button on Heltec)
 - Pressing Enter on New DM opens node picker
-- Enter on a conversation focuses message panel
-- Enter again in focused message panel opens compose for that DM
-- Space works the same as Enter for each of the steps above
+- Enter on a conversation focuses the message panel (it stops there — Enter never
+  opens compose)
+- Space opens compose for the focused DM (Space replaced Enter for new messages)
+- DM messages honor the Bubbles chat style: your messages are right-aligned in
+  the accent/ack color, the other node's are left-aligned in their node color
 
 ![Node select](screenshots/RiCa_screen_20260609_112419.png)
 ![Message view](screenshots/RiCa_screen_20260609_113850.png)
@@ -140,6 +163,8 @@ Help explains shortcuts and transport symbols.
 ## Compose behavior
 
 - Enter sends
+- Space types a space — the Space shortcut only opens compose from the chat/DM
+  screens, never while you are typing in the compose box
 - Backspace deletes a character
 - Cardputer: Esc closes compose
 - T-Deck and T-Lora Pager: Backspace on empty compose closes
@@ -154,7 +179,7 @@ Primary usage is touch plus keyboard shortcuts.
 - Use touch for channel chips and UI buttons
 - D, C, N, L open main modals; A opens Channel Actions
 - H toggles channel selector
-- Enter opens compose or reply compose
+- Space opens compose or reply compose; Enter moves the cursor into the channel's messages
 - Optional Vim-style helpers in navigation views: J maps to Up and K maps to Down
 - Modal close key: Backspace (Esc also works)
 
@@ -166,7 +191,7 @@ Primary usage is wheel plus keyboard.
 - Wheel Click enters/exits row cursor mode
 - In row cursor mode, Wheel Up and Down moves selected chat row
 - Backspace exits row cursor mode
-- Enter opens compose or reply compose
+- Space opens compose or reply compose; Enter moves the cursor into the channel's messages
 - H toggles channel selector
 - Config modal: Wheel Click swaps focus between action list and info panel
 - DM modal: Wheel Click swaps focus between conversation list and message list
@@ -181,7 +206,7 @@ Primary usage is keyboard.
 - Arrow keys map to the same directional actions
 - H toggles channel selector
 - Escape closes modals and exits chat focus mode
-- Enter/Fn+Enter opens compose or confirms selected actions
+- Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages
 - Fn+Backspace is the DM delete trigger
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)

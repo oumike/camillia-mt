@@ -25,7 +25,6 @@
 #include "fonts/roboto_splash_fonts.h"
 #include <WiFi.h>
 #include <Preferences.h>
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <lvgl.h>
 #include <time.h>
@@ -749,7 +748,19 @@ static void openDmModal();
 static void closeDmModal();
 static void refreshDmModal(bool force = false);
 static void refreshDmPanelFocusStyles();
-static void activateDmSelection();
+// allowCompose=false stops at focusing the message panel (Enter); the compose
+// dialog is only opened when true (Space).
+static void activateDmSelection(bool allowCompose = true);
+
+// Bubble chat helpers (defined further down, but also used by the DM renderer
+// so DMs can share the Bubbles style).
+static const char *chatStripPrefix(const char *line);
+static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
+                           const char *nameTag, const char *body,
+                           DisplayLine::AckState ackState,
+                           uint32_t replyPacketId, bool isSelected,
+                           lv_obj_t **outLast, lv_obj_t **outSelected,
+                           lv_event_cb_t onPressed);
 static bool dmDeleteConfirmActive(uint32_t nowMs);
 static void dmRequestDeleteSelectedConversation();
 static void onDmConversationPressed(lv_event_t *e);
@@ -7006,166 +7017,15 @@ static bool nodesStateMapCacheComplete() {
 static bool nodesDownloadStateMap(const UsStateMapSpec &s,
                                   bool staticHostResolvable,
                                   bool tileHostResolvable) {
-#if !HAS_SD_CARD
+    // On-device state maps are disabled (kStateMapsEnabled == false) and the
+    // Nodes map panel is never built, so this never ran. Its HTTPS tile /
+    // staticmap downloads were the last TLS consumer in the firmware; they are
+    // removed so WiFiClientSecure can be dropped entirely. Maps live in the web
+    // config UI, which the browser renders and fetches tiles for.
     LV_UNUSED(s);
     LV_UNUSED(staticHostResolvable);
     LV_UNUSED(tileHostResolvable);
     return false;
-#else
-    if (WiFi.status() != WL_CONNECTED || WiFi.getMode() == WIFI_AP) return false;
-    if (!nodesMapEnsureDir("/camillia")) return false;
-    if (!nodesMapEnsureDir("/camillia/state_maps")) return false;
-
-    float latPad = max(0.20f, (s.latMax - s.latMin) * 0.08f);
-    float lonPad = max(0.20f, (s.lonMax - s.lonMin) * 0.08f);
-    float lat0 = max(-85.0f, s.latMin - latPad);
-    float lat1 = min(85.0f, s.latMax + latPad);
-    float lon0 = max(-179.8f, s.lonMin - lonPad);
-    float lon1 = min(179.8f, s.lonMax + lonPad);
-
-    String path = nodesStateMapPath(s.code);
-
-    if (staticHostResolvable) {
-        String url = "https://staticmap.openstreetmap.de/staticmap.php?bbox=";
-        url += String(lon0, 4); url += ",";
-        url += String(lat0, 4); url += ",";
-        url += String(lon1, 4); url += ",";
-        url += String(lat1, 4);
-        url += "&size=";
-        url += String(kStateMapImageW);
-        url += "x";
-        url += String(kStateMapImageH);
-        url += "&maptype=mapnik";
-
-        if (!runtimeHttpsHeapOkay("state-map static")) {
-            return false;
-        }
-        Serial.printf("[https] state-map static begin url=%s\n", url.c_str());
-
-        WiFiClientSecure client;
-        client.setInsecure();
-        client.setTimeout(5000);
-
-        HTTPClient http;
-        if (http.begin(client, url)) {
-            http.addHeader("User-Agent", "camillia-mt/1.0");
-            int code = http.GET();
-            Serial.printf("[https] state-map static http=%d\n", code);
-            if (code == HTTP_CODE_OK) {
-                if (SD.exists(path.c_str())) SD.remove(path.c_str());
-                File out = SD.open(path.c_str(), FILE_WRITE);
-                if (out) {
-                    int written = http.writeToStream(&out);
-                    out.close();
-                    http.end();
-                    if (written > 0 && nodesFileLooksLikePng(path.c_str())) {
-                        nodesWriteStateMapMeta(s.code, lat0, lat1, lon0, lon1);
-                        return true;
-                    }
-                } else {
-                    http.end();
-                }
-                SD.remove(path.c_str());
-            } else {
-                http.end();
-            }
-        }
-    }
-
-    if (!tileHostResolvable) return false;
-
-    auto lonToTileX = [](double lonDeg, int z) -> int {
-        double n = (lonDeg + 180.0) / 360.0 * (double)(1 << z);
-        return (int)floor(n);
-    };
-    auto latToTileY = [](double latDeg, int z) -> int {
-        double latRad = latDeg * 3.14159265358979323846 / 180.0;
-        double n = (1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / 3.14159265358979323846) * 0.5 * (double)(1 << z);
-        return (int)floor(n);
-    };
-    auto tileXToLon = [](int x, int z) -> double {
-        return ((double)x / (double)(1 << z)) * 360.0 - 180.0;
-    };
-    auto tileYToLat = [](int y, int z) -> double {
-        double n = 3.14159265358979323846 - 2.0 * 3.14159265358979323846 * (double)y / (double)(1 << z);
-        return 180.0 / 3.14159265358979323846 * atan(0.5 * (exp(n) - exp(-n)));
-    };
-
-    float spanLon = max(0.4f, s.lonMax - s.lonMin);
-    float spanLat = max(0.4f, s.latMax - s.latMin);
-    double centerLat = (double)(s.latMin + s.latMax) * 0.5;
-    double centerLon = (double)(s.lonMin + s.lonMax) * 0.5;
-
-    int z = 5;
-    for (int cand = 7; cand >= 3; cand--) {
-        int ty = latToTileY(centerLat, cand);
-        double latTop = tileYToLat(ty, cand);
-        double latBottom = tileYToLat(ty + 1, cand);
-        double tileLatSpan = fabs(latTop - latBottom);
-        double tileLonSpan = 360.0 / (double)(1 << cand);
-        if (tileLonSpan >= (double)spanLon * 1.15 && tileLatSpan >= (double)spanLat * 1.15) {
-            z = cand;
-            break;
-        }
-    }
-
-    int tx = lonToTileX(centerLon, z);
-    int ty = latToTileY(centerLat, z);
-    int maxTile = (1 << z) - 1;
-    if (tx < 0) tx = 0;
-    if (tx > maxTile) tx = maxTile;
-    if (ty < 0) ty = 0;
-    if (ty > maxTile) ty = maxTile;
-
-    String tileUrl = "https://tile.openstreetmap.org/";
-    tileUrl += String(z);
-    tileUrl += "/";
-    tileUrl += String(tx);
-    tileUrl += "/";
-    tileUrl += String(ty);
-    tileUrl += ".png";
-
-    if (!runtimeHttpsHeapOkay("state-map tile")) {
-        return false;
-    }
-    Serial.printf("[https] state-map tile begin url=%s\n", tileUrl.c_str());
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    client.setTimeout(5000);
-
-    HTTPClient http;
-    if (!http.begin(client, tileUrl)) return false;
-    http.addHeader("User-Agent", "camillia-mt/1.0");
-    int code = http.GET();
-    Serial.printf("[https] state-map tile http=%d\n", code);
-    if (code != HTTP_CODE_OK) {
-        http.end();
-        return false;
-    }
-
-    if (SD.exists(path.c_str())) SD.remove(path.c_str());
-    File out = SD.open(path.c_str(), FILE_WRITE);
-    if (!out) {
-        http.end();
-        return false;
-    }
-
-    int written = http.writeToStream(&out);
-    out.close();
-    http.end();
-    if (written <= 0 || !nodesFileLooksLikePng(path.c_str())) {
-        SD.remove(path.c_str());
-        return false;
-    }
-
-    float tileLon0 = (float)tileXToLon(tx, z);
-    float tileLon1 = (float)tileXToLon(tx + 1, z);
-    float tileLat1 = (float)tileYToLat(ty, z);
-    float tileLat0 = (float)tileYToLat(ty + 1, z);
-    nodesWriteStateMapMeta(s.code, tileLat0, tileLat1, tileLon0, tileLon1);
-    return true;
-#endif
 }
 
 static void bootstrapStateMapsIfMissing() {
@@ -9346,7 +9206,7 @@ static DmConv *selectedDmConversation() {
     return DMs.find(nodeId);
 }
 
-static void activateDmSelection() {
+static void activateDmSelection(bool allowCompose) {
     if (s_dmSelection > 0 && dmDeleteConfirmActive(millis())) {
         DmConv *selected = selectedDmConversation();
         if (selected && selected->nodeId == s_dmDeletePendingNodeId) {
@@ -9366,7 +9226,7 @@ static void activateDmSelection() {
     if (!s_dmMsgPanelFocused) {
         s_dmMsgPanelFocused = true;
         refreshDmPanelFocusStyles();
-    } else {
+    } else if (allowCompose) {
         openComposePromptForDm(selected->nodeId);
     }
 }
@@ -9812,6 +9672,31 @@ static void closeDmNodePicker() {
     memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
 }
 
+// ── DM bubble-style helpers ──────────────────────────────────────────────────
+// Our own DM lines are written by DmMgr with a "<me> " prefix; received lines
+// use "[name] ". Only the leading prefix window is scanned so body text
+// containing "<me>" can't flip a bubble's alignment.
+static bool dmLineIsFromMe(const char *line) {
+    if (!line) return false;
+    const int kWindow = 28;
+    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
+        if (p[0] == ']') return false;   // received prefix closed first
+        if (p[0] == '<' && p[1] == 'm' && p[2] == 'e' && p[3] == '>') return true;
+    }
+    return false;
+}
+
+static DisplayLine::AckState dmAckToDisplayAck(DmLine::AckState a) {
+    switch (a) {
+        case DmLine::PENDING:     return DisplayLine::PENDING;
+        case DmLine::ACKED:       return DisplayLine::ACKED;
+        case DmLine::ACKED_RELAY: return DisplayLine::ACKED_RELAY;
+        case DmLine::NAKED:       return DisplayLine::NAKED;
+        case DmLine::TX_FAILED:   return DisplayLine::TX_FAILED;
+        default:                  return DisplayLine::NONE;
+    }
+}
+
 static void refreshDmModal(bool force) {
     if (!lvObjAlive(s_dmModal)
         || !lvObjAlive(s_dmConvList)
@@ -10055,6 +9940,27 @@ static void refreshDmModal(bool force) {
                 lastDateBucket = curBucket;
             }
 
+            // Bubbles style: reuse the channel-chat bubble renderer. Our lines
+            // sit right-aligned in the accent/ack color, the peer's left-aligned
+            // in their stable per-node color. No name tag (1:1 conversation, the
+            // peer is already named in the panel header) and no press handler
+            // (DMs have no reply/selection model).
+            if (s_cfg.chatStyle == CHAT_STYLE_BUBBLES) {
+                const bool isMe = dmLineIsFromMe(dl->text);
+                chatMakeBubble(s_dmMsgList,
+                               isMe ? 0u : selected->nodeId,
+                               isMe,
+                               nullptr,
+                               chatStripPrefix(dl->text),
+                               dmAckToDisplayAck(dl->ack),
+                               0,
+                               false,
+                               &lastMsgObj,
+                               nullptr,
+                               nullptr);
+                continue;
+            }
+
             lv_obj_t *msg = lv_label_create(s_dmMsgList);
             lastMsgObj = msg;
             lv_obj_set_width(msg, lv_pct(100));
@@ -10123,17 +10029,17 @@ static void refreshDmModal(bool force) {
         } else {
 #if defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+                                  "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
+                                  "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
                                   modalCloseKeyLabel());
 #else
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down = Select   Enter = Compose/Focus   %s = Delete   %s = Back",
+                                  "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
                                   dmDeleteTriggerLabel(),
                                   modalCloseKeyLabel());
 #endif
@@ -10301,17 +10207,17 @@ static void openDmModal() {
         0);
 #if defined(DEVICE_TDECK)
     lv_label_set_text_fmt(hint,
-                          "J/K = Select   Enter = Compose/Focus   Bksp = Delete");
+                          "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text_fmt(hint,
-                          "Up/Down = Select   Enter = Compose/Focus   Bksp = Delete");
+                          "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text_fmt(hint,
                           "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
                           modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(hint,
-                          "Up/Down = Select   Enter = Compose/Focus   %s = Delete   %s = Back",
+                          "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
                           dmDeleteTriggerLabel(),
                           modalCloseKeyLabel());
 #endif
@@ -10652,7 +10558,8 @@ static void openLegendModal() {
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
         "(H) Help\n"
-        "(Enter) Compose/Reply");
+        "(Space) Compose/Reply\n"
+        "(Enter) Focus Messages");
 #else
     lv_label_set_text(
         leftCol,
@@ -10661,7 +10568,8 @@ static void openLegendModal() {
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
         "(H) Help\n"
-        "(Enter) Compose/Reply");
+        "(Space) Compose/Reply\n"
+        "(Enter) Focus Messages");
 #endif
 
     lv_obj_t *rightCol = lv_obj_create(bodyRow);
@@ -10710,7 +10618,8 @@ static void openLegendModal() {
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
         "(H) Help\n"
-        "(Enter) Compose/Reply\n"
+        "(Space) Compose/Reply\n"
+        "(Enter) Focus Messages\n"
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -12886,10 +12795,23 @@ static void pumpKeyboardInput() {
                 }
                 continue;
             }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
             if (k == KEY_ENTER || k == ' ') {
                 activateDmSelection();
                 continue;
             }
+#else
+            // Space is the new-message key. Enter only advances focus into the
+            // conversation's messages; it never opens the compose dialog.
+            if (k == ' ') {
+                activateDmSelection(true);
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                activateDmSelection(false);
+                continue;
+            }
+#endif
             continue;
         }
 
@@ -13431,32 +13353,45 @@ static void pumpKeyboardInput() {
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-            } else if ((k == KEY_ENTER || k == KEY_FN_ENTER || k == ' ')
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+            // Touch-first build: Enter keeps its original new-message behavior.
+            } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+                if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+                    openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
+                } else {
+                    openComposePrompt(0, nullptr);
+                }
 #else
-            } else if ((k == KEY_ENTER || k == ' ')
-                       && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
-#endif
+            // Space is the new-message key on keyboard builds; it replaced Enter.
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+            } else if ((k == ' ' || k == KEY_FN_ENTER)
+                       && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
                 if (!s_cardputerMainChatPanelFocused) {
-                    // In nav focus, Enter is reserved for channel selector flow.
+                    // In nav focus, the channel selector flow owns activation.
                 } else if (s_pagerChatCursorMode && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
                     openComposePrompt(0, nullptr);
                 }
 #else
-                if (kPagerWheelChatNav) {
-                    if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
-                        openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
-                    } else {
-                        openComposePrompt(0, nullptr);
-                    }
-                } else if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+            } else if (k == ' '
+                       && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+                if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
                     openComposePrompt(0, nullptr);
+                }
+#endif
+            // Enter now moves the cursor into the selected channel's messages
+            // (same effect as the pager's wheel click) instead of composing.
+            } else if (k == KEY_ENTER
+                       && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+                if (!s_pagerChatCursorMode) {
+                    s_pagerChatCursorMode = true;
+                    if (!pagerSelectChatCursorIndex(-1)) {
+                        s_pagerChatCursorMode = false;
+                    }
                 }
 #endif
             } else if (k == KEY_BACKSPACE) {
@@ -16204,7 +16139,8 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            const char *nameTag, const char *body,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
-                           lv_obj_t **outLast, lv_obj_t **outSelected) {
+                           lv_obj_t **outLast, lv_obj_t **outSelected,
+                           lv_event_cb_t onPressed) {
     lv_obj_t *rowW = lv_obj_create(list);
     lv_obj_remove_style_all(rowW);
     lv_obj_set_width(rowW, lv_pct(100));
@@ -16300,9 +16236,12 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         if (outSelected) *outSelected = rowW;
     }
 
-    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(b, onChatMessagePressed, LV_EVENT_CLICKED,
-                        (void *)(uintptr_t)replyPacketId);
+    // DM bubbles pass nullptr: they have no channel-chat reply/selection model.
+    if (onPressed) {
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(b, onPressed, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)replyPacketId);
+    }
 
     if (outLast) *outLast = rowW;
 }
@@ -16367,7 +16306,8 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
 
         chatMakeBubble(s_chatList, sender, isMe, nameTag, body,
                        rows[i]->ack,
-                       replyPacketId, isSelected, lastMsgObj, selectedMsgObj);
+                       replyPacketId, isSelected, lastMsgObj, selectedMsgObj,
+                       onChatMessagePressed);
     }
 }
 
