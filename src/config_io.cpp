@@ -361,6 +361,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.uiTheme            = MY_UI_THEME;
     cfg.uiMode             = MY_UI_MODE;
     cfg.chatStyle          = MY_CHAT_STYLE;
+    cfg.chatNameStyle      = MY_CHAT_NAME_STYLE;
     cfg.chatColorsEnabled  = MY_CHAT_COLORS_EN;
     cfg.userMsgColor       = MY_USER_MSG_COLOR;
     cfg.btEnabled          = MY_BT_ENABLED;
@@ -559,7 +560,14 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    themeMode: ";
     out += (cfg.uiMode < kNumThemeModes) ? kThemeModeNames[cfg.uiMode] : kThemeModeNames[0];
     out += "\n";
-    out += "    chatStyle: "; out += (cfg.chatStyle == CHAT_STYLE_BUBBLES ? "BUBBLES" : "CLASSIC"); out += "\n";
+    out += "    chatStyle: ";
+    out += (cfg.chatStyle == CHAT_STYLE_BUBBLES ? "BUBBLES"
+            : cfg.chatStyle == CHAT_STYLE_OUTLINE ? "OUTLINE"
+            : "CLASSIC");
+    out += "\n";
+    out += "    chatNameStyle: ";
+    out += (cfg.chatNameStyle == CHAT_NAME_LONG ? "LONG" : "SHORT");
+    out += "\n";
     snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
@@ -911,9 +919,21 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "chatStyle")) {
                     if (isdigit((unsigned char)val[0]))
-                        cfg.chatStyle = (uint8_t)constrain(atoi(val), 0, 1);
+                        cfg.chatStyle = (uint8_t)constrain(atoi(val), 0, CHAT_STYLE_MAX);
+                    else if (!strcmp(val, "BUBBLES"))
+                        cfg.chatStyle = CHAT_STYLE_BUBBLES;
+                    else if (!strcmp(val, "OUTLINE"))
+                        cfg.chatStyle = CHAT_STYLE_OUTLINE;
                     else
-                        cfg.chatStyle = !strcmp(val, "BUBBLES") ? CHAT_STYLE_BUBBLES : CHAT_STYLE_CLASSIC;
+                        cfg.chatStyle = CHAT_STYLE_CLASSIC;
+                }
+                else if (!strcmp(key, "chatNameStyle")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.chatNameStyle = (uint8_t)constrain(atoi(val), 0, CHAT_NAME_MAX);
+                    else if (!strcmp(val, "LONG"))
+                        cfg.chatNameStyle = CHAT_NAME_LONG;
+                    else
+                        cfg.chatNameStyle = CHAT_NAME_SHORT;
                 }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);

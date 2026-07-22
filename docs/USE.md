@@ -102,14 +102,35 @@ Config includes Web Config controls, export and import, theme toggles, announce,
 
 ### Chat style
 
-Config has a **Chat Style** action that toggles between:
+Config has a **Chat Style** action. Selecting it opens a picker modal — navigate
+with the usual up/down input and press Enter (or tap) to choose Classic,
+Bubbles, or Outline; Backspace/Esc cancels. Choosing a *different* style reboots
+to apply it; re-choosing the current style just closes without a reboot.
 
 - **Classic** — one flat, colored text line per message
-- **Bubbles** — per-message rounded bubbles; your messages are right-aligned in
-  the accent color (turning green on ACK, red on failure), other nodes' are
-  left-aligned in a stable per-node color with a short-name tag
+- **Bubbles** — per-message rounded bubbles with a solid fill; your messages are
+  right-aligned in the accent color (turning green on ACK, red on failure),
+  other nodes' are left-aligned in a stable per-node color with a short-name tag
+- **Outline** — the same bubbles drawn as colored outlines over a transparent
+  fill: the per-node/accent color becomes the border (and the ACK/fail color for
+  your sent messages), the sender tag is tinted to match, and the message text
+  uses the theme's normal high-contrast color for readability
 
-The style applies to both **channel chat and Direct Messages**.
+The style applies to both **channel chat and Direct Messages**. The Web Config
+**Chat Style** dropdown offers the same three choices.
+
+### Chat names
+
+Config also has a **Chat Names** action, which opens a picker (same navigation as
+Chat Style) to choose how sender names appear in channel chat:
+
+- **Short** — the node's 4-character short name (e.g. `ABCD`)
+- **Long** — the node's full advertised name when one is known, otherwise it
+  falls back to the short name / hex id
+
+Unlike Chat Style, this applies **without a reboot**: bubble views re-render
+immediately, and new classic-chat lines use the chosen style going forward. The
+Web Config **Chat Names** dropdown offers the same two choices.
 
 ![Config screen](screenshots/RiCa_screen_20260609_110933.png)
 

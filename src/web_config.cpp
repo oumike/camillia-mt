@@ -1444,10 +1444,16 @@ static void sendConfigPage(const char *msg = "") {
     // so the option is hidden there. Changing it requires a reboot.
     html += "<div class='row2'>";
     html += "<label>Chat Style (requires reboot)<select name='chat_style'>"
-            "<option value='0'"; if (gCfg->chatStyle != CHAT_STYLE_BUBBLES) html += " selected"; html += ">Classic</option>"
+            "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>"
             "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>"
+            "<option value='2'"; if (gCfg->chatStyle == CHAT_STYLE_OUTLINE) html += " selected"; html += ">Outline</option>"
             "</select></label></div>";
 #endif
+    html += "<div class='row2'>";
+    html += "<label>Chat Names<select name='chat_names'>"
+            "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
+            "<option value='1'"; if (gCfg->chatNameStyle == CHAT_NAME_LONG)  html += " selected"; html += ">Long (full name)</option>"
+            "</select></label></div>";
     html += "<div class='row2'>";
     html += "<label>Compass North Top<select name='compass_north'>"
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
@@ -2765,10 +2771,16 @@ static void handlePostSave() {
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     if (server.hasArg("chat_style")) {
-        gCfg->chatStyle = server.arg("chat_style").toInt() != 0
-                              ? CHAT_STYLE_BUBBLES : CHAT_STYLE_CLASSIC;
+        long cs = server.arg("chat_style").toInt();
+        if (cs < 0 || cs > CHAT_STYLE_MAX) cs = CHAT_STYLE_CLASSIC;
+        gCfg->chatStyle = (uint8_t)cs;
     }
 #endif
+    if (server.hasArg("chat_names")) {
+        long cn = server.arg("chat_names").toInt();
+        if (cn < 0 || cn > CHAT_NAME_MAX) cn = CHAT_NAME_SHORT;
+        gCfg->chatNameStyle = (uint8_t)cn;
+    }
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.

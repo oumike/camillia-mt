@@ -183,6 +183,17 @@ static lv_obj_t *s_cfgColorModal = nullptr;
 static lv_obj_t *s_cfgColorGrid = nullptr;
 static int s_cfgColorSelection = 0;
 
+// Chat-style picker (Classic / Bubbles / Outline), reachable from the CFG screen.
+static lv_obj_t *s_chatStyleBackdrop = nullptr;
+static lv_obj_t *s_chatStyleModal = nullptr;
+static lv_obj_t *s_chatStyleRows[CHAT_STYLE_MAX + 1] = {};
+static int s_chatStyleSelection = 0;
+
+static lv_obj_t *s_chatNameBackdrop = nullptr;
+static lv_obj_t *s_chatNameModal = nullptr;
+static lv_obj_t *s_chatNameRows[CHAT_NAME_MAX + 1] = {};
+static int s_chatNameSelection = 0;
+
 struct KnownWifiEntry {
     char ssid[sizeof(RhinoConfig::wifiSsid)];
     char pass[sizeof(RhinoConfig::wifiPass)];
@@ -698,6 +709,12 @@ static void refreshCfgColorPickerModal();
 static void applyCfgColorSelection(int idx);
 static void onCfgColorRowPressed(lv_event_t *e);
 static void onCfgColorBackdropPressed(lv_event_t *e);
+static void openChatStyleModal();
+static void closeChatStyleModal();
+static void refreshChatStyleSelection();
+static void applyChatStyleSelection(int style);
+static void onChatStyleRowPressed(lv_event_t *e);
+static void onChatStyleBackdropPressed(lv_event_t *e);
 static void openCfgWifiPickerModal(bool forOnboarding = false);
 static void closeCfgWifiPickerModal();
 static void refreshCfgWifiPickerModal();
@@ -761,6 +778,38 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
                            lv_event_cb_t onPressed);
+
+// Chat style helpers. The three styles form a cycle for the CFG toggle:
+// Classic -> Bubbles -> Outline -> Classic. Both bubble styles share the bubble
+// renderer; only CLASSIC uses the flat-line path.
+static const char *chatStyleName(uint8_t style) {
+    switch (style) {
+        case CHAT_STYLE_BUBBLES: return "Bubbles";
+        case CHAT_STYLE_OUTLINE: return "Outline";
+        default:                 return "Classic";
+    }
+}
+static inline bool chatStyleUsesBubbles(uint8_t style) {
+    return style == CHAT_STYLE_BUBBLES || style == CHAT_STYLE_OUTLINE;
+}
+static const char *chatNameStyleName(uint8_t style) {
+    return (style == CHAT_NAME_LONG) ? "Long" : "Short";
+}
+// Resolve the sender label shown in chat, honoring the Chat Names setting.
+// Long style uses the node's advertised long name when known; otherwise (and
+// for Short style) it falls back to the standard short-name/hex label.
+static void chatSenderLabel(uint32_t nodeId, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    if (s_cfg.chatNameStyle == CHAT_NAME_LONG) {
+        NodeEntry *n = Nodes.find(nodeId);
+        if (n && n->hasName && n->longName[0]) {
+            snprintf(out, outLen, "%s", n->longName);
+            return;
+        }
+    }
+    liveNodeLabel(nodeId, out, outLen, false);
+}
+
 static bool dmDeleteConfirmActive(uint32_t nowMs);
 static void dmRequestDeleteSelectedConversation();
 static void onDmConversationPressed(lv_event_t *e);
@@ -1128,6 +1177,7 @@ enum CfgActionId {
     CFG_ACTION_OWNER_COLOR,
     CFG_ACTION_UNITS,
     CFG_ACTION_CHAT_STYLE,
+    CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
@@ -2310,8 +2360,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
             break;
         case CFG_ACTION_CHAT_STYLE:
-            snprintf(buf, bufLen, "Chat Style: %s",
-                     s_cfg.chatStyle == CHAT_STYLE_BUBBLES ? "Bubbles" : "Classic");
+            snprintf(buf, bufLen, "Chat Style: %s", chatStyleName(s_cfg.chatStyle));
+            break;
+        case CFG_ACTION_CHAT_NAMES:
+            snprintf(buf, bufLen, "Chat Names: %s", chatNameStyleName(s_cfg.chatNameStyle));
             break;
         case CFG_ACTION_CHAT_COLORS:
             snprintf(buf, bufLen, "Chat Colors: %s",
@@ -2397,7 +2449,6 @@ static bool cfgActionNeedsConfirm(int actionId) {
     return actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
-        || actionId == CFG_ACTION_CHAT_STYLE
     || actionId == CFG_ACTION_CLEAR_MSGS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
@@ -3083,6 +3134,7 @@ static void persistConfigToPrefs() {
     p.putULong("screenOnSecs", s_cfg.screenOnSecs);
     p.putUChar("dispUnits", s_cfg.displayUnits);
     p.putUChar("chatStyle", s_cfg.chatStyle);
+    p.putUChar("chatNameSty", s_cfg.chatNameStyle);
     p.putBool("chatColors", s_cfg.chatColorsEnabled);
     p.putUChar("userMsgColor", s_cfg.userMsgColor);
     p.putBool("compassNorth", s_cfg.compassNorthTop);
@@ -3251,7 +3303,9 @@ static void loadConfigFromPrefs() {
     ro = prefs.getUChar("dispUnits", 0xFF);
     if (ro != 0xFF) s_cfg.displayUnits = ro;
     ro = prefs.getUChar("chatStyle", 0xFF);
-    if (ro != 0xFF && ro <= CHAT_STYLE_BUBBLES) s_cfg.chatStyle = ro;
+    if (ro != 0xFF && ro <= CHAT_STYLE_MAX) s_cfg.chatStyle = ro;
+    ro = prefs.getUChar("chatNameSty", 0xFF);
+    if (ro != 0xFF && ro <= CHAT_NAME_MAX) s_cfg.chatNameStyle = ro;
     if (prefs.isKey("chatColors")) s_cfg.chatColorsEnabled = prefs.getBool("chatColors");
     if (prefs.isKey("userMsgColor")) {
         uint8_t umc = prefs.getUChar("userMsgColor", 0xFF);
@@ -4146,6 +4200,7 @@ static void initCfgActions() {
     // compact config layouts (notably the Pager's split action/info screen).
     // Cardputer remains Classic-only due its 240x135 display constraints.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
@@ -4586,6 +4641,325 @@ static void onCfgColorBackdropPressed(lv_event_t *e) {
     if (lv_event_get_target(e) != s_cfgColorBackdrop) return;
     closeCfgColorPickerModal();
     refreshCfgModal();
+}
+
+// ── Chat-style picker ─────────────────────────────────────────────────────────
+// A small in-CFG modal to pick Classic / Bubbles / Outline directly. Picking the
+// current style is a no-op; picking a different one reboots (the style is applied
+// at boot). Picking directly avoids the reboot-per-step of the old cycle toggle.
+static void closeChatStyleModal() {
+    if (lvObjValid(s_chatStyleBackdrop)) {
+        lv_obj_del(s_chatStyleBackdrop);
+    } else if (lvObjValid(s_chatStyleModal)) {
+        lv_obj_del(s_chatStyleModal);
+    }
+    s_chatStyleBackdrop = nullptr;
+    s_chatStyleModal = nullptr;
+    memset(s_chatStyleRows, 0, sizeof(s_chatStyleRows));
+}
+
+static void refreshChatStyleSelection() {
+    if (!s_chatStyleModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
+        lv_obj_t *row = s_chatStyleRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_chatStyleSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void applyChatStyleSelection(int style) {
+    if (style < 0 || style > CHAT_STYLE_MAX) return;
+    if ((uint8_t)style == s_cfg.chatStyle) {
+        // No change — no reboot needed; just return to the CFG screen.
+        closeChatStyleModal();
+        refreshCfgModal();
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s (unchanged)",
+                 chatStyleName((uint8_t)style));
+        return;
+    }
+    s_cfg.chatStyle = (uint8_t)style;
+    persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s - rebooting...",
+             chatStyleName((uint8_t)style));
+    closeChatStyleModal();
+    refreshCfgModal();
+    lv_timer_handler();
+    delay(1000);
+    ESP.restart();
+}
+
+static void onChatStyleRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_chatStyleSelection = idx;
+    applyChatStyleSelection(idx);
+}
+
+static void onChatStyleBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_chatStyleBackdrop) return;
+    closeChatStyleModal();
+    refreshCfgModal();
+}
+
+static void openChatStyleModal() {
+    if (!s_rootScreen || s_chatStyleModal || s_chatStyleBackdrop) return;
+    s_chatStyleSelection = (s_cfg.chatStyle <= CHAT_STYLE_MAX) ? s_cfg.chatStyle : 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_chatStyleBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chatStyleBackdrop, w, h);
+    lv_obj_align(s_chatStyleBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chatStyleBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chatStyleBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chatStyleBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_chatStyleBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_chatStyleBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_chatStyleBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_chatStyleBackdrop, onChatStyleBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chatStyleModal = lv_obj_create(s_chatStyleBackdrop);
+    lv_obj_set_size(s_chatStyleModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_chatStyleModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_chatStyleModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chatStyleModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chatStyleModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chatStyleModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chatStyleModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chatStyleModal, 1, 0);
+    lv_obj_set_style_border_color(s_chatStyleModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chatStyleModal, 8, 0);
+    lv_obj_set_style_pad_row(s_chatStyleModal, 6, 0);
+    lv_obj_set_flex_flow(s_chatStyleModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chatStyleModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_chatStyleBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_chatStyleModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Chat Style");
+
+    lv_obj_t *hint = lv_label_create(s_chatStyleModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a style to apply"
+#else
+                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+#endif
+    );
+
+    static const char *kStyleDesc[CHAT_STYLE_MAX + 1] = {
+        "Flat colored text lines",
+        "Filled color bubbles",
+        "Outlined color bubbles",
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
+        lv_obj_t *row = lv_btn_create(s_chatStyleModal);
+        s_chatStyleRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onChatStyleRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_text(name, chatStyleName((uint8_t)i));
+
+        lv_obj_t *desc = lv_label_create(row);
+        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(desc, rowTextColor, 0);
+        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+        lv_label_set_text(desc, kStyleDesc[i]);
+    }
+
+    refreshChatStyleSelection();
+}
+
+// ── Chat-name picker ──────────────────────────────────────────────────────────
+// A small in-CFG modal to pick Short / Long sender names in chat. Unlike the
+// chat-style picker this applies live (no reboot): bubble views re-render
+// immediately and new classic-chat lines follow the choice.
+static void refreshChatView(bool force);
+
+static void closeChatNameModal() {
+    if (lvObjValid(s_chatNameBackdrop)) {
+        lv_obj_del(s_chatNameBackdrop);
+    } else if (lvObjValid(s_chatNameModal)) {
+        lv_obj_del(s_chatNameModal);
+    }
+    s_chatNameBackdrop = nullptr;
+    s_chatNameModal = nullptr;
+    memset(s_chatNameRows, 0, sizeof(s_chatNameRows));
+}
+
+static void refreshChatNameSelection() {
+    if (!s_chatNameModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i <= CHAT_NAME_MAX; i++) {
+        lv_obj_t *row = s_chatNameRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_chatNameSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void applyChatNameSelection(int style) {
+    if (style < 0 || style > CHAT_NAME_MAX) return;
+    const bool changed = ((uint8_t)style != s_cfg.chatNameStyle);
+    s_cfg.chatNameStyle = (uint8_t)style;
+    if (changed) {
+        persistConfigToPrefs();
+        // Re-render chat live so bubble name tags update immediately.
+        s_lastRenderedChannel = -1;
+        refreshChatView(true);
+    }
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Names: %s%s",
+             chatNameStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+    closeChatNameModal();
+    refreshCfgModal();
+}
+
+static void onChatNameRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_chatNameSelection = idx;
+    applyChatNameSelection(idx);
+}
+
+static void onChatNameBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_chatNameBackdrop) return;
+    closeChatNameModal();
+    refreshCfgModal();
+}
+
+static void openChatNameModal() {
+    if (!s_rootScreen || s_chatNameModal || s_chatNameBackdrop) return;
+    s_chatNameSelection = (s_cfg.chatNameStyle <= CHAT_NAME_MAX) ? s_cfg.chatNameStyle : 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_chatNameBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chatNameBackdrop, w, h);
+    lv_obj_align(s_chatNameBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chatNameBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chatNameBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chatNameBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_chatNameBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_chatNameBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_chatNameBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_chatNameBackdrop, onChatNameBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chatNameModal = lv_obj_create(s_chatNameBackdrop);
+    lv_obj_set_size(s_chatNameModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_chatNameModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_chatNameModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chatNameModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chatNameModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chatNameModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chatNameModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chatNameModal, 1, 0);
+    lv_obj_set_style_border_color(s_chatNameModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chatNameModal, 8, 0);
+    lv_obj_set_style_pad_row(s_chatNameModal, 6, 0);
+    lv_obj_set_flex_flow(s_chatNameModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chatNameModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_chatNameBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_chatNameModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Chat Names");
+
+    lv_obj_t *hint = lv_label_create(s_chatNameModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a name style to apply"
+#else
+                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+#endif
+    );
+
+    static const char *kNameLabel[CHAT_NAME_MAX + 1] = { "Short", "Long" };
+    static const char *kNameDesc[CHAT_NAME_MAX + 1] = {
+        "4-char short name (ABCD)",
+        "Full node name when known",
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    for (int i = 0; i <= CHAT_NAME_MAX; i++) {
+        lv_obj_t *row = lv_btn_create(s_chatNameModal);
+        s_chatNameRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onChatNameRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_text(name, kNameLabel[i]);
+
+        lv_obj_t *desc = lv_label_create(row);
+        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(desc, rowTextColor, 0);
+        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+        lv_label_set_text(desc, kNameDesc[i]);
+    }
+
+    refreshChatNameSelection();
 }
 
 static void openCfgColorPickerModal() {
@@ -9945,7 +10319,7 @@ static void refreshDmModal(bool force) {
             // in their stable per-node color. No name tag (1:1 conversation, the
             // peer is already named in the panel header) and no press handler
             // (DMs have no reply/selection model).
-            if (s_cfg.chatStyle == CHAT_STYLE_BUBBLES) {
+            if (chatStyleUsesBubbles(s_cfg.chatStyle)) {
                 const bool isMe = dmLineIsFromMe(dl->text);
                 chatMakeBubble(s_dmMsgList,
                                isMe ? 0u : selected->nodeId,
@@ -11010,16 +11384,14 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_CHAT_STYLE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_STYLE");
-            s_cfg.chatStyle = (uint8_t)(s_cfg.chatStyle == CHAT_STYLE_BUBBLES
-                                            ? CHAT_STYLE_CLASSIC : CHAT_STYLE_BUBBLES);
-            persistConfigToPrefs();
-            // Applied at boot; reboot so the chat view rebuilds in the new style.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s - rebooting...",
-                     s_cfg.chatStyle == CHAT_STYLE_BUBBLES ? "Bubbles" : "Classic");
-            refreshCfgModal();
-            lv_timer_handler();
-            delay(1000);
-            ESP.restart();
+            showActionPopup = false;
+            openChatStyleModal();   // pick directly; reboots only on a real change
+            break;
+
+        case CFG_ACTION_CHAT_NAMES:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_NAMES");
+            showActionPopup = false;
+            openChatNameModal();    // pick directly; applies live, no reboot
             break;
 
         case CFG_ACTION_CHAT_COLORS:
@@ -11271,12 +11643,7 @@ static void openCfgConfirmModal(int actionId) {
     s_cfgConfirmPendingAction = actionId;
 
     char actionText[96];
-    if (actionId == CFG_ACTION_CHAT_STYLE) {
-        const char *nextStyle = (s_cfg.chatStyle == CHAT_STYLE_BUBBLES) ? "Classic" : "Bubbles";
-        snprintf(actionText, sizeof(actionText), "Switch Chat Style to %s? Reboot required.", nextStyle);
-    } else {
-        cfgActionLabel(actionId, actionText, sizeof(actionText));
-    }
+    cfgActionLabel(actionId, actionText, sizeof(actionText));
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -12264,6 +12631,56 @@ static void pumpKeyboardInput() {
                 if (next != s_cfgColorSelection) {
                     s_cfgColorSelection = next;
                     refreshCfgColorPickerModal();
+                }
+            }
+            continue;
+        }
+
+        if (s_chatStyleModal) {
+            if (isModalCloseKey(k)) {
+                closeChatStyleModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyChatStyleSelection(s_chatStyleSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_chatStyleSelection + delta;
+                if (next < 0) next = 0;
+                if (next > CHAT_STYLE_MAX) next = CHAT_STYLE_MAX;
+                if (next != s_chatStyleSelection) {
+                    s_chatStyleSelection = next;
+                    refreshChatStyleSelection();
+                }
+            }
+            continue;
+        }
+
+        if (s_chatNameModal) {
+            if (isModalCloseKey(k)) {
+                closeChatNameModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyChatNameSelection(s_chatNameSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_chatNameSelection + delta;
+                if (next < 0) next = 0;
+                if (next > CHAT_NAME_MAX) next = CHAT_NAME_MAX;
+                if (next != s_chatNameSelection) {
+                    s_chatNameSelection = next;
+                    refreshChatNameSelection();
                 }
             }
             continue;
@@ -15085,18 +15502,16 @@ static inline bool channelIsMuted(int chanIdx) {
 
 static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
     char timePrefix[12];
-    char sender[16];
-    char prefix[44];
+    char sender[48];
+    char prefix[80];
 
     liveBuildPrefix(timePrefix, sizeof(timePrefix));
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     LV_UNUSED(viaMqtt);
-    NodeEntry *n = Nodes.find(fromNode);
-    const char *hintShort = (n && n->shortName[0]) ? n->shortName : nullptr;
-    liveNodeLabelWithHint(fromNode, hintShort, sender, sizeof(sender), false);
+    chatSenderLabel(fromNode, sender, sizeof(sender));
     snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
 #else
-    liveNodeLabel(fromNode, sender, sizeof(sender), false);
+    chatSenderLabel(fromNode, sender, sizeof(sender));
     const char *transportIcon = viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
     // Keep a small visual buffer between transport icon and timestamp.
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
@@ -16176,24 +16591,48 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                 break;
         }
     }
-    lv_color_t txt = bubbleTextColor(bg565);
-
     lv_obj_t *b = lv_obj_create(rowW);
     lv_obj_remove_style_all(b);
     lv_obj_set_width(b, LV_SIZE_CONTENT);
     lv_obj_set_height(b, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(b, lv_pct(94), 0);
     lv_obj_set_style_radius(b, 8, 0);
-    lv_obj_set_style_bg_color(b, tftColorToLv(bg565), 0);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b, 4, 0);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(b, 1, 0);
 
+    // Filled (BUBBLES): solid per-node background, contrast text on top.
+    // Outlined (OUTLINE): transparent fill + a colored border carrying the
+    // node/ack color, with the body in the theme's readable text color and the
+    // sender/state tag tinted in the node color.
+    const bool outline = (s_cfg.chatStyle == CHAT_STYLE_OUTLINE);
+    lv_color_t tagColor;   // sender name + ME/ME(SENT) tag
+    lv_color_t bodyColor;  // message text
+    if (outline) {
+        lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(b, (s_cfg.uiMode == UI_MODE_LIGHT) ? 2 : 1, 0);
+        lv_obj_set_style_border_color(b, tftColorToLv(bg565), 0);
+        lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
+        // The border keeps the full node color, but on dark themes several
+        // palette colors (slate, purple, deep red) are too dim to read as text
+        // at 70% opacity — lighten the name/state tag toward white so it stays
+        // legible while still carrying the node's hue.
+        tagColor  = (s_cfg.uiMode == UI_MODE_LIGHT)
+                        ? tftColorToLv(bg565)
+                        : lv_color_lighten(tftColorToLv(bg565), 190);
+        bodyColor = (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x16233A)
+                                                    : lv_color_hex(0xE8F1FF);
+    } else {
+        lv_obj_set_style_bg_color(b, tftColorToLv(bg565), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        tagColor  = bubbleTextColor(bg565);
+        bodyColor = tagColor;
+    }
+
     if (nameTag && nameTag[0]) {
         lv_obj_t *nm = lv_label_create(b);
         lv_obj_set_style_text_font(nm, kChannelChatFont, 0);
-        lv_obj_set_style_text_color(nm, txt, 0);
+        lv_obj_set_style_text_color(nm, tagColor, 0);
         lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
         lv_label_set_text(nm, nameTag);
     }
@@ -16213,14 +16652,14 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     if (stateTag) {
         lv_obj_t *st = lv_label_create(b);
         lv_obj_set_style_text_font(st, kChannelChatFont, 0);
-        lv_obj_set_style_text_color(st, txt, 0);
+        lv_obj_set_style_text_color(st, tagColor, 0);
         lv_obj_set_style_text_opa(st, LV_OPA_70, 0);
         lv_label_set_text(st, stateTag);
     }
 
     lv_obj_t *bl = lv_label_create(b);
     lv_obj_set_style_text_font(bl, kChannelChatFont, 0);
-    lv_obj_set_style_text_color(bl, txt, 0);
+    lv_obj_set_style_text_color(bl, bodyColor, 0);
     lv_label_set_long_mode(bl, LV_LABEL_LONG_CLIP);  // body carries explicit '\n'
     lv_obj_set_width(bl, LV_SIZE_CONTENT);
     setLabelTextEmojiSafe(bl, body);
@@ -16284,12 +16723,15 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
             n++;
         }
 
-        // Sender name tag for others (from NodeDB; fall back to hex id).
+        // Sender name tag for others (from NodeDB; fall back to hex id). Honors
+        // the Chat Names setting: Long uses the advertised long name when known.
         char nameBuf[24];
         const char *nameTag = nullptr;
         if (!isMe && sender != 0) {
             NodeEntry *ne = Nodes.find(sender);
-            if (ne && ne->shortName[0]) {
+            if (s_cfg.chatNameStyle == CHAT_NAME_LONG && ne && ne->hasName && ne->longName[0]) {
+                nameTag = ne->longName;
+            } else if (ne && ne->shortName[0]) {
                 nameTag = ne->shortName;
             } else {
                 snprintf(nameBuf, sizeof(nameBuf), "%04X", (unsigned)(sender & 0xFFFF));
@@ -16331,6 +16773,7 @@ static uint32_t chatRenderSignature(const DisplayLine *const *rows, int rowCount
     mix(s_selectedMsgReplyPacketId);
     for (const char *p = s_selectedMsgText; *p; p++) mix((uint8_t)*p);
     mix((uint32_t)s_cfg.chatStyle);
+    mix((uint32_t)s_cfg.chatNameStyle);
     mix((uint32_t)s_cfg.chatColorsEnabled);
     mix((uint32_t)s_cfg.uiMode);
     mix((uint32_t)(s_pagerChatCursorMode ? 1u : 0u));
@@ -16372,7 +16815,7 @@ static void refreshChatView(bool force) {
         int displayOrder[MAX_MSG_LINES] = {};
         int displayCount = 0;
         buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
-        bool useBubbleStyle = (s_cfg.chatStyle == CHAT_STYLE_BUBBLES
+        bool useBubbleStyle = (chatStyleUsesBubbles(s_cfg.chatStyle)
                                && s_activeChannel >= 0
                                && s_activeChannel < MESH_CHANNELS);
         if (useBubbleStyle) {

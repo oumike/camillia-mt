@@ -97,9 +97,17 @@
 
 // Chat rendering style (applied at boot; change requires a reboot)
 #define CHAT_STYLE_CLASSIC  0      // legacy flat colored text lines
-#define CHAT_STYLE_BUBBLES  1      // per-node colored message bubbles
+#define CHAT_STYLE_BUBBLES  1      // per-node colored (filled) message bubbles
+#define CHAT_STYLE_OUTLINE  2      // per-node colored outlined bubbles (transparent fill)
+#define CHAT_STYLE_MAX      CHAT_STYLE_OUTLINE
 #define MY_CHAT_STYLE       CHAT_STYLE_CLASSIC
 #define MY_CHAT_COLORS_EN   1      // classic mode: per-node text colors
+
+// Sender name style shown in chat (channel-chat prefix + bubble name tag)
+#define CHAT_NAME_SHORT     0      // 4-char short name (e.g. "ABCD")
+#define CHAT_NAME_LONG      1      // full long name when the node has advertised one
+#define CHAT_NAME_MAX       CHAT_NAME_LONG
+#define MY_CHAT_NAME_STYLE  CHAT_NAME_SHORT
 #define MY_USER_MSG_COLOR   0xFF   // own-message color: 0..15 palette index, 0xFF=adaptive default
 
 // ── Bluetooth defaults ─────────────────────────────────────────
