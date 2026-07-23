@@ -15,6 +15,7 @@
 #include "dm_mgr.h"
 #include "ignore_list.h"
 #include "battery_util.h"
+#include "emoji_font.h"
 #include "env_sensor.h"
 #include "gps.h"
 #include "keyboard.h"
@@ -150,6 +151,13 @@ static lv_obj_t *s_rootScreen = nullptr;
 static lv_obj_t *s_composeModal = nullptr;
 static lv_obj_t *s_composeInput = nullptr;
 static lv_obj_t *s_composeKeyboard = nullptr;
+static lv_obj_t *s_emojiPickerBackdrop = nullptr;
+static lv_obj_t *s_emojiPickerModal = nullptr;
+static int s_emojiPickerSelection = 0;
+// Send mode: picking fires a one-emoji message and closes the tray (the 'e'
+// browse shortcut on keyboard builds). Insert mode: picking appends to the open
+// compose box and keeps the tray up (the touch-only in-compose 😀 button).
+static bool s_emojiPickerSendMode = false;
 static lv_obj_t *s_composeCharCount = nullptr;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
@@ -613,7 +621,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // up. Anchoring to the passed base keeps "Medium" equal to each screen's current
 // size on every board. Fonts below 10 px aren't compiled in, so Small clamps at
 // montserrat_10; 18 px is the largest compiled face, so Extra Large clamps there.
-static const lv_font_t *scaledChatFont(const lv_font_t *base) {
+static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:
             if (base == &lv_font_montserrat_12) return &lv_font_montserrat_10;
@@ -633,6 +641,15 @@ static const lv_font_t *scaledChatFont(const lv_font_t *base) {
         default:
             return base;
     }
+}
+
+// Chat/DM text face, emoji-enabled. Every chat, DM, name, and preview label
+// funnels its font through here, so attaching the emoji fallback at this one
+// point is what makes received emoji render everywhere — including inside
+// chatFitBubbleLabel(), which measures with this same face so bubble widths
+// account for emoji glyphs too.
+static const lv_font_t *scaledChatFont(const lv_font_t *base) {
+    return emojiFont(scaledChatFontBase(base));
 }
 
 static const char *fontSizeName(uint8_t size) {
@@ -767,6 +784,8 @@ static void onComposeCancelPressed(lv_event_t *e);
 static void onComposeInputChanged(lv_event_t *e);
 static void updateComposeCharCount();
 static void refreshChatComposeButtonState();
+static void openEmojiPicker(bool sendMode = false);
+static void closeEmojiPicker();
 static void onChatMessagePressed(lv_event_t *e);
 static void recomputeChannelHashes();
 static void initCfgActions();
@@ -849,6 +868,7 @@ static void openDmModal();
 static void closeDmModal();
 static void refreshDmModal(bool force = false);
 static void refreshDmPanelFocusStyles();
+static DmConv *selectedDmConversation();
 // allowCompose=false stops at focusing the message panel (Enter); the compose
 // dialog is only opened when true (Space).
 static void activateDmSelection(bool allowCompose = true);
@@ -1227,16 +1247,22 @@ static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
             }
         }
 
+#if !LV_USE_TINY_TTF
+        // No emoji font compiled in: fall back to ASCII stand-ins for the
+        // handful we have aliases for. With the emoji font present (the default)
+        // this is skipped and the codepoint passes through to be drawn.
         const char *alias = emojiAliasForCodepoint(cp);
         if (alias) {
             writePos = appendTextLiteral(dst, dstLen, writePos, alias);
             i += n;
             continue;
         }
+#endif
 
-        // Keep unknown emoji codepoints as-is so we don't force generic tokens.
-        // If the current font cannot draw them, LVGL will still show its fallback glyph.
-
+        // Pass the codepoint through untouched. The chat/DM/name/preview labels
+        // draw with an emoji-enabled face (see emojiFont / scaledChatFont), so
+        // any emoji in the font renders inline; the rest show LVGL's fallback
+        // box, same as before.
         if (writePos + n >= dstLen) break;
         memcpy(dst + writePos, src + i, n);
         writePos += n;
@@ -3406,10 +3432,6 @@ static void loadConfigFromPrefs() {
         uint8_t umc = prefs.getUChar("userMsgColor", 0xFF);
         s_cfg.userMsgColor = (umc <= 15) ? umc : 0xFF;
     }
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Cardputer is Classic-only regardless of what NVS or an imported config holds.
-    s_cfg.chatStyle = CHAT_STYLE_CLASSIC;
-#endif
     if (prefs.isKey("compassNorth")) s_cfg.compassNorthTop = prefs.getBool("compassNorth");
     if (prefs.isKey("flipScreen")) s_cfg.flipScreen = prefs.getBool("flipScreen");
     if (prefs.isKey("splashMelody")) s_cfg.splashMelodyEnabled = prefs.getBool("splashMelody");
@@ -3908,6 +3930,8 @@ static void pagerExitChatCursorMode(bool clearSelection) {
 }
 
 static void closeComposePrompt() {
+    // The emoji picker is a child of compose; never leave it orphaned.
+    closeEmojiPicker();
     lvObjDeleteSafe(s_composeModal);
     s_composeInput = nullptr;
     s_composeKeyboard = nullptr;
@@ -3916,6 +3940,213 @@ static void closeComposePrompt() {
     s_composeDmNodeId = 0;
     s_composeReplyPacketId = 0;
     s_composeChannelIdx = s_activeChannel;
+}
+
+// ── On-device emoji picker ────────────────────────────────────────────────────
+// A grid of common emoji, opened from the compose modal, that inserts the picked
+// glyph's UTF-8 into the message textarea. These keyboards have no emoji key, so
+// this is the only way to compose emoji on-device; received ones already render
+// via the emoji fallback font. The set is intentionally a small curated tray of
+// the everyday ones, not the whole 1,489-glyph font — a full grid would be
+// unusable to scroll on these panels.
+static const char *const kEmojiTray[] = {
+    // Faces
+    "\U0001F600", "\U0001F602", "\U0001F603", "\U0001F604", "\U0001F609",
+    "\U0001F60A", "\U0001F60D", "\U0001F618", "\U0001F60E", "\U0001F914",
+    "\U0001F610", "\U0001F644", "\U0001F60F", "\U0001F622", "\U0001F62D",
+    "\U0001F621", "\U0001F631", "\U0001F633", "\U0001F634", "\U0001F925",
+    "\U0001F92F", "\U0001F642", "\U0001F643", "\U0001F615", "\U0001F62C",
+    // Hands & people
+    "\U0001F44D", "\U0001F44E", "\U0001F44C", "\U0001F44B", "\U0001F44F",
+    "\U0001F64F", "\U0001F4AA", "\U0001F91D", "\U0000270C", "\U0001F44A",
+    // Symbols
+    "\U00002764", "\U0001F494", "\U0001F525", "\U00002B50", "\U00002705",
+    "\U0000274C", "\U00002757", "\U00002753", "\U0001F4A1", "\U0001F4AF",
+    "\U0001F440", "\U0001F4CD",
+    // Celebrate & objects
+    "\U0001F389", "\U0001F38A", "\U0001F381", "\U0001F680",
+    // Weather & nature
+    "\U00002600", "\U00002601", "\U0001F327", "\U000026A1", "\U00002744",
+    "\U0001F30A",
+    // Food & drink
+    "\U0001F355", "\U00002615", "\U0001F37A", "\U0001F36A", "\U0001F34E",
+};
+constexpr int kEmojiTrayCount = (int)(sizeof(kEmojiTray) / sizeof(kEmojiTray[0]));
+
+static void refreshEmojiPickerSelection() {
+    if (!s_emojiPickerModal) return;
+    lv_obj_t *grid = lv_obj_get_child(s_emojiPickerModal, 1);   // [0]=hint, [1]=grid
+    if (!grid) return;
+    const bool light = (s_cfg.uiMode == UI_MODE_LIGHT);
+    for (int i = 0; i < kEmojiTrayCount; i++) {
+        lv_obj_t *cell = lv_obj_get_child(grid, i);
+        if (!cell) continue;
+        const bool sel = (i == s_emojiPickerSelection);
+        lv_obj_set_style_bg_opa(cell, sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(cell, light ? lv_color_hex(0xC7D8F5)
+                                              : lv_color_hex(0x2A4E8F), 0);
+        lv_obj_set_style_border_width(cell, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(cell, light ? lv_color_hex(0x3A5F9E)
+                                                  : lv_color_hex(0x9BC0FF), 0);
+        if (sel) lv_obj_scroll_to_view(cell, LV_ANIM_OFF);
+    }
+}
+
+// Fire the picked glyph as a standalone one-emoji message to whatever screen the
+// picker was opened over: the selected DM conversation when the DM screen is up,
+// otherwise the active channel. There is no compose step — the picker is a
+// quick-reaction affordance opened with 'e' from the chat/DM browse screen.
+static void sendQuickEmoji(const char *emoji) {
+    if (!emoji || !emoji[0]) return;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0) return;   // no identity yet; nothing to send from
+
+    if (s_dmModal) {
+        // On the DM screen, only ever send to the selected conversation — never
+        // fall back to the channel. 'e' is gated on a live selection, so this is
+        // just belt-and-suspenders against the conversation being deselected.
+        DmConv *dm = selectedDmConversation();
+        if (!dm || dm->nodeId == 0) return;
+        if (!DMs.sendDm(s_myNodeId, dm->nodeId, emoji)) {
+            DMs.addMessage(dm->nodeId, nullptr, "", "! TX failed", TFT_RED, false, -1, 0);
+        }
+    } else {
+        int txChan = (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS)
+                   ? s_activeChannel : 0;
+        if (!Channels.sendText(s_myNodeId, emoji, s_cfg.okToMqtt, txChan)) {
+            Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
+        }
+    }
+    refreshChatView(true);
+    refreshDmModal(true);
+}
+
+static void emojiPickerActivate(int idx) {
+    if (idx < 0 || idx >= kEmojiTrayCount) return;
+    if (s_emojiPickerSendMode) {
+        closeEmojiPicker();   // one-shot: tear the tray down before the send refresh
+        sendQuickEmoji(kEmojiTray[idx]);
+        return;
+    }
+    // Insert mode: append to the open compose box and keep the tray up for more.
+    if (s_composeInput) {
+        lv_textarea_add_text(s_composeInput, kEmojiTray[idx]);
+        updateComposeCharCount();
+    }
+}
+
+static void onEmojiCellPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s_emojiPickerSendMode) {
+        s_emojiPickerSelection = idx;
+        refreshEmojiPickerSelection();
+    }
+    emojiPickerActivate(idx);   // send-and-close, or insert-and-stay by mode
+}
+
+static void onEmojiBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_emojiPickerBackdrop) return;
+    closeEmojiPicker();
+}
+
+static void closeEmojiPicker() {
+    if (lvObjValid(s_emojiPickerBackdrop)) {
+        lv_obj_del(s_emojiPickerBackdrop);
+    } else if (lvObjValid(s_emojiPickerModal)) {
+        lv_obj_del(s_emojiPickerModal);
+    }
+    s_emojiPickerBackdrop = nullptr;
+    s_emojiPickerModal = nullptr;
+}
+
+static void openEmojiPicker(bool sendMode) {
+    if (!s_rootScreen || s_emojiPickerModal) return;
+    s_emojiPickerSendMode = sendMode;
+    s_emojiPickerSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 12;
+    if (modalW > 340) modalW = 340;
+
+    // Emoji glyphs come from the fallback face; a blank base label just carries
+    // the fallback, so any Montserrat size works — pick one that reads well.
+    const lv_font_t *cellFont = emojiFont(&lv_font_montserrat_18);
+    // Cell size follows the panel: big enough to tap on touch builds, small
+    // enough that a couple of rows fit the Cardputer's 135px-tall screen.
+    const int cell = (w <= 160) ? 24 : 30;
+
+    s_emojiPickerBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_emojiPickerBackdrop, w, h);
+    lv_obj_align(s_emojiPickerBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_emojiPickerBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_emojiPickerBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_emojiPickerBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_emojiPickerBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_emojiPickerBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_emojiPickerBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_emojiPickerBackdrop, onEmojiBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_emojiPickerModal = lv_obj_create(s_emojiPickerBackdrop);
+    lv_obj_set_width(s_emojiPickerModal, modalW);
+    lv_obj_set_height(s_emojiPickerModal, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_emojiPickerModal, (h > 40) ? (h - 14) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_emojiPickerModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_emojiPickerModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_emojiPickerModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_emojiPickerModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_emojiPickerModal, 1, 0);
+    lv_obj_set_style_border_color(s_emojiPickerModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_emojiPickerModal, 6, 0);
+    lv_obj_set_style_pad_row(s_emojiPickerModal, 4, 0);
+    lv_obj_set_flex_flow(s_emojiPickerModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_emojiPickerModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_emojiPickerBackdrop);
+
+    lv_obj_t *hint = lv_label_create(s_emojiPickerModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(hint, sendMode ? "Tap to send • tap outside to close"
+                                     : "Tap to add • tap outside to close");
+#else
+    lv_label_set_text_fmt(hint, sendMode ? "Move • Enter=Send • %s=Close"
+                                         : "Move • Enter=Add • %s=Close",
+                          modalCloseKeyLabel());
+#endif
+
+    lv_obj_t *grid = lv_obj_create(s_emojiPickerModal);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(grid, (h > 60) ? (h - 44) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(grid, 2, 0);
+    lv_obj_set_style_pad_column(grid, 2, 0);
+
+    for (int i = 0; i < kEmojiTrayCount; i++) {
+        lv_obj_t *c = lv_obj_create(grid);
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, cell, cell);
+        lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_radius(c, 4, 0);
+        lv_obj_add_event_cb(c, onEmojiCellPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *g = lv_label_create(c);
+        lv_obj_set_style_text_font(g, cellFont, 0);
+        setLabelTextEmojiSafe(g, kEmojiTray[i]);
+        lv_obj_center(g);
+    }
+
+    refreshEmojiPickerSelection();
 }
 
 static void openComposePrompt(uint32_t replyPacketId,
@@ -3933,25 +4164,25 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_14;
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_14);
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_TDECK)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
     const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
 #else
-    const lv_font_t *composeBodyFont = &lv_font_montserrat_12;
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
@@ -4000,7 +4231,7 @@ static void openComposePrompt(uint32_t replyPacketId,
         lv_obj_t *replyLbl = lv_label_create(s_composeModal);
         lv_obj_set_width(replyLbl, lv_pct(100));
         lv_obj_set_height(replyLbl, lv_font_get_line_height(&lv_font_montserrat_10));
-        lv_obj_set_style_text_font(replyLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(replyLbl, emojiFont(&lv_font_montserrat_10), 0);
         lv_obj_set_style_text_color(replyLbl, lv_color_hex(0xA7C7FF), 0);
         lv_label_set_long_mode(replyLbl, LV_LABEL_LONG_DOT);
         setLabelTextEmojiSafe(replyLbl, preview[0] ? preview : "(message)");
@@ -4009,7 +4240,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     s_composeInput = lv_textarea_create(s_composeModal);
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, 44);
-    lv_obj_set_style_text_font(s_composeInput, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
     lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
     lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
@@ -4036,6 +4267,18 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_column(row, 4, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Emoji tray opener. Touch-only builds have no keyboard key to bind, so the
+    // button is the only way in here; it's narrow (fixed width, no flex-grow) so
+    // Cancel/Send keep the room.
+    lv_obj_t *emojiBtn = lv_btn_create(row);
+    lv_obj_set_size(emojiBtn, 34, lv_pct(100));
+    lv_obj_add_event_cb(emojiBtn, [](lv_event_t *) { openEmojiPicker(false); },
+                        LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *emojiLbl = lv_label_create(emojiBtn);
+    lv_obj_set_style_text_font(emojiLbl, emojiFont(&lv_font_montserrat_16), 0);
+    setLabelTextEmojiSafe(emojiLbl, "\U0001F600");
+    lv_obj_center(emojiLbl);
 
     lv_obj_t *cancelBtn = lv_btn_create(row);
     lv_obj_set_flex_grow(cancelBtn, 1);
@@ -4181,6 +4424,8 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(hint, 1, 0);
 #endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Emoji isn't a compose action anymore — it's the 'E' quick-send tray on the
+    // chat/DM screen (see openEmojiPicker), so it's off the compose legend.
     lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Delete");
 #else
     lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
@@ -4299,17 +4544,15 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
-#if defined(DEVICE_TLORA_PAGER_TFT) || !defined(DEVICE_CARDPUTER_LORA_HAT)
     // Keep Chat Style near the top so it's visible without deep scrolling on
     // compact config layouts (notably the Pager's split action/info screen).
-    // Cardputer remains Classic-only due its 240x135 display constraints.
+    // All builds get the full set — the Cardputer's bubble/outline styles render
+    // fine on its 240x135 panel.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
-#endif
-    // Font Size is not part of the Classic-only restriction above: it scales the
-    // chat and DM text in every style, so every build gets it — the Cardputer
-    // arguably most of all.
+    // Font Size scales the chat and DM text in every style, so every build gets
+    // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
@@ -8339,10 +8582,10 @@ static void refreshNodesListRows() {
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *nodesListFont = &lv_font_montserrat_12;
+    const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_12);
     const int nodesListRowH = 28;
 #else
-    const lv_font_t *nodesListFont = &lv_font_montserrat_10;
+    const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_10);
     const int nodesListRowH = 22;
 #endif
 
@@ -11182,11 +11425,11 @@ static void openNodesModal() {
     if (contentW < 120) contentW = modalW;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_14);
 #elif defined(DEVICE_TDECK)
-    const lv_font_t *nodesDetailFont = &lv_font_montserrat_14;
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_14);
 #else
-    const lv_font_t *nodesDetailFont = &lv_font_montserrat_10;
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -11472,6 +11715,7 @@ static void openLegendModal() {
         "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
+        "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages");
@@ -11482,6 +11726,7 @@ static void openLegendModal() {
         "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
+        "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages");
@@ -11532,6 +11777,7 @@ static void openLegendModal() {
         "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Live (C clears log)\n"
+        "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages\n"
@@ -13800,6 +14046,34 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // The emoji picker sits on top of the chat/DM browse screen, so capture
+        // its keys before either screen's dispatch. Move selects, Enter/click
+        // sends the picked glyph as a one-emoji message and closes the tray, a
+        // close key dismisses it without sending.
+        if (s_emojiPickerModal) {
+            if (isModalCloseKey(k)) {
+                closeEmojiPicker();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                emojiPickerActivate(s_emojiPickerSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int nxt = s_emojiPickerSelection + delta;
+                if (nxt < 0) nxt = 0;
+                if (nxt >= kEmojiTrayCount) nxt = kEmojiTrayCount - 1;
+                if (nxt != s_emojiPickerSelection) {
+                    s_emojiPickerSelection = nxt;
+                    refreshEmojiPickerSelection();
+                }
+            }
+            continue;   // swallow all other keys while the tray is up
+        }
+
         if (s_dmModal) {
             if (s_composeModal) {
                 switch (k) {
@@ -13936,6 +14210,13 @@ static void pumpKeyboardInput() {
             if (k == KEY_ROLLER && s_dmSelection > 0) {
                 s_dmMsgPanelFocused = !s_dmMsgPanelFocused;
                 refreshDmPanelFocusStyles();
+                continue;
+            }
+
+            if ((k == 'e' || k == 'E') && s_dmSelection > 0) {
+                // Quick emoji: picking sends a one-emoji DM to the selected
+                // conversation (see sendQuickEmoji / emojiPickerActivate).
+                openEmojiPicker(true);
                 continue;
             }
 
@@ -14528,6 +14809,10 @@ static void pumpKeyboardInput() {
                 openCfgModal();
             } else if (k == 'n' || k == 'N') {
                 openNodesModal();
+            } else if (k == 'e' || k == 'E') {
+                // Quick emoji: opens the tray; picking sends a one-emoji message
+                // to the active channel (see sendQuickEmoji / emojiPickerActivate).
+                openEmojiPicker(true);
             } else if (k == 'h' || k == 'H') {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
                 openLegendModal();
@@ -18915,6 +19200,7 @@ void setup() {
     }
 
     lv_init();
+    emojiFontInit();   // build emoji-fallback text faces before any UI
     nodesMapInitFsDriver();
     // Allocate the LVGL draw buffer here, on the normal-UI path only. The OTA
     // worker path returns/reboots before reaching this point, so the buffer is

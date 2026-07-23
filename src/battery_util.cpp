@@ -3,6 +3,16 @@
 #include <Wire.h>
 #include <string.h>
 
+// Per-board correction for ADC-divider voltage reads. Boards that read battery
+// through a resistor divider on a plain ADC pin can land consistently high or
+// low from divider tolerance and ADC source-impedance settling; a board header
+// may define BATT_CAL to scale the raw voltage back to true. Boards that read
+// from a fuel-gauge/PMU chip (the Pager's BQ25896, the Cardputer's M5Unified
+// path) are already calibrated in hardware and leave this at 1.0.
+#ifndef BATT_CAL
+#define BATT_CAL 1.0f
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
 constexpr uint8_t kBq25896Addr = 0x6B;
@@ -294,10 +304,10 @@ static float batteryReadVoltageRaw() {
 #else
         batterySampleAdcVolts(16);
 #endif
-    return vadc * BATT_DIV;
+    return vadc * BATT_DIV * BATT_CAL;
 #else
     float vadc = batterySampleAdcVolts(8);
-    return vadc * BATT_DIV;
+    return vadc * BATT_DIV * BATT_CAL;
 #endif
 #endif
 }

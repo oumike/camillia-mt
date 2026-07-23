@@ -208,7 +208,34 @@ to apply it; re-choosing the current style just closes without a reboot.
   uses the theme's normal high-contrast color for readability
 
 The style applies to both **channel chat and Direct Messages**. The Web Config
-**Chat Style** dropdown offers the same three choices.
+**Chat Style** dropdown offers the same three choices. All three styles are
+available on every build, including the Cardputer.
+
+### Emoji
+
+Received emoji render as monochrome glyphs inline with the message text, on
+every build. Coverage is broad — the firmware carries the full Noto Emoji set
+(~1,500 glyphs) as a flash-resident font, drawn at the current text size. Two
+notes on the monochrome approach:
+
+- Emoji are **single-color**, matching the surrounding text — not full color.
+- Multi-part sequences aren't combined: a skin-tone or variation selector is
+  dropped to the base emoji, and a family/flag ZWJ sequence shows its component
+  emoji side by side. Each piece still renders.
+
+To **send** an emoji from the device, use the quick-emoji tray. On keyboard
+builds (T-Deck, Pager, Cardputer), from the chat or DM screen — **not** while
+composing a message — press **E**. A tray of common emoji opens: move the
+selection and press Enter (or tap) to **send that emoji immediately** as a
+one-glyph message, then the tray closes. On the channel view it goes to the
+active channel; on the DM view it goes to the selected conversation. A close key
+or a tap outside dismisses the tray without sending.
+
+- **T-Deck / Pager / Cardputer** — press **E** on the chat/DM screen
+- **Heltec (touch)** — while composing, tap the 😀 button next to Cancel / Send
+  to insert emoji into the message
+
+The web-config composer can also send any emoji your browser can type.
 
 ### Chat names
 

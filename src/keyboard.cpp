@@ -602,17 +602,8 @@ void TDeckKeyboard::pumpCardputerKeys() {
         enqueueCardputerKey(status.fn ? KEY_BACKSPACE_HOLD : KEY_BACKSPACE);
     }
 
-    bool nodeFocusChordQueued = false;
     for (char key : status.word) {
         if (key == '\r' || key == '\n') {
-            continue;
-        }
-
-        if (status.alt && (key == 'e' || key == 'E')) {
-            if (!nodeFocusChordQueued) {
-                enqueueCardputerKey(KEY_NODE_FOCUS);
-                nodeFocusChordQueued = true;
-            }
             continue;
         }
 
@@ -642,7 +633,6 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
     case 0x7F: return KEY_BACKSPACE;
 #endif
         case 0x08: return KEY_BACKSPACE;
-        case 0x05: return KEY_NODE_FOCUS;  // ALT+E
         default:   return (char)raw;
     }
 }

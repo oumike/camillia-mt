@@ -25,6 +25,13 @@
 
 #define LV_USE_PNG 1
 
+// Monochrome emoji rendering: stb_truetype rasterizes glyphs from a flash-
+// resident Noto Emoji face on demand, wired in as the Montserrat fallback font
+// (see src/emoji_font.*). FILE_SUPPORT stays off — the face is baked in, so no
+// filesystem dependency and it works identically on every board.
+#define LV_USE_TINY_TTF 1
+#define LV_TINY_TTF_FILE_SUPPORT 0
+
 #define LV_TICK_CUSTOM 1
 #define LV_TICK_CUSTOM_INCLUDE "Arduino.h"
 #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())

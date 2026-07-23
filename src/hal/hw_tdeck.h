@@ -109,6 +109,14 @@
 #define BATT_DIV               2.0f   // 1:2 voltage divider
 #define BATT_SENSE_ENABLE_PIN    -1
 #define BATT_SENSE_ENABLE_LEVEL  LOW
+// The T-Deck's divider is two 100k resistors, so the ADC sees a ~50k source
+// impedance — far above the ~10k its sample-and-hold wants. The hold cap never
+// fully settles, so every reading lands proportionally low (a freshly charged
+// pack read ~86%). This scales the measured voltage back up to compensate.
+// It's a multiplier because the shortfall is a settling fraction, not a fixed
+// offset. If your unit still reads high or low, nudge this: measured_full_pct
+// is roughly (4.2 * BATT_CAL) on the OCV curve, so raise it to read higher.
+#define BATT_CAL              1.03f
 
 // ── Radio TCXO voltage ───────────────────────────────────────────────────────
 #define MESH_TCXO_V            1.6f

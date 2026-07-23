@@ -1454,16 +1454,13 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
             "</select></label></div>";
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Chat style is Classic-only on the Cardputer (screen too small for bubbles),
-    // so the option is hidden there. Changing it requires a reboot.
+    // Changing chat style requires a reboot (applied at boot).
     html += "<div class='row2'>";
     html += "<label>Chat Style (requires reboot)<select name='chat_style'>"
             "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>"
             "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>"
             "<option value='2'"; if (gCfg->chatStyle == CHAT_STYLE_OUTLINE) html += " selected"; html += ">Outline</option>"
             "</select></label></div>";
-#endif
     html += "<div class='row2'>";
     html += "<label>Chat Names<select name='chat_names'>"
             "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
