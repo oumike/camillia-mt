@@ -200,6 +200,11 @@ static lv_obj_t *s_chatNameModal = nullptr;
 static lv_obj_t *s_chatNameRows[CHAT_NAME_MAX + 1] = {};
 static int s_chatNameSelection = 0;
 
+static lv_obj_t *s_fontSizeBackdrop = nullptr;
+static lv_obj_t *s_fontSizeModal = nullptr;
+static lv_obj_t *s_fontSizeRows[FONT_SIZE_MAX + 1] = {};
+static int s_fontSizeSelection = 0;
+
 struct KnownWifiEntry {
     char ssid[sizeof(RhinoConfig::wifiSsid)];
     char pass[sizeof(RhinoConfig::wifiPass)];
@@ -451,7 +456,7 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-static int s_cfgActions[24] = {};
+static int s_cfgActions[28] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -595,6 +600,36 @@ static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
 #else
 static const lv_font_t *kChannelChatFont = kMainScreenFont;
 #endif
+
+// Applies the user's font-size preference (Small/Medium/Large) to a chat/DM base
+// font. Medium returns the base unchanged so the built-in size is the default;
+// Small/Large step one Montserrat size down/up. Anchoring to the passed base
+// keeps "Medium" equal to each screen's current size on every board. Fonts below
+// 10 px aren't compiled in, so Small clamps at montserrat_10.
+static const lv_font_t *scaledChatFont(const lv_font_t *base) {
+    switch (s_cfg.fontSize) {
+        case FONT_SIZE_SMALL:
+            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_10;
+            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_12;
+            return base;
+        case FONT_SIZE_LARGE:
+            if (base == &lv_font_montserrat_10) return &lv_font_montserrat_12;
+            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_14;
+            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_16;
+            return base;
+        default:
+            return base;
+    }
+}
+
+static const char *fontSizeName(uint8_t size) {
+    switch (size) {
+        case FONT_SIZE_SMALL: return "Small";
+        case FONT_SIZE_LARGE: return "Large";
+        case FONT_SIZE_MEDIUM:
+        default:              return "Medium";
+    }
+}
 static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -1215,6 +1250,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_STYLE,
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
+    CFG_ACTION_FONT_SIZE,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
@@ -2405,6 +2441,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Chat Colors: %s",
                      s_cfg.chatColorsEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_FONT_SIZE:
+            snprintf(buf, bufLen, "Font Size: %s", fontSizeName(s_cfg.fontSize));
+            break;
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
@@ -3210,6 +3249,7 @@ static void persistConfigToPrefs() {
     p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
     p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
     p.putUChar("chatSpace", s_cfg.chatSpacing);
+    p.putUChar("fontSize", s_cfg.fontSize);
     p.putBool("dbgAcks", s_cfg.debugAcks);
     p.putBool("dbgMsgs", s_cfg.debugMessages);
     p.putBool("dbgGps", s_cfg.debugGps);
@@ -3445,6 +3485,8 @@ static void loadConfigFromPrefs() {
     if (ul) s_cfg.nodeIdOverride = (uint32_t)ul;
     ro = prefs.getUChar("chatSpace", 0xFF);
     if (ro != 0xFF && ro <= 2) s_cfg.chatSpacing = ro;
+    ro = prefs.getUChar("fontSize", 0xFF);
+    if (ro != 0xFF && ro <= FONT_SIZE_MAX) s_cfg.fontSize = ro;
 
     if (prefs.isKey("dbgAcks")) s_cfg.debugAcks = prefs.getBool("dbgAcks");
     if (prefs.isKey("dbgMsgs")) s_cfg.debugMessages = prefs.getBool("dbgMsgs");
@@ -4247,6 +4289,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
@@ -5070,6 +5113,165 @@ static void openChatNameModal() {
     }
 
     refreshChatNameSelection();
+}
+
+// ── Font-size picker ─────────────────────────────────────────────────────────
+// Picks the chat/DM message font size (Small/Medium/Large). Applies live like
+// the chat-name picker — no reboot — by re-rendering the chat and DM views once
+// the choice is committed.
+static void closeFontSizeModal() {
+    if (lvObjValid(s_fontSizeBackdrop)) {
+        lv_obj_del(s_fontSizeBackdrop);
+    } else if (lvObjValid(s_fontSizeModal)) {
+        lv_obj_del(s_fontSizeModal);
+    }
+    s_fontSizeBackdrop = nullptr;
+    s_fontSizeModal = nullptr;
+    memset(s_fontSizeRows, 0, sizeof(s_fontSizeRows));
+}
+
+static void refreshFontSizeSelection() {
+    if (!s_fontSizeModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i <= FONT_SIZE_MAX; i++) {
+        lv_obj_t *row = s_fontSizeRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_fontSizeSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void applyFontSizeSelection(int size) {
+    if (size < 0 || size > FONT_SIZE_MAX) return;
+    const bool changed = ((uint8_t)size != s_cfg.fontSize);
+    s_cfg.fontSize = (uint8_t)size;
+    if (changed) {
+        persistConfigToPrefs();
+        // Re-render both message views so the new size takes effect immediately.
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshChatView(true);
+        refreshDmModal(true);
+    }
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Font Size: %s%s",
+             fontSizeName((uint8_t)size), changed ? "" : " (unchanged)");
+    closeFontSizeModal();
+    refreshCfgModal();
+}
+
+static void onFontSizeRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_fontSizeSelection = idx;
+    applyFontSizeSelection(idx);
+}
+
+static void onFontSizeBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_fontSizeBackdrop) return;
+    closeFontSizeModal();
+    refreshCfgModal();
+}
+
+static void openFontSizeModal() {
+    if (!s_rootScreen || s_fontSizeModal || s_fontSizeBackdrop) return;
+    s_fontSizeSelection = (s_cfg.fontSize <= FONT_SIZE_MAX) ? s_cfg.fontSize : FONT_SIZE_MEDIUM;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_fontSizeBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_fontSizeBackdrop, w, h);
+    lv_obj_align(s_fontSizeBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_fontSizeBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_fontSizeBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_fontSizeBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_fontSizeBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_fontSizeBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_fontSizeBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_fontSizeBackdrop, onFontSizeBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_fontSizeModal = lv_obj_create(s_fontSizeBackdrop);
+    lv_obj_set_size(s_fontSizeModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_fontSizeModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_fontSizeModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_fontSizeModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_fontSizeModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_fontSizeModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_fontSizeModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_fontSizeModal, 1, 0);
+    lv_obj_set_style_border_color(s_fontSizeModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_fontSizeModal, 8, 0);
+    lv_obj_set_style_pad_row(s_fontSizeModal, 6, 0);
+    lv_obj_set_flex_flow(s_fontSizeModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_fontSizeModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_fontSizeBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_fontSizeModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Font Size");
+
+    lv_obj_t *hint = lv_label_create(s_fontSizeModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a size to apply"
+#else
+                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+#endif
+    );
+
+    static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { "Small", "Medium", "Large" };
+    static const char *kSizeDesc[FONT_SIZE_MAX + 1] = {
+        "Compact chat & DM text",
+        "Default chat & DM text",
+        "Larger chat & DM text",
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    for (int i = 0; i <= FONT_SIZE_MAX; i++) {
+        lv_obj_t *row = lv_btn_create(s_fontSizeModal);
+        s_fontSizeRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onFontSizeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_text(name, kSizeLabel[i]);
+
+        lv_obj_t *desc = lv_label_create(row);
+        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(desc, rowTextColor, 0);
+        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+        lv_label_set_text(desc, kSizeDesc[i]);
+    }
+
+    refreshFontSizeSelection();
 }
 
 // ── Notification-sound picker ────────────────────────────────────────────────
@@ -10482,7 +10684,7 @@ static void refreshDmModal(bool force) {
     lv_obj_clean(s_dmMsgList);
 
     const lv_font_t *dmListFont = kMainScreenFont;
-    const lv_font_t *dmMsgFont = kMainScreenFont;
+    const lv_font_t *dmMsgFont = scaledChatFont(kMainScreenFont);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const int dmListRowH = 24;
 #else
@@ -11714,6 +11916,12 @@ static void performCfgAction(int actionId) {
             s_lastRenderedChannel = -1;
             s_lastRenderedCount = -1;
             refreshChatView(true);
+            break;
+
+        case CFG_ACTION_FONT_SIZE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
+            showActionPopup = false;
+            openFontSizeModal();    // pick directly; applies live, no reboot
             break;
 
         case CFG_ACTION_ANNOUNCE:
@@ -13011,6 +13219,31 @@ static void pumpKeyboardInput() {
                 if (next != s_chatNameSelection) {
                     s_chatNameSelection = next;
                     refreshChatNameSelection();
+                }
+            }
+            continue;
+        }
+
+        if (s_fontSizeModal) {
+            if (isModalCloseKey(k)) {
+                closeFontSizeModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyFontSizeSelection(s_fontSizeSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_fontSizeSelection + delta;
+                if (next < 0) next = 0;
+                if (next > FONT_SIZE_MAX) next = FONT_SIZE_MAX;
+                if (next != s_fontSizeSelection) {
+                    s_fontSizeSelection = next;
+                    refreshFontSizeSelection();
                 }
             }
             continue;
@@ -16935,7 +17168,14 @@ static lv_color_t bubbleTextColor(uint16_t bg565) {
 // tag and color instead. Only the leading prefix window is scanned so body text
 // containing "] " or "> " isn't cut.
 static const char *chatStripPrefix(const char *line) {
-    const int kWindow = 28;
+    // The sender prefix ("<icon> <time>[Name] ") always ends at the first "] "
+    // (or "> "), which precedes any message text. The window just bounds the
+    // scan so a prefix-less line that happens to contain "] " isn't truncated.
+    // It must be wide enough for the longest prefix: with Long chat names the
+    // bracketed name can be a full 39-char node long name plus the time/icon
+    // decorations, so a 28-char window left long-name prefixes unstripped and
+    // the name leaked into the bubble body as well as the header.
+    const int kWindow = 64;
     for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
         if ((p[0] == ']' || p[0] == '>') && p[1] == ' ') return p + 2;
     }
@@ -17026,7 +17266,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 
     if (nameTag && nameTag[0]) {
         lv_obj_t *nm = lv_label_create(b);
-        lv_obj_set_style_text_font(nm, kChannelChatFont, 0);
+        lv_obj_set_style_text_font(nm, scaledChatFont(kChannelChatFont), 0);
         lv_obj_set_style_text_color(nm, tagColor, 0);
         lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
         lv_label_set_text(nm, nameTag);
@@ -17046,14 +17286,14 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     }
     if (stateTag) {
         lv_obj_t *st = lv_label_create(b);
-        lv_obj_set_style_text_font(st, kChannelChatFont, 0);
+        lv_obj_set_style_text_font(st, scaledChatFont(kChannelChatFont), 0);
         lv_obj_set_style_text_color(st, tagColor, 0);
         lv_obj_set_style_text_opa(st, LV_OPA_70, 0);
         lv_label_set_text(st, stateTag);
     }
 
     lv_obj_t *bl = lv_label_create(b);
-    lv_obj_set_style_text_font(bl, kChannelChatFont, 0);
+    lv_obj_set_style_text_font(bl, scaledChatFont(kChannelChatFont), 0);
     lv_obj_set_style_text_color(bl, bodyColor, 0);
     lv_label_set_long_mode(bl, LV_LABEL_LONG_CLIP);  // body carries explicit '\n'
     lv_obj_set_width(bl, LV_SIZE_CONTENT);
@@ -17091,7 +17331,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
 
         uint32_t curBucket = chatDateBucket(rows[i]->epoch);
         if (curBucket != 0 && curBucket != lastDateBucket) {
-            insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
+            insertChatDateMarker(s_chatList, rows[i]->epoch, scaledChatFont(kChannelChatFont));
             lastDateBucket = curBucket;
         }
 
@@ -17203,7 +17443,7 @@ static void refreshChatView(bool force) {
 
     if (rowCount == 0) {
         lv_obj_t *empty = lv_label_create(s_chatList);
-        lv_obj_set_style_text_font(empty, kChannelChatFont, 0);
+        lv_obj_set_style_text_font(empty, scaledChatFont(kChannelChatFont), 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         lv_label_set_text(empty, "No messages yet");
     } else {
@@ -17230,7 +17470,7 @@ static void refreshChatView(bool force) {
                 if (!isContinuationLine) {
                     uint32_t curBucket = chatDateBucket(rows[i]->epoch);
                     if (curBucket != 0 && curBucket != lastDateBucket) {
-                        insertChatDateMarker(s_chatList, rows[i]->epoch, kChannelChatFont);
+                        insertChatDateMarker(s_chatList, rows[i]->epoch, scaledChatFont(kChannelChatFont));
                         lastDateBucket = curBucket;
                     }
                 }
@@ -17238,7 +17478,7 @@ static void refreshChatView(bool force) {
                 lv_obj_t *msg = lv_label_create(s_chatList);
                 lastMsgObj = msg;
                 lv_obj_set_width(msg, lv_pct(100));
-                lv_obj_set_style_text_font(msg, kChannelChatFont, 0);
+                lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
 #if defined(DEVICE_TDECK)
                 lv_obj_set_style_pad_left(msg, 1, 0);

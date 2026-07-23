@@ -400,6 +400,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
     cfg.chatSpacing        = MY_CHAT_SPACING;
+    cfg.fontSize           = MY_FONT_SIZE;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -572,6 +573,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     out += "    chatNameStyle: ";
     out += (cfg.chatNameStyle == CHAT_NAME_LONG ? "LONG" : "SHORT");
+    out += "\n";
+    out += "    fontSize: ";
+    out += (cfg.fontSize == FONT_SIZE_SMALL ? "SMALL"
+            : cfg.fontSize == FONT_SIZE_LARGE ? "LARGE"
+            : "MEDIUM");
     out += "\n";
     snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
@@ -945,6 +951,16 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         cfg.chatNameStyle = CHAT_NAME_SHORT;
                 }
+                else if (!strcmp(key, "fontSize")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.fontSize = (uint8_t)constrain(atoi(val), 0, FONT_SIZE_MAX);
+                    else if (!strcmp(val, "SMALL"))
+                        cfg.fontSize = FONT_SIZE_SMALL;
+                    else if (!strcmp(val, "LARGE"))
+                        cfg.fontSize = FONT_SIZE_LARGE;
+                    else
+                        cfg.fontSize = FONT_SIZE_MEDIUM;
+                }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);
                 }
@@ -1004,6 +1020,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     }
 
     cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
+    cfg.fontSize = (uint8_t)constrain((int)cfg.fontSize, 0, FONT_SIZE_MAX);
     if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
     if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;
     if (cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {

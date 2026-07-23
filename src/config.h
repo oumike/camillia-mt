@@ -156,6 +156,14 @@
 #define MY_AUTOFAV_RANGE_M  5000   // auto-favorite threshold, meters (5 km / ~3.1 mi)
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
+// Chat/DM message font size. Medium matches the built-in size; Small/Large step
+// one Montserrat size down/up from it. Applies to the chat and DM screens only.
+#define FONT_SIZE_SMALL     0
+#define FONT_SIZE_MEDIUM    1
+#define FONT_SIZE_LARGE     2
+#define FONT_SIZE_MAX       FONT_SIZE_LARGE
+#define MY_FONT_SIZE        FONT_SIZE_MEDIUM
+
 #define MSG_ALERT_SOUND_DEFAULT 0
 #define MSG_ALERT_SOUND_CHIRPY  1
 #define MSG_ALERT_SOUND_BASS    2

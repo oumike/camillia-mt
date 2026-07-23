@@ -117,6 +117,7 @@ struct RhinoConfig {
 
     // Chat display
     uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
+    uint8_t  fontSize;      // 0=Small, 1=Medium (default), 2=Large (chat + DM screens)
 
     // Serial debug categories
     bool     debugAcks;

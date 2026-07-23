@@ -487,6 +487,21 @@ static const char kHead[] =
                      "border:none;border-radius:5px;cursor:pointer;font-size:1em;font-weight:600}"
         ".msg{color:var(--accent);margin:.5em 0}"
         ".err{color:#ff8d8d;margin:.5em 0}"
+        // Chooser modal (font size). Reused via the .chooser-* classes.
+        ".chooser-btn{width:100%;margin-top:.1em;padding:.45em;text-align:left;background:var(--panel-2);"
+             "color:var(--text);border:1px solid var(--line);border-radius:5px;cursor:pointer;font-size:.95em;"
+             "font-weight:600}"
+        ".modal-back{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;"
+             "align-items:center;justify-content:center}"
+        ".modal-back.open{display:flex}"
+        ".modal-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1em;"
+             "width:min(90vw,320px);box-shadow:0 10px 30px rgba(0,0,0,.5)}"
+        ".modal-card h3{margin:.1em 0 .6em;border:none;color:var(--accent)}"
+        ".modal-opt{width:100%;margin:.35em 0;padding:.6em;background:var(--panel-2);color:var(--text);"
+             "border:1px solid var(--line);border-radius:6px;cursor:pointer;font-size:.95em;text-align:left}"
+        ".modal-opt.sel{border-color:var(--accent);background:var(--panel-2)}"
+        ".modal-opt b{display:block;font-weight:700}"
+        ".modal-opt span{display:block;font-size:.8em;color:var(--text-dim)}"
         ".logout{float:right;font-size:.9em;color:var(--accent);text-decoration:none}"
            ".tab-row{display:flex;align-items:center;gap:.6em;margin:1em 0 .4em;flex-wrap:wrap}"
            ".tab-btns{display:flex;gap:.5em;flex-wrap:wrap}"
@@ -1454,6 +1469,38 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
             "<option value='1'"; if (gCfg->chatNameStyle == CHAT_NAME_LONG)  html += " selected"; html += ">Long (full name)</option>"
             "</select></label></div>";
+    // Font size chooser — a modal (rather than a plain select) so the sizes read
+    // as a deliberate pick. The button shows the current value; the hidden input
+    // is what actually submits with the form.
+    {
+        const uint8_t fs = (gCfg->fontSize <= FONT_SIZE_LARGE) ? gCfg->fontSize : FONT_SIZE_MEDIUM;
+        const char *fsName = (fs == FONT_SIZE_SMALL) ? "Small"
+                             : (fs == FONT_SIZE_LARGE) ? "Large" : "Medium";
+        html += "<label>Font Size (chat &amp; DM)</label>";
+        html += "<button type='button' class='chooser-btn' id='fsBtn' onclick='fsOpen()'>";
+        html += fsName;
+        html += "</button>";
+        snprintf(tmp, sizeof(tmp), "<input type='hidden' name='font_size' id='fsInput' value='%u'>", (unsigned)fs);
+        html += tmp;
+        html += "<div class='modal-back' id='fsModal' onclick='if(event.target===this)fsClose()'>"
+                "<div class='modal-card'><h3>Font Size</h3>"
+                "<button type='button' class='modal-opt' onclick='fsPick(0,\"Small\")'>"
+                    "<b>Small</b><span>Compact chat &amp; DM text</span></button>"
+                "<button type='button' class='modal-opt' onclick='fsPick(1,\"Medium\")'>"
+                    "<b>Medium</b><span>Default chat &amp; DM text</span></button>"
+                "<button type='button' class='modal-opt' onclick='fsPick(2,\"Large\")'>"
+                    "<b>Large</b><span>Larger chat &amp; DM text</span></button>"
+                "</div></div>";
+        html += "<script>"
+                "function fsMark(v){var m=document.querySelectorAll('#fsModal .modal-opt');"
+                "for(var i=0;i<m.length;i++)m[i].classList.toggle('sel',i==v);}"
+                "function fsOpen(){fsMark(+document.getElementById('fsInput').value);"
+                "document.getElementById('fsModal').classList.add('open');}"
+                "function fsClose(){document.getElementById('fsModal').classList.remove('open');}"
+                "function fsPick(v,l){document.getElementById('fsInput').value=v;"
+                "document.getElementById('fsBtn').textContent=l;fsClose();}"
+                "</script>";
+    }
     html += "<div class='row2'>";
     html += "<label>Compass North Top<select name='compass_north'>"
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
@@ -2856,6 +2903,9 @@ static void handlePostSave() {
         long cn = server.arg("chat_names").toInt();
         if (cn < 0 || cn > CHAT_NAME_MAX) cn = CHAT_NAME_SHORT;
         gCfg->chatNameStyle = (uint8_t)cn;
+    }
+    if (server.hasArg("font_size")) {
+        gCfg->fontSize = (uint8_t)constrain(server.arg("font_size").toInt(), 0, FONT_SIZE_MAX);
     }
     // Only honor the archive checkbox when it was actually enabled in the form.
     // A disabled checkbox submits nothing, which is indistinguishable from
