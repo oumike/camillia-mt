@@ -100,6 +100,75 @@ Config includes Web Config controls, export and import, theme toggles, announce,
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
 
+### Information panel
+
+The device info panel is scrollable with the keyboard on every keyboard build:
+
+- **T-Lora Pager** — I focuses the info panel (Wheel Click also swaps between the
+  action and info panels), Wheel Up/Down scrolls it, Backspace returns to the
+  action list without closing Config
+- **T-Deck** — I opens the info popup, J/K (or the trackball) scroll it, and I or
+  Backspace closes it
+- **Cardputer** — I opens the info popup, Up/Down (or semicolon/period) scroll it,
+  and I or Esc closes it
+- **Heltec** — touch-first; the popup is dismissed by any key or by tapping
+
+### Notification sound
+
+**Notification Sound** opens a picker (same navigation as Chat Style) with
+Default, Chirpy, Bass, and Off. Moving the selection **plays that tone as a
+preview**, so you can hear each one before committing. Enter applies the
+highlighted tone; Backspace/Esc cancels and restores whatever was set before you
+opened the picker, so previewing never changes your setting by accident. On
+touch builds, tapping a row previews it and tapping it again applies it.
+
+Notification Sound and Splash Melody now sit directly under My Message Color,
+with the other presentation settings.
+
+### Node management
+
+The device keeps a fixed number of the most recently heard nodes (250 on current
+builds). When that fills up, the **least recently heard non-favorite** is dropped
+to make room — **favorited nodes are never dropped, however old they are**.
+
+Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
+**Node Management** has an *Archive dropped nodes to SD card* checkbox:
+
+- It is **off by default** — archiving only happens if you turn it on
+- It cannot be enabled on a board with no SD slot, or with no card inserted; the
+  reason is shown in place of the description
+- When on, each dropped node is appended to `/camillia/nodes_archive.csv`
+
+The same section has an **Export Node List (CSV)** button, which downloads every
+node the device currently knows about plus any previously archived nodes. A
+`source` column marks each row as `live` or `archived`.
+
+The Config info panel also shows the **Newest** and **Oldest** node heard since
+boot, with the node name and the time it was last heard.
+
+### Auto-favorite nearby nodes
+
+Also under **Node Management** in Web Config:
+
+- **Auto-favorite nearby nodes** — off by default, opt-in
+- **Auto-favorite radius** — in km or miles, following your Units setting
+  (stored internally in meters, so switching units re-displays the same distance)
+
+When enabled, any node reporting a position within the radius is favorited
+automatically. This matters beyond sorting: favorites are never dropped when the
+node table fills up, so this is a way to automatically protect your local nodes.
+
+Two deliberate limits:
+
+- It only ever **adds** favorites. A node moving out of range is never
+  un-favorited — otherwise it could silently undo a favorite you set by hand.
+  Remove those yourself from the node Actions menu.
+- It needs a known position for **both** your node and theirs. With no GPS fix
+  it falls back to your configured fixed position; nodes that have never sent a
+  position are skipped.
+
+The check runs every 30 seconds, so it also picks up nodes as *you* move.
+
 ### Chat style
 
 Config has a **Chat Style** action. Selecting it opens a picker modal — navigate

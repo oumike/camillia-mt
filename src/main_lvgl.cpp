@@ -189,6 +189,12 @@ static lv_obj_t *s_chatStyleModal = nullptr;
 static lv_obj_t *s_chatStyleRows[CHAT_STYLE_MAX + 1] = {};
 static int s_chatStyleSelection = 0;
 
+static lv_obj_t *s_alertSoundBackdrop = nullptr;
+static lv_obj_t *s_alertSoundModal = nullptr;
+static lv_obj_t *s_alertSoundRows[MSG_ALERT_SOUND_MAX + 1] = {};
+static int s_alertSoundSelection = 0;
+static uint8_t s_alertSoundOriginal = 0;   // restored if the picker is cancelled
+
 static lv_obj_t *s_chatNameBackdrop = nullptr;
 static lv_obj_t *s_chatNameModal = nullptr;
 static lv_obj_t *s_chatNameRows[CHAT_NAME_MAX + 1] = {};
@@ -325,7 +331,29 @@ static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
 static lv_obj_t *s_dmNodePickerHint = nullptr;
 static lv_obj_t *s_dmNodePickerRows[MAX_NODES] = {};
-static NodeEntry s_dmNodeSnapshot[MAX_NODES] = {};
+
+// ── Shared node snapshot buffer ──────────────────────────────────────────────
+// The Nodes screen and the DM node picker each snapshot the node list so the UI
+// renders against a stable set/order while packets keep mutating (and evicting
+// from) NodeDB underneath. They are never live at the same time: opening either
+// full-screen modal closes the other first, openDmNodePicker() requires the DM
+// modal, and closeDmModal() tears the picker down. Both close paths also zero
+// their snapshot count, and every read is bounds-checked against that count, so
+// a stale alias can never be indexed. One buffer therefore backs both.
+//
+// The snapshot stores node *ids*, not NodeEntry copies: at 4 B vs 168 B per node
+// that is what makes a 250-node MAX_NODES fit in DRAM. Row contents are resolved
+// through Nodes.find() at render time, so the frozen id list still pins the set
+// and the row order (the user's cursor never shifts under them) while the fields
+// shown stay live. A node evicted while a modal is open resolves to nullptr; all
+// render paths fall back to formatting the id so rows stay 1:1 with the filtered
+// list rather than shifting.
+//
+// The two names are kept as array references so each call site still documents
+// which screen owns the snapshot. Do NOT make the two live simultaneously.
+static uint32_t s_nodeSnapshotIds[MAX_NODES] = {};
+static uint32_t (&s_dmNodeSnapshotIds)[MAX_NODES] = s_nodeSnapshotIds;
+
 static int s_dmNodeFilteredIdx[MAX_NODES] = {};
 static int s_dmNodeSnapshotCount = 0;
 static int s_dmNodeFilteredCount = 0;
@@ -372,7 +400,8 @@ static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
 static lv_obj_t *s_nodesListRows[MAX_NODES] = {};
 static int s_nodesListRowCount = 0;
-static NodeEntry s_nodesSnapshot[MAX_NODES] = {};
+// Aliases s_nodeSnapshotIds — see the note at its definition above.
+static uint32_t (&s_nodesSnapshotIds)[MAX_NODES] = s_nodeSnapshotIds;
 static int s_nodesFilteredIdx[MAX_NODES] = {};
 static int s_nodesSnapshotCount = 0;
 static int s_nodesFilteredCount = 0;
@@ -709,6 +738,12 @@ static void refreshCfgColorPickerModal();
 static void applyCfgColorSelection(int idx);
 static void onCfgColorRowPressed(lv_event_t *e);
 static void onCfgColorBackdropPressed(lv_event_t *e);
+static void openAlertSoundModal();
+static void closeAlertSoundModal();
+static void refreshAlertSoundSelection();
+static void applyAlertSoundSelection(int mode);
+static void onAlertSoundRowPressed(lv_event_t *e);
+static void onAlertSoundBackdropPressed(lv_event_t *e);
 static void openChatStyleModal();
 static void closeChatStyleModal();
 static void refreshChatStyleSelection();
@@ -867,6 +902,7 @@ static void normalizeSerialCommand(char *line);
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void serviceNeighborInfoAnnounce(uint32_t nowMs);
+static void serviceAutoFavorite(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void setOtaWorkerBootNotice(const char *msg);
 static void syncWifiCredsToPrefs();
@@ -3169,6 +3205,9 @@ static void persistConfigToPrefs() {
     p.putBool("cannedEn", s_cfg.cannedEnabled);
     p.putString("cannedMsgs", s_cfg.cannedMessages);
     p.putBool("snfClientEn", s_cfg.snfClientEnabled);
+    p.putBool("nodeArchive", s_cfg.nodeArchiveEnabled);
+    p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
+    p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
     p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
     p.putUChar("chatSpace", s_cfg.chatSpacing);
     p.putBool("dbgAcks", s_cfg.debugAcks);
@@ -3390,6 +3429,12 @@ static void loadConfigFromPrefs() {
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
+    if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
+    if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
+    if (prefs.isKey("autoFavRange")) {
+        uint32_t r = prefs.getULong("autoFavRange", MY_AUTOFAV_RANGE_M);
+        if (r > 0) s_cfg.autoFavoriteRangeM = r;
+    }
     String canned = getStringIfKey("cannedMsgs");
     if (canned.length()) {
         strncpy(s_cfg.cannedMessages, canned.c_str(), sizeof(s_cfg.cannedMessages) - 1);
@@ -4205,6 +4250,10 @@ static void initCfgActions() {
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
+    // Sound settings sit with the other presentation options rather than down
+    // among the mesh/module actions.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
@@ -4217,8 +4266,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
@@ -4242,6 +4289,36 @@ static void refreshCfgPanelFocusStyles() {
 // Fills info[] with the current node's identity/radio details and returns the
 // line count. Shared by the pager's always-on info panel and the (I)nformation
 // popup on the other builds, so the two never drift apart.
+// Render a node's last-heard time as a compact local timestamp. lastHeardMs is a
+// millis() stamp, so it needs the wall clock to become a date; before NTP has
+// set the clock we fall back to a relative age rather than printing 1970.
+static void deviceInfoFormatHeard(uint32_t lastHeardMs, char *out, size_t outLen) {
+    const uint32_t nowMs = millis();
+    if (lastHeardMs == 0 || nowMs < lastHeardMs) {
+        snprintf(out, outLen, "?");
+        return;
+    }
+    const uint32_t ageS = (nowMs - lastHeardMs) / 1000UL;
+    const time_t nowEpoch = time(nullptr);
+    if (nowEpoch > 1700000000) {
+        time_t t = nowEpoch - (time_t)ageS;
+        struct tm lt;
+        localtime_r(&t, &lt);
+        snprintf(out, outLen, "%02d/%02d %02d:%02d",
+                 lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+    } else if (ageS < 3600UL) {
+        snprintf(out, outLen, "%lum ago", (unsigned long)(ageS / 60UL));
+    } else {
+        snprintf(out, outLen, "%luh ago", (unsigned long)(ageS / 3600UL));
+    }
+}
+
+static const char *deviceInfoNodeLabel(const NodeEntry *e, char *buf, size_t len) {
+    if (liveShortNameUsable(e->shortName)) return e->shortName;
+    snprintf(buf, len, "!%08lx", (unsigned long)e->nodeId);
+    return buf;
+}
+
 static int buildDeviceInfoLines(char info[][96], int maxLines) {
     int n = 0;
     bool hasPubKey = false;
@@ -4260,6 +4337,39 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) snprintf(info[n++], 96, "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
     if (n < maxLines) snprintf(info[n++], 96, "Relayed: %lu", (unsigned long)s_rebroadcastCount);
+
+    // Most / least recently heard node. Entries restored from NVS have
+    // lastHeardMs == 0 (unknown after reboot), so only nodes actually heard
+    // since boot are candidates.
+    const NodeEntry *newest = nullptr;
+    const NodeEntry *oldest = nullptr;
+    const int nodeCount = Nodes.count();
+    for (int i = 0; i < nodeCount; i++) {
+        NodeEntry *e = Nodes.getByRank(i);
+        if (!e || e->nodeId == 0 || e->lastHeardMs == 0) continue;
+        if (!newest || e->lastHeardMs > newest->lastHeardMs) newest = e;
+        if (!oldest || e->lastHeardMs < oldest->lastHeardMs) oldest = e;
+    }
+    if (n < maxLines) {
+        if (newest) {
+            char idBuf[12], when[24];
+            deviceInfoFormatHeard(newest->lastHeardMs, when, sizeof(when));
+            snprintf(info[n++], 96, "Newest: %s %s",
+                     deviceInfoNodeLabel(newest, idBuf, sizeof(idBuf)), when);
+        } else {
+            snprintf(info[n++], 96, "Newest: none heard yet");
+        }
+    }
+    if (n < maxLines) {
+        if (oldest) {
+            char idBuf[12], when[24];
+            deviceInfoFormatHeard(oldest->lastHeardMs, when, sizeof(when));
+            snprintf(info[n++], 96, "Oldest: %s %s",
+                     deviceInfoNodeLabel(oldest, idBuf, sizeof(idBuf)), when);
+        } else {
+            snprintf(info[n++], 96, "Oldest: none heard yet");
+        }
+    }
     return n;
 }
 
@@ -4371,7 +4481,7 @@ static void refreshCfgModal() {
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    static constexpr int kCfgInfoMaxLines = 12;
+    static constexpr int kCfgInfoMaxLines = 14;   // 11 device rows + newest/oldest node
     char info[kCfgInfoMaxLines][96] = {};
     int infoCount = buildDeviceInfoLines(info, kCfgInfoMaxLines);
 
@@ -4960,6 +5070,185 @@ static void openChatNameModal() {
     }
 
     refreshChatNameSelection();
+}
+
+// ── Notification-sound picker ────────────────────────────────────────────────
+// Picking directly instead of cycling. Moving the selection previews the sound,
+// which means s_cfg.msgAlertSound has to hold the highlighted mode while the
+// modal is open (triggerMessageAlert plays whatever is configured). The original
+// value is stashed on open and restored if the user cancels, so previewing is
+// never destructive.
+static void closeAlertSoundModal() {
+    if (lvObjValid(s_alertSoundBackdrop)) {
+        lv_obj_del(s_alertSoundBackdrop);
+    } else if (lvObjValid(s_alertSoundModal)) {
+        lv_obj_del(s_alertSoundModal);
+    }
+    s_alertSoundBackdrop = nullptr;
+    s_alertSoundModal = nullptr;
+    memset(s_alertSoundRows, 0, sizeof(s_alertSoundRows));
+}
+
+// Cancel path: undo any preview-driven change before closing.
+static void cancelAlertSoundModal() {
+    s_cfg.msgAlertSound = s_alertSoundOriginal;
+    closeAlertSoundModal();
+    refreshCfgModal();
+}
+
+static void refreshAlertSoundSelection() {
+    if (!s_alertSoundModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i <= MSG_ALERT_SOUND_MAX; i++) {
+        lv_obj_t *row = s_alertSoundRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_alertSoundSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+// Move the highlight and play that mode so the user hears it before committing.
+static void previewAlertSoundSelection(int mode) {
+    if (mode < 0 || mode > MSG_ALERT_SOUND_MAX) return;
+    s_alertSoundSelection = mode;
+    s_cfg.msgAlertSound = (uint8_t)mode;
+    refreshAlertSoundSelection();
+    triggerMessageAlert(true);   // bypass the rate limit; this is an explicit preview
+}
+
+static void applyAlertSoundSelection(int mode) {
+    if (mode < 0 || mode > MSG_ALERT_SOUND_MAX) return;
+    s_cfg.msgAlertSound = (uint8_t)mode;
+    if ((uint8_t)mode != s_alertSoundOriginal) {
+        persistMessageAlertSetting();
+    }
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification sound: %s",
+             msgAlertSoundName((uint8_t)mode));
+    closeAlertSoundModal();
+    refreshCfgModal();
+}
+
+static void onAlertSoundRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    // First tap on a different row previews it; tapping the highlighted row
+    // commits. Touch has no separate "move" gesture, so this gives touch-only
+    // builds the same hear-before-you-commit behavior as arrow navigation.
+    if (idx != s_alertSoundSelection) previewAlertSoundSelection(idx);
+    else                              applyAlertSoundSelection(idx);
+}
+
+static void onAlertSoundBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_alertSoundBackdrop) return;
+    cancelAlertSoundModal();
+}
+
+static void openAlertSoundModal() {
+    if (!s_rootScreen || s_alertSoundModal || s_alertSoundBackdrop) return;
+    s_alertSoundOriginal = s_cfg.msgAlertSound;
+    s_alertSoundSelection = (s_cfg.msgAlertSound <= MSG_ALERT_SOUND_MAX)
+                                ? s_cfg.msgAlertSound : 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    // Four short labels in a 2x2 grid, so this modal is deliberately narrower
+    // than the list-style pickers — no description column to make room for.
+    int modalW = w - 40;
+    if (modalW < 150) modalW = w - 8;
+    if (modalW > 210) modalW = 210;
+
+    s_alertSoundBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_alertSoundBackdrop, w, h);
+    lv_obj_align(s_alertSoundBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_alertSoundBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_alertSoundBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_alertSoundBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_alertSoundBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_alertSoundBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_alertSoundBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_alertSoundBackdrop, onAlertSoundBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_alertSoundModal = lv_obj_create(s_alertSoundBackdrop);
+    lv_obj_set_size(s_alertSoundModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_alertSoundModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_alertSoundModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_alertSoundModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_alertSoundModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_alertSoundModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_alertSoundModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_alertSoundModal, 1, 0);
+    lv_obj_set_style_border_color(s_alertSoundModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_alertSoundModal, 8, 0);
+    lv_obj_set_style_pad_row(s_alertSoundModal, 6, 0);
+    lv_obj_set_flex_flow(s_alertSoundModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_alertSoundModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_alertSoundBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_alertSoundModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Notification Sound");
+
+    lv_obj_t *hint = lv_label_create(s_alertSoundModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(hint, "Tap to preview, tap again to apply");
+#else
+    // Kept short so it fits the narrowed modal without wrapping to three lines.
+    lv_label_set_text_fmt(hint, "Move=Preview  Enter=OK  %s=Cancel",
+                          modalCloseKeyLabel());
+#endif
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    // Wrapping row container: four ~half-width buttons fall into two rows of
+    // two. The tone names carry no description text — moving the selection
+    // plays the tone, which describes it better than a caption could.
+    lv_obj_t *grid = lv_obj_create(s_alertSoundModal);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(grid, 6, 0);
+    lv_obj_set_style_pad_row(grid, 6, 0);
+
+    for (int i = 0; i <= MSG_ALERT_SOUND_MAX; i++) {
+        lv_obj_t *row = lv_btn_create(grid);
+        s_alertSoundRows[i] = row;
+        lv_obj_set_width(row, lv_pct(46));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 6, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onAlertSoundRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_width(name, lv_pct(100));
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(name, msgAlertSoundName((uint8_t)i));
+        lv_obj_center(name);
+    }
+
+    refreshAlertSoundSelection();
 }
 
 static void openCfgColorPickerModal() {
@@ -5811,8 +6100,8 @@ static void closeNodeInfoModal() {
 static void openNodeInfoModal() {
     if (!s_rootScreen || s_nodeInfoModal) return;
 
-    char info[12][96] = {};
-    int infoCount = buildDeviceInfoLines(info, 12);
+    char info[14][96] = {};   // 11 device rows + newest/oldest node
+    int infoCount = buildDeviceInfoLines(info, 14);
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
@@ -5858,12 +6147,15 @@ static void openNodeInfoModal() {
     lv_obj_set_style_text_font(hint, bodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_pad_top(hint, 3, 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+#elif defined(DEVICE_TDECK)
+    // T-Deck has no dedicated Up/Down keys; J/K and the trackball drive scroll.
+    lv_label_set_text_fmt(hint, "J/K = Scroll   %s = Close", modalCloseKeyLabel());
+#else
     lv_label_set_text_fmt(hint,
                           "Up/Down/J/K = Scroll   %s = Close",
                           modalCloseKeyLabel());
-#else
-    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
 #endif
 }
 #endif
@@ -6838,7 +7130,7 @@ static void snapshotNodesForModal() {
         if (!n || n->nodeId == 0) continue;
         if (!nodesShortNameDisplayable(n->shortName)) continue;
         if (nodesSnapshotContains(n->nodeId)) continue;
-        s_nodesSnapshot[s_nodesSnapshotCount++] = *n;
+        s_nodesSnapshotIds[s_nodesSnapshotCount++] = n->nodeId;
     }
 
     nodesApplyFilter();
@@ -6848,15 +7140,18 @@ static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
     for (int i = 0; i < s_nodesSnapshotCount && s_nodesFilteredCount < MAX_NODES; i++) {
-        const NodeEntry &n = s_nodesSnapshot[i];
+        const uint32_t nodeId = s_nodesSnapshotIds[i];
+        // Resolved live; null if the node was evicted since the snapshot, in
+        // which case only its id is still matchable.
+        const NodeEntry *n = Nodes.find(nodeId);
         bool match = true;
 
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
             char nodeIdText[16];
-            snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)n.nodeId);
-            match = dmNodePickerContainsNoCase(n.longName, s_nodesFilter)
-                 || dmNodePickerContainsNoCase(n.shortName, s_nodesFilter)
-                 || dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter);
+            snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
+            match = dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter)
+                 || (n && dmNodePickerContainsNoCase(n->longName, s_nodesFilter))
+                 || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter));
         }
 
         if (match) {
@@ -7001,7 +7296,7 @@ static void onNodesFilterButtonPressed(lv_event_t *e) {
 static bool nodesSnapshotContains(uint32_t nodeId) {
     if (nodeId == 0) return false;
     for (int i = 0; i < s_nodesSnapshotCount; i++) {
-        if (s_nodesSnapshot[i].nodeId == nodeId) return true;
+        if (s_nodesSnapshotIds[i] == nodeId) return true;
     }
     return false;
 }
@@ -7690,7 +7985,8 @@ static const NodeEntry *currentNodesSelection() {
     }
     int snapshotIdx = s_nodesFilteredIdx[s_nodesSelected];
     if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) return nullptr;
-    return &s_nodesSnapshot[snapshotIdx];
+    // Resolved live against NodeDB; null if evicted since the snapshot.
+    return Nodes.find(s_nodesSnapshotIds[snapshotIdx]);
 }
 
 static void refreshNodesMap(const NodeEntry *node) {
@@ -7883,7 +8179,13 @@ static void refreshNodesListRows() {
     for (int rowIdx = 0; rowIdx < s_nodesFilteredCount; rowIdx++) {
         int snapshotIdx = s_nodesFilteredIdx[rowIdx];
         if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) continue;
-        const NodeEntry &n = s_nodesSnapshot[snapshotIdx];
+        // Resolve live. If the node was evicted while this modal was open we
+        // still emit the row (from its id) so rows stay 1:1 with the filtered
+        // list — dropping one here would desync selection and row indices.
+        const uint32_t nodeId = s_nodesSnapshotIds[snapshotIdx];
+        const NodeEntry *n = Nodes.find(nodeId);
+        char nodeIdText[12];
+        snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
 
         lv_obj_t *row = lv_btn_create(s_nodesList);
         lv_obj_set_width(row, lv_pct(96));
@@ -7909,8 +8211,8 @@ static void refreshNodesListRows() {
         snprintf(rowText,
              sizeof(rowText),
              "%s%s",
-             n.favorite ? "* " : "",
-             n.shortName[0] ? n.shortName : "----");
+             (n && n->favorite) ? "* " : "",
+             !n ? nodeIdText : (n->shortName[0] ? n->shortName : "----"));
         setLabelTextEmojiSafe(lbl, rowText);
         lv_obj_center(lbl);
 
@@ -8602,7 +8904,7 @@ static void executeNodesActionSelection() {
             int snapshotIdx = s_nodesFilteredIdx[i];
             if (snapshotIdx >= 0
                 && snapshotIdx < s_nodesSnapshotCount
-                && s_nodesSnapshot[snapshotIdx].nodeId == nodeId) {
+                && s_nodesSnapshotIds[snapshotIdx] == nodeId) {
                 s_nodesSelected = i;
                 break;
             }
@@ -9778,11 +10080,13 @@ static void dmNodePickerApplyFilter() {
 
     bool useFilter = (s_dmNodeFilterOpen && s_dmNodeFilterLen > 0);
     for (int i = 0; i < s_dmNodeSnapshotCount && s_dmNodeFilteredCount < MAX_NODES; i++) {
-        const NodeEntry &n = s_dmNodeSnapshot[i];
+        // Resolved live; null if evicted since the snapshot, leaving nothing
+        // but the id to match against.
+        const NodeEntry *n = Nodes.find(s_dmNodeSnapshotIds[i]);
         if (useFilter) {
             bool match = false;
-            if (dmNodePickerContainsNoCase(n.shortName, s_dmNodeFilter)) match = true;
-            if (!match && dmNodePickerContainsNoCase(n.longName, s_dmNodeFilter)) match = true;
+            if (n && dmNodePickerContainsNoCase(n->shortName, s_dmNodeFilter)) match = true;
+            if (!match && n && dmNodePickerContainsNoCase(n->longName, s_dmNodeFilter)) match = true;
             if (!match) continue;
         }
 
@@ -9815,14 +10119,14 @@ static void snapshotNodesForDmPicker() {
 
         bool seen = false;
         for (int j = 0; j < s_dmNodeSnapshotCount; j++) {
-            if (s_dmNodeSnapshot[j].nodeId == n->nodeId) {
+            if (s_dmNodeSnapshotIds[j] == n->nodeId) {
                 seen = true;
                 break;
             }
         }
         if (seen) continue;
 
-        s_dmNodeSnapshot[s_dmNodeSnapshotCount++] = *n;
+        s_dmNodeSnapshotIds[s_dmNodeSnapshotCount++] = n->nodeId;
     }
 
     dmNodePickerApplyFilter();
@@ -9832,7 +10136,8 @@ static const NodeEntry *selectedDmNodeForPicker() {
     if (s_dmNodeSelection < 0 || s_dmNodeSelection >= s_dmNodeFilteredCount) return nullptr;
     int snapshotIdx = s_dmNodeFilteredIdx[s_dmNodeSelection];
     if (snapshotIdx < 0 || snapshotIdx >= s_dmNodeSnapshotCount) return nullptr;
-    return &s_dmNodeSnapshot[snapshotIdx];
+    // Resolved live against NodeDB; null if evicted since the snapshot.
+    return Nodes.find(s_dmNodeSnapshotIds[snapshotIdx]);
 }
 
 static void activateDmNodePickerSelection() {
@@ -9919,7 +10224,12 @@ static void refreshDmNodePicker(bool force) {
         bool selected = (i == s_dmNodeSelection);
         int snapshotIdx = s_dmNodeFilteredIdx[i];
         if (snapshotIdx < 0 || snapshotIdx >= s_dmNodeSnapshotCount) continue;
-        const NodeEntry &n = s_dmNodeSnapshot[snapshotIdx];
+        // Resolve live. Evicted nodes still emit a row (from their id) so rows
+        // stay 1:1 with the filtered list and selection indices stay valid.
+        const uint32_t nodeId = s_dmNodeSnapshotIds[snapshotIdx];
+        const NodeEntry *n = Nodes.find(nodeId);
+        char nodeIdText[12];
+        snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
 
         lv_obj_t *row = lv_btn_create(s_dmNodePickerList);
         s_dmNodePickerRows[i] = row;
@@ -9949,12 +10259,13 @@ static void refreshDmNodePicker(bool force) {
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
 
         char rowText[64];
-        const char *longDisp = n.longName[0] ? n.longName : "(unknown)";
-        const char *shortDisp = liveShortNameUsable(n.shortName) ? n.shortName : "????";
+        const char *longDisp = (n && n->longName[0]) ? n->longName : "(unknown)";
+        const char *shortDisp = (n && liveShortNameUsable(n->shortName)) ? n->shortName
+                                                                         : nodeIdText;
         snprintf(rowText,
              sizeof(rowText),
              "%s%s (%s)",
-             n.favorite ? "* " : "",
+             (n && n->favorite) ? "* " : "",
              longDisp,
              shortDisp);
         setLabelTextEmojiSafe(lbl, rowText);
@@ -10041,7 +10352,7 @@ static void closeDmNodePicker() {
     s_dmNodeFilterOpen = false;
     s_dmNodeFilterLen = 0;
     s_dmNodeFilter[0] = '\0';
-    memset(s_dmNodeSnapshot, 0, sizeof(s_dmNodeSnapshot));
+    memset(s_dmNodeSnapshotIds, 0, sizeof(s_dmNodeSnapshotIds));
     memset(s_dmNodeFilteredIdx, 0, sizeof(s_dmNodeFilteredIdx));
     memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
 }
@@ -11483,10 +11794,8 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_MSG_ALERT:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MSG_ALERT");
-            s_cfg.msgAlertSound = (uint8_t)((s_cfg.msgAlertSound + 1) % 4);
-            persistMessageAlertSetting();
-            triggerMessageAlert(true);  // Preview the selected notification profile.
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
+            showActionPopup = false;
+            openAlertSoundModal();   // pick directly; navigating previews each tone
             break;
 
         case CFG_ACTION_SPLASH_MELODY:
@@ -12661,6 +12970,27 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        if (s_alertSoundModal) {
+            if (isModalCloseKey(k)) {
+                cancelAlertSoundModal();   // undo any previewed change
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyAlertSoundSelection(s_alertSoundSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_alertSoundSelection + delta;
+                if (next < 0) next = 0;
+                if (next > MSG_ALERT_SOUND_MAX) next = MSG_ALERT_SOUND_MAX;
+                if (next != s_alertSoundSelection) previewAlertSoundSelection(next);
+            }
+            continue;
+        }
+
         if (s_chatNameModal) {
             if (isModalCloseKey(k)) {
                 closeChatNameModal();
@@ -12862,10 +13192,12 @@ static void pumpKeyboardInput() {
         }
 
 #if !defined(DEVICE_TLORA_PAGER_TFT)
-        // The (I)nformation popup layers over the CFG modal.
-        // Cardputer: allow j/k and up/down scroll inside the modal.
+        // The (I)nformation popup layers over the CFG modal. Every keyboard
+        // build scrolls it with Up/Down (J/K on T-Deck) and closes with I or the
+        // modal close key. Heltec is touch-first with no keyboard, so there any
+        // key just dismisses it.
         if (s_nodeInfoModal) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
             if (k == KEY_SCROLL_UP) {
                 scrollListClamped(s_nodeInfoModal, 18);
                 continue;
@@ -16387,6 +16719,69 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
 #endif
 }
 
+// ── Auto-favorite nearby nodes ───────────────────────────────────────────────
+// Great-circle distance in meters between two positions in 1e7-scaled degrees.
+static float geoDistanceM(int32_t latI1, int32_t lonI1, int32_t latI2, int32_t lonI2) {
+    const float kDegToRad = 0.017453292519943295f;
+    const float lat1 = (float)latI1 * 1e-7f * kDegToRad;
+    const float lat2 = (float)latI2 * 1e-7f * kDegToRad;
+    const float dLat = lat2 - lat1;
+    const float dLon = ((float)lonI2 - (float)lonI1) * 1e-7f * kDegToRad;
+    float a = sinf(dLat * 0.5f); a *= a;
+    float b = sinf(dLon * 0.5f); b *= b;
+    float h = a + cosf(lat1) * cosf(lat2) * b;
+    if (h < 0.0f) h = 0.0f;
+    if (h > 1.0f) h = 1.0f;
+    return 2.0f * 6371000.0f * asinf(sqrtf(h));
+}
+
+// Positions change slowly and each promotion writes NVS, so a lazy sweep is
+// plenty; it also re-runs as our own position moves, not just on new packets.
+static const uint32_t kAutoFavIntervalMs = 30000;
+static uint32_t s_lastAutoFavMs = 0;
+
+// Favorite any node whose last known position is within the configured radius.
+// Opt-in and additive only: it never un-favorites, because a node drifting out
+// of range (or simply going quiet) must not silently clear something the user
+// pinned by hand — and favorites are what protect a node from eviction.
+static void serviceAutoFavorite(uint32_t nowMs) {
+    if (!s_cfg.autoFavoriteEnabled || s_cfg.autoFavoriteRangeM == 0) return;
+    if (s_lastAutoFavMs != 0 && (uint32_t)(nowMs - s_lastAutoFavMs) < kAutoFavIntervalMs) return;
+    s_lastAutoFavMs = nowMs;
+
+    // Prefer a live fix; fall back to the last known / manually set position.
+    int32_t myLat, myLon;
+    if (gpsIsEnabled() && gpsHasFix()) {
+        myLat = gpsLatI();
+        myLon = gpsLonI();
+    } else {
+        myLat = s_cfg.latI;
+        myLon = s_cfg.lonI;
+    }
+    if (myLat == 0 && myLon == 0) return;   // our own position is unknown
+
+    const float rangeM = (float)s_cfg.autoFavoriteRangeM;
+    const int count = Nodes.count();
+    // Nodes.at() rather than getByRank(): getByRank() re-sorts on every call and
+    // favorites sort first, so promoting one mid-scan would shuffle the table
+    // underneath this loop and skip entries.
+    for (int i = 0; i < count; i++) {
+        NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->favorite) continue;
+        if (e->nodeId == s_myNodeId) continue;
+        if (!e->hasPosition) continue;
+        if (e->latI == 0 && e->lonI == 0) continue;
+
+        const float d = geoDistanceM(myLat, myLon, e->latI, e->lonI);
+        if (d <= rangeM) {
+            if (Nodes.setFavorite(e->nodeId, true)) {
+                Serial.printf("[autofav] favorited !%08lx at %.0f m (limit %.0f m)\n",
+                              (unsigned long)e->nodeId, (double)d, (double)rangeM);
+            }
+        }
+    }
+}
+
 static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     bool due = s_cfg.neighborInfoEnabled
         && s_cfg.neighborInfoOverLora
@@ -18198,6 +18593,14 @@ void loop() {
     serviceNodeInfoAnnounce(now);
     serviceTelemetryAnnounce(now);
     serviceNeighborInfoAnnounce(now);
+    serviceAutoFavorite(now);
+    // Append any nodes evicted from the full node table to the SD archive.
+    // Placed before the screen-sleep return below so archiving keeps working
+    // with the display off. No-op unless an eviction actually queued something.
+    // Mirror the user preference into node_db each pass so it can never drift
+    // from config (web save, YAML import, and factory reset all land here).
+    nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled);
+    nodeArchiveFlush();
 
     now = millis();
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0

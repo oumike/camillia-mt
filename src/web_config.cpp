@@ -1633,6 +1633,82 @@ static void sendConfigPage(const char *msg = "") {
     html += gWifiPass;
     html += "'></label>";
 
+    // Node Management. The archive checkbox is only meaningful where the node
+    // table can actually spill somewhere: the board needs an SD slot AND a
+    // mounted card. Where it can't, the box is rendered disabled with the
+    // reason shown, and handlePostSave leaves the stored preference untouched
+    // so it survives until a card is available.
+    {
+        const bool slot    = nodeArchiveSlotExists();
+        const bool canArch = slot && nodeArchiveAvailable();
+        html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Node Management</h3>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "The device keeps the ";
+        html += String(MAX_NODES);
+        html += " most recently heard nodes. When that fills up, the "
+                "oldest non-favorite is dropped to make room — favorites are never "
+                "dropped.</p>";
+
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+                "<input type='checkbox' name='node_archive' value='1'";
+        if (gCfg->nodeArchiveEnabled) html += " checked";
+        if (!canArch) html += " disabled";
+        html += " style='width:auto;margin:0'>"
+                "<span>Archive dropped nodes to SD card</span></label>";
+
+        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        if (!slot) {
+            html += "Unavailable: this board has no SD card slot. Dropped nodes "
+                    "are discarded.";
+        } else if (!canArch) {
+            html += "Unavailable: no SD card detected. Insert a card and reboot "
+                    "to enable archiving.";
+        } else {
+            html += "Appends each dropped node to <code>";
+            html += nodeArchiveFilePath();
+            html += "</code> so its details are preserved after it leaves the "
+                    "live list.";
+        }
+        html += "</p>";
+
+        // Auto-favorite. Radius is stored in meters but shown in whatever the
+        // Units setting uses, so it reads naturally alongside the rest of the UI.
+        const bool imperial = (gCfg->displayUnits != 0);
+        const float shown = imperial ? (gCfg->autoFavoriteRangeM / 1609.344f)
+                                     : (gCfg->autoFavoriteRangeM / 1000.0f);
+        char rangeBuf[24];
+        snprintf(rangeBuf, sizeof(rangeBuf), "%.2f", (double)shown);
+
+        html += "<label style='display:flex;align-items:center;gap:.5em;margin-top:.6em'>"
+                "<input type='checkbox' name='autofav' value='1'";
+        if (gCfg->autoFavoriteEnabled) html += " checked";
+        html += " style='width:auto;margin:0'>"
+                "<span>Auto-favorite nearby nodes</span></label>";
+
+        html += "<label>Auto-favorite radius (";
+        html += imperial ? "miles" : "km";
+        html += ")<input name='autofav_range' type='number' min='0.05' max='500'"
+                " step='0.05' value='";
+        html += rangeBuf;
+        html += "'></label>";
+
+        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .8em'>"
+                "Any node reporting a position within this radius is favorited "
+                "automatically. Favorites sort to the top of the node and DM lists "
+                "and are never dropped when the node table fills up. This only ever "
+                "<em>adds</em> favorites &mdash; a node moving out of range is never "
+                "un-favorited, so it can't undo one you set by hand. Requires a known "
+                "position for both your node and theirs.</p>";
+
+        html += "<p style='margin:.2em 0 1em'><a href='/nodes.csv'"
+                " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+                "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+                "&#11015; Export Node List (CSV)</a></p>"
+                "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+                "Downloads every node currently known to the device, plus any "
+                "previously archived nodes if an archive exists.</p>";
+    }
+
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
     sendChunk(html);
 
@@ -2781,6 +2857,25 @@ static void handlePostSave() {
         if (cn < 0 || cn > CHAT_NAME_MAX) cn = CHAT_NAME_SHORT;
         gCfg->chatNameStyle = (uint8_t)cn;
     }
+    // Only honor the archive checkbox when it was actually enabled in the form.
+    // A disabled checkbox submits nothing, which is indistinguishable from
+    // "unchecked" — so without this guard, saving on a card-less device would
+    // silently clear a preference the user set while a card was present.
+    if (nodeArchiveSlotExists() && nodeArchiveAvailable()) {
+        gCfg->nodeArchiveEnabled = server.hasArg("node_archive");
+    }
+    gCfg->autoFavoriteEnabled = server.hasArg("autofav");
+    if (server.hasArg("autofav_range")) {
+        // Shown in km or miles per the Units setting; stored in meters.
+        const double v = server.arg("autofav_range").toDouble();
+        if (v > 0.0) {
+            const double perUnit = (gCfg->displayUnits != 0) ? 1609.344 : 1000.0;
+            double meters = v * perUnit;
+            if (meters < 50.0) meters = 50.0;             // below this GPS noise dominates
+            if (meters > 800000.0) meters = 800000.0;     // 800 km / ~500 mi ceiling
+            gCfg->autoFavoriteRangeM = (uint32_t)(meters + 0.5);
+        }
+    }
     gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.
@@ -3347,6 +3442,75 @@ static void handlePostFactoryReset() {
 
 // ── Export / Import ───────────────────────────────────────────
 
+// Export every node the device knows about as CSV: the live table first, then
+// any previously archived (evicted) nodes from the SD file. Both share the
+// column schema from node_db (nodeCsvHeader/nodeCsvFormatEntry) so the two
+// halves line up; a leading "source" column distinguishes them, and
+// "archivedEpoch" is populated only for archived rows.
+static void handleGetNodesCsv() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+
+    char fileName[64];
+    snprintf(fileName, sizeof(fileName), "camillia-nodes-%s.csv",
+             (gCfg && gCfg->nodeShort[0]) ? gCfg->nodeShort : "node");
+    char cd[128];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
+    server.sendHeader("Content-Disposition", cd);
+    server.sendHeader("Cache-Control", "no-store");
+
+    // Chunked: the live table alone can be MAX_NODES rows, too big to assemble
+    // in one String on a device this size.
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/csv", "");
+
+    String out;
+    out.reserve(1024);
+    out  = "source,archivedEpoch,";
+    out += nodeCsvHeader();
+    out += "\n";
+
+    const int liveCount = Nodes.count();
+    for (int i = 0; i < liveCount; i++) {
+        NodeEntry *n = Nodes.getByRank(i);
+        if (!n || n->nodeId == 0) continue;
+        char rec[512];
+        nodeCsvFormatEntry(*n, rec, sizeof(rec));
+        out += "live,,";
+        out += rec;
+        out += "\n";
+        if (out.length() > 1024) { server.sendContent(out); out = ""; }
+    }
+    if (out.length()) { server.sendContent(out); out = ""; }
+
+    // Archived rows are streamed through verbatim: each already begins with its
+    // archivedEpoch followed by the shared columns, so only "archived," is
+    // prepended. The file's own header line is skipped.
+    const char *archPath = nodeArchiveFilePath();
+    if (archPath && sdBegin() && SD.exists(archPath)) {
+        File af = SD.open(archPath, FILE_READ);
+        if (af) {
+            bool firstLine = true;
+            while (af.available()) {
+                String line = af.readStringUntil('\n');
+                line.trim();
+                if (!line.length()) continue;
+                if (firstLine) {
+                    firstLine = false;
+                    if (line.startsWith("archivedEpoch")) continue;   // header
+                }
+                out += "archived,";
+                out += line;
+                out += "\n";
+                if (out.length() > 1024) { server.sendContent(out); out = ""; }
+            }
+            af.close();
+        }
+    }
+
+    if (out.length()) server.sendContent(out);
+    server.sendContent("");   // terminate the chunked response
+}
+
 static void handleGetExport() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
@@ -3444,6 +3608,7 @@ static void registerCommonRoutes() {
     if (gOnScreenshotPng) {
         server.on("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
+    server.on("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     server.on("/export",            HTTP_GET,  handleGetExport);
     server.on("/import",            HTTP_POST, handleImportDone, handleImportUpload);
     server.on("/clear-messages",    HTTP_POST, handlePostClearMessages);

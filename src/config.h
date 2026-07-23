@@ -151,12 +151,16 @@
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)
+#define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
+#define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
+#define MY_AUTOFAV_RANGE_M  5000   // auto-favorite threshold, meters (5 km / ~3.1 mi)
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 #define MSG_ALERT_SOUND_DEFAULT 0
 #define MSG_ALERT_SOUND_CHIRPY  1
 #define MSG_ALERT_SOUND_BASS    2
 #define MSG_ALERT_SOUND_OFF     3
+#define MSG_ALERT_SOUND_MAX     MSG_ALERT_SOUND_OFF
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
@@ -303,7 +307,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define MAX_MSG_LINES   400   // display lines per channel
 #endif
 #define MESH_TEXT_MAX_LEN 200
-#define MAX_NODES        64
+#define MAX_NODES        250
 #define MAX_PENDING_ACK   8
 
 // ── Battery ADC ───────────────────────────────────────────────

@@ -396,6 +396,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
+    cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
+    cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
+    cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
     cfg.chatSpacing        = MY_CHAT_SPACING;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
@@ -403,6 +406,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
 }
 
 // ── SD init ──────────────────────────────────────────────────
+bool sdCardMounted() { return sdReady; }
+
 bool sdBegin() {
 #if (SD_CS < 0)
     sdReady = false;
@@ -604,6 +609,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "  alt: %d\n",    (int)cfg.alt);        out += tmp;
     snprintf(tmp, sizeof(tmp), "  lat: %.7f\n",  cfg.latI * 1e-7f);    out += tmp;
     snprintf(tmp, sizeof(tmp), "  lon: %.7f\n",  cfg.lonI * 1e-7f);    out += tmp;
+    // nodes
+    out += "nodes:\n";
+    snprintf(tmp, sizeof(tmp), "  archiveEvicted: %s\n", cfg.nodeArchiveEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "  autoFavorite: %s\n", cfg.autoFavoriteEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "  autoFavoriteRangeM: %lu\n", (unsigned long)cfg.autoFavoriteRangeM); out += tmp;
     // module_config
     out += "module_config:\n";
     out += "  storeForward:\n";
@@ -982,6 +992,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
                 if (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
+            } else if (!strcmp(section, "nodes")) {
+                if      (!strcmp(key, "archiveEvicted"))     cfg.nodeArchiveEnabled  = parseBoolValue(val);
+                else if (!strcmp(key, "autoFavorite"))       cfg.autoFavoriteEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "autoFavoriteRangeM")) cfg.autoFavoriteRangeM  = (uint32_t)atol(val);
             } else if (!strcmp(section, "channels") && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
                 if (!strcmp(key, "role"))
                     CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;

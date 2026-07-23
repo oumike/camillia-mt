@@ -110,6 +110,11 @@ struct RhinoConfig {
     // Module: Store and Forward (client)
     bool     snfClientEnabled;
 
+    // Node management
+    bool     nodeArchiveEnabled;  // preserve nodes evicted from the full table to SD
+    bool     autoFavoriteEnabled; // auto-favorite nodes within autoFavoriteRangeM
+    uint32_t autoFavoriteRangeM;  // auto-favorite distance threshold, meters
+
     // Chat display
     uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
@@ -143,6 +148,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg);
 
 // Mount SD card (call after SPI.begin). Returns true if card present.
 bool sdBegin();
+
+// Cached mount state — true if a card is currently mounted. Unlike sdBegin()
+// this never probes the bus, so UI/web paths can ask cheaply and repeatedly.
+bool sdCardMounted();
 
 // Write /camillia/config.yaml. Returns true on success.
 bool cfgExport(const RhinoConfig &cfg);

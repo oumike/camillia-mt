@@ -1,6 +1,9 @@
 #include "node_db.h"
 #include "utf8_utils.h"
+#include "config_io.h"   // sdBegin()
 #include <Preferences.h>
+#include <SD.h>
+#include <time.h>
 
 NodeDB Nodes;
 
@@ -51,7 +54,8 @@ void NodeDB::init() {
     // create the namespace without logging a noisy NOT_FOUND error.
     Preferences p;
     p.begin("nodes", false);
-    uint32_t ids[MAX_NODES] = {};
+    static uint32_t ids[MAX_NODES];   // static: 1 KB at MAX_NODES=250, see _saveIds()
+    memset(ids, 0, sizeof(ids));
     int n = (int)(p.getBytes("ids", ids, sizeof(ids)) / sizeof(uint32_t));
     for (int i = 0; i < n && _count < MAX_NODES; i++) {
         char key[12]; nodeKey(key, ids[i]);
@@ -138,7 +142,9 @@ void NodeDB::_save(uint32_t nodeId) {
 }
 
 void NodeDB::_saveIds() {
-    uint32_t ids[MAX_NODES];
+    // Static, not stack: at MAX_NODES=250 this is 1 KB, and _saveIds() runs from
+    // upsert() on the packet path — 1/8th of the Arduino loop task's 8 KB stack.
+    static uint32_t ids[MAX_NODES];
     int n = 0;
     for (int i = 0; i < _count; i++)
         if (_nodes[i].nodeId) ids[n++] = _nodes[i].nodeId;
@@ -171,6 +177,209 @@ NodeEntry *NodeDB::find(uint32_t nodeId) {
     return nullptr;
 }
 
+// ── Node CSV schema ──────────────────────────────────────────────────────────
+// Shared by the SD archive writer and the web CSV export (see node_db.h). Built
+// on every board, including those with no SD slot, because the export works
+// regardless of whether archiving is possible.
+
+// Quote a field for CSV: wrap in double quotes and double any embedded quote.
+// Node long names are user-set and routinely contain commas and emoji.
+static void nodeCsvQuote(const char *in, char *out, size_t outLen) {
+    if (!out || outLen < 3) return;
+    size_t o = 0;
+    out[o++] = '"';
+    for (const char *p = in ? in : ""; *p && o < outLen - 2; p++) {
+        if (*p == '"' && o < outLen - 3) out[o++] = '"';
+        out[o++] = *p;
+    }
+    out[o++] = '"';
+    out[o] = '\0';
+}
+
+const char *nodeCsvHeader() {
+    return "lastHeardEpoch,nodeId,shortName,longName,hops,snr,latI,lonI,alt,"
+           "battPct,voltage,chUtil,airUtil,tempC,humidityPct,pressureHpa,"
+           "chanIdx,favorite,hasPosition,hasTelemetry,pubKey";
+}
+
+void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+
+    // lastHeardMs is a millis() stamp; convert to wall clock when the clock is
+    // set so the record stays meaningful across reboots. 0 = unknown.
+    const time_t nowEpoch = time(nullptr);
+    const bool   clockOk  = (nowEpoch > 1700000000);
+    const uint32_t nowMs  = millis();
+    long lastHeardEpoch = 0;
+    if (clockOk && e.lastHeardMs != 0 && nowMs >= e.lastHeardMs) {
+        lastHeardEpoch = (long)(nowEpoch - (time_t)((nowMs - e.lastHeardMs) / 1000UL));
+    }
+
+    char shortQ[16], longQ[96];
+    nodeCsvQuote(e.shortName, shortQ, sizeof(shortQ));
+    nodeCsvQuote(e.longName,  longQ,  sizeof(longQ));
+
+    // The public key is expensive to reacquire (needs a fresh NODEINFO), so
+    // preserve it too — it is what makes an exported record useful for PKI.
+    char pubHex[65];
+    pubHex[0] = '\0';
+    if (e.hasPubKey) {
+        for (int i = 0; i < 32; i++) snprintf(pubHex + i * 2, 3, "%02x", e.pubKey[i]);
+    }
+
+    snprintf(out, outLen,
+             "%ld,!%08lx,%s,%s,%u,%.2f,%ld,%ld,%ld,"
+             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%s",
+             lastHeardEpoch,
+             (unsigned long)e.nodeId,
+             shortQ, longQ,
+             (unsigned)e.hops, e.snr,
+             (long)e.latI, (long)e.lonI, (long)e.alt,
+             e.battPct, e.voltage, e.chUtil, e.airUtil,
+             e.temperatureC, e.humidityPct, e.pressureHpa,
+             e.chanIdx,
+             e.favorite ? 1 : 0,
+             e.hasPosition ? 1 : 0,
+             e.hasTelemetry ? 1 : 0,
+             pubHex);
+}
+
+// ── Evicted-node archive ─────────────────────────────────────────────────────
+// See the contract in node_db.h. Eviction runs on the packet path, so it only
+// memcpys the doomed record into this ring; nodeArchiveFlush() does the SD I/O
+// from the main loop.
+
+// User preference, mirrored from RhinoConfig::nodeArchiveEnabled by the main
+// loop so node_db never has to reach into the config object.
+static bool s_archEnabled = false;   // opt-in; mirrored from config by the main loop
+void nodeArchiveSetEnabled(bool enabled) { s_archEnabled = enabled; }
+bool nodeArchiveIsEnabled() { return s_archEnabled; }
+
+#if (SD_CS >= 0)
+static const char *kArchivePath = "/camillia/nodes_archive.csv";
+static const char *kArchiveDir  = "/camillia";
+
+// 8 slots is deep insulation: an eviction needs a packet from a node not already
+// in a full table, and the loop drains the whole queue in one file open, so in
+// practice depth never exceeds 1-2.
+static const int kArchiveQueueLen = 8;
+static NodeEntry s_archQueue[kArchiveQueueLen];
+static int      s_archHead = 0, s_archTail = 0, s_archCount = 0;
+static uint32_t s_archWritten = 0, s_archDropped = 0;
+static bool     s_archNoSdLogged = false;
+// Mounting is expensive when no card is present (the pager probes several bus
+// profiles with delays). Back off between attempts so an eviction burst on a
+// card-less device cannot stall the main loop repeatedly.
+static const uint32_t kArchiveSdRetryMs = 60000;
+static uint32_t s_archSdRetryAtMs = 0;
+
+int      nodeArchivePending() { return s_archCount; }
+uint32_t nodeArchiveWritten() { return s_archWritten; }
+uint32_t nodeArchiveDropped() { return s_archDropped; }
+bool     nodeArchiveSlotExists() { return true; }
+const char *nodeArchiveFilePath() { return kArchivePath; }
+
+// Card presence without forcing a mount probe: sdCardMounted() reports the
+// cached state, so rendering the web page stays cheap.
+bool nodeArchiveAvailable() { return sdCardMounted(); }
+
+static void archiveQueue(const NodeEntry &e) {
+    if (e.nodeId == 0) return;
+    if (!s_archEnabled) return;   // user opted out; evicted nodes just drop
+    if (s_archCount >= kArchiveQueueLen) {
+        // Full (SD missing or wedged): drop the oldest so the newest eviction
+        // still lands. Preserving recent history beats stalling on stale.
+        s_archTail = (s_archTail + 1) % kArchiveQueueLen;
+        s_archCount--;
+        s_archDropped++;
+    }
+    s_archQueue[s_archHead] = e;
+    s_archHead = (s_archHead + 1) % kArchiveQueueLen;
+    s_archCount++;
+}
+
+static void archiveDiscardAll() {
+    s_archDropped += (uint32_t)s_archCount;
+    s_archCount = 0;
+    s_archHead = s_archTail = 0;
+}
+
+void nodeArchiveFlush() {
+    if (s_archCount <= 0) return;
+    if (!s_archEnabled) { archiveDiscardAll(); return; }
+
+    const uint32_t nowMs = millis();
+    if (s_archSdRetryAtMs != 0 && (int32_t)(nowMs - s_archSdRetryAtMs) < 0) {
+        archiveDiscardAll();   // still inside the no-card backoff window
+        return;
+    }
+
+    if (!sdBegin()) {
+        s_archSdRetryAtMs = nowMs + kArchiveSdRetryMs;
+        if (!s_archNoSdLogged) {
+            s_archNoSdLogged = true;
+            Serial.println("[nodedb] archive: no SD card - evicted nodes are not preserved");
+        }
+        archiveDiscardAll();
+        return;
+    }
+    s_archSdRetryAtMs = 0;
+    s_archNoSdLogged = false;
+
+    SD.mkdir(kArchiveDir);
+    const bool needHeader = !SD.exists(kArchivePath);
+    File f = SD.open(kArchivePath, FILE_APPEND);
+    if (!f) {
+        Serial.println("[nodedb] archive: open failed - dropping queued nodes");
+        archiveDiscardAll();
+        return;
+    }
+
+    if (needHeader) {
+        // archivedEpoch is this writer's own context column; the rest is the
+        // shared node schema.
+        String hdr = "archivedEpoch,";
+        hdr += nodeCsvHeader();
+        f.println(hdr);
+    }
+
+    const time_t nowEpoch = time(nullptr);
+    const bool   clockOk  = (nowEpoch > 1700000000);
+
+    // Drain the whole queue inside one open/close — SD writes are the expensive
+    // part and evictions can arrive in bursts when the mesh is busy.
+    while (s_archCount > 0) {
+        char rec[512];
+        nodeCsvFormatEntry(s_archQueue[s_archTail], rec, sizeof(rec));
+
+        char line[544];
+        snprintf(line, sizeof(line), "%ld,%s", clockOk ? (long)nowEpoch : 0L, rec);
+        f.println(line);
+
+        s_archTail = (s_archTail + 1) % kArchiveQueueLen;
+        s_archCount--;
+        s_archWritten++;
+    }
+
+    f.close();
+}
+
+#else   // (SD_CS < 0)
+
+// Boards with no SD slot (Heltec V4) have nowhere to preserve an evicted node,
+// so it is simply dropped. The queue, its 1.3 KB of RAM, and the CSV writer are
+// all compiled out rather than queueing records that could never be written.
+static inline void archiveQueue(const NodeEntry &) {}
+void     nodeArchiveFlush() {}
+int      nodeArchivePending() { return 0; }
+uint32_t nodeArchiveWritten() { return 0; }
+uint32_t nodeArchiveDropped() { return 0; }
+bool     nodeArchiveSlotExists() { return false; }
+bool     nodeArchiveAvailable() { return false; }
+const char *nodeArchiveFilePath() { return nullptr; }
+
+#endif  // (SD_CS >= 0)
+
 NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     NodeEntry *e = find(nodeId);
     if (e) return e;
@@ -178,11 +387,26 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     uint32_t evictedId = 0;
     if (_count >= MAX_NODES) {
         _sort();
-        evictedId = _nodes[_count - 1].nodeId;
+        // Favorites are never evicted, however stale. _sort() places them first,
+        // so the tail is normally already a non-favorite; scanning back only
+        // does real work when favorites fill the end of the table.
+        int victim = -1;
+        for (int i = _count - 1; i >= 0; i--) {
+            if (!_nodes[i].favorite) { victim = i; break; }
+        }
+        if (victim < 0) {
+            // Every slot is favorited: there is genuinely no room, and taking
+            // one would break the guarantee above. Refuse rather than evict.
+            return nullptr;
+        }
+        evictedId = _nodes[victim].nodeId;
+        // Preserve the least-recently-heard node before its slot is reused.
+        // Queue only — the SD write happens off the packet path.
+        archiveQueue(_nodes[victim]);
         // Delete the evicted node's blob from NVS
         char evKey[12]; nodeKey(evKey, evictedId);
         Preferences p; p.begin("nodes", false); p.remove(evKey); p.end();
-        e = &_nodes[_count - 1];
+        e = &_nodes[victim];
     } else {
         e = &_nodes[_count++];
     }
@@ -195,6 +419,11 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     _save(nodeId); // write initial blob so load() never finds an orphaned ID
     e->lastPersistMs = millis();
     return e;
+}
+
+NodeEntry *NodeDB::at(int idx) {
+    if (idx < 0 || idx >= _count) return nullptr;
+    return &_nodes[idx];
 }
 
 NodeEntry *NodeDB::getByRank(int rank) {
@@ -225,6 +454,7 @@ void NodeDB::_sort() {
 
 void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     NodeEntry *e = upsert(pkt.hdr.from);
+    if (!e) return;   // table full of favorites
     e->lastHeardMs = pkt.rxMs;
     e->snr         = pkt.snr;
     // Routing ACK/NAK can arrive on a fallback channel and should not drive
@@ -246,6 +476,7 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
 
 void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
+    if (!e) return;   // table full of favorites
     bool changed = false;
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
@@ -272,6 +503,7 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
 
 void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {
     NodeEntry *e = upsert(nodeId);
+    if (!e) return;   // table full of favorites
     uint32_t now = millis();
     e->lastPosMs = now;
     bool hadPosition = e->hasPosition;
@@ -289,6 +521,7 @@ void NodeDB::updatePosition(uint32_t nodeId, const PositionInfo &pos) {
 void NodeDB::updateTelemetry(uint32_t nodeId, const TelemetryInfo &t) {
     if (!t.valid) return;
     NodeEntry *e = upsert(nodeId);
+    if (!e) return;   // table full of favorites
     bool changed = false;
 
     if (t.hasDeviceMetrics) {
