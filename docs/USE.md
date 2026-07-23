@@ -169,6 +169,28 @@ Two deliberate limits:
 
 The check runs every 30 seconds, so it also picks up nodes as *you* move.
 
+### Firmware update check on boot
+
+Once per boot, after WiFi comes up and settles, the device asks the release
+server whether a newer build exists. If one does, a dialog shows the jump:
+
+```
+Firmware Update
+3.4.1 -> 3.5.0
+```
+
+**Yes** reboots into OTA minimal mode and installs it (the same path as the
+Config screen's Firmware Update action, including signature verification).
+**No** dismisses it for the rest of this boot — it will not ask again until you
+reboot. On keyboard builds, `Y`/Enter accepts and `N`/close declines.
+
+Web Config → **Firmware Updates** → *Check for Updates on Boot* turns the check
+off. It defaults to on. The check is a single plain-HTTP request and is skipped
+entirely when WiFi is off or unreachable; a failed check is not retried until
+the next boot. The update source is fixed in firmware and is not configurable.
+
+Not available on the Cardputer, where OTA is disabled altogether.
+
 ### Chat style
 
 Config has a **Chat Style** action. Selecting it opens a picker modal — navigate

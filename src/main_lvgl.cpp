@@ -172,6 +172,12 @@ static bool s_cfgWifiPickerOnboardingMode = false;
 // Yes/No confirmation dialog layered over the CFG modal for destructive actions.
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
+static lv_obj_t *s_otaPromptBackdrop = nullptr;
+static lv_obj_t *s_otaPromptModal = nullptr;
+static bool s_otaAutoCheckDone = false;     // one check attempt per boot
+// Settle delay after the station associates, before the release check fires.
+static constexpr uint32_t kOtaAutoCheckSettleMs = 8000;
+static char s_otaAutoCheckTag[48] = {};     // release tag the prompt is offering
 static int s_cfgConfirmPendingAction = -1;
 // Readable action-result popup over CFG; replaces truncated header notices.
 static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
@@ -601,11 +607,12 @@ static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
 static const lv_font_t *kChannelChatFont = kMainScreenFont;
 #endif
 
-// Applies the user's font-size preference (Small/Medium/Large) to a chat/DM base
-// font. Medium returns the base unchanged so the built-in size is the default;
-// Small/Large step one Montserrat size down/up. Anchoring to the passed base
-// keeps "Medium" equal to each screen's current size on every board. Fonts below
-// 10 px aren't compiled in, so Small clamps at montserrat_10.
+// Applies the user's font-size preference (Small/Medium/Large/Extra Large) to a
+// chat/DM base font. Medium returns the base unchanged so the built-in size is
+// the default; Small/Large step one Montserrat size down/up and Extra Large two
+// up. Anchoring to the passed base keeps "Medium" equal to each screen's current
+// size on every board. Fonts below 10 px aren't compiled in, so Small clamps at
+// montserrat_10; 18 px is the largest compiled face, so Extra Large clamps there.
 static const lv_font_t *scaledChatFont(const lv_font_t *base) {
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:
@@ -617,6 +624,12 @@ static const lv_font_t *scaledChatFont(const lv_font_t *base) {
             if (base == &lv_font_montserrat_12) return &lv_font_montserrat_14;
             if (base == &lv_font_montserrat_14) return &lv_font_montserrat_16;
             return base;
+        case FONT_SIZE_XLARGE:
+            if (base == &lv_font_montserrat_10) return &lv_font_montserrat_14;
+            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_16;
+            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_18;
+            if (base == &lv_font_montserrat_16) return &lv_font_montserrat_18;
+            return base;
         default:
             return base;
     }
@@ -624,10 +637,11 @@ static const lv_font_t *scaledChatFont(const lv_font_t *base) {
 
 static const char *fontSizeName(uint8_t size) {
     switch (size) {
-        case FONT_SIZE_SMALL: return "Small";
-        case FONT_SIZE_LARGE: return "Large";
+        case FONT_SIZE_SMALL:  return "Small";
+        case FONT_SIZE_LARGE:  return "Large";
+        case FONT_SIZE_XLARGE: return "Extra Large";
         case FONT_SIZE_MEDIUM:
-        default:              return "Medium";
+        default:               return "Medium";
     }
 }
 static bool s_pagerChatCursorMode = false;
@@ -842,6 +856,7 @@ static void activateDmSelection(bool allowCompose = true);
 // Bubble chat helpers (defined further down, but also used by the DM renderer
 // so DMs can share the Bubbles style).
 static const char *chatStripPrefix(const char *line);
+static void chatBubbleBeginRender(lv_obj_t *list);
 static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            const char *nameTag, const char *body,
                            DisplayLine::AckState ackState,
@@ -3244,6 +3259,7 @@ static void persistConfigToPrefs() {
     p.putBool("cannedEn", s_cfg.cannedEnabled);
     p.putString("cannedMsgs", s_cfg.cannedMessages);
     p.putBool("snfClientEn", s_cfg.snfClientEnabled);
+    p.putBool("otaAutoChk", s_cfg.otaAutoCheckEnabled);
     p.putBool("nodeArchive", s_cfg.nodeArchiveEnabled);
     p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
     p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
@@ -3469,6 +3485,7 @@ static void loadConfigFromPrefs() {
 
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
+    if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
     if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
     if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
     if (prefs.isKey("autoFavRange")) {
@@ -4289,8 +4306,11 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
 #endif
+    // Font Size is not part of the Classic-only restriction above: it scales the
+    // chat and DM text in every style, so every build gets it — the Cardputer
+    // arguably most of all.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     // Sound settings sit with the other presentation options rather than down
@@ -5185,9 +5205,11 @@ static void openFontSizeModal() {
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
-    int modalW = w - 24;
-    if (modalW < 170) modalW = w - 8;
-    if (modalW > 280) modalW = 280;
+    // Four short labels in a 2x2 grid, so this modal is deliberately narrower
+    // than the list-style pickers — no description column to make room for.
+    int modalW = w - 40;
+    if (modalW < 150) modalW = w - 8;
+    if (modalW > 210) modalW = 210;
 
     s_fontSizeBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_fontSizeBackdrop, w, h);
@@ -5229,46 +5251,51 @@ static void openFontSizeModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Tap a size to apply"
+    lv_label_set_text(hint, "Tap a size to apply");
 #else
-                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+    // Kept short so it fits the narrowed modal without wrapping to three lines.
+    lv_label_set_text_fmt(hint, "Move  Enter=OK  %s=Cancel", modalCloseKeyLabel());
 #endif
-    );
 
-    static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { "Small", "Medium", "Large" };
-    static const char *kSizeDesc[FONT_SIZE_MAX + 1] = {
-        "Compact chat & DM text",
-        "Default chat & DM text",
-        "Larger chat & DM text",
-    };
+    // "X-Large" rather than the full name fontSizeName() reports: the grid cells
+    // are ~half the modal width and the spelled-out form wraps to two lines on
+    // the narrowest board.
+    static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { "Small", "Medium", "Large", "X-Large" };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
+    // Wrapping row container: four ~half-width buttons fall into two rows of
+    // two. A stacked list of four described rows overflows the 135 px-tall
+    // Cardputer panel, and the size names need no caption.
+    lv_obj_t *grid = lv_obj_create(s_fontSizeModal);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(grid, 6, 0);
+    lv_obj_set_style_pad_row(grid, 6, 0);
+
     for (int i = 0; i <= FONT_SIZE_MAX; i++) {
-        lv_obj_t *row = lv_btn_create(s_fontSizeModal);
+        lv_obj_t *row = lv_btn_create(grid);
         s_fontSizeRows[i] = row;
-        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_width(row, lv_pct(46));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
         lv_obj_set_style_radius(row, 4, 0);
-        lv_obj_set_style_pad_all(row, 5, 0);
-        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_pad_all(row, 6, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
         lv_obj_add_event_cb(row, onFontSizeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_width(name, lv_pct(100));
         lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
         lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(name, kSizeLabel[i]);
-
-        lv_obj_t *desc = lv_label_create(row);
-        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(desc, rowTextColor, 0);
-        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
-        lv_label_set_text(desc, kSizeDesc[i]);
+        lv_obj_center(name);
     }
 
     refreshFontSizeSelection();
@@ -10813,6 +10840,7 @@ static void refreshDmModal(bool force) {
             renderRows[rowCount++] = dl;
         }
 
+        chatBubbleBeginRender(s_dmMsgList);
         uint32_t lastDateBucket = 0;
         for (int row = rowCount - 1; row >= 0; row--) {
             const DmLine *dl = renderRows[row];
@@ -12273,6 +12301,158 @@ static void openCfgConfirmModal(int actionId) {
     makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
 }
 
+// ── Boot firmware-update prompt ───────────────────────────────────────────────
+// Once per boot, with WiFi up, ask the release server whether a newer build
+// exists and offer to install it. Declining is remembered for the rest of this
+// boot only — a reboot asks again. The check is one plain-HTTP GET against the
+// hardcoded release proxy (see ota_update.cpp), so it is cheap enough to run
+// inline from the UI loop; the signed binary is what actually gets verified.
+static void closeOtaUpdatePrompt() {
+    if (lvObjValid(s_otaPromptBackdrop)) {
+        lv_obj_del(s_otaPromptBackdrop);
+    } else if (lvObjValid(s_otaPromptModal)) {
+        lv_obj_del(s_otaPromptModal);
+    }
+    s_otaPromptBackdrop = nullptr;
+    s_otaPromptModal = nullptr;
+}
+
+static void otaPromptDecline() {
+    Serial.println("[ota-check] update declined for this boot");
+    closeOtaUpdatePrompt();
+}
+
+static void otaPromptAccept() {
+    Serial.printf("[ota-check] update accepted: %s -> %s\n", APP_VERSION, s_otaAutoCheckTag);
+    closeOtaUpdatePrompt();
+    // Same install path as the CFG screen's Firmware Update action: it reboots
+    // into OTA minimal mode, where the download and signature check happen.
+    performCfgAction(CFG_ACTION_OTA_UPDATE);
+}
+
+static void onOtaPromptNoPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    otaPromptDecline();
+}
+
+static void onOtaPromptYesPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    otaPromptAccept();
+}
+
+static void openOtaUpdatePrompt() {
+    if (!s_rootScreen || s_otaPromptModal || s_otaPromptBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 40;
+    if (modalW < 160) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t versionBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
+    const lv_color_t versionTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const lv_color_t hintColor = lightUi ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF);
+
+    s_otaPromptBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_otaPromptBackdrop, w, h);
+    lv_obj_align(s_otaPromptBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_otaPromptBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_otaPromptBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_otaPromptBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_otaPromptBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_otaPromptBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_otaPromptBackdrop, 0, 0);
+
+    s_otaPromptModal = lv_obj_create(s_otaPromptBackdrop);
+    lv_obj_set_size(s_otaPromptModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_otaPromptModal, (h > 40) ? (h - 12) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_otaPromptModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_otaPromptModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_otaPromptModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_otaPromptModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_otaPromptModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_otaPromptModal, 1, 0);
+    lv_obj_set_style_border_color(s_otaPromptModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_otaPromptModal, 8, 0);
+    lv_obj_set_style_pad_row(s_otaPromptModal, 7, 0);
+    lv_obj_set_flex_flow(s_otaPromptModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_otaPromptModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_otaPromptBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_otaPromptModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, titleTextColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Firmware Update");
+
+    // The version pair is the point of the dialog, so it gets its own boxed row.
+    lv_obj_t *versionBox = lv_obj_create(s_otaPromptModal);
+    lv_obj_set_width(versionBox, lv_pct(100));
+    lv_obj_set_height(versionBox, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(versionBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(versionBox, versionBg, 0);
+    lv_obj_set_style_bg_opa(versionBox, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(versionBox, 1, 0);
+    lv_obj_set_style_border_color(versionBox, modalBorder, 0);
+    lv_obj_set_style_pad_left(versionBox, 6, 0);
+    lv_obj_set_style_pad_right(versionBox, 6, 0);
+    lv_obj_set_style_pad_top(versionBox, 5, 0);
+    lv_obj_set_style_pad_bottom(versionBox, 5, 0);
+
+    lv_obj_t *versions = lv_label_create(versionBox);
+    lv_obj_set_width(versions, lv_pct(100));
+    lv_obj_set_style_text_font(versions, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(versions, versionTextColor, 0);
+    lv_obj_set_style_text_align(versions, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(versions, LV_LABEL_LONG_WRAP);
+    lv_label_set_text_fmt(versions, "%s -> %s", APP_VERSION, s_otaAutoCheckTag);
+
+    lv_obj_t *hint = lv_label_create(s_otaPromptModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(hint, "Install now? The device reboots to update.");
+
+    lv_obj_t *btnRow = lv_obj_create(s_otaPromptModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 12, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeOtaBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+                         lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 32);
+        lv_obj_set_style_min_width(btn, 80, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+        return btn;
+    };
+    makeOtaBtn(btnRow, "(N)o", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
+    makeOtaBtn(btnRow, "(Y)es", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+}
+
 // ── First-boot onboarding ─────────────────────────────────────────────────
 // Shown once from setup() on freshly flashed devices. If a config exists on
 // the SD card the user is offered an import; otherwise (or if declined) we
@@ -13097,6 +13277,18 @@ static void pumpKeyboardInput() {
                     char one[2] = {k, '\0'};
                     lv_textarea_add_text(s_onboardingInput, one);
                 }
+            }
+            continue;
+        }
+
+        // The boot update offer is modal on the same terms as the CFG
+        // confirmation below. Declining just closes it; it will not come back
+        // until the next reboot.
+        if (s_otaPromptModal) {
+            if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
+                otaPromptAccept();
+            } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
+                otaPromptDecline();
             }
             continue;
         }
@@ -14280,9 +14472,17 @@ static void pumpKeyboardInput() {
 
                 if (k == KEY_ROLLER && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
                     if (s_pagerChatCursorMode) {
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+                        // Trackball builds keep click-to-reply: a click is a
+                        // deliberate press, not something the thumb does on the
+                        // way past. The Pager's wheel click is easy to trigger
+                        // while scrolling, so it never opens the composer —
+                        // Tab replies to the selected message there, Space
+                        // starts a new one.
                         if (s_selectedMsgReplyPacketId != 0) {
                             openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                         }
+#endif
                     } else {
                         s_pagerChatCursorMode = true;
                         pagerSelectChatCursorIndex(-1);
@@ -17182,6 +17382,74 @@ static const char *chatStripPrefix(const char *line) {
     return line;
 }
 
+// Usable width of the list bubbles are being rendered into, resolved once per
+// render pass.
+//
+// This has to be measured, not assumed: the chat pane and the narrower DM pane
+// differ, and so do all five panels. The catch is that a list's coordinates are
+// only filled in by a layout pass, and a render that runs before the first one
+// reads back 0 — so the fallback, not the measurement, would decide the width.
+// On the Pager that fallback was the full 480 px display against a 359 px list,
+// wide enough that nothing ever looked like it needed wrapping, and the chat
+// render cache then held that bad pass on screen. lv_obj_update_layout() forces
+// the coordinates to resolve first. Doing it here, once per pass, rather than
+// per bubble, keeps it off the O(n) path — laying out a list while appending to
+// it would otherwise cost a full tree walk per message.
+static lv_coord_t s_chatBubbleListW = 0;
+
+static void chatBubbleBeginRender(lv_obj_t *list) {
+    s_chatBubbleListW = 0;
+    if (!list) return;
+    lv_obj_update_layout(list);
+    s_chatBubbleListW = lv_obj_get_content_width(list);
+    if (s_chatBubbleListW > 0) return;
+    // Layout still unresolved: fall back to the parent panel, then to a share of
+    // the display that no build's chat pane exceeds. Both under-estimate rather
+    // than over-estimate — a narrow bubble is cosmetic, a wide one truncates.
+    lv_obj_t *parent = lv_obj_get_parent(list);
+    if (parent) s_chatBubbleListW = lv_obj_get_content_width(parent) - 6;
+    if (s_chatBubbleListW <= 0) s_chatBubbleListW = (lv_coord_t)((lv_disp_get_hor_res(NULL) * 7) / 10);
+}
+
+// Widest a bubble label may draw before it has to reflow. Mirrors the bubble's
+// own geometry: 94% of the row (its max_width), less its 4 px padding per side
+// and, in outline style, its border.
+static lv_coord_t chatBubbleLabelMaxWidth(int borderW) {
+    const lv_coord_t maxW = (lv_coord_t)(((int)s_chatBubbleListW * 94) / 100 - 8 - 2 * borderW);
+    return (maxW > 24) ? maxW : 24;
+}
+
+// Size one bubble label so nothing gets clipped.
+//
+// Bubbles are LV_SIZE_CONTENT wide with a 94% cap so short messages stay short,
+// and their body label clips rather than reflows. That combination truncates any
+// text wider than the cap, and two things routinely are: channel lines arrive
+// pre-wrapped at MSG_CHARS — a character count tuned for the classic full-width
+// row, so it overshoots a 94% bubble on every board and overshoots much further
+// at Large/Extra Large — and DM bodies arrive unwrapped entirely.
+//
+// So measure what the label will really draw (post emoji substitution, in the
+// scaled font) and only reflow when it overspills. Text that already fits keeps
+// LV_SIZE_CONTENT, so short bubbles stay short. When it doesn't fit, the label
+// is re-measured at the wrap width and pinned to the widest resulting line, so
+// a message that wraps to three short lines gets a bubble that hugs them
+// instead of one stretched to the full 94%.
+static void chatFitBubbleLabel(lv_obj_t *label, const lv_font_t *font, lv_coord_t maxW) {
+    if (!label || !font || maxW <= 0) return;
+    const char *text = lv_label_get_text(label);
+    if (!text || !text[0]) return;
+
+    lv_point_t size;
+    lv_txt_get_size(&size, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    if (size.x <= maxW) return;
+
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_txt_get_size(&size, text, font, 0, 0, maxW, LV_TEXT_FLAG_NONE);
+    lv_coord_t w = size.x + 2;   // guard against rounding at the wrap boundary
+    if (w > maxW) w = maxW;
+    lv_obj_set_width(label, w);
+}
+
 // Create one message bubble (row wrapper + colored container + optional name tag
 // + body) in the chat list. Right-aligned + accent for our own messages,
 // left-aligned + node color for others. Updates the scroll anchor pointers.
@@ -17241,11 +17509,14 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     // node/ack color, with the body in the theme's readable text color and the
     // sender/state tag tinted in the node color.
     const bool outline = (s_cfg.chatStyle == CHAT_STYLE_OUTLINE);
+    const int borderW = outline ? ((s_cfg.uiMode == UI_MODE_LIGHT) ? 2 : 1) : 0;
+    const lv_font_t *bubbleFont = scaledChatFont(kChannelChatFont);
+    const lv_coord_t bubbleMaxW = chatBubbleLabelMaxWidth(borderW);
     lv_color_t tagColor;   // sender name + ME/ME(SENT) tag
     lv_color_t bodyColor;  // message text
     if (outline) {
         lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(b, (s_cfg.uiMode == UI_MODE_LIGHT) ? 2 : 1, 0);
+        lv_obj_set_style_border_width(b, borderW, 0);
         lv_obj_set_style_border_color(b, tftColorToLv(bg565), 0);
         lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
         // The border keeps the full node color, but on dark themes several
@@ -17266,10 +17537,12 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 
     if (nameTag && nameTag[0]) {
         lv_obj_t *nm = lv_label_create(b);
-        lv_obj_set_style_text_font(nm, scaledChatFont(kChannelChatFont), 0);
+        lv_obj_set_style_text_font(nm, bubbleFont, 0);
         lv_obj_set_style_text_color(nm, tagColor, 0);
         lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
         lv_label_set_text(nm, nameTag);
+        // A long chat name can be wider than the bubble on its own.
+        chatFitBubbleLabel(nm, bubbleFont, bubbleMaxW);
     }
 
     const char *stateTag = nullptr;
@@ -17286,18 +17559,21 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     }
     if (stateTag) {
         lv_obj_t *st = lv_label_create(b);
-        lv_obj_set_style_text_font(st, scaledChatFont(kChannelChatFont), 0);
+        lv_obj_set_style_text_font(st, bubbleFont, 0);   // "ME"/"ME (SENT)" always fits
         lv_obj_set_style_text_color(st, tagColor, 0);
         lv_obj_set_style_text_opa(st, LV_OPA_70, 0);
         lv_label_set_text(st, stateTag);
     }
 
     lv_obj_t *bl = lv_label_create(b);
-    lv_obj_set_style_text_font(bl, scaledChatFont(kChannelChatFont), 0);
+    lv_obj_set_style_text_font(bl, bubbleFont, 0);
     lv_obj_set_style_text_color(bl, bodyColor, 0);
     lv_label_set_long_mode(bl, LV_LABEL_LONG_CLIP);  // body carries explicit '\n'
     lv_obj_set_width(bl, LV_SIZE_CONTENT);
     setLabelTextEmojiSafe(bl, body);
+    // Measured after the text is set: emoji substitution rewrites it, so the
+    // source string is not what actually gets drawn.
+    chatFitBubbleLabel(bl, bubbleFont, bubbleMaxW);
 
     if (isSelected) {
         const bool lightTheme = (s_cfg.uiMode == UI_MODE_LIGHT);
@@ -17324,6 +17600,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                                    const int *displayOrder, int displayCount,
                                    lv_obj_t **lastMsgObj, lv_obj_t **selectedMsgObj) {
+    chatBubbleBeginRender(s_chatList);
     uint32_t lastDateBucket = 0;
     int n = 0;
     while (n < displayCount) {
@@ -17340,8 +17617,19 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
         uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 
         // Reconstruct the message body from its wrapped lines: strip the first
-        // line's prefix, join continuation lines (leading indent removed) with
-        // newlines so the existing wrap becomes the bubble's line breaks.
+        // line's prefix, then rejoin the continuation lines (leading indent
+        // removed) with spaces.
+        //
+        // Storage wraps at MSG_CHARS, a character count sized for the classic
+        // full-width row — always wider than a bubble's 94% cap, on every board
+        // and at every font size. Keeping those breaks as '\n' therefore meant
+        // each stored line still overflowed and got wrapped a second time,
+        // leaving a short orphan after every line. Rejoining hands LVGL the
+        // whole paragraph so it breaks once, at the real bubble width. The
+        // breaks being rejoined were chosen at spaces, so this restores the
+        // original text; only a word longer than a full line (which storage
+        // splits mid-word) picks up a stray space. Any newline the sender typed
+        // lives inside a stored line and survives untouched.
         char body[320];
         size_t bl = 0;
         const char *b0 = chatStripPrefix(rows[i]->text);
@@ -17354,7 +17642,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
             const char *c = t;
             while (*c == ' ') c++;
             if (bl < sizeof(body) - 1)
-                bl += (size_t)snprintf(body + bl, sizeof(body) - bl, "\n%s", c);
+                bl += (size_t)snprintf(body + bl, sizeof(body) - bl, " %s", c);
             n++;
         }
 
@@ -17409,6 +17697,9 @@ static uint32_t chatRenderSignature(const DisplayLine *const *rows, int rowCount
     for (const char *p = s_selectedMsgText; *p; p++) mix((uint8_t)*p);
     mix((uint32_t)s_cfg.chatStyle);
     mix((uint32_t)s_cfg.chatNameStyle);
+    // Both change every row's geometry, so a cached pass must not survive them.
+    mix((uint32_t)s_cfg.fontSize);
+    mix((uint32_t)s_cfg.chatSpacing);
     mix((uint32_t)s_cfg.chatColorsEnabled);
     mix((uint32_t)s_cfg.uiMode);
     mix((uint32_t)(s_pagerChatCursorMode ? 1u : 0u));
@@ -17457,22 +17748,46 @@ static void refreshChatView(bool force) {
             refreshChatViewBubbles(rows, rowCount, displayOrder, displayCount,
                                    &lastMsgObj, &selectedMsgObj);
         } else {
+            // One label per logical message, not per stored line.
+            //
+            // Storage hard-wraps at MSG_CHARS, a character count — but the fonts
+            // are proportional, so a stored line of wide glyphs runs past the row
+            // while one of narrow glyphs falls short. Giving each stored line its
+            // own wrapping label therefore broke some of them a second time,
+            // dropping a word or two onto a line of their own for no reason the
+            // reader can see. Handing LVGL the whole message lets it break once,
+            // where the text actually reaches the edge. The continuation lines
+            // being rejoined were split at spaces, so this restores the original
+            // text; any newline the sender typed sits inside a stored line and
+            // survives untouched.
             uint32_t lastDateBucket = 0;
-            for (int n = 0; n < displayCount; n++) {
+            int n = 0;
+            while (n < displayCount) {
                 int i = displayOrder[n];
 
-                const char *lineText = rows[i]->text;
-                bool isContinuationLine = (lineText[0] == ' ' && lineText[1] == ' ');
+                // Insert a date marker before any message that lands on a new
+                // local calendar day.
+                uint32_t curBucket = chatDateBucket(rows[i]->epoch);
+                if (curBucket != 0 && curBucket != lastDateBucket) {
+                    insertChatDateMarker(s_chatList, rows[i]->epoch, scaledChatFont(kChannelChatFont));
+                    lastDateBucket = curBucket;
+                }
 
-                // Insert a date marker before the first line of any message that
-                // lands on a new local calendar day. Continuation lines from a
-                // wrapped multi-line message keep the same epoch and are skipped.
-                if (!isContinuationLine) {
-                    uint32_t curBucket = chatDateBucket(rows[i]->epoch);
-                    if (curBucket != 0 && curBucket != lastDateBucket) {
-                        insertChatDateMarker(s_chatList, rows[i]->epoch, scaledChatFont(kChannelChatFont));
-                        lastDateBucket = curBucket;
-                    }
+                // Anchor line keeps its prefix; continuation lines rejoin with a
+                // space, their storage indent stripped.
+                char merged[384];
+                size_t ml = 0;
+                ml += (size_t)snprintf(merged + ml, sizeof(merged) - ml, "%s", rows[i]->text);
+                n++;
+                while (n < displayCount) {
+                    int j = displayOrder[n];
+                    const char *t = rows[j]->text;
+                    if (!(t[0] == ' ' && t[1] == ' ')) break;   // not a continuation line
+                    const char *c = t;
+                    while (*c == ' ') c++;
+                    if (ml < sizeof(merged) - 1)
+                        ml += (size_t)snprintf(merged + ml, sizeof(merged) - ml, " %s", c);
+                    n++;
                 }
 
                 lv_obj_t *msg = lv_label_create(s_chatList);
@@ -17489,11 +17804,7 @@ static void refreshChatView(bool force) {
 #endif
                 lv_obj_set_style_pad_top(msg, 0, 0);
                 lv_obj_set_style_pad_bottom(msg, 0, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT)
-                lv_label_set_long_mode(msg, LV_LABEL_LONG_CLIP);
-#else
                 lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
-#endif
 
                 uint16_t textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? TFT_BLACK : TFT_WHITE;
                 if (s_cfg.chatColorsEnabled
@@ -17511,7 +17822,9 @@ static void refreshChatView(bool force) {
                     switch (rows[i]->ack) {
                         case DisplayLine::ACKED:
                             textColor565 = (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x00, 0x66, 0x00) : TFT_GREEN;
-                            if (!isContinuationLine) ackSuffix = " [ACK]";
+                            // Now that the message is one label, the marker goes
+                            // at the end of it rather than mid-message.
+                            ackSuffix = " [ACK]";
                             break;
                         case DisplayLine::ACKED_RELAY:
                             textColor565 = userMessageAccentColor565();
@@ -17526,19 +17839,15 @@ static void refreshChatView(bool force) {
                 }
 
                 lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
-                char rendered[MSG_CHARS + 16];
-                if (ackSuffix) {
-                    snprintf(rendered, sizeof(rendered), "%s%s", lineText, ackSuffix);
-                } else {
-                    snprintf(rendered, sizeof(rendered), "%s", lineText);
+                if (ackSuffix && ml < sizeof(merged) - 1) {
+                    snprintf(merged + ml, sizeof(merged) - ml, "%s", ackSuffix);
                 }
-                setLabelTextEmojiSafe(msg, rendered);
+                setLabelTextEmojiSafe(msg, merged);
 
                 uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, i);
 
                 bool isSelected = false;
                 if (s_selectedMsgReplyPacketId != 0) {
-                    // Highlight the whole wrapped message group, not just the tapped row.
                     isSelected = (replyPacketId == s_selectedMsgReplyPacketId);
                 } else {
                     isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
@@ -17554,15 +17863,8 @@ static void refreshChatView(bool force) {
                                     LV_EVENT_CLICKED,
                                     (void *)(uintptr_t)replyPacketId);
 
-                bool nextIsDifferentMessage = false;
-                if (n + 1 < displayCount) {
-                    int nextI = displayOrder[n + 1];
-                    uint32_t curId = rows[i]->packetId;
-                    uint32_t nextId = rows[nextI]->packetId;
-                    nextIsDifferentMessage = (curId == 0 || nextId == 0 || curId != nextId);
-                }
-
-                if (nextIsDifferentMessage) {
+                // One separator between messages, none after the last.
+                if (n < displayCount) {
                     lv_obj_t *sep = lv_obj_create(s_chatList);
                     lv_obj_remove_style_all(sep);
                     lv_obj_set_size(sep, lv_pct(100), 1);
@@ -18773,6 +19075,59 @@ static void enterLightNap() {
     }
 }
 
+// Boot update check. Runs at most once per boot, and only once WiFi has been up
+// long enough to be usable — a check fired the instant the station associates
+// tends to hit DNS before it is ready. Failures are not retried: an offline or
+// unreachable device should not spend the rest of its uptime probing, and the
+// next reboot will try again.
+static uint32_t s_otaAutoCheckDueMs = 0;
+static void serviceOtaAutoCheck(uint32_t nowMs) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // OTA is disabled on this build (see CFG_ACTION_OTA_UPDATE), so there is
+    // nothing to offer.
+    LV_UNUSED(nowMs);
+#else
+    if (s_otaAutoCheckDone || !s_cfg.otaAutoCheckEnabled) return;
+    if (!s_cfg.wifiEnabled || WiFi.status() != WL_CONNECTED) {
+        s_otaAutoCheckDueMs = 0;    // restart the settle timer on reconnect
+        return;
+    }
+    // Don't interrupt onboarding or an open dialog — and don't burn the single
+    // per-boot attempt before there is a screen to show the answer on.
+    if (!s_rootScreen || s_onboardingModal || s_cfgConfirmModal || s_otaPromptModal) return;
+
+    if (s_otaAutoCheckDueMs == 0) {
+        s_otaAutoCheckDueMs = nowMs + kOtaAutoCheckSettleMs;
+        return;
+    }
+    if ((int32_t)(nowMs - s_otaAutoCheckDueMs) < 0) return;
+
+    s_otaAutoCheckDone = true;
+    Serial.println("[ota-check] checking for a newer release");
+
+    // The gate is what keeps OTA networking out of normal operation; open it
+    // only for the duration of this one request.
+    otaSetNetworkAllowed(true);
+    OtaCheckResult check = {};
+    const bool ok = otaCheckLatestRelease(check) && check.ok;
+    otaSetNetworkAllowed(false);
+
+    if (!ok) {
+        Serial.printf("[ota-check] failed: %s\n", check.error[0] ? check.error : "unknown");
+        return;
+    }
+    if (!check.updateAvailable) {
+        Serial.printf("[ota-check] up to date (%s)\n",
+                      check.latestTag[0] ? check.latestTag : APP_VERSION);
+        return;
+    }
+
+    utf8util::copyTruncate(s_otaAutoCheckTag, sizeof(s_otaAutoCheckTag), check.latestTag);
+    Serial.printf("[ota-check] update available: %s -> %s\n", APP_VERSION, s_otaAutoCheckTag);
+    openOtaUpdatePrompt();
+#endif
+}
+
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -18815,6 +19170,7 @@ void loop() {
         servicePendingRebroadcast(now);
     }
     serviceWifiStation(now);
+    serviceOtaAutoCheck(now);
     mqttBridgeLoop(now);
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
     gpsLoop();

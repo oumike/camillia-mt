@@ -396,6 +396,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
+    cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
@@ -550,6 +551,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += (cfg.deviceRole < kNumRoles) ? kRoleNames[cfg.deviceRole] : "CLIENT";
     out += "\n";
     if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
+    snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
     // display
     out += "  display:\n";
     snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
@@ -577,6 +579,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    fontSize: ";
     out += (cfg.fontSize == FONT_SIZE_SMALL ? "SMALL"
             : cfg.fontSize == FONT_SIZE_LARGE ? "LARGE"
+            : cfg.fontSize == FONT_SIZE_XLARGE ? "XLARGE"
             : "MEDIUM");
     out += "\n";
     snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
@@ -894,6 +897,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "nodeInfoBroadcastSecs"))
                     cfg.nodeInfoIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
+                else if (!strcmp(key, "otaAutoCheck")) cfg.otaAutoCheckEnabled = parseBoolValue(val);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "positionBroadcastSecs"))
                     cfg.posIntervalS = (uint32_t)atol(val);
@@ -958,6 +962,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.fontSize = FONT_SIZE_SMALL;
                     else if (!strcmp(val, "LARGE"))
                         cfg.fontSize = FONT_SIZE_LARGE;
+                    else if (!strcmp(val, "XLARGE"))
+                        cfg.fontSize = FONT_SIZE_XLARGE;
                     else
                         cfg.fontSize = FONT_SIZE_MEDIUM;
                 }

@@ -1473,9 +1473,10 @@ static void sendConfigPage(const char *msg = "") {
     // as a deliberate pick. The button shows the current value; the hidden input
     // is what actually submits with the form.
     {
-        const uint8_t fs = (gCfg->fontSize <= FONT_SIZE_LARGE) ? gCfg->fontSize : FONT_SIZE_MEDIUM;
+        const uint8_t fs = (gCfg->fontSize <= FONT_SIZE_MAX) ? gCfg->fontSize : FONT_SIZE_MEDIUM;
         const char *fsName = (fs == FONT_SIZE_SMALL) ? "Small"
-                             : (fs == FONT_SIZE_LARGE) ? "Large" : "Medium";
+                             : (fs == FONT_SIZE_LARGE) ? "Large"
+                             : (fs == FONT_SIZE_XLARGE) ? "Extra Large" : "Medium";
         html += "<label>Font Size (chat &amp; DM)</label>";
         html += "<button type='button' class='chooser-btn' id='fsBtn' onclick='fsOpen()'>";
         html += fsName;
@@ -1490,6 +1491,8 @@ static void sendConfigPage(const char *msg = "") {
                     "<b>Medium</b><span>Default chat &amp; DM text</span></button>"
                 "<button type='button' class='modal-opt' onclick='fsPick(2,\"Large\")'>"
                     "<b>Large</b><span>Larger chat &amp; DM text</span></button>"
+                "<button type='button' class='modal-opt' onclick='fsPick(3,\"Extra Large\")'>"
+                    "<b>Extra Large</b><span>Largest chat &amp; DM text</span></button>"
                 "</div></div>";
         html += "<script>"
                 "function fsMark(v){var m=document.querySelectorAll('#fsModal .modal-opt');"
@@ -1679,6 +1682,21 @@ static void sendConfigPage(const char *msg = "") {
             "<label>Password<input name='wifi_pass' type='password' maxlength='63' value='";
     html += gWifiPass;
     html += "'></label>";
+
+    // Firmware Updates. Compiled out on the Cardputer, where OTA is disabled
+    // altogether — offering the toggle there would promise a check that never
+    // leads anywhere. The update source itself is not configurable by design.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Firmware Updates</h3>";
+    html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+            "On boot, once WiFi is up, the device asks whether a newer release "
+            "exists and offers to install it. Declining is remembered until the "
+            "next reboot.</p>";
+    html += "<label>Check for Updates on Boot<select name='ota_autocheck'>"
+            "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
+            "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
+            "</select></label>";
+#endif
 
     // Node Management. The archive checkbox is only meaningful where the node
     // table can actually spill somewhere: the board needs an SD slot AND a
@@ -2994,6 +3012,9 @@ static void handlePostSave() {
     if (server.hasArg("canned_msgs")) {
         strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
         gCfg->cannedMessages[sizeof(gCfg->cannedMessages) - 1] = '\0';
+    }
+    if (server.hasArg("ota_autocheck")) {
+        gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
     }
     if (server.hasArg("snf_client_en")) {
         gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;

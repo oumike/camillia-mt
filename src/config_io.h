@@ -110,6 +110,9 @@ struct RhinoConfig {
     // Module: Store and Forward (client)
     bool     snfClientEnabled;
 
+    // Firmware updates
+    bool     otaAutoCheckEnabled; // check for a newer release once per boot
+
     // Node management
     bool     nodeArchiveEnabled;  // preserve nodes evicted from the full table to SD
     bool     autoFavoriteEnabled; // auto-favorite nodes within autoFavoriteRangeM
@@ -117,7 +120,7 @@ struct RhinoConfig {
 
     // Chat display
     uint8_t  chatSpacing;   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
-    uint8_t  fontSize;      // 0=Small, 1=Medium (default), 2=Large (chat + DM screens)
+    uint8_t  fontSize;      // 0=Small, 1=Medium (default), 2=Large, 3=Extra Large (chat + DM)
 
     // Serial debug categories
     bool     debugAcks;

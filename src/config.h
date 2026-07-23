@@ -151,17 +151,23 @@
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)
+// Ask the release server for a newer build once per boot and offer to install
+// it. Opt-out: the check is a single plain-HTTP GET and costs nothing when
+// there is no update, so it is on by default.
+#define MY_OTA_AUTOCHECK    1
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 #define MY_AUTOFAV_RANGE_M  5000   // auto-favorite threshold, meters (5 km / ~3.1 mi)
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 // Chat/DM message font size. Medium matches the built-in size; Small/Large step
-// one Montserrat size down/up from it. Applies to the chat and DM screens only.
+// one Montserrat size down/up from it, Extra Large two up. Applies to the chat
+// and DM screens only.
 #define FONT_SIZE_SMALL     0
 #define FONT_SIZE_MEDIUM    1
 #define FONT_SIZE_LARGE     2
-#define FONT_SIZE_MAX       FONT_SIZE_LARGE
+#define FONT_SIZE_XLARGE    3
+#define FONT_SIZE_MAX       FONT_SIZE_XLARGE
 #define MY_FONT_SIZE        FONT_SIZE_MEDIUM
 
 #define MSG_ALERT_SOUND_DEFAULT 0
