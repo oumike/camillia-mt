@@ -15,6 +15,12 @@ typedef void (*OtaInstallProgressCb)(size_t writtenBytes, size_t totalBytes);
 // Allows OTA networking only when explicitly enabled by the caller.
 void otaSetNetworkAllowed(bool allowed);
 
+// Selects which release channel OTA follows: UPDATE_CHANNEL_RELEASE (stable,
+// the default) or UPDATE_CHANNEL_ALPHA (latest prerelease). On the alpha channel
+// prerelease tags are treated as installable updates; on release they are never
+// installed. Call before otaCheckLatestRelease / otaInstallLatestRelease.
+void otaSetChannel(uint8_t channel);
+
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 

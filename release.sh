@@ -289,36 +289,45 @@ git push origin "$TAG"
 echo "Tag $TAG pushed."
 
 # ── Merge factory images ──────────────────────────────────────────────────────
+# Turns the current .pio build output into distributable, tag-named factory and
+# OTA images plus detached signatures, written to dist/. Factored into a function
+# so the "keep alpha up to date" step can re-run it for the alpha tag after
+# rebuilding with the alpha version string. Writes only files for $1 (the tag),
+# so calling it twice leaves both the stable and alpha asset sets in dist/.
+merge_sign_assets() {
+    local tag="$1" env_name out_name flash_size d out ota_out
+    for env_name in "${RELEASE_ENVS[@]}"; do
+        if ! has_env "$env_name"; then continue; fi
+        out_name="$(env_out_name "$env_name")"
+        flash_size="$(env_flash_size "$env_name")"
+        d=".pio/build/${env_name}"
+        out="dist/camillia-mt-${out_name}-${tag}.bin"
+        ota_out="dist/camillia-mt-${out_name}-${tag}-ota.bin"
+        echo "  ${env_name} (${flash_size}) -> ${out}"
+        $ESPTOOL --chip esp32s3 merge_bin \
+            -o "${out}" \
+            -fm dio \
+            -ff 80m \
+            -fs "${flash_size}" \
+            0x0     "${d}/bootloader.bin" \
+            0x8000  "${d}/partitions.bin" \
+            0xe000  "${BOOT_APP0}" \
+            0x10000 "${d}/firmware.bin"
+        cp "${d}/firmware.bin" "${ota_out}"
+        cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${tag}.elf"
+        # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
+        # verifies this against the baked-in public key before committing the update,
+        # which is what makes plain-HTTP (TLS-free) OTA safe.
+        openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
+        echo "    signed -> ${ota_out}.sig"
+    done
+}
+
 echo ""
 echo "Merging factory images..."
 rm -rf dist
 mkdir -p dist
-
-for env_name in "${RELEASE_ENVS[@]}"; do
-    if ! has_env "$env_name"; then continue; fi
-    out_name="$(env_out_name "$env_name")"
-    flash_size="$(env_flash_size "$env_name")"
-    d=".pio/build/${env_name}"
-    out="dist/camillia-mt-${out_name}-${TAG}.bin"
-    ota_out="dist/camillia-mt-${out_name}-${TAG}-ota.bin"
-    echo "  ${env_name} (${flash_size}) -> ${out}"
-    $ESPTOOL --chip esp32s3 merge_bin \
-        -o "${out}" \
-        -fm dio \
-        -ff 80m \
-        -fs "${flash_size}" \
-        0x0     "${d}/bootloader.bin" \
-        0x8000  "${d}/partitions.bin" \
-        0xe000  "${BOOT_APP0}" \
-        0x10000 "${d}/firmware.bin"
-    cp "${d}/firmware.bin" "${ota_out}"
-    cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${TAG}.elf"
-    # Detached ECDSA-P256/SHA-256 signature over the OTA image. The device
-    # verifies this against the baked-in public key before committing the update,
-    # which is what makes plain-HTTP (TLS-free) OTA safe.
-    openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
-    echo "    signed -> ${ota_out}.sig"
-done
+merge_sign_assets "$TAG"
 
 ls -lh dist/
 
@@ -473,6 +482,49 @@ fi
 echo ""
 echo "Release $TAG published."
 gh release view "$TAG" --json url -q .url
+
+# ── Keep the alpha channel current ────────────────────────────────────────────
+# A stable release also publishes a matching alpha prerelease built from the same
+# source, so alpha-channel devices are never stranded behind stable. The alpha is
+# tagged toward the next patch (vX.Y.(Z+1)-alpha.1) and rebuilt with that version
+# string — copying the stable binaries instead would make alpha devices report
+# the stable version and re-install on every check. The stable release is already
+# published above; its asset glob ran before any alpha files exist in dist/.
+if [[ "$ALPHA" == false ]]; then
+    ALPHA_BASE="$(next_patch_version "${TAG#v}")"
+    if [[ -z "$ALPHA_BASE" ]]; then
+        echo "Skipping alpha sync: could not derive next patch version from ${TAG}." >&2
+    else
+        ALPHA_TAG="$(next_alpha_tag "$ALPHA_BASE")"
+        echo ""
+        echo "Keeping alpha channel current: cutting ${ALPHA_TAG} from the same source..."
+
+        # Point the alpha branch at this release so future manual alphas continue
+        # from here.
+        git branch -f "$ALPHA_BRANCH" HEAD
+        git push -f origin "$ALPHA_BRANCH"
+
+        # Rebuild so the binaries self-report ${ALPHA_TAG}; restore VERSION after.
+        echo "$ALPHA_TAG" > VERSION
+        ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
+        merge_sign_assets "$ALPHA_TAG"
+        echo "$TAG" > VERSION
+
+        # Tag this commit and publish the prerelease with only the alpha assets.
+        if git tag | grep -q "^${ALPHA_TAG}$"; then git tag -d "$ALPHA_TAG"; fi
+        git tag "$ALPHA_TAG"
+        git push origin "$ALPHA_TAG"
+        gh release create "$ALPHA_TAG" \
+            --title "$ALPHA_TAG (alpha)" \
+            --prerelease \
+            --generate-notes \
+            dist/*"${ALPHA_TAG}"*.bin \
+            dist/*"${ALPHA_TAG}"*.sig
+        echo ""
+        echo "Alpha channel updated: ${ALPHA_TAG} published."
+        gh release view "$ALPHA_TAG" --json url -q .url
+    fi
+fi
 
 # Guarded as an if-block, not `[[ ... ]] && rm`: as the script's last command a
 # false test would make release.sh exit non-zero on a successful release.

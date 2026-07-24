@@ -1693,6 +1693,14 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
             "</select></label>";
+    html += "<label>Update Channel<select name='update_channel'>"
+            "<option value='0'"; if (gCfg->updateChannel == UPDATE_CHANNEL_RELEASE) html += " selected"; html += ">Release (stable)</option>"
+            "<option value='1'"; if (gCfg->updateChannel == UPDATE_CHANNEL_ALPHA)   html += " selected"; html += ">Alpha (prerelease)</option>"
+            "</select></label>";
+    html += "<p style='font-size:.78em;color:#888;margin:.1em 0 .5em'>"
+            "Release tracks stable builds. Alpha tracks the latest prerelease "
+            "(new features early, rougher edges). Switching back to Release "
+            "re-installs the latest stable on the next update check.</p>";
 #endif
 
     // Node Management. The archive checkbox is only meaningful where the node
@@ -3009,6 +3017,11 @@ static void handlePostSave() {
     if (server.hasArg("canned_msgs")) {
         strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
         gCfg->cannedMessages[sizeof(gCfg->cannedMessages) - 1] = '\0';
+    }
+    if (server.hasArg("update_channel")) {
+        long uc = server.arg("update_channel").toInt();
+        if (uc < 0 || uc > UPDATE_CHANNEL_MAX) uc = UPDATE_CHANNEL_RELEASE;
+        gCfg->updateChannel = (uint8_t)uc;
     }
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;

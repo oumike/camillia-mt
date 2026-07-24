@@ -466,6 +466,26 @@ static int s_lastRenderedCount = -1;
 // Signature of the last-rendered chat content; lets refreshChatView skip the
 // costly teardown/rebuild when a mesh event didn't actually change the view.
 static uint32_t s_lastChatSignature = 0;
+
+// ── Chat render windowing ──────────────────────────────────────────────────
+// refreshChatView rebuilds every message it emits, so rendering a whole channel
+// (up to MAX_MSG_LINES) made each teardown/rebuild scale with backlog — the chat
+// felt slower the more history you held. Instead we render only the most-recent
+// window of logical messages and grow it when the user scrolls to the top, so
+// steady-state cost stays bounded while full history stays reachable on demand.
+static constexpr int kChatWindowBaseMsgs = 40;   // messages a channel opens with
+static constexpr int kChatWindowGrowMsgs = 40;   // added each scroll-to-top load
+static constexpr lv_coord_t kChatWindowGrowScrollMargin = 12;  // px-from-top that loads older
+static int      s_chatWindowChannel      = -1;   // channel the window below belongs to
+static int      s_chatRenderWindowMsgs   = kChatWindowBaseMsgs;
+static bool     s_chatWindowMoreAbove    = false; // older messages exist outside the window
+static bool     s_chatWindowGrowPending  = false; // scroll cb asked to load older history
+// The message at the top of the pre-grow window, so we can re-anchor the viewport
+// to it after prepending older history — otherwise the view snaps to the top,
+// which would immediately re-trigger another grow.
+static bool     s_chatWindowAnchorActive   = false;
+static uint32_t s_chatWindowAnchorPacketId = 0;
+static char     s_chatWindowAnchorText[MSG_CHARS + 1] = {0};
 static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
@@ -1299,6 +1319,7 @@ enum CfgActionId {
     CFG_ACTION_MQTT_TOGGLE,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
+    CFG_ACTION_UPDATE_CHANNEL,
     CFG_ACTION_OTA_UPDATE,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
@@ -2510,6 +2531,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_UPDATE_CHANNEL:
+            snprintf(buf, bufLen, "Update Channel: %s",
+                     s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA ? "Alpha" : "Release");
+            break;
         case CFG_ACTION_OTA_UPDATE:
             if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
                 snprintf(buf, bufLen, "Firmware Update: Install %s", s_cfgOtaLatestTag);
@@ -2872,6 +2897,7 @@ static bool runOtaWorkerModeIfRequested() {
     };
 
     otaSetNetworkAllowed(true);
+    otaSetChannel(s_cfg.updateChannel);   // follow the user's selected channel
 
     Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
                   rtcRequested ? 1 : 0,
@@ -3286,6 +3312,7 @@ static void persistConfigToPrefs() {
     p.putString("cannedMsgs", s_cfg.cannedMessages);
     p.putBool("snfClientEn", s_cfg.snfClientEnabled);
     p.putBool("otaAutoChk", s_cfg.otaAutoCheckEnabled);
+    p.putUChar("updChannel", s_cfg.updateChannel);
     p.putBool("nodeArchive", s_cfg.nodeArchiveEnabled);
     p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
     p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
@@ -3508,6 +3535,10 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
     if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
+    if (prefs.isKey("updChannel")) {
+        uint8_t uc = prefs.getUChar("updChannel", 0);
+        s_cfg.updateChannel = (uc <= UPDATE_CHANNEL_MAX) ? uc : UPDATE_CHANNEL_RELEASE;
+    }
     if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
     if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
     if (prefs.isKey("autoFavRange")) {
@@ -4561,6 +4592,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Update Channel sits with Firmware Update since it only affects OTA; both
+    // are compiled out on the Cardputer, where OTA is disabled.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UPDATE_CHANNEL;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
 #if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -12287,6 +12321,18 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Splash melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
 
+        case CFG_ACTION_UPDATE_CHANNEL:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UPDATE_CHANNEL");
+            // Two channels, so activating toggles. The next update check (boot or
+            // the Firmware Update action below) uses the new channel; switching
+            // to Release while on an alpha build re-tracks to the latest stable.
+            s_cfg.updateChannel = (s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA)
+                                      ? UPDATE_CHANNEL_RELEASE : UPDATE_CHANNEL_ALPHA;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Update Channel: %s",
+                     s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA ? "Alpha" : "Release");
+            break;
+
         case CFG_ACTION_OTA_UPDATE: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_UPDATE");
             Serial.println("[ota-worker] firmware update action requested");
@@ -17884,12 +17930,23 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 // Render the chat rows as per-node colored bubbles (Bubbles chat style).
 static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                                    const int *displayOrder, int displayCount,
-                                   lv_obj_t **lastMsgObj, lv_obj_t **selectedMsgObj) {
+                                   int startFrom,
+                                   lv_obj_t **lastMsgObj, lv_obj_t **selectedMsgObj,
+                                   lv_obj_t **anchorObj) {
     chatBubbleBeginRender(s_chatList);
     uint32_t lastDateBucket = 0;
-    int n = 0;
+    int n = startFrom;
     while (n < displayCount) {
         int i = displayOrder[n];
+
+        // Remember whether this message is the saved scroll anchor before n
+        // advances past its continuation lines; chatMakeBubble reports the object.
+        bool anchorHere = false;
+        if (anchorObj && !*anchorObj && s_chatWindowAnchorActive && rows[i]) {
+            anchorHere = (s_chatWindowAnchorPacketId != 0)
+                ? (rows[i]->packetId == s_chatWindowAnchorPacketId)
+                : (strcmp(rows[i]->text, s_chatWindowAnchorText) == 0);
+        }
 
         uint32_t curBucket = chatDateBucket(rows[i]->epoch);
         if (curBucket != 0 && curBucket != lastDateBucket) {
@@ -17958,6 +18015,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                        rows[i]->ack,
                        replyPacketId, isSelected, lastMsgObj, selectedMsgObj,
                        onChatMessagePressed);
+        if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
     }
 }
 
@@ -17992,6 +18050,57 @@ static uint32_t chatRenderSignature(const DisplayLine *const *rows, int rowCount
     return h;
 }
 
+// Returns the displayOrder index at which rendering should begin so that at most
+// `maxMessages` most-recent logical messages are emitted. Logical-message
+// boundaries mirror buildChatCursorOrder (same packetId run, else two-space
+// continuation lines) so the window never splits a wrapped/grouped message.
+// Sets *moreAbove when older messages remain above the window.
+static int chatWindowStartIndex(const DisplayLine *const *rows,
+                                const int *displayOrder, int displayCount,
+                                int maxMessages, bool *moreAbove) {
+    if (moreAbove) *moreAbove = false;
+    if (maxMessages <= 0 || displayCount <= 0) return 0;
+
+    // displayOrder index where each logical message starts. Only the UI thread
+    // calls this (never re-entrant), so a static keeps it off the stack.
+    static int starts[MAX_MSG_LINES];
+    int msgCount = 0;
+    for (int n = 0; n < displayCount && msgCount < MAX_MSG_LINES;) {
+        starts[msgCount++] = n;
+        int anchor = displayOrder[n];
+        uint32_t packetId = rows[anchor] ? rows[anchor]->packetId : 0;
+        n++;
+        while (n < displayCount) {
+            int j = displayOrder[n];
+            if (!rows[j]) break;
+            if (packetId != 0) {
+                if (rows[j]->packetId != packetId) break;
+                n++;
+                continue;
+            }
+            const char *t = rows[j]->text;
+            if (!(t[0] == ' ' && t[1] == ' ')) break;   // not a continuation line
+            n++;
+        }
+    }
+
+    if (msgCount <= maxMessages) return 0;
+    if (moreAbove) *moreAbove = true;
+    return starts[msgCount - maxMessages];
+}
+
+// Scroll handler on s_chatList: when the user reaches the top and older messages
+// exist outside the window, flag a grow. The rebuild itself happens on the next
+// refreshChatView tick (never inside the scroll event) to avoid re-entering
+// LVGL layout mid-scroll.
+static void onChatListScroll(lv_event_t *e) {
+    (void)e;
+    if (!s_chatList) return;
+    if (!s_chatWindowMoreAbove || s_chatWindowGrowPending) return;
+    if (lv_obj_get_scroll_top(s_chatList) > kChatWindowGrowScrollMargin) return;
+    s_chatWindowGrowPending = true;
+}
+
 static void refreshChatView(bool force) {
     if (!s_chatPanel || !s_chatList) return;
 
@@ -17999,12 +18108,22 @@ static void refreshChatView(bool force) {
 
     const Channel &ch = Channels.get(s_activeChannel);
 
+    // Opening a different channel resets the window so it starts small (fast)
+    // regardless of how far back the user scrolled in the previous one.
+    if (s_activeChannel != s_chatWindowChannel) {
+        s_chatWindowChannel = s_activeChannel;
+        s_chatRenderWindowMsgs = kChatWindowBaseMsgs;
+        s_chatWindowMoreAbove = false;
+        s_chatWindowGrowPending = false;
+        s_chatWindowAnchorActive = false;
+    }
+
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
     collectChatRows(rows, rowCount);
 
     const uint32_t sig = chatRenderSignature(rows, rowCount);
-    if (!force
+    if (!force && !s_chatWindowGrowPending
         && s_activeChannel == s_lastRenderedChannel
         && sig == s_lastChatSignature) {
         return;
@@ -18016,8 +18135,11 @@ static void refreshChatView(bool force) {
     lv_obj_clean(s_chatList);
     lv_obj_t *lastMsgObj = nullptr;
     lv_obj_t *selectedMsgObj = nullptr;
+    lv_obj_t *anchorObj = nullptr;
 
     if (rowCount == 0) {
+        s_chatWindowMoreAbove = false;
+        s_chatWindowGrowPending = false;
         lv_obj_t *empty = lv_label_create(s_chatList);
         lv_obj_set_style_text_font(empty, scaledChatFont(kChannelChatFont), 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
@@ -18026,12 +18148,54 @@ static void refreshChatView(bool force) {
         int displayOrder[MAX_MSG_LINES] = {};
         int displayCount = 0;
         buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
+
+        // Keyboard cursor navigation (Pager) can select any message in the full
+        // history, so its target must exist as an object — render everything and
+        // suspend windowing while the cursor is active.
+        const bool windowed = !s_pagerChatCursorMode;
+
+        // Honor a pending scroll-to-top "load older" request: remember the message
+        // currently at the top of the window, then widen it. The anchor lets us
+        // restore the viewport to that message after older history is prepended.
+        if (windowed && s_chatWindowGrowPending) {
+            s_chatWindowGrowPending = false;
+            int prevStart = chatWindowStartIndex(rows, displayOrder, displayCount,
+                                                 s_chatRenderWindowMsgs, nullptr);
+            const DisplayLine *top = (prevStart < displayCount)
+                                     ? rows[displayOrder[prevStart]] : nullptr;
+            if (top) {
+                s_chatWindowAnchorPacketId = top->packetId;
+                snprintf(s_chatWindowAnchorText, sizeof(s_chatWindowAnchorText),
+                         "%s", top->text);
+                s_chatWindowAnchorActive = true;
+            }
+            s_chatRenderWindowMsgs += kChatWindowGrowMsgs;
+        }
+
+        bool moreAbove = false;
+        int startN = windowed
+            ? chatWindowStartIndex(rows, displayOrder, displayCount,
+                                   s_chatRenderWindowMsgs, &moreAbove)
+            : 0;
+        s_chatWindowMoreAbove = moreAbove;
+
+        // True when the message starting at displayOrder[n] is the saved anchor.
+        auto isAnchorAt = [&](int n) -> bool {
+            if (!s_chatWindowAnchorActive || n >= displayCount) return false;
+            const DisplayLine *d = rows[displayOrder[n]];
+            if (!d) return false;
+            if (s_chatWindowAnchorPacketId != 0)
+                return d->packetId == s_chatWindowAnchorPacketId;
+            return strcmp(d->text, s_chatWindowAnchorText) == 0;
+        };
+
         bool useBubbleStyle = (chatStyleUsesBubbles(s_cfg.chatStyle)
                                && s_activeChannel >= 0
                                && s_activeChannel < MESH_CHANNELS);
         if (useBubbleStyle) {
             refreshChatViewBubbles(rows, rowCount, displayOrder, displayCount,
-                                   &lastMsgObj, &selectedMsgObj);
+                                   startN, &lastMsgObj, &selectedMsgObj,
+                                   &anchorObj);
         } else {
             // One label per logical message, not per stored line.
             //
@@ -18046,9 +18210,10 @@ static void refreshChatView(bool force) {
             // text; any newline the sender typed sits inside a stored line and
             // survives untouched.
             uint32_t lastDateBucket = 0;
-            int n = 0;
+            int n = startN;
             while (n < displayCount) {
                 int i = displayOrder[n];
+                const bool anchorHere = !anchorObj && isAnchorAt(n);
 
                 // Insert a date marker before any message that lands on a new
                 // local calendar day.
@@ -18077,6 +18242,7 @@ static void refreshChatView(bool force) {
 
                 lv_obj_t *msg = lv_label_create(s_chatList);
                 lastMsgObj = msg;
+                if (anchorHere) anchorObj = msg;
                 lv_obj_set_width(msg, lv_pct(100));
                 lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
@@ -18160,7 +18326,17 @@ static void refreshChatView(bool force) {
         }
     }
 
-    if (s_pagerChatCursorMode) {
+    if (s_chatWindowAnchorActive) {
+        // Just loaded older history: pin the viewport to the message that was at
+        // the top before, so the newly-prepended messages sit above it instead of
+        // yanking the view to the top (which would immediately re-trigger a grow).
+        s_chatWindowAnchorActive = false;
+        if (anchorObj) {
+            lv_obj_scroll_to_view(anchorObj, LV_ANIM_OFF);
+        } else {
+            lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
+        }
+    } else if (s_pagerChatCursorMode) {
         if (selectedMsgObj) {
             lv_obj_scroll_to_view(selectedMsgObj, LV_ANIM_OFF);
         } else {
@@ -18499,6 +18675,8 @@ static void buildUi() {
     lv_obj_set_style_radius(s_chatList, 2, LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(s_chatList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chatList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    // Load older history when the user scrolls to the top of the render window.
+    lv_obj_add_event_cb(s_chatList, onChatListScroll, LV_EVENT_SCROLL, nullptr);
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
     {
@@ -19394,6 +19572,7 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     // The gate is what keeps OTA networking out of normal operation; open it
     // only for the duration of this one request.
     otaSetNetworkAllowed(true);
+    otaSetChannel(s_cfg.updateChannel);
     OtaCheckResult check = {};
     const bool ok = otaCheckLatestRelease(check) && check.ok;
     otaSetNetworkAllowed(false);
