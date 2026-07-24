@@ -155,14 +155,6 @@
 // it. Opt-out: the check is a single plain-HTTP GET and costs nothing when
 // there is no update, so it is on by default.
 #define MY_OTA_AUTOCHECK    1
-
-// OTA update channel. RELEASE tracks the latest stable release (default);
-// ALPHA tracks the latest prerelease (alpha) build, for testers who want new
-// features early and accept the rougher edges.
-#define UPDATE_CHANNEL_RELEASE 0
-#define UPDATE_CHANNEL_ALPHA   1
-#define UPDATE_CHANNEL_MAX     UPDATE_CHANNEL_ALPHA
-#define MY_UPDATE_CHANNEL      UPDATE_CHANNEL_RELEASE
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 #define MY_AUTOFAV_RANGE_M  5000   // auto-favorite threshold, meters (5 km / ~3.1 mi)

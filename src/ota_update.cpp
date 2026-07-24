@@ -21,11 +21,6 @@
 static volatile uint32_t g_otaNetworkGate = 0;
 static constexpr uint32_t kOtaNetworkGateMagic = 0x4F544131UL; // "OTA1"
 
-// Release channel OTA follows. Mirrored from config by the caller via
-// otaSetChannel(); defaults to the stable release channel.
-static uint8_t g_otaChannel = UPDATE_CHANNEL_RELEASE;
-static inline bool otaChannelIsAlpha() { return g_otaChannel == UPDATE_CHANNEL_ALPHA; }
-
 // Hardcoded OTA proxy base — intentionally NOT user-configurable, so the update
 // source can't be repointed from the UI/config. This firmware has no TLS client,
 // so the endpoint must be http://; authenticity comes from the ECDSA signature
@@ -209,10 +204,7 @@ static bool isPrereleaseTag(const char *tag) {
 
 // The proxy relays GitHub's "latest release" API over plain HTTP, so the same
 // tag_name parser works. There are no HTTPS fallbacks: this firmware has no TLS.
-//
-// Channel endpoints (both return a JSON body with tag_name):
-//   RELEASE -> /firmware/latest        (GitHub's latest stable, excludes alphas)
-//   ALPHA   -> /firmware/latest-alpha  (newest prerelease; proxy-side filter)
+// /releases/latest excludes prereleases, so alpha builds never surface here.
 static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     tagOut = "";
     errOut = "";
@@ -223,8 +215,7 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     }
 
     char url[160];
-    snprintf(url, sizeof(url), "%s/firmware/%s", s_otaBaseUrl,
-             otaChannelIsAlpha() ? "latest-alpha" : "latest");
+    snprintf(url, sizeof(url), "%s/firmware/latest", s_otaBaseUrl);
     String body, err;
     if (httpGetString(url, body, err, true, nullptr, nullptr,
                       "application/vnd.github+json")
@@ -328,12 +319,6 @@ void otaSetNetworkAllowed(bool allowed) {
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
 }
 
-void otaSetChannel(uint8_t channel) {
-    g_otaChannel = (channel == UPDATE_CHANNEL_ALPHA) ? UPDATE_CHANNEL_ALPHA
-                                                     : UPDATE_CHANNEL_RELEASE;
-    Serial.printf("[ota] channel=%s\n", otaChannelIsAlpha() ? "alpha" : "release");
-}
-
 const char *otaCurrentDeviceAssetSlug() {
 #if defined(DEVICE_TDECK)
     return "tdeck";
@@ -374,28 +359,16 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
     copyStringToBuf(out.latestTag, sizeof(out.latestTag), latestTag.c_str());
     buildAssetUrl(out.latestTag, out.downloadUrl, sizeof(out.downloadUrl));
 
-    // On the release channel the fetched tag is stable; the alpha channel's
-    // endpoint returns a prerelease, which is expected and installable.
-    const bool tagIsPre = isPrereleaseTag(out.latestTag);
-    if (!otaChannelIsAlpha() && tagIsPre) {
-        // Release channel should never see a prerelease from /firmware/latest,
-        // but if a fallback ever surfaces one, don't offer it.
-        Serial.printf("[ota] ignoring prerelease tag on release channel: %s\n", out.latestTag);
+    if (isPrereleaseTag(out.latestTag)) {
+        // Never auto-update onto an alpha/prerelease. /releases/latest already
+        // excludes prereleases, but the release-page and raw-VERSION fallbacks
+        // could theoretically surface one, so guard here too.
+        Serial.printf("[ota] ignoring prerelease tag: %s\n", out.latestTag);
         out.updateAvailable = false;
     } else if (kTreatLatestAsUpdateForTesting) {
         out.updateAvailable = true;
     } else {
-        // An update is available when the target differs from what's running and
-        // either it's semver-newer OR the running build is on the other channel.
-        // The channel-mismatch clause is what lets switching channels re-track:
-        // e.g. selecting Release while running a (higher-numbered) alpha installs
-        // the latest stable even though semver would call it a downgrade, and
-        // vice-versa for selecting Alpha while on a stable build.
-        const bool runningIsPre = isPrereleaseTag(APP_VERSION);
-        const bool channelMismatch = (runningIsPre != otaChannelIsAlpha());
-        const bool differs = (strcmp(APP_VERSION, out.latestTag) != 0);
-        out.updateAvailable = differs
-            && (channelMismatch || compareVersionTags(APP_VERSION, out.latestTag) < 0);
+        out.updateAvailable = (compareVersionTags(APP_VERSION, out.latestTag) < 0);
     }
     out.ok = true;
     return true;
@@ -432,10 +405,10 @@ bool otaInstallLatestRelease(const char *tag,
         copyStringToBuf(tagBuf, sizeof(tagBuf), latestTag.c_str());
     }
 
-    // Prerelease (alpha) builds are installable only on the alpha channel; the
-    // release channel refuses them regardless of how the tag was supplied.
-    if (isPrereleaseTag(tagBuf) && !otaChannelIsAlpha()) {
-        return setErr(errOut, errLen, "Refusing to install prerelease (alpha) build on release channel");
+    // Hard stop: never install a prerelease (alpha) build via the update path,
+    // regardless of how the tag was supplied.
+    if (isPrereleaseTag(tagBuf)) {
+        return setErr(errOut, errLen, "Refusing to install prerelease (alpha) build");
     }
 
     char url[256] = {};

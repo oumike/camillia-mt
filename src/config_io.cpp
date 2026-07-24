@@ -397,7 +397,6 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
-    cfg.updateChannel       = MY_UPDATE_CHANNEL;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
@@ -553,9 +552,6 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
     snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
-    out += "    updateChannel: ";
-    out += (cfg.updateChannel == UPDATE_CHANNEL_ALPHA ? "ALPHA" : "RELEASE");
-    out += "\n";
     // display
     out += "  display:\n";
     snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
@@ -902,14 +898,6 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.nodeInfoIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
                 else if (!strcmp(key, "otaAutoCheck")) cfg.otaAutoCheckEnabled = parseBoolValue(val);
-                else if (!strcmp(key, "updateChannel")) {
-                    if (isdigit((unsigned char)val[0]))
-                        cfg.updateChannel = (uint8_t)constrain(atoi(val), 0, UPDATE_CHANNEL_MAX);
-                    else if (!strcmp(val, "ALPHA"))
-                        cfg.updateChannel = UPDATE_CHANNEL_ALPHA;
-                    else
-                        cfg.updateChannel = UPDATE_CHANNEL_RELEASE;
-                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "positionBroadcastSecs"))
                     cfg.posIntervalS = (uint32_t)atol(val);

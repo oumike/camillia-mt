@@ -112,7 +112,6 @@ struct RhinoConfig {
 
     // Firmware updates
     bool     otaAutoCheckEnabled; // check for a newer release once per boot
-    uint8_t  updateChannel;       // 0=RELEASE (stable), 1=ALPHA (prerelease)
 
     // Node management
     bool     nodeArchiveEnabled;  // preserve nodes evicted from the full table to SD

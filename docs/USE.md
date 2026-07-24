@@ -191,25 +191,6 @@ the next boot. The update source is fixed in firmware and is not configurable.
 
 Not available on the Cardputer, where OTA is disabled altogether.
 
-### Update channel
-
-**Update Channel** — in the Config screen and Web Config → **Firmware Updates** —
-picks which stream OTA follows:
-
-- **Release** (default) — tracks the latest stable build.
-- **Alpha** — tracks the latest prerelease (alpha) build: new features sooner, at
-  the cost of rougher edges. Every stable release also publishes a matching alpha,
-  so the alpha channel is always at least as new as stable.
-
-The channel affects both the boot check and the Config screen's Firmware Update
-action. Switching channels re-tracks on the next check, even when that means
-moving to a lower version number: selecting **Release** while running an alpha
-installs the latest stable (so you leave the alpha stream cleanly), and selecting
-**Alpha** while on a stable build moves you onto the newest alpha.
-
-On the Config screen the setting toggles between the two; in Web Config it's a
-dropdown. Not available on the Cardputer (OTA disabled).
-
 ### Chat style
 
 Config has a **Chat Style** action. Selecting it opens a picker modal — navigate

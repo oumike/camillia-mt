@@ -1319,7 +1319,6 @@ enum CfgActionId {
     CFG_ACTION_MQTT_TOGGLE,
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
-    CFG_ACTION_UPDATE_CHANNEL,
     CFG_ACTION_OTA_UPDATE,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
@@ -2531,10 +2530,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
-        case CFG_ACTION_UPDATE_CHANNEL:
-            snprintf(buf, bufLen, "Update Channel: %s",
-                     s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA ? "Alpha" : "Release");
-            break;
         case CFG_ACTION_OTA_UPDATE:
             if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
                 snprintf(buf, bufLen, "Firmware Update: Install %s", s_cfgOtaLatestTag);
@@ -2897,7 +2892,6 @@ static bool runOtaWorkerModeIfRequested() {
     };
 
     otaSetNetworkAllowed(true);
-    otaSetChannel(s_cfg.updateChannel);   // follow the user's selected channel
 
     Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
                   rtcRequested ? 1 : 0,
@@ -3312,7 +3306,6 @@ static void persistConfigToPrefs() {
     p.putString("cannedMsgs", s_cfg.cannedMessages);
     p.putBool("snfClientEn", s_cfg.snfClientEnabled);
     p.putBool("otaAutoChk", s_cfg.otaAutoCheckEnabled);
-    p.putUChar("updChannel", s_cfg.updateChannel);
     p.putBool("nodeArchive", s_cfg.nodeArchiveEnabled);
     p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
     p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
@@ -3535,10 +3528,6 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("cannedEn")) s_cfg.cannedEnabled = prefs.getBool("cannedEn");
     if (prefs.isKey("snfClientEn")) s_cfg.snfClientEnabled = prefs.getBool("snfClientEn");
     if (prefs.isKey("otaAutoChk")) s_cfg.otaAutoCheckEnabled = prefs.getBool("otaAutoChk");
-    if (prefs.isKey("updChannel")) {
-        uint8_t uc = prefs.getUChar("updChannel", 0);
-        s_cfg.updateChannel = (uc <= UPDATE_CHANNEL_MAX) ? uc : UPDATE_CHANNEL_RELEASE;
-    }
     if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
     if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
     if (prefs.isKey("autoFavRange")) {
@@ -4592,9 +4581,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Update Channel sits with Firmware Update since it only affects OTA; both
-    // are compiled out on the Cardputer, where OTA is disabled.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UPDATE_CHANNEL;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
 #if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -12321,18 +12307,6 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Splash melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
 
-        case CFG_ACTION_UPDATE_CHANNEL:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UPDATE_CHANNEL");
-            // Two channels, so activating toggles. The next update check (boot or
-            // the Firmware Update action below) uses the new channel; switching
-            // to Release while on an alpha build re-tracks to the latest stable.
-            s_cfg.updateChannel = (s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA)
-                                      ? UPDATE_CHANNEL_RELEASE : UPDATE_CHANNEL_ALPHA;
-            persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Update Channel: %s",
-                     s_cfg.updateChannel == UPDATE_CHANNEL_ALPHA ? "Alpha" : "Release");
-            break;
-
         case CFG_ACTION_OTA_UPDATE: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_UPDATE");
             Serial.println("[ota-worker] firmware update action requested");
@@ -19572,7 +19546,6 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     // The gate is what keeps OTA networking out of normal operation; open it
     // only for the duration of this one request.
     otaSetNetworkAllowed(true);
-    otaSetChannel(s_cfg.updateChannel);
     OtaCheckResult check = {};
     const bool ok = otaCheckLatestRelease(check) && check.ok;
     otaSetNetworkAllowed(false);
