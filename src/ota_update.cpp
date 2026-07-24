@@ -209,10 +209,46 @@ static bool isPrereleaseTag(const char *tag) {
 
 // The proxy relays GitHub's "latest release" API over plain HTTP, so the same
 // tag_name parser works. There are no HTTPS fallbacks: this firmware has no TLS.
-//
-// Channel endpoints (both return a JSON body with tag_name):
-//   RELEASE -> /firmware/latest        (GitHub's latest stable, excludes alphas)
-//   ALPHA   -> /firmware/latest-alpha  (newest prerelease; proxy-side filter)
+// Scans a GitHub /releases array body (newest first) for the first object whose
+// prerelease flag is true, returning its tag_name. Within each release object
+// GitHub emits tag_name before prerelease, so for each tag_name we check the
+// prerelease token that falls before the next object's tag_name. Used for the
+// alpha channel, whose endpoint returns the list rather than a single release
+// (GitHub has no "latest prerelease" endpoint).
+static bool extractFirstPrereleaseTag(const String &body, String &tagOut) {
+    tagOut = "";
+    int pos = 0;
+    while (true) {
+        int t = body.indexOf("\"tag_name\"", pos);
+        if (t < 0) return false;
+        int colon = body.indexOf(':', t + 10);
+        int q1 = (colon >= 0) ? body.indexOf('"', colon + 1) : -1;
+        int q2 = (q1 >= 0) ? body.indexOf('"', q1 + 1) : -1;
+        if (q2 < 0) return false;
+        String tag = body.substring(q1 + 1, q2);
+
+        // This object's prerelease flag = the "prerelease" token before the next
+        // object's tag_name.
+        int nextT = body.indexOf("\"tag_name\"", q2);
+        int pr = body.indexOf("\"prerelease\"", q2);
+        if (pr >= 0 && (nextT < 0 || pr < nextT)) {
+            int pc = body.indexOf(':', pr + 12);
+            int v = pc + 1;
+            while (v < (int)body.length() && (body[v] == ' ' || body[v] == '\t')) v++;
+            if (body.startsWith("true", v)) {
+                tagOut = tag;
+                return tag.length() > 0;
+            }
+        }
+        pos = q2 + 1;
+    }
+}
+
+// The proxy relays GitHub's release API over plain HTTP, so this firmware never
+// needs TLS. Channel endpoints:
+//   RELEASE -> /firmware/latest        single object, GitHub's latest stable
+//   ALPHA   -> /firmware/latest-alpha  the releases list; we take the first
+//                                       prerelease client-side
 static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     tagOut = "";
     errOut = "";
@@ -222,15 +258,18 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
         return false;
     }
 
+    const bool alpha = otaChannelIsAlpha();
     char url[160];
     snprintf(url, sizeof(url), "%s/firmware/%s", s_otaBaseUrl,
-             otaChannelIsAlpha() ? "latest-alpha" : "latest");
+             alpha ? "latest-alpha" : "latest");
     String body, err;
     if (httpGetString(url, body, err, true, nullptr, nullptr,
-                      "application/vnd.github+json")
-        && extractJsonStringField(body, "tag_name", tagOut)
-        && tagOut.length() > 0) {
-        return true;
+                      "application/vnd.github+json")) {
+        const bool got = alpha ? extractFirstPrereleaseTag(body, tagOut)
+                               : extractJsonStringField(body, "tag_name", tagOut);
+        if (got && tagOut.length() > 0) return true;
+        errOut = alpha ? String("No alpha release found") : String("Release tag not found (proxy)");
+        return false;
     }
     errOut = err.length() ? err : String("Release tag not found (proxy)");
     return false;
