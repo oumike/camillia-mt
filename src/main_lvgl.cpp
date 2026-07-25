@@ -2481,7 +2481,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             } else if (!s_webCfgEnabled) {
                 snprintf(buf, bufLen, "Web Config: Disabled");
             } else if (webCfgRunning()) {
-                snprintf(buf, bufLen, "Web Config: On");
+                // AP mode serves the reduced page; name it so the missing tabs
+                // read as the mode, not a failure.
+                snprintf(buf, bufLen, webCfgIsLite() ? "Web Config: On (Lite)"
+                                                     : "Web Config: On");
             } else {
                 snprintf(buf, bufLen, "Web Config: Enabled");
             }
@@ -3377,6 +3380,10 @@ static void loadConfigFromPrefs() {
         // that as first boot so onboarding fires before anything else opens
         // the namespace read-write and creates it.
         s_firstBoot = true;
+        // Fresh install: bring the web config up by default. With no saved
+        // WiFi credentials it starts the onboarding AP, so the device is
+        // configurable from a phone/browser out of the box.
+        s_webCfgEnabled = true;
         return;
     }
 
@@ -3595,7 +3602,11 @@ static void loadConfigFromPrefs() {
         s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
     }
     s_cfg.webCfgAuthEnabled = prefs.getBool("webCfgAuth", s_cfg.webCfgAuthEnabled);
-    s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
+    // Default on for a device that has never been configured (blank NVS that
+    // some other component already created, or a namespace without our keys):
+    // the onboarding AP is the only way in before WiFi creds exist. Devices
+    // that have been set up keep whatever they last persisted.
+    s_webCfgEnabled = prefs.getBool("webCfgEnabled", s_firstBoot);
 
     // Enforce network-option invariants regardless of how the flags were set
     // (on-device toggles or web config): MQTT needs WiFi, and the MQTT bridge and
@@ -12428,8 +12439,8 @@ static void performCfgAction(int actionId) {
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
 #endif
                 if (ok) {
-                    if (webCfgIsOnboarding()) {
-                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Setup: %s", webCfgIP());
+                    if (webCfgIsLite()) {
+                        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Lite: %s", webCfgIP());
                     } else {
                         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web: %s", webCfgIP());
                     }
@@ -15627,8 +15638,8 @@ static void startWebConfigAuto() {
         return;
     }
 
-    if (webCfgIsOnboarding()) {
-        Serial.printf("[web] setup AP: %s\n", webCfgIP());
+    if (webCfgIsLite()) {
+        Serial.printf("[web] web config lite (AP): %s\n", webCfgIP());
     } else {
         Serial.printf("[web] web config: %s\n", webCfgIP());
     }

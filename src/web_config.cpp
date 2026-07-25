@@ -15,6 +15,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/select.h>   // clientWritable(): poll the socket before writing
 #include "debug_flags.h"
 #include "gps.h"
 #include "battery_util.h"
@@ -46,6 +47,13 @@ static DNSServer      gDns;
 static bool           gCaptiveActive   = false;
 static bool           running          = false;
 static bool           gOnboarding      = false;
+// True while the server is serving the SoftAP variant ("web config lite"): the
+// Config tab only, no Utilities/Live/Chat/Nodes. AP mode has far less internal
+// heap to work with than STA, and the heavy tabs are what tip it over. This is
+// tracked separately from gCaptiveActive because captive DNS can fail to start
+// while the AP itself is up — the page weight must follow the radio mode, not
+// the DNS server.
+static bool           gApMode          = false;
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
@@ -609,14 +617,237 @@ static const char kHead[] =
         "@media (max-width:560px){.row2{grid-template-columns:1fr}}"
     "</style></head><body>";
 
-// Lightweight AP onboarding page head. Keep this intentionally small so first-
-// boot AP mode still renders reliably when WiFi has reduced internal heap.
-static const char kOnboardHead[] =
+// Head for the AP-mode pages (web config lite and its /setup form). AP mode
+// leaves ~20 KB of internal heap with a largest block near 13 KB, so this is
+// deliberately a fraction of kHead's ~4 KB of CSS: no custom properties, no
+// theme table, no layout grid. Everything here streams from flash, so nothing
+// on the lite path ever needs a large contiguous allocation.
+static const char kLiteHead[] =
         "<!DOCTYPE html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Camillia Setup</title>"
-        "</head><body>";
+        "<title>Camillia &mdash; Web Config Lite</title>"
+        "<style>"
+        "body{font-family:sans-serif;margin:0 auto;padding:1em;max-width:40em}"
+        "h2{font-size:1.2em}"
+        "h3{font-size:1em;margin:1.4em 0 .3em;padding-bottom:.2em;border-bottom:1px solid #999}"
+        "p{font-size:.85em}"
+        "label{display:block;margin:.5em 0 .1em;font-size:.9em}"
+        "input,select{width:100%;box-sizing:border-box;padding:.4em;font-size:1em}"
+        "input[type=checkbox]{width:auto}"
+        "button{padding:.6em 1.2em;font-size:1em;margin-top:.6em}"
+        "</style></head><body>";
+
+// Region and preset <option> lists, shared by the full config page and web
+// config lite so the two never drift. Streamed straight from flash in lite.
+static const char kRegionOptions[] =
+        "<option value='US'>US (902&ndash;928 MHz)</option>"
+        "<option value='EU_433'>EU 433 (433&ndash;434 MHz)</option>"
+        "<option value='EU_868'>EU 868 (869.4&ndash;869.65 MHz)</option>"
+        "<option value='CN'>CN (470&ndash;510 MHz)</option>"
+        "<option value='JP'>JP (920.5&ndash;923.5 MHz)</option>"
+        "<option value='ANZ'>ANZ (915&ndash;928 MHz)</option>"
+        "<option value='ANZ_433'>ANZ 433 (433&ndash;434.8 MHz)</option>"
+        "<option value='RU'>RU (868.7&ndash;869.2 MHz)</option>"
+        "<option value='KR'>KR (920&ndash;923 MHz)</option>"
+        "<option value='TW'>TW (920&ndash;925 MHz)</option>"
+        "<option value='IN'>IN (865&ndash;867 MHz)</option>"
+        "<option value='NZ_865'>NZ 865 (864&ndash;868 MHz)</option>"
+        "<option value='TH'>TH (920&ndash;925 MHz)</option>"
+        "<option value='UA_433'>UA 433 (433&ndash;434.7 MHz)</option>"
+        "<option value='UA_868'>UA 868 (868&ndash;868.6 MHz)</option>"
+        "<option value='MY_433'>MY 433 (433&ndash;435 MHz)</option>"
+        "<option value='MY_919'>MY 919 (919&ndash;924 MHz)</option>"
+        "<option value='SG_923'>SG 923 (917&ndash;925 MHz)</option>"
+        "<option value='PH_433'>PH 433 (433&ndash;434.7 MHz)</option>"
+        "<option value='PH_868'>PH 868 (868&ndash;869.4 MHz)</option>"
+        "<option value='PH_915'>PH 915 (915&ndash;918 MHz)</option>"
+        "<option value='KZ_433'>KZ 433 (433&ndash;434.8 MHz)</option>"
+        "<option value='KZ_863'>KZ 863 (863&ndash;868 MHz)</option>"
+        "<option value='NP_865'>NP 865 (865&ndash;868 MHz)</option>"
+        "<option value='BR_902'>BR 902 (902&ndash;907.5 MHz)</option>"
+        "<option value='LORA_24'>LoRa 2.4 GHz (2400&ndash;2483.5 MHz)</option>";
+
+static const char kPresetOptions[] =
+        "<option value='Long Fast'>Long Fast (default)</option>"
+        "<option value='Long Moderate'>Long Moderate</option>"
+        "<option value='Long Slow'>Long Slow</option>"
+        "<option value='Long Turbo'>Long Turbo</option>"
+        "<option value='Medium Fast'>Medium Fast</option>"
+        "<option value='Medium Slow'>Medium Slow</option>"
+        "<option value='Short Fast'>Short Fast</option>"
+        "<option value='Short Slow'>Short Slow</option>"
+        "<option value='Short Turbo'>Short Turbo</option>";
+
+// Theme preset names, ordered dark/light per family — the same list the swatch
+// picker's NAMES array carries in JS; lite renders them as a plain select.
+static const char *kThemePresetNames[] = {
+    "Camillia Dark",        "Camillia Light",
+    "Evergreen Dark",       "Evergreen Light",
+    "Earthy Dark",          "Earthy Light",
+    "Solarized Dark",       "Solarized Light",
+    "Crimson Blue Dark",    "Crimson Blue Light",
+    "Scarlet Pop Dark",     "Scarlet Pop Light",
+    "Ink Wash Dark",        "Ink Wash Light",
+    "Lavendar Fields Dark", "Lavendar Fields Light",
+    "Wild Flowers Dark",    "Wild Flowers Light",
+    "Quiet Luxury Dark",    "Quiet Luxury Light",
+    "Morning Dew Dark",     "Morning Dew Light",
+    "Winter Chill Dark",    "Winter Chill Light",
+};
+static const uint8_t kThemePresetCount =
+    (uint8_t)(sizeof(kThemePresetNames) / sizeof(kThemePresetNames[0]));
+
+// The remaining constants below are the config pane's fat static blobs, pulled
+// out of the build-a-String path. Appending a multi-KB literal forces a
+// contiguous allocation that big; in AP mode, where the largest free block is
+// ~13 KB, that is what made the page fail to render. Streamed with
+// sendContent_P they cost nothing, so the same pane serves both modes.
+
+static const char kPresetJs[] =
+        "<script>"
+        // Region band edges {start,end MHz, power dBm} — mirror kRegions.
+        "var R={'US':{s:902,e:928,p:22},'EU_433':{s:433,e:434,p:10},'EU_868':{s:869.4,e:869.65,p:22},"
+        "'CN':{s:470,e:510,p:19},'JP':{s:920.5,e:923.5,p:13},'ANZ':{s:915,e:928,p:22},'ANZ_433':{s:433.05,e:434.79,p:14},"
+        "'RU':{s:868.7,e:869.2,p:20},'KR':{s:920,e:923,p:22},'TW':{s:920,e:925,p:22},'IN':{s:865,e:867,p:22},"
+        "'NZ_865':{s:864,e:868,p:22},'TH':{s:920,e:925,p:16},'UA_433':{s:433,e:434.7,p:10},'UA_868':{s:868,e:868.6,p:14},"
+        "'MY_433':{s:433,e:435,p:20},'MY_919':{s:919,e:924,p:22},'SG_923':{s:917,e:925,p:20},'PH_433':{s:433,e:434.7,p:10},"
+        "'PH_868':{s:868,e:869.4,p:14},'PH_915':{s:915,e:918,p:22},'KZ_433':{s:433.075,e:434.775,p:10},'KZ_863':{s:863,e:868,p:22},"
+        "'NP_865':{s:865,e:868,p:22},'BR_902':{s:902,e:907.5,p:22},'LORA_24':{s:2400,e:2483.5,p:10}};"
+        // Preset params {bw kHz, sf, cr, channel name for frequency-slot hash}.
+        "var P={'Long Fast':{bw:250,sf:11,cr:5,cn:'LongFast'},'Long Moderate':{bw:125,sf:11,cr:8,cn:'LongMod'},"
+        "'Long Slow':{bw:125,sf:12,cr:8,cn:'LongSlow'},'Long Turbo':{bw:500,sf:11,cr:8,cn:'LongTurbo'},"
+        "'Medium Fast':{bw:250,sf:9,cr:5,cn:'MediumFast'},'Medium Slow':{bw:250,sf:10,cr:5,cn:'MediumSlow'},"
+        "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'}};"
+        // djb2 hash + Meshtastic frequency-slot calc, matching regionSlotFreq().
+        "function djb2(t){var h=5381;for(var i=0;i<t.length;i++)h=((h*33)+t.charCodeAt(i))>>>0;return h;}"
+        "function slotFreq(r,p){var bw=p.bw/1000;var n=Math.floor((r.e-r.s)/bw);if(n<1)n=1;"
+          "var slot=djb2(p.cn)%n;return r.s+bw/2+slot*bw;}"
+        "function applyPreset(){"
+          "var r=R[document.getElementById('sel-rgn').value];"
+          "var p=P[document.getElementById('sel-pst').value];"
+          "if(!r||!p)return;"
+          "document.getElementById('d-freq').textContent=slotFreq(r,p).toFixed(3)+' MHz';"
+          "document.getElementById('d-bw').textContent=p.bw+' kHz';"
+          "document.getElementById('d-sf').textContent='SF'+p.sf;"
+          "document.getElementById('d-cr').textContent='4/'+p.cr;"
+          "document.querySelector('[name=pwr]').value=r.p;"
+        "}"
+        "document.addEventListener('DOMContentLoaded',applyPreset);"
+        "</script>";
+
+static const char kLoraReadout[] =
+        "<div class='row2' style='align-items:center'>"
+        "<label>Frequency<span id='d-freq' style='display:inline-block;padding:.25em .5em;"
+        "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:8em;text-align:center'>—</span></label>"
+        "<label>Bandwidth<span id='d-bw' style='display:inline-block;padding:.25em .5em;"
+        "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:6em;text-align:center'>—</span></label>"
+        "</div><div class='row2' style='align-items:center'>"
+        "<label>Spreading Factor<span id='d-sf' style='display:inline-block;padding:.25em .5em;"
+        "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+        "<label>Coding Rate<span id='d-cr' style='display:inline-block;padding:.25em .5em;"
+        "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
+        "</div>";
+
+static const char kFontModal[] =
+        "<div class='modal-back' id='fsModal' onclick='if(event.target===this)fsClose()'>"
+        "<div class='modal-card'><h3>Font Size</h3>"
+        "<button type='button' class='modal-opt' onclick='fsPick(0,\"Small\")'>"
+            "<b>Small</b><span>Compact chat &amp; DM text</span></button>"
+        "<button type='button' class='modal-opt' onclick='fsPick(1,\"Medium\")'>"
+            "<b>Medium</b><span>Default chat &amp; DM text</span></button>"
+        "<button type='button' class='modal-opt' onclick='fsPick(2,\"Large\")'>"
+            "<b>Large</b><span>Larger chat &amp; DM text</span></button>"
+        "<button type='button' class='modal-opt' onclick='fsPick(3,\"Extra Large\")'>"
+            "<b>Extra Large</b><span>Largest chat &amp; DM text</span></button>"
+        "</div></div>"
+        "<script>"
+        "function fsMark(v){var m=document.querySelectorAll('#fsModal .modal-opt');"
+        "for(var i=0;i<m.length;i++)m[i].classList.toggle('sel',i==v);}"
+        "function fsOpen(){fsMark(+document.getElementById('fsInput').value);"
+        "document.getElementById('fsModal').classList.add('open');}"
+        "function fsClose(){document.getElementById('fsModal').classList.remove('open');}"
+        "function fsPick(v,l){document.getElementById('fsInput').value=v;"
+        "document.getElementById('fsBtn').textContent=l;fsClose();}"
+        "</script>";
+
+// Swatch picker: each theme preset renders as a clickable card showing a
+// three-color preview (background, panel, accent). Cards are built in JS from
+// the same palette table used for live preview, keyed by preset.
+static const char kThemePicker[] =
+        "<style>"
+        ".theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));"
+        "gap:8px;margin:.2em 0 .4em}"
+        ".theme-card{display:flex;align-items:center;gap:8px;padding:7px 9px;cursor:pointer;"
+        "border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}"
+        ".theme-card.sel{border-color:var(--accent);border-width:2px;padding:6px 8px}"
+        ".theme-sws{display:flex;gap:3px;flex:0 0 auto}"
+        ".theme-sw{width:16px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,.25)}"
+        ".theme-name{font-size:.86em;line-height:1.15}"
+        "</style>"
+        "<div id='themeGrid' class='theme-grid'></div>"
+        "<script>"
+        "(function(){"
+        "var P={"
+                        "'0':{bg:'#10141d',panel:'#1a2230',panel2:'#232d3e',line:'#4a5b73',text:'#f4f6fb',dim:'#b0b8c8',accent:'#d7869d',ink:'#ffffff'},"
+                        "'1':{bg:'#f6ede9',panel:'#fff6f3',panel2:'#f4e2dc',line:'#cfb2ab',text:'#2e2220',dim:'#6f5c58',accent:'#b75a74',ink:'#ffffff'},"
+                        "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
+                        "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'},"
+                        "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
+                        "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'},"
+                        "'6':{bg:'#002b36',panel:'#073642',panel2:'#0b4552',line:'#586e75',text:'#eee8d5',dim:'#93a1a1',accent:'#2aa198',ink:'#002b36'},"
+                        "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'},"
+                        "'8':{bg:'#060f24',panel:'#12244c',panel2:'#1b3363',line:'#3b578f',text:'#f4f8ff',dim:'#b9c9e9',accent:'#ff4a58',ink:'#ffffff'},"
+                        "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'},"
+                        "'10':{bg:'#150009',panel:'#760031',panel2:'#8b0038',line:'#6f2d3b',text:'#fff1f1',dim:'#e5b3ba',accent:'#d51c39',ink:'#ffffff'},"
+                        "'11':{bg:'#fff2f4',panel:'#fff8f9',panel2:'#ffeaed',line:'#d8a1aa',text:'#3a0a14',dim:'#7e3b49',accent:'#d51c39',ink:'#ffffff'},"
+                        "'12':{bg:'#111318',panel:'#1c2128',panel2:'#252b34',line:'#4a525d',text:'#f3f6fa',dim:'#b7c0cc',accent:'#d8dde4',ink:'#080d14'},"
+                        "'13':{bg:'#f3f5f7',panel:'#ffffff',panel2:'#e8ebef',line:'#c2c9d0',text:'#1e242c',dim:'#5e6876',accent:'#2e3440',ink:'#ffffff'},"
+                        "'14':{bg:'#1a1230',panel:'#251a45',panel2:'#2f2258',line:'#58457f',text:'#f2eefe',dim:'#c9c0e6',accent:'#b79bff',ink:'#160f2a'},"
+                        "'15':{bg:'#f5effb',panel:'#fff9ff',panel2:'#ede1f7',line:'#c7b5db',text:'#2f2440',dim:'#6d5f82',accent:'#7b5ba7',ink:'#ffffff'},"
+                        "'16':{bg:'#1a2430',panel:'#253547',panel2:'#2d455b',line:'#4b6881',text:'#edf4fb',dim:'#bccbd9',accent:'#c78fcf',ink:'#25192d'},"
+                        "'17':{bg:'#f6faf4',panel:'#ffffff',panel2:'#e5f0e2',line:'#bccfb7',text:'#24332f',dim:'#63756f',accent:'#8a5faf',ink:'#ffffff'},"
+                        "'18':{bg:'#2a1f17',panel:'#34271e',panel2:'#403126',line:'#6a5848',text:'#f6eee6',dim:'#c9b9a8',accent:'#d9c7a3',ink:'#2a1f16'},"
+                        "'19':{bg:'#faf4ea',panel:'#fffdf8',panel2:'#f1e7d5',line:'#cdbfa8',text:'#3b2f24',dim:'#7b6b57',accent:'#a8844f',ink:'#ffffff'},"
+                        "'20':{bg:'#12282a',panel:'#1a3638',panel2:'#234345',line:'#4d7072',text:'#ebf7f5',dim:'#b3d0cc',accent:'#9cd8c8',ink:'#123130'},"
+                        "'21':{bg:'#eef9f6',panel:'#ffffff',panel2:'#ddf1ec',line:'#b5d5cd',text:'#213531',dim:'#5f7c76',accent:'#4e9c8a',ink:'#ffffff'},"
+                        "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
+                        "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'}"
+        "};"
+        "var NAMES=['Camillia Dark','Camillia Light','Evergreen Dark','Evergreen Light',"
+          "'Earthy Dark','Earthy Light','Solarized Dark','Solarized Light',"
+          "'Crimson Blue Dark','Crimson Blue Light','Scarlet Pop Dark','Scarlet Pop Light',"
+          "'Ink Wash Dark','Ink Wash Light','Lavendar Fields Dark','Lavendar Fields Light',"
+          "'Wild Flowers Dark','Wild Flowers Light','Quiet Luxury Dark','Quiet Luxury Light',"
+          "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light'];"
+        "var input=document.getElementById('themeInput');"
+        "function apply(){"
+          "var k=input.value;var p=P[k]||P['0'];"
+          "var r=document.documentElement.style;"
+          "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
+          "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
+          "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
+          "r.colorScheme=(parseInt(k,10)%2)?'light':'dark';"  // odd preset = light
+        "}"
+        "function select(k){input.value=k;"
+          "var cards=document.querySelectorAll('#themeGrid .theme-card');"
+          "for(var i=0;i<cards.length;i++)cards[i].classList.toggle('sel',cards[i].dataset.k==k);"
+          "apply();}"
+        "var grid=document.getElementById('themeGrid');"
+        "Object.keys(P).forEach(function(k){"
+          "var p=P[k];"
+          "var c=document.createElement('div');c.className='theme-card';c.dataset.k=k;"
+          "var sw=document.createElement('div');sw.className='theme-sws';"
+          "[p.bg,p.panel2,p.accent].forEach(function(col){"
+            "var b=document.createElement('div');b.className='theme-sw';b.style.background=col;sw.appendChild(b);});"
+          "var nm=document.createElement('div');nm.className='theme-name';nm.textContent=NAMES[k]||('Theme '+k);"
+          "c.appendChild(sw);c.appendChild(nm);"
+          "c.addEventListener('click',function(){select(k);});"
+          "grid.appendChild(c);"
+        "});"
+        "select(input.value);"
+        "})();"
+        "</script>";
 
 // ── Timezone table ────────────────────────────────────────────
 
@@ -646,24 +877,125 @@ static const TzOption kTzOptions[] = {
 };
 static const int kTzCount = (int)(sizeof(kTzOptions) / sizeof(kTzOptions[0]));
 
+// ── Shared page output helpers ────────────────────────────────
+
+// Helper: flush a chunk of HTML and reset the buffer.
+//
+// Writes are skipped once the client is gone — a browser that navigated away or
+// refreshed mid-render would otherwise leave us writing into a dead socket,
+// blocking the main loop for the client timeout on every remaining chunk. The
+// page keeps building (cheap, no network) and simply lands nowhere.
+// Set when a response is abandoned mid-render; cleared at the start of each page.
+static bool gSendAborted = false;
+
+// Waits (briefly) for the socket to accept data, and reports whether it will.
+//
+// This exists because WiFiClient::write() cannot be bounded from outside: it
+// sends with MSG_DONTWAIT behind a select() with a hardcoded 1 s timeout and 10
+// retries — a partial send re-arms them — and it ignores setTimeout(). When the
+// response outgrows LWIP's TCP send buffer (TCP_SND_BUF, 5744 bytes by default)
+// and ACKs stop arriving, a single sendContent() blocks the main loop for a full
+// 10 s, taking the UI and radio down with it. Checking writability ourselves
+// first means we never enter that loop unless the socket is ready.
+static bool clientWritable(uint32_t timeoutMs) {
+    const int sock = server.client().fd();
+    if (sock < 0) return false;
+
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(sock, &writable);
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(timeoutMs / 1000);
+    tv.tv_usec = (suseconds_t)((timeoutMs % 1000) * 1000);
+    return select(sock + 1, nullptr, &writable, nullptr, &tv) > 0
+           && FD_ISSET(sock, &writable);
+}
+
+// True when the response can't continue: client gone, or the socket has stopped
+// draining. Either way the rest of the page is skipped — it keeps building (that
+// part is cheap and needs no network) and simply lands nowhere.
+static bool sendStalled() {
+    if (gSendAborted) return true;
+    if (!server.client().connected()) { gSendAborted = true; return true; }
+    if (!clientWritable(250)) {
+        Serial.println("[web] socket not draining — abandoning response");
+        gSendAborted = true;
+        return true;
+    }
+    return false;
+}
+
+static void sendChunk(String &html) {
+    const size_t len = html.length();
+    if (!len) return;
+    if (sendStalled()) { html = ""; return; }
+
+    const uint32_t t0 = millis();
+    server.sendContent(html);
+    const uint32_t dt = millis() - t0;
+    if (dt > 100) Serial.printf("[web] slow chunk: %u bytes in %u ms\n",
+                                (unsigned)len, (unsigned)dt);
+    html = "";
+    delay(1);   // let the TCP stack push data out and take ACKs
+}
+
+// Same guards for the flash-resident constants, which bypass the String buffer.
+static void sendFlash(const char *progmem) {
+    if (sendStalled()) return;
+    const uint32_t t0 = millis();
+    server.sendContent_P(progmem);
+    const uint32_t dt = millis() - t0;
+    if (dt > 100) Serial.printf("[web] slow flash chunk: %u ms\n", (unsigned)dt);
+    delay(1);
+}
+
+// Flush only once the buffer is worth a TCP segment. Chunk size is a balance
+// with two failure modes at either end: one huge String needs a contiguous
+// allocation a fragmented AP-mode heap can't provide, while a flush per table
+// row means dozens of tiny chunked writes, and each one is a separate segment
+// the synchronous WebServer blocks on. In AP mode, with LWIP down to ~15 KB,
+// a pbuf allocation that fails mid-write wedges the main loop.
+static void sendChunkIfBig(String &html, size_t threshold = 700) {
+    if (html.length() >= threshold) sendChunk(html);
+}
+
+// Config-pane section wrappers. The full page folds each section into a
+// <details> accordion; web config lite renders a plain heading with everything
+// expanded — no folding, no styling, so nothing depends on CSS being there.
+static void section(String &html, bool lite, const char *title, bool open) {
+    if (lite) {
+        // Progress marker: if a render stalls, the last line names the section.
+        Serial.printf("[web] lite: %s\n", title);
+        html += "<h3>";
+        html += title;
+        html += "</h3>";
+        return;
+    }
+    html += open ? "<details open><summary>" : "<details><summary>";
+    html += title;
+    html += "</summary>";
+}
+
+static void sectionEnd(String &html, bool lite) {
+    if (!lite) html += "</details>";
+}
+
 // ── Login page ────────────────────────────────────────────────
 
 static void sendLoginPage(const char *err = "") {
     logWifiHeapDiag("serving login page");
+    gSendAborted = false;
 
-    // kHead is a ~4 KB flash constant. On the no-PSRAM Cardputer, building it
-    // into a String needs a contiguous DRAM block the fragmented heap often
-    // can't provide (the "broken login" symptom). Stream it straight from
-    // flash via chunked transfer so no large contiguous allocation is needed;
-    // only the small form body is built in RAM.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // The head is a multi-KB flash constant; building it into a String needs a
+    // contiguous DRAM block a fragmented heap often can't provide (the "broken
+    // login" symptom). Always stream it via chunked transfer so no large
+    // contiguous allocation is needed; only the small form body is built in
+    // RAM. AP mode gets the lite head — kHead's ~4 KB of CSS is more than the
+    // heap left after SoftAP comes up.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    server.sendContent_P(kHead);
+    sendFlash(gApMode ? kLiteHead : kHead);
     String html;
-#else
-    String html = kHead;
-#endif
     html +=
         "<h2>Camillia MT</h2>"
         "<form method='POST' action='/login'>"
@@ -676,45 +1008,44 @@ static void sendLoginPage(const char *err = "") {
         html += "</p>";
     }
     html += "</form></body></html>";
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    server.sendContent(html);
+    sendChunk(html);
     server.sendContent("");   // terminate chunked response
-#else
-    server.send(200, "text/html", html);
-#endif
 }
 
 // ── Config page ───────────────────────────────────────────────
 
-// Helper: flush a chunk of HTML and reset the buffer
-static void sendChunk(String &html) {
-    server.sendContent(html);
-    html = "";
-}
-
-static void sendConfigPage(const char *msg = "") {
+// Renders the config page in one of two modes. `lite` is the AP-mode variant
+// ("web config lite"): same Config pane, same form, same /save handler, but the
+// small CSS head and none of the other tabs — no node list, live feed, chat or
+// map. Both modes stream every large constant straight from flash and flush the
+// working String often, which is what lets the pane render inside AP mode's
+// ~13 KB largest free block.
+static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
-
-    // AP mode has much tighter internal-heap headroom. Render a lighter page
-    // (Config + Utilities only) to keep the synchronous WebServer responsive.
-    const bool apLite = gCaptiveActive;
+    logWifiHeapDiag(lite ? "serving config page (lite)" : "serving config page");
 
     // Use chunked transfer to avoid building one giant String
+    gSendAborted = false;
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
 
+    // Bounds the socket's SO_RCVTIMEO/SO_SNDTIMEO. Note this does NOT bound how
+    // long a chunk write can block: WiFiClient::write() runs its own select()
+    // retry loop with a hardcoded 1 s timeout and ignores this value. It only
+    // helps the read side.
+    server.client().setTimeout(3);
+
     char tmp[96];
-    // Stream the ~4 KB kHead constant straight from flash on Cardputer (no
-    // PSRAM) so it never needs a contiguous DRAM allocation; see sendLoginPage.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    server.sendContent_P(kHead);
+    // Stream the head straight from flash rather than seeding the String with
+    // it: kHead is ~4 KB and even kLiteHead is ~1 KB, and a contiguous
+    // allocation that size is exactly what a fragmented heap can't provide.
+    sendFlash(lite ? kLiteHead : kHead);
     String html;
-#else
-    String html = kHead;
-#endif
     uint8_t themeBase = (uint8_t)constrain((int)gCfg->uiTheme, 0, UI_THEME_COUNT - 1);
     uint8_t themePreset = (uint8_t)(themeBase * 2 + (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0));
-    int totalNodes = apLite ? 0 : Nodes.count();
+    // Zero in lite mode: the node loops below accumulate tens of KB of options
+    // and detail panels, which AP mode has no room for and lite never shows.
+    int totalNodes = lite ? 0 : Nodes.count();
     uint8_t battPct = readBatteryPctWeb();
     const char *battCls = (battPct >= 60) ? "metric-good" : ((battPct >= 25) ? "metric-warn" : "metric-bad");
     bool gpsEn = gpsIsEnabled();
@@ -1121,28 +1452,34 @@ static void sendConfigPage(const char *msg = "") {
     }
     mapPoints += "]";
 #endif  // !DEVICE_CARDPUTER_LORA_HAT
-    html += "<h2>Camillia for Meshtastic";
+    // Everything above this point is the node list: on the full page it walks
+    // every known node and builds the dropdown and detail panels in RAM before
+    // a single byte goes out. If a render stalls between "serving config page"
+    // and here, it is that build, not the socket.
+    if (!lite) logWifiHeapDiag("node list built");
+
+    html += lite ? "<h2>Camillia &mdash; Web Config Lite"
+                 : "<h2>Camillia for Meshtastic";
     if (gCfg && gCfg->webCfgAuthEnabled)
         html += " <a class='logout' href='/logout'>Logout</a>";
     html += "</h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
-    if (gOnboarding) {
-        html += "<p class='msg'>No WiFi credentials saved yet. "
-                "Quick setup form: <a href='/setup'>/setup</a>.</p>";
-    }
 
+    if (lite) {
+        html += "<p>Access-point mode. All settings are here; the live feed, "
+                "chat and node map need the device on your WiFi network. "
+                "<a href='/setup'>Quick WiFi setup</a></p>";
+    } else {
         html += "<div class='tab-row'><div class='tab-btns'>"
-            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>";
-        if (!apLite) {
-        html += "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>";
-        html += "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>";
+            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-        html += "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>";
+            "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
 #endif
-        html += "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
-    }
-    html += "</div><div class='tab-metrics'><span class='metric-chip ";
+            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
+        html += "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
         html += battChip;
@@ -1152,11 +1489,13 @@ static void sendConfigPage(const char *msg = "") {
         html += gpsChip;
         html += "</span></div></div>";
         html += "<div class='tab-panel active' id='tab-config'><div class='tab-pane-center'>";
+    }
+    sendChunk(html);
 
     html += "<form method='POST' action='/save'>";
 
     // ── Node Identity ─────────────────────────────────────────
-    html += "<details open><summary>Node Identity</summary>";
+    section(html, lite, "Node Identity", true);
     html += "<label>Long Name (max 39 chars)"
             "<input name='long' type='text' maxlength='39' value='";
     html += gCfg->nodeLong; html += "'></label>";
@@ -1166,9 +1505,9 @@ static void sendConfigPage(const char *msg = "") {
     // Node ID override (developer option — hidden for end users)
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
-    html += "</details>";
+    sectionEnd(html, lite);
 
-        html += "<details><summary>Web Config Access</summary>";
+        section(html, lite, "Web Config Access", false);
         html += "<label style='display:flex;align-items:center;gap:.5em'>"
                 "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
                 " onchange=\"document.getElementById('web-auth-creds').style.display="
@@ -1185,11 +1524,11 @@ static void sendConfigPage(const char *msg = "") {
             "<input name='web_pass' type='password' maxlength='63' autocomplete='new-password'"
             " placeholder='Enter new password'></label>";
         html += "</div>";
-        html += "</details>";
+        sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
-    html += "<details open><summary>Device</summary>";
+    section(html, lite, "Device", true);
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
     // Only client roles are offered; values are the canonical Meshtastic enum
@@ -1236,6 +1575,7 @@ static void sendConfigPage(const char *msg = "") {
             html += "<option value='"; html += kTzOptions[i].posix; html += "'";
             if (strcmp(gCfg->tzDef, kTzOptions[i].posix) == 0) html += " selected";
             html += ">"; html += kTzOptions[i].label; html += "</option>";
+            sendChunkIfBig(html);
         }
         html += "</select></label>";
     }
@@ -1244,11 +1584,11 @@ static void sendConfigPage(const char *msg = "") {
     html += gCfg->ntpServer;
     html += "' placeholder='pool.ntp.org'></label>";
     html += "</div>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Position ──────────────────────────────────────────────
-    html += "<details open><summary>Position</summary>";
+    section(html, lite, "Position", true);
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
@@ -1269,11 +1609,11 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%d", (int)gCfg->alt);
     html += "<label>Altitude m (fallback)<input name='alt' type='number' value='";
     html += tmp; html += "' style='max-width:120px'></label>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Channels ──────────────────────────────────────────────
-    html += "<details><summary>Channels</summary>";
+    section(html, lite, "Channels", false);
     html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
             "Hash is recomputed automatically on save. "
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
@@ -1323,99 +1663,38 @@ static void sendConfigPage(const char *msg = "") {
         if (ch.downlinkEnabled) html += " checked";
         html += "> Downlink</label>";
         html += "</div>";
+        sendChunkIfBig(html);
     }
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── LoRa Radio ────────────────────────────────────────────
-    html += "<details open><summary>LoRa Radio</summary>";
-    html += "<div class='row2'>"
-            "<label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>"
-            "<option value='US'>US (902&ndash;928 MHz)</option>"
-            "<option value='EU_433'>EU 433 (433&ndash;434 MHz)</option>"
-            "<option value='EU_868'>EU 868 (869.4&ndash;869.65 MHz)</option>"
-            "<option value='CN'>CN (470&ndash;510 MHz)</option>"
-            "<option value='JP'>JP (920.5&ndash;923.5 MHz)</option>"
-            "<option value='ANZ'>ANZ (915&ndash;928 MHz)</option>"
-            "<option value='ANZ_433'>ANZ 433 (433&ndash;434.8 MHz)</option>"
-            "<option value='RU'>RU (868.7&ndash;869.2 MHz)</option>"
-            "<option value='KR'>KR (920&ndash;923 MHz)</option>"
-            "<option value='TW'>TW (920&ndash;925 MHz)</option>"
-            "<option value='IN'>IN (865&ndash;867 MHz)</option>"
-            "<option value='NZ_865'>NZ 865 (864&ndash;868 MHz)</option>"
-            "<option value='TH'>TH (920&ndash;925 MHz)</option>"
-            "<option value='UA_433'>UA 433 (433&ndash;434.7 MHz)</option>"
-            "<option value='UA_868'>UA 868 (868&ndash;868.6 MHz)</option>"
-            "<option value='MY_433'>MY 433 (433&ndash;435 MHz)</option>"
-            "<option value='MY_919'>MY 919 (919&ndash;924 MHz)</option>"
-            "<option value='SG_923'>SG 923 (917&ndash;925 MHz)</option>"
-            "<option value='PH_433'>PH 433 (433&ndash;434.7 MHz)</option>"
-            "<option value='PH_868'>PH 868 (868&ndash;869.4 MHz)</option>"
-            "<option value='PH_915'>PH 915 (915&ndash;918 MHz)</option>"
-            "<option value='KZ_433'>KZ 433 (433&ndash;434.8 MHz)</option>"
-            "<option value='KZ_863'>KZ 863 (863&ndash;868 MHz)</option>"
-            "<option value='NP_865'>NP 865 (865&ndash;868 MHz)</option>"
-            "<option value='BR_902'>BR 902 (902&ndash;907.5 MHz)</option>"
-            "<option value='LORA_24'>LoRa 2.4 GHz (2400&ndash;2483.5 MHz)</option>"
-            "</select></label>"
-            "<label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>"
-            "<option value='Long Fast'>Long Fast (default)</option>"
-            "<option value='Long Moderate'>Long Moderate</option>"
-            "<option value='Long Slow'>Long Slow</option>"
-            "<option value='Long Turbo'>Long Turbo</option>"
-            "<option value='Medium Fast'>Medium Fast</option>"
-            "<option value='Medium Slow'>Medium Slow</option>"
-            "<option value='Short Fast'>Short Fast</option>"
-            "<option value='Short Slow'>Short Slow</option>"
-            "<option value='Short Turbo'>Short Turbo</option>"
-            "</select></label></div>";
+    section(html, lite, "LoRa Radio", true);
+    // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
+    // both, so its selects carry no onchange handler to call.
+    html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
+                 : "<div class='row2'><label>Region<select name='region' id='sel-rgn' onchange='applyPreset()'>";
+    sendChunk(html);
+    sendFlash(kRegionOptions);
+    html += lite ? "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset'>"
+                 : "</select></label><label>Modem Preset<select id='sel-pst' name='modem_preset' onchange='applyPreset()'>";
+    sendChunk(html);
+    sendFlash(kPresetOptions);
+    html += "</select></label></div>";
+    // Both option lists are static constants, so the current values are applied
+    // here rather than by marking one <option> selected.
     html += "<script>document.getElementById('sel-rgn').value='";
     html += gCfg->region; html += "';"
             "document.getElementById('sel-pst').value='";
     html += kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name;
     html += "';</script>";
-    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically from region and preset.</p>"
-            "<script>"
-            // Region band edges {start,end MHz, power dBm} — mirror kRegions.
-            "var R={'US':{s:902,e:928,p:22},'EU_433':{s:433,e:434,p:10},'EU_868':{s:869.4,e:869.65,p:22},"
-            "'CN':{s:470,e:510,p:19},'JP':{s:920.5,e:923.5,p:13},'ANZ':{s:915,e:928,p:22},'ANZ_433':{s:433.05,e:434.79,p:14},"
-            "'RU':{s:868.7,e:869.2,p:20},'KR':{s:920,e:923,p:22},'TW':{s:920,e:925,p:22},'IN':{s:865,e:867,p:22},"
-            "'NZ_865':{s:864,e:868,p:22},'TH':{s:920,e:925,p:16},'UA_433':{s:433,e:434.7,p:10},'UA_868':{s:868,e:868.6,p:14},"
-            "'MY_433':{s:433,e:435,p:20},'MY_919':{s:919,e:924,p:22},'SG_923':{s:917,e:925,p:20},'PH_433':{s:433,e:434.7,p:10},"
-            "'PH_868':{s:868,e:869.4,p:14},'PH_915':{s:915,e:918,p:22},'KZ_433':{s:433.075,e:434.775,p:10},'KZ_863':{s:863,e:868,p:22},"
-            "'NP_865':{s:865,e:868,p:22},'BR_902':{s:902,e:907.5,p:22},'LORA_24':{s:2400,e:2483.5,p:10}};"
-            // Preset params {bw kHz, sf, cr, channel name for frequency-slot hash}.
-            "var P={'Long Fast':{bw:250,sf:11,cr:5,cn:'LongFast'},'Long Moderate':{bw:125,sf:11,cr:8,cn:'LongMod'},"
-            "'Long Slow':{bw:125,sf:12,cr:8,cn:'LongSlow'},'Long Turbo':{bw:500,sf:11,cr:8,cn:'LongTurbo'},"
-            "'Medium Fast':{bw:250,sf:9,cr:5,cn:'MediumFast'},'Medium Slow':{bw:250,sf:10,cr:5,cn:'MediumSlow'},"
-            "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'}};"
-            // djb2 hash + Meshtastic frequency-slot calc, matching regionSlotFreq().
-            "function djb2(t){var h=5381;for(var i=0;i<t.length;i++)h=((h*33)+t.charCodeAt(i))>>>0;return h;}"
-            "function slotFreq(r,p){var bw=p.bw/1000;var n=Math.floor((r.e-r.s)/bw);if(n<1)n=1;"
-              "var slot=djb2(p.cn)%n;return r.s+bw/2+slot*bw;}"
-            "function applyPreset(){"
-              "var r=R[document.getElementById('sel-rgn').value];"
-              "var p=P[document.getElementById('sel-pst').value];"
-              "if(!r||!p)return;"
-              "document.getElementById('d-freq').textContent=slotFreq(r,p).toFixed(3)+' MHz';"
-              "document.getElementById('d-bw').textContent=p.bw+' kHz';"
-              "document.getElementById('d-sf').textContent='SF'+p.sf;"
-              "document.getElementById('d-cr').textContent='4/'+p.cr;"
-              "document.querySelector('[name=pwr]').value=r.p;"
-            "}"
-            "document.addEventListener('DOMContentLoaded',applyPreset);"
-            "</script>";
-    html += "<div class='row2' style='align-items:center'>"
-            "<label>Frequency<span id='d-freq' style='display:inline-block;padding:.25em .5em;"
-            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:8em;text-align:center'>—</span></label>"
-            "<label>Bandwidth<span id='d-bw' style='display:inline-block;padding:.25em .5em;"
-            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:6em;text-align:center'>—</span></label>"
-            "</div><div class='row2' style='align-items:center'>"
-            "<label>Spreading Factor<span id='d-sf' style='display:inline-block;padding:.25em .5em;"
-            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
-            "<label>Coding Rate<span id='d-cr' style='display:inline-block;padding:.25em .5em;"
-            "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
-            "</div><div class='row2'>";
+    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically from region and preset.</p>";
+    sendChunk(html);
+    if (!lite) {
+        sendFlash(kPresetJs);
+        sendFlash(kLoraReadout);
+    }
+    html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%d", gCfg->loraPower);
     html += "<label>TX Power (dBm, 1&ndash;22)<input name='pwr' type='number' min='1' max='22' value='";
     html += tmp; html += "'></label>";
@@ -1430,11 +1709,11 @@ static void sendConfigPage(const char *msg = "") {
             "<input type='checkbox' name='ignore_mqtt' value='1'";
     if (gCfg->ignoreMqtt) html += " checked";
     html += "> Ignore MQTT &mdash; drop received packets that arrived via MQTT</label>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── MQTT ──────────────────────────────────────────────────
-    html += "<details><summary>MQTT</summary>";
+    section(html, lite, "MQTT", false);
     // Marker so the POST handler can apply checkbox state (unchecked boxes send
     // nothing) only when this section was actually rendered.
     html += "<input type='hidden' name='mqtt_present' value='1'>";
@@ -1475,11 +1754,11 @@ static void sendConfigPage(const char *msg = "") {
     html += "> Map reporting</label>";
     html += "<p style='font-size:.8em;color:var(--muted);margin:.4em 0 0'>"
             "Requires WiFi credentials above. Default broker: mqtt.meshtastic.org:8883.</p>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Display ───────────────────────────────────────────────
-    html += "<details><summary>Display</summary>";
+    section(html, lite, "Display", false);
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -1508,38 +1787,45 @@ static void sendConfigPage(const char *msg = "") {
         const char *fsName = (fs == FONT_SIZE_SMALL) ? "Small"
                              : (fs == FONT_SIZE_LARGE) ? "Large"
                              : (fs == FONT_SIZE_XLARGE) ? "Extra Large" : "Medium";
-        html += "<label>Font Size (chat &amp; DM)</label>";
-        html += "<button type='button' class='chooser-btn' id='fsBtn' onclick='fsOpen()'>";
-        html += fsName;
-        html += "</button>";
-        snprintf(tmp, sizeof(tmp), "<input type='hidden' name='font_size' id='fsInput' value='%u'>", (unsigned)fs);
-        html += tmp;
-        html += "<div class='modal-back' id='fsModal' onclick='if(event.target===this)fsClose()'>"
-                "<div class='modal-card'><h3>Font Size</h3>"
-                "<button type='button' class='modal-opt' onclick='fsPick(0,\"Small\")'>"
-                    "<b>Small</b><span>Compact chat &amp; DM text</span></button>"
-                "<button type='button' class='modal-opt' onclick='fsPick(1,\"Medium\")'>"
-                    "<b>Medium</b><span>Default chat &amp; DM text</span></button>"
-                "<button type='button' class='modal-opt' onclick='fsPick(2,\"Large\")'>"
-                    "<b>Large</b><span>Larger chat &amp; DM text</span></button>"
-                "<button type='button' class='modal-opt' onclick='fsPick(3,\"Extra Large\")'>"
-                    "<b>Extra Large</b><span>Largest chat &amp; DM text</span></button>"
-                "</div></div>";
-        html += "<script>"
-                "function fsMark(v){var m=document.querySelectorAll('#fsModal .modal-opt');"
-                "for(var i=0;i<m.length;i++)m[i].classList.toggle('sel',i==v);}"
-                "function fsOpen(){fsMark(+document.getElementById('fsInput').value);"
-                "document.getElementById('fsModal').classList.add('open');}"
-                "function fsClose(){document.getElementById('fsModal').classList.remove('open');}"
-                "function fsPick(v,l){document.getElementById('fsInput').value=v;"
-                "document.getElementById('fsBtn').textContent=l;fsClose();}"
-                "</script>";
+        if (lite) {
+            // Plain select — the modal needs CSS and JS that lite doesn't carry.
+            static const char *kFsNames[] = { "Small", "Medium", "Large", "Extra Large" };
+            html += "<label>Font Size (chat &amp; DM)<select name='font_size'>";
+            for (uint8_t v = 0; v <= FONT_SIZE_MAX && v < 4; v++) {
+                snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                         (unsigned)v, (v == fs) ? " selected" : "", kFsNames[v]);
+                html += tmp;
+            }
+            html += "</select></label>";
+        } else {
+            html += "<label>Font Size (chat &amp; DM)</label>";
+            html += "<button type='button' class='chooser-btn' id='fsBtn' onclick='fsOpen()'>";
+            html += fsName;
+            html += "</button>";
+            snprintf(tmp, sizeof(tmp), "<input type='hidden' name='font_size' id='fsInput' value='%u'>", (unsigned)fs);
+            html += tmp;
+            sendChunk(html);
+            sendFlash(kFontModal);
+        }
     }
     html += "<div class='row2'>";
     html += "<label>Compass North Top<select name='compass_north'>"
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->compassNorthTop) html += " selected"; html += ">No</option>"
             "</select></label></div>";
+    if (lite) {
+        // Plain select instead of the swatch grid: the grid is ~7 KB of JS plus
+        // its own stylesheet, and it only exists to preview colors lite doesn't use.
+        html += "<label>Theme<select name='ui_theme_preset'>";
+        for (uint8_t v = 0; v < kThemePresetCount; v++) {
+            snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                     (unsigned)v, (v == themePreset) ? " selected" : "",
+                     kThemePresetNames[v]);
+            html += tmp;
+            sendChunkIfBig(html);
+        }
+        html += "</select></label>";
+    } else {
         html += "<label>Theme</label>";
         {
             char themeHidden[110];
@@ -1548,87 +1834,14 @@ static void sendConfigPage(const char *msg = "") {
                      (unsigned)themePreset);
             html += themeHidden;
         }
-        // Swatch picker: each theme preset renders as a clickable card showing a
-        // three-color preview (background, panel, accent). Cards are built in JS
-        // from the same palette table used for live preview, keyed by preset.
-        html += "<style>"
-            ".theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));"
-            "gap:8px;margin:.2em 0 .4em}"
-            ".theme-card{display:flex;align-items:center;gap:8px;padding:7px 9px;cursor:pointer;"
-            "border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}"
-            ".theme-card.sel{border-color:var(--accent);border-width:2px;padding:6px 8px}"
-            ".theme-sws{display:flex;gap:3px;flex:0 0 auto}"
-            ".theme-sw{width:16px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,.25)}"
-            ".theme-name{font-size:.86em;line-height:1.15}"
-            "</style>";
-        html += "<div id='themeGrid' class='theme-grid'></div>";
-        html += "<script>"
-            "(function(){"
-            "var P={"
-                            "'0':{bg:'#10141d',panel:'#1a2230',panel2:'#232d3e',line:'#4a5b73',text:'#f4f6fb',dim:'#b0b8c8',accent:'#d7869d',ink:'#ffffff'},"
-                            "'1':{bg:'#f6ede9',panel:'#fff6f3',panel2:'#f4e2dc',line:'#cfb2ab',text:'#2e2220',dim:'#6f5c58',accent:'#b75a74',ink:'#ffffff'},"
-                            "'2':{bg:'#091713',panel:'#102722',panel2:'#18332d',line:'#3a5f55',text:'#e8f4ef',dim:'#a5beb4',accent:'#5dbf9a',ink:'#073022'},"
-                            "'3':{bg:'#eaf4ee',panel:'#f7fcf9',panel2:'#deece4',line:'#b5ccbf',text:'#1f2e25',dim:'#5f7668',accent:'#2f8f63',ink:'#ffffff'},"
-                            "'4':{bg:'#1f1712',panel:'#2a2019',panel2:'#352920',line:'#655345',text:'#f3e9df',dim:'#c4b2a2',accent:'#c38a4a',ink:'#ffffff'},"
-                            "'5':{bg:'#f3e9dd',panel:'#fbf4ea',panel2:'#efdfcc',line:'#c9b39a',text:'#3b2d23',dim:'#7f6a57',accent:'#a9763f',ink:'#ffffff'},"
-                            "'6':{bg:'#002b36',panel:'#073642',panel2:'#0b4552',line:'#586e75',text:'#eee8d5',dim:'#93a1a1',accent:'#2aa198',ink:'#002b36'},"
-                            "'7':{bg:'#fdf6e3',panel:'#eee8d5',panel2:'#e7e2cf',line:'#93a1a1',text:'#002b36',dim:'#586e75',accent:'#268bd2',ink:'#fdf6e3'},"
-                            "'8':{bg:'#060f24',panel:'#12244c',panel2:'#1b3363',line:'#3b578f',text:'#f4f8ff',dim:'#b9c9e9',accent:'#ff4a58',ink:'#ffffff'},"
-                            "'9':{bg:'#f3f7ff',panel:'#f8fbff',panel2:'#e6efff',line:'#a5bbe7',text:'#1f2d4d',dim:'#5d6e95',accent:'#c62839',ink:'#ffffff'},"
-                            "'10':{bg:'#150009',panel:'#760031',panel2:'#8b0038',line:'#6f2d3b',text:'#fff1f1',dim:'#e5b3ba',accent:'#d51c39',ink:'#ffffff'},"
-                            "'11':{bg:'#fff2f4',panel:'#fff8f9',panel2:'#ffeaed',line:'#d8a1aa',text:'#3a0a14',dim:'#7e3b49',accent:'#d51c39',ink:'#ffffff'},"
-                            "'12':{bg:'#111318',panel:'#1c2128',panel2:'#252b34',line:'#4a525d',text:'#f3f6fa',dim:'#b7c0cc',accent:'#d8dde4',ink:'#080d14'},"
-                            "'13':{bg:'#f3f5f7',panel:'#ffffff',panel2:'#e8ebef',line:'#c2c9d0',text:'#1e242c',dim:'#5e6876',accent:'#2e3440',ink:'#ffffff'},"
-                            "'14':{bg:'#1a1230',panel:'#251a45',panel2:'#2f2258',line:'#58457f',text:'#f2eefe',dim:'#c9c0e6',accent:'#b79bff',ink:'#160f2a'},"
-                            "'15':{bg:'#f5effb',panel:'#fff9ff',panel2:'#ede1f7',line:'#c7b5db',text:'#2f2440',dim:'#6d5f82',accent:'#7b5ba7',ink:'#ffffff'},"
-                            "'16':{bg:'#1a2430',panel:'#253547',panel2:'#2d455b',line:'#4b6881',text:'#edf4fb',dim:'#bccbd9',accent:'#c78fcf',ink:'#25192d'},"
-                            "'17':{bg:'#f6faf4',panel:'#ffffff',panel2:'#e5f0e2',line:'#bccfb7',text:'#24332f',dim:'#63756f',accent:'#8a5faf',ink:'#ffffff'},"
-                            "'18':{bg:'#2a1f17',panel:'#34271e',panel2:'#403126',line:'#6a5848',text:'#f6eee6',dim:'#c9b9a8',accent:'#d9c7a3',ink:'#2a1f16'},"
-                            "'19':{bg:'#faf4ea',panel:'#fffdf8',panel2:'#f1e7d5',line:'#cdbfa8',text:'#3b2f24',dim:'#7b6b57',accent:'#a8844f',ink:'#ffffff'},"
-                            "'20':{bg:'#12282a',panel:'#1a3638',panel2:'#234345',line:'#4d7072',text:'#ebf7f5',dim:'#b3d0cc',accent:'#9cd8c8',ink:'#123130'},"
-                            "'21':{bg:'#eef9f6',panel:'#ffffff',panel2:'#ddf1ec',line:'#b5d5cd',text:'#213531',dim:'#5f7c76',accent:'#4e9c8a',ink:'#ffffff'},"
-                            "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
-                            "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'}"
-            "};"
-            "var NAMES=['Camillia Dark','Camillia Light','Evergreen Dark','Evergreen Light',"
-              "'Earthy Dark','Earthy Light','Solarized Dark','Solarized Light',"
-              "'Crimson Blue Dark','Crimson Blue Light','Scarlet Pop Dark','Scarlet Pop Light',"
-              "'Ink Wash Dark','Ink Wash Light','Lavendar Fields Dark','Lavendar Fields Light',"
-              "'Wild Flowers Dark','Wild Flowers Light','Quiet Luxury Dark','Quiet Luxury Light',"
-              "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light'];"
-            "var input=document.getElementById('themeInput');"
-            "function apply(){"
-              "var k=input.value;var p=P[k]||P['0'];"
-              "var r=document.documentElement.style;"
-              "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
-              "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
-              "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
-              "r.colorScheme=(parseInt(k,10)%2)?'light':'dark';"  // odd preset = light
-            "}"
-            "function select(k){input.value=k;"
-              "var cards=document.querySelectorAll('#themeGrid .theme-card');"
-              "for(var i=0;i<cards.length;i++)cards[i].classList.toggle('sel',cards[i].dataset.k==k);"
-              "apply();}"
-            "var grid=document.getElementById('themeGrid');"
-            "Object.keys(P).forEach(function(k){"
-              "var p=P[k];"
-              "var c=document.createElement('div');c.className='theme-card';c.dataset.k=k;"
-              "var sw=document.createElement('div');sw.className='theme-sws';"
-              "[p.bg,p.panel2,p.accent].forEach(function(col){"
-                "var b=document.createElement('div');b.className='theme-sw';b.style.background=col;sw.appendChild(b);});"
-              "var nm=document.createElement('div');nm.className='theme-name';nm.textContent=NAMES[k]||('Theme '+k);"
-              "c.appendChild(sw);c.appendChild(nm);"
-              "c.addEventListener('click',function(){select(k);});"
-              "grid.appendChild(c);"
-            "});"
-            "select(input.value);"
-            "})();"
-            "</script>";
-    html += "</details>";
+        sendChunk(html);
+        sendFlash(kThemePicker);
+    }
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Power ─────────────────────────────────────────────────
-    html += "<details><summary>Power</summary>";
+    section(html, lite, "Power", false);
     html += "<label>Power Saving<select name='pwr_saving'>"
             "<option value='1'"; if ( gCfg->isPowerSaving) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->isPowerSaving) html += " selected"; html += ">Disabled</option>"
@@ -1640,11 +1853,11 @@ static void sendConfigPage(const char *msg = "") {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->minWakeSecs);
     html += "<label>Min Wake (s)<input name='min_wake' type='number' min='0' value='";
     html += tmp; html += "'></label></div>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Modules ───────────────────────────────────────────────
-    html += "<details><summary>Modules</summary>";
+    section(html, lite, "Modules", false);
     // Telemetry
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Telemetry</h3>";
     html += "<div class='row2'>";
@@ -1712,7 +1925,7 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
-    html += "</details>";
+    sectionEnd(html, lite);
     sendChunk(html);
 
     // WiFi
@@ -1818,10 +2031,19 @@ static void sendConfigPage(const char *msg = "") {
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
     sendChunk(html);
 
-    if (apLite) {
-        html += "</div></div></body></html>";
-        server.sendContent(html);
-        server.sendContent("");
+    if (lite) {
+        // No further tabs in AP mode — close the document.
+        html += "</body></html>";
+        sendChunk(html);
+        if (gSendAborted) {
+            // Never terminated the chunked stream — drop the socket so the
+            // browser fails the load now instead of waiting on more chunks.
+            server.client().stop();
+            logWifiHeapDiag("lite page abandoned");
+            return;
+        }
+        server.sendContent("");   // terminate chunked response
+        logWifiHeapDiag("lite page sent");
         return;
     }
 
@@ -2698,16 +2920,23 @@ static void sendConfigPage(const char *msg = "") {
                         "</script>";
 
     html += "</body></html>";
-    server.sendContent(html);
+    sendChunk(html);
+    if (gSendAborted) {
+        server.client().stop();
+        logWifiHeapDiag("config page abandoned");
+        return;
+    }
     server.sendContent("");   // empty chunk signals end of response
+    logWifiHeapDiag("config page sent");
 }
 
 // ── Onboarding (WiFi setup) ───────────────────────────────────
 
 static void sendOnboardingPage(const char *err = "") {
+    gSendAborted = false;
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    server.sendContent_P(kOnboardHead);
+    sendFlash(kLiteHead);
 
     String html;
     html.reserve(480);
@@ -2734,16 +2963,12 @@ static void handleGetOnboard() {
 }
 
 static void handleGetConfig() {
-    if (gCaptiveActive) {
-        sendOnboardingPage();
-        return;
-    }
     if (!isLoggedIn()) { redirect("/login"); return; }
     char msg[sizeof(gFlashMsg)];
     strncpy(msg, gFlashMsg, sizeof(msg));
     msg[sizeof(msg) - 1] = '\0';
     gFlashMsg[0] = '\0';
-    sendConfigPage(msg);
+    sendConfigPage(msg, /*lite=*/gApMode);
 }
 
 static void handlePostOnboard() {
@@ -2773,7 +2998,7 @@ static void handlePostOnboard() {
 
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    server.sendContent_P(kOnboardHead);
+    sendFlash(kLiteHead);
 
     String html;
     html +=
@@ -2793,21 +3018,17 @@ static void handlePostOnboard() {
 // ── Route handlers ────────────────────────────────────────────
 
 static void handleGetRoot() {
-    // In AP/captive mode keep the page minimal and credential-focused.
-    if (gCaptiveActive || gOnboarding) {
-        sendOnboardingPage();
-        return;
-    }
+    // Both radio modes serve a config page from "/": the full one in STA, web
+    // config lite in AP. The phone's captive-portal probes are answered
+    // separately by onNotFound with a redirect to the minimal /setup form, so
+    // they never pay for building this page.
+    Serial.printf("[web] GET / (%s)\n", gApMode ? "lite" : "full");
     handleGetConfig();
 }
 
 static void handleGetLogin() {
-    if (gCaptiveActive) {
-        redirect("/setup");
-        return;
-    }
     if (isLoggedIn()) {
-        redirect(gOnboarding ? "/setup" : "/");
+        redirect("/");
         return;
     }
     sendLoginPage();
@@ -2821,7 +3042,7 @@ static void handlePostLogin() {
         snprintf(sessionToken, sizeof(sessionToken), "%08x%08x", r1, r2);
         String cookie = String("sess=") + sessionToken + "; Path=/; HttpOnly";
         server.sendHeader("Set-Cookie", cookie);
-        redirect((gOnboarding || gCaptiveActive) ? "/setup" : "/");
+        redirect("/");
     } else {
         sendLoginPage("Invalid username or password.");
     }
@@ -3712,9 +3933,52 @@ static void handleGetLogout() {
 
 // ── Public API ────────────────────────────────────────────────
 
-// Register the common HTTP routes shared by all three lifecycle paths
-// (onboarding AP, STA-fallback AP, normal STA). The onboarding path
-// additionally registers /setup and /onboard before calling this.
+// Unmatched-request handler, shared by both route sets.
+static void registerNotFound() {
+    // Log any unmatched request so we can see exactly what a failing tab hits
+    // (the default handler only prints a generic "request handler not found").
+    server.onNotFound([]() {
+        // In AP/captive mode, steer the OS's portal-detection probes (which hit
+        // unknown paths like /generate_204, /hotspot-detect.html) to the minimal
+        // setup form so the phone surfaces the portal instead of retrying.
+        // Answering fast here is also what keeps those probes from stalling the
+        // header read — they never pay to build the lite page.
+        if (gCaptiveActive) {
+            char loc[64];
+            snprintf(loc,
+                     sizeof(loc),
+                     "http://%s/%s",
+                     ipBuf,
+                     "setup");
+            server.sendHeader("Location", loc);
+            server.send(302, "text/plain", "");
+            return;
+        }
+        Serial.printf("[web] 404 %s %s\n",
+                      (server.method() == HTTP_GET) ? "GET" : "POST",
+                      server.uri().c_str());
+        server.send(404, "text/plain", "Not found");
+    });
+}
+
+// Routes for web config lite (both AP paths: first-boot onboarding and the
+// STA-connect fallback). Deliberately excludes every heavy endpoint — chat,
+// live feed, charts, node CSV, import/export, screenshots — both because the
+// lite page never calls them and because each registration costs heap that AP
+// mode doesn't have to spare.
+static void registerLiteRoutes() {
+    server.on("/",           HTTP_GET,  handleGetRoot);
+    server.on("/config",     HTTP_GET,  handleGetConfig);
+    server.on("/setup",      HTTP_GET,  handleGetOnboard);
+    server.on("/onboard",    HTTP_POST, handlePostOnboard);
+    server.on("/save",       HTTP_POST, handlePostSave);
+    server.on("/login",      HTTP_GET,  handleGetLogin);
+    server.on("/login",      HTTP_POST, handlePostLogin);
+    server.on("/logout",     HTTP_GET,  handleGetLogout);
+    registerNotFound();
+}
+
+// Full route set, registered only for a working STA connection.
 static void registerCommonRoutes() {
     server.on("/",                  HTTP_GET,  handleGetRoot);
     server.on("/config",            HTTP_GET,  handleGetConfig);
@@ -3741,29 +4005,7 @@ static void registerCommonRoutes() {
     server.on("/clear-messages",    HTTP_POST, handlePostClearMessages);
     server.on("/clear-nodes",       HTTP_POST, handlePostClearNodes);
     server.on("/factory-reset",     HTTP_POST, handlePostFactoryReset);
-    // Log any unmatched request so we can see exactly what a failing tab hits
-    // (the default handler only prints a generic "request handler not found").
-    server.onNotFound([]() {
-        // In AP/captive mode, steer the OS's portal-detection probes (which hit
-        // unknown paths like /generate_204, /hotspot-detect.html) to our page so
-        // the phone surfaces the portal instead of retrying. Answering fast here
-        // is also what keeps those probes from stalling the header read.
-        if (gCaptiveActive) {
-            char loc[64];
-            snprintf(loc,
-                     sizeof(loc),
-                     "http://%s/%s",
-                     ipBuf,
-                     "setup");
-            server.sendHeader("Location", loc);
-            server.send(302, "text/plain", "");
-            return;
-        }
-        Serial.printf("[web] 404 %s %s\n",
-                      (server.method() == HTTP_GET) ? "GET" : "POST",
-                      server.uri().c_str());
-        server.send(404, "text/plain", "Not found");
-    });
+    registerNotFound();
 }
 
 bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
@@ -3804,6 +4046,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     };
 
     gCfg    = cfg;
+    gApMode = false;
     gOnSave = onSave;
     gOnScreenshotPng = onScreenshotPng;
     gAnnounceReq = false;
@@ -3838,6 +4081,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     auto startApMode = [&](const char *modeTag, bool onboarding) {
         gOnboarding = onboarding;
+        gApMode     = true;   // "/" serves web config lite for this session
         WiFi.disconnect(false);
         if (!ensureWifiMode(WIFI_AP, modeTag)) return false;
         delay(120);
@@ -3863,12 +4107,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             Serial.println("[web] captive DNS start failed (continuing without it)");
         }
 
-        // AP onboarding and AP fallback both need the lightweight WiFi setup
-        // page so a user can recover credentials even when full config is too
-        // heavy for current heap headroom.
-        server.on("/setup",   HTTP_GET,  handleGetOnboard);
-        server.on("/onboard", HTTP_POST, handlePostOnboard);
-        registerCommonRoutes();
+        // Both AP paths serve web config lite; the full page is STA-only.
+        registerLiteRoutes();
         server.begin();
         running = true;
         Serial.printf("[web] %s at http://%s/\n",
@@ -3977,10 +4217,12 @@ void webCfgEnd() {
     gChatSendText[0] = '\0';
     running     = false;
     gOnboarding = false;
+    gApMode     = false;
     Serial.println("[web] stopped");
 }
 
 bool webCfgIsOnboarding() { return gOnboarding; }
+bool webCfgIsLite() { return running && gApMode; }
 const char *webCfgWifiSsid() { return gWifiSsid; }
 const char *webCfgWifiPass() { return gWifiPass; }
 

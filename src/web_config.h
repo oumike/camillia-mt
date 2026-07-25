@@ -57,6 +57,10 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
 
+// True while the server is running as "web config lite" — the SoftAP variant,
+// serving the Config tab only. False for the full config served over STA.
+bool webCfgIsLite();
+
 // Current WiFi credentials (updated by web UI save, used by NVS save callback)
 const char *webCfgWifiSsid();
 const char *webCfgWifiPass();
