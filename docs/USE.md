@@ -92,13 +92,23 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 
 ## Config screen
 
-Config includes Web Config controls, export and import, theme toggles, announce, and reset actions.
+Config includes Web Config controls, export and import, the theme picker, announce, and reset actions.
 
 - Open from the main screen (C on keyboard builds, Config bottom-nav button on Heltec)
 - Navigate action rows with Up and Down input
 - Enter runs the selected action
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
+
+### Theme
+
+The **Theme** action opens a picker rather than cycling. Each theme/mode preset
+gets a row with its name and a three-swatch preview — background, panel, and
+accent color — so you can see what you're choosing. Navigate with the usual
+up/down input and press Enter (or tap) to apply; it takes effect immediately, no
+reboot. Backspace/Esc (or tapping outside) cancels. Web Config shows the same
+themes as a grid of swatch cards, and previews the selected one live before you
+save.
 
 ### Information panel
 

@@ -182,4 +182,17 @@ run_pio_target "upload" "Upload"
 BUILD_END_TS="$(date +%s)"
 BUILD_ELAPSED_SECS=$((BUILD_END_TS - BUILD_START_TS))
 echo "[PIO] Build completed in $(format_duration "$BUILD_ELAPSED_SECS")."
+
+ELF_PATH=".pio/build/${ENV_NAME}/firmware.elf"
+BIN_PATH=".pio/build/${ENV_NAME}/firmware.bin"
+if [ -f "$ELF_PATH" ]; then
+	ELF_SHA="$(shasum -a 256 "$ELF_PATH" | awk '{print $1}')"
+	echo "[PIO] ELF SHA256: $ELF_SHA"
+	echo "[PIO] Runtime monitor should show: ELF file SHA256: ${ELF_SHA:0:16}"
+fi
+if [ -f "$BIN_PATH" ]; then
+	BIN_SHA="$(shasum -a 256 "$BIN_PATH" | awk '{print $1}')"
+	echo "[PIO] BIN SHA256: $BIN_SHA"
+fi
+
 run_pio_target "monitor" "Monitor"

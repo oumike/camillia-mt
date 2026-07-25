@@ -8,6 +8,29 @@
 NodeDB Nodes;
 
 static const uint32_t kNodePersistMinMs = 10000;  // throttle hot-path NVS writes
+static const uint32_t kNodePersistNoSpaceRetryMs = 120000;
+static bool s_nodePersistBlockedNoSpace = false;
+static uint32_t s_nodePersistRetryAtMs = 0;
+
+static bool nodePersistCanWrite() {
+    if (!s_nodePersistBlockedNoSpace) return true;
+    if ((int32_t)(millis() - s_nodePersistRetryAtMs) >= 0) {
+        s_nodePersistBlockedNoSpace = false;
+        return true;
+    }
+    return false;
+}
+
+static void nodePersistMarkWriteFailure(const char *key, size_t wanted, size_t wrote) {
+    if (!s_nodePersistBlockedNoSpace) {
+        Serial.printf("[nodedb] NVS full; pausing node persistence (%s wrote=%u need=%u)\n",
+                      key ? key : "?",
+                      (unsigned)wrote,
+                      (unsigned)wanted);
+    }
+    s_nodePersistBlockedNoSpace = true;
+    s_nodePersistRetryAtMs = millis() + kNodePersistNoSpaceRetryMs;
+}
 
 // ── NVS layout ────────────────────────────────────────────────
 // Namespace : "nodes"
@@ -56,18 +79,26 @@ void NodeDB::init() {
     p.begin("nodes", false);
     static uint32_t ids[MAX_NODES];   // static: 1 KB at MAX_NODES=250, see _saveIds()
     memset(ids, 0, sizeof(ids));
+    bool staleIds = false;
     int n = (int)(p.getBytes("ids", ids, sizeof(ids)) / sizeof(uint32_t));
     for (int i = 0; i < n && _count < MAX_NODES; i++) {
         char key[12]; nodeKey(key, ids[i]);
-        size_t blobLen = p.getBytesLength(key);
-        if (blobLen == 0) continue;
+        if (!p.isKey(key)) {
+            staleIds = true;
+            continue;
+        }
 
         NodeBlob b = {};
+        size_t blobLen = p.getBytes(key, &b, sizeof(b));
         if (blobLen == sizeof(NodeBlob)) {
-            if (p.getBytes(key, &b, sizeof(b)) != sizeof(b)) continue;
-        } else if (blobLen == sizeof(NodeBlobV1)) {
+            // loaded as current blob format above
+        } else {
             NodeBlobV1 v1 = {};
-            if (p.getBytes(key, &v1, sizeof(v1)) != sizeof(v1)) continue;
+            blobLen = p.getBytes(key, &v1, sizeof(v1));
+            if (blobLen != sizeof(NodeBlobV1)) {
+                staleIds = true;
+                continue;
+            }
             utf8util::copyTruncate(b.longName, sizeof(b.longName), v1.longName);
             utf8util::copyTruncate(b.shortName, sizeof(b.shortName), v1.shortName);
             b.latI = v1.latI; b.lonI = v1.lonI; b.alt = v1.alt;
@@ -75,8 +106,6 @@ void NodeDB::init() {
             memcpy(b.pubKey, v1.pubKey, 32);
             b.chanIdx = v1.chanIdx;
             b.flags = v1.flags;
-        } else {
-            continue;
         }
 
         NodeEntry *e = &_nodes[_count++];
@@ -108,6 +137,23 @@ void NodeDB::init() {
         e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
     }
+
+    if (staleIds) {
+        // Heal an out-of-sync id index (missing node blobs) so future boots
+        // don't spam NOT_FOUND lookups for stale keys.
+        static uint32_t validIds[MAX_NODES];
+        int validCount = 0;
+        for (int i = 0; i < _count && validCount < MAX_NODES; i++) {
+            if (_nodes[i].nodeId != 0) validIds[validCount++] = _nodes[i].nodeId;
+        }
+        size_t wanted = (size_t)validCount * sizeof(uint32_t);
+        size_t wrote = p.putBytes("ids", validIds, wanted);
+        if (wrote != wanted) {
+            nodePersistMarkWriteFailure("ids", wanted, wrote);
+        } else {
+            Serial.printf("[nodedb] compacted stale ids (%d valid)\n", validCount);
+        }
+    }
     p.end();
     Serial.printf("[nodedb] loaded %d node(s) from NVS\n", _count);
 }
@@ -117,6 +163,7 @@ void NodeDB::init() {
 void NodeDB::_save(uint32_t nodeId) {
     NodeEntry *e = find(nodeId);
     if (!e || !e->nodeId) return;
+    if (!nodePersistCanWrite()) return;
 
     NodeBlob b = {};
     utf8util::copyTruncate(b.longName, sizeof(b.longName), e->longName);
@@ -136,9 +183,13 @@ void NodeDB::_save(uint32_t nodeId) {
             | (e->hasEnvironmentTelemetry ? 64 : 0);
 
     char key[12]; nodeKey(key, nodeId);
-    Preferences p; p.begin("nodes", false);
-    p.putBytes(key, &b, sizeof(b));
+    Preferences p;
+    if (!p.begin("nodes", false)) return;
+    size_t wrote = p.putBytes(key, &b, sizeof(b));
     p.end();
+    if (wrote != sizeof(b)) {
+        nodePersistMarkWriteFailure(key, sizeof(b), wrote);
+    }
 }
 
 void NodeDB::_saveIds() {
@@ -148,9 +199,15 @@ void NodeDB::_saveIds() {
     int n = 0;
     for (int i = 0; i < _count; i++)
         if (_nodes[i].nodeId) ids[n++] = _nodes[i].nodeId;
-    Preferences p; p.begin("nodes", false);
-    p.putBytes("ids", ids, n * sizeof(uint32_t));
+    if (!nodePersistCanWrite()) return;
+    Preferences p;
+    if (!p.begin("nodes", false)) return;
+    size_t wanted = n * sizeof(uint32_t);
+    size_t wrote = p.putBytes("ids", ids, wanted);
     p.end();
+    if (wrote != wanted) {
+        nodePersistMarkWriteFailure("ids", wanted, wrote);
+    }
 }
 
 void NodeDB::clearPersisted() {

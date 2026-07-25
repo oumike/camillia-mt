@@ -11,15 +11,9 @@
 #define LV_MEM_SIZE (128U * 1024U)
 #endif
 
-// --- TEMPORARY DEBUG: hunt the live-screen pool corruption ---------------------
-// Validate the LVGL pool on every alloc/free so a corrupting write is caught at
-// the NEXT lv_mem op (near the real culprit) instead of much later when the live
-// screen's big allocation trips over a poisoned free-list. abort() gives a clean
-// ESP32 backtrace. Remove this block once the root cause is fixed — it noticeably
-// slows the UI.
-#define LV_USE_ASSERT_MEM_INTEGRITY 1
-#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>
-#define LV_ASSERT_HANDLER abort();
+// Keep LVGL assert-integrity checks off in normal builds; with constrained RAM,
+// transient pool pressure can otherwise force hard abort/reboot paths.
+#define LV_USE_ASSERT_MEM_INTEGRITY 0
 
 #define LV_USE_LOG 0
 

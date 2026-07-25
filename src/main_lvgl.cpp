@@ -418,7 +418,17 @@ static lv_obj_t *s_nodesFilterDialog = nullptr;
 static lv_obj_t *s_nodesFilterInput = nullptr;
 static lv_obj_t *s_nodesFilterKeyboard = nullptr;
 static lv_obj_t *s_nodesListRows[MAX_NODES] = {};
+static int s_nodesRenderedFilteredIdx[MAX_NODES] = {};
 static int s_nodesListRowCount = 0;
+static constexpr int kNodesMaxRenderedRows =
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    40;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    64;
+#else
+    48;
+#endif
+static int s_nodesRenderStart = 0;
 // Aliases s_nodeSnapshotIds — see the note at its definition above.
 static uint32_t (&s_nodesSnapshotIds)[MAX_NODES] = s_nodeSnapshotIds;
 static int s_nodesFilteredIdx[MAX_NODES] = {};
@@ -838,6 +848,13 @@ static void refreshChatStyleSelection();
 static void applyChatStyleSelection(int style);
 static void onChatStyleRowPressed(lv_event_t *e);
 static void onChatStyleBackdropPressed(lv_event_t *e);
+static lv_color_t tftColorToLv(uint16_t c);
+static void openThemeModal();
+static void closeThemeModal();
+static void refreshThemeSelection();
+static void applyThemeSelection(int idx);
+static void onThemeRowPressed(lv_event_t *e);
+static void onThemeBackdropPressed(lv_event_t *e);
 static void openCfgWifiPickerModal(bool forOnboarding = false);
 static void closeCfgWifiPickerModal();
 static void refreshCfgWifiPickerModal();
@@ -958,6 +975,8 @@ static void closeNodesFilterDialog();
 static void onNodesFilterButtonPressed(lv_event_t *e);
 static void onNodesFilterKeyboardEvent(lv_event_t *e);
 static void onNodesFilterInputEvent(lv_event_t *e);
+static void nodesClampRenderWindow();
+static lv_obj_t *selectedNodesRowObj();
 static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
@@ -2861,6 +2880,13 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
 // portal keeps working alongside it.
 static uint32_t s_wifiStaKickMs = 0;
 static void serviceWifiStation(uint32_t now) {
+    // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
+    // AP fallback when the saved station won't connect) and webCfgEnd() tears it
+    // down. Kicking a station reconnect here mid-session flips WiFi.mode() to
+    // AP_STA and calls WiFi.begin() underneath it — which drops the AP client and
+    // wedges the driver against the synchronous web server, so the page never
+    // loads and the device looks frozen. Leave the radio to web config.
+    if (webCfgRunning()) return;
     if (!s_cfg.wifiEnabled || !wifiHasActiveCreds()) return;
     if (WiFi.status() == WL_CONNECTED) return;
     if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < 10000UL) return;
@@ -4258,6 +4284,11 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
     s_composeInput = lv_textarea_create(s_composeModal);
+    if (!s_composeInput) {
+        logLvglMemDiag("compose open aborted (low LVGL mem)");
+        closeComposePrompt();
+        return;
+    }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, 44);
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
@@ -4406,6 +4437,11 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
 
     s_composeInput = lv_textarea_create(composeInputHost);
+    if (!s_composeInput) {
+        logLvglMemDiag("compose open aborted (low LVGL mem)");
+        closeComposePrompt();
+        return;
+    }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
 #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -4743,6 +4779,12 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 3;
     const int cfgPadBottom = 3;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only build: tall rows give a comfortable tap target. The action list
+    // scrolls, so the extra height just means a bit more scrolling.
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_10;
+    const int cfgPadTop = 11;
+    const int cfgPadBottom = 11;
 #else
     const lv_font_t *cfgRowFont = &lv_font_montserrat_10;
     const int cfgPadTop = 2;
@@ -5238,6 +5280,205 @@ static void openChatStyleModal() {
     }
 
     refreshChatStyleSelection();
+}
+
+// ── Theme picker ──────────────────────────────────────────────────────────────
+// Replaces blind theme cycling with a scrollable modal: every theme/mode preset
+// gets a row showing its name and a three-swatch preview (background, panel,
+// accent). Navigating highlights; Enter/tap applies live (no reboot) via the same
+// palette+rebuild path the old cycling used.
+static lv_obj_t *s_themeBackdrop = nullptr;
+static lv_obj_t *s_themeModal = nullptr;
+static lv_obj_t *s_themeRows[kUiThemePresetCount] = {};
+static int s_themeSelection = 0;
+
+static void closeThemeModal() {
+    if (lvObjValid(s_themeBackdrop)) {
+        lv_obj_del(s_themeBackdrop);
+    } else if (lvObjValid(s_themeModal)) {
+        lv_obj_del(s_themeModal);
+    }
+    s_themeBackdrop = nullptr;
+    s_themeModal = nullptr;
+    memset(s_themeRows, 0, sizeof(s_themeRows));
+}
+
+static void refreshThemeSelection() {
+    if (!s_themeModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < kUiThemePresetCount; i++) {
+        lv_obj_t *row = s_themeRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_themeSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void applyThemeSelection(int idx) {
+    if (idx < 0 || idx >= kUiThemePresetCount) return;
+    const UiThemePresetLite &p = kUiThemePresets[idx];
+    if (p.theme == s_cfg.uiTheme && p.mode == s_cfg.uiMode) {
+        // No change — just return to the CFG screen.
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s (unchanged)", p.name);
+        closeThemeModal();
+        refreshCfgModal();
+        return;
+    }
+    s_cfg.uiTheme = p.theme;
+    s_cfg.uiMode = p.mode;
+    persistUiTheme();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s", p.name);
+    closeThemeModal();
+    // Applies live: repaint the palette and rebuild the UI (no reboot). The
+    // rebuild is deferred, so don't touch the CFG modal after scheduling it.
+    applyUiThemePalette();
+    scheduleThemeRebuild(true);
+}
+
+static void onThemeRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_themeSelection = idx;
+    applyThemeSelection(idx);
+}
+
+static void onThemeBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_themeBackdrop) return;
+    closeThemeModal();
+    refreshCfgModal();
+}
+
+static void openThemeModal() {
+    if (!s_rootScreen || s_themeModal || s_themeBackdrop) return;
+    s_themeSelection = uiThemePresetIndexFromCfg();
+    if (s_themeSelection < 0 || s_themeSelection >= kUiThemePresetCount) s_themeSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 190) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_themeBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_themeBackdrop, w, h);
+    lv_obj_align(s_themeBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_themeBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_themeBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_themeBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_themeBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_themeBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_themeBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_themeBackdrop, onThemeBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    // Fixed-size modal holding a fixed header (title + hint) and a scrollable
+    // row list below. The modal itself does NOT scroll — earlier it was the
+    // scroll container with center main-axis alignment, which centered the
+    // 24-row overflow and pushed the top (and the initial selection) off-screen.
+    s_themeModal = lv_obj_create(s_themeBackdrop);
+    lv_obj_set_width(s_themeModal, modalW);
+    lv_obj_set_height(s_themeModal, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_themeModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_themeModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_themeModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_themeModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_themeModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_themeModal, 1, 0);
+    lv_obj_set_style_border_color(s_themeModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_themeModal, 8, 0);
+    lv_obj_set_style_pad_row(s_themeModal, 5, 0);
+    lv_obj_set_flex_flow(s_themeModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_themeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_themeBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_themeModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Theme");
+
+    lv_obj_t *hint = lv_label_create(s_themeModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a theme to apply"
+#else
+                      "Arrows=Move  Enter=Select  Backspace=Cancel"
+#endif
+    );
+
+    // Scrollable list holding the theme rows; the header above stays fixed.
+    lv_obj_t *list = lv_obj_create(s_themeModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    // Cap the list so it scrolls internally, leaving room for the header.
+    lv_obj_set_style_max_height(list, (h > 96) ? (h - 78) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 5, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+    const lv_color_t swatchBorder = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x8FA6CC) : lv_color_hex(0x0A1730);
+    const int swatch = (w <= 160) ? 12 : 16;
+
+    for (int i = 0; i < kUiThemePresetCount; i++) {
+        const UiThemePresetLite &p = kUiThemePresets[i];
+        lv_obj_t *row = lv_btn_create(list);
+        s_themeRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_column(row, 6, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_event_cb(row, onThemeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_flex_grow(name, 1);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_label_set_text(name, p.name);
+
+        // Three-swatch preview: background, panel, accent.
+        const uint16_t swatches[3] = { p.bgMain, p.panelAlt, p.accent };
+        for (int s = 0; s < 3; s++) {
+            lv_obj_t *box = lv_obj_create(row);
+            lv_obj_remove_style_all(box);
+            lv_obj_set_size(box, swatch, swatch);
+            lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_radius(box, 3, 0);
+            lv_obj_set_style_bg_color(box, tftColorToLv(swatches[s]), 0);
+            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(box, 1, 0);
+            lv_obj_set_style_border_color(box, swatchBorder, 0);
+        }
+    }
+
+    // Resolve geometry first: lv_obj_scroll_to_view() is a no-op before the tree
+    // is laid out, which is why the initial selection previously landed off-screen.
+    lv_obj_update_layout(s_themeModal);
+    refreshThemeSelection();
 }
 
 // ── Chat-name picker ──────────────────────────────────────────────────────────
@@ -6149,6 +6390,11 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_label_set_text_fmt(title, "Connect: %s", s_cfgWifiPassTargetSsid);
 
     s_cfgWifiPassInput = lv_textarea_create(s_cfgWifiPassModal);
+    if (!s_cfgWifiPassInput) {
+        logLvglMemDiag("wifi pass modal aborted (low LVGL mem)");
+        closeCfgWifiPassModal();
+        return;
+    }
     lv_obj_set_width(s_cfgWifiPassInput, lv_pct(100));
     lv_obj_set_height(s_cfgWifiPassInput, 42);
     lv_obj_set_style_text_font(s_cfgWifiPassInput, &lv_font_montserrat_14, 0);
@@ -7560,7 +7806,9 @@ static void closeNodesModal() {
     s_nodesFilterOpen = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
+    s_nodesRenderStart = 0;
     memset(s_nodesFilteredIdx, 0, sizeof(s_nodesFilteredIdx));
+    memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
     s_nodesActionSelection = 0;
     s_nodesActionNodeId = 0;
     memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
@@ -7628,6 +7876,40 @@ static void snapshotNodesForModal() {
     nodesApplyFilter();
 }
 
+static void nodesClampRenderWindow() {
+    if (s_nodesFilteredCount <= 0) {
+        s_nodesRenderStart = 0;
+        return;
+    }
+
+    if (s_nodesSelected < 0) s_nodesSelected = 0;
+    if (s_nodesSelected >= s_nodesFilteredCount) s_nodesSelected = s_nodesFilteredCount - 1;
+
+    int renderRows = min(kNodesMaxRenderedRows, s_nodesFilteredCount);
+    if (renderRows < 1) renderRows = 1;
+    int maxStart = s_nodesFilteredCount - renderRows;
+    if (maxStart < 0) maxStart = 0;
+
+    if (s_nodesRenderStart > maxStart) s_nodesRenderStart = maxStart;
+    if (s_nodesSelected < s_nodesRenderStart) {
+        s_nodesRenderStart = s_nodesSelected;
+    } else if (s_nodesSelected >= (s_nodesRenderStart + renderRows)) {
+        s_nodesRenderStart = s_nodesSelected - renderRows + 1;
+    }
+
+    if (s_nodesRenderStart < 0) s_nodesRenderStart = 0;
+    if (s_nodesRenderStart > maxStart) s_nodesRenderStart = maxStart;
+}
+
+static lv_obj_t *selectedNodesRowObj() {
+    for (int i = 0; i < s_nodesListRowCount; i++) {
+        if (s_nodesRenderedFilteredIdx[i] == s_nodesSelected) {
+            return s_nodesListRows[i];
+        }
+    }
+    return nullptr;
+}
+
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
@@ -7653,6 +7935,7 @@ static void nodesApplyFilter() {
 
     if (s_nodesFilteredCount <= 0) {
         s_nodesSelected = -1;
+        s_nodesRenderStart = 0;
         return;
     }
 
@@ -7661,6 +7944,8 @@ static void nodesApplyFilter() {
     } else if (s_nodesSelected >= s_nodesFilteredCount) {
         s_nodesSelected = s_nodesFilteredCount - 1;
     }
+
+    nodesClampRenderWindow();
 }
 
 static void applyNodesFilterText(const char *text) {
@@ -7685,10 +7970,8 @@ static void applyNodesFilterText(const char *text) {
     refreshNodesListSelection();
     refreshNodesDetails();
 
-    if (s_nodesSelected >= 0
-        && s_nodesSelected < s_nodesListRowCount
-        && s_nodesListRows[s_nodesSelected]) {
-        lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
     }
 }
 
@@ -7748,6 +8031,11 @@ static void openNodesFilterDialog() {
     lv_label_set_text(title, "Filter Nodes");
 
     s_nodesFilterInput = lv_textarea_create(s_nodesFilterDialog);
+    if (!s_nodesFilterInput) {
+        logLvglMemDiag("nodes filter aborted (low LVGL mem)");
+        closeNodesFilterDialog();
+        return;
+    }
     lv_obj_set_width(s_nodesFilterInput, lv_pct(100));
     lv_obj_set_height(s_nodesFilterInput, 28);
     lv_obj_set_style_text_font(s_nodesFilterInput, &lv_font_montserrat_12, 0);
@@ -8597,6 +8885,8 @@ static void refreshNodesListRows() {
     if (!lvObjAlive(s_nodesList)) {
         s_nodesList = nullptr;
         s_nodesListRowCount = 0;
+        s_nodesRenderStart = 0;
+        memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
         memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
         return;
     }
@@ -8651,6 +8941,7 @@ static void refreshNodesListRows() {
 
     lv_obj_clean(s_nodesList);
     s_nodesListRowCount = 0;
+    memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 
     if (s_nodesFilteredCount <= 0) {
@@ -8668,7 +8959,18 @@ static void refreshNodesListRows() {
         return;
     }
 
-    for (int rowIdx = 0; rowIdx < s_nodesFilteredCount; rowIdx++) {
+    nodesClampRenderWindow();
+    int renderStart = s_nodesRenderStart;
+    int renderLimit = min(kNodesMaxRenderedRows, s_nodesFilteredCount - renderStart);
+    for (int listIdx = 0; listIdx < renderLimit; listIdx++) {
+        lv_mem_monitor_t nodesMem;
+        lv_mem_monitor(&nodesMem);
+        if (nodesMem.free_biggest_size < 4096) {
+            logLvglMemDiag("nodes render stopped (low LVGL mem)");
+            break;
+        }
+
+        int rowIdx = renderStart + listIdx;
         int snapshotIdx = s_nodesFilteredIdx[rowIdx];
         if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) continue;
         // Resolve live. If the node was evicted while this modal was open we
@@ -8680,6 +8982,10 @@ static void refreshNodesListRows() {
         snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
 
         lv_obj_t *row = lv_btn_create(s_nodesList);
+        if (!row) {
+            Serial.println("[nodes] list row allocation failed");
+            break;
+        }
         lv_obj_set_width(row, lv_pct(96));
         lv_obj_set_height(row, nodesListRowH);
         lv_obj_set_style_radius(row, 4, 0);
@@ -8694,6 +9000,11 @@ static void refreshNodesListRows() {
         lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
 
         lv_obj_t *lbl = lv_label_create(row);
+        if (!lbl) {
+            lv_obj_del(row);
+            Serial.println("[nodes] list label allocation failed");
+            break;
+        }
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, nodesListFont, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -8709,7 +9020,9 @@ static void refreshNodesListRows() {
         lv_obj_center(lbl);
 
         if (s_nodesListRowCount < MAX_NODES) {
-            s_nodesListRows[s_nodesListRowCount++] = row;
+            s_nodesListRows[s_nodesListRowCount] = row;
+            s_nodesRenderedFilteredIdx[s_nodesListRowCount] = rowIdx;
+            s_nodesListRowCount++;
         }
     }
 }
@@ -8718,7 +9031,7 @@ static void refreshNodesListSelection() {
     for (int i = 0; i < s_nodesListRowCount; i++) {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
-        bool selected = (i == s_nodesSelected);
+        bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
         lv_color_t rowTextColor = lv_color_hex(0xE8F1FF);
         if (s_cfg.uiMode != UI_MODE_LIGHT) {
             // Dark themes: keep node names brighter for better list readability.
@@ -8896,10 +9209,11 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
         closeNodesActionMenu();
     }
     s_nodesSelected = idx;
+    nodesClampRenderWindow();
     refreshNodesListSelection();
     refreshNodesDetails();
-    if (idx >= 0 && idx < s_nodesListRowCount && s_nodesListRows[idx]) {
-        lv_obj_scroll_to_view(s_nodesListRows[idx], LV_ANIM_OFF);
+    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
     }
 }
 
@@ -11435,6 +11749,17 @@ static void openNodesModal() {
     closeLegendModal();
     closeChannelActionsModal();
 
+    // This modal frame + row list can be large; bail out before lv_obj_create
+    // would hit LV_ASSERT_MALLOC and hard-reset the device.
+    {
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 8192) {
+            logLvglMemDiag("openNodesModal aborted (low LVGL mem)");
+            return;
+        }
+    }
+
     snapshotNodesForModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
@@ -11608,6 +11933,8 @@ static void openNodesModal() {
     lv_obj_set_flex_align(s_nodesList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
     s_nodesListRowCount = 0;
+    s_nodesRenderStart = 0;
+    memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 
     nodesApplyFilter();
@@ -12159,20 +12486,11 @@ static void performCfgAction(int actionId) {
             }
         } break;
 
-        case CFG_ACTION_THEME: {
+        case CFG_ACTION_THEME:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec THEME");
-            int next = (uiThemePresetIndexFromCfg() + 1) % kUiThemePresetCount;
-            s_cfg.uiTheme = kUiThemePresets[next].theme;
-            s_cfg.uiMode = kUiThemePresets[next].mode;
-            persistUiTheme();
-            applyUiThemePalette();
-            scheduleThemeRebuild(true);
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s", uiThemePresetNameFromCfg());
-            openCfgActionMessageModal(s_cfgStatus);
-            // Do not rebuild/clean cfg rows in this same input cycle.
-            // The deferred theme rebuild will recreate the modal safely.
-            return;
-        } break;
+            showActionPopup = false;
+            openThemeModal();   // pick from a preview grid instead of cycling
+            break;
 
         case CFG_ACTION_OWNER_COLOR:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OWNER_COLOR");
@@ -13135,6 +13453,11 @@ static void renderOnboardingStage() {
         }
 
         s_onboardingInput = lv_textarea_create(s_onboardingModal);
+        if (!s_onboardingInput) {
+            logLvglMemDiag("onboarding input aborted (low LVGL mem)");
+            closeOnboardingModal();
+            return;
+        }
         lv_obj_set_width(s_onboardingInput, lv_pct(100));
         lv_obj_set_height(s_onboardingInput, onboardingInputH);
         lv_obj_set_style_text_font(s_onboardingInput, onboardingInputFont, 0);
@@ -13606,6 +13929,31 @@ static void pumpKeyboardInput() {
                 if (next != s_cfgColorSelection) {
                     s_cfgColorSelection = next;
                     refreshCfgColorPickerModal();
+                }
+            }
+            continue;
+        }
+
+        if (s_themeModal) {
+            if (isModalCloseKey(k)) {
+                closeThemeModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyThemeSelection(s_themeSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_themeSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= kUiThemePresetCount) next = kUiThemePresetCount - 1;
+                if (next != s_themeSelection) {
+                    s_themeSelection = next;
+                    refreshThemeSelection();
                 }
             }
             continue;
@@ -14432,10 +14780,12 @@ static void pumpKeyboardInput() {
                     && nextSelected >= 0
                     && nextSelected < s_nodesFilteredCount) {
                     s_nodesSelected = nextSelected;
+                    nodesClampRenderWindow();
+                    refreshNodesListRows();
                     refreshNodesListSelection();
                     refreshNodesDetails();
-                    if (s_nodesSelected >= 0 && s_nodesSelected < s_nodesListRowCount && s_nodesListRows[s_nodesSelected]) {
-                        lv_obj_scroll_to_view(s_nodesListRows[s_nodesSelected], LV_ANIM_OFF);
+                    if (lv_obj_t *selectedRow = selectedNodesRowObj()) {
+                        lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
                     }
                 }
                 continue;
@@ -19170,6 +19520,87 @@ static void normalizeSerialCommand(char *line) {
     }
 }
 
+static bool parseCliUnsignedInt(const char *s, int &out) {
+    if (!s || !*s) return false;
+    int v = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        v = (v * 10) + (*p - '0');
+        if (v > MAX_NODES) {
+            v = MAX_NODES;
+            break;
+        }
+    }
+    out = v;
+    return true;
+}
+
+static uint32_t s_cliNodeSeedRound = 0;
+
+static void seedNodesForRepro(int requestedCount) {
+    int target = requestedCount;
+    if (target < 1) target = 1;
+    if (target > MAX_NODES) target = MAX_NODES;
+
+    int seeded = 0;
+    int favorited = 0;
+    uint32_t now = millis();
+    uint32_t roundOffset = s_cliNodeSeedRound * (uint32_t)MAX_NODES;
+    for (int i = 0; i < target; i++) {
+        // Deterministic but well-spread IDs so repeated runs hit stable slots.
+        uint32_t idIdx = roundOffset + (uint32_t)i;
+        uint32_t nodeId = 0x14000000UL + (uint32_t)(idIdx * 2654435761UL);
+        NodeEntry *e = Nodes.upsert(nodeId);
+        if (!e) continue;
+
+        snprintf(e->longName, sizeof(e->longName), "Seed Node %03d", i + 1);
+        snprintf(e->shortName, sizeof(e->shortName), "S%03d", (i + 1) % 1000);
+        e->hasName = true;
+        e->lastHeardMs = now - (uint32_t)((target - i) * 25U);
+        e->snr = -12.0f + (float)(i % 30) * 0.8f;
+        e->hops = (uint8_t)(i % 4);
+
+        PositionInfo p = {};
+        p.latI = 404000000 + (i * 131);
+        p.lonI = -739000000 + (i * 167);
+        p.alt = 25 + (i % 200);
+        Nodes.updatePosition(nodeId, p);
+
+        TelemetryInfo t = {};
+        t.valid = true;
+        t.hasDeviceMetrics = true;
+        t.hasEnvironmentMetrics = ((i % 3) == 0);
+        t.battPct = 20.0f + (float)(i % 80);
+        t.voltage = 3.45f + (float)(i % 45) * 0.01f;
+        t.chUtil = (float)(i % 100) * 0.7f;
+        t.airUtil = (float)(i % 50) * 0.3f;
+        t.temperatureC = 14.0f + (float)(i % 28) * 0.5f;
+        t.humidityPct = 30.0f + (float)(i % 65);
+        t.pressureHpa = 996.0f + (float)(i % 35) * 0.8f;
+        Nodes.updateTelemetry(nodeId, t);
+
+        if ((i % 8) == 0 && Nodes.setFavorite(nodeId, true)) {
+            favorited++;
+        }
+
+        seeded++;
+        if ((i & 0x0F) == 0) yield();
+    }
+
+    if (s_nodesModal) {
+        snapshotNodesForModal();
+        refreshNodesListRows();
+        refreshNodesListSelection();
+        refreshNodesDetails();
+    }
+    s_lastRenderedCount = -1;
+    s_lastRenderedChannel = -1;
+    s_cliNodeSeedRound++;
+
+    Serial.printf("[cli] nodes seeded=%d favorites=%d count=%d\n",
+                  seeded, favorited, Nodes.count());
+}
+
 // Dispatch a single normalised CLI command. Aliases are intentional so the
 // common shorthand a developer might type (`scan`, `i2c`) maps to the same
 // action as the canonical command.
@@ -19178,7 +19609,33 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now");
+        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count]");
+        return;
+    }
+
+    if (strcmp(line, "nodes") == 0 || strcmp(line, "nodes stats") == 0) {
+        int favorites = 0;
+        for (int i = 0; i < Nodes.count(); i++) {
+            NodeEntry *e = Nodes.at(i);
+            if (e && e->nodeId && e->favorite) favorites++;
+        }
+        Serial.printf("[cli] nodes count=%d favorites=%d max=%d\n",
+                      Nodes.count(), favorites, MAX_NODES);
+        return;
+    }
+
+    if (strcmp(line, "nodes seed") == 0 || strncmp(line, "nodes seed ", 11) == 0) {
+        int target = 220;
+        if (line[10] == ' ') {
+            int parsed = 0;
+            if (!parseCliUnsignedInt(line + 11, parsed) || parsed < 1) {
+                Serial.println("[cli] usage: nodes seed [1-250]");
+                return;
+            }
+            target = parsed;
+        }
+        Serial.printf("[cli] seeding %d synthetic nodes...\n", target);
+        seedNodesForRepro(target);
         return;
     }
 

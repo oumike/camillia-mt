@@ -6,6 +6,7 @@
 #include "dm_mgr.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <nvs_flash.h>
@@ -36,6 +37,13 @@ static const char    *kDefaultWebPass  = "admin";
 #endif
 
 static WebServer      server(80);
+// Captive-portal DNS for AP mode: answers every lookup with the SoftAP IP so a
+// connecting phone resolves its portal-detection host to us and opens the page
+// immediately, instead of firing partial/abandoned probe requests at an open AP
+// that never resolves — those stall the synchronous WebServer's header read and
+// freeze the main loop. Only active while an AP is up.
+static DNSServer      gDns;
+static bool           gCaptiveActive   = false;
 static bool           running          = false;
 static bool           gOnboarding      = false;
 static char           ipBuf[16]        = "";
@@ -1506,32 +1514,28 @@ static void sendConfigPage(const char *msg = "") {
             "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->compassNorthTop) html += " selected"; html += ">No</option>"
             "</select></label></div>";
-        html += "<label>Theme<select name='ui_theme_preset' id='sel-theme-preset'>"
-            "<option value='0'"; if (themePreset == 0) html += " selected"; html += ">Camillia Dark</option>"
-            "<option value='1'"; if (themePreset == 1) html += " selected"; html += ">Camillia Light</option>"
-            "<option value='2'"; if (themePreset == 2) html += " selected"; html += ">Evergreen Dark</option>"
-            "<option value='3'"; if (themePreset == 3) html += " selected"; html += ">Evergreen Light</option>"
-            "<option value='4'"; if (themePreset == 4) html += " selected"; html += ">Earthy Dark</option>"
-            "<option value='5'"; if (themePreset == 5) html += " selected"; html += ">Earthy Light</option>"
-            "<option value='6'"; if (themePreset == 6) html += " selected"; html += ">Solarized Dark</option>"
-            "<option value='7'"; if (themePreset == 7) html += " selected"; html += ">Solarized Light</option>"
-            "<option value='8'"; if (themePreset == 8) html += " selected"; html += ">Crimson Blue Dark</option>"
-            "<option value='9'"; if (themePreset == 9) html += " selected"; html += ">Crimson Blue Light</option>"
-            "<option value='10'"; if (themePreset == 10) html += " selected"; html += ">Scarlet Pop Dark</option>"
-            "<option value='11'"; if (themePreset == 11) html += " selected"; html += ">Scarlet Pop Light</option>"
-            "<option value='12'"; if (themePreset == 12) html += " selected"; html += ">Ink Wash Dark</option>"
-            "<option value='13'"; if (themePreset == 13) html += " selected"; html += ">Ink Wash Light</option>"
-            "<option value='14'"; if (themePreset == 14) html += " selected"; html += ">Lavendar Fields Dark</option>"
-            "<option value='15'"; if (themePreset == 15) html += " selected"; html += ">Lavendar Fields Light</option>"
-            "<option value='16'"; if (themePreset == 16) html += " selected"; html += ">Wild Flowers Dark</option>"
-            "<option value='17'"; if (themePreset == 17) html += " selected"; html += ">Wild Flowers Light</option>"
-            "<option value='18'"; if (themePreset == 18) html += " selected"; html += ">Quiet Luxury Dark</option>"
-            "<option value='19'"; if (themePreset == 19) html += " selected"; html += ">Quiet Luxury Light</option>"
-            "<option value='20'"; if (themePreset == 20) html += " selected"; html += ">Morning Dew Dark</option>"
-            "<option value='21'"; if (themePreset == 21) html += " selected"; html += ">Morning Dew Light</option>"
-            "<option value='22'"; if (themePreset == 22) html += " selected"; html += ">Winter Chill Dark</option>"
-            "<option value='23'"; if (themePreset == 23) html += " selected"; html += ">Winter Chill Light</option>"
-            "</select></label>";
+        html += "<label>Theme</label>";
+        {
+            char themeHidden[110];
+            snprintf(themeHidden, sizeof(themeHidden),
+                     "<input type='hidden' name='ui_theme_preset' id='themeInput' value='%u'>",
+                     (unsigned)themePreset);
+            html += themeHidden;
+        }
+        // Swatch picker: each theme preset renders as a clickable card showing a
+        // three-color preview (background, panel, accent). Cards are built in JS
+        // from the same palette table used for live preview, keyed by preset.
+        html += "<style>"
+            ".theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));"
+            "gap:8px;margin:.2em 0 .4em}"
+            ".theme-card{display:flex;align-items:center;gap:8px;padding:7px 9px;cursor:pointer;"
+            "border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}"
+            ".theme-card.sel{border-color:var(--accent);border-width:2px;padding:6px 8px}"
+            ".theme-sws{display:flex;gap:3px;flex:0 0 auto}"
+            ".theme-sw{width:16px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,.25)}"
+            ".theme-name{font-size:.86em;line-height:1.15}"
+            "</style>";
+        html += "<div id='themeGrid' class='theme-grid'></div>";
         html += "<script>"
             "(function(){"
             "var P={"
@@ -1560,17 +1564,38 @@ static void sendConfigPage(const char *msg = "") {
                             "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
                             "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'}"
             "};"
+            "var NAMES=['Camillia Dark','Camillia Light','Evergreen Dark','Evergreen Light',"
+              "'Earthy Dark','Earthy Light','Solarized Dark','Solarized Light',"
+              "'Crimson Blue Dark','Crimson Blue Light','Scarlet Pop Dark','Scarlet Pop Light',"
+              "'Ink Wash Dark','Ink Wash Light','Lavendar Fields Dark','Lavendar Fields Light',"
+              "'Wild Flowers Dark','Wild Flowers Light','Quiet Luxury Dark','Quiet Luxury Light',"
+              "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light'];"
+            "var input=document.getElementById('themeInput');"
             "function apply(){"
-              "var k=document.getElementById('sel-theme-preset').value;"
-              "var p=P[k]||P['0'];"
+              "var k=input.value;var p=P[k]||P['0'];"
               "var r=document.documentElement.style;"
               "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
               "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
               "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
               "r.colorScheme=(parseInt(k,10)%2)?'light':'dark';"  // odd preset = light
             "}"
-            "document.getElementById('sel-theme-preset').addEventListener('change',apply);"
-            "apply();"
+            "function select(k){input.value=k;"
+              "var cards=document.querySelectorAll('#themeGrid .theme-card');"
+              "for(var i=0;i<cards.length;i++)cards[i].classList.toggle('sel',cards[i].dataset.k==k);"
+              "apply();}"
+            "var grid=document.getElementById('themeGrid');"
+            "Object.keys(P).forEach(function(k){"
+              "var p=P[k];"
+              "var c=document.createElement('div');c.className='theme-card';c.dataset.k=k;"
+              "var sw=document.createElement('div');sw.className='theme-sws';"
+              "[p.bg,p.panel2,p.accent].forEach(function(col){"
+                "var b=document.createElement('div');b.className='theme-sw';b.style.background=col;sw.appendChild(b);});"
+              "var nm=document.createElement('div');nm.className='theme-name';nm.textContent=NAMES[k]||('Theme '+k);"
+              "c.appendChild(sw);c.appendChild(nm);"
+              "c.addEventListener('click',function(){select(k);});"
+              "grid.appendChild(c);"
+            "});"
+            "select(input.value);"
             "})();"
             "</script>";
     html += "</details>";
@@ -1640,13 +1665,6 @@ static void sendConfigPage(const char *msg = "") {
     html += "<label>Transmit Over LoRa<select name='neighbor_info_lora'>"
             "<option value='1'"; if ( gCfg->neighborInfoOverLora) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->neighborInfoOverLora) html += " selected"; html += ">No</option>"
-            "</select></label>";
-
-    // Canned Messages
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Canned Messages</h3>";
-    html += "<label>Enabled<select name='canned_en'>"
-            "<option value='1'"; if ( gCfg->cannedEnabled) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->cannedEnabled) html += " selected"; html += ">No</option>"
             "</select></label>";
 
     // Store and Forward (client)
@@ -2737,6 +2755,17 @@ static void handlePostOnboard() {
 // ── Route handlers ────────────────────────────────────────────
 
 static void handleGetRoot() {
+    if (gOnboarding || gCaptiveActive) {
+        // In AP onboarding/fallback mode, always serve the lightweight setup
+        // page so low internal heap doesn't fail while building the full UI.
+        sendOnboardingPage();
+        return;
+    }
+
+    // "/" always serves the full config UI (this is what the user reaches at the
+    // AP IP). The captive-portal DNS + onNotFound redirect handle the phone's
+    // portal-probe requests separately, so those no longer stall the header read
+    // — which is what previously froze the loop when the big page was served.
     if (!isLoggedIn()) { redirect("/login"); return; }
     char msg[sizeof(gFlashMsg)];
     strncpy(msg, gFlashMsg, sizeof(msg));
@@ -3005,11 +3034,6 @@ static void handlePostSave() {
         gCfg->neighborInfoOverLora = server.arg("neighbor_info_lora").toInt() != 0;
     }
 
-    gCfg->cannedEnabled      = server.arg("canned_en").toInt() != 0;
-    if (server.hasArg("canned_msgs")) {
-        strncpy(gCfg->cannedMessages, server.arg("canned_msgs").c_str(), sizeof(gCfg->cannedMessages) - 1);
-        gCfg->cannedMessages[sizeof(gCfg->cannedMessages) - 1] = '\0';
-    }
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
     }
@@ -3685,6 +3709,21 @@ static void registerCommonRoutes() {
     // Log any unmatched request so we can see exactly what a failing tab hits
     // (the default handler only prints a generic "request handler not found").
     server.onNotFound([]() {
+        // In AP/captive mode, steer the OS's portal-detection probes (which hit
+        // unknown paths like /generate_204, /hotspot-detect.html) to our page so
+        // the phone surfaces the portal instead of retrying. Answering fast here
+        // is also what keeps those probes from stalling the header read.
+        if (gCaptiveActive) {
+            char loc[64];
+            snprintf(loc,
+                     sizeof(loc),
+                     "http://%s/%s",
+                     ipBuf,
+                     gOnboarding ? "setup" : "");
+            server.sendHeader("Location", loc);
+            server.send(302, "text/plain", "");
+            return;
+        }
         Serial.printf("[web] 404 %s %s\n",
                       (server.method() == HTTP_GET) ? "GET" : "POST",
                       server.uri().c_str());
@@ -3758,13 +3797,27 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             return false;
         }
         delay(250);
-        WiFi.softAPIP().toString().toCharArray(ipBuf, sizeof(ipBuf));
+        // Disable modem power-save for the AP session too (the STA path does the
+        // same below): with it on, the synchronous WebServer stalls on inbound
+        // packets and the page load times out. webCfgEnd() powers the radio off.
+        WiFi.setSleep(false);
+        IPAddress apIP = WiFi.softAPIP();
+        apIP.toString().toCharArray(ipBuf, sizeof(ipBuf));
 
-        if (onboarding) {
-            // Serve both the onboarding WiFi page and full config.
-            server.on("/setup",   HTTP_GET,  handleGetOnboard);
-            server.on("/onboard", HTTP_POST, handlePostOnboard);
+        // Captive-portal DNS: resolve every host to us so the connecting device
+        // pops the portal straight to the config/onboarding page.
+        gDns.setErrorReplyCode(DNSReplyCode::NoError);
+        if (gDns.start(53, "*", apIP)) {
+            gCaptiveActive = true;
+        } else {
+            Serial.println("[web] captive DNS start failed (continuing without it)");
         }
+
+        // AP onboarding and AP fallback both need the lightweight WiFi setup
+        // page so a user can recover credentials even when full config is too
+        // heavy for current heap headroom.
+        server.on("/setup",   HTTP_GET,  handleGetOnboard);
+        server.on("/onboard", HTTP_POST, handlePostOnboard);
         registerCommonRoutes();
         server.begin();
         running = true;
@@ -3834,6 +3887,10 @@ void webCfgEnd() {
     gRebootAtMs = 0;
     clearReleaseCheckResult();
     gReleaseCheckState = RELEASE_CHECK_IDLE;
+    if (gCaptiveActive) {
+        gDns.stop();
+        gCaptiveActive = false;
+    }
     server.stop();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -3871,6 +3928,7 @@ const char *webCfgWifiPass() { return gWifiPass; }
 void webCfgLoop() {
     if (!running) return;
 
+    if (gCaptiveActive) gDns.processNextRequest();
     server.handleClient();
     if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
         gRebootPending = false;
