@@ -65,6 +65,7 @@ static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
 static bool           gRebootPending   = false;
 static uint32_t       gRebootAtMs      = 0;
+static bool           gWebBuffersReclaimed = false;
 
 static int compareVersionTags(const char *a, const char *b);
 static bool isPrereleaseTag(const char *tag);
@@ -524,6 +525,12 @@ static const char kHead[] =
         ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
         ".tab-panel{display:none}"
         ".tab-panel.active{display:block}"
+        ".tab-pane-center{max-width:760px;margin:0 auto}"
+        "#tab-config form{max-width:760px;margin:0 auto}"
+        "#tab-utils .tab-pane-center{max-width:620px;text-align:center}"
+        "#tab-utils h3,#tab-utils p{margin-left:auto;margin-right:auto}"
+        "#tab-utils form{max-width:520px;margin:.5em auto}"
+        "#tab-utils label{text-align:left}"
         ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
         ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
         ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
@@ -602,6 +609,15 @@ static const char kHead[] =
         "@media (max-width:560px){.row2{grid-template-columns:1fr}}"
     "</style></head><body>";
 
+// Lightweight AP onboarding page head. Keep this intentionally small so first-
+// boot AP mode still renders reliably when WiFi has reduced internal heap.
+static const char kOnboardHead[] =
+        "<!DOCTYPE html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Camillia Setup</title>"
+        "</head><body>";
+
 // ── Timezone table ────────────────────────────────────────────
 
 struct TzOption { const char *label; const char *posix; };
@@ -679,6 +695,10 @@ static void sendChunk(String &html) {
 static void sendConfigPage(const char *msg = "") {
     if (!gCfg) { server.send(500, "text/plain", "No config"); return; }
 
+    // AP mode has much tighter internal-heap headroom. Render a lighter page
+    // (Config + Utilities only) to keep the synchronous WebServer responsive.
+    const bool apLite = gCaptiveActive;
+
     // Use chunked transfer to avoid building one giant String
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
@@ -694,7 +714,7 @@ static void sendConfigPage(const char *msg = "") {
 #endif
     uint8_t themeBase = (uint8_t)constrain((int)gCfg->uiTheme, 0, UI_THEME_COUNT - 1);
     uint8_t themePreset = (uint8_t)(themeBase * 2 + (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0));
-    int totalNodes = Nodes.count();
+    int totalNodes = apLite ? 0 : Nodes.count();
     uint8_t battPct = readBatteryPctWeb();
     const char *battCls = (battPct >= 60) ? "metric-good" : ((battPct >= 25) ? "metric-warn" : "metric-bad");
     bool gpsEn = gpsIsEnabled();
@@ -1107,16 +1127,22 @@ static void sendConfigPage(const char *msg = "") {
     html += "</h2>";
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
+    if (gOnboarding) {
+        html += "<p class='msg'>No WiFi credentials saved yet. "
+                "Quick setup form: <a href='/setup'>/setup</a>.</p>";
+    }
 
         html += "<div class='tab-row'><div class='tab-btns'>"
-            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
-            "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
+            "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>";
+        if (!apLite) {
+        html += "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>";
+        html += "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>";
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-            "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
+        html += "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>";
 #endif
-            "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>"
-            "</div><div class='tab-metrics'><span class='metric-chip ";
+        html += "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
+    }
+    html += "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
         html += battChip;
@@ -1125,7 +1151,7 @@ static void sendConfigPage(const char *msg = "") {
         html += "'>";
         html += gpsChip;
         html += "</span></div></div>";
-        html += "<div class='tab-panel active' id='tab-config'>";
+        html += "<div class='tab-panel active' id='tab-config'><div class='tab-pane-center'>";
 
     html += "<form method='POST' action='/save'>";
 
@@ -1792,7 +1818,14 @@ static void sendConfigPage(const char *msg = "") {
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
     sendChunk(html);
 
-    html += "</div><div class='tab-panel' id='tab-utils'>";
+    if (apLite) {
+        html += "</div></div></body></html>";
+        server.sendContent(html);
+        server.sendContent("");
+        return;
+    }
+
+    html += "</div></div><div class='tab-panel' id='tab-utils'><div class='tab-pane-center'>";
 
     // ── Diagnostics / Utilities ───────────────────────────────
     html +=
@@ -1886,7 +1919,7 @@ static void sendConfigPage(const char *msg = "") {
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
         " The device will behave as if freshly flashed.</p>";
 
-    html += "</div><div class='tab-panel' id='tab-live'>";
+    html += "</div></div><div class='tab-panel' id='tab-live'>";
     html += "<h3 style='margin-top:1.2em'>Live RX/TX</h3>"
             "<p class='gps-hint'>Streams the Announcements feed from the device, similar to the on-device ANN view.</p>"
             "<div class='live-wrap'>"
@@ -2672,43 +2705,45 @@ static void sendConfigPage(const char *msg = "") {
 // ── Onboarding (WiFi setup) ───────────────────────────────────
 
 static void sendOnboardingPage(const char *err = "") {
-    // Stream kHead from flash on Cardputer (no PSRAM); see sendLoginPage.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    server.sendContent_P(kHead);
+    server.sendContent_P(kOnboardHead);
+
     String html;
-#else
-    String html = kHead;
-#endif
+    html.reserve(480);
     html +=
-        "<h2>Camillia-MT Setup</h2>"
-        "<p style='color:#555;font-size:.95em'>"
-        "Enter your WiFi network name and password. The device will connect "
-        "and display its IP address on screen.</p>"
+        "<h2>WiFi Setup</h2>"
         "<form method='POST' action='/onboard'>"
-        "<label>WiFi Name (SSID)"
-        "<input name='ssid' type='text' autofocus autocomplete='off' "
-        "placeholder='MyNetwork'></label>"
-        "<label>WiFi Password"
-        "<input name='pass' type='password' autocomplete='off'></label>"
-        "<button type='submit'>Connect</button>";
-    if (err[0]) {
-        html += "<p class='err'>";
+        "<p><label>SSID</label><br>"
+        "<input name='ssid' type='text' autofocus autocomplete='off' placeholder='MyNetwork'></p>"
+        "<p><label>Password</label><br>"
+        "<input name='pass' type='password' autocomplete='off'>"
+        "</p><p><button type='submit'>Save and Reboot</button></p>";
+    if (err && err[0]) {
+        html += "<p>";
         html += err;
         html += "</p>";
     }
     html += "</form></body></html>";
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
     server.sendContent(html);
     server.sendContent("");   // terminate chunked response
-#else
-    server.send(200, "text/html", html);
-#endif
 }
 
 static void handleGetOnboard() {
     sendOnboardingPage();
+}
+
+static void handleGetConfig() {
+    if (gCaptiveActive) {
+        sendOnboardingPage();
+        return;
+    }
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    char msg[sizeof(gFlashMsg)];
+    strncpy(msg, gFlashMsg, sizeof(msg));
+    msg[sizeof(msg) - 1] = '\0';
+    gFlashMsg[0] = '\0';
+    sendConfigPage(msg);
 }
 
 static void handlePostOnboard() {
@@ -2736,17 +2771,20 @@ static void handlePostOnboard() {
         gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
     }
 
-    String html = kHead;
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    server.sendContent_P(kOnboardHead);
+
+    String html;
     html +=
-        "<h2>WiFi Saved</h2>"
+        "<h2>Saved</h2>"
         "<p>The device is rebooting and will connect to <b>";
     html += ssid;
     html +=
         "</b>.</p>"
-        "<p>Once connected, the IP address will appear on the device screen. "
-        "Open that address in your browser to complete setup.</p>"
         "</body></html>";
-    server.send(200, "text/html", html);
+    server.sendContent(html);
+    server.sendContent("");   // terminate chunked response
     server.stop();
     delay(500);
     ESP.restart();
@@ -2755,27 +2793,23 @@ static void handlePostOnboard() {
 // ── Route handlers ────────────────────────────────────────────
 
 static void handleGetRoot() {
-    if (gOnboarding || gCaptiveActive) {
-        // In AP onboarding/fallback mode, always serve the lightweight setup
-        // page so low internal heap doesn't fail while building the full UI.
+    // In AP/captive mode keep the page minimal and credential-focused.
+    if (gCaptiveActive || gOnboarding) {
         sendOnboardingPage();
         return;
     }
-
-    // "/" always serves the full config UI (this is what the user reaches at the
-    // AP IP). The captive-portal DNS + onNotFound redirect handle the phone's
-    // portal-probe requests separately, so those no longer stall the header read
-    // — which is what previously froze the loop when the big page was served.
-    if (!isLoggedIn()) { redirect("/login"); return; }
-    char msg[sizeof(gFlashMsg)];
-    strncpy(msg, gFlashMsg, sizeof(msg));
-    msg[sizeof(msg) - 1] = '\0';
-    gFlashMsg[0] = '\0';
-    sendConfigPage(msg);
+    handleGetConfig();
 }
 
 static void handleGetLogin() {
-    if (isLoggedIn()) { redirect("/"); return; }
+    if (gCaptiveActive) {
+        redirect("/setup");
+        return;
+    }
+    if (isLoggedIn()) {
+        redirect(gOnboarding ? "/setup" : "/");
+        return;
+    }
     sendLoginPage();
 }
 
@@ -2787,7 +2821,7 @@ static void handlePostLogin() {
         snprintf(sessionToken, sizeof(sessionToken), "%08x%08x", r1, r2);
         String cookie = String("sess=") + sessionToken + "; Path=/; HttpOnly";
         server.sendHeader("Set-Cookie", cookie);
-        redirect("/");
+        redirect((gOnboarding || gCaptiveActive) ? "/setup" : "/");
     } else {
         sendLoginPage("Invalid username or password.");
     }
@@ -3683,6 +3717,7 @@ static void handleGetLogout() {
 // additionally registers /setup and /onboard before calling this.
 static void registerCommonRoutes() {
     server.on("/",                  HTTP_GET,  handleGetRoot);
+    server.on("/config",            HTTP_GET,  handleGetConfig);
     server.on("/login",             HTTP_GET,  handleGetLogin);
     server.on("/login",             HTTP_POST, handlePostLogin);
     server.on("/save",              HTTP_POST, handlePostSave);
@@ -3719,7 +3754,7 @@ static void registerCommonRoutes() {
                      sizeof(loc),
                      "http://%s/%s",
                      ipBuf,
-                     gOnboarding ? "setup" : "");
+                     "setup");
             server.sendHeader("Location", loc);
             server.send(302, "text/plain", "");
             return;
@@ -3740,18 +3775,33 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // against the "server up" snapshot below to see how much WiFi consumed.
     logWifiHeapDiag("web start (pre-WiFi)");
 
+    // No-PSRAM builds are most sensitive to internal-heap pressure in AP mode.
+    // Reclaim chat/DM buffers for the duration of the web session, then restore
+    // from persistence in webCfgEnd().
+    gWebBuffersReclaimed = false;
+    bool reclaimUiBuffers = false;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // No PSRAM: the chat/DM line buffers sit in the same DRAM the Wi-Fi stack
-    // and page rendering need. Free them for the duration of the web session
-    // (restored in webCfgEnd(); the post-save reboot reallocates fresh anyway).
-    {
+    reclaimUiBuffers = true;
+#elif defined(BOARD_HAS_PSRAM)
+    reclaimUiBuffers = (ESP.getPsramSize() == 0);
+#else
+    reclaimUiBuffers = true;
+#endif
+    if (reclaimUiBuffers) {
         size_t reclaimed = Channels.releaseBuffers();
         DMs.clearAll(false);   // free DM line buffers, keep SD-persisted history
-        Serial.printf("[web] cardputer: reclaimed %u bytes of chat buffers\n",
-                      (unsigned)reclaimed);
+        gWebBuffersReclaimed = true;
+        Serial.printf("[web] reclaimed %u bytes of chat buffers\n", (unsigned)reclaimed);
         logWifiHeapDiag("after chat reclaim");
     }
-#endif
+
+    auto restoreUiBuffersIfNeeded = [&]() {
+        if (!gWebBuffersReclaimed) return;
+        Channels.restoreBuffers();
+        DMs.clearAll(false);
+        DMs.loadAll();
+        gWebBuffersReclaimed = false;
+    };
 
     gCfg    = cfg;
     gOnSave = onSave;
@@ -3830,20 +3880,26 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
     if (savedSsid.isEmpty()) {
         // ── Onboarding mode: create an AP with full config ────
-        return startApMode("onboarding AP", true);
+        bool ok = startApMode("onboarding AP", true);
+        if (!ok) restoreUiBuffersIfNeeded();
+        return ok;
     }
 
     // ── Normal mode: connect to saved WiFi ────────────────────
     gOnboarding = false;
     if (!ensureWifiMode(WIFI_STA, "STA connect")) {
         Serial.println("[web] STA mode failed — using AP fallback");
-        return startApMode("AP fallback", false);
+        bool ok = startApMode("AP fallback", false);
+        if (!ok) restoreUiBuffersIfNeeded();
+        return ok;
     }
     wl_status_t beginStatus = WiFi.begin(savedSsid.c_str(), savedPass.c_str());
     if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
         Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
         logWifiHeapDiag("STA begin failed");
-        return startApMode("AP fallback", false);
+        bool ok = startApMode("AP fallback", false);
+        if (!ok) restoreUiBuffersIfNeeded();
+        return ok;
     }
     Serial.printf("[web] connecting to \"%s\" ...\n", savedSsid.c_str());
 
@@ -3853,11 +3909,15 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (st == WL_NO_SHIELD) {
             Serial.println("[web] WiFi stack unavailable during STA connect");
             logWifiHeapDiag("STA connect unavailable");
-            return startApMode("AP fallback", false);
+            bool ok = startApMode("AP fallback", false);
+            if (!ok) restoreUiBuffersIfNeeded();
+            return ok;
         }
         if (millis() - start >= kConnectTimeout) {
             Serial.println("[web] STA connect timeout — falling back to AP mode");
-            return startApMode("AP fallback", false);
+            bool ok = startApMode("AP fallback", false);
+            if (!ok) restoreUiBuffersIfNeeded();
+            return ok;
         }
         delay(100);
     }
@@ -3895,15 +3955,14 @@ void webCfgEnd() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Wi-Fi is down and its DRAM is back; reallocate the chat/DM buffers that
-    // webCfgBegin() released and reload persisted history. Reset DM state
-    // first so any conversation that arrived mid-session (and was persisted)
-    // isn't double-loaded — loadAll() appends rather than replacing.
-    Channels.restoreBuffers();
-    DMs.clearAll(false);
-    DMs.loadAll();
-#endif
+    if (gWebBuffersReclaimed) {
+        // Reallocate chat/DM buffers released in webCfgBegin() and reload
+        // persisted history now that Wi-Fi/web RAM pressure is gone.
+        Channels.restoreBuffers();
+        DMs.clearAll(false);
+        DMs.loadAll();
+        gWebBuffersReclaimed = false;
+    }
 
     ipBuf[0]    = '\0';
     gCfg        = nullptr;
