@@ -65,6 +65,7 @@ void ChannelMgr::init() {
         _chans[i].name      = CHANNEL_KEYS[i].name;
         _chans[i].count     = 0;
         _chans[i].scrollOff = 0;
+        _chans[i].revision  = 0;
         _chans[i].unread    = false;
         _chans[i].lines = allocChannelLines();
         _chans[i].active = (_chans[i].lines != nullptr);
@@ -87,6 +88,7 @@ void ChannelMgr::clearChannel(int idx) {
     _chans[idx].count = 0;
     _chans[idx].scrollOff = 0;
     _chans[idx].unread = false;
+    _chans[idx].revision++;
 }
 
 void ChannelMgr::clearAllMessages(bool clearPersisted) {
@@ -122,6 +124,7 @@ size_t ChannelMgr::releaseBuffers() {
         }
         _chans[i].count     = 0;
         _chans[i].scrollOff = 0;
+        _chans[i].revision++;
         _chans[i].unread    = false;
         _chans[i].active    = false;
     }
@@ -137,6 +140,7 @@ void ChannelMgr::restoreBuffers() {
         _chans[i].active    = (_chans[i].lines != nullptr);
         _chans[i].count     = 0;
         _chans[i].scrollOff = 0;
+        _chans[i].revision++;
     }
     // Repopulate scrollback from SD if persistence is available (no-op otherwise).
     loadPersisted();
@@ -158,6 +162,7 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     dl.epoch        = epoch;
     dl.senderNodeId = senderNodeId;
     ch.count++;
+    ch.revision++;
 
     if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
         _persistChannel(chanIdx, ch);
@@ -467,11 +472,14 @@ void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
             Channel &ch = _chans[_pending[i].chanIdx];
             int chanIdx = _pending[i].chanIdx;
             if (!ch.lines) return;
+            bool updated = false;
             for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
                 if (ch.lines[j].packetId == packetId) {
                     ch.lines[j].ack = state;
+                    updated = true;
                 }
             }
+            if (updated) ch.revision++;
             if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
                 _persistChannel(chanIdx, ch);
             }

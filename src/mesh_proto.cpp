@@ -572,11 +572,15 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
         memcpy(buf + n, &replyId, 4);
         n += 4;
     }
-    // field 8 (emoji), varint — non-zero marks this message as a tapback reaction
+    // field 8 (emoji), fixed32 — non-zero marks this message as a tapback reaction.
+    // Data.emoji is fixed32 in mesh.proto, like reply_id; writing it as a varint
+    // makes nanopb reject the whole Data message, so stock firmware drops the
+    // packet outright rather than just ignoring the reaction.
     if (emoji) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (8 << 3) | 0);
-        n += pbWriteVarint(buf + n, emoji);
+        if (n + 5 > bufLen) return 0;
+        buf[n++] = (8 << 3) | 5;
+        memcpy(buf + n, &emoji, 4);
+        n += 4;
     }
     // field 9 (bitfield), varint — only written when non-zero (e.g. OK_TO_MQTT bit)
     if (bitfield) {

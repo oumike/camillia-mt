@@ -158,6 +158,10 @@ static int s_emojiPickerSelection = 0;
 // browse shortcut on keyboard builds). Insert mode: picking appends to the open
 // compose box and keeps the tray up (the touch-only in-compose 😀 button).
 static bool s_emojiPickerSendMode = false;
+// Packet id the pick reacts to. Non-zero when the tray was opened in send mode
+// with the chat cursor sitting on a message: the pick then goes out as a tapback
+// (reply_id + emoji flag) on that message instead of a standalone message.
+static uint32_t s_emojiPickerTapbackId = 0;
 static lv_obj_t *s_composeCharCount = nullptr;
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
@@ -481,9 +485,10 @@ static bool s_tracerouteAwaitingReply = false;
 static int s_activeChannel = 0;
 static int s_lastRenderedChannel = -1;
 static int s_lastRenderedCount = -1;
-// Signature of the last-rendered chat content; lets refreshChatView skip the
-// costly teardown/rebuild when a mesh event didn't actually change the view.
-static uint32_t s_lastChatSignature = 0;
+// Chat redraw gate: channel-revision tracks message/ACK mutations; context
+// signature tracks UI-only state (style, selection, cursor mode).
+static uint32_t s_lastChatRenderedRevision = 0;
+static uint32_t s_lastChatContextSignature = 0;
 
 // ── Chat render windowing ──────────────────────────────────────────────────
 // refreshChatView rebuilds every message it emits, so rendering a whole channel
@@ -701,6 +706,8 @@ static const char *fontSizeName(uint8_t size) {
 }
 static bool s_pagerChatCursorMode = false;
 static int s_pagerChatCursorDisplayIndex = -1;
+// One-shot: after leaving chat cursor mode, reopen plain chat at latest.
+static bool s_chatScrollToLatestOnce = false;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static bool s_cardputerMainChatPanelFocused = false;
 #endif
@@ -4067,6 +4074,11 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
 static void pagerExitChatCursorMode(bool clearSelection) {
     s_pagerChatCursorMode = false;
     s_pagerChatCursorDisplayIndex = -1;
+    s_chatScrollToLatestOnce = true;
+    // Cursor mode renders full history; on exit we should not reuse any
+    // pending window-growth anchor from an earlier windowed pass.
+    s_chatWindowGrowPending = false;
+    s_chatWindowAnchorActive = false;
     if (clearSelection) {
         s_selectedMsgReplyPacketId = 0;
         s_selectedMsgText[0] = '\0';
@@ -4141,7 +4153,10 @@ static void refreshEmojiPickerSelection() {
 // picker was opened over: the selected DM conversation when the DM screen is up,
 // otherwise the active channel. There is no compose step — the picker is a
 // quick-reaction affordance opened with 'e' from the chat/DM browse screen.
-static void sendQuickEmoji(const char *emoji) {
+// tapbackId, when non-zero, turns the channel send into a reaction on that
+// message (Data.reply_id + Data.emoji) — same wire shape as the web UI's tapback
+// buttons — so other clients render it on the bubble instead of as a new line.
+static void sendQuickEmoji(const char *emoji, uint32_t tapbackId = 0) {
     if (!emoji || !emoji[0]) return;
     if (s_myNodeId == 0) deriveNodeId();
     if (s_myNodeId == 0) return;   // no identity yet; nothing to send from
@@ -4158,7 +4173,8 @@ static void sendQuickEmoji(const char *emoji) {
     } else {
         int txChan = (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS)
                    ? s_activeChannel : 0;
-        if (!Channels.sendText(s_myNodeId, emoji, s_cfg.okToMqtt, txChan)) {
+        if (!Channels.sendText(s_myNodeId, emoji, s_cfg.okToMqtt, txChan,
+                               tapbackId, tapbackId ? 1 : 0)) {
             Channels.addMessage(txChan, "", "! TX failed", TFT_RED, 0);
         }
     }
@@ -4169,8 +4185,9 @@ static void sendQuickEmoji(const char *emoji) {
 static void emojiPickerActivate(int idx) {
     if (idx < 0 || idx >= kEmojiTrayCount) return;
     if (s_emojiPickerSendMode) {
+        const uint32_t tapbackId = s_emojiPickerTapbackId;   // survives the teardown
         closeEmojiPicker();   // one-shot: tear the tray down before the send refresh
-        sendQuickEmoji(kEmojiTray[idx]);
+        sendQuickEmoji(kEmojiTray[idx], tapbackId);
         return;
     }
     // Insert mode: append to the open compose box and keep the tray up for more.
@@ -4202,12 +4219,17 @@ static void closeEmojiPicker() {
     }
     s_emojiPickerBackdrop = nullptr;
     s_emojiPickerModal = nullptr;
+    s_emojiPickerTapbackId = 0;
 }
 
 static void openEmojiPicker(bool sendMode) {
     if (!s_rootScreen || s_emojiPickerModal) return;
     s_emojiPickerSendMode = sendMode;
     s_emojiPickerSelection = 0;
+    // Cursor parked on a chat message → this pick reacts to it. The DM screen has
+    // no per-message cursor, so a stale chat selection must never target there.
+    s_emojiPickerTapbackId = (sendMode && !s_dmModal) ? s_selectedMsgReplyPacketId : 0;
+    const bool tapback = (s_emojiPickerTapbackId != 0);
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -4255,11 +4277,13 @@ static void openEmojiPicker(bool sendMode) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(hint, sendMode ? "Tap to send • tap outside to close"
-                                     : "Tap to add • tap outside to close");
+    lv_label_set_text(hint, tapback  ? "Tap to react • tap outside to close"
+                            : sendMode ? "Tap to send • tap outside to close"
+                                       : "Tap to add • tap outside to close");
 #else
-    lv_label_set_text_fmt(hint, sendMode ? "Move • Enter=Send • %s=Close"
-                                         : "Move • Enter=Add • %s=Close",
+    lv_label_set_text_fmt(hint, tapback  ? "Move • Enter=React • %s=Close"
+                                : sendMode ? "Move • Enter=Send • %s=Close"
+                                           : "Move • Enter=Add • %s=Close",
                           modalCloseKeyLabel());
 #endif
 
@@ -15569,10 +15593,12 @@ static void pumpKeyboardInput() {
             } else if (k == KEY_BACKSPACE) {
                 if (s_pagerChatCursorMode) {
                     pagerExitChatCursorMode(true);
+                    refreshChatView(true);
                 } else if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
                     s_selectedMsgReplyPacketId = 0;
                     s_selectedMsgText[0] = '\0';
                     s_lastRenderedChannel = -1;
+                    refreshChatView(true);
                 }
             }
             continue;
@@ -18698,23 +18724,12 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
     }
 }
 
-// FNV-1a rolling hash over everything that changes the rendered chat: per-row
-// identity/ack/text plus the global toggles that restyle every row. Used to
-// skip the expensive rebuild when an incoming mesh packet (telemetry, position,
-// other-channel traffic, an unchanged ACK) leaves the visible view identical —
-// which is what made the heavier Bubbles style feel sluggish on busy meshes.
-static uint32_t chatRenderSignature(const DisplayLine *const *rows, int rowCount) {
+// FNV-1a over non-row context that still changes rendered chat appearance.
+// Row payload mutations are tracked by Channel::revision so this stays O(1)
+// regardless of chat backlog size.
+static uint32_t chatRenderContextSignature() {
     uint32_t h = 2166136261u;
     auto mix = [&](uint32_t v) { h = (h ^ v) * 16777619u; };
-    mix((uint32_t)rowCount);
-    for (int i = 0; i < rowCount; i++) {
-        const DisplayLine *d = rows[i];
-        mix(d->packetId);
-        mix((uint32_t)d->ack);
-        mix(d->senderNodeId);
-        mix(d->epoch);
-        for (const char *p = d->text; *p; p++) mix((uint8_t)*p);
-    }
     mix(s_selectedMsgReplyPacketId);
     for (const char *p = s_selectedMsgText; *p; p++) mix((uint8_t)*p);
     mix((uint32_t)s_cfg.chatStyle);
@@ -18786,10 +18801,12 @@ static void refreshChatView(bool force) {
     refreshChatComposeButtonState();
 
     const Channel &ch = Channels.get(s_activeChannel);
+    const uint32_t contextSig = chatRenderContextSignature();
 
     // Opening a different channel resets the window so it starts small (fast)
     // regardless of how far back the user scrolled in the previous one.
-    if (s_activeChannel != s_chatWindowChannel) {
+    const bool channelChanged = (s_activeChannel != s_chatWindowChannel);
+    if (channelChanged) {
         s_chatWindowChannel = s_activeChannel;
         s_chatRenderWindowMsgs = kChatWindowBaseMsgs;
         s_chatWindowMoreAbove = false;
@@ -18797,19 +18814,24 @@ static void refreshChatView(bool force) {
         s_chatWindowAnchorActive = false;
     }
 
+    if (!force && !s_chatWindowGrowPending && !s_chatScrollToLatestOnce
+        && s_activeChannel == s_lastRenderedChannel
+        && ch.revision == s_lastChatRenderedRevision
+        && contextSig == s_lastChatContextSignature) {
+        return;
+    }
+
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
     collectChatRows(rows, rowCount);
 
-    const uint32_t sig = chatRenderSignature(rows, rowCount);
-    if (!force && !s_chatWindowGrowPending
-        && s_activeChannel == s_lastRenderedChannel
-        && sig == s_lastChatSignature) {
-        return;
-    }
-
-    const bool stickToBottom = force || (lv_obj_get_scroll_bottom(s_chatList) <= 6);
-    const int32_t prevScrollY = lv_obj_get_scroll_y(s_chatList);
+    // A channel switch always lands on the newest message. Both measurements
+    // below describe the channel being left — its scroll position says nothing
+    // about where the incoming one should open, and carrying it over is what
+    // made a switch sometimes arrive part-way up the new channel's history.
+    const bool stickToBottom = force || s_chatScrollToLatestOnce || channelChanged
+                               || (lv_obj_get_scroll_bottom(s_chatList) <= 6);
+    const int32_t prevScrollY = channelChanged ? 0 : lv_obj_get_scroll_y(s_chatList);
 
     lv_obj_clean(s_chatList);
     lv_obj_t *lastMsgObj = nullptr;
@@ -19005,6 +19027,17 @@ static void refreshChatView(bool force) {
         }
     }
 
+    // Wrapped labels do not have final heights until layout runs; scrolling
+    // against stale geometry can land part-way through history intermittently.
+    lv_obj_update_layout(s_chatList);
+
+    // Scrollbar mode can alter effective content width, which changes wrapping
+    // and total content height. Decide scrollbar visibility before the final
+    // scroll placement so we scroll against stable geometry.
+    bool overflow = lv_obj_get_scroll_bottom(s_chatList) > 0;
+    lv_obj_set_scrollbar_mode(s_chatList, overflow ? LV_SCROLLBAR_MODE_ON : LV_SCROLLBAR_MODE_OFF);
+    lv_obj_update_layout(s_chatList);
+
     if (s_chatWindowAnchorActive) {
         // Just loaded older history: pin the viewport to the message that was at
         // the top before, so the newly-prepended messages sit above it instead of
@@ -19025,16 +19058,22 @@ static void refreshChatView(bool force) {
         if (lastMsgObj) {
             lv_obj_scroll_to_view(lastMsgObj, LV_ANIM_OFF);
         }
+        // `scroll_to_view` only guarantees visibility; it may still leave a
+        // small bottom gap. Clamp to absolute bottom so the next refresh keeps
+        // treating this view as "at latest".
+        int32_t bottomGap = lv_obj_get_scroll_bottom(s_chatList);
+        if (bottomGap > 0) {
+            lv_obj_scroll_by(s_chatList, 0, bottomGap, LV_ANIM_OFF);
+        }
     } else {
         lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
     }
 
-    bool overflow = lv_obj_get_scroll_bottom(s_chatList) > 0;
-    lv_obj_set_scrollbar_mode(s_chatList, overflow ? LV_SCROLLBAR_MODE_ON : LV_SCROLLBAR_MODE_OFF);
-
+    s_chatScrollToLatestOnce = false;
     s_lastRenderedChannel = s_activeChannel;
     s_lastRenderedCount = ch.count;
-    s_lastChatSignature = sig;
+    s_lastChatRenderedRevision = ch.revision;
+    s_lastChatContextSignature = contextSig;
 }
 
 static void buildUi() {
@@ -19875,14 +19914,15 @@ static void normalizeSerialCommand(char *line) {
     }
 }
 
-static bool parseCliUnsignedInt(const char *s, int &out) {
+static bool parseCliUnsignedInt(const char *s, int &out, int maxVal) {
     if (!s || !*s) return false;
+    if (maxVal < 1) maxVal = 1;
     int v = 0;
     for (const char *p = s; *p; p++) {
         if (*p < '0' || *p > '9') return false;
         v = (v * 10) + (*p - '0');
-        if (v > MAX_NODES) {
-            v = MAX_NODES;
+        if (v > maxVal) {
+            v = maxVal;
             break;
         }
     }
@@ -19891,6 +19931,7 @@ static bool parseCliUnsignedInt(const char *s, int &out) {
 }
 
 static uint32_t s_cliNodeSeedRound = 0;
+static uint32_t s_cliChatSeedRound = 0;
 
 static void seedNodesForRepro(int requestedCount) {
     int target = requestedCount;
@@ -19956,6 +19997,42 @@ static void seedNodesForRepro(int requestedCount) {
                   seeded, favorited, Nodes.count());
 }
 
+static void seedChatForRepro(int requestedCount) {
+    int target = requestedCount;
+    if (target < 1) target = 1;
+    if (target > MAX_MSG_LINES) target = MAX_MSG_LINES;
+
+    int added = 0;
+    uint32_t base = s_cliChatSeedRound * 1000UL;
+
+    for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
+        for (int i = 0; i < target; i++) {
+            uint32_t n = base + (uint32_t)(chanIdx * target + i);
+            uint32_t sender = 0x22000000UL + (n * 2654435761UL);
+            char prefix[16];
+            snprintf(prefix, sizeof(prefix), "[%04X] ", (unsigned)(sender & 0xFFFF));
+
+            char msg[220];
+            snprintf(msg, sizeof(msg),
+                     "Seed msg %d/%d on ch%d. This is synthetic chat traffic to stress rendering with wrapped text and many rows. "
+                     "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789",
+                     i + 1, target, chanIdx);
+
+            Channels.addMessage(chanIdx, prefix, msg, TFT_WHITE, 0, false, sender);
+            added++;
+            if ((added & 0x1F) == 0) yield();
+        }
+    }
+
+    s_cliChatSeedRound++;
+    s_lastRenderedChannel = -1;
+    refreshChatView(true);
+    int activeChan = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
+    Serial.printf("[cli] chat seeded=%d/ch x %d ch (total=%d) active ch%d lines=%d\n",
+                  target, MESH_CHANNELS, added, activeChan,
+                  Channels.get(activeChan).count);
+}
+
 // Dispatch a single normalised CLI command. Aliases are intentional so the
 // common shorthand a developer might type (`scan`, `i2c`) maps to the same
 // action as the canonical command.
@@ -19964,7 +20041,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count]");
+        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
         return;
     }
 
@@ -19983,14 +20060,29 @@ static void handleSerialCommandLine(char *line) {
         int target = 220;
         if (line[10] == ' ') {
             int parsed = 0;
-            if (!parseCliUnsignedInt(line + 11, parsed) || parsed < 1) {
-                Serial.println("[cli] usage: nodes seed [1-250]");
+            if (!parseCliUnsignedInt(line + 11, parsed, MAX_NODES) || parsed < 1) {
+                Serial.printf("[cli] usage: nodes seed [1-%d]\n", MAX_NODES);
                 return;
             }
             target = parsed;
         }
         Serial.printf("[cli] seeding %d synthetic nodes...\n", target);
         seedNodesForRepro(target);
+        return;
+    }
+
+    if (strcmp(line, "chat seed") == 0 || strncmp(line, "chat seed ", 10) == 0) {
+        int target = 120;
+        if (line[9] == ' ') {
+            int parsed = 0;
+            if (!parseCliUnsignedInt(line + 10, parsed, MAX_MSG_LINES) || parsed < 1) {
+                Serial.printf("[cli] usage: chat seed [1-%d]\n", MAX_MSG_LINES);
+                return;
+            }
+            target = parsed;
+        }
+        Serial.printf("[cli] seeding %d synthetic chat messages...\n", target);
+        seedChatForRepro(target);
         return;
     }
 

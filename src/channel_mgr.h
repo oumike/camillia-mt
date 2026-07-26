@@ -18,6 +18,7 @@ struct Channel {
     DisplayLine *lines;       // PSRAM circular buffer
     int          count;       // total lines ever added
     int          scrollOff;   // 0 = latest at top
+    uint32_t     revision;    // increments whenever visible line content changes
     bool         unread;
     bool         active;      // has been allocated
 };
