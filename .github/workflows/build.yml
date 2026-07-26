@@ -2,20 +2,36 @@ name: Build
 
 on:
   push:
-    tags:     [ 'v*.*.*' ]      # Tag build — compile-only verification gate
+    branches: [ main ]          # Primary: catch breakage while it's cheap to fix
+    tags:     [ 'v*.*.*' ]      # Per-release record of the tagged tree
+  pull_request:
+    branches: [ main ]
 
+# What this job is actually for: building from a CLEAN CHECKOUT.
+#
+# A local `pio run` reuses .pio caches and can see untracked files, so it cannot
+# catch an uncommitted header or a .gitignore'd dependency. This job can, and
+# that is the whole of its value.
+#
+# It is NOT a release gate, despite the tag trigger. release.sh pushes the tag
+# and then publishes seconds later, while this job spends minutes installing
+# PlatformIO and building five environments — so the release is always public
+# before CI has an opinion. The branch trigger above is the one that earns its
+# keep: it runs on the commit release.sh pushes just before tagging, and on
+# every ordinary push in between. To make it a real gate, release.sh would have
+# to wait on the run (`gh run watch`) before `gh release create`.
+#
 # IMPORTANT: this workflow must NOT publish release assets.
 #
 # release.sh is the single source of truth for published artifacts: it builds,
 # merges the factory images, copies the app-only OTA images, and signs each
 # -ota.bin with the private ECDSA key (which lives only on the release machine,
-# never in CI). It then uploads every .bin/.elf/.sig via `gh release create`.
+# never in CI). It then uploads every .bin/.sig via `gh release create`.
 #
 # If CI also published dist/*.bin, its independently-built binaries would
 # overwrite the exact bytes release.sh signed — while the detached .sig stayed
 # put — so the on-device signature check would reject every OTA image. CI has
-# no signing key, so it can never produce a matching pair. This job therefore
-# only compiles every environment to catch build breakage on a clean checkout.
+# no signing key, so it can never produce a matching pair.
 
 jobs:
   build:
@@ -42,18 +58,8 @@ jobs:
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
 
-      # Archive debug symbols as workflow artifacts instead of bloating the
-      # public release with ~35MB ELF files per environment. NOTE: these come
-      # from THIS CI build, which is not guaranteed byte-identical to the
-      # release.sh-built (and signed) binaries actually shipped, so addresses
-      # may drift. For exact crash symbolication use the dist/*.elf produced on
-      # the machine that ran release.sh.
-      - name: Archive debug symbols (ELF/MAP)
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-symbols-${{ github.ref_name }}
-          path: |
-            .pio/build/*/firmware.elf
-            .pio/build/*/firmware.map
-          if-no-files-found: warn
-          retention-days: 90
+      # Debug symbols are deliberately not archived here. CI's build is not
+      # byte-identical to the release.sh-built, signed binaries that actually
+      # ship, so its addresses can drift — symbolicating a real crash against
+      # them is misleading. Use the dist/*.elf left on the machine that ran
+      # release.sh, which matches the shipped image exactly.

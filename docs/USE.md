@@ -63,6 +63,8 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   Space opens compose, and Fn+Enter is also accepted for the compose/reply flow
 - DM delete trigger on selected conversation: Fn+Backspace
 - Compose close behavior: Esc closes compose (Backspace only deletes characters)
+- Picker modals (Chat Style, Chat Names) show option names without the
+  explanatory line underneath, and scroll when they outgrow the 240x135 panel
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion
 
@@ -259,6 +261,61 @@ Chat Style) to choose how sender names appear in channel chat:
 Unlike Chat Style, this applies **without a reboot**: bubble views re-render
 immediately, and new classic-chat lines use the chosen style going forward. The
 Web Config **Chat Names** dropdown offers the same two choices.
+
+### Brightness
+
+The **Brightness** action opens a slider covering 10%–100% in 10% steps. The
+panel follows the slider as you move it, so you are judging the real level
+rather than a number:
+
+- **J** steps right (brighter), **K** steps left (dimmer); the scroll and
+  channel keys work too
+- **Enter** saves and closes
+- **Backspace/Esc** (or tapping outside) cancels and restores the level you
+  opened with
+
+The default matches whatever brightness the board has always used, so an
+unconfigured device looks unchanged. Web Config offers the same setting as a
+slider under **Display**, and the value is included in YAML export/import as
+`display.brightness`.
+
+### Web Config
+
+Web Config serves a browser-based settings UI over Wi-Fi. **It is on by default
+on a new device**, so a freshly flashed board comes up as the `camillia-mt`
+access point and can be set up from a phone without touching the device screen.
+Toggle it from the Config screen; the row shows the address once it is running.
+
+There are two versions of the page:
+
+- **Web Config Lite** — served in access-point mode. It carries the complete
+  Config form (identity, Wi-Fi, LoRa, channels, MQTT, display, modules), but not
+  the Utilities, Live, Chat, or Nodes tabs. Access-point mode leaves the device
+  with very little memory once Wi-Fi is running, and those extras do not fit.
+- **Full Web Config** — served once the device has joined your Wi-Fi network.
+  Same Config form plus Utilities, the Live feed, Chat, and the Nodes map.
+
+The Cardputer always serves Lite, on its own network or yours, because it has no
+PSRAM to spare.
+
+**On the Cardputer, chat is paused while Web Config runs.** That board needs its
+message memory to run Wi-Fi, so messages sent to it during a Web Config session
+are not received or stored — they are lost, not queued. The device warns you
+when Web Config starts, the Config row reads *chat PAUSED*, and the web page
+shows a red banner. Turn Web Config off to resume messaging.
+
+### Choosing a Wi-Fi network
+
+The **Choose WiFi** action lists your configured network, an **AP** entry, and
+any networks found by a scan — names only.
+
+Selecting **AP** does not join a network: it brings up the device's own
+`camillia-mt` access point, so Web Config stays reachable even when a network is
+configured but out of range, or when you would rather connect to the device
+directly. This choice persists across reboots, so a device left on **AP** keeps
+hosting its own network until you pick a real one. While it is selected the
+Wi-Fi row reads *AP mode*, and features that need an internet connection (time
+sync, MQTT) stay offline.
 
 ![Config screen](screenshots/RiCa_screen_20260609_110933.png)
 

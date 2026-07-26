@@ -45,7 +45,7 @@ Notes:
 
 - **8 configurable LoRa channels** — each independently named, keyed, and color-coded
 - **ANN tab** — read-only announcement feed (join/leave events, channel activity)
-- **Web configuration** — browser-based settings UI served over Wi-Fi AP
+- **Web configuration** — browser-based settings UI, on by default, served over the device's own Wi-Fi AP or your network
 - **YAML config** — import/export all settings and channel keys via microSD at `/camillia/config.yaml`
 
 ## First-Time Setup
@@ -56,7 +56,11 @@ On first boot, connect to the `camillia-mt` Wi-Fi access point, then open `http:
 
 ### Web config
 
-Connect to the `camillia-mt` Wi-Fi access point and navigate to `http://192.168.4.1`. All settings (node identity, LoRa parameters, channel keys, etc.) can be configured here without reflashing. Changes persist across reboots.
+Web config is enabled by default on a new device, so a freshly flashed board comes up as the `camillia-mt` access point. Connect to it and navigate to `http://192.168.4.1`. All settings (node identity, LoRa parameters, channel keys, etc.) can be configured here without reflashing. Changes persist across reboots.
+
+Once the device joins your own Wi-Fi network it serves the full page — the same settings plus Utilities, a live feed, chat, and the node map — at the address shown on the Config screen. In access-point mode it serves **Web Config Lite**: the complete settings form without those extra tabs, which do not fit in the memory left once Wi-Fi is running. The Cardputer always serves Lite, and pauses chat while web config is on; see [USE.md](docs/USE.md#web-config).
+
+The Config screen's **Choose WiFi** list includes an **AP** entry that forces the device's own access point even when a network is configured, so web config stays reachable out of range. That choice persists across reboots.
 
 ### SD card
 
@@ -65,8 +69,16 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 ## Releases
 
 Releases are cut with [`release.sh`](release.sh), which builds every device
-profile, merges factory images, tags the commit, and publishes a GitHub release
-with the `.bin`/`.elf` assets.
+profile, merges factory images, signs the OTA images, tags the commit, and
+publishes a GitHub release with the `.bin`/`.sig` assets. Debug symbols
+(`.elf`/`.map`) stay in `dist/` on the release machine rather than bloating the
+release by ~35MB per profile.
+
+Pushing the tag also triggers [the build workflow](.github/workflows/build.yml),
+which compiles every environment from a clean checkout. It is a breakage check,
+not a release gate — `release.sh` publishes before CI finishes — and it never
+uploads release assets, since only the release machine holds the OTA signing
+key.
 
 ```bash
 ./release.sh        # prompts for a version, e.g. 3.2.0
