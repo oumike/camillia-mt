@@ -192,6 +192,11 @@ static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
 static lv_obj_t *s_cfgActionMsgModal = nullptr;
 static uint32_t s_cfgActionMsgOpenedMs = 0;
 // Own-message color picker (16 basic swatches), reachable from the CFG screen.
+static lv_obj_t *s_cfgBrightBackdrop = nullptr;
+static lv_obj_t *s_cfgBrightModal = nullptr;
+static lv_obj_t *s_cfgBrightSlider = nullptr;
+static lv_obj_t *s_cfgBrightValue = nullptr;
+static uint8_t   s_cfgBrightOriginal = 0;   // restored if the user cancels
 static lv_obj_t *s_cfgColorBackdrop = nullptr;
 static lv_obj_t *s_cfgColorModal = nullptr;
 static lv_obj_t *s_cfgColorGrid = nullptr;
@@ -238,6 +243,9 @@ static KnownWifiEntry s_cfgKnownWifi[kKnownWifiMaxCount] = {};
 static int s_cfgKnownWifiCount = 0;
 static int s_cfgWifiSelection = 0;
 static int s_cfgWifiScanSelection = 0;
+// Sentinel SSID for the WiFi picker's "AP" entry. Selecting it doesn't join a
+// network — it forces the device's own SoftAP (see wifiForceApMode()).
+static const char kForceApSsid[] = "AP";
 static bool s_wifiUsingKnownOverride = false;
 static KnownWifiEntry s_cfgKnownWifiAdded[kKnownWifiExtraCount] = {};
 static int s_cfgKnownWifiAddedCount = 0;
@@ -831,6 +839,12 @@ static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
 static void openCfgColorPickerModal();
+static void openCfgBrightnessModal();
+static void closeCfgBrightnessModal();
+static void revertCfgBrightnessPreview();
+static void applyBrightness();
+static void onCfgBrightSliderChanged(lv_event_t *e);
+static void onCfgBrightBackdropPressed(lv_event_t *e);
 static void closeCfgColorPickerModal();
 static void refreshCfgColorPickerModal();
 static void applyCfgColorSelection(int idx);
@@ -920,6 +934,16 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
                            lv_event_cb_t onPressed);
+
+// Per-row helper text under an option's name in the CFG picker modals. The
+// Cardputer's 240x135 panel can't spare the ~13px per row it costs — three
+// styles' worth pushed the last option off the modal entirely — so there it
+// renders names only.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static constexpr bool kModalRowDescriptions = false;
+#else
+static constexpr bool kModalRowDescriptions = true;
+#endif
 
 // Chat style helpers. The three styles form a cycle for the CFG toggle:
 // Classic -> Bubbles -> Outline -> Classic. Both bubble styles share the bubble
@@ -1016,6 +1040,7 @@ static void applyTimezoneFromConfig();
 static void setOtaWorkerBootNotice(const char *msg);
 static void syncWifiCredsToPrefs();
 static void persistWebCfgEnabled();
+static void persistWifiForceAp();
 static void requestSkipWebAutoStartOnce();
 static bool consumeSkipWebAutoStartOnce();
 static bool requestOtaWorkerModeOnce();
@@ -1331,6 +1356,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
+    CFG_ACTION_BRIGHTNESS,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
@@ -2360,6 +2386,15 @@ static void populateKnownWifiEntries() {
         strncpy(entry.pass, s_cfg.wifiPass, sizeof(entry.pass) - 1);
     }
 
+    // Slot 1 is not a network: picking it forces the device's own SoftAP, so
+    // web config stays reachable when the configured network is out of range
+    // or the user simply wants to connect to the device directly.
+    if (s_cfgKnownWifiCount < kKnownWifiMaxCount) {
+        KnownWifiEntry &entry = s_cfgKnownWifi[s_cfgKnownWifiCount++];
+        memset(&entry, 0, sizeof(entry));
+        strncpy(entry.ssid, kForceApSsid, sizeof(entry.ssid) - 1);
+    }
+
     // Add known networks created by successful scan/connect attempts.
     for (int i = 0; i < s_cfgKnownWifiAddedCount && s_cfgKnownWifiCount < kKnownWifiMaxCount; i++) {
         KnownWifiEntry &entry = s_cfgKnownWifi[s_cfgKnownWifiCount++];
@@ -2382,6 +2417,10 @@ static void populateKnownWifiEntries() {
 
 static void addTempKnownWifi(const char *ssid, const char *pass) {
     if (!ssid || !ssid[0]) return;
+
+    // "AP" is the picker's force-SoftAP sentinel, not a joinable network; a
+    // scanned network by that name would shadow it.
+    if (strncmp(ssid, kForceApSsid, sizeof(kForceApSsid)) == 0) return;
 
     // Configured network remains in slot 0; no need to duplicate it.
     if (strncmp(ssid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid)) == 0) {
@@ -2426,7 +2465,18 @@ static void wifiGetActiveCreds(const char **ssidOut, const char **passOut) {
     if (passOut) *passOut = pass;
 }
 
+// True when the picker's "AP" entry is selected: the device hosts its own
+// network instead of joining one.
+static bool wifiForceApMode() {
+    return s_wifiUsingKnownOverride
+        && strncmp(s_wifiSelectedSsid, kForceApSsid, sizeof(s_wifiSelectedSsid)) == 0;
+}
+
 static bool wifiHasActiveCreds() {
+    // Forced AP mode has no station credentials by definition. Reporting none
+    // keeps every STA path — reconnect kicks, MQTT, the nodes-over-WiFi session
+    // — from trying to associate with a network literally named "AP".
+    if (wifiForceApMode()) return false;
     const char *ssid = nullptr;
     wifiGetActiveCreds(&ssid, nullptr);
     return ssid && ssid[0];
@@ -2458,6 +2508,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "WiFi: On (%s)", WiFi.localIP().toString().c_str());
             } else if (webCfgRunning()) {
                 snprintf(buf, bufLen, "WiFi: On (%s)", webCfgIP());  // AP fallback
+            } else if (wifiForceApMode()) {
+                snprintf(buf, bufLen, "WiFi: On (AP mode)");
             } else if (!wifiHasActiveCreds()) {
                 snprintf(buf, bufLen, "WiFi: On (AP MODE ONLY)");
             } else {
@@ -2470,7 +2522,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             } else if (s_cfg.wifiSsid[0]) {
                 snprintf(buf, bufLen, "Choose WiFi: %s", s_cfg.wifiSsid);
             } else {
-                snprintf(buf, bufLen, "Choose WiFi: Configured (none)");
+                snprintf(buf, bufLen, "Choose WiFi: (none)");
             }
             break;
         case CFG_ACTION_WEBCFG:
@@ -2482,9 +2534,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Web Config: Disabled");
             } else if (webCfgRunning()) {
                 // AP mode serves the reduced page; name it so the missing tabs
-                // read as the mode, not a failure.
-                snprintf(buf, bufLen, webCfgIsLite() ? "Web Config: On (Lite)"
-                                                     : "Web Config: On");
+                // read as the mode, not a failure. Chat-paused outranks it —
+                // that one costs the user messages.
+                if (webCfgChatPaused()) {
+                    snprintf(buf, bufLen, "Web Config: On (chat PAUSED)");
+                } else {
+                    snprintf(buf, bufLen, webCfgIsLite() ? "Web Config: On (Lite)"
+                                                         : "Web Config: On");
+                }
             } else {
                 snprintf(buf, bufLen, "Web Config: Enabled");
             }
@@ -2526,6 +2583,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_FONT_SIZE:
             snprintf(buf, bufLen, "Font Size: %s", fontSizeName(s_cfg.fontSize));
+            break;
+        case CFG_ACTION_BRIGHTNESS:
+            snprintf(buf, bufLen, "Brightness: %u%%", (unsigned)s_cfg.brightness);
             break;
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
@@ -2636,6 +2696,15 @@ static void persistWebCfgEnabled() {
     Preferences p;
     if (!p.begin("camillia", false)) return;
     p.putBool("webCfgEnabled", s_webCfgEnabled);
+    p.end();
+}
+
+// The picker's "AP" choice survives reboots; other picker overrides remain
+// runtime-only, since they hold credentials that already live in config.
+static void persistWifiForceAp() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    p.putBool("wifiForceAp", wifiForceApMode());
     p.end();
 }
 
@@ -3083,6 +3152,12 @@ static void setPagerKeyboardBacklight(bool on) {
 #endif
 }
 
+// Pushes the configured brightness to the panel. Used at boot, on wake, and
+// live while the slider moves; sleepScreen() still drives the backlight to 0.
+static void applyBrightness() {
+    displayDev().setBrightness(cfgBrightnessDuty(s_cfg.brightness));
+}
+
 static void sleepScreen(const char *reason) {
     if (s_screenAsleep) return;
 
@@ -3104,7 +3179,7 @@ static void wakeScreen() {
         return;
     }
 
-    displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    applyBrightness();
     setPagerKeyboardBacklight(true);
     s_screenAsleep = false;
     s_lastActivityMs = millis();
@@ -3339,11 +3414,13 @@ static void persistConfigToPrefs() {
     p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
     p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
     p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
+    p.putUChar("brightness", s_cfg.brightness);
     p.putUChar("chatSpace", s_cfg.chatSpacing);
     p.putUChar("fontSize", s_cfg.fontSize);
     p.putBool("dbgAcks", s_cfg.debugAcks);
     p.putBool("dbgMsgs", s_cfg.debugMessages);
     p.putBool("dbgGps", s_cfg.debugGps);
+    p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
 }
@@ -3575,6 +3652,8 @@ static void loadConfigFromPrefs() {
 
     ul = prefs.getULong("nodeIdOvr", 0);
     if (ul) s_cfg.nodeIdOverride = (uint32_t)ul;
+    ro = prefs.getUChar("brightness", 0xFF);
+    if (ro != 0xFF) s_cfg.brightness = cfgCoerceBrightness(ro);
     ro = prefs.getUChar("chatSpace", 0xFF);
     if (ro != 0xFF && ro <= 2) s_cfg.chatSpacing = ro;
     ro = prefs.getUChar("fontSize", 0xFF);
@@ -3607,6 +3686,15 @@ static void loadConfigFromPrefs() {
     // the onboarding AP is the only way in before WiFi creds exist. Devices
     // that have been set up keep whatever they last persisted.
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", s_firstBoot);
+
+    // Restore the picker's "AP" choice by re-selecting the sentinel, so every
+    // wifiForceApMode() caller sees it exactly as if the user had just picked it.
+    if (prefs.getBool("wifiForceAp", false)) {
+        s_wifiUsingKnownOverride = true;
+        strncpy(s_wifiSelectedSsid, kForceApSsid, sizeof(s_wifiSelectedSsid) - 1);
+        s_wifiSelectedSsid[sizeof(s_wifiSelectedSsid) - 1] = '\0';
+        s_wifiSelectedPass[0] = '\0';
+    }
 
     // Enforce network-option invariants regardless of how the flags were set
     // (on-device toggles or web config): MQTT needs WiFi, and the MQTT bridge and
@@ -4621,6 +4709,7 @@ static void initCfgActions() {
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     // Sound settings sit with the other presentation options rather than down
@@ -4960,16 +5049,11 @@ static void refreshCfgWifiPickerModal() {
     lv_obj_clean(s_cfgWifiList);
     for (int i = 0; i < s_cfgKnownWifiCount; i++) {
         const KnownWifiEntry &entry = s_cfgKnownWifi[i];
+        // Network names only — where an entry came from isn't something the
+        // user picks by, and the "AP" row reads as a choice on its own.
         char rowText[96];
-        if (i == 0 && entry.ssid[0]) {
-            snprintf(rowText, sizeof(rowText), "Configured: %s", entry.ssid);
-        } else if (i == 0) {
-            snprintf(rowText, sizeof(rowText), "Configured: (not set)");
-        } else if (entry.ssid[0]) {
-            snprintf(rowText, sizeof(rowText), "Known: %s", entry.ssid);
-        } else {
-            snprintf(rowText, sizeof(rowText), "Known: (empty)");
-        }
+        snprintf(rowText, sizeof(rowText), "%s",
+                 entry.ssid[0] ? entry.ssid : "(not set)");
 
         lv_obj_t *row = lv_label_create(s_cfgWifiList);
         lv_obj_set_width(row, lv_pct(100));
@@ -5021,13 +5105,38 @@ static void applyCfgWifiSelection(int idx) {
         s_wifiUsingKnownOverride = true;
         strncpy(s_wifiSelectedSsid, entry.ssid, sizeof(s_wifiSelectedSsid) - 1);
         strncpy(s_wifiSelectedPass, entry.pass, sizeof(s_wifiSelectedPass) - 1);
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+        if (wifiForceApMode()) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode selected");
+        } else {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi selected: %s", entry.ssid);
+        }
     }
 
     s_cfgWifiSelection = idx;
     s_wifiStaKickMs = 0;
+    webCfgSetForceAp(wifiForceApMode());
+    persistWifiForceAp();
     if (s_cfg.wifiEnabled && wifiHasActiveCreds()) {
         WiFi.disconnect(false);
+    }
+
+    // Web config picked its radio mode when it started, so a running server has
+    // to be restarted to move between the SoftAP and the station network.
+    if (s_webCfgEnabled && webCfgRunning()) {
+        webCfgEnd();
+#if HAS_SD_CARD
+        bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
+#else
+        bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
+#endif
+        if (ok) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     webCfgIsLite() ? "Web Lite: %s" : "Web: %s", webCfgIP());
+        } else {
+            s_webCfgEnabled = false;
+            persistWebCfgEnabled();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config start failed");
+        }
     }
 }
 
@@ -5132,6 +5241,158 @@ static void onCfgColorBackdropPressed(lv_event_t *e) {
     refreshCfgModal();
 }
 
+// ── Brightness picker ─────────────────────────────────────────────────────────
+// A slider in 10% steps. The panel follows the slider live so the level can be
+// judged directly; closing without Enter restores the level we opened with.
+
+static void setCfgBrightnessPreview(int pct) {
+    s_cfg.brightness = cfgCoerceBrightness(pct);
+    applyBrightness();
+    if (lvObjValid(s_cfgBrightValue)) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u%%", (unsigned)s_cfg.brightness);
+        lv_label_set_text(s_cfgBrightValue, buf);
+    }
+}
+
+static void closeCfgBrightnessModal() {
+    if (lvObjValid(s_cfgBrightBackdrop)) {
+        lv_obj_del(s_cfgBrightBackdrop);
+    } else if (lvObjValid(s_cfgBrightModal)) {
+        lv_obj_del(s_cfgBrightModal);
+    }
+    s_cfgBrightBackdrop = nullptr;
+    s_cfgBrightModal = nullptr;
+    s_cfgBrightSlider = nullptr;
+    s_cfgBrightValue = nullptr;
+}
+
+// Abandon the preview and put the panel back where it was. Teardown-safe: the
+// settings screen can close with this modal open, and an unapplied preview must
+// not linger in s_cfg where the next unrelated save would persist it.
+static void revertCfgBrightnessPreview() {
+    if (!s_cfgBrightModal && !s_cfgBrightBackdrop) return;
+    s_cfg.brightness = s_cfgBrightOriginal;
+    applyBrightness();
+    closeCfgBrightnessModal();
+}
+
+static void cancelCfgBrightness() {
+    revertCfgBrightnessPreview();
+    refreshCfgModal();
+}
+
+static void applyCfgBrightness() {
+    persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Brightness: %u%%",
+             (unsigned)s_cfg.brightness);
+    closeCfgBrightnessModal();
+    refreshCfgModal();
+}
+
+// Nudge by whole steps; used by the key handler on non-touch boards.
+static void stepCfgBrightness(int steps) {
+    if (!steps) return;
+    const int next = (int)s_cfg.brightness + steps * BRIGHTNESS_PCT_STEP;
+    const uint8_t coerced = cfgCoerceBrightness(next);
+    if (coerced == s_cfg.brightness) return;
+    setCfgBrightnessPreview(coerced);
+    if (lvObjValid(s_cfgBrightSlider)) {
+        lv_slider_set_value(s_cfgBrightSlider, coerced, LV_ANIM_OFF);
+    }
+}
+
+static void onCfgBrightSliderChanged(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target(e);
+    if (!slider) return;
+    setCfgBrightnessPreview((int)lv_slider_get_value(slider));
+}
+
+static void onCfgBrightBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgBrightBackdrop) return;
+    cancelCfgBrightness();
+}
+
+static void openCfgBrightnessModal() {
+    if (!s_rootScreen || s_cfgBrightModal || s_cfgBrightBackdrop) return;
+
+    s_cfgBrightOriginal = cfgCoerceBrightness(s_cfg.brightness);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgBrightBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgBrightBackdrop, w, h);
+    lv_obj_align(s_cfgBrightBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgBrightBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgBrightBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBrightBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgBrightBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgBrightBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgBrightBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgBrightBackdrop, onCfgBrightBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgBrightModal = lv_obj_create(s_cfgBrightBackdrop);
+    lv_obj_set_size(s_cfgBrightModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgBrightModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgBrightModal, LV_ALIGN_CENTER, 0, 0);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_cfgBrightModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgBrightModal, LV_DIR_VER);
+    lv_obj_add_flag(s_cfgBrightModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBrightModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgBrightModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgBrightModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgBrightModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgBrightModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgBrightModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgBrightModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgBrightModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgBrightBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Brightness");
+
+    s_cfgBrightValue = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightValue, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBrightValue, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_cfgBrightValue, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_cfgBrightValue, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgBrightSlider = lv_slider_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightSlider, modalW - 40);
+    lv_slider_set_range(s_cfgBrightSlider, BRIGHTNESS_PCT_MIN, BRIGHTNESS_PCT_MAX);
+    lv_slider_set_value(s_cfgBrightSlider, s_cfgBrightOriginal, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0x123266), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_cfgBrightSlider, lvColorFrom565(s_ui.selectAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t *hint = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Drag to adjust"
+#else
+                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+#endif
+    );
+
+    setCfgBrightnessPreview(s_cfgBrightOriginal);
+}
+
 // ── Chat-style picker ─────────────────────────────────────────────────────────
 // A small in-CFG modal to pick Classic / Bubbles / Outline directly. Picking the
 // current style is a no-op; picking a different one reboots (the style is applied
@@ -5224,7 +5485,10 @@ static void openChatStyleModal() {
     lv_obj_set_size(s_chatStyleModal, modalW, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_chatStyleModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_chatStyleModal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_chatStyleModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_chatStyleModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_chatStyleModal, LV_DIR_VER);
     lv_obj_add_flag(s_chatStyleModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_chatStyleModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_chatStyleModal, LV_OPA_COVER, 0);
@@ -5283,11 +5547,13 @@ static void openChatStyleModal() {
         lv_obj_set_style_text_color(name, rowTextColor, 0);
         lv_label_set_text(name, chatStyleName((uint8_t)i));
 
-        lv_obj_t *desc = lv_label_create(row);
-        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(desc, rowTextColor, 0);
-        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
-        lv_label_set_text(desc, kStyleDesc[i]);
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowTextColor, 0);
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+            lv_label_set_text(desc, kStyleDesc[i]);
+        }
     }
 
     refreshChatStyleSelection();
@@ -5397,7 +5663,10 @@ static void openThemeModal() {
     lv_obj_set_height(s_themeModal, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_themeModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_themeModal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_themeModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_themeModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_themeModal, LV_DIR_VER);
     lv_obj_set_style_bg_color(s_themeModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_themeModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_themeModal, 1, 0);
@@ -5581,7 +5850,10 @@ static void openChatNameModal() {
     lv_obj_set_size(s_chatNameModal, modalW, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_chatNameModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_chatNameModal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_chatNameModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_chatNameModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_chatNameModal, LV_DIR_VER);
     lv_obj_add_flag(s_chatNameModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_chatNameModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_chatNameModal, LV_OPA_COVER, 0);
@@ -5640,11 +5912,13 @@ static void openChatNameModal() {
         lv_obj_set_style_text_color(name, rowTextColor, 0);
         lv_label_set_text(name, kNameLabel[i]);
 
-        lv_obj_t *desc = lv_label_create(row);
-        lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(desc, rowTextColor, 0);
-        lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
-        lv_label_set_text(desc, kNameDesc[i]);
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowTextColor, 0);
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+            lv_label_set_text(desc, kNameDesc[i]);
+        }
     }
 
     refreshChatNameSelection();
@@ -5741,7 +6015,10 @@ static void openFontSizeModal() {
     lv_obj_set_size(s_fontSizeModal, modalW, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_fontSizeModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_fontSizeModal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_fontSizeModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_fontSizeModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_fontSizeModal, LV_DIR_VER);
     lv_obj_add_flag(s_fontSizeModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_fontSizeModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_fontSizeModal, LV_OPA_COVER, 0);
@@ -5923,7 +6200,10 @@ static void openAlertSoundModal() {
     lv_obj_set_size(s_alertSoundModal, modalW, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_alertSoundModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_alertSoundModal, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_alertSoundModal, LV_OBJ_FLAG_SCROLLABLE);
+    // Content taller than the height cap must stay reachable; the refresh
+    // helpers scroll the selected row into view.
+    lv_obj_add_flag(s_alertSoundModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_alertSoundModal, LV_DIR_VER);
     lv_obj_add_flag(s_alertSoundModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_alertSoundModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_alertSoundModal, LV_OPA_COVER, 0);
@@ -6692,6 +6972,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
 }
 
 static void closeCfgModal() {
+    revertCfgBrightnessPreview();
     closeCfgWifiPickerModal();
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
@@ -12432,6 +12713,7 @@ static void performCfgAction(int actionId) {
                 Serial.println("[web] CFG action: enable web config");
                 s_webCfgEnabled = true;
                 persistWebCfgEnabled();
+                webCfgSetForceAp(wifiForceApMode());
 
 #if HAS_SD_CARD
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
@@ -12443,6 +12725,20 @@ static void performCfgAction(int actionId) {
                         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Lite: %s", webCfgIP());
                     } else {
                         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web: %s", webCfgIP());
+                    }
+                    // On boards without the RAM for both, chat memory was just
+                    // handed to Wi-Fi. Messages are dropped, not queued, so make
+                    // that a dialog rather than a status line the user may miss.
+                    if (webCfgChatPaused()) {
+                        char warn[192];
+                        snprintf(warn, sizeof(warn),
+                                 "Web config: %s\n\n"
+                                 "Chat is PAUSED while web config runs - this "
+                                 "device needs that memory for Wi-Fi. Messages "
+                                 "sent to you now are not received or stored.\n\n"
+                                 "Turn web config off to resume messaging.",
+                                 webCfgIP());
+                        openCfgActionMessageModal(warn);
                     }
                 } else {
                     s_webCfgEnabled = false;
@@ -12545,6 +12841,12 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FONT_SIZE");
             showActionPopup = false;
             openFontSizeModal();    // pick directly; applies live, no reboot
+            break;
+
+        case CFG_ACTION_BRIGHTNESS:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BRIGHTNESS");
+            showActionPopup = false;
+            openCfgBrightnessModal();   // previews live, no reboot
             break;
 
         case CFG_ACTION_ANNOUNCE:
@@ -13912,6 +14214,28 @@ static void pumpKeyboardInput() {
 #endif
                 closeTracerouteProgressModal();
             }
+            continue;
+        }
+
+        // Brightness slider: j/k (and the scroll/channel keys) move by one 10%
+        // step, Enter saves, a close key restores the level we opened with.
+        if (s_cfgBrightModal) {
+            if (isModalCloseKey(k)) {
+                cancelCfgBrightness();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyCfgBrightness();
+                continue;
+            }
+            int steps = 0;
+            if (k == 'j' || k == 'J')            steps = 1;    // right / brighter
+            else if (k == 'k' || k == 'K')       steps = -1;   // left / dimmer
+            else if (k == KEY_SCROLL_UP)         steps = invertScrollNav ? -1 : 1;
+            else if (k == KEY_SCROLL_DN)         steps = invertScrollNav ? 1 : -1;
+            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
+            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
+            stepCfgBrightness(steps);
             continue;
         }
 
@@ -15349,6 +15673,8 @@ static void onWebCfgSaved() {
     persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
     applyUiThemePalette();
+    s_cfg.brightness = cfgCoerceBrightness(s_cfg.brightness);
+    if (!s_screenAsleep) applyBrightness();   // don't light a sleeping panel
 
     recomputeChannelHashes();
     deriveNodeId();
@@ -15626,6 +15952,7 @@ static void startWebConfigAuto() {
         return;
     }
     if (webCfgRunning()) return;
+    webCfgSetForceAp(wifiForceApMode());
 #if HAS_SD_CARD
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
@@ -15642,6 +15969,23 @@ static void startWebConfigAuto() {
         Serial.printf("[web] web config lite (AP): %s\n", webCfgIP());
     } else {
         Serial.printf("[web] web config: %s\n", webCfgIP());
+    }
+
+    // Auto-start means the user never chose this, so warn here too. Boards that
+    // don't reclaim chat memory report false and see nothing. (On boards where
+    // this runs before buildUi(), the modal call is a no-op — but those are the
+    // PSRAM boards, which never pause chat.)
+    if (webCfgChatPaused()) {
+        Serial.println("[web] chat buffers released - messages are being dropped");
+        char warn[192];
+        snprintf(warn, sizeof(warn),
+                 "Web config: %s\n\n"
+                 "Chat is PAUSED while web config runs - this device needs that "
+                 "memory for Wi-Fi. Messages sent to you now are not received "
+                 "or stored.\n\n"
+                 "Turn web config off to resume messaging.",
+                 webCfgIP());
+        openCfgActionMessageModal(warn);
     }
 }
 
@@ -19872,6 +20216,9 @@ void setup() {
 #endif
 
     loadConfigFromSd();
+    // The panel came up at the hardware default above, before any config
+    // existed; now that it's loaded, honour the user's level.
+    applyBrightness();
     drawBootSplash();
     playSplashStartupRiff();
     recomputeChannelHashes();

@@ -88,6 +88,16 @@
 #define MY_TZ_DEF        "EST5EDT,M3.2.0,M11.1.0"   // Eastern (Detroit)
 
 // ── Display defaults ──────────────────────────────────────────
+// Backlight level as a percentage, adjustable in 10% steps. The default is
+// derived from the board's TFT_BRIGHTNESS_DEFAULT duty (0-255) and rounded to
+// the nearest step, so an unconfigured device keeps the brightness its hardware
+// profile always used.
+#define MY_BRIGHTNESS_PCT \
+    ((((TFT_BRIGHTNESS_DEFAULT * 100 + 127) / 255) + 5) / 10 * 10)
+#define BRIGHTNESS_PCT_MIN  10
+#define BRIGHTNESS_PCT_MAX  100
+#define BRIGHTNESS_PCT_STEP 10
+
 #define MY_SCREEN_ON_SECS   30     // 30 s
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0

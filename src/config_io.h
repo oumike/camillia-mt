@@ -56,6 +56,7 @@ struct RhinoConfig {
     char     webCfgPass[64];
 
     // Display
+    uint8_t  brightness;         // backlight percent, 10..100 in 10% steps
     uint32_t screenOnSecs;
     uint8_t  displayUnits;       // 0=METRIC, 1=IMPERIAL
     bool     compassNorthTop;
@@ -127,6 +128,21 @@ struct RhinoConfig {
     bool     debugMessages;
     bool     debugGps;
 };
+
+// Clamps a backlight percentage to the supported range and snaps it to the
+// nearest 10% step. Shared by the on-device slider, the web form and YAML
+// import so an out-of-range value from any source lands somewhere sane.
+static inline uint8_t cfgCoerceBrightness(int pct) {
+    if (pct < BRIGHTNESS_PCT_MIN) return BRIGHTNESS_PCT_MIN;
+    if (pct > BRIGHTNESS_PCT_MAX) return BRIGHTNESS_PCT_MAX;
+    return (uint8_t)(((pct + BRIGHTNESS_PCT_STEP / 2) / BRIGHTNESS_PCT_STEP)
+                     * BRIGHTNESS_PCT_STEP);
+}
+
+// Backlight percent -> LGFX setBrightness() duty (0-255).
+static inline uint8_t cfgBrightnessDuty(uint8_t pct) {
+    return (uint8_t)((cfgCoerceBrightness(pct) * 255 + 50) / 100);
+}
 
 // Only client device roles are supported on this firmware. Values are the
 // canonical Meshtastic enum positions so they stay wire-compatible.

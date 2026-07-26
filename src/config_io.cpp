@@ -352,6 +352,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.webCfgAuthEnabled  = false;  // authentication disabled by default
     strncpy(cfg.webCfgPass, "admin", sizeof(cfg.webCfgPass) - 1);
     cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
+    cfg.brightness         = cfgCoerceBrightness(MY_BRIGHTNESS_PCT);
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
@@ -554,6 +555,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
     // display
     out += "  display:\n";
+    snprintf(tmp, sizeof(tmp), "    brightness: %u\n", (unsigned)cfg.brightness); out += tmp;
     snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
@@ -914,7 +916,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "fixedPin")) cfg.btFixedPin = (uint32_t)atol(val);
                 else if (!strcmp(key, "mode"))     cfg.btMode = !strcmp(val,"FIXED_PIN") ? 1 : !strcmp(val,"NO_PIN") ? 2 : 0;
             } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
-                if      (!strcmp(key, "screenOnSecs"))    cfg.screenOnSecs    = (uint32_t)atol(val);
+                if      (!strcmp(key, "brightness"))      cfg.brightness      = cfgCoerceBrightness(atoi(val));
+                else if (!strcmp(key, "screenOnSecs"))    cfg.screenOnSecs    = (uint32_t)atol(val);
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));

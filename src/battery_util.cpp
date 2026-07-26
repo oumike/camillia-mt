@@ -17,6 +17,7 @@
 namespace {
 constexpr uint8_t kBq25896Addr = 0x6B;
 constexpr uint8_t kBqRegAdcControl = 0x02;
+constexpr uint8_t kBqRegWatchdogRst = 0x03;   // bit 6 = WD_RST
 constexpr uint8_t kBqRegBattVoltage = 0x0E;
 constexpr uint16_t kBqVbatBaseMv = 2304;
 constexpr uint16_t kBqVbatStepMv = 20;
@@ -25,6 +26,7 @@ constexpr uint32_t kBqRetryBackoffMs = 15000UL;
 static bool sBqWireStarted = false;
 static bool sBqPresent = false;
 static bool sBqConfigured = false;
+static bool sBqZeroLogged = false;   // rate-limits the BATV=0 recovery log
 static uint32_t sBqNextProbeMs = 0;
 
 static void bqEnsureWire() {
@@ -69,6 +71,17 @@ static bool bqEnableBatteryAdc() {
     return bqWriteReg(kBqRegAdcControl, adc);
 }
 
+// Pet the charger's I2C watchdog (REG03 bit 6, WD_RST). It defaults to 40 s,
+// and on expiry the BQ25896 restores its registers to power-on defaults — which
+// clears the ADC enable we set above, so BATV then reads 0 with the chip still
+// happily ACKing. That is why the gauge would work for the first half-minute
+// after boot and read 0% forever after.
+static bool bqKickWatchdog() {
+    uint8_t reg = 0;
+    if (!bqReadReg(kBqRegWatchdogRst, reg)) return false;
+    return bqWriteReg(kBqRegWatchdogRst, (uint8_t)(reg | 0x40));
+}
+
 static float batteryReadPagerBqVolts() {
     bqEnsureWire();
     uint32_t nowMs = millis();
@@ -93,13 +106,31 @@ static float batteryReadPagerBqVolts() {
         }
     }
 
+    // Keep the charger's watchdog from expiring and wiping our ADC config.
+    bqKickWatchdog();
+
     uint8_t reg = 0;
     if (!bqReadReg(kBqRegBattVoltage, reg)) {
+        Serial.println("[batt] BQ25896 read failed - retrying probe");
         bqMarkUnavailable(nowMs);
         return 0.0f;
     }
     uint8_t raw = reg & 0x7F;
-    if (raw == 0) return 0.0f;
+    if (raw == 0) {
+        // The chip answered but the ADC has no result: its registers were reset
+        // out from under us (watchdog, brown-out) or conversion stopped. Without
+        // re-arming here this latches at 0% forever, because sBqPresent and
+        // sBqConfigured both still look healthy. Re-enable and pick it up on the
+        // next sample rather than blocking this one on a conversion.
+        sBqConfigured = bqEnableBatteryAdc();
+        if (sBqZeroLogged == false) {
+            Serial.printf("[batt] BQ25896 BATV=0 (reg0x0E=0x%02X) - re-armed ADC %s\n",
+                          reg, sBqConfigured ? "OK" : "FAILED");
+            sBqZeroLogged = true;
+        }
+        return 0.0f;
+    }
+    sBqZeroLogged = false;
 
     uint16_t mv = (uint16_t)(kBqVbatBaseMv + (raw * kBqVbatStepMv));
     return mv / 1000.0f;

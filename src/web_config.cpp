@@ -54,6 +54,23 @@ static bool           gOnboarding      = false;
 // while the AP itself is up — the page weight must follow the radio mode, not
 // the DNS server.
 static bool           gApMode          = false;
+// Set from the on-device WiFi picker's "AP" entry: start the SoftAP even when
+// credentials are saved, instead of joining the network.
+static bool           gForceAp         = false;
+
+// Boards that always serve web config lite, regardless of radio mode. The
+// Cardputer has no PSRAM and ~23 KB of internal heap once Wi-Fi is up, which the
+// full page's Live/Nodes/Utilities panes and their JS cannot fit: writes crawl
+// at a few hundred bytes per 300 ms because the stack can't get TX buffers.
+// Lite carries the entire Config pane, so nothing configurable is lost.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static const bool     kLiteOnlyBoard   = true;
+#else
+static const bool     kLiteOnlyBoard   = false;
+#endif
+
+// True when the current response should be the lite page.
+static inline bool webCfgUseLite() { return gApMode || kLiteOnlyBoard; }
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
@@ -888,6 +905,10 @@ static const int kTzCount = (int)(sizeof(kTzOptions) / sizeof(kTzOptions[0]));
 // Set when a response is abandoned mid-render; cleared at the start of each page.
 static bool gSendAborted = false;
 
+// Largest single write handed to the socket. Comfortably inside one TCP segment
+// so a write can't outrun the space the writability check just observed.
+static const size_t kFlashChunkBytes = 512;
+
 // Waits (briefly) for the socket to accept data, and reports whether it will.
 //
 // This exists because WiFiClient::write() cannot be bounded from outside: it
@@ -928,25 +949,46 @@ static bool sendStalled() {
 static void sendChunk(String &html) {
     const size_t len = html.length();
     if (!len) return;
-    if (sendStalled()) { html = ""; return; }
 
-    const uint32_t t0 = millis();
-    server.sendContent(html);
-    const uint32_t dt = millis() - t0;
-    if (dt > 100) Serial.printf("[web] slow chunk: %u bytes in %u ms\n",
-                                (unsigned)len, (unsigned)dt);
+    // Sliced for the same reason as sendFlash(): keep any single write inside
+    // what the socket just said it could take.
+    const char *data = html.c_str();
+    for (size_t off = 0; off < len; ) {
+        if (sendStalled()) break;
+        const size_t n = (len - off > kFlashChunkBytes) ? kFlashChunkBytes
+                                                        : (len - off);
+        const uint32_t t0 = millis();
+        server.sendContent(data + off, n);
+        const uint32_t dt = millis() - t0;
+        if (dt > 100) Serial.printf("[web] slow chunk: %u bytes in %u ms\n",
+                                    (unsigned)n, (unsigned)dt);
+        off += n;
+        delay(1);   // let the TCP stack push data out and take ACKs
+    }
     html = "";
-    delay(1);   // let the TCP stack push data out and take ACKs
 }
 
 // Same guards for the flash-resident constants, which bypass the String buffer.
+//
+// Sliced rather than handed over whole: several of these run to multiple KB, and
+// a socket reporting "writable" only promises *some* space. Passing 7 KB to one
+// write() lets it fill the send buffer and then spin in its own retry loop for
+// 10 s — exactly the stall the writability check was meant to prevent. Writing
+// in small pieces keeps that check meaningful, since it runs again before each.
 static void sendFlash(const char *progmem) {
-    if (sendStalled()) return;
-    const uint32_t t0 = millis();
-    server.sendContent_P(progmem);
-    const uint32_t dt = millis() - t0;
-    if (dt > 100) Serial.printf("[web] slow flash chunk: %u ms\n", (unsigned)dt);
-    delay(1);
+    const size_t total = strlen(progmem);   // ESP32 maps flash, so plain strlen
+    for (size_t off = 0; off < total; ) {
+        if (sendStalled()) return;
+        const size_t n = (total - off > kFlashChunkBytes) ? kFlashChunkBytes
+                                                          : (total - off);
+        const uint32_t t0 = millis();
+        server.sendContent_P(progmem + off, n);
+        const uint32_t dt = millis() - t0;
+        if (dt > 100) Serial.printf("[web] slow flash chunk: %u bytes in %u ms\n",
+                                    (unsigned)n, (unsigned)dt);
+        off += n;
+        delay(1);
+    }
 }
 
 // Flush only once the buffer is worth a TCP segment. Chunk size is a balance
@@ -994,7 +1036,7 @@ static void sendLoginPage(const char *err = "") {
     // heap left after SoftAP comes up.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
-    sendFlash(gApMode ? kLiteHead : kHead);
+    sendFlash(webCfgUseLite() ? kLiteHead : kHead);
     String html;
     html +=
         "<h2>Camillia MT</h2>"
@@ -1466,6 +1508,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     if (msg[0]) { html += "<p class='msg'>"; html += msg; html += "</p>"; }
 
+    // This board freed its chat buffers so Wi-Fi could start, so the device is
+    // dropping messages for as long as this page is being served. Say so
+    // prominently — it is not recoverable by anything on this page.
+    if (gWebBuffersReclaimed) {
+        html += "<p style='color:#d81f2a;font-weight:700;border:1px solid #d81f2a;"
+                "border-radius:4px;padding:.5em;margin:.5em 0'>"
+                "Chat is paused. This device needed its message memory to run "
+                "Wi-Fi, so messages sent to it are not being received or stored "
+                "while web config is on. Turn web config off on the device to "
+                "resume messaging.</p>";
+    }
+
     if (lite) {
         html += "<p>Access-point mode. All settings are here; the live feed, "
                 "chat and node map need the device on your WiFi network. "
@@ -1759,6 +1813,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // ── Display ───────────────────────────────────────────────
     section(html, lite, "Display", false);
+    // Brightness: a range input in the same 10% steps as the on-device slider,
+    // with the value mirrored next to it since a bare range shows no number.
+    {
+        char b[8];
+        snprintf(b, sizeof(b), "%u", (unsigned)cfgCoerceBrightness(gCfg->brightness));
+        html += "<label>Brightness <output id='briOut'>";
+        html += b; html += "%</output>"
+                "<input name='brightness' type='range' id='briIn'"
+                " min='"; html += String(BRIGHTNESS_PCT_MIN);
+        html += "' max='"; html += String(BRIGHTNESS_PCT_MAX);
+        html += "' step='"; html += String(BRIGHTNESS_PCT_STEP);
+        html += "' value='"; html += b;
+        html += "' oninput=\"document.getElementById('briOut').textContent=this.value+'%'\">"
+                "</label>";
+    }
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -2968,7 +3037,7 @@ static void handleGetConfig() {
     strncpy(msg, gFlashMsg, sizeof(msg));
     msg[sizeof(msg) - 1] = '\0';
     gFlashMsg[0] = '\0';
-    sendConfigPage(msg, /*lite=*/gApMode);
+    sendConfigPage(msg, /*lite=*/webCfgUseLite());
 }
 
 static void handlePostOnboard() {
@@ -3189,6 +3258,9 @@ static void handlePostSave() {
     }
 
     // Display
+    if (server.hasArg("brightness")) {
+        gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
+    }
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -4118,9 +4190,12 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         return true;
     };
 
-    if (savedSsid.isEmpty()) {
-        // ── Onboarding mode: create an AP with full config ────
-        bool ok = startApMode("onboarding AP", true);
+    // No credentials means onboarding; the picker's "AP" entry forces the same
+    // SoftAP even when credentials exist, so the user can reach web config
+    // without their network (or when it's out of range).
+    if (savedSsid.isEmpty() || gForceAp) {
+        const bool onboarding = savedSsid.isEmpty();
+        bool ok = startApMode(onboarding ? "onboarding AP" : "forced AP", onboarding);
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
@@ -4171,7 +4246,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // this only stays in effect while web config is up.
     WiFi.setSleep(false);
 
-    registerCommonRoutes();
+    if (kLiteOnlyBoard) {
+        registerLiteRoutes();
+    } else {
+        registerCommonRoutes();
+    }
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
@@ -4222,7 +4301,9 @@ void webCfgEnd() {
 }
 
 bool webCfgIsOnboarding() { return gOnboarding; }
-bool webCfgIsLite() { return running && gApMode; }
+bool webCfgIsLite() { return running && webCfgUseLite(); }
+bool webCfgChatPaused() { return running && gWebBuffersReclaimed; }
+void webCfgSetForceAp(bool force) { gForceAp = force; }
 const char *webCfgWifiSsid() { return gWifiSsid; }
 const char *webCfgWifiPass() { return gWifiPass; }
 

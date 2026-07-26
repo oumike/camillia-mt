@@ -61,6 +61,16 @@ bool webCfgIsOnboarding();
 // serving the Config tab only. False for the full config served over STA.
 bool webCfgIsLite();
 
+// Force the next webCfgBegin() to bring up the SoftAP even when WiFi
+// credentials are saved. Backs the "AP" entry in the on-device WiFi picker,
+// which lets a user reach web config without joining their network.
+void webCfgSetForceAp(bool force);
+
+// True while the server is up AND this board had to free its chat/DM buffers to
+// fit the WiFi stack (no-PSRAM boards). Messages are dropped, not queued, for
+// the duration — callers should say so rather than let it look like a fault.
+bool webCfgChatPaused();
+
 // Current WiFi credentials (updated by web UI save, used by NVS save callback)
 const char *webCfgWifiSsid();
 const char *webCfgWifiPass();
