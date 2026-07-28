@@ -3357,6 +3357,12 @@ struct CfgBlobHeader {
     uint16_t bytes;      // RhinoConfig bytes following the header
 };
 
+// One buffer shared by the save and load paths. Static rather than stack because
+// serviceConfigFlush() saves from the main loop, on the same 8 KB task stack LVGL
+// renders from; shared rather than one each because this board has little static
+// RAM to spare. Only the UI thread touches it, and never re-entrantly.
+static uint8_t s_cfgBlobBuf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)];
+
 // Keys in "camillia" that are not part of the blob and must survive migration:
 // the node identity, and the one-shot flags read before any config is loaded.
 static bool camilliaKeyIsPreserved(const char *key) {
@@ -3375,8 +3381,12 @@ static bool camilliaKeyIsPreserved(const char *key) {
 // the way are reclaimed too. Collects first and deletes after: removing entries
 // while an NVS iterator is open is not safe.
 static int removeLegacyConfigKeys() {
-    static char doomed[96][NVS_KEY_NAME_MAX_SIZE];
-    const int cap = (int)(sizeof(doomed) / sizeof(doomed[0]));
+    // Heap, not a static: this runs once ever, on the boot that migrates, and a
+    // permanent 1.5 KB for a one-shot is RAM this board would rather keep.
+    const int cap = 96;
+    char (*doomed)[NVS_KEY_NAME_MAX_SIZE] =
+        (char (*)[NVS_KEY_NAME_MAX_SIZE])malloc((size_t)cap * NVS_KEY_NAME_MAX_SIZE);
+    if (!doomed) return 0;
     int n = 0;
 
     nvs_iterator_t it = nvs_entry_find("nvs", "camillia", NVS_TYPE_ANY);
@@ -3384,19 +3394,20 @@ static int removeLegacyConfigKeys() {
         nvs_entry_info_t info = {};
         nvs_entry_info(it, &info);
         if (!camilliaKeyIsPreserved(info.key)) {
-            strncpy(doomed[n], info.key, sizeof(doomed[0]) - 1);
-            doomed[n][sizeof(doomed[0]) - 1] = '\0';
+            strncpy(doomed[n], info.key, NVS_KEY_NAME_MAX_SIZE - 1);
+            doomed[n][NVS_KEY_NAME_MAX_SIZE - 1] = '\0';
             n++;
         }
         it = nvs_entry_next(it);
     }
     if (it) nvs_release_iterator(it);   // loop stopped early; iterator still open
-    if (n <= 0) return 0;
+    if (n <= 0) { free(doomed); return 0; }
 
     Preferences p;
-    if (!p.begin("camillia", false)) return 0;
+    if (!p.begin("camillia", false)) { free(doomed); return 0; }
     for (int i = 0; i < n; i++) p.remove(doomed[i]);
     p.end();
+    free(doomed);
     return n;
 }
 
@@ -3414,7 +3425,7 @@ static void persistConfigToPrefs() {
         s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
     }
 
-    uint8_t buf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)];
+    uint8_t *buf = s_cfgBlobBuf;
     const CfgBlobHeader hdr = { kCfgBlobVersion, (uint16_t)sizeof(RhinoConfig) };
     memcpy(buf, &hdr, sizeof(hdr));
     memcpy(buf + sizeof(hdr), &s_cfg, sizeof(s_cfg));
@@ -3482,8 +3493,12 @@ struct ChanBlob {
     ChanBlobRecord chans[MESH_CHANNELS];
 };
 
+// Shared by save and load for the same reasons as s_cfgBlobBuf.
+static ChanBlob s_chanBlob;
+
 static void persistChannelsToPrefs() {
-    ChanBlob blob = {};
+    ChanBlob &blob = s_chanBlob;
+    memset(&blob, 0, sizeof(blob));
     blob.version = kChanBlobVersion;
     blob.count   = MESH_CHANNELS;
     for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -3521,8 +3536,10 @@ static void persistChannelsToPrefs() {
 // Drops the per-channel keys written before the blob existed. Same collect-then-
 // delete shape as removeLegacyConfigKeys(); everything but the blob goes.
 static int removeLegacyChannelKeys() {
-    static char doomed[64][NVS_KEY_NAME_MAX_SIZE];
-    const int cap = (int)(sizeof(doomed) / sizeof(doomed[0]));
+    const int cap = 64;   // heap for the same reason as removeLegacyConfigKeys()
+    char (*doomed)[NVS_KEY_NAME_MAX_SIZE] =
+        (char (*)[NVS_KEY_NAME_MAX_SIZE])malloc((size_t)cap * NVS_KEY_NAME_MAX_SIZE);
+    if (!doomed) return 0;
     int n = 0;
 
     nvs_iterator_t it = nvs_entry_find("nvs", "mesh_ch", NVS_TYPE_ANY);
@@ -3530,19 +3547,20 @@ static int removeLegacyChannelKeys() {
         nvs_entry_info_t info = {};
         nvs_entry_info(it, &info);
         if (strcmp(info.key, kChanBlobKey) != 0) {
-            strncpy(doomed[n], info.key, sizeof(doomed[0]) - 1);
-            doomed[n][sizeof(doomed[0]) - 1] = '\0';
+            strncpy(doomed[n], info.key, NVS_KEY_NAME_MAX_SIZE - 1);
+            doomed[n][NVS_KEY_NAME_MAX_SIZE - 1] = '\0';
             n++;
         }
         it = nvs_entry_next(it);
     }
     if (it) nvs_release_iterator(it);
-    if (n <= 0) return 0;
+    if (n <= 0) { free(doomed); return 0; }
 
     Preferences p;
-    if (!p.begin("mesh_ch", false)) return 0;
+    if (!p.begin("mesh_ch", false)) { free(doomed); return 0; }
     for (int i = 0; i < n; i++) p.remove(doomed[i]);
     p.end();
+    free(doomed);
     return n;
 }
 
@@ -3580,8 +3598,9 @@ static void loadConfigFromPrefs() {
     // kept only so a device upgrading from an older build can be migrated.
     if (prefs.isKey(kCfgBlobKey)) {
         s_firstBoot = false;
-        uint8_t buf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)] = {};
-        const size_t got = prefs.getBytes(kCfgBlobKey, buf, sizeof(buf));
+        uint8_t *buf = s_cfgBlobBuf;
+        memset(buf, 0, sizeof(s_cfgBlobBuf));
+        const size_t got = prefs.getBytes(kCfgBlobKey, buf, sizeof(s_cfgBlobBuf));
         // Both live outside the blob because they are consulted before config
         // is unpacked; read them here so this path ends up in the same state as
         // the legacy one below.
@@ -3876,7 +3895,8 @@ static void loadChannelsFromPrefs() {
     if (!cp.begin("mesh_ch", false)) return;
 
     if (cp.isKey(kChanBlobKey)) {
-        ChanBlob blob = {};
+        ChanBlob &blob = s_chanBlob;
+        memset(&blob, 0, sizeof(blob));
         const size_t got = cp.getBytes(kChanBlobKey, &blob, sizeof(blob));
         cp.end();
         if (got < sizeof(blob) || blob.version != kChanBlobVersion) {
