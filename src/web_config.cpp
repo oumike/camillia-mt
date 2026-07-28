@@ -3077,6 +3077,16 @@ static void handlePostOnboard() {
         gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
     }
 
+    // Write the settings blob too, via the same callback every other save path
+    // uses. The standalone keys above are the pre-blob format: on a device that
+    // has already migrated they are ignored at load, so onboarding alone left
+    // the credentials nowhere the next boot would look and the setup AP came
+    // straight back. A freshly erased device has no blob yet, takes the legacy
+    // read path, and is why this only reproduced after an upgrade-in-place.
+    // Synchronous on purpose — the debounced markConfigDirty() path would not
+    // survive the ESP.restart() below.
+    if (gOnSave) gOnSave();
+
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/html", "");
     sendFlash(kLiteHead);
@@ -4148,6 +4158,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // a device that has not migrated yet. Copying them over gCfg unconditionally
     // wiped the credentials the blob had just supplied, which is why WiFi (and a
     // custom web password) came back empty on every boot after the migration.
+    //
+    // Everything downstream must therefore key off gCfg, never savedSsid: on a
+    // migrated device those keys are gone, so savedSsid is empty even when the
+    // blob has good credentials. Deciding AP-vs-STA on savedSsid sent every such
+    // device to the onboarding AP on each boot.
     Preferences prefs;
     prefs.begin("camillia", true);
     String savedSsid = prefs.isKey("wifiSsid") ? prefs.getString("wifiSsid", "") : "";
@@ -4215,8 +4230,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // No credentials means onboarding; the picker's "AP" entry forces the same
     // SoftAP even when credentials exist, so the user can reach web config
     // without their network (or when it's out of range).
-    if (savedSsid.isEmpty() || gForceAp) {
-        const bool onboarding = savedSsid.isEmpty();
+    if (!gCfg->wifiSsid[0] || gForceAp) {
+        const bool onboarding = !gCfg->wifiSsid[0];
         bool ok = startApMode(onboarding ? "onboarding AP" : "forced AP", onboarding);
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
@@ -4230,7 +4245,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
-    wl_status_t beginStatus = WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    wl_status_t beginStatus = WiFi.begin(gCfg->wifiSsid, gCfg->wifiPass);
     if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
         Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
         logWifiHeapDiag("STA begin failed");
@@ -4238,7 +4253,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
-    Serial.printf("[web] connecting to \"%s\" ...\n", savedSsid.c_str());
+    Serial.printf("[web] connecting to \"%s\" ...\n", gCfg->wifiSsid);
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {

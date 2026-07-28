@@ -37,6 +37,7 @@
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <esp_partition.h>
+#include <esp_ota_ops.h>
 #include <SD.h>
 #include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -1101,6 +1102,10 @@ static void applyChannelButtonTheme();
 
 static void openOnboardingModal();
 static void closeOnboardingModal();
+// Set when the paused-chat notice is raised while onboarding owns the keyboard;
+// closeOnboardingModal() shows it once there is something to dismiss it with.
+static bool s_webCfgChatPausedNoticePending = false;
+static void showWebCfgChatPausedNotice();
 static void renderOnboardingStage();
 static void onboardingAcceptImport();
 static void onboardingDeclineImport();
@@ -3363,6 +3368,12 @@ struct CfgBlobHeader {
 // RAM to spare. Only the UI thread touches it, and never re-entrantly.
 static uint8_t s_cfgBlobBuf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)];
 
+// What the boot-time settings load actually did. loadConfigFromPrefs() runs
+// before USB CDC enumerates, so its Serial output is never seen on these
+// boards (same reason logNvsHealth() is repeated at the end of setup()).
+// Recorded here and restated alongside that repeat.
+static char s_cfgLoadReport[112] = "loadConfigFromPrefs() never ran";
+
 // Keys in "camillia" that are not part of the blob and must survive migration:
 // the node identity, and the one-shot flags read before any config is loaded.
 static bool camilliaKeyIsPreserved(const char *key) {
@@ -3446,6 +3457,11 @@ static void persistConfigToPrefs() {
     if (wrote != sizeof(s_cfgBlobBuf)) {
         Serial.printf("[cfg] save FAILED: wrote %u of %u bytes (NVS full?)\n",
                       (unsigned)wrote, (unsigned)sizeof(s_cfgBlobBuf));
+    } else {
+        // Success was silent, which made "did the save happen?" unanswerable
+        // from a log. It is one line per debounced flush, not per keypress.
+        Serial.printf("[cfg] saved %u bytes, wifiSsid=\"%s\" forceAp=%d\n",
+                      (unsigned)wrote, s_cfg.wifiSsid, (int)wifiForceApMode());
     }
 }
 
@@ -3593,6 +3609,8 @@ static void loadConfigFromPrefs() {
         // WiFi credentials it starts the onboarding AP, so the device is
         // configurable from a phone/browser out of the box.
         s_webCfgEnabled = true;
+        snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
+                 "no 'camillia' namespace - first boot, defaults");
         return;
     }
 
@@ -3624,6 +3642,10 @@ static void loadConfigFromPrefs() {
             // Defaults are already in s_cfg; better that than misread bytes.
             Serial.printf("[cfg] settings blob v%u unusable (want v%u) - using defaults\n",
                           (unsigned)hdr.version, (unsigned)kCfgBlobVersion);
+            snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
+                     "blob UNUSABLE: got=%u v%u want v%u payload=%u - defaults",
+                     (unsigned)got, (unsigned)hdr.version,
+                     (unsigned)kCfgBlobVersion, (unsigned)payload);
             return;
         }
         // Append-only rule: a shorter blob fills the front of the struct and
@@ -3631,6 +3653,10 @@ static void loadConfigFromPrefs() {
         const size_t copy = (payload < sizeof(RhinoConfig)) ? payload : sizeof(RhinoConfig);
         memcpy(&s_cfg, buf + sizeof(hdr), copy);
         applyLoadedConfigInvariants();
+        snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
+                 "blob ok: got=%u copied=%u/%u wifiSsid=\"%s\" forceAp=%d",
+                 (unsigned)got, (unsigned)copy, (unsigned)sizeof(RhinoConfig),
+                 s_cfg.wifiSsid, (int)forceAp);
         return;
     }
 
@@ -3888,8 +3914,14 @@ static void loadConfigFromPrefs() {
             const int freed = removeLegacyConfigKeys();
             Serial.printf("[cfg] migrated settings to blob storage (%d legacy keys reclaimed)\n",
                           freed);
+            snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
+                     "legacy keys migrated to blob (%d reclaimed) wifiSsid=\"%s\"",
+                     freed, s_cfg.wifiSsid);
         } else {
             Serial.println("[cfg] blob migration failed; keeping legacy keys");
+            snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
+                     "legacy keys read, blob migration FAILED wifiSsid=\"%s\"",
+                     s_cfg.wifiSsid);
         }
     }
 }
@@ -6852,19 +6884,16 @@ static void cfgWifiConnectFromPassModal() {
 
     if (connected) {
         addTempKnownWifi(s_cfgWifiPassTargetSsid, pass);
-        if (strncmp(s_cfgWifiPassTargetSsid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid)) == 0) {
-            s_wifiUsingKnownOverride = false;
-            memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
-            memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
-        } else {
-            s_wifiUsingKnownOverride = true;
-            strncpy(s_wifiSelectedSsid, s_cfgWifiPassTargetSsid, sizeof(s_wifiSelectedSsid) - 1);
-            strncpy(s_wifiSelectedPass, pass, sizeof(s_wifiSelectedPass) - 1);
-        }
         s_wifiStaKickMs = 0;
 
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi connected: %s", s_cfgWifiPassTargetSsid);
         if (s_cfgWifiPickerOnboardingMode) {
+            // Onboarding keeps this a runtime override on purpose: the scratch
+            // copied below is what onboardingFinalize() folds into s_cfg once
+            // the whole flow is confirmed.
+            s_wifiUsingKnownOverride = true;
+            strncpy(s_wifiSelectedSsid, s_cfgWifiPassTargetSsid, sizeof(s_wifiSelectedSsid) - 1);
+            strncpy(s_wifiSelectedPass, pass, sizeof(s_wifiSelectedPass) - 1);
             utf8util::copyTruncate(s_onboardingWifiSsidScratch,
                                    sizeof(s_onboardingWifiSsidScratch),
                                    s_cfgWifiPassTargetSsid);
@@ -6878,6 +6907,26 @@ static void cfgWifiConnectFromPassModal() {
             onboardingSetStatus(s_cfgStatus);
             return;
         }
+        // Outside onboarding this picker *is* the WiFi settings UI, so a network
+        // joined here becomes the configured one rather than a runtime override.
+        // Leaving it as an override was why credentials entered on an already
+        // onboarded device never survived a reboot: the override lives only in
+        // RAM, s_cfg.wifiSsid stayed empty, and syncWifiCredsToPrefs() bails on
+        // exactly that condition — so nothing ever reached the settings blob and
+        // the next boot came up in the onboarding AP. A freshly erased device
+        // hid this by going through onboarding, whose scratch does reach s_cfg.
+        utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_cfgWifiPassTargetSsid);
+        utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), pass ? pass : "");
+        s_wifiUsingKnownOverride = false;
+        memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+        memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+        // Clearing the override also drops any persisted "AP" choice, which
+        // would otherwise force the SoftAP again on the next boot and mask the
+        // network just saved.
+        persistWifiForceAp();
+        syncWifiCredsToPrefs();
+        flushConfigIfDirty();   // not debounced: the user may power-cycle next
+
         closeCfgWifiPassModal();
         closeCfgWifiScanModal();
         populateKnownWifiEntries();
@@ -14225,6 +14274,13 @@ static void closeOnboardingModal() {
     s_onboardingKeyboard = nullptr;
     s_onboardingStatus = nullptr;
     s_onboardingPickLabel = nullptr;
+
+    // Web config came up during setup and paused chat; now there is a keyboard
+    // free to dismiss the notice with.
+    if (s_webCfgChatPausedNoticePending) {
+        s_webCfgChatPausedNoticePending = false;
+        showWebCfgChatPausedNotice();
+    }
 }
 
 static void onboardingAcceptImport() {
@@ -14421,6 +14477,18 @@ static void pumpKeyboardInput() {
         // First-boot onboarding is fully modal: swallow every other UI key
         // while it's up so the user can't wander into the main app before
         // supplying a node identity.
+        // The action popup is drawn above everything, so it takes keys before any
+        // screen underneath it — otherwise whatever it covers keeps consuming
+        // input and the popup cannot be dismissed at all. Any key closes it.
+        if (s_cfgActionMsgModal) {
+            const uint32_t nowMs = millis();
+            // Ignore repeats from the keypress that raised it.
+            if ((uint32_t)(nowMs - s_cfgActionMsgOpenedMs) >= 300UL) {
+                closeCfgActionMessageModal();
+            }
+            continue;
+        }
+
         if (s_onboardingModal && !s_cfgWifiModal && !s_cfgWifiScanModal && !s_cfgWifiPassModal) {
             if (s_onboardingStage == ONBOARD_STAGE_ASK_IMPORT) {
                 if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
@@ -14521,10 +14589,14 @@ static void pumpKeyboardInput() {
                 continue;
             }
             int steps = 0;
-            if (k == 'j' || k == 'J')            steps = 1;    // right / brighter
-            else if (k == 'k' || k == 'K')       steps = -1;   // left / dimmer
-            else if (k == KEY_SCROLL_UP)         steps = invertScrollNav ? -1 : 1;
-            else if (k == KEY_SCROLL_DN)         steps = invertScrollNav ? 1 : -1;
+            // j/k reach here already remapped to KEY_SCROLL_UP/DN by
+            // remapJkUiKey(), so the literal cases below only fire on builds
+            // where that remap is compiled out. navFromJk is what tells the two
+            // apart, and here they run opposite to the wheel: j dims, k brightens.
+            if (k == 'j' || k == 'J')            steps = -1;   // dimmer
+            else if (k == 'k' || k == 'K')       steps = 1;    // brighter
+            else if (k == KEY_SCROLL_UP)         steps = (invertScrollNav || navFromJk) ? -1 : 1;
+            else if (k == KEY_SCROLL_DN)         steps = (invertScrollNav || navFromJk) ? 1 : -1;
             else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
             else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
             stepCfgBrightness(steps);
@@ -14882,17 +14954,6 @@ static void pumpKeyboardInput() {
 #endif
         }
 #endif
-
-        // Action-result popup over CFG is modal; any key dismisses it.
-        if (s_cfgActionMsgModal) {
-            uint32_t nowMs = millis();
-            // Ignore immediate key repeats from the Enter that triggered the action.
-            if ((uint32_t)(nowMs - s_cfgActionMsgOpenedMs) < 300UL) {
-                continue;
-            }
-            closeCfgActionMessageModal();
-            continue;
-        }
 
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
@@ -16284,16 +16345,28 @@ static void startWebConfigAuto() {
     // PSRAM boards, which never pause chat.)
     if (webCfgChatPaused()) {
         Serial.println("[web] chat buffers released - messages are being dropped");
-        char warn[192];
-        snprintf(warn, sizeof(warn),
-                 "Web config: %s\n\n"
-                 "Chat is PAUSED while web config runs - this device needs that "
-                 "memory for Wi-Fi. Messages sent to you now are not received "
-                 "or stored.\n\n"
-                 "Turn web config off to resume messaging.",
-                 webCfgIP());
-        openCfgActionMessageModal(warn);
+        // Not while onboarding is up. Onboarding owns the keyboard until it
+        // finishes, so a popup raised over it can never be dismissed — and its
+        // advice ("turn web config off") is not something the user can act on
+        // mid-setup anyway. Defer it to whenever onboarding closes.
+        if (s_onboardingModal) {
+            s_webCfgChatPausedNoticePending = true;
+        } else {
+            showWebCfgChatPausedNotice();
+        }
     }
+}
+
+static void showWebCfgChatPausedNotice() {
+    char warn[192];
+    snprintf(warn, sizeof(warn),
+             "Web config: %s\n\n"
+             "Chat is PAUSED while web config runs - this device needs that "
+             "memory for Wi-Fi. Messages sent to you now are not received "
+             "or stored.\n\n"
+             "Turn web config off to resume messaging.",
+             webCfgIP());
+    openCfgActionMessageModal(warn);
 }
 
 static bool shouldHideChatLine(const char *text) {
@@ -20771,6 +20844,19 @@ void setup() {
     // enumerated, so on these boards it is never seen; by here the host is
     // attached and this is the first output a serial monitor reliably catches.
     logNvsHealth();
+    // Which OTA slot actually booted. `pio run -t upload` always writes app0,
+    // but the bootloader follows otadata — so on a device that has taken an OTA
+    // update, otadata points at app1 and every subsequent local upload lands in
+    // a slot that is never executed. That failure is silent and looks exactly
+    // like a code change having no effect.
+    if (const esp_partition_t *running = esp_ota_get_running_partition()) {
+        Serial.printf("[boot] running app: %s @0x%06X (upload writes app0 @0x010000)\n",
+                      running->label, (unsigned)running->address);
+    }
+    Serial.printf("[cfg] boot load: %s\n", s_cfgLoadReport);
+    Serial.printf("[cfg] live: wifiSsid=\"%s\" override=%d selected=\"%s\" webCfgRunning=%d\n",
+                  s_cfg.wifiSsid, (int)s_wifiUsingKnownOverride,
+                  s_wifiSelectedSsid, (int)webCfgRunning());
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer (no PSRAM): auto-start web config only now that the node DB,
     // chat/DM buffers, radio, and UI are all allocated — this mirrors the
