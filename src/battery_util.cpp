@@ -25,9 +25,11 @@ constexpr uint32_t kBqRetryBackoffMs = 15000UL;
 
 static bool sBqWireStarted = false;
 static bool sBqPresent = false;
-static bool sBqConfigured = false;
-static bool sBqZeroLogged = false;   // rate-limits the BATV=0 recovery log
+static bool sBqConversionPending = false;   // one-shot started, result not yet read
+static bool sBqZeroLogged = false;   // rate-limits the BATV=0 log
 static uint32_t sBqNextProbeMs = 0;
+static uint8_t sBqLastRawReg = 0;    // last REG0E byte, for the `batt` CLI dump
+static uint16_t sBqLastMv = 0;       // last decoded millivolts
 
 static void bqEnsureWire() {
     if (sBqWireStarted) return;
@@ -43,7 +45,7 @@ static bool bqProbePresent() {
 
 static void bqMarkUnavailable(uint32_t nowMs) {
     sBqPresent = false;
-    sBqConfigured = false;
+    sBqConversionPending = false;
     sBqNextProbeMs = nowMs + kBqRetryBackoffMs;
 }
 
@@ -63,12 +65,33 @@ static bool bqWriteReg(uint8_t reg, uint8_t val) {
     return Wire.endTransmission() == 0;
 }
 
-static bool bqEnableBatteryAdc() {
+// One-shot conversions, not continuous. Continuous mode (CONV_RATE, bit 6) has
+// to survive on its own between reads, and on this board it does not: anything
+// that resets the charger's registers — the I2C watchdog below, a brown-out,
+// the charger re-entering a state that halts conversion — leaves REG0E
+// answering 0 or a stale value while the chip still ACKs every read. There is
+// no status bit that distinguishes "no conversion running" from "battery is
+// flat", which is why it presents as a battery stuck at 0% or a percentage that
+// does not track reality.
+//
+// A one-shot cannot go stale the same way: CONV_START is set here and cleared
+// by the hardware when the result is ready, so the bit itself says whether
+// REG0E holds a fresh answer. Started on one sample and collected on the next
+// (~1.2 s later), so nothing blocks the UI waiting ~70 ms for a conversion.
+static bool bqStartConversion() {
     uint8_t adc = 0;
     if (!bqReadReg(kBqRegAdcControl, adc)) return false;
-    adc |= 0x80; // ADC conversion enable
-    adc |= 0x40; // Continuous conversion mode
+    adc &= (uint8_t)~0x40;   // CONV_RATE = 0: one shot
+    adc |= 0x80;             // CONV_START
     return bqWriteReg(kBqRegAdcControl, adc);
+}
+
+// True once the hardware has cleared CONV_START, meaning REG0E is fresh.
+static bool bqConversionReady(bool &readOk) {
+    uint8_t adc = 0;
+    readOk = bqReadReg(kBqRegAdcControl, adc);
+    if (!readOk) return false;
+    return (adc & 0x80) == 0;
 }
 
 // Pet the charger's I2C watchdog (REG03 bit 6, WD_RST). It defaults to 40 s,
@@ -95,19 +118,31 @@ static float batteryReadPagerBqVolts() {
             return 0.0f;
         }
         sBqPresent = true;
-        sBqConfigured = false;
+        sBqConversionPending = false;
     }
 
-    if (!sBqConfigured) {
-        sBqConfigured = bqEnableBatteryAdc();
-        if (!sBqConfigured) {
-            bqMarkUnavailable(nowMs);
-            return 0.0f;
-        }
-    }
-
-    // Keep the charger's watchdog from expiring and wiping our ADC config.
+    // Keep the charger's watchdog from expiring and restoring register defaults.
     bqKickWatchdog();
+
+    // No conversion in flight: start one and collect it on the next sample.
+    if (!sBqConversionPending) {
+        sBqConversionPending = bqStartConversion();
+        if (!sBqConversionPending) {
+            bqMarkUnavailable(nowMs);
+        }
+        return 0.0f;   // caller keeps the previous reading; see batteryRefreshFilter
+    }
+
+    bool ctrlReadOk = false;
+    if (!bqConversionReady(ctrlReadOk)) {
+        if (!ctrlReadOk) {
+            Serial.println("[batt] BQ25896 read failed - retrying probe");
+            sBqConversionPending = false;
+            bqMarkUnavailable(nowMs);
+        }
+        return 0.0f;   // still converting: hold, don't report a false 0%
+    }
+    sBqConversionPending = false;
 
     uint8_t reg = 0;
     if (!bqReadReg(kBqRegBattVoltage, reg)) {
@@ -115,17 +150,15 @@ static float batteryReadPagerBqVolts() {
         bqMarkUnavailable(nowMs);
         return 0.0f;
     }
+    sBqLastRawReg = reg;
     uint8_t raw = reg & 0x7F;
     if (raw == 0) {
-        // The chip answered but the ADC has no result: its registers were reset
-        // out from under us (watchdog, brown-out) or conversion stopped. Without
-        // re-arming here this latches at 0% forever, because sBqPresent and
-        // sBqConfigured both still look healthy. Re-enable and pick it up on the
-        // next sample rather than blocking this one on a conversion.
-        sBqConfigured = bqEnableBatteryAdc();
-        if (sBqZeroLogged == false) {
-            Serial.printf("[batt] BQ25896 BATV=0 (reg0x0E=0x%02X) - re-armed ADC %s\n",
-                          reg, sBqConfigured ? "OK" : "FAILED");
+        // Conversion completed and still reported nothing. With one-shot that is
+        // a real answer rather than a stalled ADC, so there is nothing to re-arm
+        // — but it is also indistinguishable from a battery below the 2.304 V
+        // floor, so report unknown and let the caller hold its last value.
+        if (!sBqZeroLogged) {
+            Serial.printf("[batt] BQ25896 BATV=0 after conversion (reg0x0E=0x%02X)\n", reg);
             sBqZeroLogged = true;
         }
         return 0.0f;
@@ -133,6 +166,7 @@ static float batteryReadPagerBqVolts() {
     sBqZeroLogged = false;
 
     uint16_t mv = (uint16_t)(kBqVbatBaseMv + (raw * kBqVbatStepMv));
+    sBqLastMv = mv;
     return mv / 1000.0f;
 }
 } // namespace
@@ -305,9 +339,12 @@ void batteryInitAdc() {
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
     bqEnsureWire();
-    if (bqProbePresent() && bqEnableBatteryAdc()) {
+    if (bqProbePresent() && bqStartConversion()) {
+        // First conversion is in flight; batteryRefreshFilter() below will not
+        // get a voltage from it, which is why the filter treats 0 as "unknown"
+        // and holds rather than displaying 0%.
         sBqPresent = true;
-        sBqConfigured = true;
+        sBqConversionPending = true;
         sBqNextProbeMs = 0;
     } else {
         bqMarkUnavailable(millis());
@@ -394,4 +431,34 @@ float batteryReadVoltage() {
 uint8_t batteryReadPercent() {
     batteryRefreshFilter(false);
     return sBatteryFilter.initialized ? sBatteryFilter.displayPct : 0;
+}
+
+void batteryDebugSnapshot(char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    batteryRefreshFilter(false);
+
+    const float filtered = sBatteryFilter.initialized ? sBatteryFilter.filteredVoltage : 0.0f;
+    const int shown = sBatteryFilter.initialized ? (int)sBatteryFilter.displayPct : -1;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Raw register included deliberately: bit 7 is THERM_STAT, so a value that
+    // looks 128 too high is a masking problem, not a bad battery. 20 mV per LSB
+    // means the voltage can only ever be 2304 + 20n mV.
+    snprintf(out, outLen,
+             "[batt] BQ25896 present=%d pending=%d reg0x0E=0x%02X raw=%u -> %umV | "
+             "filtered=%.3fV shown=%d%% (curve=%d%%)",
+             sBqPresent ? 1 : 0,
+             sBqConversionPending ? 1 : 0,
+             sBqLastRawReg,
+             (unsigned)(sBqLastRawReg & 0x7F),
+             (unsigned)sBqLastMv,
+             (double)filtered,
+             shown,
+             batteryVoltageToPct(filtered));
+#else
+    const float rawV = batteryReadVoltageRaw();
+    snprintf(out, outLen,
+             "[batt] raw=%.3fV | filtered=%.3fV shown=%d%% (curve=%d%%)",
+             (double)rawV, (double)filtered, shown, batteryVoltageToPct(filtered));
+#endif
 }

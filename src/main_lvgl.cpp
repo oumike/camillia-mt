@@ -7514,7 +7514,7 @@ static void openNodeInfoModal() {
 }
 #endif
 
-// ── Hidden system-stats screen (CPU / memory) ────────────────────────────────
+// ── Hidden system-stats screen (system / memory / storage) ───────────────────
 // Builds three ready-to-display section bodies. Kept as separate strings so a
 // wide screen can lay them out side by side and a narrow one can stack them.
 static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_t sz) {
@@ -7526,19 +7526,29 @@ static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_
     const uint32_t psramFree  = ESP.getFreePsram();
     const uint32_t upSec = millis() / 1000UL;
 
+    // Battery reads the same filtered values the header icon shows, so a
+    // disagreement between this screen and the icon would itself be a bug. The
+    // voltage is the useful half: on boards that read through a charger IC it
+    // is quantised (20 mV steps on the Pager's BQ25896), so a percentage that
+    // moves in jumps is explained by the voltage sitting on those steps.
+    const float battV = batteryReadVoltage();
+    const uint8_t battPct = batteryReadPercent();
+
     snprintf(cpuOut, sz,
              "%s x%u\n"
              "Clock: %u MHz\n"
              "Revision: %u\n"
              "Uptime: %luh %02lum %02lus\n"
-             "Loop rate: %lu /s",
+             "Loop rate: %lu /s\n"
+             "Battery: %u%% %.3fV",
              ESP.getChipModel(), (unsigned)ESP.getChipCores(),
              (unsigned)ESP.getCpuFreqMHz(),
              (unsigned)ESP.getChipRevision(),
              (unsigned long)(upSec / 3600UL),
              (unsigned long)((upSec / 60UL) % 60UL),
              (unsigned long)(upSec % 60UL),
-             (unsigned long)s_loopsPerSec);
+             (unsigned long)s_loopsPerSec,
+             (unsigned)battPct, (double)battV);
 
     snprintf(memOut, sz,
              "Used: %lu KB (%lu%%)\n"
@@ -7591,7 +7601,9 @@ static void refreshSysStatsModal(bool force) {
     if (!force && (uint32_t)(now - s_sysStatsLastRefreshMs) < 500UL) return;
     s_sysStatsLastRefreshMs = now;
 
-    char cpu[128], mem[128], sto[160];
+    // One size for all three: buildSysStatsColumns() takes a single length and
+    // applies it to every buffer, so the smallest is what it must be told.
+    char cpu[192], mem[192], sto[192];
     buildSysStatsColumns(cpu, mem, sto, sizeof(cpu));
 
     if (s_sysStatsCols[1] && s_sysStatsCols[2]) {
@@ -7601,9 +7613,9 @@ static void refreshSysStatsModal(bool force) {
         lv_label_set_text(s_sysStatsCols[2], sto);
     } else {
         // Narrow layout: everything stacked in the single scrollable label.
-        char body[448];
+        char body[640];
         snprintf(body, sizeof(body),
-                 "CPU\n%s\n\nMEMORY\n%s\n\nSTORAGE\n%s", cpu, mem, sto);
+                 "SYSTEM\n%s\n\nMEMORY\n%s\n\nSTORAGE\n%s", cpu, mem, sto);
         lv_label_set_text(s_sysStatsCols[0], body);
     }
 }
@@ -7692,7 +7704,9 @@ static void openSysStatsModal() {
         lv_obj_set_flex_flow(cols, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(cols, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-        s_sysStatsCols[0] = makeSysStatsColumn(cols, "CPU", headFont, bodyFont);
+        // "SYSTEM" rather than "CPU": the column carries uptime, loop rate and
+        // now battery alongside the chip identity.
+        s_sysStatsCols[0] = makeSysStatsColumn(cols, "SYSTEM", headFont, bodyFont);
         s_sysStatsCols[1] = makeSysStatsColumn(cols, "MEMORY", headFont, bodyFont);
         s_sysStatsCols[2] = makeSysStatsColumn(cols, "STORAGE", headFont, bodyFont);
     } else {
@@ -20485,7 +20499,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | batt | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
         return;
     }
 
@@ -20494,6 +20508,13 @@ static void handleSerialCommandLine(char *line) {
     // reaches the host, and this is exactly the report you need after a reboot.
     if (strcmp(line, "nvs") == 0) {
         logNvsHealth();
+        return;
+    }
+
+    if (strcmp(line, "batt") == 0 || strcmp(line, "battery") == 0) {
+        char snap[192];
+        batteryDebugSnapshot(snap, sizeof(snap));
+        Serial.println(snap);
         return;
     }
 
