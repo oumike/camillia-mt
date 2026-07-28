@@ -4141,24 +4141,34 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     clearReleaseCheckResult();
     gReleaseCheckState = RELEASE_CHECK_IDLE;
 
-    // Load saved WiFi credentials
+    // Load saved WiFi credentials. The settings blob loaded by
+    // loadConfigFromPrefs() is the source of truth — it always runs before this.
+    // The standalone "wifiSsid"/"wifiPass"/"webPass" keys are a pre-blob format
+    // that the blob migration reclaims, so they are read only as a fallback for
+    // a device that has not migrated yet. Copying them over gCfg unconditionally
+    // wiped the credentials the blob had just supplied, which is why WiFi (and a
+    // custom web password) came back empty on every boot after the migration.
     Preferences prefs;
     prefs.begin("camillia", true);
     String savedSsid = prefs.isKey("wifiSsid") ? prefs.getString("wifiSsid", "") : "";
     String savedPass = prefs.isKey("wifiPass") ? prefs.getString("wifiPass", "") : "";
     String savedWebPass = prefs.isKey("webPass") ? prefs.getString("webPass", "") : "";
     prefs.end();
-    strncpy(gWifiSsid, savedSsid.c_str(), sizeof(gWifiSsid) - 1);
+    if (!gCfg->wifiSsid[0] && savedSsid.length()) {
+        strncpy(gCfg->wifiSsid, savedSsid.c_str(), sizeof(gCfg->wifiSsid) - 1);
+        gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
+        strncpy(gCfg->wifiPass, savedPass.c_str(), sizeof(gCfg->wifiPass) - 1);
+        gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
+    }
+    strncpy(gWifiSsid, gCfg->wifiSsid, sizeof(gWifiSsid) - 1);
     gWifiSsid[sizeof(gWifiSsid) - 1] = '\0';
-    strncpy(gWifiPass, savedPass.c_str(), sizeof(gWifiPass) - 1);
+    strncpy(gWifiPass, gCfg->wifiPass, sizeof(gWifiPass) - 1);
     gWifiPass[sizeof(gWifiPass) - 1] = '\0';
-    strncpy(gCfg->wifiSsid, gWifiSsid, sizeof(gCfg->wifiSsid) - 1);
-    gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
-    strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
-    gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
-    if (savedWebPass.length() == 0) savedWebPass = kDefaultWebPass;
-    strncpy(gCfg->webCfgPass, savedWebPass.c_str(), sizeof(gCfg->webCfgPass) - 1);
-    gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
+    if (!gCfg->webCfgPass[0]) {
+        const char *webPass = savedWebPass.length() ? savedWebPass.c_str() : kDefaultWebPass;
+        strncpy(gCfg->webCfgPass, webPass, sizeof(gCfg->webCfgPass) - 1);
+        gCfg->webCfgPass[sizeof(gCfg->webCfgPass) - 1] = '\0';
+    }
 
     const char *headers[] = {"Cookie"};
     server.collectHeaders(headers, 1);
