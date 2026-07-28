@@ -35,6 +35,8 @@
 #include <esp_random.h>
 #include <esp_heap_caps.h>
 #include <nvs_flash.h>
+#include <nvs.h>
+#include <esp_partition.h>
 #include <SD.h>
 #include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -503,6 +505,11 @@ static int      s_chatWindowChannel      = -1;   // channel the window below bel
 static int      s_chatRenderWindowMsgs   = kChatWindowBaseMsgs;
 static bool     s_chatWindowMoreAbove    = false; // older messages exist outside the window
 static bool     s_chatWindowGrowPending  = false; // scroll cb asked to load older history
+// True while refreshChatView is tearing down and re-adding rows. LVGL emits
+// LV_EVENT_SCROLL for programmatic scrolls and for the readjustment that follows
+// lv_obj_clean(), so without this the rebuild's own transient scroll-at-top state
+// looks exactly like the user scrolling up to load older history.
+static bool     s_chatRebuilding         = false;
 // The message at the top of the pre-grow window, so we can re-anchor the viewport
 // to it after prepending older history — otherwise the view snaps to the top,
 // which would immediately re-trigger another grow.
@@ -1046,6 +1053,12 @@ static void serviceAutoFavorite(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void setOtaWorkerBootNotice(const char *msg);
 static void syncWifiCredsToPrefs();
+static void persistConfigToPrefs();
+// Queues a settings save. Config is one NVS blob now, so a per-keypress write
+// would rewrite ~1 KB each time; this coalesces a burst of changes into one
+// write and is flushed by serviceConfigFlush() (and before reboot/sleep).
+static void markConfigDirty();
+static void flushConfigIfDirty();
 static void persistWebCfgEnabled();
 static void persistWifiForceAp();
 static void requestSkipWebAutoStartOnce();
@@ -2184,27 +2197,12 @@ static const char *uiThemePresetNameFromCfg() {
     return kUiThemePresets[idx].name;
 }
 
-static void persistUiTheme() {
-    Preferences p;
-    if (!p.begin("camillia", false)) return;
-    p.putUChar("uiTheme", s_cfg.uiTheme);
-    p.putUChar("uiMode", s_cfg.uiMode);
-    p.end();
-}
-
-static void persistMessageAlertSetting() {
-    Preferences p;
-    if (!p.begin("camillia", false)) return;
-    p.putUChar("msgAlertSound", s_cfg.msgAlertSound);
-    p.end();
-}
-
-static void persistSplashMelodySetting() {
-    Preferences p;
-    if (!p.begin("camillia", false)) return;
-    p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
-    p.end();
-}
+// These used to write one key each. Settings now live in a single blob, so a
+// one-field save means rewriting the whole thing — hence the debounce in
+// markConfigDirty() rather than a write per keypress.
+static void persistUiTheme()             { markConfigDirty(); }
+static void persistMessageAlertSetting() { markConfigDirty(); }
+static void persistSplashMelodySetting() { markConfigDirty(); }
 
 static void applyUiThemePalette() {
     s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
@@ -2691,12 +2689,8 @@ static void cfgDebugSelection(const char *tag, int actionId) {
 
 static void syncWifiCredsToPrefs() {
     if (!s_cfg.wifiSsid[0]) return;
-
-    Preferences p;
-    if (!p.begin("camillia", false)) return;
-    p.putString("wifiSsid", s_cfg.wifiSsid);
-    p.putString("wifiPass", s_cfg.wifiPass);
-    p.end();
+    // Credentials live inside the settings blob; saving them means saving it.
+    markConfigDirty();
 }
 
 static void persistWebCfgEnabled() {
@@ -3120,6 +3114,7 @@ static bool runOtaWorkerModeIfRequested() {
         delay(700);
         otaSetNetworkAllowed(false);
         clearWorkerRequestFlags();
+        flushConfigIfDirty();   // pending settings must reach NVS before we go
         ESP.restart();
         return true;
     }
@@ -3342,118 +3337,228 @@ static bool pollUserButton(uint32_t nowMs) {
     return false;
 }
 
-static void persistConfigToPrefs() {
-    const char *wifiSsid = webCfgWifiSsid();
-    const char *wifiPass = webCfgWifiPass();
-    if ((!wifiSsid || !wifiSsid[0]) && s_cfg.wifiSsid[0]) wifiSsid = s_cfg.wifiSsid;
-    if ((!wifiPass || !wifiPass[0]) && s_cfg.wifiPass[0]) wifiPass = s_cfg.wifiPass;
+// ── Settings storage: one blob, not ~80 keys ─────────────────────────────────
+// Every NVS key costs at least one 32-byte entry, and a rewrite spends fresh
+// entries for each until a page can be compacted. On the 16 KB partition a
+// third-party flash layout hands us, ~80 config keys plus 48 channel keys came
+// to 169 entries against the ~73 that are actually writable (NVS keeps a whole
+// page in reserve for compaction), so a full save could not be placed at all.
+// Packed as blobs the same data is ~50 entries, and a save costs the same.
+//
+// Fields may only be APPENDED to RhinoConfig: a shorter stored blob is copied
+// into the front of the struct and anything newer keeps its compiled default.
+// Reordering or removing a field means bumping kCfgBlobVersion, which discards
+// older blobs and resets settings to defaults.
+static constexpr const char *kCfgBlobKey     = "cfg";
+static constexpr uint16_t    kCfgBlobVersion = 1;
+
+struct CfgBlobHeader {
+    uint16_t version;
+    uint16_t bytes;      // RhinoConfig bytes following the header
+};
+
+// Keys in "camillia" that are not part of the blob and must survive migration:
+// the node identity, and the one-shot flags read before any config is loaded.
+static bool camilliaKeyIsPreserved(const char *key) {
+    static const char *const kKeep[] = {
+        kCfgBlobKey, "nodeId", "pub25519", "priv25519", "pubKey", "privKey",
+        "webCfgEnabled", "wifiForceAp", kPrefSkipWebAutoOnce, kPrefOtaWorkerOnce,
+    };
+    for (size_t i = 0; i < sizeof(kKeep) / sizeof(kKeep[0]); i++) {
+        if (kKeep[i] && strcmp(key, kKeep[i]) == 0) return true;
+    }
+    return false;
+}
+
+// Reclaims the per-key settings written by builds that predate the blob.
+// Enumerated rather than listed by name, so keys dropped from the writer along
+// the way are reclaimed too. Collects first and deletes after: removing entries
+// while an NVS iterator is open is not safe.
+static int removeLegacyConfigKeys() {
+    static char doomed[96][NVS_KEY_NAME_MAX_SIZE];
+    const int cap = (int)(sizeof(doomed) / sizeof(doomed[0]));
+    int n = 0;
+
+    nvs_iterator_t it = nvs_entry_find("nvs", "camillia", NVS_TYPE_ANY);
+    while (it && n < cap) {
+        nvs_entry_info_t info = {};
+        nvs_entry_info(it, &info);
+        if (!camilliaKeyIsPreserved(info.key)) {
+            strncpy(doomed[n], info.key, sizeof(doomed[0]) - 1);
+            doomed[n][sizeof(doomed[0]) - 1] = '\0';
+            n++;
+        }
+        it = nvs_entry_next(it);
+    }
+    if (it) nvs_release_iterator(it);   // loop stopped early; iterator still open
+    if (n <= 0) return 0;
 
     Preferences p;
-    if (!p.begin("camillia", false)) return;
+    if (!p.begin("camillia", false)) return 0;
+    for (int i = 0; i < n; i++) p.remove(doomed[i]);
+    p.end();
+    return n;
+}
 
-    if (wifiSsid && wifiSsid[0]) p.putString("wifiSsid", wifiSsid);
-    if (wifiPass && wifiPass[0]) p.putString("wifiPass", wifiPass);
-    if (s_cfg.webCfgPass[0]) p.putString("webPass", s_cfg.webCfgPass);
-    p.putBool("webCfgAuth", s_cfg.webCfgAuthEnabled);
-    p.putString("nodeLong", s_cfg.nodeLong);
-    p.putString("nodeShort", s_cfg.nodeShort);
-    p.putUChar("modemPreset", s_cfg.modemPreset);
-    p.putFloat("loraFreq", s_cfg.loraFreq);
-    p.putFloat("loraBw", s_cfg.loraBw);
-    p.putUChar("loraSf", s_cfg.loraSf);
-    p.putUChar("loraCr", s_cfg.loraCr);
-    p.putUChar("loraPower", s_cfg.loraPower);
-    p.putUChar("loraHopLim", s_cfg.loraHopLimit);
-    p.putBool("gpsEnabled", s_cfg.gpsEnabled);
-    p.putInt("latI", s_cfg.latI);
-    p.putInt("lonI", s_cfg.lonI);
-    p.putInt("alt", s_cfg.alt);
-    p.putUChar("devRole", s_cfg.deviceRole);
-    p.putUChar("rebroadcast", s_cfg.rebroadcastMode);
-    p.putBool("okToMqtt", s_cfg.okToMqtt);
-    p.putBool("ignoreMqtt", s_cfg.ignoreMqtt);
-    p.putULong("nodeInfoIntv", s_cfg.nodeInfoIntervalS);
-    p.putULong("posIntv", s_cfg.posIntervalS);
-    p.putULong("gpsPollS", s_cfg.gpsPollIntervalS);
-    p.putString("region", s_cfg.region);
-    p.putString("tzDef", s_cfg.tzDef);
-    p.putString("ntpServer", s_cfg.ntpServer);
-    p.putULong("screenOnSecs", s_cfg.screenOnSecs);
-    p.putUChar("dispUnits", s_cfg.displayUnits);
-    p.putUChar("chatStyle", s_cfg.chatStyle);
-    p.putUChar("chatNameSty", s_cfg.chatNameStyle);
-    p.putBool("chatColors", s_cfg.chatColorsEnabled);
-    p.putUChar("userMsgColor", s_cfg.userMsgColor);
-    p.putBool("compassNorth", s_cfg.compassNorthTop);
-    p.putBool("flipScreen", s_cfg.flipScreen);
-    p.putBool("splashMelody", s_cfg.splashMelodyEnabled);
-    p.putUChar("msgAlertSound", s_cfg.msgAlertSound);
-    p.putUChar("uiTheme", s_cfg.uiTheme);
-    p.putUChar("uiMode", s_cfg.uiMode);
-    p.putBool("btEnabled", s_cfg.btEnabled);
-    p.putUChar("btMode", s_cfg.btMode);
-    p.putULong("btFixedPin", s_cfg.btFixedPin);
-    p.putBool("wifiEnabled", s_cfg.wifiEnabled);
-    p.putBool("mqttEnabled", s_cfg.mqttEnabled);
-    p.putString("mqttServer", s_cfg.mqttServer);
-    p.putString("mqttUser", s_cfg.mqttUser);
-    p.putString("mqttPass", s_cfg.mqttPass);
-    p.putString("mqttRoot", s_cfg.mqttRoot);
-    p.putBool("mqttEncrypt", s_cfg.mqttEncryption);
-    p.putBool("mqttMapRpt", s_cfg.mqttMapReport);
-    p.putUShort("mqttPort", s_cfg.mqttPort);
-    p.putBool("mqttTls", s_cfg.mqttTls);
-    p.putBool("isPwrSaving", s_cfg.isPowerSaving);
-    p.putULong("lsSecs", s_cfg.lsSecs);
-    p.putULong("minWakeSecs", s_cfg.minWakeSecs);
-    p.putBool("telDevEn", s_cfg.telDeviceEnabled);
-    p.putULong("telDevIntv", s_cfg.telDeviceIntervalS);
-    p.putBool("telEnvEn", s_cfg.telEnvEnabled);
-    p.putULong("telEnvIntv", s_cfg.telEnvIntervalS);
-    p.putBool("nbrInfoEn", s_cfg.neighborInfoEnabled);
-    p.putULong("nbrInfoIntv", s_cfg.neighborInfoIntervalS);
-    p.putBool("nbrInfoLoRa", s_cfg.neighborInfoOverLora);
-    p.putBool("cannedEn", s_cfg.cannedEnabled);
-    p.putString("cannedMsgs", s_cfg.cannedMessages);
-    p.putBool("snfClientEn", s_cfg.snfClientEnabled);
-    p.putBool("otaAutoChk", s_cfg.otaAutoCheckEnabled);
-    p.putBool("nodeArchive", s_cfg.nodeArchiveEnabled);
-    p.putBool("autoFav", s_cfg.autoFavoriteEnabled);
-    p.putULong("autoFavRange", s_cfg.autoFavoriteRangeM);
-    p.putULong("nodeIdOvr", s_cfg.nodeIdOverride);
-    p.putUChar("brightness", s_cfg.brightness);
-    p.putUChar("chatSpace", s_cfg.chatSpacing);
-    p.putUChar("fontSize", s_cfg.fontSize);
-    p.putBool("dbgAcks", s_cfg.debugAcks);
-    p.putBool("dbgMsgs", s_cfg.debugMessages);
-    p.putBool("dbgGps", s_cfg.debugGps);
+static void persistConfigToPrefs() {
+    // Web config edits land in its own copies of the credentials first; fold
+    // them back into s_cfg so the blob is written from a single source.
+    const char *wifiSsid = webCfgWifiSsid();
+    const char *wifiPass = webCfgWifiPass();
+    if (wifiSsid && wifiSsid[0]) {
+        strncpy(s_cfg.wifiSsid, wifiSsid, sizeof(s_cfg.wifiSsid) - 1);
+        s_cfg.wifiSsid[sizeof(s_cfg.wifiSsid) - 1] = '\0';
+    }
+    if (wifiPass && wifiPass[0]) {
+        strncpy(s_cfg.wifiPass, wifiPass, sizeof(s_cfg.wifiPass) - 1);
+        s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
+    }
+
+    uint8_t buf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)];
+    const CfgBlobHeader hdr = { kCfgBlobVersion, (uint16_t)sizeof(RhinoConfig) };
+    memcpy(buf, &hdr, sizeof(hdr));
+    memcpy(buf + sizeof(hdr), &s_cfg, sizeof(s_cfg));
+
+    Preferences p;
+    if (!p.begin("camillia", false)) {
+        Serial.println("[cfg] save FAILED: cannot open NVS namespace 'camillia'");
+        return;
+    }
+    const size_t wrote = p.putBytes(kCfgBlobKey, buf, sizeof(buf));
+    // Read during early boot, before the blob is unpacked, so they stay keys.
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
+
+    if (wrote != sizeof(buf)) {
+        Serial.printf("[cfg] save FAILED: wrote %u of %u bytes (NVS full?)\n",
+                      (unsigned)wrote, (unsigned)sizeof(buf));
+    }
 }
 
-static void persistChannelsToPrefs() {
-    Preferences cp;
-    if (!cp.begin("mesh_ch", false)) return;
+// Debounced save. A settings blob write is a synchronous flash operation, and
+// NVS may compact a page while doing it — long enough to show as a hitch if it
+// ran on every step of a slider. Coalescing also cuts flash wear, which matters
+// on a 16 KB partition where there is little room to spread writes.
+static constexpr uint32_t kConfigFlushDelayMs = 1500;
+static bool     s_configDirty     = false;
+static uint32_t s_configDirtyAtMs = 0;
 
+static void markConfigDirty() {
+    s_configDirty     = true;
+    s_configDirtyAtMs = millis();
+}
+
+static void flushConfigIfDirty() {
+    if (!s_configDirty) return;
+    s_configDirty = false;
+    persistConfigToPrefs();
+}
+
+static void serviceConfigFlush(uint32_t nowMs) {
+    if (!s_configDirty) return;
+    if ((uint32_t)(nowMs - s_configDirtyAtMs) < kConfigFlushDelayMs) return;
+    flushConfigIfDirty();
+}
+
+// The channel plan, packed the same way as the config blob: 48 keys (six per
+// channel) became one. Field order is fixed; extending a record means bumping
+// the version, which falls back to the compiled channel defaults.
+static constexpr const char *kChanBlobKey     = "ch";
+static constexpr uint16_t    kChanBlobVersion = 1;
+
+struct ChanBlobRecord {
+    char    name[16];
+    uint8_t key[32];
+    uint8_t keyLen;
+    uint8_t role;
+    uint8_t flags;       // bit0 uplink, bit1 downlink, bit2 muted
+    uint8_t reserved;
+};
+
+struct ChanBlob {
+    uint16_t       version;
+    uint16_t       count;
+    ChanBlobRecord chans[MESH_CHANNELS];
+};
+
+static void persistChannelsToPrefs() {
+    ChanBlob blob = {};
+    blob.version = kChanBlobVersion;
+    blob.count   = MESH_CHANNELS;
     for (int i = 0; i < MESH_CHANNELS; i++) {
-        const char *name = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
-        char key[8];
-        snprintf(key, sizeof(key), "n%d", i);
-        cp.putString(key, name ? name : "");
-        snprintf(key, sizeof(key), "k%d", i);
-        cp.putBytes(key, CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen);
-        snprintf(key, sizeof(key), "r%d", i);
-        cp.putUChar(key, CHANNEL_KEYS[i].role);
-        snprintf(key, sizeof(key), "u%d", i);
-        cp.putBool(key, CHANNEL_KEYS[i].uplinkEnabled);
-        snprintf(key, sizeof(key), "d%d", i);
-        cp.putBool(key, CHANNEL_KEYS[i].downlinkEnabled);
-        snprintf(key, sizeof(key), "m%d", i);
-        cp.putBool(key, CHANNEL_KEYS[i].muted);
+        const ChannelKey &ck = CHANNEL_KEYS[i];
+        const char *name = ck.name_buf[0] ? ck.name_buf : ck.name;
+        if (name) {
+            strncpy(blob.chans[i].name, name, sizeof(blob.chans[i].name) - 1);
+        }
+        const uint8_t len = (ck.keyLen <= sizeof(blob.chans[i].key)) ? ck.keyLen
+                                                                    : (uint8_t)sizeof(blob.chans[i].key);
+        memcpy(blob.chans[i].key, ck.key, len);
+        blob.chans[i].keyLen = len;
+        blob.chans[i].role   = ck.role;
+        blob.chans[i].flags  = (uint8_t)((ck.uplinkEnabled   ? 1 : 0)
+                                       | (ck.downlinkEnabled ? 2 : 0)
+                                       | (ck.muted           ? 4 : 0));
     }
 
+    Preferences cp;
+    if (!cp.begin("mesh_ch", false)) {
+        Serial.println("[cfg] channel save FAILED: cannot open NVS namespace 'mesh_ch'");
+        return;
+    }
+    // Preferences returns 0 on failure and never throws, so a full partition
+    // would otherwise lose the channel plan silently: it survives in RAM until
+    // the next boot and is then simply gone.
+    const size_t wrote = cp.putBytes(kChanBlobKey, &blob, sizeof(blob));
     cp.end();
+    if (wrote != sizeof(blob)) {
+        Serial.printf("[cfg] channel save FAILED: wrote %u of %u bytes (NVS full?)\n",
+                      (unsigned)wrote, (unsigned)sizeof(blob));
+    }
+}
+
+// Drops the per-channel keys written before the blob existed. Same collect-then-
+// delete shape as removeLegacyConfigKeys(); everything but the blob goes.
+static int removeLegacyChannelKeys() {
+    static char doomed[64][NVS_KEY_NAME_MAX_SIZE];
+    const int cap = (int)(sizeof(doomed) / sizeof(doomed[0]));
+    int n = 0;
+
+    nvs_iterator_t it = nvs_entry_find("nvs", "mesh_ch", NVS_TYPE_ANY);
+    while (it && n < cap) {
+        nvs_entry_info_t info = {};
+        nvs_entry_info(it, &info);
+        if (strcmp(info.key, kChanBlobKey) != 0) {
+            strncpy(doomed[n], info.key, sizeof(doomed[0]) - 1);
+            doomed[n][sizeof(doomed[0]) - 1] = '\0';
+            n++;
+        }
+        it = nvs_entry_next(it);
+    }
+    if (it) nvs_release_iterator(it);
+    if (n <= 0) return 0;
+
+    Preferences p;
+    if (!p.begin("mesh_ch", false)) return 0;
+    for (int i = 0; i < n; i++) p.remove(doomed[i]);
+    p.end();
+    return n;
+}
+
+// Cross-setting rules every load path must finish with, whichever storage
+// format it read: MQTT needs WiFi, the MQTT bridge and the web-config portal
+// are mutually exclusive, and the radio parameters are always re-derived from
+// region + preset rather than trusted from storage.
+static void applyLoadedConfigInvariants() {
+    if (!s_cfg.wifiEnabled) {
+        s_cfg.mqttEnabled = false;
+        s_webCfgEnabled   = false;
+    }
+    if (s_cfg.mqttEnabled) {
+        s_webCfgEnabled = false;
+    }
+    applyPresetParams(s_cfg);
 }
 
 static void loadConfigFromPrefs() {
@@ -3468,6 +3573,43 @@ static void loadConfigFromPrefs() {
         // WiFi credentials it starts the onboarding AP, so the device is
         // configurable from a phone/browser out of the box.
         s_webCfgEnabled = true;
+        return;
+    }
+
+    // Blob path: everything below this point is the pre-blob per-key reader,
+    // kept only so a device upgrading from an older build can be migrated.
+    if (prefs.isKey(kCfgBlobKey)) {
+        s_firstBoot = false;
+        uint8_t buf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)] = {};
+        const size_t got = prefs.getBytes(kCfgBlobKey, buf, sizeof(buf));
+        // Both live outside the blob because they are consulted before config
+        // is unpacked; read them here so this path ends up in the same state as
+        // the legacy one below.
+        s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
+        const bool forceAp = prefs.getBool("wifiForceAp", false);
+        prefs.end();
+        if (forceAp) {
+            s_wifiUsingKnownOverride = true;
+            strncpy(s_wifiSelectedSsid, kForceApSsid, sizeof(s_wifiSelectedSsid) - 1);
+            s_wifiSelectedSsid[sizeof(s_wifiSelectedSsid) - 1] = '\0';
+            s_wifiSelectedPass[0] = '\0';
+        }
+
+        CfgBlobHeader hdr = {};
+        if (got >= sizeof(hdr)) memcpy(&hdr, buf, sizeof(hdr));
+        const size_t payload = (got >= sizeof(hdr)) ? (got - sizeof(hdr)) : 0;
+        if (hdr.version != kCfgBlobVersion || payload == 0) {
+            // Written by a build whose struct layout we cannot interpret.
+            // Defaults are already in s_cfg; better that than misread bytes.
+            Serial.printf("[cfg] settings blob v%u unusable (want v%u) - using defaults\n",
+                          (unsigned)hdr.version, (unsigned)kCfgBlobVersion);
+            return;
+        }
+        // Append-only rule: a shorter blob fills the front of the struct and
+        // any field added since keeps its default.
+        const size_t copy = (payload < sizeof(RhinoConfig)) ? payload : sizeof(RhinoConfig);
+        memcpy(&s_cfg, buf + sizeof(hdr), copy);
+        applyLoadedConfigInvariants();
         return;
     }
 
@@ -3703,21 +3845,29 @@ static void loadConfigFromPrefs() {
         s_wifiSelectedPass[0] = '\0';
     }
 
-    // Enforce network-option invariants regardless of how the flags were set
-    // (on-device toggles or web config): MQTT needs WiFi, and the MQTT bridge and
-    // the web-config portal are mutually exclusive.
-    if (!s_cfg.wifiEnabled) {
-        s_cfg.mqttEnabled = false;
-        s_webCfgEnabled   = false;
-    }
-    if (s_cfg.mqttEnabled) {
-        s_webCfgEnabled = false;
-    }
-
     prefs.end();
+    applyLoadedConfigInvariants();
 
-    // Re-derive freq/BW/SF/CR from region + preset so they're always consistent.
-    applyPresetParams(s_cfg);
+    // Migration: what we just read came from ~80 individual keys. Rewrite it as
+    // the blob and reclaim them — but only once the blob is confirmed readable,
+    // so a failure here leaves the old keys as the surviving copy rather than
+    // deleting settings we could not replace.
+    if (!s_firstBoot) {
+        persistConfigToPrefs();
+        Preferences verify;
+        bool ok = false;
+        if (verify.begin("camillia", true)) {
+            ok = verify.isKey(kCfgBlobKey);
+            verify.end();
+        }
+        if (ok) {
+            const int freed = removeLegacyConfigKeys();
+            Serial.printf("[cfg] migrated settings to blob storage (%d legacy keys reclaimed)\n",
+                          freed);
+        } else {
+            Serial.println("[cfg] blob migration failed; keeping legacy keys");
+        }
+    }
 }
 
 static void loadChannelsFromPrefs() {
@@ -3725,6 +3875,38 @@ static void loadChannelsFromPrefs() {
     // Open read-write so first boot can create namespace instead of logging NOT_FOUND.
     if (!cp.begin("mesh_ch", false)) return;
 
+    if (cp.isKey(kChanBlobKey)) {
+        ChanBlob blob = {};
+        const size_t got = cp.getBytes(kChanBlobKey, &blob, sizeof(blob));
+        cp.end();
+        if (got < sizeof(blob) || blob.version != kChanBlobVersion) {
+            Serial.printf("[cfg] channel blob unusable (v%u, %u bytes) - using defaults\n",
+                          (unsigned)blob.version, (unsigned)got);
+            return;
+        }
+        const int n = (blob.count < MESH_CHANNELS) ? blob.count : MESH_CHANNELS;
+        for (int i = 0; i < n; i++) {
+            const ChanBlobRecord &r = blob.chans[i];
+            if (r.name[0]) {
+                strncpy(CHANNEL_KEYS[i].name_buf, r.name, sizeof(CHANNEL_KEYS[i].name_buf) - 1);
+                CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
+                CHANNEL_KEYS[i].name = CHANNEL_KEYS[i].name_buf;
+            }
+            if (r.keyLen > 0 && r.keyLen <= sizeof(CHANNEL_KEYS[i].key)) {
+                memcpy(CHANNEL_KEYS[i].key, r.key, r.keyLen);
+                CHANNEL_KEYS[i].keyLen = r.keyLen;
+            }
+            CHANNEL_KEYS[i].role            = r.role;
+            CHANNEL_KEYS[i].uplinkEnabled   = (r.flags & 1) != 0;
+            CHANNEL_KEYS[i].downlinkEnabled = (r.flags & 2) != 0;
+            CHANNEL_KEYS[i].muted           = (r.flags & 4) != 0;
+        }
+        return;
+    }
+
+    // Pre-blob per-channel keys. Read them, then (below) re-save as a blob and
+    // reclaim the 48 entries they occupy.
+    bool migrated = false;
     for (int i = 0; i < MESH_CHANNELS; i++) {
         char key[8];
 
@@ -3761,9 +3943,31 @@ static void loadChannelsFromPrefs() {
         if (cp.isKey(key)) CHANNEL_KEYS[i].downlinkEnabled = cp.getBool(key);
         snprintf(key, sizeof(key), "m%d", i);
         if (cp.isKey(key)) CHANNEL_KEYS[i].muted = cp.getBool(key);
+        if (!migrated) {
+            snprintf(key, sizeof(key), "n%d", i);
+            migrated = cp.isKey(key);
+        }
     }
 
     cp.end();
+
+    // Only migrate if there was something stored — a first boot has no keys and
+    // wants the compiled defaults, not a blob written over them.
+    if (migrated) {
+        persistChannelsToPrefs();
+        Preferences verify;
+        bool ok = false;
+        if (verify.begin("mesh_ch", true)) {
+            ok = verify.isKey(kChanBlobKey);
+            verify.end();
+        }
+        if (ok) {
+            Serial.printf("[cfg] migrated channels to blob storage (%d legacy keys reclaimed)\n",
+                          removeLegacyChannelKeys());
+        } else {
+            Serial.println("[cfg] channel blob migration failed; keeping legacy keys");
+        }
+    }
 }
 
 static bool loadPkiPairFromPrefs(Preferences &prefs, const char *pubKeyName,
@@ -3780,9 +3984,10 @@ static bool loadPkiPairFromPrefs(Preferences &prefs, const char *pubKeyName,
 static void persistPkiPair(Preferences &prefs, const uint8_t pubKey[32], const uint8_t privKey[32]) {
     prefs.putBytes("pub25519", pubKey, 32);
     prefs.putBytes("priv25519", privKey, 32);
-    // Keep legacy key names in sync for older builds/tools.
-    prefs.putBytes("pubKey", pubKey, 32);
-    prefs.putBytes("privKey", privKey, 32);
+    // The legacy pubKey/privKey names are still *read* by initPkiIdentity() so
+    // an older device keeps its identity, but they are no longer written: two
+    // more 32-byte blobs cost entries a 16 KB partition cannot spare, and
+    // nothing downstream of this build reads them.
 }
 
 static void initPkiIdentity() {
@@ -3868,8 +4073,27 @@ static void recomputeChannelHashes() {
     }
 }
 
-// Keeps channel 0's name in sync with the active modem preset.
+// True while channel 0 still carries a preset-derived name (or none at all) —
+// i.e. nobody has deliberately renamed the primary channel.
+static bool primaryChannelNameIsPresetDefault() {
+    const char *cur = CHANNEL_KEYS[0].name_buf[0] ? CHANNEL_KEYS[0].name_buf
+                                                  : CHANNEL_KEYS[0].name;
+    if (!cur || !cur[0]) return true;
+    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+        const char *pn = kPresets[i].channelName;
+        if (pn && strcmp(cur, pn) == 0) return true;
+    }
+    return false;
+}
+
+// Keeps channel 0's name in sync with the active modem preset — but only while
+// the name is still preset-derived. A primary channel the user renamed stays
+// renamed: this runs on every config save (just before the channel plan is
+// written to NVS) and again at boot after the plan is loaded, so overwriting
+// unconditionally erased a renamed channel 0 both on the way to storage and on
+// the way back out of it.
 static void syncPrimaryChannelName() {
+    if (!primaryChannelNameIsPresetDefault()) return;
     uint8_t pi = s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0;
     const char *pname = kPresets[pi].channelName;
     strncpy(CHANNEL_KEYS[0].name_buf, pname, sizeof(CHANNEL_KEYS[0].name_buf) - 1);
@@ -5250,6 +5474,7 @@ static void applyCfgColorSelection(int navIdx) {
     refreshCfgModal();
     lv_timer_handler();
     delay(1000);
+    flushConfigIfDirty();   // pending settings must reach NVS before we go
     ESP.restart();
 }
 
@@ -5469,6 +5694,7 @@ static void applyChatStyleSelection(int style) {
     refreshCfgModal();
     lv_timer_handler();
     delay(1000);
+    flushConfigIfDirty();   // pending settings must reach NVS before we go
     ESP.restart();
 }
 
@@ -12811,6 +13037,7 @@ static void performCfgAction(int actionId) {
                 refreshCfgModal();
                 lv_timer_handler();
                 delay(1000);
+                flushConfigIfDirty();   // pending settings must reach NVS before we go
                 ESP.restart();
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Import FAILED (no file?)");
@@ -12946,6 +13173,7 @@ static void performCfgAction(int actionId) {
             refreshCfgModal();
             lv_timer_handler();
             delay(1000);
+            flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
             break;
 
@@ -12974,6 +13202,15 @@ static void performCfgAction(int actionId) {
                      "OTA disabled on Cardputer build");
             break;
 #endif
+
+            // A third-party installer's layout keeps another firmware in the
+            // slot an update would land in. Refuse before touching the network.
+            if (!otaLayoutSupportsUpdate()) {
+                snprintf(s_cfgStatus,
+                         sizeof(s_cfgStatus),
+                         "OTA needs the factory image (flash layout)");
+                break;
+            }
 
             bool webWasRunning = webCfgRunning();
             if (webWasRunning) {
@@ -13018,6 +13255,7 @@ static void performCfgAction(int actionId) {
             refreshCfgModal();
             openCfgActionMessageModal(s_cfgStatus);
             delay(800);
+            flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
         } break;
 
@@ -13031,6 +13269,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Messages cleared - rebooting...");
             refreshCfgModal();
             delay(1000);
+            flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
             refreshChatView(true);
             break;
@@ -13042,6 +13281,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Node DB cleared - rebooting...");
             refreshCfgModal();
             delay(1000);
+            flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
             break;
 
@@ -13057,6 +13297,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Factory reset - rebooting...");
             refreshCfgModal();
             delay(1000);
+            flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
             break;
     }
@@ -13982,6 +14223,7 @@ static void onboardingAcceptImport() {
     Serial.println("[onboarding] imported OK - rebooting");
     lv_timer_handler();
     delay(500);
+    flushConfigIfDirty();   // pending settings must reach NVS before we go
     ESP.restart();
 }
 
@@ -14089,6 +14331,7 @@ static void onboardingFinalize() {
     Serial.println("[onboarding] complete - rebooting");
     lv_timer_handler();
     delay(500);
+    flushConfigIfDirty();   // pending settings must reach NVS before we go
     ESP.restart();
 }
 
@@ -15695,6 +15938,19 @@ static void onWebCfgSaved() {
     }
 
     persistConfigToPrefs();
+    // An import can carry the node's identity keypair. The parser restores it
+    // into RAM only, and every import path reboots straight after this, so the
+    // pair has to reach NVS here or the device comes back as a new identity.
+    if (cfgImportRestoredKeys()) {
+        Preferences pkiPrefs;
+        if (pkiPrefs.begin("camillia", false)) {
+            persistPkiPair(pkiPrefs, myPubKey, myPrivKey);
+            pkiPrefs.end();
+            Serial.println("[pki] restored identity keypair from imported config");
+        } else {
+            Serial.println("[pki] restore FAILED: cannot open NVS namespace");
+        }
+    }
     syncPrimaryChannelName();
     persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
@@ -16751,6 +17007,13 @@ static void setActiveChannel(int channelIdx) {
 #endif
     s_selectedMsgReplyPacketId = 0;
     s_selectedMsgText[0] = '\0';
+    // Opening a channel always lands on its newest message. This is a latch, not
+    // just the force flag below, because the refresh here is a no-op until the
+    // chat panel exists (boot picks a channel before buildUi runs) — the intent
+    // has to survive until the first render that can honor it.
+    s_chatScrollToLatestOnce = true;
+    s_chatWindowGrowPending = false;
+    s_chatWindowAnchorActive = false;
     s_channelNeedsAttention[channelIdx] = false;
     Channels.setActive(channelIdx);
     refreshChannelSelectorLabel();
@@ -17046,10 +17309,83 @@ static void fitChannelDropdownToButtonContent() {
 #endif
 }
 
+// A build runs on whichever partition table is in flash, not necessarily this
+// repo's partitions.csv (nvs, 64KB @0x650000). Third-party installers write our
+// app into a slot of *their* table, so NVS can land somewhere smaller or shared
+// with other payloads. Preferences fails silently when it runs out of room, and
+// the symptom is settings that apply immediately and then vanish on reboot — so
+// state the geometry once at boot instead of leaving it to guesswork.
+// Per-namespace key census. Which namespace owns the partition decides what has
+// to shrink, and on a small NVS that is not guessable from our side: the WiFi
+// driver's credentials and the PHY calibration blob live in the same partition
+// as our settings. Counts keys, not entries — a blob key spans several entries,
+// so the true footprint of a blob-heavy namespace is larger than its key count.
+static void logNvsNamespaceCensus() {
+    struct NsTally { char ns[16]; int keys; };
+    NsTally tally[10] = {};
+    int tracked = 0;
+    int untracked = 0;
+
+    nvs_iterator_t it = nvs_entry_find("nvs", nullptr, NVS_TYPE_ANY);
+    while (it) {
+        nvs_entry_info_t info = {};
+        nvs_entry_info(it, &info);
+        int slot = -1;
+        for (int i = 0; i < tracked; i++) {
+            if (strcmp(tally[i].ns, info.namespace_name) == 0) { slot = i; break; }
+        }
+        if (slot < 0 && tracked < (int)(sizeof(tally) / sizeof(tally[0]))) {
+            slot = tracked++;
+            strncpy(tally[slot].ns, info.namespace_name, sizeof(tally[0].ns) - 1);
+        }
+        if (slot >= 0) tally[slot].keys++; else untracked++;
+        it = nvs_entry_next(it);
+    }
+
+    for (int i = 0; i < tracked; i++) {
+        Serial.printf("[nvs]   %-18s %3d keys\n", tally[i].ns, tally[i].keys);
+    }
+    if (untracked) {
+        Serial.printf("[nvs]   (%d keys in further namespaces)\n", untracked);
+    }
+}
+
+static void logNvsHealth() {
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, nullptr);
+    if (!part) {
+        Serial.println("[nvs] no NVS partition in this flash layout - nothing can persist");
+        return;
+    }
+    nvs_stats_t st = {};
+    if (nvs_get_stats(nullptr, &st) == ESP_OK) {
+        Serial.printf("[nvs] '%s' @0x%06X %uKB - entries used=%u free=%u, namespaces=%u\n",
+                      part->label, (unsigned)part->address, (unsigned)(part->size / 1024),
+                      (unsigned)st.used_entries, (unsigned)st.free_entries,
+                      (unsigned)st.namespace_count);
+        // NVS holds one page (126 entries) back for compaction and will not
+        // spend it, so free_entries sitting at ~one page means the partition is
+        // full in practice — writes fail with NOT_ENOUGH_SPACE while the stats
+        // still show entries "free".
+        if (st.free_entries <= 130) {
+            Serial.println("[nvs] FULL - only the compaction page is left; settings writes will fail");
+        }
+        logNvsNamespaceCensus();
+    } else {
+        Serial.printf("[nvs] '%s' @0x%06X %uKB (stats unavailable)\n",
+                      part->label, (unsigned)part->address, (unsigned)(part->size / 1024));
+    }
+}
+
 static void loadConfigFromSd() {
     cfgInitDefaults(s_cfg);
     myDeviceRole = s_cfg.deviceRole;
     s_webCfgEnabled = false;
+    // The WiFi driver otherwise mirrors the SSID/password into NVS on every
+    // connect, duplicating credentials we already store ourselves. Free on a
+    // 64 KB partition; not free on the 16 KB one a third-party layout provides.
+    WiFi.persistent(false);
+    logNvsHealth();
 
     if (!sdBegin()) {
         Serial.println("[lvgl-poc] SD not available; loading state from NVS");
@@ -18790,6 +19126,13 @@ static int chatWindowStartIndex(const DisplayLine *const *rows,
 static void onChatListScroll(lv_event_t *e) {
     (void)e;
     if (!s_chatList) return;
+    // Only a real user gesture loads older history. Our own rebuild scrolls, and
+    // a list too short to scroll at all, must never latch a grow — a grow that
+    // latches on its own re-anchors the viewport to the top of the old window on
+    // the next tick, which reads as the chat jumping away from the latest message
+    // right after a channel opens.
+    if (s_chatRebuilding) return;
+    if (lv_obj_get_scroll_bottom(s_chatList) <= 0) return;   // nothing to scroll
     if (!s_chatWindowMoreAbove || s_chatWindowGrowPending) return;
     if (lv_obj_get_scroll_top(s_chatList) > kChatWindowGrowScrollMargin) return;
     s_chatWindowGrowPending = true;
@@ -18820,6 +19163,8 @@ static void refreshChatView(bool force) {
         && contextSig == s_lastChatContextSignature) {
         return;
     }
+
+    s_chatRebuilding = true;   // cleared once the final scroll placement is done
 
     const DisplayLine *rows[MAX_MSG_LINES] = {};
     int rowCount = 0;
@@ -19069,6 +19414,7 @@ static void refreshChatView(bool force) {
         lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
     }
 
+    s_chatRebuilding = false;
     s_chatScrollToLatestOnce = false;
     s_lastRenderedChannel = s_activeChannel;
     s_lastRenderedCount = ch.count;
@@ -20041,7 +20387,15 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        return;
+    }
+
+    // On-demand because the boot-time copy is emitted before USB CDC finishes
+    // enumerating — on these boards the first second of serial output never
+    // reaches the host, and this is exactly the report you need after a reboot.
+    if (strcmp(line, "nvs") == 0) {
+        logNvsHealth();
         return;
     }
 
@@ -20337,6 +20691,10 @@ void setup() {
     batteryInitAdc();
     gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
+    // Runs after init() so the RAM copy is already loaded: on a partition that a
+    // previous build filled with node blobs, this hands the space back before
+    // anything tries to save settings into it.
+    Nodes.releaseNvsForSettings();
     DMs.init();
     Ignored.init();
     Channels.init();
@@ -20384,6 +20742,10 @@ void setup() {
     }
 #endif
     Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
+    // Repeat of the boot-time report. The early copy runs before USB CDC has
+    // enumerated, so on these boards it is never seen; by here the host is
+    // attached and this is the first output a serial monitor reliably catches.
+    logNvsHealth();
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer (no PSRAM): auto-start web config only now that the node DB,
     // chat/DM buffers, radio, and UI are all allocated — this mirrors the
@@ -20433,6 +20795,12 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     LV_UNUSED(nowMs);
 #else
     if (s_otaAutoCheckDone || !s_cfg.otaAutoCheckEnabled) return;
+    // Nothing to offer on a layout that cannot accept the update anyway.
+    if (!otaLayoutSupportsUpdate()) {
+        s_otaAutoCheckDone = true;
+        Serial.println("[ota-check] skipped: flash layout cannot accept OTA updates");
+        return;
+    }
     if (!s_cfg.wifiEnabled || WiFi.status() != WL_CONNECTED) {
         s_otaAutoCheckDueMs = 0;    // restart the settle timer on reconnect
         return;
@@ -20535,6 +20903,7 @@ void loop() {
     serviceTelemetryAnnounce(now);
     serviceNeighborInfoAnnounce(now);
     serviceAutoFavorite(now);
+    serviceConfigFlush(now);
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.

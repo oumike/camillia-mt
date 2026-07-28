@@ -159,12 +159,19 @@ void applyPresetParams(RhinoConfig &cfg);
 // Initialise from compile-time defaults. Call once before sdBegin().
 void cfgInitDefaults(RhinoConfig &cfg);
 
-// Serialise cfg (and CHANNEL_KEYS[]) to YAML, appending into out.
+// Serialise cfg (and CHANNEL_KEYS[], plus the identity keypair) to YAML,
+// appending into out. The output carries the node's private key — an exported
+// config is a secret, not just a settings file.
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 
 // Parse YAML from an in-memory buffer. Updates CHANNEL_KEYS[] and fills cfg.
 // Returns true on success.
 bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg);
+
+// True when the last import restored a complete identity keypair into
+// myPubKey/myPrivKey. The parser only touches RAM, so the caller must write
+// them to NVS for the identity to survive the reboot that follows an import.
+bool cfgImportRestoredKeys();
 
 // Mount SD card (call after SPI.begin). Returns true if card present.
 bool sdBegin();

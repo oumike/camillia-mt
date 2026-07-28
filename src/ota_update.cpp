@@ -374,12 +374,48 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
     return true;
 }
 
+// True when the device is running the dual-slot layout this project ships:
+// OTA slot 0 at 0x10000, a second slot of identical size, no third, and the
+// running app in one of them.
+//
+// A third-party installer keeps its own app in a non-OTA partition at 0x10000
+// and carves one OTA slot per firmware it installs, so it fails these tests.
+// That distinction matters: on such a device the "next" OTA slot holds another
+// app the user installed, and an update would overwrite it without warning.
+//
+// Structural rather than a size comparison against partitions.csv, so it stays
+// correct if the slot sizes change. It fails closed — anything unrecognised
+// gets no update offered.
+bool otaLayoutSupportsUpdate() {
+    const esp_partition_t *slot0 = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+    const esp_partition_t *slot1 = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
+    const esp_partition_t *slot2 = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_2, nullptr);
+    if (!slot0 || !slot1 || slot2) return false;
+    if (slot0->size != slot1->size) return false;
+    // The first app partition follows the bootloader, table and data partitions
+    // at the conventional 0x10000. An installer that owns the flash has its own
+    // app there, which is what pushes its OTA slots higher.
+    if (slot0->address != 0x10000) return false;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) return false;
+    return (running->address == slot0->address || running->address == slot1->address);
+}
+
 bool otaInstallLatestRelease(const char *tag,
                              char *errOut,
                              size_t errLen,
                              OtaInstallProgressCb progressCb) {
     if (g_otaNetworkGate != kOtaNetworkGateMagic) {
         return setErr(errOut, errLen, "OTA network blocked (non-worker mode)");
+    }
+
+    if (!otaLayoutSupportsUpdate()) {
+        return setErr(errOut, errLen,
+                      "OTA unavailable on this flash layout - reflash the factory image");
     }
 
     preferExternalHeapForOta();

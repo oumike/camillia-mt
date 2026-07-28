@@ -3,6 +3,7 @@
 #include "config_io.h"   // sdBegin()
 #include <Preferences.h>
 #include <SD.h>
+#include <nvs.h>
 #include <time.h>
 
 NodeDB Nodes;
@@ -12,7 +13,51 @@ static const uint32_t kNodePersistNoSpaceRetryMs = 120000;
 static bool s_nodePersistBlockedNoSpace = false;
 static uint32_t s_nodePersistRetryAtMs = 0;
 
+// Entries held back for settings. The config namespace plus the channel plan
+// come to roughly 175 entries; this keeps margin on top of that.
+//
+// Node data is a cache — re-learned from the mesh within minutes — while
+// settings are not, so the cache is what yields when the partition is tight.
+// Without this the node table simply wins the race for space: on the 16 KB NVS
+// a Launcher install runs under, a busy mesh fills the partition with node
+// blobs and every later config or channel write fails silently.
+// Settings are two blobs now — roughly 50 entries — and a save rewrites them
+// before the old copies are reclaimed, so double that plus margin. Sized from
+// the actual footprint rather than guessed: the earlier 224 was above the free
+// count a 16 KB partition ever reaches, which switched node persistence off
+// permanently instead of only under pressure.
+static const size_t   kNvsSettingsReserveEntries = 128;
+static const uint32_t kNvsHeadroomRecheckMs      = 5000;
+
+// Free entries across the whole NVS partition (all namespaces share it).
+// Returns SIZE_MAX when stats are unavailable, so an unknown state never
+// blocks writes that would otherwise have succeeded.
+static size_t nvsFreeEntries() {
+    nvs_stats_t st = {};
+    if (nvs_get_stats(nullptr, &st) != ESP_OK) return SIZE_MAX;
+    return st.free_entries;
+}
+
+static bool nodePersistHasHeadroom() {
+    static uint32_t lastCheckMs = 0;
+    static bool     lastResult  = true;
+    const uint32_t now = millis();
+    if (lastCheckMs != 0 && (uint32_t)(now - lastCheckMs) < kNvsHeadroomRecheckMs) {
+        return lastResult;
+    }
+    lastCheckMs = now ? now : 1;
+    const size_t freeEntries = nvsFreeEntries();
+    const bool ok = (freeEntries >= kNvsSettingsReserveEntries);
+    if (!ok && lastResult) {
+        Serial.printf("[nodedb] NVS down to %u free entries; pausing node persistence "
+                      "so settings stay writable\n", (unsigned)freeEntries);
+    }
+    lastResult = ok;
+    return ok;
+}
+
 static bool nodePersistCanWrite() {
+    if (!nodePersistHasHeadroom()) return false;
     if (!s_nodePersistBlockedNoSpace) return true;
     if ((int32_t)(millis() - s_nodePersistRetryAtMs) >= 0) {
         s_nodePersistBlockedNoSpace = false;
@@ -208,6 +253,31 @@ void NodeDB::_saveIds() {
     if (wrote != wanted) {
         nodePersistMarkWriteFailure("ids", wanted, wrote);
     }
+}
+
+bool NodeDB::releaseNvsForSettings() {
+    if (nvsFreeEntries() >= kNvsSettingsReserveEntries) return false;
+
+    // Only worth doing if this cache is actually holding anything. Clearing an
+    // empty namespace frees nothing and reports a recovery that did not happen —
+    // which is misleading precisely when the partition is full for some other
+    // reason and the log is what you are reading to find out why.
+    const size_t before = nvsFreeEntries();
+    Preferences p;
+    if (!p.begin("nodes", false)) return false;
+    const bool hadAny = p.isKey("ids");
+    if (!hadAny) { p.end(); return false; }
+
+    // Saturated with node blobs. Drop the persisted cache wholesale rather than
+    // evicting node by node: the RAM copy loaded at init() stays intact so the
+    // UI is unchanged, the mesh refills it, and the headroom gate above now
+    // stops it before it can crowd settings out again.
+    p.clear();
+    p.end();
+    const size_t after = nvsFreeEntries();
+    Serial.printf("[nodedb] cleared persisted node cache to free NVS for settings "
+                  "(%u -> %u entries free)\n", (unsigned)before, (unsigned)after);
+    return true;
 }
 
 void NodeDB::clearPersisted() {

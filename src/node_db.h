@@ -41,6 +41,12 @@ class NodeDB {
 public:
     void init();          // zeros RAM, then loads persisted nodes from NVS
     void clearPersisted(); // wipe "nodes" NVS namespace and clear runtime node cache
+    // Boot-time recovery for a saturated NVS: drops the persisted node cache
+    // (RAM copy untouched) when free space has fallen below the reserve settings
+    // need. Returns true if it freed space. Ordinary operation never needs this
+    // — node persistence self-limits — but a device that filled its partition
+    // under an older build cannot save settings until the space comes back.
+    bool releaseNvsForSettings();
     void saveAll();        // rewrite all nodes to NVS (after partition erase)
 
     // Find or create the entry for nodeId. When the table is full this evicts

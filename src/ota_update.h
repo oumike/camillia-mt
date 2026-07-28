@@ -18,6 +18,13 @@ void otaSetNetworkAllowed(bool allowed);
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 
+// True when the flash layout can accept an update safely — the dual-slot table
+// this project ships. False on a third-party installer's layout, where the
+// spare OTA slot belongs to another firmware the user installed. Callers should
+// skip checking and hide the update action when this is false; the install path
+// refuses regardless.
+bool otaLayoutSupportsUpdate();
+
 // Checks GitHub release metadata and computes the expected OTA binary URL.
 bool otaCheckLatestRelease(OtaCheckResult &out);
 

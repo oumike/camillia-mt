@@ -18,6 +18,7 @@
 #include <sys/select.h>   // clientWritable(): poll the socket before writing
 #include "debug_flags.h"
 #include "gps.h"
+#include "ota_update.h"   // otaLayoutSupportsUpdate()
 #include "battery_util.h"
 #include "utf8_utils.h"
 
@@ -2011,14 +2012,25 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // leads anywhere. The update source itself is not configurable by design.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Firmware Updates</h3>";
-    html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
-            "On boot, once WiFi is up, the device asks whether a newer release "
-            "exists and offers to install it. Declining is remembered until the "
-            "next reboot.</p>";
-    html += "<label>Check for Updates on Boot<select name='ota_autocheck'>"
-            "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
-            "</select></label>";
+    if (!otaLayoutSupportsUpdate()) {
+        // Installed by a third-party flasher into its own partition layout: the
+        // slot an update would land in belongs to another firmware. Say so
+        // instead of offering a toggle that leads nowhere.
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "Updates are unavailable on this install: the device was flashed "
+                "with a third-party partition layout, where the spare app slot may "
+                "hold other firmware. Re-flash the factory image to enable "
+                "over-the-air updates.</p>";
+    } else {
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "On boot, once WiFi is up, the device asks whether a newer release "
+                "exists and offers to install it. Declining is remembered until the "
+                "next reboot.</p>";
+        html += "<label>Check for Updates on Boot<select name='ota_autocheck'>"
+                "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
+                "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
+                "</select></label>";
+    }
 #endif
 
     // Node Management. The archive checkbox is only meaningful where the node

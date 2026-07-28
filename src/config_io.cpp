@@ -1,5 +1,6 @@
 #include "config_io.h"
 #include "mesh_channel_plan.h"
+#include "mesh_proto.h"      // myPubKey / myPrivKey — node identity in the backup
 #include "base64_util.h"
 #include "utf8_utils.h"
 #include "ignore_list.h"
@@ -553,6 +554,24 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
     snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
+    // security — the Curve25519 identity keypair, so a backup can restore the
+    // same node identity after a reflash or NVS wipe. Without it a restored
+    // device comes up as a new identity: peers' stored public key no longer
+    // matches, and DMs to it can no longer be decrypted. Emitted only once an
+    // identity exists. This does put the private key in the file — treat an
+    // exported config as a secret.
+    {
+        bool haveKeys = false;
+        for (int i = 0; i < 32 && !haveKeys; i++) haveKeys = (myPubKey[i] || myPrivKey[i]);
+        if (haveKeys) {
+            char kb64[48];
+            out += "  security:\n";
+            base64Encode(myPubKey, 32, kb64);
+            out += "    publicKey: ";  out += kb64; out += "\n";
+            base64Encode(myPrivKey, 32, kb64);
+            out += "    privateKey: "; out += kb64; out += "\n";
+        }
+    }
     // display
     out += "  display:\n";
     snprintf(tmp, sizeof(tmp), "    brightness: %u\n", (unsigned)cfg.brightness); out += tmp;
@@ -688,6 +707,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
 }
 
+// Set by the parse below when an import carried a complete identity keypair, so
+// the caller knows to write the restored keys to NVS (the parser only reaches
+// the in-RAM globals). Valid until the next import.
+static bool s_importRestoredKeys = false;
+
 // ── YAML parse (from memory buffer) ──────────────────────────
 // Handles both:
 //   - Meshtastic CLI format (owner/owner_short top-level, config.lora at indent 4, location)
@@ -696,6 +720,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     char        section[20]    = "";   // indent-0 section key
     char        subsection[20] = "";   // indent-2 subsection key (e.g. "lora" under "config")
     int         chanIdx        = -1;
+    bool        gotPubKey      = false;
+    bool        gotPrivKey     = false;
     const char *p              = buf;
     const char *end            = buf + len;
 
@@ -911,6 +937,17 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "gpsMode"))
                     cfg.gpsEnabled = (!strcmp(val,"ENABLED"));
+            } else if (!strcmp(section, "config") && !strcmp(subsection, "security")) {
+                // Node identity restore. Both halves must decode to full 32-byte
+                // keys before we claim a restore — a half-applied pair would boot
+                // as a mismatched identity and get regenerated anyway.
+                if (!strcmp(key, "publicKey")) {
+                    uint8_t k[32];
+                    if (base64Decode(val, k, 32) == 32) { memcpy(myPubKey, k, 32); gotPubKey = true; }
+                } else if (!strcmp(key, "privateKey")) {
+                    uint8_t k[32];
+                    if (base64Decode(val, k, 32) == 32) { memcpy(myPrivKey, k, 32); gotPrivKey = true; }
+                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "bluetooth")) {
                 if      (!strcmp(key, "enabled"))  cfg.btEnabled  = (!strcmp(val,"true"));
                 else if (!strcmp(key, "fixedPin")) cfg.btFixedPin = (uint32_t)atol(val);
@@ -1043,8 +1080,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);
+    // Both halves or neither: the caller persists the pair only on a full restore.
+    s_importRestoredKeys = (gotPubKey && gotPrivKey);
     return true;
 }
+
+bool cfgImportRestoredKeys() { return s_importRestoredKeys; }
 
 // ── Export to SD ──────────────────────────────────────────────
 bool cfgExport(const RhinoConfig &cfg) {

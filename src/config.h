@@ -167,7 +167,7 @@
 #define MY_OTA_AUTOCHECK    1
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
-#define MY_AUTOFAV_RANGE_M  5000   // auto-favorite threshold, meters (5 km / ~3.1 mi)
+#define MY_AUTOFAV_RANGE_M  1609   // auto-favorite threshold, meters (1 mile)
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 // Chat/DM message font size. Medium matches the built-in size; Small/Large step
