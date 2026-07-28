@@ -3425,25 +3425,27 @@ static void persistConfigToPrefs() {
         s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
     }
 
-    uint8_t *buf = s_cfgBlobBuf;
+    // Sized off the array, never off a pointer to it: a decayed `uint8_t *buf`
+    // here made sizeof() four bytes, so saves stored the header alone and every
+    // reboot after one fell back to defaults.
     const CfgBlobHeader hdr = { kCfgBlobVersion, (uint16_t)sizeof(RhinoConfig) };
-    memcpy(buf, &hdr, sizeof(hdr));
-    memcpy(buf + sizeof(hdr), &s_cfg, sizeof(s_cfg));
+    memcpy(s_cfgBlobBuf, &hdr, sizeof(hdr));
+    memcpy(s_cfgBlobBuf + sizeof(hdr), &s_cfg, sizeof(s_cfg));
 
     Preferences p;
     if (!p.begin("camillia", false)) {
         Serial.println("[cfg] save FAILED: cannot open NVS namespace 'camillia'");
         return;
     }
-    const size_t wrote = p.putBytes(kCfgBlobKey, buf, sizeof(buf));
+    const size_t wrote = p.putBytes(kCfgBlobKey, s_cfgBlobBuf, sizeof(s_cfgBlobBuf));
     // Read during early boot, before the blob is unpacked, so they stay keys.
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
 
-    if (wrote != sizeof(buf)) {
+    if (wrote != sizeof(s_cfgBlobBuf)) {
         Serial.printf("[cfg] save FAILED: wrote %u of %u bytes (NVS full?)\n",
-                      (unsigned)wrote, (unsigned)sizeof(buf));
+                      (unsigned)wrote, (unsigned)sizeof(s_cfgBlobBuf));
     }
 }
 
@@ -3876,7 +3878,10 @@ static void loadConfigFromPrefs() {
         Preferences verify;
         bool ok = false;
         if (verify.begin("camillia", true)) {
-            ok = verify.isKey(kCfgBlobKey);
+            // Length, not just presence: a short write still creates the key, and
+            // reclaiming the legacy keys against one would delete the only
+            // complete copy of the settings.
+            ok = (verify.getBytesLength(kCfgBlobKey) == sizeof(s_cfgBlobBuf));
             verify.end();
         }
         if (ok) {
