@@ -553,10 +553,13 @@ static const char kHead[] =
         ".tab-panel.active{display:block}"
         ".tab-pane-center{max-width:760px;margin:0 auto}"
         "#tab-config form{max-width:760px;margin:0 auto}"
-        "#tab-utils .tab-pane-center{max-width:620px;text-align:center}"
-        "#tab-utils h3,#tab-utils p{margin-left:auto;margin-right:auto}"
-        "#tab-utils form{max-width:520px;margin:.5em auto}"
-        "#tab-utils label{text-align:left}"
+        // Same 760px column and same left alignment as the config tab, so the
+        // section boxes and their contents line up when switching tabs. The
+        // per-element centering this replaced (auto margins on h3/p/form plus
+        // text-align:center on the pane) is all dropped rather than overridden —
+        // left is the default, so the overrides that fought it are dead weight.
+        "#tab-utils .tab-pane-center{max-width:760px}"
+        "#tab-utils form{max-width:520px;margin:.5em 0}"
         ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
         ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
         ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
@@ -1583,7 +1586,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
-    section(html, lite, "Device", true);
+    section(html, lite, "Device", false);
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
     // Only client roles are offered; values are the canonical Meshtastic enum
@@ -1643,7 +1646,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── Position ──────────────────────────────────────────────
-    section(html, lite, "Position", true);
+    section(html, lite, "Position", false);
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
@@ -1724,7 +1727,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     // ── LoRa Radio ────────────────────────────────────────────
-    section(html, lite, "LoRa Radio", true);
+    section(html, lite, "LoRa Radio", false);
     // The live frequency/BW/SF/CR readout is driven by kPresetJs. Lite skips
     // both, so its selects carry no onchange handler to call.
     html += lite ? "<div class='row2'><label>Region<select name='region' id='sel-rgn'>"
@@ -1998,20 +2001,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
-    // WiFi
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>WiFi</h3>"
-            "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
+    // WiFi. Collapsed by default, matching MQTT / Power / Modules. A <details>
+    // only hides its contents visually — the inputs stay in the form and submit
+    // either way, which is what the other collapsed sections already rely on.
+    section(html, lite, "WiFi", false);
+    html += "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
     html += gWifiSsid;
     html += "'></label>"
             "<label>Password<input name='wifi_pass' type='password' maxlength='63' value='";
     html += gWifiPass;
     html += "'></label>";
+    sectionEnd(html, lite);
+    sendChunk(html);
 
     // Firmware Updates. Compiled out on the Cardputer, where OTA is disabled
     // altogether — offering the toggle there would promise a check that never
     // leads anywhere. The update source itself is not configurable by design.
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Firmware Updates</h3>";
+    section(html, lite, "Firmware Updates", false);
     if (!otaLayoutSupportsUpdate()) {
         // Installed by a third-party flasher into its own partition layout: the
         // slot an update would land in belongs to another firmware. Say so
@@ -2031,6 +2038,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
                 "</select></label>";
     }
+    sectionEnd(html, lite);
+    sendChunk(html);
 #endif
 
     // Node Management. The archive checkbox is only meaningful where the node
@@ -2041,7 +2050,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     {
         const bool slot    = nodeArchiveSlotExists();
         const bool canArch = slot && nodeArchiveAvailable();
-        html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Node Management</h3>";
+        section(html, lite, "Node Management", false);
         html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
                 "The device keeps the ";
         html += String(MAX_NODES);
@@ -2107,6 +2116,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
                 "Downloads every node currently known to the device, plus any "
                 "previously archived nodes if an archive exists.</p>";
+        sectionEnd(html, lite);
     }
 
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
@@ -2131,8 +2141,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "</div></div><div class='tab-panel' id='tab-utils'><div class='tab-pane-center'>";
 
     // ── Diagnostics / Utilities ───────────────────────────────
+    // Collapsible, matching the config tab. These pass `false` rather than
+    // `lite` because the lite page returns above and never reaches this tab.
+    section(html, false, "Diagnostics", false);
     html +=
-        "<h3 style='margin-top:1.5em'>Diagnostics</h3>"
         "<form method='POST' action='/announce'>"
         "<button type='submit' style='background:#e07b00'>"
         "&#128225; Send NODEINFO Broadcast</button>"
@@ -2147,9 +2159,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
+    sectionEnd(html, false);
+    sendChunk(html);
 
+    section(html, false, "Debug Output", false);
     html +=
-        "<h3 style='margin-top:.8em'>Debug Output</h3>"
         "<form method='POST' action='/set-debug-monitor'>"
         "<label style='display:flex;align-items:center;gap:.5em'>"
         "<input type='checkbox' name='dbg_monitor' value='1'";
@@ -2160,9 +2174,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "When disabled, debug logs are suppressed from serial monitor output.</p>";
+    sectionEnd(html, false);
+    sendChunk(html);
 
+    section(html, false, "Software Update", false);
     html +=
-        "<h3 style='margin-top:.8em'>Software Update</h3>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>Current firmware: <b>";
     html += APP_VERSION;
     html +=
@@ -2172,8 +2188,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // and its client JS) remains dormant behind kWebDeviceReleaseCheckEnabled and
     // is no longer reachable from the UI.
 
+    sectionEnd(html, false);
+    sendChunk(html);
+
+    section(html, false, "Backup &amp; Restore", false);
     html +=
-        "<h3 style='margin-top:.5em'>Backup &amp; Restore</h3>"
         "<p><a href='/export'"
         " style='display:inline-block;padding:.4em 1.2em;background:#2a9d8f;"
         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
@@ -2185,20 +2204,28 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         " style='margin-top:.3em'><br />"
         "<button type='submit'>&#11014; Upload &amp; Apply</button>"
         "</form>";
+    sectionEnd(html, false);
+    sendChunk(html);
 
     if (gOnScreenshotPng) {
+        section(html, false, "Display Capture", false);
         html +=
-            "<h3 style='margin-top:1.1em'>Display Capture</h3>"
             "<p><a href='/screenshot'"
             " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
             "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
             "&#128247; Capture &amp; Download PNG</a></p>"
             "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
             "Captures the current on-device screen and downloads it as a PNG file.</p>";
+        sectionEnd(html, false);
+        sendChunk(html);
     }
 
+    // Written out rather than using section(): the helper has no way to carry
+    // the red, and losing it would make the destructive actions read like any
+    // other group. Collapsed like the rest, which also puts a deliberate click
+    // in front of Factory Reset.
     html +=
-        "<h3 style='margin-top:1.5em;color:#c0392b'>Danger Zone</h3>"
+        "<details><summary style='color:#c0392b'>Danger Zone</summary>"
         "<form method='POST' action='/clear-messages'"
         " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -2220,7 +2247,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Erases all NVS configuration (node identity, channels, keys) and reboots."
-        " The device will behave as if freshly flashed.</p>";
+        " The device will behave as if freshly flashed.</p>"
+        "</details>";
 
     html += "</div></div><div class='tab-panel' id='tab-live'>";
     html += "<h3 style='margin-top:1.2em'>Live RX/TX</h3>"

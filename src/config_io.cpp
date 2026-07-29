@@ -712,6 +712,17 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
 // the in-RAM globals). Valid until the next import.
 static bool s_importRestoredKeys = false;
 
+// The three Node Management settings, shared by both indent levels of the
+// parser. cfgToYaml() writes the "nodes:" section with two-space keys, but this
+// used to be handled only in the indent-4 branch — so every export round-tripped
+// these out and silently dropped them coming back in. Accepting both indents
+// keeps older or hand-edited files working too.
+static void parseNodesSectionKey(RhinoConfig &cfg, const char *key, const char *val) {
+    if      (!strcmp(key, "archiveEvicted"))     cfg.nodeArchiveEnabled  = parseBoolValue(val);
+    else if (!strcmp(key, "autoFavorite"))       cfg.autoFavoriteEnabled = parseBoolValue(val);
+    else if (!strcmp(key, "autoFavoriteRangeM")) cfg.autoFavoriteRangeM  = (uint32_t)atol(val);
+}
+
 // ── YAML parse (from memory buffer) ──────────────────────────
 // Handles both:
 //   - Meshtastic CLI format (owner/owner_short top-level, config.lora at indent 4, location)
@@ -882,6 +893,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else if (!strcmp(key, "power"))        cfg.loraPower    = (uint8_t)atoi(val);
                     else if (!strcmp(key, "hop_limit"))    cfg.loraHopLimit = (uint8_t)atoi(val);
                     else if (!strcmp(key, "modem_preset")) cfg.modemPreset  = presetFromName(val);
+                } else if (!strcmp(section, "nodes")) {
+                    parseNodesSectionKey(cfg, key, val);
                 }
             }
         } else if (indent == 4) {
@@ -1055,9 +1068,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
                 if (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "nodes")) {
-                if      (!strcmp(key, "archiveEvicted"))     cfg.nodeArchiveEnabled  = parseBoolValue(val);
-                else if (!strcmp(key, "autoFavorite"))       cfg.autoFavoriteEnabled = parseBoolValue(val);
-                else if (!strcmp(key, "autoFavoriteRangeM")) cfg.autoFavoriteRangeM  = (uint32_t)atol(val);
+                // Also handled at indent 2, which is where cfgToYaml writes it.
+                parseNodesSectionKey(cfg, key, val);
             } else if (!strcmp(section, "channels") && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
                 if (!strcmp(key, "role"))
                     CHANNEL_KEYS[chanIdx].role = !strcmp(val,"SECONDARY") ? 1 : !strcmp(val,"DISABLED") ? 2 : 0;

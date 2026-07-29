@@ -13,20 +13,26 @@ static const uint32_t kNodePersistNoSpaceRetryMs = 120000;
 static bool s_nodePersistBlockedNoSpace = false;
 static uint32_t s_nodePersistRetryAtMs = 0;
 
-// Entries held back for settings. The config namespace plus the channel plan
-// come to roughly 175 entries; this keeps margin on top of that.
+// Entries held back for settings.
 //
 // Node data is a cache — re-learned from the mesh within minutes — while
 // settings are not, so the cache is what yields when the partition is tight.
 // Without this the node table simply wins the race for space: on the 16 KB NVS
 // a Launcher install runs under, a busy mesh fills the partition with node
 // blobs and every later config or channel write fails silently.
-// Settings are two blobs now — roughly 50 entries — and a save rewrites them
-// before the old copies are reclaimed, so double that plus margin. Sized from
-// the actual footprint rather than guessed: the earlier 224 was above the free
-// count a 16 KB partition ever reaches, which switched node persistence off
-// permanently instead of only under pressure.
-static const size_t   kNvsSettingsReserveEntries = 128;
+//
+// MUST stay above ~170. nvs_get_stats() counts the compaction page in
+// free_entries, and NVS never spends that page: at free_entries == 126 the
+// partition is full in practice and even a one-byte write fails with
+// NOT_ENOUGH_SPACE. So the usable figure is (free_entries - 126). A settings
+// save needs ~44 of those (an ~884-byte config blob is ~29 entries, the channel
+// blob ~15) and the superseded copies linger until a compaction, so the floor is
+// 126 + 44, and this leaves room for consecutive saves on top.
+//
+// Lowering this to 128 "to match the settings footprint" is what reintroduced
+// the original bug — it left two usable entries and settings stopped persisting
+// on Launcher installs.
+static const size_t   kNvsSettingsReserveEntries = 224;
 static const uint32_t kNvsHeadroomRecheckMs      = 5000;
 
 // Free entries across the whole NVS partition (all namespaces share it).

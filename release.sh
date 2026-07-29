@@ -71,14 +71,20 @@ delete_existing_release_and_tags() {
 }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
+ASSUME_YES=false
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: $0"
+            echo "Usage: $0 [-y|--yes]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
+            echo ""
+            echo "  -y, --yes   Bump the patch level of the latest tag without"
+            echo "              prompting (v3.6.5 -> v3.6.6) and accept the AI"
+            echo "              release notes."
             exit 0
             ;;
+        -y|--yes) ASSUME_YES=true ;;
         *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
     esac
 done
@@ -90,7 +96,22 @@ echo "Current version: ${CURRENT:-unknown}"
 echo "Latest git tag:  $PREV_TAG"
 echo ""
 
-read -rp "New version (e.g. 1.0.0): " VERSION
+if [[ "$ASSUME_YES" == true ]]; then
+    # Derived from the latest tag, not the VERSION file: the tag is what was
+    # actually published, and VERSION has been seen lagging behind it.
+    # Deliberately strict — the tag list contains malformed entries (vv3.2.4),
+    # and silently "fixing" one of those would publish a wrong version.
+    if [[ "$PREV_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$(( BASH_REMATCH[3] + 1 ))"
+        echo "Auto-bumped $PREV_TAG -> v$VERSION"
+    else
+        echo "Cannot auto-bump: latest tag '$PREV_TAG' is not vMAJOR.MINOR.PATCH." >&2
+        echo "Re-run without -y and enter the version explicitly." >&2
+        exit 1
+    fi
+else
+    read -rp "New version (e.g. 1.0.0): " VERSION
+fi
 if [[ -z "$VERSION" ]]; then
     echo "No version entered. Aborting."
     exit 1
@@ -321,7 +342,8 @@ if [[ -n "${AI_SUMMARY// /}" ]]; then
     echo "────────────────────────────────────────"
 
     # Only prompt on a TTY so CI/non-interactive runs accept and continue.
-    if [[ -t 0 ]]; then
+    # --yes accepts explicitly rather than relying on that heuristic.
+    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
         while true; do
             read -rp "Use these notes? [Y]es / [e]dit / [n]o (GitHub notes only): " ans \
                 || ans="y"
