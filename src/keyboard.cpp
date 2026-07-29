@@ -64,6 +64,37 @@ bool cardputerSpeakerTone(float frequency, uint32_t duration, int channel, bool 
 }
 #endif
 
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+namespace {
+char sHeldKeyBestEffort = KEY_NONE;
+uint32_t sHeldSinceMsBestEffort = 0;
+uint32_t sHeldLastSeenMsBestEffort = 0;
+constexpr uint32_t kHeldStaleMsBestEffort = 260;
+
+static inline void clearHeldKeyBestEffort() {
+    sHeldKeyBestEffort = KEY_NONE;
+    sHeldSinceMsBestEffort = 0;
+    sHeldLastSeenMsBestEffort = 0;
+}
+
+static inline void noteHeldKeyBestEffort(char key, uint32_t nowMs) {
+    if (key == KEY_NONE) return;
+    if (key != sHeldKeyBestEffort) {
+        sHeldKeyBestEffort = key;
+        sHeldSinceMsBestEffort = nowMs;
+    }
+    sHeldLastSeenMsBestEffort = nowMs;
+}
+
+static inline void expireHeldKeyBestEffort(uint32_t nowMs) {
+    if (sHeldKeyBestEffort == KEY_NONE || sHeldLastSeenMsBestEffort == 0) return;
+    if ((uint32_t)(nowMs - sHeldLastSeenMsBestEffort) > kHeldStaleMsBestEffort) {
+        clearHeldKeyBestEffort();
+    }
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
 constexpr uint8_t TLORA_KB_ADDR = 0x34;
@@ -107,6 +138,9 @@ uint32_t sTloraModifierSetMs = 0;
 bool sTloraBackspaceDown = false;
 bool sTloraBackspaceHoldSent = false;
 uint32_t sTloraBackspaceDownMs = 0;
+// Currently-held key and when it went down, for keyboardHeldKey() below.
+char sTloraHeldKey = KEY_NONE;
+uint32_t sTloraHeldSinceMs = 0;
 
 static inline uint8_t tloraReadRotaryAB() {
     uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
@@ -266,11 +300,25 @@ char tloraReadMappedKey() {
             }
         }
 
-        if (!pressed) continue;
+        // Track whatever is currently held so callers can offer hold-to-repeat.
+        // The controller reports one press event and then nothing until release,
+        // so a held key is invisible without this; the backspace-hold path above
+        // already relies on the same press/release pairing.
+        char heldMapped = tloraTranslateKey(keyNum);
+        if (!pressed) {
+            if (heldMapped != KEY_NONE && heldMapped == sTloraHeldKey) {
+                sTloraHeldKey = KEY_NONE;
+                sTloraHeldSinceMs = 0;
+            }
+            continue;
+        }
+        if (heldMapped != KEY_NONE && heldMapped != sTloraHeldKey) {
+            sTloraHeldKey = heldMapped;
+            sTloraHeldSinceMs = now;
+        }
 
-        char mapped = tloraTranslateKey(keyNum);
-        if (mapped != KEY_NONE) {
-            return mapped;
+        if (heldMapped != KEY_NONE) {
+            return heldMapped;
         }
     }
 
@@ -463,10 +511,10 @@ char TDeckKeyboard::readKey() {
 #else
     // Read immediately; higher-level poll loop already controls cadence.
     // A local gate here prevents draining buffered bursts and drops keys.
+    uint32_t now = millis();
 #if (KB_INT >= 0)
     static uint32_t lastIdleProbeMs = 0;
     static uint32_t lastKeyHitMs = 0;
-    uint32_t now = millis();
     bool irqActive = (digitalRead(KB_INT) == LOW);
     // T-Deck can miss very short taps if we only probe every 250ms when the
     // IRQ line is not asserted; keep a faster fallback cadence there.
@@ -480,23 +528,61 @@ char TDeckKeyboard::readKey() {
 #if defined(DEVICE_TDECK)
         bool inBurstDrain = (now - lastKeyHitMs) < kBurstWindowMs;
         if (!inBurstDrain) {
-            if (now - lastIdleProbeMs < kIdleProbeMs) return KEY_NONE;
+            if (now - lastIdleProbeMs < kIdleProbeMs) {
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+                expireHeldKeyBestEffort(now);
+#endif
+                return KEY_NONE;
+            }
             lastIdleProbeMs = now;
         }
 #else
-        if (now - lastIdleProbeMs < kIdleProbeMs) return KEY_NONE;
+        if (now - lastIdleProbeMs < kIdleProbeMs) {
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+            expireHeldKeyBestEffort(now);
+#endif
+            return KEY_NONE;
+        }
         lastIdleProbeMs = now;
 #endif
     }
 #endif
     uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
-    if (!Wire.available()) return KEY_NONE;
+    if (!Wire.available()) {
+    #if defined(DEVICE_TDECK) && (KB_INT >= 0)
+        if (irqActive) {
+            // While the keyboard IRQ stays asserted, preserve the current held
+            // key even if this poll doesn't return a byte yet.
+            return KEY_NONE;
+        }
+    #endif
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+        expireHeldKeyBestEffort(now);
+#endif
+        return KEY_NONE;
+    }
     uint8_t raw = Wire.read();
-    if (raw == 0x00 || raw == 0xFF) return KEY_NONE;
+    if (raw == 0x00 || raw == 0xFF) {
+    #if defined(DEVICE_TDECK) && (KB_INT >= 0)
+        if (irqActive) {
+            // Same as above: no new byte yet, but key hardware still signals
+            // pending activity, so don't drop held-key timing.
+            return KEY_NONE;
+        }
+    #endif
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+        expireHeldKeyBestEffort(now);
+#endif
+        return KEY_NONE;
+    }
 #if defined(DEVICE_TDECK)
     lastKeyHitMs = now;
 #endif
-    return mapKey(raw);
+    char mapped = mapKey(raw);
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+    noteHeldKeyBestEffort(mapped, now);
+#endif
+    return mapped;
 #endif
 }
 
@@ -548,6 +634,41 @@ void TDeckKeyboard::pumpCardputerKeys() {
             }
         }
     }
+
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+    char heldCandidate = KEY_NONE;
+    if (enterPressed) {
+        heldCandidate = fnActiveForEnter ? KEY_FN_ENTER : KEY_ENTER;
+    }
+    if (heldCandidate == KEY_NONE) {
+        for (uint8_t hidKey : status.hid_keys) {
+            if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_UP) { heldCandidate = KEY_SCROLL_UP; break; }
+            if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_DOWN) { heldCandidate = KEY_SCROLL_DN; break; }
+            if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_LEFT) { heldCandidate = KEY_PREV_CHAN; break; }
+            if (hidKey == (uint8_t)CARDPUTER_HID_ARROW_RIGHT) { heldCandidate = KEY_NEXT_CHAN; break; }
+            if (hidKey == (uint8_t)CARDPUTER_HID_BACKSPACE || hidKey == (uint8_t)CARDPUTER_HID_DELETE) {
+                heldCandidate = status.fn ? KEY_BACKSPACE_HOLD : KEY_BACKSPACE;
+                break;
+            }
+            if (hidKey == (uint8_t)CARDPUTER_HID_ESCAPE) { heldCandidate = KEY_ESCAPE; break; }
+        }
+    }
+    if (heldCandidate == KEY_NONE) {
+        for (char key : status.word) {
+            if (key == '\r' || key == '\n') continue;
+            if (status.fn) {
+                if (key == ';') { heldCandidate = KEY_SCROLL_UP; break; }
+                if (key == '.') { heldCandidate = KEY_SCROLL_DN; break; }
+                if (key == ',') { heldCandidate = KEY_PREV_CHAN; break; }
+                if (key == '/') { heldCandidate = KEY_NEXT_CHAN; break; }
+            }
+            heldCandidate = normalizeCardputerKey(key);
+            break;
+        }
+    }
+    if (heldCandidate != KEY_NONE) noteHeldKeyBestEffort(heldCandidate, now);
+    else clearHeldKeyBestEffort();
+#endif
 
     if (enterPressed && !_cardputerEnterDown) {
         enqueueCardputerKey(fnActiveForEnter ? KEY_FN_ENTER : KEY_ENTER);
@@ -674,3 +795,32 @@ void IRAM_ATTR TDeckKeyboard::_isrPagerRotary() {
 }
 #endif
 void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = true; }
+
+// Held-key reporting. Only the Pager's controller gives us press *and* release
+// events, so it is the only build that can answer this; elsewhere callers get
+// a best-effort heuristic keyed from recent keyboard activity.
+char keyboardHeldKey() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    return sTloraHeldKey;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    return KEY_NONE;
+#else
+    uint32_t now = millis();
+    expireHeldKeyBestEffort(now);
+    return sHeldKeyBestEffort;
+#endif
+}
+
+uint32_t keyboardHeldMs() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
+    return millis() - sTloraHeldSinceMs;
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    return 0;
+#else
+    uint32_t now = millis();
+    expireHeldKeyBestEffort(now);
+    if (sHeldKeyBestEffort == KEY_NONE || sHeldSinceMsBestEffort == 0) return 0;
+    return now - sHeldSinceMsBestEffort;
+#endif
+}

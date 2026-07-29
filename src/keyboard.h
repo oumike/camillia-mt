@@ -20,6 +20,13 @@
 #define KEY_BACKSPACE_HOLD 0x87  // long-hold BACKSPACE (non-touch panel close)
 #define KEY_FN_ENTER    0x88   // Fn+Enter (Cardputer compose shortcut)
 
+// The key currently held down (mapped code), or KEY_NONE when nothing is held,
+// plus how long it has been down. Pager builds report this from real press/
+// release events; other keyboard builds infer hold from repeated key sightings,
+// so callers must treat it as a best-effort enhancement.
+char     keyboardHeldKey();
+uint32_t keyboardHeldMs();
+
 class TDeckKeyboard {
 public:
     void begin();

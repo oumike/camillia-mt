@@ -161,6 +161,9 @@ static int s_emojiPickerSelection = 0;
 // browse shortcut on keyboard builds). Insert mode: picking appends to the open
 // compose box and keeps the tray up (the touch-only in-compose 😀 button).
 static bool s_emojiPickerSendMode = false;
+// Cells per row in the tray, computed when it is built (see openEmojiPicker), so
+// up/down step a row instead of a cell.
+static int s_emojiPickerCols = 1;
 // Packet id the pick reacts to. Non-zero when the tray was opened in send mode
 // with the chat cursor sitting on a message: the pick then goes out as a tapback
 // (reply_id + emoji flag) on that message instead of a standalone message.
@@ -4469,6 +4472,18 @@ static void sendQuickEmoji(const char *emoji, uint32_t tapbackId = 0) {
     refreshDmModal(true);
 }
 
+// Moves the tray cursor by delta, clamped. Shared by key handling and the
+// hold-to-repeat service.
+static void emojiPickerStep(int delta) {
+    if (delta == 0) return;
+    int nxt = s_emojiPickerSelection + delta;
+    if (nxt < 0) nxt = 0;
+    if (nxt >= kEmojiTrayCount) nxt = kEmojiTrayCount - 1;
+    if (nxt == s_emojiPickerSelection) return;
+    s_emojiPickerSelection = nxt;
+    refreshEmojiPickerSelection();
+}
+
 static void emojiPickerActivate(int idx) {
     if (idx < 0 || idx >= kEmojiTrayCount) return;
     if (s_emojiPickerSendMode) {
@@ -4588,6 +4603,12 @@ static void openEmojiPicker(bool sendMode) {
     lv_obj_set_style_pad_row(grid, 2, 0);
     lv_obj_set_style_pad_column(grid, 2, 0);
 
+    // Row width, derived from the same numbers the grid is built with (modal
+    // width less its 6px padding either side, cells plus a 2px column gap). Used
+    // by up/down navigation so those keys move a row rather than one cell.
+    s_emojiPickerCols = (modalW - 12 + 2) / (cell + 2);
+    if (s_emojiPickerCols < 1) s_emojiPickerCols = 1;
+
     for (int i = 0; i < kEmojiTrayCount; i++) {
         lv_obj_t *c = lv_obj_create(grid);
         lv_obj_remove_style_all(c);
@@ -4598,6 +4619,14 @@ static void openEmojiPicker(bool sendMode) {
         lv_obj_add_event_cb(c, onEmojiCellPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *g = lv_label_create(c);
         lv_obj_set_style_text_font(g, cellFont, 0);
+        // The emoji font is monochrome — glyphs take the label's text color —
+        // so without setting it they inherit whatever the default is and read as
+        // dark shapes on the dark tray background.
+        lv_obj_set_style_text_color(g,
+                                    (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x16233A)
+                                        : lv_color_hex(0xFFFFFF),
+                                    0);
         setLabelTextEmojiSafe(g, kEmojiTray[i]);
         lv_obj_center(g);
     }
@@ -14480,7 +14509,10 @@ static void pumpKeyboardInput() {
         }
         s_lastActivityMs = millis();
 
-        bool typingContext = s_composeModal || (s_dmNodePickerModal && s_dmNodeFilterOpen)
+        char rawKey = k;
+
+        bool typingContext = (s_composeModal && !s_emojiPickerModal)
+                             || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
@@ -14496,6 +14528,15 @@ static void pumpKeyboardInput() {
         navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
         // Enable vim-style j/k navigation for all keyboard-capable builds.
         k = remapJkUiKey(k, !typingContext);
+#endif
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Cardputer parity rule: physical Up/Down arrows must behave exactly
+    // like j/k anywhere j/k are used for navigation, so all downstream
+    // navFromJk direction branches apply the same way.
+    if (!typingContext && (rawKey == KEY_SCROLL_UP || rawKey == KEY_SCROLL_DN)) {
+        navFromJk = true;
+    }
 #endif
 
         const bool invertScrollNav = kPagerWheelChatNav && !navFromJk;
@@ -15141,17 +15182,29 @@ static void pumpKeyboardInput() {
                 emojiPickerActivate(s_emojiPickerSelection);
                 continue;
             }
+            // Up/down move a whole row; left/right move one cell. Keep this
+            // mapping fixed regardless of wheel-invert settings so picker nav
+            // always feels the same.
+            // T-Deck/Pager override: j/k are horizontal in the emoji tray
+            // (left/right) while non-j/k scroll input still moves by row.
+            // On the
+            // Cardputer ',' and '/' arrive unmapped here (the main screen turns
+            // them into channel keys further down, but the tray is handled
+            // first), and ';' / '.' have already become KEY_SCROLL_UP/DN.
             int delta = 0;
-            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
-            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+            if (navFromJk && k == KEY_SCROLL_UP)       delta = -1;
+            else if (navFromJk && k == KEY_SCROLL_DN)  delta = 1;
+            else if (k == KEY_SCROLL_UP)               delta = -s_emojiPickerCols;
+            else if (k == KEY_SCROLL_DN)               delta = s_emojiPickerCols;
+#else
+            if (k == KEY_SCROLL_UP)      delta = -s_emojiPickerCols;
+            else if (k == KEY_SCROLL_DN) delta = s_emojiPickerCols;
+#endif
+            else if (k == ',' || k == KEY_PREV_CHAN) delta = -1;
+            else if (k == '/' || k == KEY_NEXT_CHAN) delta = 1;
             if (delta != 0) {
-                int nxt = s_emojiPickerSelection + delta;
-                if (nxt < 0) nxt = 0;
-                if (nxt >= kEmojiTrayCount) nxt = kEmojiTrayCount - 1;
-                if (nxt != s_emojiPickerSelection) {
-                    s_emojiPickerSelection = nxt;
-                    refreshEmojiPickerSelection();
-                }
+                emojiPickerStep(delta);
             }
             continue;   // swallow all other keys while the tray is up
         }
