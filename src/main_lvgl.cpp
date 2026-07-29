@@ -811,6 +811,11 @@ static inline char remapJkUiKey(char k, bool allowScrollRemap) {
 static void refreshChatView(bool force = false);
 static uint32_t chatDateBucket(uint32_t epoch);
 static void formatChatDateLabel(uint32_t epoch, char *out, size_t len);
+static void formatChatClock(uint32_t epoch, char *out, size_t len);
+static void chatParsePrefix(const char *line, char *iconOut, size_t iconLen,
+                            char *timeOut, size_t timeLen);
+static void chatComposeBubbleMeta(const char *icon, const char *clock,
+                                  char *out, size_t len);
 static void insertChatDateMarker(lv_obj_t *parent, uint32_t epoch,
                                  const lv_font_t *font);
 static void collectChatRows(const DisplayLine **rows, int &rowCount);
@@ -944,7 +949,8 @@ static void activateDmSelection(bool allowCompose = true);
 static const char *chatStripPrefix(const char *line);
 static void chatBubbleBeginRender(lv_obj_t *list);
 static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
-                           const char *nameTag, const char *body,
+                           const char *metaTag, const char *nameTag,
+                           const char *body,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
@@ -12069,9 +12075,15 @@ static void refreshDmModal(bool force) {
             // (DMs have no reply/selection model).
             if (chatStyleUsesBubbles(s_cfg.chatStyle)) {
                 const bool isMe = dmLineIsFromMe(dl->text);
+                char dmIconBuf[12], dmTimeBuf[8], dmMetaBuf[24];
+                chatParsePrefix(dl->text, dmIconBuf, sizeof(dmIconBuf),
+                                dmTimeBuf, sizeof(dmTimeBuf));
+                if (!dmTimeBuf[0]) formatChatClock(dl->epoch, dmTimeBuf, sizeof(dmTimeBuf));
+                chatComposeBubbleMeta(dmIconBuf, dmTimeBuf, dmMetaBuf, sizeof(dmMetaBuf));
                 chatMakeBubble(s_dmMsgList,
                                isMe ? 0u : selected->nodeId,
                                isMe,
+                               dmMetaBuf,
                                nullptr,
                                chatStripPrefix(dl->text),
                                dmAckToDisplayAck(dl->ack),
@@ -18753,6 +18765,20 @@ static uint32_t chatDateBucket(uint32_t epoch) {
     return (uint32_t)((tmv.tm_year + 1900) * 512 + tmv.tm_yday);
 }
 
+// "HH:MM" for a stored message, matching liveBuildPrefix()'s 24-hour format and
+// its 1700000000 sentinel for "clock was not synced when this arrived". Empty
+// output means no usable time, and callers drop the field rather than print a
+// placeholder inside a bubble.
+static void formatChatClock(uint32_t epoch, char *out, size_t len) {
+    if (!out || len == 0) return;
+    out[0] = '\0';
+    if (epoch < 1700000000) return;
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    snprintf(out, len, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+}
+
 static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
     if (!out || len == 0) return;
     out[0] = '\0';
@@ -18851,6 +18877,70 @@ static lv_color_t bubbleTextColor(uint16_t bg565) {
 // for our own) is stripped for bubble rendering — the sender is shown as a name
 // tag and color instead. Only the leading prefix window is scanned so body text
 // containing "] " or "> " isn't cut.
+// Splits a stored line's prefix into its transport icon and its clock — the two
+// things classic draws and bubbles were dropping.
+//
+// The prefix is built at store time and is the only place this information
+// survives: appendRxText() writes "<icon>  HH:MM [Name] " (the icon says radio
+// vs MQTT bridge), our own sends write "HH:MM <me> ", and the Cardputer build
+// omits the icon entirely. DisplayLine::epoch is a separate, later field that is
+// 0 for anything stored before it existed or loaded from a legacy persistence
+// format — which is why sourcing bubble timestamps from epoch alone showed
+// nothing on lines classic happily timestamps.
+//
+// The clock is found by pattern rather than position, since the icon precedes
+// it. The scan is bounded to the prefix window so a "12:34" inside message text
+// cannot be mistaken for one.
+static void chatParsePrefix(const char *line,
+                            char *iconOut, size_t iconLen,
+                            char *timeOut, size_t timeLen) {
+    if (iconOut && iconLen) iconOut[0] = '\0';
+    if (timeOut && timeLen) timeOut[0] = '\0';
+    if (!line) return;
+
+    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    const char *found = nullptr;
+    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
+        if (isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])
+            && p[2] == ':'
+            && isdigit((unsigned char)p[3]) && isdigit((unsigned char)p[4])) {
+            found = p;
+            break;
+        }
+    }
+    if (!found) return;
+
+    if (timeOut && timeLen >= 6) {
+        memcpy(timeOut, found, 5);
+        timeOut[5] = '\0';
+    }
+
+    // Whatever sits ahead of the clock is the transport icon (empty when the
+    // build or the message type has none). Copied as raw bytes: these are
+    // multi-byte UTF-8 symbol glyphs from the font.
+    if (iconOut && iconLen) {
+        size_t n = (size_t)(found - line);
+        while (n > 0 && line[n - 1] == ' ') n--;   // drop the spacer before the time
+        if (n > 0 && n < iconLen) {
+            memcpy(iconOut, line, n);
+            iconOut[n] = '\0';
+        }
+    }
+}
+
+// Joins the icon and clock into the bubble's leading meta field, in the same
+// order classic shows them. Either half may be absent.
+static void chatComposeBubbleMeta(const char *icon, const char *clock,
+                                  char *out, size_t len) {
+    if (!out || len == 0) return;
+    const bool haveIcon  = (icon && icon[0]);
+    const bool haveClock = (clock && clock[0]);
+    if (haveIcon && haveClock)      snprintf(out, len, "%s %s", icon, clock);
+    else if (haveClock)             snprintf(out, len, "%s", clock);
+    else if (haveIcon)              snprintf(out, len, "%s", icon);
+    else                            out[0] = '\0';
+}
+
 static const char *chatStripPrefix(const char *line) {
     // The sender prefix ("<icon> <time>[Name] ") always ends at the first "] "
     // (or "> "), which precedes any message text. The window just bounds the
@@ -18938,7 +19028,8 @@ static void chatFitBubbleLabel(lv_obj_t *label, const lv_font_t *font, lv_coord_
 // + body) in the chat list. Right-aligned + accent for our own messages,
 // left-aligned + node color for others. Updates the scroll anchor pointers.
 static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
-                           const char *nameTag, const char *body,
+                           const char *metaTag, const char *nameTag,
+                           const char *body,
                            DisplayLine::AckState ackState,
                            uint32_t replyPacketId, bool isSelected,
                            lv_obj_t **outLast, lv_obj_t **outSelected,
@@ -19019,16 +19110,10 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         bodyColor = tagColor;
     }
 
-    if (nameTag && nameTag[0]) {
-        lv_obj_t *nm = lv_label_create(b);
-        lv_obj_set_style_text_font(nm, bubbleFont, 0);
-        lv_obj_set_style_text_color(nm, tagColor, 0);
-        lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
-        lv_label_set_text(nm, nameTag);
-        // A long chat name can be wider than the bubble on its own.
-        chatFitBubbleLabel(nm, bubbleFont, bubbleMaxW);
-    }
-
+    // Header line: time then who. One label rather than two, because the bubble
+    // is a column flex — separate labels would stack, and the time belongs on
+    // the same line as the name. Own messages use the ME/ME(SENT) tag as the
+    // "who", so every bubble carries a time, not just received ones.
     const char *stateTag = nullptr;
     if (isMe) {
         switch (ackState) {
@@ -19041,12 +19126,22 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                 break;
         }
     }
-    if (stateTag) {
-        lv_obj_t *st = lv_label_create(b);
-        lv_obj_set_style_text_font(st, bubbleFont, 0);   // "ME"/"ME (SENT)" always fits
-        lv_obj_set_style_text_color(st, tagColor, 0);
-        lv_obj_set_style_text_opa(st, LV_OPA_70, 0);
-        lv_label_set_text(st, stateTag);
+
+    const char *whoTag = (nameTag && nameTag[0]) ? nameTag : stateTag;
+    if (whoTag || (metaTag && metaTag[0])) {
+        char header[56];
+        if (metaTag && metaTag[0] && whoTag) {
+            snprintf(header, sizeof(header), "%s  %s", metaTag, whoTag);
+        } else {
+            snprintf(header, sizeof(header), "%s", whoTag ? whoTag : metaTag);
+        }
+        lv_obj_t *nm = lv_label_create(b);
+        lv_obj_set_style_text_font(nm, bubbleFont, 0);
+        lv_obj_set_style_text_color(nm, tagColor, 0);
+        lv_obj_set_style_text_opa(nm, LV_OPA_70, 0);
+        lv_label_set_text(nm, header);
+        // A long chat name plus the time can be wider than the bubble on its own.
+        chatFitBubbleLabel(nm, bubbleFont, bubbleMaxW);
     }
 
     lv_obj_t *bl = lv_label_create(b);
@@ -19164,7 +19259,15 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
             isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
         }
 
-        chatMakeBubble(s_chatList, sender, isMe, nameTag, body,
+        // Prefer the prefix, so a bubble shows the same time and transport icon
+        // classic does for the same line; fall back to epoch for lines stored
+        // without a prefix.
+        char iconBuf[12], timeBuf[8], metaBuf[24];
+        chatParsePrefix(rows[i]->text, iconBuf, sizeof(iconBuf), timeBuf, sizeof(timeBuf));
+        if (!timeBuf[0]) formatChatClock(rows[i]->epoch, timeBuf, sizeof(timeBuf));
+        chatComposeBubbleMeta(iconBuf, timeBuf, metaBuf, sizeof(metaBuf));
+
+        chatMakeBubble(s_chatList, sender, isMe, metaBuf, nameTag, body,
                        rows[i]->ack,
                        replyPacketId, isSelected, lastMsgObj, selectedMsgObj,
                        onChatMessagePressed);
@@ -20499,7 +20602,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | batt | chatdump | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
         return;
     }
 
@@ -20508,6 +20611,31 @@ static void handleSerialCommandLine(char *line) {
     // reaches the host, and this is exactly the report you need after a reboot.
     if (strcmp(line, "nvs") == 0) {
         logNvsHealth();
+        return;
+    }
+
+    // Ground truth for what the bubble renderer is actually parsing: the stored
+    // line as bytes, plus what chatParsePrefix() makes of it. Beliefs about the
+    // prefix format are what made the last two attempts at bubble timestamps
+    // land on nothing.
+    if (strcmp(line, "chatdump") == 0) {
+        const DisplayLine *rows[MAX_MSG_LINES] = {};
+        int rowCount = 0;
+        collectChatRows(rows, rowCount);
+        Serial.printf("[chat] channel %d, %d row(s)\n", s_activeChannel, rowCount);
+        const int show = (rowCount < 4) ? rowCount : 4;
+        for (int r = 0; r < show; r++) {
+            if (!rows[r]) continue;
+            char icon[12], clock[8];
+            chatParsePrefix(rows[r]->text, icon, sizeof(icon), clock, sizeof(clock));
+            Serial.printf("[chat] row%d epoch=%lu text=\"%s\"\n",
+                          r, (unsigned long)rows[r]->epoch, rows[r]->text);
+            Serial.print("[chat]      bytes:");
+            for (int b = 0; b < 14 && rows[r]->text[b]; b++) {
+                Serial.printf(" %02X", (unsigned char)rows[r]->text[b]);
+            }
+            Serial.printf("\n[chat]      parsed icon=\"%s\" clock=\"%s\"\n", icon, clock);
+        }
         return;
     }
 
