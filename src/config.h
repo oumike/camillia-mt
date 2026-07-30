@@ -192,6 +192,20 @@
 #define MY_MSG_ALERT_SOUND  MSG_ALERT_SOUND_DEFAULT
 #endif
 #define MY_SPLASH_MELODY_ENABLED 1
+
+// Notification volume, percent. Scales the tone amplitude on boards that
+// synthesize audio (Pager/T-Deck I2S, Cardputer speaker). Boards that alert
+// through a plain piezo buzzer have no amplitude control, so the setting is
+// hidden there rather than shown doing nothing. Same 10% steps as brightness.
+#define VOLUME_PCT_MIN   0
+#define VOLUME_PCT_MAX   100
+#define VOLUME_PCT_STEP  10
+#define MY_VOLUME_PCT    50
+
+// A passive buzzer driven by tone() has no amplitude control — only boards that
+// synthesize or route audio can honor a volume setting. Gate the UI on this so
+// the option is absent where it would do nothing rather than present and inert.
+#define HAS_VOLUME_CONTROL (BOARD_BUZZER < 0)
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

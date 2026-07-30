@@ -139,7 +139,12 @@ bool sTloraBackspaceDown = false;
 bool sTloraBackspaceHoldSent = false;
 uint32_t sTloraBackspaceDownMs = 0;
 // Currently-held key and when it went down, for keyboardHeldKey() below.
+// The key number is tracked alongside the mapped character because the
+// character depends on modifier state that the press itself consumes: a
+// release re-mapped after the fact would yield a different char and never
+// match what the press recorded.
 char sTloraHeldKey = KEY_NONE;
+uint8_t sTloraHeldKeyNum = 0;
 uint32_t sTloraHeldSinceMs = 0;
 
 static inline uint8_t tloraReadRotaryAB() {
@@ -275,7 +280,12 @@ char tloraReadMappedKey() {
     if (count == 0) return KEY_NONE;
 
     for (uint8_t i = 0; i < count; i++) {
-        uint8_t ev = tloraReadReg(TLORA_REG_KEY_EVENT_A + i);
+        // KEY_EVENT_A is the FIFO head and pops on read; the registers above it
+        // are a passive view of the queue. Reading A+i therefore skips an event
+        // per iteration and strands it in the FIFO, which is how a modifier
+        // release ends up arriving after the keypress it was meant to modify.
+        uint8_t ev = tloraReadReg(TLORA_REG_KEY_EVENT_A);
+        if (ev == 0) break;
         bool pressed = (ev & 0x80) != 0;
         uint8_t keyNum = ev & 0x7F;
 
@@ -300,25 +310,33 @@ char tloraReadMappedKey() {
             }
         }
 
-        // Track whatever is currently held so callers can offer hold-to-repeat.
-        // The controller reports one press event and then nothing until release,
-        // so a held key is invisible without this; the backspace-hold path above
-        // already relies on the same press/release pairing.
-        char heldMapped = tloraTranslateKey(keyNum);
+        // Releases must never reach tloraTranslateKey(): it drives the one-shot
+        // modifier state machine, so re-mapping a release toggles shift/sym back
+        // on (or clears a modifier the press already consumed) and the modifier
+        // bleeds into a second keypress.
         if (!pressed) {
-            if (heldMapped != KEY_NONE && heldMapped == sTloraHeldKey) {
+            if (keyNum == sTloraHeldKeyNum) {
                 sTloraHeldKey = KEY_NONE;
+                sTloraHeldKeyNum = 0;
                 sTloraHeldSinceMs = 0;
             }
             continue;
         }
-        if (heldMapped != KEY_NONE && heldMapped != sTloraHeldKey) {
-            sTloraHeldKey = heldMapped;
+
+        char mapped = tloraTranslateKey(keyNum);
+
+        // Track whatever is currently held so callers can offer hold-to-repeat.
+        // The controller reports one press event and then nothing until release,
+        // so a held key is invisible without this; the backspace-hold path above
+        // already relies on the same press/release pairing.
+        if (mapped != KEY_NONE && keyNum != sTloraHeldKeyNum) {
+            sTloraHeldKey = mapped;
+            sTloraHeldKeyNum = keyNum;
             sTloraHeldSinceMs = now;
         }
 
-        if (heldMapped != KEY_NONE) {
-            return heldMapped;
+        if (mapped != KEY_NONE) {
+            return mapped;
         }
     }
 

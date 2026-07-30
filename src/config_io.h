@@ -127,7 +127,23 @@ struct RhinoConfig {
     bool     debugAcks;
     bool     debugMessages;
     bool     debugGps;
+
+    // APPEND-ONLY BELOW. Settings are stored as one NVS blob of this struct
+    // (see kCfgBlobVersion in main_lvgl.cpp): a shorter stored blob is copied
+    // into the front of the struct and anything newer keeps its default here.
+    // Inserting or reordering a field silently misreads every existing device's
+    // settings — add at the end, or bump the blob version.
+    uint8_t  volumePct;     // notification volume, 0..100 in 10% steps
 };
+
+// Clamps a notification volume to range and snaps it to the nearest 10% step,
+// mirroring cfgCoerceBrightness. Shared by the on-device slider, the web form
+// and YAML import so an out-of-range value from any source lands somewhere sane.
+static inline uint8_t cfgCoerceVolume(int pct) {
+    if (pct < VOLUME_PCT_MIN) return VOLUME_PCT_MIN;
+    if (pct > VOLUME_PCT_MAX) return VOLUME_PCT_MAX;
+    return (uint8_t)(((pct + VOLUME_PCT_STEP / 2) / VOLUME_PCT_STEP) * VOLUME_PCT_STEP);
+}
 
 // Clamps a backlight percentage to the supported range and snaps it to the
 // nearest 10% step. Shared by the on-device slider, the web form and YAML

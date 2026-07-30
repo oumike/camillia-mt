@@ -1832,6 +1832,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' oninput=\"document.getElementById('briOut').textContent=this.value+'%'\">"
                 "</label>";
     }
+#if HAS_VOLUME_CONTROL
+    // Notification volume, same shape as brightness. Compiled out where the
+    // board alerts through a passive buzzer: amplitude is not controllable
+    // there, so the control would be present and do nothing.
+    {
+        char v[8];
+        snprintf(v, sizeof(v), "%u", (unsigned)cfgCoerceVolume((int)gCfg->volumePct));
+        html += "<label>Notification Volume <output id='volOut'>";
+        html += v; html += "%</output>"
+                "<input name='volume' type='range' id='volIn'"
+                " min='"; html += String(VOLUME_PCT_MIN);
+        html += "' max='"; html += String(VOLUME_PCT_MAX);
+        html += "' step='"; html += String(VOLUME_PCT_STEP);
+        html += "' value='"; html += v;
+        html += "' oninput=\"document.getElementById('volOut').textContent=this.value+'%'\">"
+                "</label>";
+    }
+#endif
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -3308,6 +3326,13 @@ static void handlePostSave() {
     }
 
     // Display
+#if HAS_VOLUME_CONTROL
+    // hasArg-guarded like brightness: a form rendered without the control (or a
+    // partial POST) must leave the stored value alone rather than zero it.
+    if (server.hasArg("volume")) {
+        gCfg->volumePct = cfgCoerceVolume(server.arg("volume").toInt());
+    }
+#endif
     if (server.hasArg("brightness")) {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }

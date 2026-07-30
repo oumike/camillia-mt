@@ -89,6 +89,20 @@ static LGFX_TDeck lcd;
 static TDeckKeyboard s_keyboard;
 static RhinoConfig s_cfg;
 
+// Notification volume as a multiplier on each board's established loudness.
+//
+// The scale is centred on 50%, not topped out at it: MY_VOLUME_PCT defaults to
+// 50 and must sound exactly as the firmware always has, so 50 -> 1.0x, 0 ->
+// silent, 100 -> 2.0x. Dividing by 100 instead would have made every device
+// half as loud as before the setting existed.
+//
+// Headroom checks for the 2.0x end: the Pager's 7800 and the T-Deck's 2800
+// sample amplitudes double to 15600 and 5600, both well inside int16. The
+// Cardputer's driver volume is a uint8_t, so its caller clamps.
+static inline float notifyVolumeScale() {
+    return (float)cfgCoerceVolume((int)s_cfg.volumePct) / (float)MY_VOLUME_PCT;
+}
+
 static lgfx::LGFX_Device &displayDev() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     return M5Cardputer.Display;
@@ -164,6 +178,11 @@ static bool s_emojiPickerSendMode = false;
 // Cells per row in the tray, computed when it is built (see openEmojiPicker), so
 // up/down step a row instead of a cell.
 static int s_emojiPickerCols = 1;
+// Hold-to-repeat: the direction the held key is stepping, and when it last
+// stepped. Driven from the loop because a held key produces no further key
+// events to hang this off; see serviceEmojiPickerRepeat.
+static int      s_emojiPickerRepeatDelta = 0;
+static uint32_t s_emojiPickerRepeatLastMs = 0;
 // Packet id the pick reacts to. Non-zero when the tray was opened in send mode
 // with the chat cursor sitting on a message: the pick then goes out as a tapback
 // (reply_id + emoji flag) on that message instead of a standalone message.
@@ -207,6 +226,14 @@ static lv_obj_t *s_cfgBrightModal = nullptr;
 static lv_obj_t *s_cfgBrightSlider = nullptr;
 static lv_obj_t *s_cfgBrightValue = nullptr;
 static uint8_t   s_cfgBrightOriginal = 0;   // restored if the user cancels
+#if HAS_VOLUME_CONTROL
+static lv_obj_t *s_cfgVolBackdrop = nullptr;
+static lv_obj_t *s_cfgVolModal = nullptr;
+static lv_obj_t *s_cfgVolSlider = nullptr;
+static lv_obj_t *s_cfgVolValue = nullptr;
+static uint8_t   s_cfgVolOriginal = 0;      // restored if the user cancels
+static uint32_t  s_cfgVolLastPreviewMs = 0; // rate-limits the audible preview
+#endif
 static lv_obj_t *s_cfgColorBackdrop = nullptr;
 static lv_obj_t *s_cfgColorModal = nullptr;
 static lv_obj_t *s_cfgColorGrid = nullptr;
@@ -864,6 +891,14 @@ static void onCfgActionRowPressed(lv_event_t *e);
 static void openCfgColorPickerModal();
 static void openCfgBrightnessModal();
 static void closeCfgBrightnessModal();
+#if HAS_VOLUME_CONTROL
+static void openCfgVolumeModal();
+static void closeCfgVolumeModal();
+static void revertCfgVolumePreview();
+static void stepCfgVolume(int steps);
+static void cancelCfgVolume();
+static void applyCfgVolume();
+#endif
 static void revertCfgBrightnessPreview();
 static void applyBrightness();
 static void onCfgBrightSliderChanged(lv_event_t *e);
@@ -1396,6 +1431,9 @@ enum CfgActionId {
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_SNF_CLIENT,
     CFG_ACTION_MQTT_TOGGLE,
+    #if HAS_VOLUME_CONTROL
+    CFG_ACTION_VOLUME,
+    #endif
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -1810,7 +1848,7 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
                 if (tail < env) env = tail;
             }
 
-            int16_t v = (int16_t)(s * kPagerToneAmplitude * env);
+            int16_t v = (int16_t)(s * kPagerToneAmplitude * notifyVolumeScale() * env);
             pcm[(i * 2)] = v;
             pcm[(i * 2) + 1] = v;
             frameIndex++;
@@ -1993,7 +2031,7 @@ static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
                 if (tail < env) env = tail;
             }
 
-            int16_t v = (int16_t)(s * 2800.0f * env);
+            int16_t v = (int16_t)(s * 2800.0f * notifyVolumeScale() * env);
             pcm[(i * 2)] = v;
             pcm[(i * 2) + 1] = v;
             frameIndex++;
@@ -2056,9 +2094,14 @@ static void tdeckPlayBassPattern() {
 namespace {
 static bool sCardputerAudioReady = false;
 
+// Re-applied on every play rather than once: the volume setting can change
+// between notifications, and M5's speaker keeps whatever it was last given.
 static inline void cardputerAudioEnsureReady() {
-    if (sCardputerAudioReady) return;
-    cardputerSpeakerSetVolume(180);
+    // Clamped: the scale reaches 2.0x at 100%, and this driver takes a uint8_t.
+    {
+        const float scaled = 180.0f * notifyVolumeScale();
+        cardputerSpeakerSetVolume((uint8_t)(scaled > 255.0f ? 255.0f : scaled));
+    }
     sCardputerAudioReady = true;
 }
 
@@ -2156,6 +2199,23 @@ static void triggerMessageAlert(bool bypassRateLimit = false) {
     tone(BOARD_BUZZER, 1760, 60);
 #endif
 }
+
+#if HAS_VOLUME_CONTROL
+// Sample tone for the volume slider. Deliberately not triggerMessageAlert():
+// that returns early when notification sound is OFF, which would leave the
+// volume control silent for exactly the people most likely to be turning it
+// back up. Plays the default pattern whatever the alert style is set to — the
+// slider is about level, not about which sound.
+static void playVolumePreviewTone() {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    pagerAudioPlayAlertPattern();
+#elif defined(DEVICE_TDECK)
+    tdeckPlayAlertPattern();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    cardputerPlayAlertPattern();
+#endif
+}
+#endif
 
 static void playSplashStartupRiff() {
     if (!s_cfg.splashMelodyEnabled) return;
@@ -2628,6 +2688,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_MSG_ALERT:
             snprintf(buf, bufLen, "Notification Sound: %s", msgAlertSoundName(s_cfg.msgAlertSound));
             break;
+        #if HAS_VOLUME_CONTROL
+        case CFG_ACTION_VOLUME:
+            snprintf(buf, bufLen, "Volume: %u%%", (unsigned)s_cfg.volumePct);
+            break;
+        #endif
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
@@ -4484,6 +4549,27 @@ static void emojiPickerStep(int delta) {
     refreshEmojiPickerSelection();
 }
 
+// Hold-to-repeat for the tray cursor: after the key has been down for
+// kEmojiRepeatDelayMs it steps every kEmojiRepeatIntervalMs, so crossing the
+// tray is one long press instead of sixty taps. Depends on keyboardHeldKey(),
+// which the Pager answers from real press/release events and other boards
+// approximate from repeat traffic — where that approximation cannot see a held
+// key, this simply never engages.
+static constexpr uint32_t kEmojiRepeatDelayMs    = 1000;
+static constexpr uint32_t kEmojiRepeatIntervalMs = 120;
+
+static void serviceEmojiPickerRepeat(uint32_t nowMs) {
+    if (!s_emojiPickerModal || s_emojiPickerRepeatDelta == 0) return;
+    if (keyboardHeldKey() == KEY_NONE) {   // released, or not detectable here
+        s_emojiPickerRepeatDelta = 0;
+        return;
+    }
+    if (keyboardHeldMs() < kEmojiRepeatDelayMs) return;
+    if ((uint32_t)(nowMs - s_emojiPickerRepeatLastMs) < kEmojiRepeatIntervalMs) return;
+    s_emojiPickerRepeatLastMs = nowMs;
+    emojiPickerStep(s_emojiPickerRepeatDelta);
+}
+
 static void emojiPickerActivate(int idx) {
     if (idx < 0 || idx >= kEmojiTrayCount) return;
     if (s_emojiPickerSendMode) {
@@ -4522,6 +4608,7 @@ static void closeEmojiPicker() {
     s_emojiPickerBackdrop = nullptr;
     s_emojiPickerModal = nullptr;
     s_emojiPickerTapbackId = 0;
+    s_emojiPickerRepeatDelta = 0;
 }
 
 static void openEmojiPicker(bool sendMode) {
@@ -5054,6 +5141,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     // Sound settings sit with the other presentation options rather than down
     // among the mesh/module actions.
+    #if HAS_VOLUME_CONTROL
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VOLUME;
+    #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -5733,6 +5823,164 @@ static void openCfgBrightnessModal() {
 
     setCfgBrightnessPreview(s_cfgBrightOriginal);
 }
+
+#if HAS_VOLUME_CONTROL
+// ── Notification volume picker ───────────────────────────────────────────────
+// Same shape as the brightness slider: 10% steps, live preview, Enter saves and
+// closing without it restores the level we opened with. Unlike brightness the
+// effect is not visible, so each change plays the alert tone at the new level —
+// rate-limited, because holding a key would otherwise machine-gun the speaker.
+static constexpr uint32_t kVolPreviewMinGapMs = 400;
+
+static void setCfgVolumePreview(int pct, bool audible) {
+    s_cfg.volumePct = cfgCoerceVolume(pct);
+    if (lvObjValid(s_cfgVolValue)) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u%%", (unsigned)s_cfg.volumePct);
+        lv_label_set_text(s_cfgVolValue, buf);
+    }
+    if (!audible || s_cfg.volumePct == 0) return;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - s_cfgVolLastPreviewMs) < kVolPreviewMinGapMs) return;
+    s_cfgVolLastPreviewMs = now;
+    playVolumePreviewTone();   // plays even when notification sound is OFF
+}
+
+static void closeCfgVolumeModal() {
+    if (lvObjValid(s_cfgVolBackdrop)) {
+        lv_obj_del(s_cfgVolBackdrop);
+    } else if (lvObjValid(s_cfgVolModal)) {
+        lv_obj_del(s_cfgVolModal);
+    }
+    s_cfgVolBackdrop = nullptr;
+    s_cfgVolModal = nullptr;
+    s_cfgVolSlider = nullptr;
+    s_cfgVolValue = nullptr;
+}
+
+// Teardown-safe, like the brightness equivalent: the settings screen can close
+// with this open, and an unapplied preview must not linger in s_cfg where the
+// next unrelated save would persist it.
+static void revertCfgVolumePreview() {
+    if (!s_cfgVolModal && !s_cfgVolBackdrop) return;
+    s_cfg.volumePct = s_cfgVolOriginal;
+    closeCfgVolumeModal();
+}
+
+static void cancelCfgVolume() {
+    revertCfgVolumePreview();
+    refreshCfgModal();
+}
+
+static void applyCfgVolume() {
+    persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Volume: %u%%",
+             (unsigned)s_cfg.volumePct);
+    closeCfgVolumeModal();
+    refreshCfgModal();
+}
+
+static void stepCfgVolume(int steps) {
+    if (!steps) return;
+    const int next = (int)s_cfg.volumePct + steps * VOLUME_PCT_STEP;
+    const uint8_t coerced = cfgCoerceVolume(next);
+    if (coerced == s_cfg.volumePct) return;
+    setCfgVolumePreview(coerced, true);
+    if (lvObjValid(s_cfgVolSlider)) {
+        lv_slider_set_value(s_cfgVolSlider, coerced, LV_ANIM_OFF);
+    }
+}
+
+static void onCfgVolSliderChanged(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target(e);
+    if (!slider) return;
+    setCfgVolumePreview((int)lv_slider_get_value(slider), true);
+}
+
+static void onCfgVolBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_cfgVolBackdrop) return;
+    cancelCfgVolume();
+}
+
+static void openCfgVolumeModal() {
+    if (!s_rootScreen || s_cfgVolModal || s_cfgVolBackdrop) return;
+
+    s_cfgVolOriginal = cfgCoerceVolume((int)s_cfg.volumePct);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgVolBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgVolBackdrop, w, h);
+    lv_obj_align(s_cfgVolBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgVolBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgVolBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgVolBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgVolBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgVolBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgVolBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgVolBackdrop, onCfgVolBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgVolModal = lv_obj_create(s_cfgVolBackdrop);
+    lv_obj_set_size(s_cfgVolModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgVolModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgVolModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_cfgVolModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgVolModal, LV_DIR_VER);
+    lv_obj_add_flag(s_cfgVolModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgVolModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgVolModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgVolModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgVolModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgVolModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgVolModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgVolModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgVolModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgVolBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgVolModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Volume");
+
+    s_cfgVolValue = lv_label_create(s_cfgVolModal);
+    lv_obj_set_width(s_cfgVolValue, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgVolValue, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_cfgVolValue, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_cfgVolValue, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgVolSlider = lv_slider_create(s_cfgVolModal);
+    lv_obj_set_width(s_cfgVolSlider, modalW - 40);
+    lv_slider_set_range(s_cfgVolSlider, VOLUME_PCT_MIN, VOLUME_PCT_MAX);
+    lv_slider_set_value(s_cfgVolSlider, s_cfgVolOriginal, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_cfgVolSlider, lv_color_hex(0x123266), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_cfgVolSlider, lvColorFrom565(s_ui.selectAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_cfgVolSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_cfgVolSlider, onCfgVolSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t *hint = lv_label_create(s_cfgVolModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Drag to adjust"
+#else
+                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+#endif
+    );
+
+    // Silent on open: announce the level visually, do not beep before asked.
+    setCfgVolumePreview(s_cfgVolOriginal, false);
+}
+#endif  // HAS_VOLUME_CONTROL
 
 // ── Chat-style picker ─────────────────────────────────────────────────────────
 // A small in-CFG modal to pick Classic / Bubbles / Outline directly. Picking the
@@ -7332,6 +7580,9 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
 
 static void closeCfgModal() {
     revertCfgBrightnessPreview();
+#if HAS_VOLUME_CONTROL
+    revertCfgVolumePreview();   // same reason: an unapplied preview must not persist
+#endif
     closeCfgWifiPickerModal();
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
@@ -13229,6 +13480,14 @@ static void performCfgAction(int actionId) {
             openCfgBrightnessModal();   // previews live, no reboot
             break;
 
+#if HAS_VOLUME_CONTROL
+        case CFG_ACTION_VOLUME:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec VOLUME");
+            showActionPopup = false;
+            openCfgVolumeModal();       // previews audibly, no reboot
+            break;
+#endif
+
         case CFG_ACTION_ANNOUNCE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ANNOUNCE");
             webCfgQueueAnnounce();
@@ -14670,6 +14929,32 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+#if HAS_VOLUME_CONTROL
+        // Volume slider: same keys and the same j-left / k-right sense as
+        // brightness. The Cardputer's arrows arrive as KEY_SCROLL_UP/DN and
+        // KEY_PREV_CHAN/KEY_NEXT_CHAN (see cardputerMapHidKey), so left/right
+        // and up/down both work without special-casing the board.
+        if (s_cfgVolModal) {
+            if (isModalCloseKey(k)) {
+                cancelCfgVolume();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyCfgVolume();
+                continue;
+            }
+            int steps = 0;
+            if (k == 'j' || k == 'J')            steps = -1;   // quieter
+            else if (k == 'k' || k == 'K')       steps = 1;    // louder
+            else if (k == KEY_SCROLL_UP)         steps = (invertScrollNav || navFromJk) ? -1 : 1;
+            else if (k == KEY_SCROLL_DN)         steps = (invertScrollNav || navFromJk) ? 1 : -1;
+            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
+            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
+            stepCfgVolume(steps);
+            continue;
+        }
+#endif
+
         // Own-message color picker: arrows/scroll move through the 16-swatch
         // grid (one step, or a whole row via page/channel keys), Enter applies
         // and reboots, a close key cancels.
@@ -15205,6 +15490,8 @@ static void pumpKeyboardInput() {
             else if (k == '/' || k == KEY_NEXT_CHAN) delta = 1;
             if (delta != 0) {
                 emojiPickerStep(delta);
+                s_emojiPickerRepeatDelta  = delta;
+                s_emojiPickerRepeatLastMs = millis();
             }
             continue;   // swallow all other keys while the tray is up
         }
@@ -21217,6 +21504,7 @@ void loop() {
     serviceNeighborInfoAnnounce(now);
     serviceAutoFavorite(now);
     serviceConfigFlush(now);
+    serviceEmojiPickerRepeat(now);
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.

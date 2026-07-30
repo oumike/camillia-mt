@@ -400,6 +400,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
+    cfg.volumePct           = MY_VOLUME_PCT;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
     cfg.chatSpacing        = MY_CHAT_SPACING;
@@ -580,6 +581,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    splashMelodyEnabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    volume: %u\n", (unsigned)cfg.volumePct); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -972,6 +974,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "splashMelodyEnabled")) cfg.splashMelodyEnabled = (!strcmp(val,"true"));
+                else if (!strcmp(key, "volume"))          cfg.volumePct = cfgCoerceVolume(atoi(val));
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)
@@ -1079,6 +1082,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
 
     cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
     cfg.fontSize = (uint8_t)constrain((int)cfg.fontSize, 0, FONT_SIZE_MAX);
+    cfg.volumePct = cfgCoerceVolume((int)cfg.volumePct);
     if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
     if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;
     if (cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {
