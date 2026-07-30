@@ -1858,9 +1858,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
             "</select></label></div>";
-    // Changing chat style requires a reboot (applied at boot).
     html += "<div class='row2'>";
-    html += "<label>Chat Style (requires reboot)<select name='chat_style'>"
+    html += "<label>Chat Style<select name='chat_style'>"
             "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>"
             "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>"
             "<option value='2'"; if (gCfg->chatStyle == CHAT_STYLE_OUTLINE) html += " selected"; html += ">Outline</option>"

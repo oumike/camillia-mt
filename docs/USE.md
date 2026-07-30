@@ -76,10 +76,10 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 - The Space/Enter remap above does **not** apply here: this build is touch-first,
   so Enter keeps its original "new message" behavior
 
-![Chat screen](screenshots/RiCa_screen_20260609_110546.png)
-![Chat screen 2](screenshots/RiCa_screen_20260609_110604.png)
-![New message](screenshots/RiCa_screen_20260609_110637.png)
-![Reply message](screenshots/RiCa_screen_20260609_110658.png)
+![Chat screen (Outline)](screenshots/RiCa_screen_20260730_193708.png)
+![Chat screen 2 (Bubble)](screenshots/RiCa_screen_20260730_193759.png)
+![New message](screenshots/RiCa_screen_20260730_193858.png)
+![Emojis](screenshots/RiCa_screen_20260730_193919.png)
 
 ## Live screen
 
@@ -317,7 +317,7 @@ hosting its own network until you pick a real one. While it is selected the
 Wi-Fi row reads *AP mode*, and features that need an internet connection (time
 sync, MQTT) stay offline.
 
-![Config screen](screenshots/RiCa_screen_20260609_110933.png)
+![Config screen](screenshots/RiCa_screen_20260730_193743.png)
 
 ## Nodes screen
 
@@ -338,7 +338,7 @@ Nodes shows discovered nodes and detail fields, including map position details.
 - Backspace edits the filter text; backspacing past the last character closes the
   filter and clears the brackets
 
-![Node details screen](screenshots/RiCa_screen_20260609_110407.png)
+![Node details screen](screenshots/RiCa_screen_20260730_194331.png)
 
 ## Direct Messages
 
@@ -352,8 +352,9 @@ Direct messaging:
 - DM messages honor the Bubbles chat style: your messages are right-aligned in
   the accent/ack color, the other node's are left-aligned in their node color
 
-![Node select](screenshots/RiCa_screen_20260609_112419.png)
-![Message view](screenshots/RiCa_screen_20260609_113850.png)
+![Node actions](screenshots/RiCa_screen_20260730_194240.png)
+![Message view](screenshots/RiCa_screen_20260730_194306.png)
+
 Delete behavior:
 - T-Deck and T-Lora Pager: Backspace triggers delete confirmation on selected conversation
 - Cardputer: Fn+Backspace triggers delete confirmation on selected conversation

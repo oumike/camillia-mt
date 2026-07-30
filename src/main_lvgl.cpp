@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "config.h"
+#include "base64_util.h"
 #include "channel_mgr.h"
 #include "config_io.h"
 #include "hal/display.h"
@@ -551,7 +552,10 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-static int s_cfgActions[28] = {};
+// Sized well above the longest build's action list (initCfgActions appends
+// without a bounds check, so headroom here is the only thing standing between
+// a new entry and a silent stack-adjacent write).
+static int s_cfgActions[32] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -1437,6 +1441,7 @@ enum CfgActionId {
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
+    CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
@@ -2695,6 +2700,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         #endif
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
+            break;
+        case CFG_ACTION_CHANNEL_CFG:
+            snprintf(buf, bufLen, "Channel Configuration");
             break;
         case CFG_ACTION_OTA_UPDATE:
             if (s_cfgOtaInstallArmed && s_cfgOtaLatestTag[0]) {
@@ -5126,6 +5134,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
     // Keep Chat Style near the top so it's visible without deep scrolling on
     // compact config layouts (notably the Pager's split action/info screen).
     // All builds get the full set — the Cardputer's bubble/outline styles render
@@ -5983,9 +5992,9 @@ static void openCfgVolumeModal() {
 #endif  // HAS_VOLUME_CONTROL
 
 // ── Chat-style picker ─────────────────────────────────────────────────────────
-// A small in-CFG modal to pick Classic / Bubbles / Outline directly. Picking the
-// current style is a no-op; picking a different one reboots (the style is applied
-// at boot). Picking directly avoids the reboot-per-step of the old cycle toggle.
+// A small in-CFG modal to pick Classic / Bubbles / Outline directly, replacing
+// the old cycle toggle. The style is chosen per chat rebuild, so applying one is
+// just a forced re-render.
 static void closeChatStyleModal() {
     if (lvObjValid(s_chatStyleBackdrop)) {
         lv_obj_del(s_chatStyleBackdrop);
@@ -6018,24 +6027,22 @@ static void refreshChatStyleSelection() {
 
 static void applyChatStyleSelection(int style) {
     if (style < 0 || style > CHAT_STYLE_MAX) return;
-    if ((uint8_t)style == s_cfg.chatStyle) {
-        // No change — no reboot needed; just return to the CFG screen.
-        closeChatStyleModal();
-        refreshCfgModal();
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s (unchanged)",
-                 chatStyleName((uint8_t)style));
-        return;
-    }
+    const bool changed = ((uint8_t)style != s_cfg.chatStyle);
     s_cfg.chatStyle = (uint8_t)style;
-    persistConfigToPrefs();
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s - rebooting...",
-             chatStyleName((uint8_t)style));
+    if (changed) {
+        persistConfigToPrefs();
+        // Applies live: the classic/bubble branch is chosen per rebuild, and
+        // refreshChatView() tears the list down with lv_obj_clean() before
+        // repopulating, so nothing structural survives from the old style.
+        // The DM view reads the same setting when it repopulates.
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshChatView(true);
+    }
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s%s",
+             chatStyleName((uint8_t)style), changed ? "" : " (unchanged)");
     closeChatStyleModal();
     refreshCfgModal();
-    lv_timer_handler();
-    delay(1000);
-    flushConfigIfDirty();   // pending settings must reach NVS before we go
-    ESP.restart();
 }
 
 static void onChatStyleRowPressed(lv_event_t *e) {
@@ -6681,6 +6688,731 @@ static void openFontSizeModal() {
     }
 
     refreshFontSizeSelection();
+}
+
+// ── Channel configuration ────────────────────────────────────────────────────
+// Two nested modals. The slot picker lists all MESH_CHANNELS slots, showing the
+// channel name where one is set and "Channel N" where the slot is still empty.
+// Selecting a slot opens an editor for its name, encryption type and raw key.
+//
+// The editor works on a staged copy: nothing reaches CHANNEL_KEYS[] until Save,
+// so backing out leaves the live channel plan — and therefore the radio — alone.
+// This mirrors what the web config's Channels section can already do, for the
+// (common) case of a device that never has a browser pointed at it.
+
+// Encryption types we can write. The stored form is Meshtastic's: a 1-byte PSK
+// index that the receiver expands (0 = plaintext, 1 = the well-known default
+// key), or a literal 16/32-byte key.
+enum ChanEncType : uint8_t {
+    CHAN_ENC_NONE = 0,
+    CHAN_ENC_DEFAULT,
+    CHAN_ENC_AES128,
+    CHAN_ENC_AES256,
+    CHAN_ENC_TYPE_COUNT
+};
+
+static lv_obj_t *s_chanCfgBackdrop = nullptr;
+static lv_obj_t *s_chanCfgModal    = nullptr;
+static lv_obj_t *s_chanCfgRows[MESH_CHANNELS]  = {};
+static lv_obj_t *s_chanCfgNames[MESH_CHANNELS] = {};
+static lv_obj_t *s_chanCfgDescs[MESH_CHANNELS] = {};
+static int       s_chanCfgSelection = 0;
+
+// Editor rows are fixed; the enum doubles as the navigation index.
+enum ChanEditRow : uint8_t {
+    CHAN_EDIT_NAME = 0,
+    CHAN_EDIT_ENC,
+    CHAN_EDIT_KEY,
+    CHAN_EDIT_SAVE,
+    CHAN_EDIT_ROW_COUNT
+};
+
+static lv_obj_t *s_chanEditBackdrop = nullptr;
+static lv_obj_t *s_chanEditModal    = nullptr;
+static lv_obj_t *s_chanEditRows[CHAN_EDIT_ROW_COUNT]   = {};
+static lv_obj_t *s_chanEditValues[CHAN_EDIT_ROW_COUNT] = {};
+static int       s_chanEditSelection = 0;
+static int       s_chanEditSlot      = -1;
+
+// Staged edits.
+static char    s_chanEditName[16] = {};
+static uint8_t s_chanEditKey[32]  = {};
+static uint8_t s_chanEditKeyLen   = 0;
+
+// Text-entry sub-modal, shared by the name and key fields.
+static lv_obj_t *s_chanTextBackdrop = nullptr;
+static lv_obj_t *s_chanTextModal    = nullptr;
+static lv_obj_t *s_chanTextInput    = nullptr;
+static lv_obj_t *s_chanTextKeyboard = nullptr;
+static lv_obj_t *s_chanTextStatus   = nullptr;
+static int       s_chanTextField    = -1;   // ChanEditRow currently being typed
+
+static void openChanCfgModal();
+static void closeChanCfgModal();
+static void refreshChanCfgSelection();
+static void refreshChanCfgLabels();
+static void openChanEditModal(int slot);
+static void closeChanEditModal();
+static void refreshChanEditRows();
+static void openChanTextModal(int field);
+static void closeChanTextModal();
+static void commitChanTextModal();
+
+// Channel-name limit. Meshtastic caps the on-air name at 11 bytes and the web
+// config's input already enforces that, so the on-device editor matches rather
+// than letting someone type a name that only this firmware can round-trip.
+static constexpr size_t kChanNameMax = 11;
+
+static ChanEncType chanEncTypeOf(const uint8_t *key, uint8_t keyLen) {
+    if (keyLen == 0) return CHAN_ENC_NONE;
+    if (keyLen == 1) return (key[0] == 0x00) ? CHAN_ENC_NONE : CHAN_ENC_DEFAULT;
+    if (keyLen == 32) return CHAN_ENC_AES256;
+    return CHAN_ENC_AES128;
+}
+
+// Describes what is actually stored, which is not always something the type
+// cycler can produce — a key pasted through the web config or an import can be
+// any length, and silently relabelling it as AES-128 would be a lie.
+static void chanEncLabel(const uint8_t *key, uint8_t keyLen, char *out, size_t outLen) {
+    if (keyLen == 0 || (keyLen == 1 && key[0] == 0x00)) {
+        snprintf(out, outLen, "None");
+    } else if (keyLen == 1) {
+        if (key[0] == 0x01) snprintf(out, outLen, "Default");
+        else                snprintf(out, outLen, "Default +%u", (unsigned)key[0]);
+    } else if (keyLen == 16) {
+        snprintf(out, outLen, "AES-128");
+    } else if (keyLen == 32) {
+        snprintf(out, outLen, "AES-256");
+    } else {
+        snprintf(out, outLen, "Custom (%u B)", (unsigned)keyLen);
+    }
+}
+
+static void chanEditApplyEncType(ChanEncType t) {
+    switch (t) {
+        case CHAN_ENC_NONE:
+            s_chanEditKey[0] = 0x00;
+            s_chanEditKeyLen = 1;
+            break;
+        case CHAN_ENC_DEFAULT:
+            s_chanEditKey[0] = 0x01;
+            s_chanEditKeyLen = 1;
+            break;
+        case CHAN_ENC_AES128:
+            // Keep a key that is already the right size: cycling past a type and
+            // back must not roll a fresh key, which would silently cut off every
+            // peer already provisioned with this one.
+            if (s_chanEditKeyLen != 16) {
+                esp_fill_random(s_chanEditKey, 16);
+                s_chanEditKeyLen = 16;
+            }
+            break;
+        case CHAN_ENC_AES256:
+            if (s_chanEditKeyLen != 32) {
+                esp_fill_random(s_chanEditKey, 32);
+                s_chanEditKeyLen = 32;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void chanEditCycleEncType(int delta) {
+    int next = (int)chanEncTypeOf(s_chanEditKey, s_chanEditKeyLen) + delta;
+    while (next < 0) next += CHAN_ENC_TYPE_COUNT;
+    next %= CHAN_ENC_TYPE_COUNT;
+    chanEditApplyEncType((ChanEncType)next);
+    refreshChanEditRows();
+}
+
+// Slot label for the picker: the name when the slot is configured, otherwise a
+// plain 1-based channel number.
+static void chanSlotLabel(int slot, char *out, size_t outLen) {
+    const char *nm = channelName(slot);
+    if (nm && nm[0]) snprintf(out, outLen, "%s", nm);
+    else             snprintf(out, outLen, "Channel %d", slot);
+}
+
+static void chanEditSave() {
+    if (s_chanEditSlot < 0 || s_chanEditSlot >= MESH_CHANNELS) return;
+    ChannelKey &ck = CHANNEL_KEYS[s_chanEditSlot];
+
+    strncpy(ck.name_buf, s_chanEditName, sizeof(ck.name_buf) - 1);
+    ck.name_buf[sizeof(ck.name_buf) - 1] = '\0';
+    ck.name = ck.name_buf;
+
+    memset(ck.key, 0, sizeof(ck.key));
+    memcpy(ck.key, s_chanEditKey, s_chanEditKeyLen);
+    ck.keyLen = s_chanEditKeyLen;
+
+    // Role is deliberately untouched — the web config owns it, and an empty
+    // secondary slot already ships as SECONDARY, so naming one is enough to put
+    // it on the air.
+    recomputeChannelHashes();
+
+    // Channel::name is bound once in ChannelMgr::init(), and the assignment above
+    // may have just moved ChannelKey::name off its compiled literal.
+    Channels.get(s_chanEditSlot).name = ck.name;
+
+    persistChannelsToPrefs();
+
+    char label[24];
+    chanSlotLabel(s_chanEditSlot, label, sizeof(label));
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Saved: %s", label);
+}
+
+static void onChanCfgRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_chanCfgSelection = idx;
+    refreshChanCfgSelection();
+    openChanEditModal(idx);
+}
+
+static void onChanCfgBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_chanCfgBackdrop) return;
+    closeChanCfgModal();
+    refreshCfgModal();
+}
+
+static void closeChanCfgModal() {
+    closeChanEditModal();
+    if (lvObjValid(s_chanCfgBackdrop)) {
+        lv_obj_del(s_chanCfgBackdrop);
+    } else if (lvObjValid(s_chanCfgModal)) {
+        lv_obj_del(s_chanCfgModal);
+    }
+    s_chanCfgBackdrop = nullptr;
+    s_chanCfgModal = nullptr;
+    memset(s_chanCfgRows, 0, sizeof(s_chanCfgRows));
+    memset(s_chanCfgNames, 0, sizeof(s_chanCfgNames));
+    memset(s_chanCfgDescs, 0, sizeof(s_chanCfgDescs));
+}
+
+// Re-reads the live channel plan into the picker rows. Used after a save so the
+// list agrees with what was stored, without deleting and rebuilding the modal
+// from inside one of its own row event callbacks.
+static void refreshChanCfgLabels() {
+    if (!s_chanCfgModal) return;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_chanCfgNames[i]) {
+            char slotText[24];
+            chanSlotLabel(i, slotText, sizeof(slotText));
+            lv_label_set_text(s_chanCfgNames[i], slotText);
+        }
+        if (s_chanCfgDescs[i]) {
+            char encText[24];
+            chanEncLabel(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, encText, sizeof(encText));
+            lv_label_set_text(s_chanCfgDescs[i], encText);
+        }
+    }
+}
+
+static void refreshChanCfgSelection() {
+    if (!s_chanCfgModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *row = s_chanCfgRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_chanCfgSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void openChanCfgModal() {
+    if (!s_rootScreen || s_chanCfgModal || s_chanCfgBackdrop) return;
+    if (s_chanCfgSelection < 0 || s_chanCfgSelection >= MESH_CHANNELS) s_chanCfgSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 280) modalW = 280;
+
+    s_chanCfgBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chanCfgBackdrop, w, h);
+    lv_obj_align(s_chanCfgBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chanCfgBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chanCfgBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chanCfgBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_chanCfgBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_chanCfgBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_chanCfgBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_chanCfgBackdrop, onChanCfgBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chanCfgModal = lv_obj_create(s_chanCfgBackdrop);
+    lv_obj_set_size(s_chanCfgModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_chanCfgModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_chanCfgModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_chanCfgModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_chanCfgModal, LV_DIR_VER);
+    lv_obj_add_flag(s_chanCfgModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chanCfgModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chanCfgModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chanCfgModal, 1, 0);
+    lv_obj_set_style_border_color(s_chanCfgModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chanCfgModal, 8, 0);
+    lv_obj_set_style_pad_row(s_chanCfgModal, 6, 0);
+    lv_obj_set_flex_flow(s_chanCfgModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chanCfgModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_chanCfgBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_chanCfgModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Channels");
+
+    lv_obj_t *hint = lv_label_create(s_chanCfgModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a channel to edit"
+#else
+                      "Arrows=Move  Enter=Edit  Backspace=Back"
+#endif
+    );
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *row = lv_btn_create(s_chanCfgModal);
+        s_chanCfgRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onChanCfgRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        s_chanCfgNames[i] = name;
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            s_chanCfgDescs[i] = desc;
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowTextColor, 0);
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+        }
+    }
+
+    refreshChanCfgLabels();
+    refreshChanCfgSelection();
+}
+
+static void onChanEditRowPressed(lv_event_t *e);
+
+static void onChanEditBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_chanEditBackdrop) return;
+    closeChanEditModal();   // discards staged edits
+}
+
+static void closeChanEditModal() {
+    closeChanTextModal();
+    if (lvObjValid(s_chanEditBackdrop)) {
+        lv_obj_del(s_chanEditBackdrop);
+    } else if (lvObjValid(s_chanEditModal)) {
+        lv_obj_del(s_chanEditModal);
+    }
+    s_chanEditBackdrop = nullptr;
+    s_chanEditModal = nullptr;
+    memset(s_chanEditRows, 0, sizeof(s_chanEditRows));
+    memset(s_chanEditValues, 0, sizeof(s_chanEditValues));
+    s_chanEditSlot = -1;
+}
+
+static void refreshChanEditRows() {
+    if (!s_chanEditModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    char encText[24];
+    char keyText[48];
+    chanEncLabel(s_chanEditKey, s_chanEditKeyLen, encText, sizeof(encText));
+    base64Encode(s_chanEditKey, s_chanEditKeyLen, keyText);
+
+    for (int i = 0; i < CHAN_EDIT_ROW_COUNT; i++) {
+        lv_obj_t *row = s_chanEditRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_chanEditSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+
+        lv_obj_t *val = s_chanEditValues[i];
+        if (!val) continue;
+        switch (i) {
+            case CHAN_EDIT_NAME:
+                lv_label_set_text(val, s_chanEditName[0] ? s_chanEditName : "(none)");
+                break;
+            case CHAN_EDIT_ENC:
+                lv_label_set_text(val, encText);
+                break;
+            case CHAN_EDIT_KEY:
+                lv_label_set_text(val, keyText);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+static void chanEditActivateRow(int row) {
+    switch (row) {
+        case CHAN_EDIT_NAME:
+        case CHAN_EDIT_KEY:
+            openChanTextModal(row);
+            break;
+        case CHAN_EDIT_ENC:
+            chanEditCycleEncType(1);
+            break;
+        case CHAN_EDIT_SAVE:
+            chanEditSave();
+            closeChanEditModal();
+            // The picker underneath still shows the pre-save name/encryption.
+            refreshChanCfgLabels();
+            break;
+        default:
+            break;
+    }
+}
+
+static void onChanEditRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_chanEditSelection = idx;
+    refreshChanEditRows();
+    chanEditActivateRow(idx);
+}
+
+static void openChanEditModal(int slot) {
+    if (!s_rootScreen || s_chanEditModal || s_chanEditBackdrop) return;
+    if (slot < 0 || slot >= MESH_CHANNELS) return;
+
+    s_chanEditSlot = slot;
+    s_chanEditSelection = CHAN_EDIT_NAME;
+
+    // Stage the current values.
+    const ChannelKey &ck = CHANNEL_KEYS[slot];
+    const char *nm = ck.name_buf[0] ? ck.name_buf : (ck.name ? ck.name : "");
+    snprintf(s_chanEditName, sizeof(s_chanEditName), "%s", nm);
+    s_chanEditKeyLen = (ck.keyLen <= sizeof(s_chanEditKey)) ? ck.keyLen
+                                                            : (uint8_t)sizeof(s_chanEditKey);
+    memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
+    memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 20;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_chanEditBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chanEditBackdrop, w, h);
+    lv_obj_align(s_chanEditBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chanEditBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chanEditBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chanEditBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_chanEditBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_chanEditBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_chanEditBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_chanEditBackdrop, onChanEditBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chanEditModal = lv_obj_create(s_chanEditBackdrop);
+    lv_obj_set_size(s_chanEditModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_chanEditModal, (h > 40) ? (h - 12) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_chanEditModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_chanEditModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_chanEditModal, LV_DIR_VER);
+    lv_obj_add_flag(s_chanEditModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chanEditModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chanEditModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chanEditModal, 1, 0);
+    lv_obj_set_style_border_color(s_chanEditModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chanEditModal, 8, 0);
+    lv_obj_set_style_pad_row(s_chanEditModal, 5, 0);
+    lv_obj_set_flex_flow(s_chanEditModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chanEditModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_chanEditBackdrop);
+
+    char titleText[32];
+    chanSlotLabel(slot, titleText, sizeof(titleText));
+    lv_obj_t *title = lv_label_create(s_chanEditModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, titleText);
+
+    lv_obj_t *hint = lv_label_create(s_chanEditModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Tap a field to change it"
+#else
+                      "Arrows=Move  Enter=Change  Backspace=Cancel"
+#endif
+    );
+
+    static const char *kRowLabel[CHAN_EDIT_ROW_COUNT] = {
+        "Name", "Encryption", "Key", "Save"
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    for (int i = 0; i < CHAN_EDIT_ROW_COUNT; i++) {
+        lv_obj_t *row = lv_btn_create(s_chanEditModal);
+        s_chanEditRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onChanEditRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *label = lv_label_create(row);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(label, rowTextColor, 0);
+        lv_label_set_text(label, kRowLabel[i]);
+
+        if (i == CHAN_EDIT_SAVE) {
+            s_chanEditValues[i] = nullptr;
+            continue;
+        }
+        // The key's base64 runs to 44 characters, well past the modal width, so
+        // values wrap rather than being clipped to something unverifiable.
+        lv_obj_t *val = lv_label_create(row);
+        s_chanEditValues[i] = val;
+        lv_obj_set_width(val, lv_pct(100));
+        lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(val, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(val, rowTextColor, 0);
+        lv_obj_set_style_text_opa(val, LV_OPA_80, 0);
+        lv_label_set_text(val, "");
+    }
+
+    refreshChanEditRows();
+}
+
+// ── Channel field text entry ─────────────────────────────────────────────────
+static void onChanTextBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_chanTextBackdrop) return;
+    closeChanTextModal();
+}
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onChanTextOkPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    commitChanTextModal();
+}
+
+static void onChanTextCancelPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeChanTextModal();
+}
+#endif
+
+static void closeChanTextModal() {
+    if (lvObjValid(s_chanTextBackdrop)) {
+        lv_obj_del(s_chanTextBackdrop);
+    } else if (lvObjValid(s_chanTextModal)) {
+        lv_obj_del(s_chanTextModal);
+    }
+    s_chanTextBackdrop = nullptr;
+    s_chanTextModal = nullptr;
+    s_chanTextInput = nullptr;
+    s_chanTextKeyboard = nullptr;
+    s_chanTextStatus = nullptr;
+    s_chanTextField = -1;
+}
+
+static void commitChanTextModal() {
+    if (!s_chanTextInput) return;
+    const char *text = lv_textarea_get_text(s_chanTextInput);
+    if (!text) text = "";
+
+    if (s_chanTextField == CHAN_EDIT_NAME) {
+        snprintf(s_chanEditName, sizeof(s_chanEditName), "%s", text);
+        if (strlen(s_chanEditName) > kChanNameMax) s_chanEditName[kChanNameMax] = '\0';
+    } else if (s_chanTextField == CHAN_EDIT_KEY) {
+        uint8_t decoded[32];
+        const int len = base64Decode(text, decoded, (int)sizeof(decoded));
+        // A key that won't decode is rejected outright: accepting a truncated one
+        // would leave the channel silently unable to talk to anybody, with the
+        // modal reporting success.
+        if (len <= 0) {
+            if (s_chanTextStatus) lv_label_set_text(s_chanTextStatus, "Invalid base64 key");
+            return;
+        }
+        memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
+        memcpy(s_chanEditKey, decoded, len);
+        s_chanEditKeyLen = (uint8_t)len;
+    }
+
+    closeChanTextModal();
+    refreshChanEditRows();
+}
+
+static void openChanTextModal(int field) {
+    if (!s_rootScreen || s_chanTextModal || s_chanTextBackdrop) return;
+    if (field != CHAN_EDIT_NAME && field != CHAN_EDIT_KEY) return;
+    s_chanTextField = field;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 320) modalW = 320;
+
+    s_chanTextBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_chanTextBackdrop, w, h);
+    lv_obj_align(s_chanTextBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chanTextBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_chanTextBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_chanTextBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_chanTextBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_chanTextBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_chanTextBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_chanTextBackdrop, onChanTextBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_chanTextModal = lv_obj_create(s_chanTextBackdrop);
+    lv_obj_set_size(s_chanTextModal,
+                    modalW,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                    h - 18
+#else
+                    LV_SIZE_CONTENT
+#endif
+    );
+    lv_obj_align(s_chanTextModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_chanTextModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_chanTextModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_chanTextModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chanTextModal, 1, 0);
+    lv_obj_set_style_border_color(s_chanTextModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_chanTextModal, 8, 0);
+    lv_obj_set_style_pad_row(s_chanTextModal, 6, 0);
+    lv_obj_set_flex_flow(s_chanTextModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_chanTextModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_chanTextBackdrop);
+
+    const bool editingName = (field == CHAN_EDIT_NAME);
+
+    lv_obj_t *title = lv_label_create(s_chanTextModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, editingName ? "Channel Name" : "Channel Key");
+
+    s_chanTextInput = lv_textarea_create(s_chanTextModal);
+    if (!s_chanTextInput) {
+        logLvglMemDiag("channel text modal aborted (low LVGL mem)");
+        closeChanTextModal();
+        return;
+    }
+    lv_obj_set_width(s_chanTextInput, lv_pct(100));
+    lv_obj_set_height(s_chanTextInput, 42);
+    lv_obj_set_style_text_font(s_chanTextInput, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_chanTextInput, lv_color_hex(0xE8F1FF), 0);
+    lv_obj_set_style_bg_color(s_chanTextInput, lv_color_hex(0x102B61), 0);
+    lv_obj_set_style_bg_opa(s_chanTextInput, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_chanTextInput, 1, 0);
+    lv_obj_set_style_border_color(s_chanTextInput, lv_color_hex(0x4C76BA), 0);
+    lv_textarea_set_one_line(s_chanTextInput, true);
+    lv_textarea_set_max_length(s_chanTextInput, editingName ? (uint32_t)kChanNameMax : 48);
+    lv_textarea_set_placeholder_text(s_chanTextInput,
+                                     editingName ? "Leave blank to clear" : "base64 key");
+
+    if (editingName) {
+        lv_textarea_set_text(s_chanTextInput, s_chanEditName);
+    } else {
+        char b64[48];
+        base64Encode(s_chanEditKey, s_chanEditKeyLen, b64);
+        lv_textarea_set_text(s_chanTextInput, b64);
+    }
+
+    s_chanTextStatus = lv_label_create(s_chanTextModal);
+    lv_obj_set_width(s_chanTextStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_chanTextStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_chanTextStatus, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_chanTextStatus, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_text(s_chanTextStatus,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Type, then tap OK"
+#else
+                      "Enter=OK  Backspace=Erase/Back"
+#endif
+    );
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *btnRow = lv_obj_create(s_chanTextModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *cancelBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(cancelBtn, 1);
+    lv_obj_set_height(cancelBtn, lv_pct(100));
+    lv_obj_add_event_cb(cancelBtn, onChanTextCancelPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *cancelLbl = lv_label_create(cancelBtn);
+    lv_obj_set_style_text_font(cancelLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(cancelLbl, "Cancel");
+    lv_obj_center(cancelLbl);
+
+    lv_obj_t *okBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(okBtn, 1);
+    lv_obj_set_height(okBtn, lv_pct(100));
+    lv_obj_add_event_cb(okBtn, onChanTextOkPressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *okLbl = lv_label_create(okBtn);
+    lv_obj_set_style_text_font(okLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(okLbl, "OK");
+    lv_obj_center(okLbl);
+
+    s_chanTextKeyboard = lv_keyboard_create(s_chanTextModal);
+    lv_obj_set_width(s_chanTextKeyboard, lv_pct(100));
+    lv_obj_set_flex_grow(s_chanTextKeyboard, 1);
+    lv_keyboard_set_textarea(s_chanTextKeyboard, s_chanTextInput);
+#endif
 }
 
 // ── Notification-sound picker ────────────────────────────────────────────────
@@ -13438,6 +14170,7 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_UNITS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
+            showActionPopup = false;   // row already reads Imperial/Metric
             s_cfg.displayUnits = (uint8_t)(s_cfg.displayUnits ? 0 : 1);
             persistConfigToPrefs();
             refreshNodesDetails();
@@ -13459,6 +14192,7 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_CHAT_COLORS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
+            showActionPopup = false;   // row already reads On/Off; applies live
             s_cfg.chatColorsEnabled = !s_cfg.chatColorsEnabled;
             persistConfigToPrefs();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Colors: %s",
@@ -13502,6 +14236,7 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_NEIGHBOR_INFO:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NEIGHBOR_INFO");
+            showActionPopup = false;   // row already reads On/Off
             s_cfg.neighborInfoEnabled = !s_cfg.neighborInfoEnabled;
             persistConfigToPrefs();
             if (s_cfg.neighborInfoEnabled) {
@@ -13515,6 +14250,7 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_SNF_CLIENT:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_CLIENT");
+            showActionPopup = false;   // row already reads On/Off
             s_cfg.snfClientEnabled = !s_cfg.snfClientEnabled;
             persistConfigToPrefs();
             snprintf(s_cfgStatus,
@@ -13573,9 +14309,16 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_SPLASH_MELODY:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SPLASH_MELODY");
+            showActionPopup = false;   // row already reads On/Off
             s_cfg.splashMelodyEnabled = !s_cfg.splashMelodyEnabled;
             persistSplashMelodySetting();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Splash melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_CHANNEL_CFG:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHANNEL_CFG");
+            showActionPopup = false;
+            openChanCfgModal();
             break;
 
         case CFG_ACTION_OTA_UPDATE: {
@@ -15030,6 +15773,90 @@ static void pumpKeyboardInput() {
                 if (next != s_chatStyleSelection) {
                     s_chatStyleSelection = next;
                     refreshChatStyleSelection();
+                }
+            }
+            continue;
+        }
+
+        // Channel config modals, innermost first: text entry sits on top of the
+        // field editor, which sits on top of the slot picker.
+        if (s_chanTextModal) {
+            if (k == KEY_ENTER) {
+                commitChanTextModal();
+                continue;
+            }
+            if (isBackspaceKey(k)) {
+                if (s_chanTextInput && k == KEY_BACKSPACE) {
+                    const char *cur = lv_textarea_get_text(s_chanTextInput);
+                    // Backspace on an empty field backs out, matching the WiFi
+                    // password modal. A cleared name is committed with Enter.
+                    if (!cur || !cur[0]) closeChanTextModal();
+                    else                 lv_textarea_del_char(s_chanTextInput);
+                }
+                continue;
+            }
+            if (isModalCloseKey(k)) {
+                closeChanTextModal();
+                continue;
+            }
+            if (k >= 0x20 && k < 0x7F && s_chanTextInput) {
+                char one[2] = {k, '\0'};
+                lv_textarea_add_text(s_chanTextInput, one);
+                continue;
+            }
+            continue;
+        }
+
+        if (s_chanEditModal) {
+            if (isModalCloseKey(k)) {
+                closeChanEditModal();   // discards staged edits
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                chanEditActivateRow(s_chanEditSelection);
+                continue;
+            }
+            // Left/right cycle the encryption type in place, so the type can be
+            // changed without stepping into a sub-modal.
+            if (s_chanEditSelection == CHAN_EDIT_ENC) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP)  { chanEditCycleEncType(-1); continue; }
+                if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN)  { chanEditCycleEncType(1);  continue; }
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_chanEditSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= CHAN_EDIT_ROW_COUNT) next = CHAN_EDIT_ROW_COUNT - 1;
+                if (next != s_chanEditSelection) {
+                    s_chanEditSelection = next;
+                    refreshChanEditRows();
+                }
+            }
+            continue;
+        }
+
+        if (s_chanCfgModal) {
+            if (isModalCloseKey(k)) {
+                closeChanCfgModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                openChanEditModal(s_chanCfgSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_chanCfgSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= MESH_CHANNELS) next = MESH_CHANNELS - 1;
+                if (next != s_chanCfgSelection) {
+                    s_chanCfgSelection = next;
+                    refreshChanCfgSelection();
                 }
             }
             continue;

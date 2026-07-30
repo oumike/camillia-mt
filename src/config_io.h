@@ -65,7 +65,7 @@ struct RhinoConfig {
     uint8_t  msgAlertSound;      // 0=DEFAULT, 1=CHIRPY, 2=BASS, 3=OFF
     uint8_t  uiTheme;            // UiThemeFamily
     uint8_t  uiMode;             // UiThemeMode
-    uint8_t  chatStyle;          // 0=CLASSIC, 1=BUBBLES, 2=OUTLINE (applied at boot; needs reboot)
+    uint8_t  chatStyle;          // 0=CLASSIC, 1=BUBBLES, 2=OUTLINE (applies live)
     uint8_t  chatNameStyle;      // 0=SHORT (4-char), 1=LONG (full node name) in chat
     bool     chatColorsEnabled;  // classic mode: use per-node text colors
     uint8_t  userMsgColor;       // own-message color: 0..15 = basic palette index,
