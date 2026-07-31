@@ -90,7 +90,7 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - Press C to clear the log
 - Close with the device close key (see device sections below)
 
-![Live screen](screenshots/RiCa_screen_20260609_110224.png)
+![Live screen](screenshots/RiCa_screen_20260730_195834.png)
 
 ## Config screen
 

@@ -1,4 +1,4 @@
-# Camillia-MT
+# Camillia for Meshtastic
 
 Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
