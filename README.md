@@ -131,7 +131,7 @@ This project is a bit more than a proof of concept but not something that has an
 
 ## License
 
-Camillia-MT is released under the **GNU General Public License v3.0 or later**
+Camillia for Meshtastic is released under the **GNU General Public License v3.0 or later**
 (`SPDX-License-Identifier: GPL-3.0-or-later`).
 
 Copyright © 2025–2026 Michael A. Cojocari and contributors.

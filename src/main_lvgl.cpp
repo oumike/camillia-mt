@@ -6711,6 +6711,58 @@ enum ChanEncType : uint8_t {
     CHAN_ENC_TYPE_COUNT
 };
 
+// Channel-modal layout. Eight slots stacked one per row, each with its name and
+// encryption on separate lines, came to roughly 420px of content: the Pager
+// (480x222) showed five slots at a time and the Cardputer (240x135) three, so
+// picking a channel meant scrolling a list short enough to fit on screen. Both
+// lay the slots out in two columns of single-line rows instead, which puts all
+// eight in view. The Pager's wide panel keeps the encryption label on that line;
+// the Cardputer has no room for it and shows names only, matching how
+// kModalRowDescriptions already drops per-row helper text there.
+//
+// Slots fill column-major (left column 0-3, right column 4-7) so stepping the
+// selection by one still walks straight down a column — the Pager's wheel is the
+// only way to move on that board, and a row-major fill would have left it
+// zig-zagging across the grid.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+// 240x135: eight 19px rows in two columns, plus title and hint, come to 125 of
+// the 129px the modal is allowed — the tightest fit of any board, so these
+// numbers have very little slack in them.
+static constexpr int  kChanModalCols  = 2;
+static constexpr int  kChanModalMaxW  = 236;
+static constexpr int  kChanModalPad   = 3;
+static constexpr int  kChanModalGap   = 3;
+static constexpr int  kChanModalRowH  = 19;
+static constexpr bool kChanCfgShowEnc = false;
+static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
+static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int  kChanModalCols  = 2;
+static constexpr int  kChanModalMaxW  = 448;
+static constexpr int  kChanModalPad   = 8;
+static constexpr int  kChanModalGap   = 5;
+static constexpr int  kChanModalRowH  = 28;
+static constexpr bool kChanCfgShowEnc = true;
+static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
+static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
+#else
+static constexpr int  kChanModalCols  = 1;
+static constexpr int  kChanModalMaxW  = 300;
+static constexpr int  kChanModalPad   = 8;
+static constexpr int  kChanModalGap   = 6;
+static constexpr int  kChanModalRowH  = 28;
+static constexpr bool kChanCfgShowEnc = true;
+static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
+static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
+#endif
+static constexpr int kChanModalRowsPerCol =
+    (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
+
+// Width of one grid cell as a percentage of the row: 49% for two columns leaves
+// the gutter that pad_column draws between them.
+static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
+
+
 static lv_obj_t *s_chanCfgBackdrop = nullptr;
 static lv_obj_t *s_chanCfgModal    = nullptr;
 static lv_obj_t *s_chanCfgRows[MESH_CHANNELS]  = {};
@@ -6834,6 +6886,15 @@ static void chanSlotLabel(int slot, char *out, size_t outLen) {
     else             snprintf(out, outLen, "Channel %d", slot);
 }
 
+// Same label with the slot index in front. A named slot otherwise gives no clue
+// which of the eight it is, and in the two-column grid there is no row order to
+// infer it from either.
+static void chanCfgRowLabel(int slot, char *out, size_t outLen) {
+    const char *nm = channelName(slot);
+    if (nm && nm[0]) snprintf(out, outLen, "%d  %s", slot, nm);
+    else             snprintf(out, outLen, "Channel %d", slot);
+}
+
 static void chanEditSave() {
     if (s_chanEditSlot < 0 || s_chanEditSlot >= MESH_CHANNELS) return;
     ChannelKey &ck = CHANNEL_KEYS[s_chanEditSlot];
@@ -6896,8 +6957,8 @@ static void refreshChanCfgLabels() {
     if (!s_chanCfgModal) return;
     for (int i = 0; i < MESH_CHANNELS; i++) {
         if (s_chanCfgNames[i]) {
-            char slotText[24];
-            chanSlotLabel(i, slotText, sizeof(slotText));
+            char slotText[28];
+            chanCfgRowLabel(i, slotText, sizeof(slotText));
             lv_label_set_text(s_chanCfgNames[i], slotText);
         }
         if (s_chanCfgDescs[i]) {
@@ -6923,7 +6984,9 @@ static void refreshChanCfgSelection() {
         lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
         lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
         lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        // Recursive: the scrollable object is the modal, two levels up from a row
+        // sitting inside the grid.
+        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
     }
 }
 
@@ -6933,9 +6996,9 @@ static void openChanCfgModal() {
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
-    int modalW = w - 24;
-    if (modalW < 170) modalW = w - 8;
-    if (modalW > 280) modalW = 280;
+    int modalW = w - 16;
+    if (modalW > kChanModalMaxW) modalW = kChanModalMaxW;
+    if (modalW < 120) modalW = w - 4;
 
     s_chanCfgBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_chanCfgBackdrop, w, h);
@@ -6950,7 +7013,8 @@ static void openChanCfgModal() {
 
     s_chanCfgModal = lv_obj_create(s_chanCfgBackdrop);
     lv_obj_set_size(s_chanCfgModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(s_chanCfgModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_set_style_max_height(s_chanCfgModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_chanCfgModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(s_chanCfgModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chanCfgModal, LV_DIR_VER);
@@ -6959,8 +7023,8 @@ static void openChanCfgModal() {
     lv_obj_set_style_bg_opa(s_chanCfgModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_chanCfgModal, 1, 0);
     lv_obj_set_style_border_color(s_chanCfgModal, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_chanCfgModal, 8, 0);
-    lv_obj_set_style_pad_row(s_chanCfgModal, 6, 0);
+    lv_obj_set_style_pad_all(s_chanCfgModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_chanCfgModal, kChanModalGap, 0);
     lv_obj_set_flex_flow(s_chanCfgModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chanCfgModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -6968,7 +7032,7 @@ static void openChanCfgModal() {
 
     lv_obj_t *title = lv_label_create(s_chanCfgModal);
     lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Channels");
@@ -6978,36 +7042,57 @@ static void openChanCfgModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Tap a channel to edit"
+    lv_label_set_text(hint, "Tap a channel to edit");
 #else
-                      "Arrows=Move  Enter=Edit  Backspace=Back"
+    lv_label_set_text_fmt(hint, "Move  Enter=Edit  %s=Back", modalCloseKeyLabel());
 #endif
-    );
 
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        lv_obj_t *row = lv_btn_create(s_chanCfgModal);
+    lv_obj_t *grid = lv_obj_create(s_chanCfgModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
+    for (int pos = 0; pos < MESH_CHANNELS; pos++) {
+        // Children are laid out row-major, so walking the slots column-major here
+        // is what puts 0-3 down the left column and 4-7 down the right.
+        const int i = (pos % kChanModalCols) * kChanModalRowsPerCol + (pos / kChanModalCols);
+        if (i >= MESH_CHANNELS) continue;
+
+        lv_obj_t *row = lv_btn_create(grid);
         s_chanCfgRows[i] = row;
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_width(row, lv_pct(kChanModalCellPct));
+        lv_obj_set_height(row, kChanModalRowH);
         lv_obj_set_style_radius(row, 4, 0);
-        lv_obj_set_style_pad_all(row, 5, 0);
-        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_pad_column(row, 4, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_event_cb(row, onChanCfgRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t *name = lv_label_create(row);
         s_chanCfgNames[i] = name;
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_flex_grow(name, 1);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(name, kChanModalRowFont, 0);
         lv_obj_set_style_text_color(name, rowTextColor, 0);
 
-        if (kModalRowDescriptions) {
+        if (kChanCfgShowEnc) {
             lv_obj_t *desc = lv_label_create(row);
             s_chanCfgDescs[i] = desc;
             lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
@@ -7017,6 +7102,9 @@ static void openChanCfgModal() {
     }
 
     refreshChanCfgLabels();
+    // scroll_to_view() is a no-op until the tree has geometry, so resolve the
+    // layout before the initial selection tries to scroll itself into view.
+    lv_obj_update_layout(s_chanCfgModal);
     refreshChanCfgSelection();
 }
 
@@ -7127,9 +7215,9 @@ static void openChanEditModal(int slot) {
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
-    int modalW = w - 20;
-    if (modalW < 170) modalW = w - 8;
-    if (modalW > 300) modalW = 300;
+    int modalW = w - 16;
+    if (modalW > kChanModalMaxW) modalW = kChanModalMaxW;
+    if (modalW < 120) modalW = w - 4;
 
     s_chanEditBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_chanEditBackdrop, w, h);
@@ -7144,7 +7232,8 @@ static void openChanEditModal(int slot) {
 
     s_chanEditModal = lv_obj_create(s_chanEditBackdrop);
     lv_obj_set_size(s_chanEditModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(s_chanEditModal, (h > 40) ? (h - 12) : LV_SIZE_CONTENT, 0);
+    lv_obj_set_style_max_height(s_chanEditModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
     lv_obj_align(s_chanEditModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(s_chanEditModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chanEditModal, LV_DIR_VER);
@@ -7153,20 +7242,21 @@ static void openChanEditModal(int slot) {
     lv_obj_set_style_bg_opa(s_chanEditModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_chanEditModal, 1, 0);
     lv_obj_set_style_border_color(s_chanEditModal, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_chanEditModal, 8, 0);
-    lv_obj_set_style_pad_row(s_chanEditModal, 5, 0);
+    lv_obj_set_style_pad_all(s_chanEditModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_chanEditModal, kChanModalGap, 0);
     lv_obj_set_flex_flow(s_chanEditModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chanEditModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chanEditBackdrop);
 
     char titleText[32];
-    chanSlotLabel(slot, titleText, sizeof(titleText));
+    chanCfgRowLabel(slot, titleText, sizeof(titleText));
     lv_obj_t *title = lv_label_create(s_chanEditModal);
     lv_obj_set_width(title, lv_pct(100));
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_label_set_text(title, titleText);
 
     lv_obj_t *hint = lv_label_create(s_chanEditModal);
@@ -7174,13 +7264,11 @@ static void openChanEditModal(int slot) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Tap a field to change it"
+    lv_label_set_text(hint, "Tap a field to change it");
 #else
-                      "Arrows=Move  Enter=Change  Backspace=Cancel"
+    lv_label_set_text_fmt(hint, "Move  Enter=Change  %s=Cancel", modalCloseKeyLabel());
 #endif
-    );
 
     static const char *kRowLabel[CHAN_EDIT_ROW_COUNT] = {
         "Name", "Encryption", "Key", "Save"
@@ -7192,17 +7280,22 @@ static void openChanEditModal(int slot) {
         lv_obj_t *row = lv_btn_create(s_chanEditModal);
         s_chanEditRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        // Label and value share one line: stacked, the four rows plus the header
+        // ran past the bottom of both small panels.
+        lv_obj_set_height(row, kChanModalRowH);
         lv_obj_set_style_radius(row, 4, 0);
-        lv_obj_set_style_pad_all(row, 5, 0);
-        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_pad_column(row, 6, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_event_cb(row, onChanEditRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t *label = lv_label_create(row);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(label, kChanModalRowFont, 0);
         lv_obj_set_style_text_color(label, rowTextColor, 0);
         lv_label_set_text(label, kRowLabel[i]);
 
@@ -7210,18 +7303,21 @@ static void openChanEditModal(int slot) {
             s_chanEditValues[i] = nullptr;
             continue;
         }
-        // The key's base64 runs to 44 characters, well past the modal width, so
-        // values wrap rather than being clipped to something unverifiable.
+        // The key's base64 runs to 44 characters. That fits on the Pager's line
+        // but not the Cardputer's, where it ellipsises — the text-entry modal
+        // shows the whole thing, which is where a key gets checked anyway.
         lv_obj_t *val = lv_label_create(row);
         s_chanEditValues[i] = val;
-        lv_obj_set_width(val, lv_pct(100));
-        lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
+        lv_obj_set_flex_grow(val, 1);
+        lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(val, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(val, rowTextColor, 0);
         lv_obj_set_style_text_opa(val, LV_OPA_80, 0);
+        lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
         lv_label_set_text(val, "");
     }
 
+    lv_obj_update_layout(s_chanEditModal);
     refreshChanEditRows();
 }
 
@@ -7240,6 +7336,17 @@ static void onChanTextOkPressed(lv_event_t *e) {
 static void onChanTextCancelPressed(lv_event_t *e) {
     LV_UNUSED(e);
     closeChanTextModal();
+}
+#endif
+
+#if defined(DEVICE_TDECK)
+// Base64 keys are '='-padded, and the T-Deck's BB Q10 keyboard has no '=' key or
+// shortcut — every other board can type one. Tapping this inserts it at the
+// cursor, so a key can also be repaired mid-string, not just padded at the end.
+static void onChanTextEqualsPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (!s_chanTextInput) return;
+    lv_textarea_add_char(s_chanTextInput, '=');
 }
 #endif
 
@@ -7369,13 +7476,51 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_font(s_chanTextStatus, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_chanTextStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_chanTextStatus, LV_TEXT_ALIGN_LEFT, 0);
-    lv_label_set_text(s_chanTextStatus,
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Type, then tap OK"
+    lv_label_set_text(s_chanTextStatus, "Type, then tap OK");
 #else
-                      "Enter=OK  Backspace=Erase/Back"
+    // Backspace erases here on every board (and backs out of an empty field), so
+    // where Esc is the close key both have to be named.
+    if (kModalCloseUsesEscape) {
+        lv_label_set_text_fmt(s_chanTextStatus, "Enter=OK  Bksp=Erase  %s=Back",
+                              modalCloseKeyLabel());
+    } else {
+        lv_label_set_text_fmt(s_chanTextStatus, "Enter=OK  %s=Erase/Back",
+                              modalCloseKeyLabel());
+    }
 #endif
-    );
+
+#if defined(DEVICE_TDECK)
+    // Key field only: the name field has no use for a character the keyboard
+    // can't produce.
+    if (!editingName) {
+        lv_obj_t *eqRow = lv_obj_create(s_chanTextModal);
+        lv_obj_set_width(eqRow, lv_pct(100));
+        lv_obj_set_height(eqRow, 30);
+        lv_obj_clear_flag(eqRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(eqRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(eqRow, 0, 0);
+        lv_obj_set_style_pad_all(eqRow, 0, 0);
+        lv_obj_set_flex_flow(eqRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(eqRow, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t *eqBtn = lv_btn_create(eqRow);
+        lv_obj_set_size(eqBtn, 46, 30);
+        lv_obj_set_style_radius(eqBtn, 4, 0);
+        lv_obj_set_style_pad_all(eqBtn, 2, 0);
+        lv_obj_set_style_shadow_width(eqBtn, 0, 0);
+        lv_obj_set_style_bg_color(eqBtn, lv_color_hex(0x2A4E8F), 0);
+        lv_obj_set_style_bg_opa(eqBtn, LV_OPA_COVER, 0);
+        lv_obj_add_event_cb(eqBtn, onChanTextEqualsPressed, LV_EVENT_CLICKED, nullptr);
+
+        lv_obj_t *eqLbl = lv_label_create(eqBtn);
+        lv_obj_set_style_text_font(eqLbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(eqLbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(eqLbl, "=");
+        lv_obj_center(eqLbl);
+    }
+#endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_t *btnRow = lv_obj_create(s_chanTextModal);
@@ -10896,10 +11041,13 @@ static void tracerouteProgressSetStatus(const char *status, lv_color_t color) {
 
 static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t payloadLen, bool viaMqtt) {
     if (!s_tracerouteModal || !s_tracerouteResultsBox || !s_tracerouteResultsLabel) return;
-    if (!payload || payloadLen == 0) return;
+    // An empty RouteDiscovery is a legitimate reply — it means a direct hop with
+    // no relays in between — so it still has a path worth drawing.
+    if (!payload) payloadLen = 0;
 
     constexpr int kMaxPathNodes = 12;
-    constexpr int kMaxEdges = 7;
+    // Three edges render per line and the box holds three lines.
+    constexpr int kMaxEdges = 9;
     uint32_t route[kMaxPathNodes] = {};
     uint32_t routeBack[kMaxPathNodes] = {};
     int routeCount = 0;
@@ -10987,18 +11135,37 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
         }
     };
 
-    appendEdges(routeBack, routeBackCount, viaMqtt);
+    // RouteDiscovery carries only the nodes *between* the endpoints: `route` is
+    // the way out and `route_back` the way home, with neither us nor the target
+    // listed. Both ends have to be put back on, or a one-relay traceroute draws
+    // as "us -> relay" and never names the node that was actually traced.
+    constexpr int kMaxFullPath = kMaxPathNodes + 2;
+    uint32_t hops[kMaxFullPath];
+    int hopCount = 0;
 
-    if (edgeCount == 0 && routeCount > 0 && s_myNodeId != 0) {
-        edges[edgeCount++] = {s_myNodeId, route[0], false};
-    }
+    auto appendHop = [&](uint32_t node) {
+        if (node == 0 || hopCount >= kMaxFullPath) return;
+        if (hopCount > 0 && hops[hopCount - 1] == node) return;
+        hops[hopCount++] = node;
+    };
 
-    // Meshtastic direct traceroute replies can have empty route arrays.
-    if (edgeCount == 0 && s_myNodeId != 0 && s_tracerouteNodeId != 0) {
-        edges[edgeCount++] = {s_myNodeId, s_tracerouteNodeId, false};
-        if (edgeCount < kMaxEdges) {
-            edges[edgeCount++] = {s_tracerouteNodeId, s_myNodeId, viaMqtt};
-        }
+    appendHop(s_myNodeId);
+    for (int idx = 0; idx < routeCount; idx++) appendHop(route[idx]);
+    appendHop(s_tracerouteNodeId);
+    appendEdges(hops, hopCount, false);
+
+    // The return leg is only drawn when the reply actually reported one; a
+    // symmetric route comes back with route_back empty and needs no second line.
+    if (routeBackCount > 0) {
+        hopCount = 0;
+        appendHop(s_tracerouteNodeId);
+        for (int idx = 0; idx < routeBackCount; idx++) appendHop(routeBack[idx]);
+        appendHop(s_myNodeId);
+        appendEdges(hops, hopCount, viaMqtt);
+    } else if (viaMqtt && edgeCount < kMaxEdges && s_tracerouteNodeId != 0 && s_myNodeId != 0) {
+        // No return path was reported, but the reply came in over MQTT rather
+        // than RF. That changes what the result means, so it still gets a line.
+        edges[edgeCount++] = {s_tracerouteNodeId, s_myNodeId, true};
     }
 
     char text[420];
@@ -11230,6 +11397,41 @@ static void tracerouteProgressOnResponse(const MeshPacket &pkt) {
     snprintf(status, sizeof(status), "Reply from %s (%lus)", who, (unsigned long)(elapsedMs / 1000UL));
     tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
     tracerouteProgressRenderRoutes(pkt);
+}
+
+// Long enough for a multi-hop round trip with relay backoff, short enough that
+// a dead traceroute doesn't look like a live one indefinitely.
+static constexpr uint32_t kTracerouteTimeoutMs = 45000UL;
+
+// Without this the modal sits on "Waiting for..." forever when nothing comes
+// back, which on screen is indistinguishable from a traceroute still in flight.
+// Takes no `now`: the modal is opened by a keypress in the same loop pass that
+// sampled it, which leaves the start time a few milliseconds in the future and
+// wraps the unsigned subtraction below to ~49 days — timing the traceroute out
+// the instant it is sent. Sampling after the guards means millis() is only read
+// while one is actually pending, and is always at or past the start.
+static void serviceTracerouteTimeout() {
+    if (!s_tracerouteModal) return;
+    if (!s_tracerouteAwaitingRouting && !s_tracerouteAwaitingReply) return;
+    if (s_tracerouteStartedMs == 0) return;
+
+    const uint32_t elapsedMs = millis() - s_tracerouteStartedMs;
+    if (elapsedMs < kTracerouteTimeoutMs) return;
+
+    // An ACK without a reply means the target heard us and never answered —
+    // worth telling apart from silence, which is usually a routing failure.
+    const bool ackedButSilent = s_tracerouteAwaitingReply;
+    s_tracerouteAwaitingRouting = false;
+    s_tracerouteAwaitingReply = false;
+
+    const unsigned long secs = (unsigned long)(elapsedMs / 1000UL);
+    char status[64];
+    if (ackedButSilent) {
+        snprintf(status, sizeof(status), "ACKed, no reply (%lus)", secs);
+    } else {
+        snprintf(status, sizeof(status), "No reply (%lus)", secs);
+    }
+    tracerouteProgressSetStatus(status, lv_color_hex(0xFFC080));
 }
 
 static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
@@ -15850,6 +16052,16 @@ static void pumpKeyboardInput() {
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            // Slots run down one column and into the next, so a step of one is
+            // already a vertical move; left/right hop between the columns. The
+            // wheel-only Pager still reaches every slot with scroll alone.
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kChanModalRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kChanModalRowsPerCol;
+                }
+            }
             if (delta != 0) {
                 int next = s_chanCfgSelection + delta;
                 if (next < 0) next = 0;
@@ -16790,12 +17002,12 @@ static void pumpKeyboardInput() {
                         next -= 1;
                     } else {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-                        // Keep Cardputer selector movement aligned with existing channel-selector behavior.
-                        if (navFromJk || invertScrollNav) {
-                            next += (k == KEY_SCROLL_UP) ? 1 : -1;
-                        } else {
-                            next += (k == KEY_SCROLL_UP) ? -1 : 1;
-                        }
+                        // j and the up arrow move up the list, k and the down
+                        // arrow move down it, the same as every other list on
+                        // this board. This used to reverse itself whenever the
+                        // key came from j/k — which, via the arrow-parity rule
+                        // in this function, meant the arrows flipped too.
+                        next += (k == KEY_SCROLL_UP) ? -1 : 1;
 #else
                         // Mirror existing main-screen channel stepping directions.
                         if (navFromJk) {
@@ -16935,12 +17147,10 @@ static void pumpKeyboardInput() {
                         if (isChannelDropdownVisible()) {
                             int next = s_cardputerDropdownSelection;
                             if (next < 0 || next >= MESH_CHANNELS) next = s_activeChannel;
-                            // Channel selector expects j/k opposite from list navigation.
-                            if (navFromJk || invertScrollNav) {
-                                next += (k == KEY_SCROLL_UP) ? 1 : -1;
-                            } else {
-                                next += (k == KEY_SCROLL_UP) ? -1 : 1;
-                            }
+                            // Same direction as the selector handler above, which
+                            // claims these keys first whenever the dropdown is
+                            // open and so is the one that actually runs.
+                            next += (k == KEY_SCROLL_UP) ? -1 : 1;
                             if (next < 0) next = MESH_CHANNELS - 1;
                             if (next >= MESH_CHANNELS) next = 0;
                             s_cardputerDropdownSelection = next;
@@ -19019,6 +19229,64 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     return Radio.transmit(frame, sizeof(hdr) + protoLen);
 }
 
+// Answer a traceroute aimed at us. Stock Meshtastic's destination node echoes
+// the RouteDiscovery it received back to the requester with request_id set. We
+// used to send only the routing ACK, so anyone tracing this node — including
+// another board running this firmware — waited for a reply that never came.
+static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
+                                const uint8_t *routePayload, size_t routePayloadLen,
+                                int chanIdx) {
+    if (!Radio.isReady()) return false;
+    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0 || toNodeId == s_myNodeId) return false;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) chanIdx = 0;
+
+    // Sized for a full 7-hop RouteDiscovery with SNR arrays and change to spare;
+    // an echo that won't fit is dropped rather than truncated into nonsense.
+    uint8_t proto[208];
+    size_t protoLen = encodeTracerouteReply(proto, sizeof(proto),
+                                            routePayload, routePayloadLen,
+                                            requestId, s_myNodeId);
+    if (protoLen == 0) return false;
+
+    // Reply on the channel the request arrived on: that is the one the sender is
+    // listening to, and it need not be the primary.
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    uint8_t cipher[sizeof(proto)];
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+        return false;
+    }
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
+    MeshHdr hdr = {};
+    hdr.to = toNodeId;
+    hdr.from = s_myNodeId;
+    hdr.id = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+
+    // Logged like the outbound request, so the Live feed shows both halves of a
+    // traceroute and answering one can be confirmed without a second device.
+    char timePrefix[12];
+    char dst[16];
+    char line[72];
+    liveBuildPrefix(timePrefix, sizeof(timePrefix));
+    liveNodeLabel(toNodeId, dst, sizeof(dst), true);
+    snprintf(line, sizeof(line), "T TRC U %s %08lX %s",
+             dst, (unsigned long)requestId, ok ? "RPLY" : "ER");
+    liveFeedAddPrefixed(timePrefix, line, ok ? TFT_DARKGREY : TFT_RED, 0, false);
+
+    return ok;
+}
+
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
 // Stock Meshtastic: every role rebroadcasts except CLIENT_MUTE / CLIENT_HIDDEN.
 static bool roleRebroadcasts(uint8_t role) {
@@ -19540,7 +19808,16 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         }
 
         case TRACEROUTE_APP: {
-            tracerouteProgressOnResponse(pkt);
+            // want_response marks the outbound half of a traceroute; anything
+            // else on this port is somebody's reply, including the one our own
+            // progress modal is waiting for.
+            const bool isRequestToUs = addressedToMe && pkt.wantResponse;
+            if (isRequestToUs) {
+                (void)sendTracerouteReply(pkt.hdr.from, pkt.hdr.id,
+                                          pkt.payload, pkt.payloadLen, chanIdx);
+            } else {
+                tracerouteProgressOnResponse(pkt);
+            }
             if (wantsAck && addressedToMe) {
                 (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
             }
@@ -22332,6 +22609,7 @@ void loop() {
     serviceAutoFavorite(now);
     serviceConfigFlush(now);
     serviceEmojiPickerRepeat(now);
+    serviceTracerouteTimeout();
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.

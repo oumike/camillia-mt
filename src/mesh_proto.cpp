@@ -967,6 +967,38 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
     return n;
 }
 
+size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
+                             const uint8_t *routePayload, size_t routePayloadLen,
+                             uint32_t requestId, uint32_t fromNodeId) {
+    if (!buf) return 0;
+    if (!routePayload) routePayloadLen = 0;
+    // portnum (2) + payload tag and length (up to 4) + source (5) + request_id (5).
+    if (routePayloadLen + 16 > bufLen) return 0;
+
+    size_t n = 0;
+
+    // Data.portnum = TRACEROUTE_APP
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, TRACEROUTE_APP);
+
+    // Data.payload = the RouteDiscovery we were sent, unchanged.
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, routePayloadLen);
+    if (routePayloadLen > 0) {
+        memcpy(buf + n, routePayload, routePayloadLen);
+        n += routePayloadLen;
+    }
+
+    // Data.source (field 5), fixed32
+    buf[n++] = (5 << 3) | 5;
+    memcpy(buf + n, &fromNodeId, 4); n += 4;
+    // Data.request_id (field 6), fixed32 — marks this as a response, not a request.
+    buf[n++] = (6 << 3) | 5;
+    memcpy(buf + n, &requestId, 4); n += 4;
+
+    return n;
+}
+
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
     // Empty Position payload + want_response=true: peer replies with their Position.
     size_t n = 0;

@@ -241,6 +241,15 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
 // payload. wantResponse should stay true for request packets.
 size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = true);
 
+// Encode the TRACEROUTE_APP reply a traceroute's destination owes its sender.
+// routePayload is the RouteDiscovery from the request, echoed back unchanged:
+// the hops in it are appended by the nodes that relay a traceroute, not by the
+// node it was aimed at. request_id is what marks the packet as a response —
+// without it the requester reads the reply as another request.
+size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
+                             const uint8_t *routePayload, size_t routePayloadLen,
+                             uint32_t requestId, uint32_t fromNodeId);
+
 // Encode a POSITION_APP Data request with an empty payload and want_response=true.
 // Used to ask a specific peer to reply with their current Position.
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen);
