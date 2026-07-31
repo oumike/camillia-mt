@@ -86,6 +86,9 @@ static uint32_t       gChatSendTarget  = 0;
 static uint32_t       gChatSendReplyId = 0;
 static uint32_t       gChatSendEmoji   = 0;
 static char           gChatSendText[MESH_TEXT_MAX_LEN + 1] = "";
+// Manual clock set from the config form, applied on the main loop.
+static volatile bool  gManualTimeReq   = false;
+static int            gManualTime[5]   = {0, 0, 0, 0, 0};  // y, mon, day, hour, min
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
@@ -1564,25 +1567,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
     sectionEnd(html, lite);
-
-        section(html, lite, "Web Config Access", false);
-        html += "<label style='display:flex;align-items:center;gap:.5em'>"
-                "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
-                " onchange=\"document.getElementById('web-auth-creds').style.display="
-                "this.checked?'':'none'\"";
-        if (gCfg->webCfgAuthEnabled) html += " checked";
-        html += "> Require login (authentication)</label>";
-        html += "<p class='gps-hint'>When disabled, the web config is reachable without a "
-                "username or password. Only leave this off on trusted networks.</p>";
-        html += "<div id='web-auth-creds'";
-        if (!gCfg->webCfgAuthEnabled) html += " style='display:none'";
-        html += ">";
-        html += "<label>Username<input type='text' value='admin' readonly></label>";
-        html += "<label>Password (leave blank to keep current)"
-            "<input name='web_pass' type='password' maxlength='63' autocomplete='new-password'"
-            " placeholder='Enter new password'></label>";
-        html += "</div>";
-        sectionEnd(html, lite);
     sendChunk(html);
 
     // ── Device ────────────────────────────────────────────────
@@ -1642,6 +1626,66 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += gCfg->ntpServer;
     html += "' placeholder='pool.ntp.org'></label>";
     html += "</div>";
+
+    // ── Time and Date ─────────────────────────────────────────
+    // Automatic means NTP when there's a network path and GPS otherwise. Manual
+    // stops both from touching the clock and uses the fields below, which are
+    // read as local time in the timezone selected above.
+    {
+        const bool manual = (gCfg->timeSource == TIME_SOURCE_MANUAL);
+        html += "<label>Time Source<select name='time_source' id='time_source'>";
+        html += "<option value='0'";
+        if (!manual) html += " selected";
+        html += ">Automatic (Internet / GPS)</option>";
+        html += "<option value='1'";
+        if (manual) html += " selected";
+        html += ">Manual</option></select></label>";
+
+        // Seeded from the device clock so the fields open on something sane.
+        char dbuf[16] = "";
+        char tbuf[8] = "";
+        time_t nowSec = time(nullptr);
+        if (nowSec >= 1700000000) {
+            struct tm lt;
+            localtime_r(&nowSec, &lt);
+            strftime(dbuf, sizeof(dbuf), "%Y-%m-%d", &lt);
+            strftime(tbuf, sizeof(tbuf), "%H:%M", &lt);
+        }
+
+        html += "<div id='manual_row' class='row2'";
+        if (!manual) html += " style='display:none'";
+        html += ">";
+        html += "<label>Date<input name='manual_date' type='date' value='";
+        html += dbuf;
+        html += "'></label>";
+        html += "<label>Time (24h)<input name='manual_time' type='time' value='";
+        html += tbuf;
+        html += "'></label></div>";
+        sendChunkIfBig(html);   // AP mode renders this with very little heap
+        html += "<p class='gps-hint' id='manual_hint'";
+        if (!manual) html += " style='display:none'";
+        html += ">Saving applies this time to the device clock. "
+                "The clock is not battery-backed, so it restarts unset after a power cycle.</p>";
+        html += "<p class='gps-hint'><button type='button' id='browser_time'>Use this browser's time"
+                "</button></p>";
+        html += "<script>"
+                "(function(){"
+                "var s=document.getElementById('time_source');"
+                "var m=document.getElementById('manual_row');"
+                "var h=document.getElementById('manual_hint');"
+                "function u(){var on=s.value=='1';m.style.display=on?'':'none';"
+                "h.style.display=on?'':'none';}"
+                "s.addEventListener('change',u);u();"
+                "document.getElementById('browser_time').addEventListener('click',function(){"
+                "var n=new Date(),p=function(v){return(v<10?'0':'')+v;};"
+                "document.getElementsByName('manual_date')[0].value="
+                "n.getFullYear()+'-'+p(n.getMonth()+1)+'-'+p(n.getDate());"
+                "document.getElementsByName('manual_time')[0].value="
+                "p(n.getHours())+':'+p(n.getMinutes());"
+                "s.value='1';u();});"
+                "})();"
+                "</script>";
+    }
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -1832,24 +1876,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' oninput=\"document.getElementById('briOut').textContent=this.value+'%'\">"
                 "</label>";
     }
-#if HAS_VOLUME_CONTROL
-    // Notification volume, same shape as brightness. Compiled out where the
-    // board alerts through a passive buzzer: amplitude is not controllable
-    // there, so the control would be present and do nothing.
-    {
-        char v[8];
-        snprintf(v, sizeof(v), "%u", (unsigned)cfgCoerceVolume((int)gCfg->volumePct));
-        html += "<label>Notification Volume <output id='volOut'>";
-        html += v; html += "%</output>"
-                "<input name='volume' type='range' id='volIn'"
-                " min='"; html += String(VOLUME_PCT_MIN);
-        html += "' max='"; html += String(VOLUME_PCT_MAX);
-        html += "' step='"; html += String(VOLUME_PCT_STEP);
-        html += "' value='"; html += v;
-        html += "' oninput=\"document.getElementById('volOut').textContent=this.value+'%'\">"
-                "</label>";
-    }
-#endif
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -1898,11 +1924,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             sendFlash(kFontModal);
         }
     }
-    html += "<div class='row2'>";
-    html += "<label>Compass North Top<select name='compass_north'>"
-            "<option value='1'"; if ( gCfg->compassNorthTop) html += " selected"; html += ">Yes</option>"
-            "<option value='0'"; if (!gCfg->compassNorthTop) html += " selected"; html += ">No</option>"
-            "</select></label></div>";
     if (lite) {
         // Plain select instead of the swatch grid: the grid is ~7 KB of JS plus
         // its own stylesheet, and it only exists to preview colors lite doesn't use.
@@ -1927,6 +1948,43 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         sendChunk(html);
         sendFlash(kThemePicker);
     }
+    sectionEnd(html, lite);
+    sendChunk(html);
+
+    // ── Sound ─────────────────────────────────────────────────
+    // Everything the device can make noise with, in one place rather than split
+    // between Display (volume) and Modules (alert tones).
+    section(html, lite, "Sound", false);
+#if HAS_VOLUME_CONTROL
+    // Same shape as the brightness slider. Compiled out where the board alerts
+    // through a passive buzzer: amplitude is not controllable there, so the
+    // control would be present and do nothing.
+    {
+        char v[8];
+        snprintf(v, sizeof(v), "%u", (unsigned)cfgCoerceVolume((int)gCfg->volumePct));
+        html += "<label>Notification Volume <output id='volOut'>";
+        html += v; html += "%</output>"
+                "<input name='volume' type='range' id='volIn'"
+                " min='"; html += String(VOLUME_PCT_MIN);
+        html += "' max='"; html += String(VOLUME_PCT_MAX);
+        html += "' step='"; html += String(VOLUME_PCT_STEP);
+        html += "' value='"; html += v;
+        html += "' oninput=\"document.getElementById('volOut').textContent=this.value+'%'\">"
+                "</label>";
+    }
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    html += "<label>Notification Sound<select name='msg_alert_sound'>"
+            "<option value='0'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_DEFAULT) html += " selected"; html += ">Default</option>"
+            "<option value='1'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_CHIRPY) html += " selected"; html += ">Chirpy</option>"
+            "<option value='2'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_BASS) html += " selected"; html += ">Bass</option>"
+            "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
+            "</select></label>";
+#endif
+    html += "<label>Splash Melody<select name='splash_melody'>"
+            "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -2001,19 +2059,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Receive Replayed Messages<select name='snf_client_en'>"
             "<option value='1'"; if ( gCfg->snfClientEnabled) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->snfClientEnabled) html += " selected"; html += ">No</option>"
-            "</select></label>";
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
-    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Alerts</h3>";
-    html += "<label>Notification Sound<select name='msg_alert_sound'>"
-            "<option value='0'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_DEFAULT) html += " selected"; html += ">Default</option>"
-            "<option value='1'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_CHIRPY) html += " selected"; html += ">Chirpy</option>"
-            "<option value='2'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_BASS) html += " selected"; html += ">Bass</option>"
-            "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
-            "</select></label>";
-#endif
-    html += "<label>Splash Melody<select name='splash_melody'>"
-            "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
-            "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
     sectionEnd(html, lite);
     sendChunk(html);
@@ -2135,6 +2180,29 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "previously archived nodes if an archive exists.</p>";
         sectionEnd(html, lite);
     }
+
+    // Web Config Access. Last section on the page by design: it governs who can
+    // reach this page rather than how the device behaves, so it sits after
+    // everything someone actually came here to change.
+    section(html, lite, "Web Config Access", false);
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='web_auth' value='1' id='web-auth-cb'"
+            " onchange=\"document.getElementById('web-auth-creds').style.display="
+            "this.checked?'':'none'\"";
+    if (gCfg->webCfgAuthEnabled) html += " checked";
+    html += "> Require login (authentication)</label>";
+    html += "<p class='gps-hint'>When disabled, the web config is reachable without a "
+            "username or password. Only leave this off on trusted networks.</p>";
+    html += "<div id='web-auth-creds'";
+    if (!gCfg->webCfgAuthEnabled) html += " style='display:none'";
+    html += ">";
+    html += "<label>Username<input type='text' value='admin' readonly></label>";
+    html += "<label>Password (leave blank to keep current)"
+        "<input name='web_pass' type='password' maxlength='63' autocomplete='new-password'"
+        " placeholder='Enter new password'></label>";
+    html += "</div>";
+    sectionEnd(html, lite);
+    sendChunk(html);
 
     html += "<button type='submit' style='width:100%;margin-top:1.5em'>Save All</button></form>";
     sendChunk(html);
@@ -3233,6 +3301,27 @@ static void handlePostSave() {
         gCfg->ntpServer[sizeof(gCfg->ntpServer) - 1] = '\0';
     }
 
+    // Time source, and the clock itself when set manually. The clock is queued
+    // rather than set here: the main loop owns it, and this handler runs on the
+    // web server task.
+    if (server.hasArg("time_source")) {
+        gCfg->timeSource = cfgCoerceTimeSource(server.arg("time_source").toInt());
+    }
+    if (gCfg->timeSource == TIME_SOURCE_MANUAL
+        && server.hasArg("manual_date") && server.hasArg("manual_time")) {
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+        // <input type=date> gives YYYY-MM-DD, <input type=time> gives HH:MM.
+        if (sscanf(server.arg("manual_date").c_str(), "%d-%d-%d", &y, &mo, &d) == 3
+            && sscanf(server.arg("manual_time").c_str(), "%d:%d", &h, &mi) == 2) {
+            gManualTime[0] = y;
+            gManualTime[1] = mo;
+            gManualTime[2] = d;
+            gManualTime[3] = h;
+            gManualTime[4] = mi;
+            gManualTimeReq = true;
+        }
+    }
+
     // Position
     gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
     gCfg->latI = (int32_t)(server.arg("lat").toFloat() * 1e7f);
@@ -3371,7 +3460,6 @@ static void handlePostSave() {
             gCfg->autoFavoriteRangeM = (uint32_t)(meters + 0.5);
         }
     }
-    gCfg->compassNorthTop = server.arg("compass_north").toInt() != 0;
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.
     if (server.hasArg("chat_space")) {
@@ -4452,5 +4540,16 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
     replyId  = gChatSendReplyId;
     emoji    = gChatSendEmoji;
     if (text && textLen) strlcpy(text, gChatSendText, textLen);
+    return true;
+}
+
+bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute) {
+    if (!gManualTimeReq) return false;
+    gManualTimeReq = false;
+    year   = gManualTime[0];
+    mon    = gManualTime[1];
+    day    = gManualTime[2];
+    hour   = gManualTime[3];
+    minute = gManualTime[4];
     return true;
 }

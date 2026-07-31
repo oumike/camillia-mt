@@ -54,6 +54,11 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
                         char *text, size_t textLen,
                         uint32_t &replyId, uint32_t &emoji);
 
+// Pending "set the clock to this" request from the config form, drained on the
+// main loop where the system clock is owned. Fields are local wall-clock time in
+// 24-hour form. Returns false when nothing is queued.
+bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute);
+
 // True if the server is running in first-boot WiFi onboarding mode.
 bool webCfgIsOnboarding();
 

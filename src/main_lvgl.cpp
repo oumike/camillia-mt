@@ -23,6 +23,7 @@
 #include "web_config.h"
 #include "ota_update.h"
 #include "debug_flags.h"
+#include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
 #include "utf8_utils.h"
 #include "fonts/roboto_splash_fonts.h"
 #include <WiFi.h>
@@ -30,6 +31,7 @@
 #include <HTTPClient.h>
 #include <lvgl.h>
 #include <time.h>
+#include <sys/time.h>   // settimeofday() for the manual/GPS clock paths
 #include <math.h>
 #include <ctype.h>
 #include <esp_mac.h>
@@ -328,6 +330,15 @@ static char s_onboardingWifiSsidScratch[sizeof(RhinoConfig::wifiSsid)] = {0};
 static char s_onboardingWifiPassScratch[sizeof(RhinoConfig::wifiPass)] = {0};
 static int s_onboardingPickIndex = 0;  // current option index on region/role stages
 static lv_obj_t *s_legendModal = nullptr;
+
+// Release notes for the running build, baked in at build time from
+// RELEASE_NOTES.md. Layered over the CFG modal, scrolled rather than selected.
+static lv_obj_t *s_releaseNotesBackdrop = nullptr;
+static lv_obj_t *s_releaseNotesModal = nullptr;
+// The scroll target is the body box, not the modal: the title and the key hint
+// sit outside it so they stay put while the notes move.
+static lv_obj_t *s_releaseNotesScroll = nullptr;
+
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
 static lv_obj_t *s_nodeInfoModal = nullptr;
@@ -618,6 +629,13 @@ static bool s_lastWifiApMode = false;
 static bool s_ntpConfigured = false;
 static char s_ntpServerActive[48] = "";
 static uint32_t s_ntpLastConfigureMs = 0;
+// Last GPS-driven clock set; 0 until one happens. Declared here because the
+// Time and Date modal clears it when handing the clock back to automatic.
+static uint32_t s_gpsClockSyncMs = 0;
+
+// A clock this far along is one somebody actually set; anything below it is the
+// 1970 epoch the ESP32 boots at.
+static constexpr time_t kClockSetEpoch = 1700000000;
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
@@ -953,6 +971,12 @@ static void closeNodeInfoModal();
 static void openLegendModal();
 static void closeLegendModal();
 static void onLegendClosePressed(lv_event_t *e);
+static void openReleaseNotesModal();
+static void closeReleaseNotesModal();
+// Clock plumbing lives down with the NTP code, but the Time and Date modal sits
+// well above it.
+static void applyTimezoneFromConfig();
+static bool applyManualClock(int year, int mon, int day, int hour, int minute);
 static void openLiveModal();
 static void closeLiveModal();
 static void openSysStatsModal();
@@ -1441,6 +1465,8 @@ enum CfgActionId {
     CFG_ACTION_MSG_ALERT,
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
+    CFG_ACTION_RELEASE_NOTES,
+    CFG_ACTION_TIME_DATE,
     CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
@@ -2711,6 +2737,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Firmware Update Check");
             }
             break;
+        case CFG_ACTION_RELEASE_NOTES:
+            snprintf(buf, bufLen, "Release Notes");
+            break;
+        case CFG_ACTION_TIME_DATE:
+            snprintf(buf, bufLen, "Time and Date: %s",
+                     (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? "Manual" : "Auto");
+            break;
         case CFG_ACTION_CLEAR_MSGS:
             snprintf(buf, bufLen, "Clear Messages");
             break;
@@ -3676,6 +3709,8 @@ static void applyLoadedConfigInvariants() {
     if (s_cfg.mqttEnabled) {
         s_webCfgEnabled = false;
     }
+    // Anything but a known source would silently disable both NTP and GPS.
+    s_cfg.timeSource = cfgCoerceTimeSource(s_cfg.timeSource);
     applyPresetParams(s_cfg);
 }
 
@@ -5155,9 +5190,14 @@ static void initCfgActions() {
     #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
 #endif
+    // Sits under the update entry it describes. Present on every board — the
+    // notes are baked into the image, so this needs neither OTA nor WiFi, and
+    // the Cardputer (no OTA) still gets to see what its build contains.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RELEASE_NOTES;
 #if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
@@ -7560,6 +7600,399 @@ static void openChanTextModal(int field) {
 #endif
 }
 
+// ── Time and Date ────────────────────────────────────────────────────────────
+// One modal for both halves of the question: where the clock comes from, and —
+// when that answer is Manual — what to set it to. The date/time rows only exist
+// in Manual mode, so Automatic stays a two-line modal.
+//
+// Edits are staged: nothing reaches the system clock or the saved config until
+// Save, so backing out of a half-typed date leaves the running clock alone.
+enum TimeCfgRow : uint8_t {
+    TIME_CFG_SOURCE = 0,
+    TIME_CFG_YEAR,
+    TIME_CFG_MONTH,
+    TIME_CFG_DAY,
+    TIME_CFG_HOUR,
+    TIME_CFG_MINUTE,
+    TIME_CFG_SAVE,
+    TIME_CFG_ROW_COUNT
+};
+
+static lv_obj_t *s_timeCfgBackdrop = nullptr;
+static lv_obj_t *s_timeCfgModal    = nullptr;
+static lv_obj_t *s_timeCfgRows[TIME_CFG_ROW_COUNT]   = {};
+static lv_obj_t *s_timeCfgValues[TIME_CFG_ROW_COUNT] = {};
+// Carriers for the two grid lines, hidden wholesale in Automatic mode.
+static lv_obj_t *s_timeCfgDateGrid = nullptr;
+static lv_obj_t *s_timeCfgTimeGrid = nullptr;
+static lv_obj_t *s_timeCfgHint = nullptr;
+static int       s_timeCfgSelection = 0;
+
+// Staged edits.
+static uint8_t s_timeCfgSource = TIME_SOURCE_AUTO;
+static int     s_timeCfgYear   = 2026;
+static int     s_timeCfgMonth  = 1;
+static int     s_timeCfgDay    = 1;
+static int     s_timeCfgHour   = 0;
+static int     s_timeCfgMinute = 0;
+
+static void openTimeCfgModal();
+static void closeTimeCfgModal();
+static void refreshTimeCfgRows();
+
+static bool timeCfgIsManual() { return s_timeCfgSource == TIME_SOURCE_MANUAL; }
+
+static int daysInMonth(int year, int month) {
+    static const int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12) return 31;
+    if (month == 2) {
+        const bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        return leap ? 29 : 28;
+    }
+    return kDays[month - 1];
+}
+
+// Rows the user can reach right now. In Automatic mode the date and time rows
+// are hidden, so navigation has to skip them rather than stall on a blank line.
+static bool timeCfgRowVisible(int row) {
+    if (row == TIME_CFG_SOURCE || row == TIME_CFG_SAVE) return true;
+    return timeCfgIsManual();
+}
+
+static void timeCfgAdjust(int row, int delta) {
+    if (delta == 0) return;
+    switch (row) {
+        case TIME_CFG_SOURCE:
+            s_timeCfgSource = timeCfgIsManual() ? TIME_SOURCE_AUTO : TIME_SOURCE_MANUAL;
+            break;
+        case TIME_CFG_YEAR:
+            s_timeCfgYear += delta;
+            if (s_timeCfgYear < 2020) s_timeCfgYear = 2099;
+            if (s_timeCfgYear > 2099) s_timeCfgYear = 2020;
+            break;
+        case TIME_CFG_MONTH:
+            s_timeCfgMonth += delta;
+            if (s_timeCfgMonth < 1)  s_timeCfgMonth = 12;
+            if (s_timeCfgMonth > 12) s_timeCfgMonth = 1;
+            break;
+        case TIME_CFG_DAY: {
+            const int last = daysInMonth(s_timeCfgYear, s_timeCfgMonth);
+            s_timeCfgDay += delta;
+            if (s_timeCfgDay < 1)    s_timeCfgDay = last;
+            if (s_timeCfgDay > last) s_timeCfgDay = 1;
+            break;
+        }
+        case TIME_CFG_HOUR:
+            s_timeCfgHour = (s_timeCfgHour + delta + 24) % 24;
+            break;
+        case TIME_CFG_MINUTE:
+            s_timeCfgMinute = (s_timeCfgMinute + delta + 60) % 60;
+            break;
+        default:
+            return;
+    }
+    // Feb 30 is reachable by changing month or year under a high day number.
+    const int last = daysInMonth(s_timeCfgYear, s_timeCfgMonth);
+    if (s_timeCfgDay > last) s_timeCfgDay = last;
+
+    // Leaving Manual with the cursor down in the date rows would strand the
+    // selection on a row that is about to disappear.
+    if (row == TIME_CFG_SOURCE && !timeCfgRowVisible(s_timeCfgSelection)) {
+        s_timeCfgSelection = TIME_CFG_SOURCE;
+    }
+    refreshTimeCfgRows();
+}
+
+static void timeCfgSave() {
+    const bool manual = timeCfgIsManual();
+    s_cfg.timeSource = manual ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
+    markConfigDirty();
+
+    if (manual) {
+        if (applyManualClock(s_timeCfgYear, s_timeCfgMonth, s_timeCfgDay,
+                             s_timeCfgHour, s_timeCfgMinute)) {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock set: %04d-%02d-%02d %02d:%02d",
+                     s_timeCfgYear, s_timeCfgMonth, s_timeCfgDay,
+                     s_timeCfgHour, s_timeCfgMinute);
+        } else {
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Invalid date/time");
+            return;   // stay open so the bad field can be corrected
+        }
+    } else {
+        // Back to automatic: let the next NTP attempt reconfigure from scratch
+        // rather than wait out the six-hour re-arm window.
+        s_ntpConfigured = false;
+        s_gpsClockSyncMs = 0;
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Time source: Internet / GPS");
+    }
+    closeTimeCfgModal();
+    refreshCfgModal();
+}
+
+static void onTimeCfgRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= TIME_CFG_ROW_COUNT) return;
+    s_timeCfgSelection = idx;
+    if (idx == TIME_CFG_SAVE) {
+        timeCfgSave();
+        return;
+    }
+    // Touch builds have no left/right: a tap steps the field, wrapping at the
+    // end, which is the only way to drive this without a keyboard.
+    timeCfgAdjust(idx, 1);
+}
+
+static void onTimeCfgBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_timeCfgBackdrop) return;
+    closeTimeCfgModal();   // discards staged edits
+}
+
+static void closeTimeCfgModal() {
+    if (lvObjValid(s_timeCfgBackdrop)) {
+        lv_obj_del(s_timeCfgBackdrop);
+    } else if (lvObjValid(s_timeCfgModal)) {
+        lv_obj_del(s_timeCfgModal);
+    }
+    s_timeCfgBackdrop = nullptr;
+    s_timeCfgModal = nullptr;
+    s_timeCfgDateGrid = nullptr;
+    s_timeCfgTimeGrid = nullptr;
+    s_timeCfgHint = nullptr;
+    memset(s_timeCfgRows, 0, sizeof(s_timeCfgRows));
+    memset(s_timeCfgValues, 0, sizeof(s_timeCfgValues));
+}
+
+static void refreshTimeCfgRows() {
+    if (!s_timeCfgModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    // Automatic mode drops the whole date line, and the two time cells from the
+    // line below — but not that line itself, which carries Save. Flex skips
+    // hidden children, so the modal shrinks to what is left.
+    const bool manual = timeCfgIsManual();
+    if (s_timeCfgDateGrid) {
+        if (manual) lv_obj_clear_flag(s_timeCfgDateGrid, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_timeCfgDateGrid, LV_OBJ_FLAG_HIDDEN);
+    }
+    const int kTimeCells[2] = { TIME_CFG_HOUR, TIME_CFG_MINUTE };
+    for (int c = 0; c < 2; c++) {
+        lv_obj_t *cell = s_timeCfgRows[kTimeCells[c]];
+        if (!cell) continue;
+        if (manual) lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
+    }
+    // A third of the line next to Hour and Minute, the whole line without them.
+    if (s_timeCfgRows[TIME_CFG_SAVE]) {
+        lv_obj_set_width(s_timeCfgRows[TIME_CFG_SAVE], lv_pct(manual ? 32 : 100));
+    }
+
+    for (int i = 0; i < TIME_CFG_ROW_COUNT; i++) {
+        lv_obj_t *row = s_timeCfgRows[i];
+        if (!row) continue;
+        if (!timeCfgRowVisible(i)) continue;   // hidden, or inside a hidden line
+
+        const bool sel = (i == s_timeCfgSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        // Recursive: the date and time cells sit inside a grid, one level below
+        // the modal that actually scrolls.
+        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+
+        lv_obj_t *val = s_timeCfgValues[i];
+        if (!val) continue;
+        switch (i) {
+            case TIME_CFG_SOURCE:
+                lv_label_set_text(val, timeCfgIsManual() ? "Manual" : "Internet / GPS");
+                break;
+            case TIME_CFG_YEAR:   lv_label_set_text_fmt(val, "%04d", s_timeCfgYear);   break;
+            case TIME_CFG_MONTH:  lv_label_set_text_fmt(val, "%02d", s_timeCfgMonth);  break;
+            case TIME_CFG_DAY:    lv_label_set_text_fmt(val, "%02d", s_timeCfgDay);    break;
+            case TIME_CFG_HOUR:   lv_label_set_text_fmt(val, "%02d", s_timeCfgHour);   break;
+            case TIME_CFG_MINUTE: lv_label_set_text_fmt(val, "%02d", s_timeCfgMinute); break;
+            default: break;
+        }
+    }
+
+    if (s_timeCfgHint) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_label_set_text(s_timeCfgHint, timeCfgIsManual()
+                              ? "Tap a field to step it, then Save"
+                              : "Tap the source to change it");
+#else
+        // Context-sensitive: one short line that fits the Cardputer beats one
+        // long line listing every key, most of which don't apply to this row.
+        if (s_timeCfgSelection == TIME_CFG_SAVE) {
+            lv_label_set_text_fmt(s_timeCfgHint, "Enter=Save   %s=Back", modalCloseKeyLabel());
+        } else {
+            lv_label_set_text_fmt(s_timeCfgHint, "L/R or Enter=Change   %s=Back",
+                                  modalCloseKeyLabel());
+        }
+#endif
+    }
+}
+
+static void openTimeCfgModal() {
+    if (!s_rootScreen || s_timeCfgModal || s_timeCfgBackdrop) return;
+
+    // Stage from the config and the running clock, so Manual opens on the time
+    // the device currently believes it is rather than on an arbitrary default.
+    s_timeCfgSource = cfgCoerceTimeSource(s_cfg.timeSource);
+    applyTimezoneFromConfig();
+    time_t nowSec = time(nullptr);
+    if (nowSec >= kClockSetEpoch) {
+        struct tm lt;
+        localtime_r(&nowSec, &lt);
+        s_timeCfgYear   = lt.tm_year + 1900;
+        s_timeCfgMonth  = lt.tm_mon + 1;
+        s_timeCfgDay    = lt.tm_mday;
+        s_timeCfgHour   = lt.tm_hour;
+        s_timeCfgMinute = lt.tm_min;
+    }
+    s_timeCfgSelection = TIME_CFG_SOURCE;
+
+    // Borrows the channel modals' per-board metrics: same kind of surface (a
+    // short list of single-line rows), so the two should measure the same.
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 16;
+    if (modalW > kChanModalMaxW) modalW = kChanModalMaxW;
+    if (modalW < 120) modalW = w - 4;
+
+    s_timeCfgBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_timeCfgBackdrop, w, h);
+    lv_obj_align(s_timeCfgBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_timeCfgBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_timeCfgBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_timeCfgBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_timeCfgBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_timeCfgBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_timeCfgBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_timeCfgBackdrop, onTimeCfgBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_timeCfgModal = lv_obj_create(s_timeCfgBackdrop);
+    lv_obj_set_size(s_timeCfgModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_timeCfgModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_timeCfgModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_timeCfgModal, LV_OBJ_FLAG_CLICKABLE);
+    setupVScroll(s_timeCfgModal);
+    lv_obj_set_scrollbar_mode(s_timeCfgModal, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_timeCfgModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_timeCfgModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_timeCfgModal, 1, 0);
+    lv_obj_set_style_border_color(s_timeCfgModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_timeCfgModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_timeCfgModal, kChanModalGap, 0);
+    lv_obj_set_flex_flow(s_timeCfgModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_timeCfgModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_timeCfgBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_timeCfgModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Time and Date");
+
+    s_timeCfgHint = lv_label_create(s_timeCfgModal);
+    lv_obj_set_width(s_timeCfgHint, lv_pct(100));
+    lv_obj_set_style_text_font(s_timeCfgHint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_timeCfgHint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_timeCfgHint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_timeCfgHint, "");
+
+    static const char *kTimeRowLabel[TIME_CFG_ROW_COUNT] = {
+        "Source", "Year", "Month", "Day", "Hour", "Minute", "Save"
+    };
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    // One cell of the modal: a full-width row (Source, Save) or one column of the
+    // date/time grids. Values are short enough — four digits at most — that even
+    // a third of the Cardputer's width fits "Month 07" on a single line.
+    auto makeCell = [&](lv_obj_t *parent, int i, int widthPct) {
+        lv_obj_t *cell = lv_btn_create(parent);
+        s_timeCfgRows[i] = cell;
+        lv_obj_set_width(cell, lv_pct(widthPct));
+        lv_obj_set_height(cell, kChanModalRowH);
+        lv_obj_set_style_radius(cell, 4, 0);
+        lv_obj_set_style_pad_left(cell, 5, 0);
+        lv_obj_set_style_pad_right(cell, 5, 0);
+        lv_obj_set_style_pad_top(cell, 1, 0);
+        lv_obj_set_style_pad_bottom(cell, 1, 0);
+        lv_obj_set_style_pad_column(cell, 4, 0);
+        lv_obj_set_style_shadow_width(cell, 0, 0);
+        lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_event_cb(cell, onTimeCfgRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *label = lv_label_create(cell);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(label, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(label, rowTextColor, 0);
+        lv_label_set_text(label, kTimeRowLabel[i]);
+
+        if (i == TIME_CFG_SAVE) {
+            s_timeCfgValues[i] = nullptr;
+            return;
+        }
+        lv_obj_t *val = lv_label_create(cell);
+        s_timeCfgValues[i] = val;
+        lv_obj_set_flex_grow(val, 1);
+        lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(val, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(val, rowTextColor, 0);
+        lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_text(val, "");
+    };
+
+    // Transparent carrier for one grid line. Hiding this is what makes the whole
+    // date (or time) line vanish in Automatic mode — hiding the cells alone would
+    // leave an empty band behind.
+    auto makeGrid = [&](int cellHeight) {
+        lv_obj_t *grid = lv_obj_create(s_timeCfgModal);
+        lv_obj_set_width(grid, lv_pct(100));
+        lv_obj_set_height(grid, cellHeight);
+        lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(grid, 0, 0);
+        lv_obj_set_style_pad_all(grid, 0, 0);
+        lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+        lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        return grid;
+    };
+
+    makeCell(s_timeCfgModal, TIME_CFG_SOURCE, 100);
+
+    // Date across three columns, then hour, minute and Save across three more.
+    // Percentages leave room for the gutter pad_column draws between cells.
+    s_timeCfgDateGrid = makeGrid(kChanModalRowH);
+    makeCell(s_timeCfgDateGrid, TIME_CFG_YEAR,  32);
+    makeCell(s_timeCfgDateGrid, TIME_CFG_MONTH, 32);
+    makeCell(s_timeCfgDateGrid, TIME_CFG_DAY,   32);
+
+    // Save shares the line with the time fields. It is the one cell here that
+    // has to survive Automatic mode, so this grid is never hidden — the Hour and
+    // Minute cells are hidden individually and Save widens to take the line.
+    s_timeCfgTimeGrid = makeGrid(kChanModalRowH);
+    makeCell(s_timeCfgTimeGrid, TIME_CFG_HOUR,   32);
+    makeCell(s_timeCfgTimeGrid, TIME_CFG_MINUTE, 32);
+    makeCell(s_timeCfgTimeGrid, TIME_CFG_SAVE,   32);
+
+    lv_obj_update_layout(s_timeCfgModal);
+    refreshTimeCfgRows();
+}
+
 // ── Notification-sound picker ────────────────────────────────────────────────
 // Picking directly instead of cycling. Moving the selection previews the sound,
 // which means s_cfg.msgAlertSound has to hold the highlighted mode while the
@@ -8464,6 +8897,8 @@ static void closeCfgModal() {
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
     closeSysStatsModal();
+    closeReleaseNotesModal();
+    closeTimeCfgModal();
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     closeNodeInfoModal();
 #endif
@@ -13815,6 +14250,138 @@ static void openNodesModal() {
 #endif
 }
 
+// ── Release notes ────────────────────────────────────────────────────────────
+// Shows the notes baked into this image at build time (RELEASE_NOTES.md ->
+// src/release_notes.h). Nothing is fetched: the text is already in flash, so it
+// works with the radio off, no WiFi, and on boards without OTA.
+static void closeReleaseNotesModal() {
+    if (lvObjValid(s_releaseNotesBackdrop)) {
+        lv_obj_del(s_releaseNotesBackdrop);
+    } else if (lvObjValid(s_releaseNotesModal)) {
+        lv_obj_del(s_releaseNotesModal);
+    }
+    s_releaseNotesBackdrop = nullptr;
+    s_releaseNotesModal = nullptr;
+    s_releaseNotesScroll = nullptr;
+}
+
+static void onReleaseNotesBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target(e) != s_releaseNotesBackdrop) return;
+    closeReleaseNotesModal();
+}
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onReleaseNotesClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeReleaseNotesModal();
+}
+#endif
+
+static void openReleaseNotesModal() {
+    if (!s_rootScreen || s_releaseNotesModal || s_releaseNotesBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+
+    s_releaseNotesBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_releaseNotesBackdrop, w, h);
+    lv_obj_align(s_releaseNotesBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_releaseNotesBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_releaseNotesBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_releaseNotesBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_releaseNotesBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_releaseNotesBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_releaseNotesBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_releaseNotesBackdrop, onReleaseNotesBackdropPressed,
+                        LV_EVENT_CLICKED, nullptr);
+
+    // Notes are prose, so this takes as much of the panel as it can get.
+    int modalW = w - 12;
+    if (modalW < 120) modalW = w - 4;
+    const int modalH = (h > 40) ? (h - 12) : h;
+
+    s_releaseNotesModal = lv_obj_create(s_releaseNotesBackdrop);
+    lv_obj_set_size(s_releaseNotesModal, modalW, modalH);
+    lv_obj_align(s_releaseNotesModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_releaseNotesModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_releaseNotesModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_releaseNotesModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_releaseNotesModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_releaseNotesModal, 1, 0);
+    lv_obj_set_style_border_color(s_releaseNotesModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_releaseNotesModal, 6, 0);
+    lv_obj_set_style_pad_row(s_releaseNotesModal, 4, 0);
+    lv_obj_set_flex_flow(s_releaseNotesModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_releaseNotesModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_releaseNotesBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_releaseNotesModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(title, "Release Notes  %s", APP_VERSION);
+
+    // Takes the space the title and the footer below don't, so the notes scroll
+    // inside a frame rather than carrying the header off the top with them.
+    s_releaseNotesScroll = lv_obj_create(s_releaseNotesModal);
+    lv_obj_set_width(s_releaseNotesScroll, lv_pct(100));
+    lv_obj_set_flex_grow(s_releaseNotesScroll, 1);
+    setupVScroll(s_releaseNotesScroll);
+    lv_obj_set_scrollbar_mode(s_releaseNotesScroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_releaseNotesScroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_releaseNotesScroll, 0, 0);
+    lv_obj_set_style_pad_all(s_releaseNotesScroll, 0, 0);
+    lv_obj_set_style_pad_right(s_releaseNotesScroll, 2, 0);
+
+    lv_obj_t *body = lv_label_create(s_releaseNotesScroll);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    if (RELEASE_NOTES_TEXT[0]) {
+        lv_label_set_text(body, RELEASE_NOTES_TEXT);
+    } else {
+        // A dev build, or a release whose summary generation failed.
+        lv_label_set_text(body, "No release notes in this build.");
+    }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only: the backdrop margin is too thin to aim at, so closing needs a
+    // real target.
+    lv_obj_t *closeBtn = lv_btn_create(s_releaseNotesModal);
+    lv_obj_set_width(closeBtn, lv_pct(100));
+    lv_obj_set_height(closeBtn, 30);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 2, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(closeBtn, onReleaseNotesClosePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(closeLbl,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#else
+    lv_obj_t *hint = lv_label_create(s_releaseNotesModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_TDECK)
+    // No dedicated Up/Down keys here; J/K and the trackball drive scroll.
+    lv_label_set_text(hint, "J/K = Scroll   Bksp = Close");
+#else
+    lv_label_set_text(hint, "Up/Down/J/K = Scroll   Bksp = Close");
+#endif
+#endif
+}
+
 static void openLegendModal() {
     if (s_legendModal && !lvObjAlive(s_legendModal)) {
         s_legendModal = nullptr;
@@ -14521,6 +15088,18 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHANNEL_CFG");
             showActionPopup = false;
             openChanCfgModal();
+            break;
+
+        case CFG_ACTION_RELEASE_NOTES:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec RELEASE_NOTES");
+            showActionPopup = false;
+            openReleaseNotesModal();
+            break;
+
+        case CFG_ACTION_TIME_DATE:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec TIME_DATE");
+            showActionPopup = false;
+            openTimeCfgModal();
             break;
 
         case CFG_ACTION_OTA_UPDATE: {
@@ -15980,6 +16559,50 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // Time and Date: up/down picks a field, left/right changes it, Enter
+        // saves from any row (there is one Save row, but reaching it from the
+        // minute field would otherwise be five keypresses).
+        if (s_timeCfgModal) {
+            if (isModalCloseKey(k)) {
+                closeTimeCfgModal();   // discards staged edits
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                // Same shape as the channel editor: Enter activates the row, and
+                // Save is a row of its own.
+                if (s_timeCfgSelection == TIME_CFG_SAVE) timeCfgSave();
+                else                                     timeCfgAdjust(s_timeCfgSelection, 1);
+                continue;
+            }
+            if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                timeCfgAdjust(s_timeCfgSelection, -1);
+                continue;
+            }
+            if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                timeCfgAdjust(s_timeCfgSelection, 1);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                // Automatic mode hides the date/time rows, so stepping has to
+                // pass over them rather than land on a hidden line.
+                int next = s_timeCfgSelection;
+                for (int guard = 0; guard < TIME_CFG_ROW_COUNT; guard++) {
+                    next += delta;
+                    if (next < 0 || next >= TIME_CFG_ROW_COUNT) { next = s_timeCfgSelection; break; }
+                    if (timeCfgRowVisible(next)) break;
+                }
+                if (next != s_timeCfgSelection) {
+                    s_timeCfgSelection = next;
+                    refreshTimeCfgRows();
+                }
+            }
+            continue;
+        }
+
         // Channel config modals, innermost first: text entry sits on top of the
         // field editor, which sits on top of the slot picker.
         if (s_chanTextModal) {
@@ -16316,6 +16939,24 @@ static void pumpKeyboardInput() {
         if (s_sysStatsModal) {
             if ((uint32_t)(millis() - s_sysStatsOpenedMs) >= 300UL) {
                 closeSysStatsModal();
+            }
+            continue;
+        }
+
+        // Release notes: pure reading surface, so every nav key scrolls and
+        // nothing selects. Backspace closes it on every board (the Cardputer's
+        // Esc still works too, via isModalCloseKey).
+        if (s_releaseNotesModal) {
+            if (k == KEY_SCROLL_UP || k == KEY_PAGE_UP || k == KEY_PREV_CHAN) {
+                scrollListClamped(s_releaseNotesScroll, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN || k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) {
+                scrollListClamped(s_releaseNotesScroll, -18);
+                continue;
+            }
+            if (isModalCloseKey(k) || isBackspaceKey(k)) {
+                closeReleaseNotesModal();
             }
             continue;
         }
@@ -17793,7 +18434,88 @@ static void applyTimezoneFromConfig() {
     tzset();
 }
 
+static inline bool clockIsSet() {
+    return time(nullptr) >= kClockSetEpoch;
+}
+
+// The user owns the clock: NTP and GPS must both leave it alone.
+static inline bool timeSourceIsManual() {
+    return s_cfg.timeSource == TIME_SOURCE_MANUAL;
+}
+
+// Sets the system clock from a local wall-clock reading (24-hour). The fields go
+// through mktime, so the configured timezone and its DST rules are what turn the
+// time the user typed into the epoch — entering 14:30 means 14:30 where they are.
+static bool applyManualClock(int year, int mon, int day, int hour, int minute) {
+    if (year < 2020 || year > 2099) return false;
+    if (mon < 1 || mon > 12 || day < 1 || day > 31) return false;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return false;
+
+    applyTimezoneFromConfig();
+
+    struct tm tmv = {};
+    tmv.tm_year  = year - 1900;
+    tmv.tm_mon   = mon - 1;
+    tmv.tm_mday  = day;
+    tmv.tm_hour  = hour;
+    tmv.tm_min   = minute;
+    tmv.tm_sec   = 0;
+    tmv.tm_isdst = -1;          // let the zone rules decide, don't guess
+
+    time_t epoch = mktime(&tmv);
+    if (epoch <= 0) return false;
+
+    struct timeval tv = {};
+    tv.tv_sec = epoch;
+    tv.tv_usec = 0;
+    if (settimeofday(&tv, nullptr) != 0) return false;
+
+    Serial.printf("[time] manual clock set: %04d-%02d-%02d %02d:%02d (epoch %lld)\n",
+                  year, mon, day, hour, minute, (long long)epoch);
+    return true;
+}
+
+// UTC calendar fields -> epoch seconds, without depending on timegm(). GPS
+// reports UTC, so this deliberately skips the timezone that applyManualClock()
+// leans on. (Howard Hinnant's days_from_civil.)
+static int64_t daysFromCivil(int y, unsigned m, unsigned d) {
+    y -= (m <= 2);
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    return (int64_t)era * 146097 + (int64_t)doe - 719468;
+}
+
+// GPS is the time source when there is no network path. Only in automatic mode,
+// and only when the clock is unset or an hour stale, so a fix doesn't fight NTP
+// or overwrite what the user typed.
+static void serviceGpsTimeSync(uint32_t now) {
+    if (timeSourceIsManual()) return;
+    if (!gpsIsEnabled() || !gpsHasFix()) return;
+    if (clockIsSet() && s_gpsClockSyncMs != 0 && (now - s_gpsClockSyncMs) < 3600000UL) return;
+
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+    if (!gpsUtcDateTime(y, mo, d, h, mi, s)) return;
+    if (y < 2020 || y > 2099) return;
+
+    const int64_t epoch = daysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400LL
+                        + (int64_t)h * 3600 + (int64_t)mi * 60 + s;
+    if (epoch < (int64_t)kClockSetEpoch) return;
+
+    struct timeval tv = {};
+    tv.tv_sec = (time_t)epoch;
+    tv.tv_usec = 0;
+    if (settimeofday(&tv, nullptr) != 0) return;
+
+    applyTimezoneFromConfig();
+    s_gpsClockSyncMs = now ? now : 1;
+    Serial.printf("[time] GPS clock sync: %04d-%02d-%02d %02d:%02d:%02d UTC\n",
+                  y, mo, d, h, mi, s);
+}
+
 static bool wifiHasInternetTimePath() {
+    if (timeSourceIsManual()) return false;   // nothing may overwrite a set clock
     if (WiFi.status() != WL_CONNECTED) return false;
     wifi_mode_t mode = WiFi.getMode();
     return mode != WIFI_AP;
@@ -17825,7 +18547,21 @@ static void ensureNtpConfigured() {
 static bool ntpSyncSystemClock() {
     if (!wifiHasInternetTimePath()) return false;
     ensureNtpConfigured();
-    return time(nullptr) >= 1700000000;
+    return time(nullptr) >= kClockSetEpoch;
+}
+
+// Automatic mode has to be able to re-arm itself. NTP is otherwise only tried at
+// boot, so a device switched back from Manual — or one that had no network when
+// it started — would sit on a stale clock until the next restart.
+// ensureNtpConfigured() self-throttles, so calling it on a slow tick is cheap.
+static void serviceAutoTimeSync(uint32_t now) {
+    if (timeSourceIsManual()) return;
+    if (!wifiHasInternetTimePath()) return;
+
+    static uint32_t sLastTryMs = 0;
+    if (sLastTryMs != 0 && (now - sLastTryMs) < 60000UL) return;
+    sLastTryMs = now ? now : 1;
+    ensureNtpConfigured();
 }
 
 static bool waitForNtpSync(uint32_t timeoutMs, bool pumpWebCfg) {
@@ -17895,6 +18631,14 @@ static bool bootTimeNtpSyncDirectSta(const char *ssidOverride, const char *passO
 }
 
 static void bootTimeNtpSync() {
+    // Manual clock: don't spend ten seconds bringing WiFi up at boot for a sync
+    // that would be refused anyway.
+    if (timeSourceIsManual()) {
+        applyTimezoneFromConfig();
+        Serial.println("[time] Boot time sync skipped (clock set manually)");
+        return;
+    }
+
     bool bootTimeSynced = false;
     char cfgWifiSsid[sizeof(s_cfg.wifiSsid)] = {};
     char cfgWifiPass[sizeof(s_cfg.wifiPass)] = {};
@@ -19827,6 +20571,20 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
         default:
             return false;
+    }
+}
+
+// Drain a clock set queued by the web config form. Same reason as the chat send
+// below: the form handler runs on the web server task, and the system clock is
+// set from here.
+static void serviceWebManualTime() {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    if (!webCfgTakeManualTime(y, mo, d, h, mi)) return;
+    if (applyManualClock(y, mo, d, h, mi)) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock set from web config");
+    } else {
+        Serial.printf("[time] web manual clock rejected: %04d-%02d-%02d %02d:%02d\n",
+                      y, mo, d, h, mi);
     }
 }
 
@@ -22579,6 +23337,7 @@ void loop() {
     if (webCfgRunning()) {
         webCfgLoop();
         serviceWebChatSend();
+        serviceWebManualTime();
     }
     if (s_sysStatsModal) refreshSysStatsModal(false);
     bool meshChanged = false;
@@ -22591,6 +23350,8 @@ void loop() {
     mqttBridgeLoop(now);
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
     gpsLoop();
+    serviceAutoTimeSync(now);
+    serviceGpsTimeSync(now);
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {

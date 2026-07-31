@@ -150,6 +150,165 @@ fi
 echo "$TAG" > VERSION
 echo "Updated VERSION to $TAG"
 
+# ── AI release summary ────────────────────────────────────────────────────────
+# Turns the commit range since the last tag into user-facing release notes,
+# written to RELEASE_NOTES.md. This runs BEFORE the build on purpose: the build
+# bakes that file into the firmware (see tools/gen_release_notes.py) so the
+# device can show the same notes that get published here, and the release
+# commit below picks the file up. It also means the notes are reviewed before
+# a long build rather than after it.
+# Prefers the Claude API (works in CI with ANTHROPIC_API_KEY); falls back to the
+# locally authenticated `claude` CLI. Every failure path is non-fatal — the
+# release still publishes with GitHub's auto-generated notes.
+# RELEASE_NOTES.md is committed, so whatever is on disk at build time gets baked
+# into the firmware. When this release has no summary of its own, overwrite it —
+# leaving the previous release's notes there would ship them as if they were
+# these, which is worse than showing nothing.
+write_placeholder_notes() {
+    printf 'Release %s\n\nNo release notes were generated for this build.\n' "$TAG" \
+        > "$NOTES_FILE"
+}
+
+generate_ai_summary() {
+    local range base log diffstat diff untracked prompt
+    if [[ -n "$PREV_TAG" && "$PREV_TAG" != "none" ]]; then
+        range="${PREV_TAG}..HEAD"
+        base="$PREV_TAG"
+    else
+        range="HEAD"    # first release: summarize what history we have
+        base="HEAD"
+    fi
+
+    log=$(git log "$range" --no-merges --pretty=format:'- %s' 2>/dev/null | head -200 || true)
+
+    # Diffed against the working tree, not HEAD: this runs before the release
+    # commit, so a release whose work is still uncommitted — the normal case when
+    # you run this straight after finishing the work — has nothing in the log at
+    # all. `git diff <tag>` spans both committed and uncommitted changes.
+    diffstat=$(git diff --stat "$base" 2>/dev/null | tail -40 || true)
+    # Commit subjects are often terse ("Loads of stuff"), so include a bounded,
+    # zero-context diff — it's what lets the summary describe real changes.
+    # Capped so a large release can't blow up the request.
+    diff=$(git diff "$base" --unified=0 \
+              -- . ':(exclude)dist' ':(exclude)*.bin' ':(exclude)*.sig' \
+              2>/dev/null | head -2000 || true)
+    # New files are untracked until the release commit, so they are invisible to
+    # git diff. Their names at least tell the summary something was added.
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | head -40 || true)
+
+    # Commits alone are no longer the test: an uncommitted release has none.
+    [[ -n "$log" || -n "$diff" ]] || return 1
+
+    prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
+firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Lora Pager TFT, M5Stack
+Cardputer, Heltec V4).
+
+Summarize what changed in release ${TAG} for the people who flash and use it.
+
+Rules:
+- Group under '### New', '### Changed', '### Fixed'. Omit any empty section.
+- One line per user-visible change, written for a device owner, not a developer.
+- Name the affected board(s) when a change is board-specific.
+- Skip pure refactors, dependency bumps, version bumps, and release chores.
+- Commit subjects are often terse or uninformative. When one is, work out what
+  changed from the diff instead. If you still cannot tell what it means for a
+  user, leave it out silently.
+- The release commit has not been made yet, so some or all of this release's
+  work is uncommitted and the commit list may be short or empty. The diff is the
+  authoritative record of what changed; use it.
+- This text is published verbatim as the release notes. Never address the reader
+  or the requester, never ask questions, and never explain what you omitted or
+  why. Output nothing but the section headers and their bullet lines.
+
+Commits since ${PREV_TAG} (may be empty):
+${log}
+
+Files changed (committed and uncommitted):
+${diffstat}
+
+New files not yet tracked by git:
+${untracked}
+
+Diff (zero context, truncated):
+${diff}"
+
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        jq -n --arg p "$prompt" \
+            '{model:"claude-opus-4-8",
+              max_tokens:16000,
+              thinking:{type:"adaptive"},
+              messages:[{role:"user",content:$p}]}' 2>/dev/null \
+        | curl -sS --max-time 180 https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            --data @- 2>/dev/null \
+        | jq -r '.content[]? | select(.type=="text") | .text' 2>/dev/null || true
+    elif command -v claude >/dev/null 2>&1; then
+        claude -p "$prompt" 2>/dev/null || true
+    else
+        return 1
+    fi
+}
+
+NOTES_ARGS=(--generate-notes)
+NOTES_FILE="RELEASE_NOTES.md"
+echo ""
+echo "Generating AI release summary..."
+AI_SUMMARY=$(generate_ai_summary || true)
+if [[ -n "${AI_SUMMARY// /}" ]]; then
+    AI_NOTES_FILE="$NOTES_FILE"
+    printf '%s\n' "$AI_SUMMARY" > "$AI_NOTES_FILE"
+    echo ""
+    echo "──────── proposed release notes ────────"
+    cat "$AI_NOTES_FILE"
+    echo "────────────────────────────────────────"
+
+    # Only prompt on a TTY so CI/non-interactive runs accept and continue.
+    # --yes accepts explicitly rather than relying on that heuristic.
+    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
+        while true; do
+            read -rp "Use these notes? [Y]es / [e]dit / [n]o (GitHub notes only): " ans \
+                || ans="y"
+            case "${ans:-y}" in
+                y|Y|yes|Yes)
+                    break
+                    ;;
+                e|E|edit)
+                    "${EDITOR:-vi}" "$AI_NOTES_FILE" || true
+                    echo ""
+                    echo "──────── edited release notes ────────"
+                    cat "$AI_NOTES_FILE"
+                    echo "──────────────────────────────────────"
+                    ;;
+                n|N|no)
+                    write_placeholder_notes
+                    AI_NOTES_FILE=""
+                    echo "Discarded — using GitHub's generated notes only."
+                    break
+                    ;;
+                *)
+                    echo "Please answer y, e, or n."
+                    ;;
+            esac
+        done
+    fi
+
+    # An accepted-but-emptied file would publish blank notes; fall back instead.
+    if [[ -n "$AI_NOTES_FILE" && -s "$AI_NOTES_FILE" ]]; then
+        # gh prepends --notes-file content above the auto-generated commit list.
+        NOTES_ARGS=(--notes-file "$AI_NOTES_FILE" --generate-notes)
+    elif [[ -n "$AI_NOTES_FILE" ]]; then
+        write_placeholder_notes
+        AI_NOTES_FILE=""
+        echo "Notes file is empty — using GitHub's generated notes only."
+    fi
+else
+    write_placeholder_notes
+    echo "AI summary unavailable (no ANTHROPIC_API_KEY and no usable 'claude' CLI,"
+    echo "or the request failed) — falling back to GitHub's generated notes."
+fi
+
 # ── Build firmware ────────────────────────────────────────────────────────────
 echo ""
 echo "Building firmware..."
@@ -260,130 +419,6 @@ merge_sign_assets "$TAG"
 
 ls -lh dist/
 
-# ── AI release summary ────────────────────────────────────────────────────────
-# Turns the commit range since the last tag into user-facing release notes.
-# Prefers the Claude API (works in CI with ANTHROPIC_API_KEY); falls back to the
-# locally authenticated `claude` CLI. Every failure path is non-fatal — the
-# release still publishes with GitHub's auto-generated notes.
-generate_ai_summary() {
-    local range log diffstat diff prompt
-    if [[ -n "$PREV_TAG" && "$PREV_TAG" != "none" ]]; then
-        range="${PREV_TAG}..HEAD"
-    else
-        range="HEAD"    # first release: summarize what history we have
-    fi
-
-    log=$(git log "$range" --no-merges --pretty=format:'- %s' 2>/dev/null | head -200 || true)
-    diffstat=$(git diff --stat "$range" 2>/dev/null | tail -40 || true)
-    # Commit subjects are often terse ("Loads of stuff"), so include a bounded,
-    # zero-context diff — it's what lets the summary describe real changes.
-    # Capped so a large release can't blow up the request.
-    diff=$(git diff "$range" --unified=0 \
-              -- . ':(exclude)dist' ':(exclude)*.bin' ':(exclude)*.sig' \
-              2>/dev/null | head -2000 || true)
-    [[ -n "$log" ]] || return 1
-
-    prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
-firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Lora Pager TFT, M5Stack
-Cardputer, Heltec V4).
-
-Summarize what changed in release ${TAG} for the people who flash and use it.
-
-Rules:
-- Group under '### New', '### Changed', '### Fixed'. Omit any empty section.
-- One line per user-visible change, written for a device owner, not a developer.
-- Name the affected board(s) when a change is board-specific.
-- Skip pure refactors, dependency bumps, version bumps, and release chores.
-- Commit subjects are often terse or uninformative. When one is, work out what
-  changed from the diff instead. If you still cannot tell what it means for a
-  user, leave it out silently.
-- This text is published verbatim as the release notes. Never address the reader
-  or the requester, never ask questions, and never explain what you omitted or
-  why. Output nothing but the section headers and their bullet lines.
-
-Commits:
-${log}
-
-Files changed:
-${diffstat}
-
-Diff (zero context, truncated):
-${diff}"
-
-    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-        jq -n --arg p "$prompt" \
-            '{model:"claude-opus-4-8",
-              max_tokens:16000,
-              thinking:{type:"adaptive"},
-              messages:[{role:"user",content:$p}]}' 2>/dev/null \
-        | curl -sS --max-time 180 https://api.anthropic.com/v1/messages \
-            -H "content-type: application/json" \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            --data @- 2>/dev/null \
-        | jq -r '.content[]? | select(.type=="text") | .text' 2>/dev/null || true
-    elif command -v claude >/dev/null 2>&1; then
-        claude -p "$prompt" 2>/dev/null || true
-    else
-        return 1
-    fi
-}
-
-NOTES_ARGS=(--generate-notes)
-echo ""
-echo "Generating AI release summary..."
-AI_SUMMARY=$(generate_ai_summary || true)
-if [[ -n "${AI_SUMMARY// /}" ]]; then
-    AI_NOTES_FILE=$(mktemp)
-    printf '%s\n' "$AI_SUMMARY" > "$AI_NOTES_FILE"
-    echo ""
-    echo "──────── proposed release notes ────────"
-    cat "$AI_NOTES_FILE"
-    echo "────────────────────────────────────────"
-
-    # Only prompt on a TTY so CI/non-interactive runs accept and continue.
-    # --yes accepts explicitly rather than relying on that heuristic.
-    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
-        while true; do
-            read -rp "Use these notes? [Y]es / [e]dit / [n]o (GitHub notes only): " ans \
-                || ans="y"
-            case "${ans:-y}" in
-                y|Y|yes|Yes)
-                    break
-                    ;;
-                e|E|edit)
-                    "${EDITOR:-vi}" "$AI_NOTES_FILE" || true
-                    echo ""
-                    echo "──────── edited release notes ────────"
-                    cat "$AI_NOTES_FILE"
-                    echo "──────────────────────────────────────"
-                    ;;
-                n|N|no)
-                    rm -f "$AI_NOTES_FILE"
-                    AI_NOTES_FILE=""
-                    echo "Discarded — using GitHub's generated notes only."
-                    break
-                    ;;
-                *)
-                    echo "Please answer y, e, or n."
-                    ;;
-            esac
-        done
-    fi
-
-    # An accepted-but-emptied file would publish blank notes; fall back instead.
-    if [[ -n "$AI_NOTES_FILE" && -s "$AI_NOTES_FILE" ]]; then
-        # gh prepends --notes-file content above the auto-generated commit list.
-        NOTES_ARGS=(--notes-file "$AI_NOTES_FILE" --generate-notes)
-    elif [[ -n "$AI_NOTES_FILE" ]]; then
-        rm -f "$AI_NOTES_FILE"
-        AI_NOTES_FILE=""
-        echo "Notes file is empty — using GitHub's generated notes only."
-    fi
-else
-    echo "AI summary unavailable (no ANTHROPIC_API_KEY and no usable 'claude' CLI,"
-    echo "or the request failed) — falling back to GitHub's generated notes."
-fi
 
 # ── Create GitHub release ─────────────────────────────────────────────────────
 # Publish only the flashable images and their signatures. ELF/MAP symbol files
@@ -402,8 +437,6 @@ echo ""
 echo "Release $TAG published."
 gh release view "$TAG" --json url -q .url
 
-# Guarded as an if-block, not `[[ ... ]] && rm`: as the script's last command a
-# false test would make release.sh exit non-zero on a successful release.
-if [[ -n "${AI_NOTES_FILE:-}" ]]; then
-    rm -f "$AI_NOTES_FILE"
-fi
+# RELEASE_NOTES.md is deliberately left in place: it is committed with the
+# release and is what the next build embeds until the following release
+# overwrites it.

@@ -371,6 +371,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.btFixedPin         = MY_BT_PIN;
     strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
     cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
+    cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
     cfg.mqttServer[sizeof(cfg.mqttServer) - 1] = '\0';
@@ -625,6 +626,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
+    out += "    timeSource: ";
+    out += (cfg.timeSource == TIME_SOURCE_MANUAL) ? "MANUAL" : "AUTO";
+    out += "\n";
     // position
     out += "  position:\n";
     snprintf(tmp, sizeof(tmp), "    fixedPosition: %s\n", cfg.gpsEnabled ? "false" : "true"); out += tmp;
@@ -1038,6 +1042,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
                 if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
+                else if (!strcmp(key, "timeSource")) {
+                    cfg.timeSource = (!strcmp(val, "MANUAL") || !strcmp(val, "manual"))
+                                         ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
+                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "power")) {
                 if      (!strcmp(key, "isPowerSaving")) cfg.isPowerSaving = (!strcmp(val,"true"));
                 else if (!strcmp(key, "lsSecs"))        cfg.lsSecs        = (uint32_t)atol(val);

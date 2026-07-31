@@ -134,7 +134,19 @@ struct RhinoConfig {
     // Inserting or reordering a field silently misreads every existing device's
     // settings — add at the end, or bump the blob version.
     uint8_t  volumePct;     // notification volume, 0..100 in 10% steps
+    uint8_t  timeSource;    // TIME_SOURCE_AUTO / TIME_SOURCE_MANUAL
 };
+
+// Where the wall clock comes from. AUTO is NTP when there's a network path and
+// GPS otherwise; MANUAL means the user set it and nothing may overwrite it.
+enum : uint8_t {
+    TIME_SOURCE_AUTO   = 0,
+    TIME_SOURCE_MANUAL = 1,
+};
+
+static inline uint8_t cfgCoerceTimeSource(int v) {
+    return (v == TIME_SOURCE_MANUAL) ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
+}
 
 // Clamps a notification volume to range and snaps it to the nearest 10% step,
 // mirroring cfgCoerceBrightness. Shared by the on-device slider, the web form
