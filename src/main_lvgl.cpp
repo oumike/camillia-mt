@@ -88,6 +88,29 @@
 #define APP_VERSION "unknown"
 #endif
 
+// LVGL runs entirely on the Arduino loopTask (lv_timer_handler below), and the
+// default 8 KB loopTask stack is not enough to rasterize an emoji under LVGL 9.
+//
+// Rendering a character the built-in Montserrat face lacks falls through to the
+// tiny_ttf/stb_truetype fallback (see emoji_font.*), which is by far the
+// deepest path in the firmware:
+//
+//   lv_timer_handler -> lv_display_refr_timer -> lv_obj_refr -> lv_obj_redraw
+//     -> lv_draw_label_iterate_characters (400B) -> lv_draw_unit_draw_letter
+//     -> ttf_get_glyph_bitmap_cb -> stbtt__rasterize_sorted_edges (672B)
+//     -> stbtt__tesselate_cubic, which self-recurses to depth 16 at 128B a
+//        frame = 2 KB of recursion on its own
+//
+// That is ~5-6 KB worst case. It fit under LVGL 8 only barely; v9's draw
+// pipeline (draw tasks/units) sits about 0.5-1 KB deeper and pushed it over,
+// which is why a DM containing an emoji aborted with a loopTask stack overflow
+// while plain ASCII — served from pre-rasterized Montserrat bitmaps, no stb
+// involvement at all — was fine.
+//
+// Costs 8 KB of internal RAM. Verify headroom with the stack high-water mark
+// reported by logLvglMemDiag().
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 static LGFX_TDeck lcd;
 static TDeckKeyboard s_keyboard;
 static RhinoConfig s_cfg;
@@ -134,8 +157,11 @@ static constexpr uint16_t kDrawBufLines = 40;
 #endif
 // Allocated at UI init (heap_caps, internal RAM) rather than a static array so
 // the OTA worker path can complete without it ever being reserved.
-static lv_color_t *s_drawBufMem = nullptr;
-static lv_disp_draw_buf_t s_drawBuf;
+// LVGL v9 decouples lv_color_t (always 24-bit RGB) from the render buffer's
+// pixel format, so the buffer is typed by the display's format — RGB565 — and
+// sized in bytes, not in lv_color_t units.
+static uint16_t *s_drawBufMem = nullptr;
+static lv_display_t *s_lvDisplay = nullptr;
 #if defined(DEVICE_TDECK)
 static uint16_t *s_screenshotCaptureFrame = nullptr;
 static int32_t s_screenshotCaptureW = 0;
@@ -853,7 +879,9 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
 static inline char remapJkUiKey(char k, bool allowScrollRemap) {
     if (!allowScrollRemap) return k;
-    // Keep vim-style mapping stable everywhere: j=up, k=down.
+    // This firmware's convention is j=up, k=down — deliberately NOT vim's
+    // j=down/k=up. Every screen is expected to match it, so j folds onto
+    // KEY_SCROLL_UP and k onto KEY_SCROLL_DN and the tokens mean what they say.
     if (k == 'j' || k == 'J') return KEY_SCROLL_UP;
     if (k == 'k' || k == 'K') return KEY_SCROLL_DN;
     return k;
@@ -4526,7 +4554,28 @@ static const char *const kEmojiTray[] = {
     // Food & drink
     "\U0001F355", "\U00002615", "\U0001F37A", "\U0001F36A", "\U0001F34E",
 };
-constexpr int kEmojiTrayCount = (int)(sizeof(kEmojiTray) / sizeof(kEmojiTray[0]));
+constexpr int kEmojiTrayTotal = (int)(sizeof(kEmojiTray) / sizeof(kEmojiTray[0]));
+
+// How many of the tray actually get built. Every cell is two live LVGL objects
+// (cell + label) held for as long as the picker is open, on top of a DM view
+// that can already be 60 message rows — and the picker's glyphs then rasterize
+// out of whatever pool is left.
+//
+// The PSRAM boards run a 384 KB pool (see lv_conf.h) and can afford the whole
+// tray. The Cardputer cannot: no PSRAM means its pool is a 96 KB internal-DRAM
+// array, so it takes a shorter tray, the same way it already takes MAX_DM_LINES
+// 16 against everyone else's 60.
+//
+// Truncation is from the end, and kEmojiTray is ordered by category, so the cut
+// keeps every face and hand plus the common reaction symbols and drops the
+// tail: celebrate, weather, food.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+constexpr int kEmojiTrayCount = 40;
+#else
+constexpr int kEmojiTrayCount = kEmojiTrayTotal;
+#endif
+static_assert(kEmojiTrayCount <= kEmojiTrayTotal,
+              "emoji tray cap must not exceed the number of emoji defined");
 
 static void refreshEmojiPickerSelection() {
     if (!s_emojiPickerModal) return;
@@ -4638,7 +4687,7 @@ static void onEmojiCellPressed(lv_event_t *e) {
 }
 
 static void onEmojiBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_emojiPickerBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_emojiPickerBackdrop) return;
     closeEmojiPicker();
 }
 
@@ -4652,6 +4701,23 @@ static void closeEmojiPicker() {
     s_emojiPickerModal = nullptr;
     s_emojiPickerTapbackId = 0;
     s_emojiPickerRepeatDelta = 0;
+}
+
+// DIAGNOSTIC (emoji-picker OOM): scrolling the tray aborts inside
+// stbtt__new_active, i.e. lv_malloc returned NULL mid-rasterize. Sampling the
+// pool as the tray scrolls separates the three candidate causes, which need
+// different fixes:
+//   - free stays low and flat  -> the working set genuinely does not fit
+//   - free walks downward      -> something leaks per refresh
+//   - free is fine but biggest is tiny -> fragmentation, not exhaustion
+// Throttled so the logging itself does not perturb the scroll it measures.
+static void onEmojiGridScrolled(lv_event_t *e) {
+    LV_UNUSED(e);
+    static uint32_t lastLogMs = 0;
+    const uint32_t now = millis();
+    if (now - lastLogMs < 400) return;
+    lastLogMs = now;
+    logLvglMemDiag("emoji scroll");
 }
 
 static void openEmojiPicker(bool sendMode) {
@@ -4741,6 +4807,15 @@ static void openEmojiPicker(bool sendMode) {
 
     for (int i = 0; i < kEmojiTrayCount; i++) {
         lv_obj_t *c = lv_obj_create(grid);
+        // The whole tray is built up front, so this is the largest single burst
+        // of allocations in the UI — and it lands on top of the chat/DM screen
+        // that is still live underneath. Bail out cleanly instead of leaving a
+        // half-built grid behind when the pool cannot take all of it.
+        if (!c) {
+            logLvglMemDiag("emoji picker aborted (low LVGL mem)");
+            closeEmojiPicker();
+            return;
+        }
         lv_obj_remove_style_all(c);
         lv_obj_set_size(c, cell, cell);
         lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
@@ -4748,6 +4823,11 @@ static void openEmojiPicker(bool sendMode) {
         lv_obj_set_style_radius(c, 4, 0);
         lv_obj_add_event_cb(c, onEmojiCellPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *g = lv_label_create(c);
+        if (!g) {
+            logLvglMemDiag("emoji picker aborted (low LVGL mem)");
+            closeEmojiPicker();
+            return;
+        }
         lv_obj_set_style_text_font(g, cellFont, 0);
         // The emoji font is monochrome — glyphs take the label's text color —
         // so without setting it they inherit whatever the default is and read as
@@ -4760,6 +4840,11 @@ static void openEmojiPicker(bool sendMode) {
         setLabelTextEmojiSafe(g, kEmojiTray[i]);
         lv_obj_center(g);
     }
+
+    // Baseline right after the tray is built but before a single glyph has been
+    // rasterized: whatever the scroll samples show, they are relative to this.
+    logLvglMemDiag("emoji picker built");
+    lv_obj_add_event_cb(grid, onEmojiGridScrolled, LV_EVENT_SCROLL, nullptr);
 
     refreshEmojiPickerSelection();
 }
@@ -5100,7 +5185,13 @@ static void onComposeCancelPressed(lv_event_t *e) {
 static void updateComposeCharCount() {
     if (!s_composeCharCount || !s_composeInput) return;
     const char *txt = lv_textarea_get_text(s_composeInput);
-    uint32_t used = (txt && txt[0]) ? _lv_txt_get_encoded_length(txt) : 0;
+    // v9 moved the old _lv_txt_get_encoded_length into lv_text_private.h, which
+    // public lvgl.h does not expose. Counting non-continuation bytes gives the
+    // same UTF-8 character count without reaching into LVGL internals.
+    uint32_t used = 0;
+    for (const char *p = txt; p && *p; p++) {
+        if (!utf8util::isContinuationByte((uint8_t)*p)) used++;
+    }
     lv_label_set_text_fmt(s_composeCharCount, "%u of %d",
                           (unsigned)used, (int)MESH_TEXT_MAX_LEN);
 }
@@ -5716,7 +5807,7 @@ static void onCfgColorRowPressed(lv_event_t *e) {
 }
 
 static void onCfgColorBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgColorBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgColorBackdrop) return;
     closeCfgColorPickerModal();
     refreshCfgModal();
 }
@@ -5783,13 +5874,13 @@ static void stepCfgBrightness(int steps) {
 }
 
 static void onCfgBrightSliderChanged(lv_event_t *e) {
-    lv_obj_t *slider = lv_event_get_target(e);
+    lv_obj_t *slider = lv_event_get_target_obj(e);
     if (!slider) return;
     setCfgBrightnessPreview((int)lv_slider_get_value(slider));
 }
 
 static void onCfgBrightBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgBrightBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgBrightBackdrop) return;
     cancelCfgBrightness();
 }
 
@@ -5941,13 +6032,13 @@ static void stepCfgVolume(int steps) {
 }
 
 static void onCfgVolSliderChanged(lv_event_t *e) {
-    lv_obj_t *slider = lv_event_get_target(e);
+    lv_obj_t *slider = lv_event_get_target_obj(e);
     if (!slider) return;
     setCfgVolumePreview((int)lv_slider_get_value(slider), true);
 }
 
 static void onCfgVolBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgVolBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgVolBackdrop) return;
     cancelCfgVolume();
 }
 
@@ -6092,7 +6183,7 @@ static void onChatStyleRowPressed(lv_event_t *e) {
 }
 
 static void onChatStyleBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_chatStyleBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_chatStyleBackdrop) return;
     closeChatStyleModal();
     refreshCfgModal();
 }
@@ -6264,7 +6355,7 @@ static void onThemeRowPressed(lv_event_t *e) {
 }
 
 static void onThemeBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_themeBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_themeBackdrop) return;
     closeThemeModal();
     refreshCfgModal();
 }
@@ -6457,7 +6548,7 @@ static void onChatNameRowPressed(lv_event_t *e) {
 }
 
 static void onChatNameBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_chatNameBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_chatNameBackdrop) return;
     closeChatNameModal();
     refreshCfgModal();
 }
@@ -6620,7 +6711,7 @@ static void onFontSizeRowPressed(lv_event_t *e) {
 }
 
 static void onFontSizeBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_fontSizeBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_fontSizeBackdrop) return;
     closeFontSizeModal();
     refreshCfgModal();
 }
@@ -6971,7 +7062,7 @@ static void onChanCfgRowPressed(lv_event_t *e) {
 }
 
 static void onChanCfgBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_chanCfgBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_chanCfgBackdrop) return;
     closeChanCfgModal();
     refreshCfgModal();
 }
@@ -7151,7 +7242,7 @@ static void openChanCfgModal() {
 static void onChanEditRowPressed(lv_event_t *e);
 
 static void onChanEditBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_chanEditBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_chanEditBackdrop) return;
     closeChanEditModal();   // discards staged edits
 }
 
@@ -7363,7 +7454,7 @@ static void openChanEditModal(int slot) {
 
 // ── Channel field text entry ─────────────────────────────────────────────────
 static void onChanTextBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_chanTextBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_chanTextBackdrop) return;
     closeChanTextModal();
 }
 
@@ -7743,7 +7834,7 @@ static void onTimeCfgRowPressed(lv_event_t *e) {
 }
 
 static void onTimeCfgBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_timeCfgBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_timeCfgBackdrop) return;
     closeTimeCfgModal();   // discards staged edits
 }
 
@@ -8067,7 +8158,7 @@ static void onAlertSoundRowPressed(lv_event_t *e) {
 }
 
 static void onAlertSoundBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_alertSoundBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_alertSoundBackdrop) return;
     cancelAlertSoundModal();
 }
 
@@ -8286,7 +8377,7 @@ static void onCfgWifiRowPressed(lv_event_t *e) {
 }
 
 static void onCfgWifiBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgWifiBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgWifiBackdrop) return;
     const bool fromOnboarding = s_cfgWifiPickerOnboardingMode;
     closeCfgWifiPickerModal();
     if (fromOnboarding || s_onboardingModal) renderOnboardingStage();
@@ -8307,7 +8398,7 @@ static void onCfgWifiCancelPressed(lv_event_t *e) {
 }
 
 static void onCfgWifiScanBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgWifiScanBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgWifiScanBackdrop) return;
     closeCfgWifiScanModal();
     if (s_cfgWifiModal) refreshCfgWifiPickerModal();
 }
@@ -8432,7 +8523,7 @@ static void onCfgWifiScanConnectPressed(lv_event_t *e) {
 }
 
 static void onCfgWifiPassBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_cfgWifiPassBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_cfgWifiPassBackdrop) return;
     closeCfgWifiPassModal();
     refreshCfgWifiScanModal(false);
 }
@@ -8922,7 +9013,7 @@ static void closeCfgActionMessageModal() {
 }
 
 static void onCfgActionMessageBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) == s_cfgActionMsgBackdrop) {
+    if (lv_event_get_target_obj(e) == s_cfgActionMsgBackdrop) {
         closeCfgActionMessageModal();
     }
 }
@@ -10934,8 +11025,8 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 
     uint16_t srcW = kStateMapImageW;
     uint16_t srcH = kStateMapImageH;
-    lv_img_header_t header;
-    lv_res_t headerRes = lv_img_decoder_get_info(s_nodesMapImageSrc, &header);
+    lv_image_header_t header;
+    lv_res_t headerRes = lv_image_decoder_get_info(s_nodesMapImageSrc, &header);
     if (headerRes == LV_RES_OK && header.w > 0 && header.h > 0) {
         srcW = header.w;
         srcH = header.h;
@@ -11460,7 +11551,7 @@ static void closeTracerouteProgressModal() {
 
 static void onTracerouteBackdropPressed(lv_event_t *e) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (lv_event_get_target(e) == s_tracerouteBackdrop) {
+    if (lv_event_get_target_obj(e) == s_tracerouteBackdrop) {
         closeTracerouteProgressModal();
     }
 #else
@@ -12415,12 +12506,25 @@ static void refreshLiveView(bool force) {
 static void logLvglMemDiag(const char *tag) {
     lv_mem_monitor_t m;
     lv_mem_monitor(&m);
-    Serial.printf("[lvgl] %s pool used=%u%% free=%u biggest=%u frag=%u%%\n",
+    // stackFree is the lowest the loopTask stack has ever got (bytes still
+    // unused at the high-water mark), so it accounts for the deep emoji
+    // rasterization path even if we are not in it right now. If this ever
+    // approaches zero, raise SET_LOOP_TASK_STACK_SIZE at the top of this file.
+    unsigned stackFree = (unsigned)uxTaskGetStackHighWaterMark(nullptr);
+    // The LVGL pool and the system heap are separate arenas; stb_truetype
+    // rasterizes out of the LVGL pool (STBTT_malloc is #defined to lv_malloc),
+    // so print both to tell which one is actually under pressure.
+    unsigned heapBiggest =
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    Serial.printf("[lvgl] %s pool used=%u%% free=%u biggest=%u frag=%u%% "
+                  "stackFree=%u heapBiggest=%u\n",
                   tag ? tag : "mem",
                   (unsigned)m.used_pct,
                   (unsigned)m.free_size,
                   (unsigned)m.free_biggest_size,
-                  (unsigned)m.frag_pct);
+                  (unsigned)m.frag_pct,
+                  stackFree,
+                  heapBiggest);
 }
 
 static void openLiveModal() {
@@ -12567,26 +12671,77 @@ static int16_t chartClampInt(float v, int16_t lo, int16_t hi) {
     return (int16_t)lroundf(v);
 }
 
-static void onChUtilChartDrawEvent(lv_event_t *e) {
-    lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
-    if (!dsc) return;
-    if (dsc->part != LV_PART_TICKS) return;
-    if (!dsc->text) return;
-    if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
-        lv_snprintf(dsc->text, dsc->text_length, "%d%%", (int)dsc->value);
-    }
+// LVGL v9 removed the chart's built-in axis ticks and labels, along with the
+// LV_EVENT_DRAW_PART_BEGIN hook the "%d%%" / "%d dB" formatting used to ride
+// on. The replacement is a standalone lv_scale sitting beside the plot, with
+// the tick text supplied up front as a static array — which is why the labels
+// below are literals rather than formatted per draw.
+//
+// Tick geometry mirrors the old lv_chart_set_axis_tick(chart, axis, 4, 2, 5, 2,
+// true, w) calls: 5 major ticks with 2 minor steps between each, so 9 ticks
+// total with every 2nd major. lv_scale draws vertical ticks bottom-to-top, so
+// index 0 of the label array is the range minimum.
+static lv_obj_t *makeChartYScale(lv_obj_t *parent, lv_scale_mode_t mode,
+                                 int32_t width, int32_t rangeMin, int32_t rangeMax,
+                                 const char **labels) {
+    lv_obj_t *scale = lv_scale_create(parent);
+    lv_obj_remove_style_all(scale);
+    lv_obj_set_width(scale, width);
+    lv_obj_set_height(scale, lv_pct(100));
+    lv_obj_clear_flag(scale, LV_OBJ_FLAG_SCROLLABLE);
+    lv_scale_set_mode(scale, mode);
+    lv_scale_set_range(scale, rangeMin, rangeMax);
+    lv_scale_set_total_tick_count(scale, 9);
+    lv_scale_set_major_tick_every(scale, 2);
+    lv_scale_set_label_show(scale, true);
+    lv_scale_set_text_src(scale, labels);
+
+    // Axis line (MAIN) and minor ticks (ITEMS) match the chart's grid lines.
+    lv_obj_set_style_line_color(scale, lv_color_hex(0x335D9D), LV_PART_MAIN);
+    lv_obj_set_style_line_width(scale, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_color(scale, lv_color_hex(0x335D9D), LV_PART_ITEMS);
+    lv_obj_set_style_line_width(scale, 1, LV_PART_ITEMS);
+    lv_obj_set_style_length(scale, 2, LV_PART_ITEMS);
+    // Major ticks and their labels use the old LV_PART_TICKS text styling.
+    lv_obj_set_style_line_color(scale, lv_color_hex(0xA7C7FF), LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(scale, 1, LV_PART_INDICATOR);
+    lv_obj_set_style_length(scale, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_text_font(scale, &lv_font_montserrat_10, LV_PART_INDICATOR);
+    lv_obj_set_style_text_color(scale, lv_color_hex(0xA7C7FF), LV_PART_INDICATOR);
+    lv_obj_set_style_pad_left(scale, 3, LV_PART_INDICATOR);
+    lv_obj_set_style_pad_right(scale, 3, LV_PART_INDICATOR);
+    return scale;
 }
 
-static void onSnrChartDrawEvent(lv_event_t *e) {
-    lv_obj_draw_part_dsc_t *dsc = lv_event_get_draw_part_dsc(e);
-    if (!dsc) return;
-    if (dsc->part != LV_PART_TICKS) return;
-    if (!dsc->text) return;
-    if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
-        lv_snprintf(dsc->text, dsc->text_length, "%d dB", (int)dsc->value);
-    } else if (dsc->id == LV_CHART_AXIS_SECONDARY_Y) {
-        lv_snprintf(dsc->text, dsc->text_length, "%d dBm", (int)dsc->value);
-    }
+// A scale is a sibling of the chart, not a child, so nothing lines its ticks up
+// with the plot area automatically. The chart's grid spans its content box, so
+// inset the scale by the chart's border + vertical padding to match.
+static void syncChartScalePads(lv_obj_t *scale, lv_obj_t *chart) {
+    if (!scale || !chart) return;
+    int32_t border = lv_obj_get_style_border_width(chart, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(scale,
+                             lv_obj_get_style_pad_top(chart, LV_PART_MAIN) + border,
+                             LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(scale,
+                                lv_obj_get_style_pad_bottom(chart, LV_PART_MAIN) + border,
+                                LV_PART_MAIN);
+}
+
+// Horizontal band holding [scale][chart][scale]; grows to fill the modal the
+// way the bare chart used to.
+static lv_obj_t *makeChartRow(lv_obj_t *parent) {
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_flex_grow(row, 1);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    // Children carry their own height: 100% here, so no cross-axis stretch
+    // needed (and v9's flex has no STRETCH align anyway).
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    return row;
 }
 
 static void refreshChUtilChart(bool force) {
@@ -12723,25 +12878,29 @@ static void openChUtilChartModal() {
     lv_obj_center(headerCloseLbl);
 #endif
 
-    s_chUtilChart = lv_chart_create(s_chUtilChartModal);
-    lv_obj_set_width(s_chUtilChart, lv_pct(100));
+    // Bottom-to-top, matching lv_scale's vertical tick order.
+    static const char *kChUtilYLabels[] = { "0%", "25%", "50%", "75%", "100%", nullptr };
+
+    lv_obj_t *chartRow = makeChartRow(s_chUtilChartModal);
+    lv_obj_t *yScale = makeChartYScale(chartRow, LV_SCALE_MODE_VERTICAL_LEFT,
+                                       40, 0, 100, kChUtilYLabels);
+
+    s_chUtilChart = lv_chart_create(chartRow);
+    lv_obj_set_height(s_chUtilChart, lv_pct(100));
     lv_obj_set_flex_grow(s_chUtilChart, 1);
     lv_chart_set_type(s_chUtilChart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_chUtilChart, ChartHist::CAP);
     lv_chart_set_range(s_chUtilChart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_chart_set_div_line_count(s_chUtilChart, 5, 6);
     lv_chart_set_update_mode(s_chUtilChart, LV_CHART_UPDATE_MODE_SHIFT);
-    lv_chart_set_axis_tick(s_chUtilChart, LV_CHART_AXIS_PRIMARY_Y, 4, 2, 5, 2, true, 40);
-    lv_obj_set_style_size(s_chUtilChart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_size(s_chUtilChart, 0, 0, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_chUtilChart, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_chUtilChart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(s_chUtilChart, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_border_width(s_chUtilChart, 1, 0);
     lv_obj_set_style_line_color(s_chUtilChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
     lv_obj_set_style_line_opa(s_chUtilChart, LV_OPA_40, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_chUtilChart, &lv_font_montserrat_10, LV_PART_TICKS);
-    lv_obj_set_style_text_color(s_chUtilChart, lv_color_hex(0xA7C7FF), LV_PART_TICKS);
-    lv_obj_add_event_cb(s_chUtilChart, onChUtilChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+    syncChartScalePads(yScale, s_chUtilChart);
 
     s_chUtilSeries = lv_chart_add_series(s_chUtilChart,
                                          lv_color_hex(0x4FD1C5),
@@ -12911,8 +13070,18 @@ static void openSnrRssiChartModal() {
     lv_obj_center(headerCloseLbl);
 #endif
 
-    s_snrChart = lv_chart_create(s_snrChartModal);
-    lv_obj_set_width(s_snrChart, lv_pct(100));
+    // Bottom-to-top. Units live in the modal title ("SNR (dB) / RSSI (dBm)")
+    // rather than on every tick — a per-tick suffix no longer fits now that the
+    // labels are fixed strings and the columns are only as wide as the widest.
+    static const char *kSnrYLabels[]  = { "-25", "-15", "-5", "5", "15", nullptr };
+    static const char *kRssiYLabels[] = { "-130", "-105", "-80", "-55", "-30", nullptr };
+
+    lv_obj_t *chartRow = makeChartRow(s_snrChartModal);
+    lv_obj_t *snrScale = makeChartYScale(chartRow, LV_SCALE_MODE_VERTICAL_LEFT,
+                                         34, -25, 15, kSnrYLabels);
+
+    s_snrChart = lv_chart_create(chartRow);
+    lv_obj_set_height(s_snrChart, lv_pct(100));
     lv_obj_set_flex_grow(s_snrChart, 1);
     lv_chart_set_type(s_snrChart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_snrChart, ChartHist::CAP);
@@ -12920,18 +13089,18 @@ static void openSnrRssiChartModal() {
     lv_chart_set_range(s_snrChart, LV_CHART_AXIS_SECONDARY_Y, -130, -30);
     lv_chart_set_div_line_count(s_snrChart, 5, 6);
     lv_chart_set_update_mode(s_snrChart, LV_CHART_UPDATE_MODE_SHIFT);
-    lv_chart_set_axis_tick(s_snrChart, LV_CHART_AXIS_PRIMARY_Y, 4, 2, 5, 2, true, 50);
-    lv_chart_set_axis_tick(s_snrChart, LV_CHART_AXIS_SECONDARY_Y, 4, 2, 5, 2, true, 56);
-    lv_obj_set_style_size(s_snrChart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_size(s_snrChart, 0, 0, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_snrChart, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_snrChart, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(s_snrChart, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_border_width(s_snrChart, 1, 0);
     lv_obj_set_style_line_color(s_snrChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
     lv_obj_set_style_line_opa(s_snrChart, LV_OPA_40, LV_PART_MAIN);
-    lv_obj_set_style_text_font(s_snrChart, &lv_font_montserrat_10, LV_PART_TICKS);
-    lv_obj_set_style_text_color(s_snrChart, lv_color_hex(0xA7C7FF), LV_PART_TICKS);
-    lv_obj_add_event_cb(s_snrChart, onSnrChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+
+    lv_obj_t *rssiScale = makeChartYScale(chartRow, LV_SCALE_MODE_VERTICAL_RIGHT,
+                                          40, -130, -30, kRssiYLabels);
+    syncChartScalePads(snrScale, s_snrChart);
+    syncChartScalePads(rssiScale, s_snrChart);
 
     s_snrSeries = lv_chart_add_series(s_snrChart,
                                       lv_color_hex(0x68D391),
@@ -13782,7 +13951,25 @@ static void refreshDmModal(bool force) {
         }
 
         if (autoScrollToLatest && lastMsgObj) {
+            // Two separate reasons this lands mid-conversation without help,
+            // both of which the channel chat view already handles:
+            //
+            // 1. Wrapped message labels have no final height until layout runs,
+            //    so scrolling against stale geometry aims at the wrong offset.
+            // 2. scroll_to_view only guarantees the object is *visible* — for a
+            //    tall last message it happily stops with that message's top edge
+            //    at the viewport top, leaving the rest of it below the fold.
+            lv_obj_update_layout(s_dmMsgList);
             lv_obj_scroll_to_view(lastMsgObj, LV_ANIM_OFF);
+            int32_t bottomGap = lv_obj_get_scroll_bottom(s_dmMsgList);
+            if (bottomGap > 0) {
+                // Absolute position rather than lv_obj_scroll_by(): scroll_by's
+                // dy is inverted (negative reveals content below), which is an
+                // easy sign to get backwards.
+                lv_obj_scroll_to_y(s_dmMsgList,
+                                   lv_obj_get_scroll_y(s_dmMsgList) + bottomGap,
+                                   LV_ANIM_OFF);
+            }
         }
 
         if (rowCount == 0) {
@@ -14266,7 +14453,7 @@ static void closeReleaseNotesModal() {
 }
 
 static void onReleaseNotesBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target(e) != s_releaseNotesBackdrop) return;
+    if (lv_event_get_target_obj(e) != s_releaseNotesBackdrop) return;
     closeReleaseNotesModal();
 }
 
@@ -16300,6 +16487,11 @@ static void pumpKeyboardInput() {
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
         bool navFromJk = false;
+        // True only when the key really was j or k, for the few places that must
+        // treat them differently from wheel/arrow input. navFromJk cannot be used
+        // for this: the Cardputer parity rule below also raises it for the
+        // physical arrows, and those must keep their own direction.
+        bool jkDirectionInvert = false;
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // Match v1 Cardputer shortcuts: ';' / '.' navigate lists, and
@@ -16309,6 +16501,7 @@ static void pumpKeyboardInput() {
 
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
         navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
+        jkDirectionInvert = navFromJk;
         // Enable vim-style j/k navigation for all keyboard-capable builds.
         k = remapJkUiKey(k, !typingContext);
 #endif
@@ -16382,7 +16575,7 @@ static void pumpKeyboardInput() {
                             s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
                             renderOnboardingStage();
                         } else {
-                            lv_textarea_del_char(s_onboardingInput);
+                            lv_textarea_delete_char(s_onboardingInput);
                         }
                     }
                 } else if (k >= 0x20 && k < 0x7F && s_onboardingInput) {
@@ -16616,7 +16809,7 @@ static void pumpKeyboardInput() {
                     // Backspace on an empty field backs out, matching the WiFi
                     // password modal. A cleared name is committed with Enter.
                     if (!cur || !cur[0]) closeChanTextModal();
-                    else                 lv_textarea_del_char(s_chanTextInput);
+                    else                 lv_textarea_delete_char(s_chanTextInput);
                 }
                 continue;
             }
@@ -16780,7 +16973,7 @@ static void pumpKeyboardInput() {
                         closeCfgWifiPassModal();
                         refreshCfgWifiScanModal(false);
                     } else {
-                        lv_textarea_del_char(s_cfgWifiPassInput);
+                        lv_textarea_delete_char(s_cfgWifiPassInput);
                     }
                 }
                 continue;
@@ -17191,13 +17384,13 @@ static void pumpKeyboardInput() {
                             const char *cur = lv_textarea_get_text(s_composeInput);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                             if (cur && cur[0] && k == KEY_BACKSPACE) {
-                                lv_textarea_del_char(s_composeInput);
+                                lv_textarea_delete_char(s_composeInput);
                             }
 #else
                             if (!cur || !cur[0]) {
                                 closeComposePrompt();
                             } else if (k == KEY_BACKSPACE) {
-                                lv_textarea_del_char(s_composeInput);
+                                lv_textarea_delete_char(s_composeInput);
                             }
 #endif
                         }
@@ -17325,9 +17518,20 @@ static void pumpKeyboardInput() {
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 if (s_dmMsgPanelFocused && s_dmSelection > 0 && s_dmMsgList) {
                     const int scrollStep = 18;
-                    const int delta = (k == KEY_SCROLL_UP)
-                        ? (invertScrollNav ? scrollStep : -scrollStep)
-                        : (invertScrollNav ? -scrollStep : scrollStep);
+                    int delta;
+                    if (jkDirectionInvert) {
+                        // This pane scrolled j=down while every list navigates
+                        // j=up, which is the inconsistency that made j/k feel
+                        // broken in DMs. Positive dy scrolls up
+                        // (lv_obj_scroll_by_raw moves children by +dy, revealing
+                        // content above), so j=up is +scrollStep.
+                        delta = (k == KEY_SCROLL_UP) ? scrollStep : -scrollStep;
+                    } else {
+                        // Wheel and arrow input keep their existing feel.
+                        delta = (k == KEY_SCROLL_UP)
+                            ? (invertScrollNav ? scrollStep : -scrollStep)
+                            : (invertScrollNav ? -scrollStep : scrollStep);
+                    }
                     scrollListClamped(s_dmMsgList, delta);
                     continue;
                 }
@@ -17387,13 +17591,13 @@ static void pumpKeyboardInput() {
                             const char *cur = lv_textarea_get_text(s_composeInput);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                             if (cur && cur[0] && k == KEY_BACKSPACE) {
-                                lv_textarea_del_char(s_composeInput);
+                                lv_textarea_delete_char(s_composeInput);
                             }
 #else
                             if (!cur || !cur[0]) {
                                 closeComposePrompt();
                             } else if (k == KEY_BACKSPACE) {
-                                lv_textarea_del_char(s_composeInput);
+                                lv_textarea_delete_char(s_composeInput);
                             }
 #endif
                         }
@@ -17990,13 +18194,13 @@ static void pumpKeyboardInput() {
                     const char *cur = lv_textarea_get_text(s_composeInput);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                     if (cur && cur[0] && k == KEY_BACKSPACE) {
-                        lv_textarea_del_char(s_composeInput);
+                        lv_textarea_delete_char(s_composeInput);
                     }
 #else
                     if (!cur || !cur[0]) {
                         closeComposePrompt();
                     } else if (k == KEY_BACKSPACE) {
-                        lv_textarea_del_char(s_composeInput);
+                        lv_textarea_delete_char(s_composeInput);
                     }
 #endif
                 }
@@ -18041,7 +18245,7 @@ static void refreshChatComposeButtonState() {
 }
 
 static void onChatMessagePressed(lv_event_t *e) {
-    lv_obj_t *label = lv_event_get_target(e);
+    lv_obj_t *label = lv_event_get_target_obj(e);
     if (!label) return;
 
     uint32_t replyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
@@ -18289,10 +18493,10 @@ static bool captureWebScreenshotPng(const char *outPath) {
             const uint16_t *srcRow = frame565 + ((size_t)y * rowPixels);
             size_t p = 1;
             for (int32_t x = 0; x < w; x++) {
+                // Native-order RGB565, exactly as captured from the LVGL flush
+                // buffer. v9 has no LV_COLOR_16_SWAP; byte order is the display
+                // driver's concern and LovyanGFX takes the native layout.
                 uint16_t c = srcRow[x];
-#if LV_COLOR_16_SWAP
-                c = (uint16_t)((c << 8) | (c >> 8));
-#endif
 
                 uint8_t r = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
                 uint8_t g = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
@@ -18659,10 +18863,12 @@ static void bootTimeNtpSync() {
     applyTimezoneFromConfig();
 }
 
-static void lvglFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
-    displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)&color_p->full);
+    // v9 hands over a raw byte buffer in the display's colour format (RGB565).
+    uint16_t *pixels = (uint16_t *)px_map;
+    displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
 #if defined(DEVICE_TDECK)
     if (s_screenshotCaptureActive && s_screenshotCaptureFrame && s_screenshotCaptureW > 0 && s_screenshotCaptureH > 0) {
         int32_t capX1 = area->x1 < 0 ? 0 : area->x1;
@@ -18674,20 +18880,20 @@ static void lvglFlush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *co
             for (int32_t y = capY1; y <= capY2; y++) {
                 int32_t srcY = y - area->y1;
                 int32_t srcX = capX1 - area->x1;
-                lv_color_t *src = color_p + (srcY * w) + srcX;
+                const uint16_t *src = pixels + (srcY * w) + srcX;
                 uint16_t *dst = s_screenshotCaptureFrame + ((size_t)y * (size_t)s_screenshotCaptureW) + capX1;
                 for (int32_t x = capX1; x <= capX2; x++) {
-                    *dst++ = (uint16_t)(src++)->full;
+                    *dst++ = *src++;
                 }
             }
             s_screenshotCaptureTouched = true;
         }
     }
 #endif
-    lv_disp_flush_ready(disp);
+    lv_display_flush_ready(disp);
 }
 
-static void lvglTouchRead(lv_indev_drv_t *indev, lv_indev_data_t *data) {
+static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     LV_UNUSED(indev);
 #if TOUCH_POLL_ENABLED
     int32_t tx = 0;
@@ -21825,7 +22031,14 @@ static void refreshChatView(bool force) {
         // treating this view as "at latest".
         int32_t bottomGap = lv_obj_get_scroll_bottom(s_chatList);
         if (bottomGap > 0) {
-            lv_obj_scroll_by(s_chatList, 0, bottomGap, LV_ANIM_OFF);
+            // Was lv_obj_scroll_by(list, 0, +bottomGap), which scrolled the
+            // wrong way: scroll_by's dy is inverted (lv_obj_scroll_to_y computes
+            // diff = -y + scroll_y), so a positive dy reveals content *above*
+            // and pushed the view further from the bottom rather than closing
+            // the gap. Absolute positioning avoids the sign entirely.
+            lv_obj_scroll_to_y(s_chatList,
+                               lv_obj_get_scroll_y(s_chatList) + bottomGap,
+                               LV_ANIM_OFF);
         }
     } else {
         lv_obj_scroll_to_y(s_chatList, prevScrollY, LV_ANIM_OFF);
@@ -22169,7 +22382,10 @@ static void buildUi() {
         s_channelList = lv_obj_create(screen);
         lv_obj_set_size(s_channelList, dropdownW, dropdownH);
         lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + 4, chatY + 4);
-        lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_HIDDEN);
+        // v9 made lv_obj_flag_t a real enum, so an OR of two flags is an int in
+        // C++ and needs the cast back.
+        lv_obj_add_flag(s_channelList,
+                        (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_HIDDEN));
         setupVScroll(s_channelList);
         lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
@@ -23059,6 +23275,9 @@ void setup() {
     }
 
     lv_init();
+    // v9 dropped the LV_TICK_CUSTOM compile-time hook; the tick source is
+    // installed here instead. Must happen before the first lv_timer_handler().
+    lv_tick_set_cb((lv_tick_get_cb_t)millis);
     emojiFontInit();   // build emoji-fallback text faces before any UI
     nodesMapInitFsDriver();
     // Allocate the LVGL draw buffer here, on the normal-UI path only. The OTA
@@ -23066,28 +23285,26 @@ void setup() {
     // never allocated during a firmware update — leaving the full contiguous
     // internal heap for the TLS handshake. Prefer internal RAM (fast to render
     // and flush); fall back to PSRAM, then a minimal buffer, rather than crash.
+    constexpr size_t kBytesPerPx = 2;   // LV_COLOR_FORMAT_RGB565
     const size_t kDrawBufPx = (size_t)kMaxHorRes * (size_t)kDrawBufLines;
-    s_drawBufMem = (lv_color_t *)heap_caps_malloc(kDrawBufPx * sizeof(lv_color_t),
-                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_drawBufMem = (uint16_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
+                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     size_t drawBufPx = kDrawBufPx;
     if (!s_drawBufMem) {
         Serial.println("[lvgl] draw buffer internal alloc failed; trying PSRAM");
-        s_drawBufMem = (lv_color_t *)heap_caps_malloc(kDrawBufPx * sizeof(lv_color_t),
-                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_drawBufMem = (uint16_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (!s_drawBufMem) {
         // Last resort: a small internal buffer keeps the UI alive (stripey but
         // functional) instead of a null-buffer crash.
         drawBufPx = (size_t)kMaxHorRes * 8u;
-        s_drawBufMem = (lv_color_t *)heap_caps_malloc(drawBufPx * sizeof(lv_color_t),
-                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        s_drawBufMem = (uint16_t *)heap_caps_malloc(drawBufPx * kBytesPerPx,
+                                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         Serial.printf("[lvgl] FATAL-ish: fell back to %u-line draw buffer\n",
                       (unsigned)(drawBufPx / kMaxHorRes));
     }
-    lv_disp_draw_buf_init(&s_drawBuf, s_drawBufMem, nullptr, drawBufPx);
 
-    static lv_disp_drv_t dispDrv;
-    lv_disp_drv_init(&dispDrv);
     int32_t dispW = displayDev().width();
     int32_t dispH = displayDev().height();
     if (dispW <= 0 || dispH <= 0) {
@@ -23096,18 +23313,20 @@ void setup() {
         Serial.printf("[lvgl] WARNING: invalid lcd size, fallback to %ldx%ld\n",
                       (long)dispW, (long)dispH);
     }
-    dispDrv.hor_res = dispW;
-    dispDrv.ver_res = dispH;
-    dispDrv.flush_cb = lvglFlush;
-    dispDrv.draw_buf = &s_drawBuf;
-    lv_disp_drv_register(&dispDrv);
+    s_lvDisplay = lv_display_create(dispW, dispH);
+    lv_display_set_color_format(s_lvDisplay, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(s_lvDisplay, lvglFlush);
+    // Single buffer, partial render mode — same stripe-at-a-time flushing the
+    // v8 lv_disp_draw_buf_t gave us. Note buf_size is in BYTES in v9.
+    lv_display_set_buffers(s_lvDisplay, s_drawBufMem, nullptr,
+                           (uint32_t)(drawBufPx * kBytesPerPx),
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
 
 #if HAS_TOUCH
-    static lv_indev_drv_t touchDrv;
-    lv_indev_drv_init(&touchDrv);
-    touchDrv.type = LV_INDEV_TYPE_POINTER;
-    touchDrv.read_cb = lvglTouchRead;
-    lv_indev_drv_register(&touchDrv);
+    lv_indev_t *touchIndev = lv_indev_create();
+    lv_indev_set_type(touchIndev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(touchIndev, lvglTouchRead);
+    lv_indev_set_display(touchIndev, s_lvDisplay);
 #endif
 
     loadConfigFromSd();
