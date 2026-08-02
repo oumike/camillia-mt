@@ -304,6 +304,38 @@ are not received or stored — they are lost, not queued. The device warns you
 when Web Config starts, the Config row reads *chat PAUSED*, and the web page
 shows a red banner. Turn Web Config off to resume messaging.
 
+### Custom LoRa modem settings
+
+The **Modem Preset** dropdown in Web Config's LoRa section has a **Custom** entry
+below the nine Meshtastic presets. Pick it and four fields become live:
+
+- **Bandwidth** — 62.5, 125, 250 or 500 kHz, plus 31.25 kHz on boards whose radio
+  supports it. The LR1121 variant of the Pager cannot go below 62.5 kHz, so that
+  build does not list 31.25.
+- **Spreading Factor** — SF7 to SF12.
+- **Coding Rate** — 4/5 to 4/8.
+- **Frequency Slot** — `0` derives the frequency from your primary channel's
+  name, exactly as a preset does. Any other value pins that slot number
+  (1-based), which is how most local meshes on custom settings are described.
+  The readout shows the resulting frequency and how many slots the region has at
+  your bandwidth — narrow bandwidths have far more of them (62.5 kHz over the US
+  band is 416 slots).
+
+Every node you want to talk to must match on all four, plus region and channel.
+Custom settings are not compatible with the presets: nothing running Long Fast
+will hear a 62.5 kHz mesh, by design.
+
+An unnamed primary channel is called `Custom` while these settings are active,
+which is the name Meshtastic hashes for the frequency slot in the same
+situation. Switching back to a preset restores the preset's channel name; a
+channel you renamed yourself is never touched.
+
+In YAML these live under `config.lora` as `usePreset`, `bandwidth`,
+`spreadFactor`, `codingRate` and `channelNum`, using Meshtastic's convention
+that a bandwidth of `31` means 31.25 kHz and `62` means 62.5 kHz. A
+`meshtastic --export-config` dump from a node on custom settings imports
+directly.
+
 ### Choosing a Wi-Fi network
 
 The **Choose WiFi** action lists your configured network, an **AP** entry, and

@@ -711,7 +711,44 @@ static const char kPresetOptions[] =
         "<option value='Medium Slow'>Medium Slow</option>"
         "<option value='Short Fast'>Short Fast</option>"
         "<option value='Short Slow'>Short Slow</option>"
-        "<option value='Short Turbo'>Short Turbo</option>";
+        "<option value='Short Turbo'>Short Turbo</option>"
+        "<option value='Custom'>Custom&hellip;</option>";
+
+// Custom modem settings. One constant serves both pages: the full page hides
+// the block until Custom is selected (applyPreset() does it), while lite has no
+// JS and simply always shows it — the fields are read only when the preset
+// select says Custom, so a visible block is harmless there.
+//
+// The bandwidth list is what THIS board's radio can produce. On the LR1121
+// pager 31.25 kHz is absent rather than offered-and-rejected: the LR1121 has no
+// sub-GHz bandwidth below 62.5, and a setting the radio refuses would leave the
+// device on the air at nothing anyone can hear.
+static const char kCustomLoraFields[] =
+        "<div id='cust-blk'>"
+        "<div class='row2'><label>Bandwidth<select name='cbw' id='sel-cbw' onchange='applyPreset()'>"
+#if LORA_BW_CODE_MIN <= 31
+        "<option value='31'>31.25 kHz</option>"
+#endif
+        "<option value='62'>62.5 kHz</option>"
+        "<option value='125'>125 kHz</option>"
+        "<option value='250'>250 kHz</option>"
+        "<option value='500'>500 kHz</option>"
+        "</select></label>"
+        "<label>Spreading Factor<select name='csf' id='sel-csf' onchange='applyPreset()'>"
+        "<option value='7'>SF7</option><option value='8'>SF8</option>"
+        "<option value='9'>SF9</option><option value='10'>SF10</option>"
+        "<option value='11'>SF11</option><option value='12'>SF12</option>"
+        "</select></label></div>"
+        "<div class='row2'><label>Coding Rate<select name='ccr' id='sel-ccr' onchange='applyPreset()'>"
+        "<option value='5'>4/5</option><option value='6'>4/6</option>"
+        "<option value='7'>4/7</option><option value='8'>4/8</option>"
+        "</select></label>"
+        "<label>Frequency Slot<input name='cslot' id='in-cslot' type='number' min='0' max='255' "
+        "onchange='applyPreset()'></label></div>"
+        "<p class='gps-hint'>Custom modem settings, used when Modem Preset is Custom. "
+        "Slot 0 derives the frequency from the primary channel name, the way a preset does; "
+        "any other value pins the slot. Every node in your mesh has to match.</p>"
+        "</div>";
 
 // Theme preset names, ordered dark/light per family — the same list the swatch
 // picker's NAMES array carries in JS; lite renders them as a plain select.
@@ -755,13 +792,36 @@ static const char kPresetJs[] =
         "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'}};"
         // djb2 hash + Meshtastic frequency-slot calc, matching regionSlotFreq().
         "function djb2(t){var h=5381;for(var i=0;i<t.length;i++)h=((h*33)+t.charCodeAt(i))>>>0;return h;}"
-        "function slotFreq(r,p){var bw=p.bw/1000;var n=Math.floor((r.e-r.s)/bw);if(n<1)n=1;"
-          "var slot=djb2(p.cn)%n;return r.s+bw/2+slot*bw;}"
+        "function nSlot(r,p){var n=Math.floor((r.e-r.s)/(p.bw/1000));return n<1?1:n;}"
+        "function slotN(r,p,i){var bw=p.bw/1000;var n=nSlot(r,p);if(i>=n)i=n-1;return r.s+bw/2+i*bw;}"
+        // Primary channel name, which is what a custom slot-0 setup hashes.
+        // Saving with Custom selected renames a still-default channel 0 to
+        // "Custom" (syncPrimaryChannelName), so a preset name in that field is
+        // not what the device will end up hashing — predict the rename here or
+        // the readout advertises a frequency the radio never tunes to.
+        "function isDefName(n){if(!n||n=='Custom')return 1;"
+          "for(var k in P)if(P[k].cn==n)return 1;return 0;}"
+        "function cn0(){var e=document.querySelector('[name=ch0_name]');"
+          "var n=e?e.value.trim():'';return isDefName(n)?'Custom':n;}"
         "function applyPreset(){"
           "var r=R[document.getElementById('sel-rgn').value];"
-          "var p=P[document.getElementById('sel-pst').value];"
+          "var pv=document.getElementById('sel-pst').value;"
+          "var cust=(pv=='Custom');"
+          "var cb=document.getElementById('cust-blk');"
+          "if(cb)cb.style.display=cust?'':'none';"
+          "var p,slot=0;"
+          "if(cust){"
+            "var c=+document.getElementById('sel-cbw').value;"
+            "p={bw:c==31?31.25:c==62?62.5:c,sf:+document.getElementById('sel-csf').value,"
+              "cr:+document.getElementById('sel-ccr').value,cn:cn0()};"
+            "slot=+document.getElementById('in-cslot').value||0;"
+          "}else p=P[pv];"
           "if(!r||!p)return;"
-          "document.getElementById('d-freq').textContent=slotFreq(r,p).toFixed(3)+' MHz';"
+          "var n=nSlot(r,p);"
+          "var si=slot>0?(slot>n?n:slot):(djb2(p.cn)%n)+1;"
+          "var f=slotN(r,p,si-1);"
+          "document.getElementById('d-freq').textContent=f.toFixed(3)+' MHz'"
+            "+(cust?' (slot '+si+' of '+n+')':'');"
           "document.getElementById('d-bw').textContent=p.bw+' kHz';"
           "document.getElementById('d-sf').textContent='SF'+p.sf;"
           "document.getElementById('d-cr').textContent='4/'+p.cr;"
@@ -1797,14 +1857,37 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
     sendFlash(kPresetOptions);
     html += "</select></label></div>";
+    sendChunk(html);
+    sendFlash(kCustomLoraFields);
     // Both option lists are static constants, so the current values are applied
-    // here rather than by marking one <option> selected.
+    // here rather than by marking one <option> selected. This runs before
+    // kPresetJs registers its DOMContentLoaded handler, so the first
+    // applyPreset() already sees these values.
     html += "<script>document.getElementById('sel-rgn').value='";
     html += gCfg->region; html += "';"
             "document.getElementById('sel-pst').value='";
-    html += kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name;
-    html += "';</script>";
-    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically from region and preset.</p>";
+    html += gCfg->loraUsePreset
+                ? kPresets[gCfg->modemPreset < PRESET_COUNT ? gCfg->modemPreset : 0].name
+                : "Custom";
+    html += "';";
+    // A value with no matching <option> — a bandwidth this radio cannot do, or
+    // an SF/CR out of range from an imported config — would leave the select
+    // blank. Coerce to what applyPresetParams() would land on anyway. Set
+    // through a one-line helper so the four assignments still fit in tmp[96].
+    html += "function sv(i,v){document.getElementById(i).value=v;}";
+    snprintf(tmp, sizeof(tmp), "sv('sel-cbw',%u);sv('sel-csf',%u);sv('sel-ccr',%u);sv('in-cslot',%u);",
+             (unsigned)loraCoerceBwCode(gCfg->loraCustomBwKhz),
+             (unsigned)constrain((int)gCfg->loraCustomSf, LORA_SF_MIN, LORA_SF_MAX),
+             (unsigned)constrain((int)gCfg->loraCustomCr, LORA_CR_MIN, LORA_CR_MAX),
+             (unsigned)gCfg->loraCustomSlot);
+    html += tmp;
+    // Lite carries no kPresetJs, so the custom fields' onchange would throw on
+    // every edit. Stub it: with no live readout to update there is nothing for
+    // it to do, and the block it would show/hide is always visible here.
+    if (lite) html += "function applyPreset(){}";
+    html += "</script>";
+    html += "<p class='gps-hint'>Frequency and modem parameters are derived automatically "
+            "from region and preset, or from the fields above when the preset is Custom.</p>";
     sendChunk(html);
     if (!lite) {
         sendFlash(kPresetJs);
@@ -3390,8 +3473,21 @@ static void handlePostSave() {
     gCfg->okToMqtt    = (server.arg("ok_to_mqtt")   == "1");
     gCfg->ignoreMqtt  = (server.arg("ignore_mqtt")  == "1");
     String presetStr = server.arg("modem_preset");
-    gCfg->modemPreset = presetFromName(presetStr.c_str());
-    applyPresetParams(*gCfg);   // sets loraFreq, loraBw, loraSf, loraCr from region+preset
+    gCfg->loraUsePreset = (presetStr != "Custom");
+    if (gCfg->loraUsePreset) {
+        gCfg->modemPreset = presetFromName(presetStr.c_str());
+    } else {
+        // modemPreset is deliberately left alone: it is what Custom is edited
+        // away from, and what picking a preset again comes back to.
+        if (server.hasArg("cbw"))   gCfg->loraCustomBwKhz = (uint16_t)server.arg("cbw").toInt();
+        if (server.hasArg("csf"))   gCfg->loraCustomSf    = (uint8_t)server.arg("csf").toInt();
+        if (server.hasArg("ccr"))   gCfg->loraCustomCr    = (uint8_t)server.arg("ccr").toInt();
+        if (server.hasArg("cslot")) gCfg->loraCustomSlot  =
+            (uint8_t)constrain(server.arg("cslot").toInt(), 0, 255);
+    }
+    // Sets loraFreq/BW/SF/CR from region + preset, or from the custom fields;
+    // also coerces every custom value into what this radio can be tuned to.
+    applyPresetParams(*gCfg);
     gCfg->loraPower    = (uint8_t)constrain(server.arg("pwr").toInt(), 1, 22);
     gCfg->loraHopLimit = (uint8_t)constrain(server.arg("hop").toInt(), 1,  7);
 

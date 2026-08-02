@@ -68,6 +68,43 @@ uint8_t presetFromName(const char *name) {
     return PRESET_LONG_FAST;
 }
 
+// Meshtastic bandwidth codes this board's radio can produce. 31 (31.25 kHz) is
+// absent on the LR1121 pager variant — see LORA_BW_CODE_MIN in config.h.
+const uint16_t kBwCodes[] = {
+#if LORA_BW_CODE_MIN <= 31
+    31,
+#endif
+    62, 125, 250, 500,
+};
+const uint8_t kBwCodeCount = (uint8_t)(sizeof(kBwCodes) / sizeof(kBwCodes[0]));
+
+float loraBwFromCode(uint16_t code) {
+    for (uint8_t i = 0; i < kBwCodeCount; i++) {
+        if (kBwCodes[i] != code) continue;
+        // The two shorthand codes; the rest are already the literal kHz.
+        if (code == 31) return 31.25f;
+        if (code == 62) return 62.5f;
+        return (float)code;
+    }
+    return 0.0f;
+}
+
+uint16_t loraCoerceBwCode(uint16_t code) {
+    for (uint8_t i = 0; i < kBwCodeCount; i++) {
+        if (kBwCodes[i] == code) return code;
+    }
+    // Unsupported: snap to the nearest supported code rather than silently
+    // falling back to the default, so importing 31 on an LR1121 lands on 62
+    // (the closest thing that radio can do) instead of jumping to 250.
+    uint16_t best = kBwCodes[0];
+    uint32_t bestDist = (uint32_t)abs((int32_t)best - (int32_t)code);
+    for (uint8_t i = 1; i < kBwCodeCount; i++) {
+        uint32_t d = (uint32_t)abs((int32_t)kBwCodes[i] - (int32_t)code);
+        if (d < bestDist) { best = kBwCodes[i]; bestDist = d; }
+    }
+    return best;
+}
+
 // djb2 string hash — the function Meshtastic uses to pick a frequency slot.
 static uint32_t meshNameHash(const char *s) {
     uint32_t h = 5381;
@@ -84,14 +121,26 @@ static const RegionPlan *regionLookup(const char *code) {
     return nullptr;
 }
 
-float regionSlotFreq(const char *code, float bwKhz, const char *channelName) {
+uint32_t regionSlotCount(const char *code, float bwKhz) {
     const RegionPlan *r = regionLookup(code);
-    if (!r || bwKhz <= 0.0f) return MESH_FREQ;
+    if (!r || bwKhz <= 0.0f) return 0;
+    uint32_t numChannels = (uint32_t)((r->freqEnd - r->freqStart) / (bwKhz / 1000.0f));
+    return numChannels == 0 ? 1 : numChannels;
+}
+
+float regionSlotFreqNum(const char *code, float bwKhz, uint32_t slot) {
+    const RegionPlan *r = regionLookup(code);
+    uint32_t numChannels = regionSlotCount(code, bwKhz);
+    if (!r || numChannels == 0) return MESH_FREQ;
+    if (slot >= numChannels) slot = numChannels - 1;
     float bwMhz = bwKhz / 1000.0f;
-    uint32_t numChannels = (uint32_t)((r->freqEnd - r->freqStart) / bwMhz);
-    if (numChannels == 0) numChannels = 1;
-    uint32_t slot = meshNameHash(channelName) % numChannels;
     return r->freqStart + (bwMhz / 2.0f) + (slot * bwMhz);
+}
+
+float regionSlotFreq(const char *code, float bwKhz, const char *channelName) {
+    uint32_t numChannels = regionSlotCount(code, bwKhz);
+    if (numChannels == 0) return MESH_FREQ;
+    return regionSlotFreqNum(code, bwKhz, meshNameHash(channelName) % numChannels);
 }
 
 uint8_t regionPower(const char *code) {
@@ -99,8 +148,50 @@ uint8_t regionPower(const char *code) {
     return r ? r->power : MESH_POWER;
 }
 
+// Name channel 0 is known by for the frequency-slot hash under custom settings.
+// Those sit on whatever the primary channel is actually called, the way
+// Meshtastic hashes the primary channel's name once a preset is no longer in
+// play; an unnamed channel 0 hashes CUSTOM_CHANNEL_NAME, as it does there.
+static const char *primaryChannelNameForHash() {
+    const char *n = CHANNEL_KEYS[0].name_buf[0] ? CHANNEL_KEYS[0].name_buf
+                                                : CHANNEL_KEYS[0].name;
+    if (n && n[0]) return n;
+    return CUSTOM_CHANNEL_NAME;
+}
+
 void applyPresetParams(RhinoConfig &cfg) {
     if (cfg.modemPreset >= PRESET_COUNT) cfg.modemPreset = PRESET_LONG_FAST;
+
+    if (!cfg.loraUsePreset) {
+        // Custom modem settings. Everything is coerced back into range here
+        // rather than at each entry point, so a value from YAML, an HTTP form
+        // or a config blob saved by a build for a different radio all land
+        // somewhere this hardware can actually be tuned to.
+        cfg.loraCustomBwKhz = loraCoerceBwCode(cfg.loraCustomBwKhz);
+        if (cfg.loraCustomSf < LORA_SF_MIN) cfg.loraCustomSf = LORA_SF_MIN;
+        if (cfg.loraCustomSf > LORA_SF_MAX) cfg.loraCustomSf = LORA_SF_MAX;
+        if (cfg.loraCustomCr < LORA_CR_MIN) cfg.loraCustomCr = LORA_CR_MIN;
+        if (cfg.loraCustomCr > LORA_CR_MAX) cfg.loraCustomCr = LORA_CR_MAX;
+
+        cfg.loraBw = loraBwFromCode(cfg.loraCustomBwKhz);
+        cfg.loraSf = cfg.loraCustomSf;
+        cfg.loraCr = cfg.loraCustomCr;
+
+        uint32_t slots = regionSlotCount(cfg.region, cfg.loraBw);
+        if (slots && cfg.loraCustomSlot > slots) cfg.loraCustomSlot = (uint8_t)slots;
+        if (cfg.loraCustomSlot == 0) {
+            // Auto: same name hash the presets use.
+            cfg.loraFreq = regionSlotFreq(cfg.region, cfg.loraBw,
+                                          primaryChannelNameForHash());
+        } else {
+            // Pinned: stored 1-based to keep 0 free as "auto", matching the
+            // Meshtastic channel_num field this mirrors.
+            cfg.loraFreq = regionSlotFreqNum(cfg.region, cfg.loraBw,
+                                             (uint32_t)cfg.loraCustomSlot - 1);
+        }
+        return;
+    }
+
     const PresetParams &p = kPresets[cfg.modemPreset];
     cfg.loraBw = p.bw;
     cfg.loraSf = p.sf;
@@ -334,6 +425,13 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.loraBw       = MESH_BW;
     cfg.loraSf       = MESH_SF;
     cfg.loraCr       = MESH_CR;
+    // Custom modem settings start as a copy of the default preset, so a user
+    // who flips to Custom edits from Long Fast rather than from nothing.
+    cfg.loraUsePreset   = true;
+    cfg.loraCustomBwKhz = loraCoerceBwCode((uint16_t)MESH_BW);
+    cfg.loraCustomSf    = MESH_SF;
+    cfg.loraCustomCr    = MESH_CR;
+    cfg.loraCustomSlot  = 0;   // auto: hash the primary channel name
     cfg.loraPower    = MESH_POWER;
     cfg.loraHopLimit = MESH_HOP_LIMIT;
     cfg.loraRxBoostedGain = (bool)MY_LORA_RX_BOOST;
@@ -616,7 +714,16 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     // lora
     out += "  lora:\n";
-    snprintf(tmp, sizeof(tmp), "    bandwidth: %.0f\n",    cfg.loraBw);       out += tmp;
+    // Bandwidth goes out as the Meshtastic integer code, not the derived float:
+    // a custom 62.5 kHz setup must read back as "62", the number the rest of
+    // the Meshtastic world uses for it.
+    snprintf(tmp, sizeof(tmp), "    bandwidth: %u\n",
+             cfg.loraUsePreset ? (unsigned)(cfg.loraBw + 0.5f)
+                               : (unsigned)cfg.loraCustomBwKhz);              out += tmp;
+    if (!cfg.loraUsePreset) {
+        snprintf(tmp, sizeof(tmp), "    channelNum: %u\n",
+                 (unsigned)cfg.loraCustomSlot);                               out += tmp;
+    }
     snprintf(tmp, sizeof(tmp), "    codingRate: %d\n",     cfg.loraCr);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    freq_mhz: %.3f\n",     cfg.loraFreq);     out += tmp;
     snprintf(tmp, sizeof(tmp), "    hopLimit: %d\n",       cfg.loraHopLimit); out += tmp;
@@ -625,6 +732,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     out += "    region: "; out += cfg.region; out += "\n";
     snprintf(tmp, sizeof(tmp), "    spreadFactor: %d\n",   cfg.loraSf);       out += tmp;
+    snprintf(tmp, sizeof(tmp), "    usePreset: %s\n",
+             cfg.loraUsePreset ? "true" : "false");                           out += tmp;
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
     snprintf(tmp, sizeof(tmp), "    loraRxBoostedGain: %s\n",
              cfg.loraRxBoostedGain ? "true" : "false");                       out += tmp;
@@ -936,11 +1045,27 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
-                // Meshtastic CLI format
-                if      (!strcmp(key, "bandwidth"))    cfg.loraBw       = atof(val);
-                else if (!strcmp(key, "codingRate"))   cfg.loraCr       = (uint8_t)atoi(val);
+                // Meshtastic CLI format. bandwidth/spreadFactor/codingRate also
+                // land in the custom fields: with usePreset false they are the
+                // settings, and applyPresetParams() overwrites loraBw/Sf/Cr at
+                // the end of the import either way, so parsing them into the
+                // derived fields alone would silently drop them.
+                // A zero is Meshtastic's "unset" for these three — it shows up
+                // in exports from nodes running a preset — so leave the custom
+                // fields on their defaults rather than coercing 0 into range.
+                if      (!strcmp(key, "bandwidth")) {
+                    cfg.loraBw = atof(val);
+                    if (atoi(val) > 0) cfg.loraCustomBwKhz = (uint16_t)atoi(val);
+                } else if (!strcmp(key, "codingRate")) {
+                    cfg.loraCr = (uint8_t)atoi(val);
+                    if (atoi(val) > 0) cfg.loraCustomCr = (uint8_t)atoi(val);
+                } else if (!strcmp(key, "spreadFactor")) {
+                    cfg.loraSf = (uint8_t)atoi(val);
+                    if (atoi(val) > 0) cfg.loraCustomSf = (uint8_t)atoi(val);
+                }
+                else if (!strcmp(key, "usePreset"))    cfg.loraUsePreset = parseBoolValue(val);
+                else if (!strcmp(key, "channelNum"))   cfg.loraCustomSlot = (uint8_t)constrain(atoi(val), 0, 255);
                 else if (!strcmp(key, "hopLimit"))     cfg.loraHopLimit = (uint8_t)atoi(val);
-                else if (!strcmp(key, "spreadFactor")) cfg.loraSf       = (uint8_t)atoi(val);
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
                 else if (!strcmp(key, "loraRxBoostedGain")) cfg.loraRxBoostedGain = parseBoolValue(val);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);

@@ -162,6 +162,19 @@ struct RhinoConfig {
     // Off by default: the standby command dialect cannot be probed at runtime,
     // so this stays opt-in until verified on a given unit. See gpsSetDutyCycle().
     bool     gpsDutyCycleEnabled;
+    // Pad past what was trailing padding when the struct ended at
+    // gpsDutyCycleEnabled, so the custom-modem block below starts at an offset
+    // no smaller than the old sizeof and keeps its defaults on an upgrade.
+    // Same trap as _reservedPad0 above.
+    uint8_t  _reservedPad1[3];
+    // Custom (non-preset) modem settings. When loraUsePreset is false the four
+    // fields below drive loraBw/loraSf/loraCr/loraFreq instead of modemPreset;
+    // modemPreset is still kept so switching back restores the last preset.
+    bool     loraUsePreset;    // true = derive from modemPreset (the default)
+    uint8_t  loraCustomSf;     // LORA_SF_MIN..LORA_SF_MAX
+    uint8_t  loraCustomCr;     // LORA_CR_MIN..LORA_CR_MAX (denominator of 4/n)
+    uint8_t  loraCustomSlot;   // 1-based frequency slot; 0 = hash channel name
+    uint16_t loraCustomBwKhz;  // Meshtastic bandwidth code (31 = 31.25, 62 = 62.5)
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and

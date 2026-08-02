@@ -52,6 +52,18 @@
 // little range for battery.
 #define MY_LORA_RX_BOOST 1
 
+// Narrowest bandwidth this board's radio can actually produce, as a Meshtastic
+// bandwidth code (see loraBwFromCode(): 31 means 31.25 kHz, 62 means 62.5 kHz).
+// The LR1121 has no sub-GHz LoRa bandwidth below 62.5 kHz, so on that variant
+// 31.25 is removed from every UI rather than accepted into config and then
+// rejected by setBandwidth() at reconfigure time — a silently dead radio is a
+// far worse outcome than an option that was never offered.
+#if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
+#  define LORA_BW_CODE_MIN 62
+#else
+#  define LORA_BW_CODE_MIN 31
+#endif
+
 // ── Node identity (change to your callsign/name) ─────────────
 #define MY_LONG_NAME    "Camillia"
 #define MY_SHORT_NAME   "CaMi"

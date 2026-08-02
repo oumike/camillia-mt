@@ -4404,11 +4404,14 @@ static void recomputeChannelHashes() {
 }
 
 // True while channel 0 still carries a preset-derived name (or none at all) —
-// i.e. nobody has deliberately renamed the primary channel.
+// i.e. nobody has deliberately renamed the primary channel. CUSTOM_CHANNEL_NAME
+// counts as derived too: it is what custom settings put there, so switching
+// back to a preset must be free to rename it again.
 static bool primaryChannelNameIsPresetDefault() {
     const char *cur = CHANNEL_KEYS[0].name_buf[0] ? CHANNEL_KEYS[0].name_buf
                                                   : CHANNEL_KEYS[0].name;
     if (!cur || !cur[0]) return true;
+    if (strcmp(cur, CUSTOM_CHANNEL_NAME) == 0) return true;
     for (uint8_t i = 0; i < PRESET_COUNT; i++) {
         const char *pn = kPresets[i].channelName;
         if (pn && strcmp(cur, pn) == 0) return true;
@@ -4425,7 +4428,8 @@ static bool primaryChannelNameIsPresetDefault() {
 static void syncPrimaryChannelName() {
     if (!primaryChannelNameIsPresetDefault()) return;
     uint8_t pi = s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0;
-    const char *pname = kPresets[pi].channelName;
+    const char *pname = s_cfg.loraUsePreset ? kPresets[pi].channelName
+                                            : CUSTOM_CHANNEL_NAME;
     strncpy(CHANNEL_KEYS[0].name_buf, pname, sizeof(CHANNEL_KEYS[0].name_buf) - 1);
     CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
     CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
@@ -5492,9 +5496,15 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     if (n < maxLines) snprintf(info[n++], 96, "Long: %s", s_cfg.nodeLong);
     if (n < maxLines) snprintf(info[n++], 96, "Short: %s", s_cfg.nodeShort);
     if (n < maxLines) snprintf(info[n++], 96, "Preset: %s",
-                               kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name);
+                               s_cfg.loraUsePreset
+                                   ? kPresets[s_cfg.modemPreset < PRESET_COUNT ? s_cfg.modemPreset : 0].name
+                                   : "Custom");
     if (n < maxLines) snprintf(info[n++], 96, "Freq: %.3f MHz", s_cfg.loraFreq);
-    if (n < maxLines) snprintf(info[n++], 96, "BW %.0f SF %d CR 4/%d", s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
+    // One decimal: the custom bandwidths include 62.5 and 31.25 kHz, which the
+    // old %.0f rendered as a plain "62" — the same digits as the config code,
+    // but not the bandwidth the radio is actually running.
+    if (n < maxLines) snprintf(info[n++], 96, "BW %.4g SF %d CR 4/%d",
+                               (double)s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
     if (n < maxLines) snprintf(info[n++], 96, "Relayed: %lu", (unsigned long)s_rebroadcastCount);
 
@@ -18424,6 +18434,10 @@ static void onWebCfgSaved() {
         }
     }
     syncPrimaryChannelName();
+    // Same reason as at boot: the automatic custom slot hashes channel 0's
+    // name, which this save may have just changed, and the Radio.reconfigure()
+    // below is about to tune to whatever loraFreq holds.
+    applyPresetParams(s_cfg);
     persistChannelsToPrefs();
     myDeviceRole = s_cfg.deviceRole;
     applyUiThemePalette();
@@ -23534,6 +23548,11 @@ void setup() {
     Channels.loadPersisted();
     syncPrimaryChannelName();
     recomputeChannelHashes();
+    // Re-derive now that channel 0's name is final. Custom settings on the
+    // automatic slot hash that name, and the config load back in
+    // loadConfigFromSd() ran before the channel plan existed — it would have
+    // hashed whatever the compiled-in default channel was called.
+    applyPresetParams(s_cfg);
     s_radioReady = Radio.init(s_cfg.loraPower, s_cfg.loraRxBoostedGain);
     // Deliberately after Radio.init(). On the pager, pagerPrimeLoRaRail() arms
     // every peripheral rail on the expander including GPS_EN, so starting GPS
