@@ -40,7 +40,9 @@
 #define TFT_BL_INVERT           false
 #define TFT_BL_FREQ              256
 #define TFT_BL_PWM_CH              7
-#define TFT_BRIGHTNESS_DEFAULT   180
+// See the note on the Heltec default: lowered for battery, user-adjustable, and
+// also sets the default brightness percentage via cfgBrightnessDuty().
+#define TFT_BRIGHTNESS_DEFAULT   150
 #define TFT_RST                   33
 #define TFT_PANEL_WIDTH          135
 #define TFT_PANEL_HEIGHT         240

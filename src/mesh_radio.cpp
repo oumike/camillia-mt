@@ -29,6 +29,13 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
     if (invertDirSense) {
         // Inverted polarity: configure all rails as inputs, which on these
         // units has the effect of enabling the peripheral power switches.
+        //
+        // Unlike the standard branch below, DRV_EN and NFC_EN are still enabled
+        // here. Disabling them would mean driving the pin as an output at a
+        // level this path has never established, and this branch only runs on
+        // revisions we have no way to test against — a wrong guess costs a
+        // board that will not bring its LoRa rail up at all. The saving is not
+        // worth that risk on the fallback path.
         xl9555SetInput(XL9555_PIN_DRV_EN,    cfg0, cfg1);
         xl9555SetInput(XL9555_PIN_AMP_EN,    cfg0, cfg1);
         xl9555SetInput(XL9555_PIN_KB_RST,    cfg0, cfg1);
@@ -41,8 +48,16 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
         xl9555SetInput(XL9555_PIN_SD_EN,     cfg0, cfg1);
         xl9555SetInput(XL9555_PIN_SD_PULLEN, cfg0, cfg1);
     } else {
-        // Standard polarity: drive all rail enables high, SD pull-down as input.
-        xl9555SetOutput(XL9555_PIN_DRV_EN,  true, out0, out1, cfg0, cfg1);
+        // Standard polarity: drive the rails we actually use high, SD pull-down
+        // as input.
+        //
+        // DRV_EN (haptic driver) and NFC_EN are deliberately left OFF: there is
+        // no haptic or NFC code anywhere in this firmware, so powering them was
+        // energising silicon we never address, for the entire uptime. Same
+        // reasoning as AMP_EN below, which has always been handled this way.
+        // If haptics or NFC are added later, power them at point of use rather
+        // than restoring a blanket enable here.
+        xl9555SetOutput(XL9555_PIN_DRV_EN,  false, out0, out1, cfg0, cfg1);
         // Speaker amp stays OFF at boot; the audio layer powers it only while a
         // sound plays, so an idle amp can't emit random clicks (e.g. from LoRa
         // TX current transients coupling into the always-on amp).
@@ -50,7 +65,7 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
         xl9555SetOutput(XL9555_PIN_KB_RST,  true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_LORA_EN, true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_GPS_EN,  true, out0, out1, cfg0, cfg1);
-        xl9555SetOutput(XL9555_PIN_NFC_EN,  true, out0, out1, cfg0, cfg1);
+        xl9555SetOutput(XL9555_PIN_NFC_EN,  false, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_GPS_RST, true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_KB_EN,   true, out0, out1, cfg0, cfg1);
         xl9555SetOutput(XL9555_PIN_GPIO_EN, true, out0, out1, cfg0, cfg1);
@@ -110,7 +125,18 @@ float airPct(bool txOnly) {
 
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
-bool MeshRadio::init() {
+void MeshRadio::setRxBoostedGain(bool enabled) {
+    _rxBoostedGain = enabled;
+#if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
+    if (_ready) {
+        _radio.setRxBoostedGainMode(enabled);
+        _radio.startReceive();   // re-arm so the new gain setting takes effect
+    }
+#endif
+}
+
+bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
+    _rxBoostedGain = rxBoostedGain;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     (void)pagerPrimeLoRaRail(false);
 #endif
@@ -146,14 +172,14 @@ bool MeshRadio::init() {
 
     _radio.reset();
     int state = _radio.begin(MESH_FREQ, MESH_BW, MESH_SF, MESH_CR,
-                             MESH_SYNC, MESH_POWER, MESH_PREAMBLE,
+                             MESH_SYNC, txPower, MESH_PREAMBLE,
                              MESH_TCXO_V);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (state == RADIOLIB_ERR_CHIP_NOT_FOUND) {
         Serial.println("[radio] retrying init with alternate pager expander polarity");
         if (pagerPrimeLoRaRail(true)) {
             state = _radio.begin(MESH_FREQ, MESH_BW, MESH_SF, MESH_CR,
-                                 MESH_SYNC, MESH_POWER, MESH_PREAMBLE,
+                                 MESH_SYNC, txPower, MESH_PREAMBLE,
                                  MESH_TCXO_V);
         }
     }
@@ -180,10 +206,14 @@ bool MeshRadio::init() {
 #if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
     _radio.setDio2AsRfSwitch(true);
 #endif
-    _radio.setOutputPower(22);       // explicitly apply PA; begin() param alone may not stick
+    // Explicitly apply the PA; the begin() parameter alone may not stick. This
+    // used to be a hardcoded 22, which silently overrode the configured power
+    // whenever setup()'s "did anything differ from the compile-time default?"
+    // check decided not to call reconfigure().
+    _radio.setOutputPower(txPower);
 #if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
     _radio.setCurrentLimit(140.0);   // SX1262 HP PA max; default OCP may be too low
-    _radio.setRxBoostedGainMode(true);   // sx126xRxBoostedGain from config
+    _radio.setRxBoostedGainMode(_rxBoostedGain);
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
     _radio.setIrqAction(_onDio1);
@@ -193,8 +223,9 @@ bool MeshRadio::init() {
     _radio.startReceive();
 
     _ready = true;
-    Serial.printf("[radio] ready  %.3f MHz  SF%d  BW%.0f  CR4/%d\n",
-                  MESH_FREQ, MESH_SF, MESH_BW, MESH_CR);
+    Serial.printf("[radio] ready  %.3f MHz  SF%d  BW%.0f  CR4/%d  %ddBm  rxBoost=%d\n",
+                  MESH_FREQ, MESH_SF, MESH_BW, MESH_CR,
+                  (int)txPower, _rxBoostedGain ? 1 : 0);
     return true;
 }
 

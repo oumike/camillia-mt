@@ -21,6 +21,22 @@ void gpsSetEnabled(bool en);
 // True while GPS serial is active.
 bool gpsIsEnabled();
 
+// Duty cycling: park the receiver in a RAM-retained standby between position
+// samples instead of tracking continuously. periodS is how long to stay parked;
+// a period below the internal floor (120 s) is treated as "off", because below
+// that the re-acquire costs more than the standby saves. RAM is retained so the
+// next start is a hot one.
+//
+// Self-disabling: if a wake ever fails to produce NMEA, duty cycling turns
+// itself off for the session and leaves the receiver running. The standby
+// command dialect cannot be verified at runtime, and a wedged GPS is a much
+// worse outcome than a missed battery saving.
+void gpsSetDutyCycle(bool enabled, uint32_t periodS);
+
+// True while the receiver is parked in standby. Fix accessors report no fix
+// during this window; the last known position lives in config.
+bool gpsIsAsleep();
+
 // True if a valid fix has been received within the last 5 seconds.
 bool gpsHasFix();
 

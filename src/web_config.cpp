@@ -48,6 +48,16 @@ static DNSServer      gDns;
 static bool           gCaptiveActive   = false;
 static bool           running          = false;
 static bool           gOnboarding      = false;
+// ── Idle timeout ─────────────────────────────────────────────────────────────
+// Web config has to run Wi-Fi with modem power-save disabled (see the
+// WiFi.setSleep(false) calls below), which makes it one of the largest
+// continuous draws on the device — and nothing ever stopped it except the user
+// remembering to. Stamped on every request; webCfgLoop() raises gIdleExpired
+// once the window passes and the main loop performs the actual teardown, so
+// the shutdown path stays the same one the manual toggle uses.
+static uint32_t       gLastRequestMs   = 0;
+static uint32_t       gIdleTimeoutMs   = 0;     // 0 = never expire
+static bool           gIdleExpired     = false;
 // True while the server is serving the SoftAP variant ("web config lite"): the
 // Config tab only, no Utilities/Live/Chat/Nodes. AP mode has far less internal
 // heap to work with than STA, and the heavy tabs are what tip it over. This is
@@ -1596,13 +1606,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += ">"; html += kRebroad[i].l; html += "</option>";
     }
     html += "</select></label></div>";
-    html += "<div class='row2'>";
+    // GPS Broadcast Interval lives in the Position section, next to the poll
+    // interval it is easily confused with.
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->nodeInfoIntervalS);
     html += "<label>NodeInfo Interval (s)<input name='nodeinfo_intv' type='number' min='60' value='";
     html += tmp; html += "'></label>";
-    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
-    html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
-    html += tmp; html += "'></label></div>";
     // Timezone dropdown
     {
         bool tzMatched = false;
@@ -1697,10 +1705,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "> GPS Enabled (L76K hardware GPS)</label>";
     html += "<p class='gps-hint'>When GPS is enabled, position is sourced from the GPS module. "
             "The manual coordinates below are used as fallback until a fix is acquired.</p>";
-        snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->gpsPollIntervalS);
-        html += "<label>GPS Poll Interval (s)<input name='gps_poll_s' type='number' min='0' max='3600' step='1' value='";
-        html += tmp; html += "'></label>";
-        html += "<p class='gps-hint'>Set to 0 to poll every loop. Higher values reduce GPS polling frequency.</p>";
+    html += "<div class='row2'>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->gpsPollIntervalS);
+    html += "<label>GPS Poll Interval (s)<input name='gps_poll_s' type='number' min='0' max='3600' step='1' value='";
+    html += tmp; html += "'></label>";
+    snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->posIntervalS);
+    html += "<label>GPS Broadcast Interval (s)<input name='pos_intv' type='number' min='60' value='";
+    html += tmp; html += "'></label></div>";
+    html += "<p class='gps-hint'>Poll is how often this device reads its own GPS "
+            "(0 = every loop). Broadcast is how often that position is sent to "
+            "the mesh.</p>";
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%.7f", gCfg->latI * 1e-7);
     html += "<label>Latitude&deg; (fallback)<input name='lat' type='number' step='0.0000001' value='";
@@ -4168,10 +4182,33 @@ static void handleGetLogout() {
 // ── Public API ────────────────────────────────────────────────
 
 // Unmatched-request handler, shared by both route sets.
+// All routes register through these rather than server.on() directly, so the
+// idle-timeout stamp lives in exactly one place. This core's WebServer has no
+// per-request hook, and stamping 29 handlers by hand is the kind of thing a
+// later route addition quietly forgets — which would show up as web config
+// shutting down under an active user.
+static void noteWebRequest() { gLastRequestMs = millis(); }
+
+static void onRoute(const char *uri, HTTPMethod method,
+                    WebServer::THandlerFunction fn) {
+    server.on(uri, method, [fn]() { noteWebRequest(); fn(); });
+}
+
+static void onRoute(const char *uri, HTTPMethod method,
+                    WebServer::THandlerFunction fn,
+                    WebServer::THandlerFunction upload) {
+    server.on(uri, method,
+              [fn]()     { noteWebRequest(); fn(); },
+              [upload]() { noteWebRequest(); upload(); });
+}
+
 static void registerNotFound() {
     // Log any unmatched request so we can see exactly what a failing tab hits
     // (the default handler only prints a generic "request handler not found").
     server.onNotFound([]() {
+        // Counts as activity: captive-portal probes and a browser retrying a
+        // stale URL both mean someone is still using this.
+        noteWebRequest();
         // In AP/captive mode, steer the OS's portal-detection probes (which hit
         // unknown paths like /generate_204, /hotspot-detect.html) to the minimal
         // setup form so the phone surfaces the portal instead of retrying.
@@ -4201,50 +4238,57 @@ static void registerNotFound() {
 // lite page never calls them and because each registration costs heap that AP
 // mode doesn't have to spare.
 static void registerLiteRoutes() {
-    server.on("/",           HTTP_GET,  handleGetRoot);
-    server.on("/config",     HTTP_GET,  handleGetConfig);
-    server.on("/setup",      HTTP_GET,  handleGetOnboard);
-    server.on("/onboard",    HTTP_POST, handlePostOnboard);
-    server.on("/save",       HTTP_POST, handlePostSave);
-    server.on("/login",      HTTP_GET,  handleGetLogin);
-    server.on("/login",      HTTP_POST, handlePostLogin);
-    server.on("/logout",     HTTP_GET,  handleGetLogout);
+    onRoute("/",           HTTP_GET,  handleGetRoot);
+    onRoute("/config",     HTTP_GET,  handleGetConfig);
+    onRoute("/setup",      HTTP_GET,  handleGetOnboard);
+    onRoute("/onboard",    HTTP_POST, handlePostOnboard);
+    onRoute("/save",       HTTP_POST, handlePostSave);
+    onRoute("/login",      HTTP_GET,  handleGetLogin);
+    onRoute("/login",      HTTP_POST, handlePostLogin);
+    onRoute("/logout",     HTTP_GET,  handleGetLogout);
     registerNotFound();
 }
 
 // Full route set, registered only for a working STA connection.
 static void registerCommonRoutes() {
-    server.on("/",                  HTTP_GET,  handleGetRoot);
-    server.on("/config",            HTTP_GET,  handleGetConfig);
-    server.on("/login",             HTTP_GET,  handleGetLogin);
-    server.on("/login",             HTTP_POST, handlePostLogin);
-    server.on("/save",              HTTP_POST, handlePostSave);
-    server.on("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
-    server.on("/live-data",         HTTP_GET,  handleGetLiveData);
+    onRoute("/",                  HTTP_GET,  handleGetRoot);
+    onRoute("/config",            HTTP_GET,  handleGetConfig);
+    onRoute("/login",             HTTP_GET,  handleGetLogin);
+    onRoute("/login",             HTTP_POST, handlePostLogin);
+    onRoute("/save",              HTTP_POST, handlePostSave);
+    onRoute("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
+    onRoute("/live-data",         HTTP_GET,  handleGetLiveData);
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    server.on("/chat-targets",      HTTP_GET,  handleGetChatTargets);
-    server.on("/chat-data",         HTTP_GET,  handleGetChatData);
-    server.on("/chat-send",         HTTP_POST, handlePostChatSend);
+    onRoute("/chat-targets",      HTTP_GET,  handleGetChatTargets);
+    onRoute("/chat-data",         HTTP_GET,  handleGetChatData);
+    onRoute("/chat-send",         HTTP_POST, handlePostChatSend);
 #endif
-    server.on("/chart-data",        HTTP_GET,  handleGetChartData);
-    server.on("/logout",            HTTP_GET,  handleGetLogout);
-    server.on("/announce",          HTTP_POST, handlePostAnnounce);
-    server.on("/telemetry",         HTTP_POST, handlePostTelemetry);
+    onRoute("/chart-data",        HTTP_GET,  handleGetChartData);
+    onRoute("/logout",            HTTP_GET,  handleGetLogout);
+    onRoute("/announce",          HTTP_POST, handlePostAnnounce);
+    onRoute("/telemetry",         HTTP_POST, handlePostTelemetry);
     if (gOnScreenshotPng) {
-        server.on("/screenshot",    HTTP_GET,  handleGetScreenshot);
+        onRoute("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
-    server.on("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
-    server.on("/export",            HTTP_GET,  handleGetExport);
-    server.on("/import",            HTTP_POST, handleImportDone, handleImportUpload);
-    server.on("/clear-messages",    HTTP_POST, handlePostClearMessages);
-    server.on("/clear-nodes",       HTTP_POST, handlePostClearNodes);
-    server.on("/factory-reset",     HTTP_POST, handlePostFactoryReset);
+    onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
+    onRoute("/export",            HTTP_GET,  handleGetExport);
+    onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
+    onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
+    onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
+    onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
     registerNotFound();
 }
 
 bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
                  WebCfgScreenshotPngCb onScreenshotPng) {
     if (running) return true;
+
+    // Start the idle clock before any of the (slow) radio bring-up, so the
+    // window measures time the user had the page available rather than time
+    // spent associating.
+    gIdleExpired   = false;
+    gLastRequestMs = millis();
+    gIdleTimeoutMs = cfg ? (cfg->webCfgIdleTimeoutS * 1000UL) : 0;
 
     // Baseline internal-heap snapshot before WiFi/LWIP allocate anything.
     // On the no-PSRAM Cardputer this is the key margin to watch: compare it
@@ -4437,6 +4481,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
 void webCfgEnd() {
     if (!running) return;
+    gIdleExpired    = false;
+    gIdleTimeoutMs  = 0;
     sessionToken[0] = '\0';
     gFlashMsg[0] = '\0';
     gRebootPending = false;
@@ -4489,6 +4535,16 @@ void webCfgLoop() {
 
     if (gCaptiveActive) gDns.processNextRequest();
     server.handleClient();
+
+    // Onboarding is exempt: the user may be reading the setup page for a while
+    // before submitting anything, and pulling the AP out from under a
+    // half-finished first-time setup is worse than the power it saves.
+    if (gIdleTimeoutMs && !gIdleExpired && !gOnboarding
+        && (uint32_t)(millis() - gLastRequestMs) >= gIdleTimeoutMs) {
+        gIdleExpired = true;
+        Serial.printf("[web] idle %lus with no request - requesting shutdown\n",
+                      (unsigned long)(gIdleTimeoutMs / 1000UL));
+    }
     if (gRebootPending && (int32_t)(millis() - gRebootAtMs) >= 0) {
         gRebootPending = false;
         server.stop();
@@ -4498,6 +4554,8 @@ void webCfgLoop() {
 }
 
 bool webCfgRunning() { return running; }
+
+bool webCfgIdleExpired() { return gIdleExpired; }
 const char *webCfgIP() { return ipBuf; }
 
 bool webCfgAnnounceRequested() {

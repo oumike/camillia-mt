@@ -46,6 +46,11 @@
 #define MESH_PREAMBLE   16
 #define MESH_POWER      22        // dBm (hardware max; ribl_config requests 30)
 #define MESH_HOP_LIMIT   7        // from ribl_config
+// SX1262 RX boosted gain. ~2 dB more sensitivity for ~2 mA more receive
+// current, paid continuously because the radio idles in RX. 1 keeps the
+// long-standing behaviour; set 0 (or loraRxBoostedGain in YAML) to trade a
+// little range for battery.
+#define MY_LORA_RX_BOOST 1
 
 // ── Node identity (change to your callsign/name) ─────────────
 #define MY_LONG_NAME    "Camillia"
@@ -72,6 +77,13 @@
 #endif
 
 #define MY_GPS_ENABLED  1     // runtime default (can be toggled via web config)
+// Park the receiver in standby between position samples, using gpsPollIntervalS
+// as the period. Continuous tracking is ~20-25 mA, which dominates the current
+// draw of a screen-off device — but the standby command dialect ("L76K" ships
+// as both CASIC and MediaTek silicon) cannot be probed at runtime, so this is
+// opt-in until confirmed working on a given unit. It self-disables if a wake
+// ever fails to produce NMEA.
+#define MY_GPS_DUTY_CYCLE 0
 
 // ── Fixed position (from ribl_config) ────────────────────────
 // Used as the startup default when HAS_GPS == 0.
@@ -127,6 +139,11 @@
 
 // ── Network defaults ───────────────────────────────────────────
 #define MY_WIFI_ENABLED     1      // master WiFi switch (gates web config + MQTT)
+// Auto-stop the web config server after this long with no HTTP request. Web
+// config disables Wi-Fi modem power-save (it has to; the synchronous server
+// stalls otherwise), so leaving it up is one of the most expensive things the
+// device can do. 0 = never time out.
+#define MY_WEBCFG_IDLE_S    600    // 10 minutes
 #define MY_NTP_SERVER       "meshtastic.pool.ntp.org"
 #define MY_MQTT_ENABLED     0
 #define MY_MQTT_SERVER      "mqtt.meshtastic.org"

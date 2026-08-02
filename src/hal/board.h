@@ -59,6 +59,38 @@ DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION"
 #  define TFT_PANEL_OFFSET_Y 0
 #endif
 
+// ── Screen wake policy defaults ──────────────────────────────────────────────
+// Which inputs are allowed to wake a sleeping display. Boards that want a
+// narrower gesture set (T-Deck: trackball click only) override these in their
+// hw_*.h. Anything excluded here is also excluded as a light-sleep GPIO wake
+// source, so it cannot wake the CPU either.
+#ifndef SCREEN_WAKE_FROM_KEYBOARD
+#  define SCREEN_WAKE_FROM_KEYBOARD 1
+#endif
+#ifndef SCREEN_WAKE_FROM_TOUCH
+#  define SCREEN_WAKE_FROM_TOUCH 1
+#endif
+
+// ── Light-sleep nap length ───────────────────────────────────────────────────
+// How long a light-sleep nap may last before a timer wake. Inputs that can
+// assert a GPIO wake line (keyboard IRQ, wheel/trackball click, buttons) make
+// this irrelevant to responsiveness — they interrupt the nap directly, so the
+// timer only has to be quick enough for scheduled TX, and a longer nap
+// amortises the fixed entry/exit cost.
+//
+// The exception is a board whose primary input cannot raise an interrupt at
+// all: there the nap length *is* the input latency, and a long one drops
+// keystrokes outright. Cardputer's keyboard is a matrix scanned in software
+// over shared GPIO with no IRQ line, so it takes the short nap. Its BOOT button
+// is armed as a wake source, but that is not how anyone types.
+#ifndef NAP_MAX_MS
+#  if defined(DEVICE_CARDPUTER_LORA_HAT)
+#    define NAP_MAX_MS 250
+#  else
+#    define NAP_MAX_MS 1500
+#  endif
+#endif
+
 // ── Backward-compatible SPI bus aliases ──────────────────────────────────────
 // Several modules reference SPI_SCK/SPI_MISO/SPI_MOSI for the LoRa bus.
 // These resolve to the LoRa-specific macros so both spellings work.

@@ -336,6 +336,9 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.loraCr       = MESH_CR;
     cfg.loraPower    = MESH_POWER;
     cfg.loraHopLimit = MESH_HOP_LIMIT;
+    cfg.loraRxBoostedGain = (bool)MY_LORA_RX_BOOST;
+    cfg.webCfgIdleTimeoutS = MY_WEBCFG_IDLE_S;
+    cfg.gpsDutyCycleEnabled = (bool)MY_GPS_DUTY_CYCLE;
     cfg.deviceRole        = MY_DEVICE_ROLE;
     cfg.rebroadcastMode   = MY_REBROADCAST;
     cfg.okToMqtt          = true;   // allow MQTT nodes to forward our packets by default
@@ -623,9 +626,13 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    region: "; out += cfg.region; out += "\n";
     snprintf(tmp, sizeof(tmp), "    spreadFactor: %d\n",   cfg.loraSf);       out += tmp;
     snprintf(tmp, sizeof(tmp), "    txPower: %d\n",        cfg.loraPower);    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    loraRxBoostedGain: %s\n",
+             cfg.loraRxBoostedGain ? "true" : "false");                       out += tmp;
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    webCfgIdleTimeoutS: %lu\n",
+             (unsigned long)cfg.webCfgIdleTimeoutS);                          out += tmp;
     out += "    timeSource: ";
     out += (cfg.timeSource == TIME_SOURCE_MANUAL) ? "MANUAL" : "AUTO";
     out += "\n";
@@ -633,6 +640,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "  position:\n";
     snprintf(tmp, sizeof(tmp), "    fixedPosition: %s\n", cfg.gpsEnabled ? "false" : "true"); out += tmp;
     out += "    gpsMode: "; out += (cfg.gpsEnabled ? "ENABLED" : "DISABLED"); out += "\n";
+    snprintf(tmp, sizeof(tmp), "    gpsDutyCycle: %s\n",
+             cfg.gpsDutyCycleEnabled ? "true" : "false");                     out += tmp;
     snprintf(tmp, sizeof(tmp), "    positionBroadcastSecs: %lu\n", (unsigned long)cfg.posIntervalS); out += tmp;
     snprintf(tmp, sizeof(tmp), "    gpsPollIntervalSecs: %lu\n", (unsigned long)cfg.gpsPollIntervalS); out += tmp;
     // power
@@ -933,6 +942,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "hopLimit"))     cfg.loraHopLimit = (uint8_t)atoi(val);
                 else if (!strcmp(key, "spreadFactor")) cfg.loraSf       = (uint8_t)atoi(val);
                 else if (!strcmp(key, "txPower"))      cfg.loraPower    = (uint8_t)constrain(atoi(val), 1, 22);
+                else if (!strcmp(key, "loraRxBoostedGain")) cfg.loraRxBoostedGain = parseBoolValue(val);
                 else if (!strcmp(key, "freq_mhz"))     cfg.loraFreq     = atof(val);
                 else if (!strcmp(key, "region"))       strncpy(cfg.region, val, sizeof(cfg.region) - 1);
                 else if (!strcmp(key, "modemPreset"))  cfg.modemPreset  = presetFromName(val);
@@ -956,6 +966,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "gpsMode"))
                     cfg.gpsEnabled = (!strcmp(val,"ENABLED"));
+                else if (!strcmp(key, "gpsDutyCycle"))
+                    cfg.gpsDutyCycleEnabled = parseBoolValue(val);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "security")) {
                 // Node identity restore. Both halves must decode to full 32-byte
                 // keys before we claim a restore — a half-applied pair would boot
@@ -1041,7 +1053,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     }
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
-                if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
+                if (!strcmp(key, "webCfgIdleTimeoutS")) cfg.webCfgIdleTimeoutS = (uint32_t)atol(val);
+                else if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
                 else if (!strcmp(key, "timeSource")) {
                     cfg.timeSource = (!strcmp(val, "MANUAL") || !strcmp(val, "manual"))
                                          ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;

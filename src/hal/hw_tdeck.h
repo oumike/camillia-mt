@@ -83,6 +83,17 @@
 #define TOUCH_POLL_ENABLED        1
 #endif
 
+// ── Screen wake policy ───────────────────────────────────────────────────────
+// The trackball click is the only wake gesture on this board. The keyboard sits
+// exposed under the lid and the capacitive panel reacts to contact with
+// anything, so both would wake the device in a pocket or bag; the click is
+// deliberate, and it is already the sleep gesture (press and hold), which keeps
+// the two symmetric. These also govern light-sleep GPIO wake sources — a line
+// that cannot wake the screen must not wake the CPU either, or it burns power
+// for nothing.
+#define SCREEN_WAKE_FROM_KEYBOARD 0
+#define SCREEN_WAKE_FROM_TOUCH    0
+
 // ── Trackball — four directional GPIOs + center click ───────────────────────
 // Physical motion is decoded via ISR in keyboard.cpp.
 // Empirically confirmed mapping (right=DOWN, left=LEFT, up=RIGHT, down=UP).

@@ -25,6 +25,12 @@ void webCfgLoop();
 // True while the server is active.
 bool webCfgRunning();
 
+// True once the server has gone webCfgIdleTimeoutS seconds with no HTTP
+// request. The main loop polls this and performs the teardown itself, so the
+// shutdown takes the same path as the manual toggle (radio down, station
+// re-associated, buffers restored). Always false while onboarding.
+bool webCfgIdleExpired();
+
 // DHCP-assigned IP address string — valid only while running, empty otherwise.
 const char *webCfgIP();
 

@@ -2199,8 +2199,17 @@ static void cardputerPlayBassPattern() {
 static void triggerMessageAlert(bool bypassRateLimit = false) {
     static uint32_t lastAlertMs = 0;
     uint32_t nowMs = millis();
-    if (!bypassRateLimit && nowMs - lastAlertMs < 120) return;
+    if (!bypassRateLimit && nowMs - lastAlertMs < 120) {
+        debugLogMessages("[alert] suppressed (rate limit, %lums since last)\n",
+                         (unsigned long)(nowMs - lastAlertMs));
+        return;
+    }
     lastAlertMs = nowMs;
+    // Distinguishes "never asked to play" from "played but inaudible" when a
+    // notification goes missing — the two have completely different causes.
+    debugLogMessages("[alert] play mode=%u vol=%u screenAsleep=%d cpu=%luMHz\n",
+                     (unsigned)s_cfg.msgAlertSound, (unsigned)s_cfg.volumePct,
+                     (int)s_screenAsleep, (unsigned long)getCpuFrequencyMhz());
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
@@ -3099,7 +3108,17 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
 // config portal or the MQTT bridge. Non-blocking: kicks WiFi.begin() at most once
 // per interval and returns immediately. Coexists with the AP (AP_STA) so the web
 // portal keeps working alongside it.
-static uint32_t s_wifiStaKickMs = 0;
+// Reconnect backoff. A scan-and-associate attempt is among the most expensive
+// things the radio does, and the old fixed 10 s retry ran forever — a device
+// carried out of range of its home AP paid that every 10 s for the rest of its
+// uptime. Back off to a 5 minute ceiling instead; the moment an association
+// succeeds the interval resets, so coming back into range still reconnects
+// within one interval rather than being permanently slow.
+static constexpr uint32_t kWifiKickMinMs = 10000UL;
+static constexpr uint32_t kWifiKickMaxMs = 300000UL;
+static uint32_t s_wifiStaKickMs       = 0;
+static uint32_t s_wifiStaKickIntervalMs = kWifiKickMinMs;
+
 static void serviceWifiStation(uint32_t now) {
     // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
     // AP fallback when the saved station won't connect) and webCfgEnd() tears it
@@ -3109,9 +3128,17 @@ static void serviceWifiStation(uint32_t now) {
     // loads and the device looks frozen. Leave the radio to web config.
     if (webCfgRunning()) return;
     if (!s_cfg.wifiEnabled || !wifiHasActiveCreds()) return;
-    if (WiFi.status() == WL_CONNECTED) return;
-    if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < 10000UL) return;
+    if (WiFi.status() == WL_CONNECTED) {
+        // Associated: next disconnection gets a prompt retry again.
+        s_wifiStaKickIntervalMs = kWifiKickMinMs;
+        return;
+    }
+    if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < s_wifiStaKickIntervalMs) return;
     s_wifiStaKickMs = now;
+    if (s_wifiStaKickIntervalMs < kWifiKickMaxMs) {
+        s_wifiStaKickIntervalMs *= 2;
+        if (s_wifiStaKickIntervalMs > kWifiKickMaxMs) s_wifiStaKickIntervalMs = kWifiKickMaxMs;
+    }
 
     wifi_mode_t mode = WiFi.getMode();
     if (mode == WIFI_AP)       WiFi.mode(WIFI_AP_STA);
@@ -3302,6 +3329,74 @@ static void setPagerKeyboardBacklight(bool on) {
 #endif
 }
 
+// ── CPU frequency scaling ────────────────────────────────────────────────────
+// Screen-off is the only state where nobody is waiting on redraw latency, so
+// that is when the CPU drops. 80 MHz is the floor on purpose: on the ESP32-S3
+// the APB clock is a fixed 80 MHz for every PLL-sourced CPU frequency
+// (240/160/80) and only follows the CPU below that, so at 80 MHz every
+// peripheral clock — UART, SPI, I2C, LEDC, esp_timer — is untouched, and
+// setCpuFrequencyMhz() doesn't even enter its APB-change path. It is also the
+// minimum Wi-Fi will run at.
+static constexpr uint32_t kCpuMhzActive = 240;
+static constexpr uint32_t kCpuMhzIdle   = 80;
+static uint32_t s_cpuMhz = kCpuMhzActive;
+
+static void applyCpuMhz(uint32_t mhz) {
+    if (s_cpuMhz == mhz) return;
+    if (!setCpuFrequencyMhz(mhz)) {
+        Serial.printf("[power] CPU %lu MHz rejected\n", (unsigned long)mhz);
+        return;
+    }
+    s_cpuMhz = mhz;
+    Serial.printf("[power] CPU %lu MHz\n", (unsigned long)mhz);
+}
+
+// Web config runs a synchronous server that is already latency-sensitive and
+// prone to browser timeouts, so it keeps the full clock even with the screen
+// off. Reconciled every loop pass rather than only on sleep/wake so that
+// starting or stopping web config while the screen is off lands correctly.
+static void serviceCpuScaling() {
+    applyCpuMhz((s_screenAsleep && !webCfgRunning()) ? kCpuMhzIdle : kCpuMhzActive);
+}
+
+// The ST7789/ST7796 controllers need ~120 ms after SLPOUT before they reliably
+// accept drawing commands. LovyanGFX's wakeup() issues the command but does not
+// wait, so wakeScreen() does. The panel also still holds the pre-sleep frame in
+// its RAM across SLPIN/SLPOUT, so the backlight stays off until the loop has
+// repainted — otherwise waking shows a stale screen for a frame.
+static constexpr uint32_t kPanelWakeSettleMs = 120;
+static bool s_backlightPendingOn = false;
+
+// How often loop() runs the view-refresh block. The loop itself keeps its 5 ms
+// pace because the T-Deck keyboard needs a sub-12 ms poll cadence; only the
+// redraw work is throttled.
+static constexpr uint32_t kUiRefreshTickMs = 30;
+
+// ── Pre-sleep dim ────────────────────────────────────────────────────────────
+// The backlight is usually the largest single draw while the screen is on, so
+// the tail of the idle timeout is worth reclaiming. Doubles as a warning that
+// the screen is about to sleep, which is why it is a visible step down rather
+// than a gradual fade.
+static constexpr uint32_t kPreSleepDimMs  = 5000;  // dim for the last 5 s
+static constexpr uint8_t  kPreSleepDimPct = 25;    // % of the configured level
+static bool s_preSleepDimmed = false;
+
+// Puts the touch controller into its own low-power mode alongside the panel.
+// Only safe where touch is not a wake gesture: Touch_GT911::sleep() drives the
+// INT pin as an output, which is exactly the line serviceTouchWakeWhileAsleep()
+// and the light-sleep wake path read. On boards where a tap must wake the
+// display this would silently break it, so it is gated on the same policy flag.
+static void setTouchSleep(bool asleep) {
+#if HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
+    if (lgfx::ITouch *t = displayDev().touch()) {
+        if (asleep) t->sleep();
+        else        t->wakeup();
+    }
+#else
+    LV_UNUSED(asleep);
+#endif
+}
+
 // Pushes the configured brightness to the panel. Used at boot, on wake, and
 // live while the slider moves; sleepScreen() still drives the backlight to 0.
 static void applyBrightness() {
@@ -3311,10 +3406,19 @@ static void applyBrightness() {
 static void sleepScreen(const char *reason) {
     if (s_screenAsleep) return;
 
-    displayDev().setBrightness(0);
+    // sleep() zeroes the backlight and then issues SLPIN, which stops the
+    // panel's internal refresh — setBrightness(0) alone leaves the controller
+    // fully powered and self-refreshing an image nobody can see. It drives the
+    // panel's brightness directly rather than going through
+    // LGFX_Device::setBrightness(), so the cached duty survives for wakeup().
+    displayDev().sleep();
+    setTouchSleep(true);
     setPagerKeyboardBacklight(false);
+    s_backlightPendingOn = false;
+    s_preSleepDimmed = false;
     s_screenAsleep = true;
     s_screenWakeBlockedUntilMs = millis() + kScreenWakeInputDelayMs;
+    serviceCpuScaling();
 
     if (reason && reason[0]) {
         Serial.printf("[screen] sleeping (%s)\n", reason);
@@ -3329,7 +3433,22 @@ static void wakeScreen() {
         return;
     }
 
-    applyBrightness();
+    // Full clock first: the repaint that follows on this same loop pass should
+    // run at speed.
+    applyCpuMhz(kCpuMhzActive);
+
+    // SLPOUT, then straight back to a dark backlight — wakeup() restores the
+    // brightness LGFX cached, which would expose the stale frame the controller
+    // kept. serviceBacklightWake() lights it after the repaint lands. The
+    // settle wait is blocking because sending pixels before the controller is
+    // ready is what produces corrupt wakes; ~120 ms once per wake is the cost.
+    displayDev().wakeup();
+    displayDev().setBrightness(0);
+    setTouchSleep(false);
+    delay(kPanelWakeSettleMs);
+    s_backlightPendingOn = true;
+    s_preSleepDimmed = false;
+
     setPagerKeyboardBacklight(true);
     s_screenAsleep = false;
     s_lastActivityMs = millis();
@@ -3343,6 +3462,15 @@ static void wakeScreen() {
     s_lastBattPct = 255;
     s_lastGpsSats = 255;
     Serial.println("[screen] woke");
+}
+
+// Lights the backlight once the panel has settled and the loop has repainted.
+// The flag persists until this runs, so a loop pass that bails out early just
+// defers the backlight to the next full pass rather than losing it.
+static void serviceBacklightWake() {
+    if (!s_backlightPendingOn) return;
+    s_backlightPendingOn = false;
+    applyBrightness();
 }
 
 static bool tryWakeScreenFromInput(uint32_t nowMs) {
@@ -16472,6 +16600,16 @@ static void pumpKeyboardInput() {
             if (fromTrackball && k != KEY_ROLLER) {
                 continue;
             }
+#if !SCREEN_WAKE_FROM_KEYBOARD
+            // Keyboard is not a wake gesture on this board (see
+            // SCREEN_WAKE_FROM_KEYBOARD). Keys are still drained here so the
+            // controller's buffer cannot back up while the screen is off; they
+            // just don't wake it. KEY_ROLLER is the trackball click and arrives
+            // via readTrackball(), so it is unaffected by this.
+            if (!fromTrackball) {
+                continue;
+            }
+#endif
             if (!tryWakeScreenFromInput(millis())) {
                 continue;
             }
@@ -18900,7 +19038,13 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     int32_t ty = 0;
     if (displayDev().getTouch(&tx, &ty)) {
         if (s_screenAsleep) {
+            // Normally unreachable — loop() stops calling lv_timer_handler()
+            // while the screen is off — but modal helpers do call it directly,
+            // so honour the board's wake policy here rather than letting a
+            // stray tap wake a device that excludes touch as a wake gesture.
+#if SCREEN_WAKE_FROM_TOUCH
             (void)tryWakeScreenFromInput(millis());
+#endif
             data->state = LV_INDEV_STATE_RELEASED;
             return;
         }
@@ -18913,6 +19057,27 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     }
 #else
     data->state = LV_INDEV_STATE_RELEASED;
+#endif
+}
+
+// Touch-to-wake while the screen is off.
+//
+// lvglTouchRead() above is an LVGL indev callback, so it only ever runs from
+// inside lv_timer_handler() — and loop() stops calling that once the screen is
+// asleep. On boards where touch is a wake gesture that callback was the only
+// path by which a tap could wake the display, so the poll has to happen
+// directly here instead. The touch controller is a separate I2C device and
+// stays readable while the panel itself is in SLPIN.
+//
+// Compiled out where touch is not a wake gesture (T-Deck), which also drops the
+// I2C poll that would otherwise run for the entire time the screen is off.
+static void serviceTouchWakeWhileAsleep() {
+#if TOUCH_POLL_ENABLED && SCREEN_WAKE_FROM_TOUCH
+    int32_t tx = 0;
+    int32_t ty = 0;
+    if (displayDev().getTouch(&tx, &ty)) {
+        (void)tryWakeScreenFromInput(millis());
+    }
 #endif
 }
 
@@ -23357,7 +23522,6 @@ void setup() {
 #endif
     bootstrapStateMapsIfMissing();
     batteryInitAdc();
-    gpsSetEnabled(s_cfg.gpsEnabled);
     Nodes.init();
     // Runs after init() so the RAM copy is already loaded: on a partition that a
     // previous build filled with node blobs, this hands the space back before
@@ -23370,7 +23534,12 @@ void setup() {
     Channels.loadPersisted();
     syncPrimaryChannelName();
     recomputeChannelHashes();
-    s_radioReady = Radio.init();
+    s_radioReady = Radio.init(s_cfg.loraPower, s_cfg.loraRxBoostedGain);
+    // Deliberately after Radio.init(). On the pager, pagerPrimeLoRaRail() arms
+    // every peripheral rail on the expander including GPS_EN, so starting GPS
+    // before the radio meant a boot with GPS disabled had its power-down
+    // immediately undone — the module ran all session with nobody listening.
+    gpsSetEnabled(s_cfg.gpsEnabled);
 #if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
     Serial.println("[radio] *** LORA_TEST_MQTT_ONLY: LoRa TX/RX DISABLED (MQTT-only test build) ***");
     Channels.addMessage(0, "", "[TEST] LoRa disabled - MQTT only", TFT_ORANGE);
@@ -23378,12 +23547,19 @@ void setup() {
     if (!s_radioReady) {
         Channels.addMessage(0, "", "[radio] init failed", TFT_RED);
     } else {
-        // init() uses compile-time defaults; apply the loaded config values.
+        // init() already applied loraPower and loraRxBoostedGain. The rest still
+        // comes from compile-time defaults, so push the loaded values if any of
+        // them differ.
+        //
+        // Power is no longer part of this test: it used to be, and because
+        // init() hardcoded 22 dBm, a device configured for 22 with everything
+        // else at defaults never reconfigured — which was correct by luck. Any
+        // board whose MESH_POWER was not 22 would have transmitted at full
+        // power regardless of configuration.
         if (fabsf(s_cfg.loraFreq - MESH_FREQ) > 0.001f ||
             fabsf(s_cfg.loraBw   - MESH_BW)   > 0.001f ||
             s_cfg.loraSf    != MESH_SF    ||
-            s_cfg.loraCr    != MESH_CR    ||
-            s_cfg.loraPower != MESH_POWER) {
+            s_cfg.loraCr    != MESH_CR) {
             Radio.reconfigure(s_cfg.loraFreq, s_cfg.loraBw,
                               s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
         }
@@ -23437,30 +23613,90 @@ void setup() {
 }
 
 // ── Light-sleep power management (opt-in via isPowerSaving) ───────────────────
-// While the screen is asleep we duty-cycle the CPU with short light-sleep naps
-// instead of busy-waiting. The SX1262 stays in RX and wakes us instantly via its
-// DIO1 line, so messages are still received; otherwise a ~200 ms timer wake keeps
-// input polling and scheduled TX responsive. lsSecs/minWakeSecs are reserved for
-// a future deeper-sleep tier and intentionally unused here.
+// While the screen is asleep we duty-cycle the CPU with light-sleep naps instead
+// of busy-waiting. Every input that is allowed to wake the display is registered
+// as a GPIO wake source, so the timer wake only has to be fast enough for
+// scheduled TX (nodeinfo is 15 min) rather than doubling as the input-latency
+// ceiling. lsSecs/minWakeSecs are reserved for a future deeper-sleep tier and
+// intentionally unused here.
 static bool powerSaveShouldNap() {
     return s_cfg.isPowerSaving
         && s_screenAsleep                 // only after screen-off inactivity
         && !webCfgRunning()               // never while the web-config server is up
-        && WiFi.getMode() == WIFI_OFF;    // light sleep + active Wi-Fi don't mix
+        && WiFi.getMode() == WIFI_OFF     // light sleep + active Wi-Fi don't mix
+        // Light sleep stops the UART ISR, so the RX FIFO (128 B) overruns after
+        // ~33 ms at 38400 baud and the NMEA stream is shredded. Napping is only
+        // honest when nothing is streaming — which now includes a duty-cycled
+        // receiver during the (long) windows it spends parked in standby.
+        && (!gpsIsEnabled() || gpsIsAsleep());
 }
 
-static void enterLightNap() {
-    static constexpr uint32_t kNapMs = 200;   // input latency ceiling while asleep
+// Lines that must bring the CPU straight back: incoming packets, plus exactly
+// the inputs that are allowed to wake the display. An input that cannot wake
+// the screen must not wake the CPU either — it would burn a full wake cycle and
+// then go straight back to sleep with nothing to show for it. That rules out
+// the four trackball direction GPIOs on every board (they pulse on every roll,
+// which deliberately does not wake the display), and on T-Deck the keyboard and
+// touch lines as well, per SCREEN_WAKE_FROM_*.
+struct NapWakeLine { int pin; bool wakeOnHigh; };
+static const NapWakeLine kNapWakeLines[] = {
 #if defined(LORA_DIO1) && (LORA_DIO1 >= 0)
-    // SX1262 holds DIO1 high on RX-done → wake immediately on an incoming packet.
-    gpio_wakeup_enable((gpio_num_t)LORA_DIO1, GPIO_INTR_HIGH_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
+    { LORA_DIO1,   true  },   // SX1262 holds DIO1 high on RX-done
 #endif
+#if SCREEN_WAKE_FROM_KEYBOARD && defined(KB_INT) && (KB_INT >= 0)
+    { KB_INT,      false },   // keyboard has a byte ready (active low)
+#endif
+#if SCREEN_WAKE_FROM_TOUCH && defined(TOUCH_INT) && (TOUCH_INT >= 0)
+    { TOUCH_INT,   false },   // touch panel (active low)
+#endif
+#if defined(TBALL_CLICK) && (TBALL_CLICK >= 0)
+    { TBALL_CLICK, false },   // trackball click / pager wheel press
+#endif
+#if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+    { USER_BUTTON_PIN, (USER_BUTTON_ACTIVE_LEVEL) == HIGH },
+#endif
+#if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
+    { DISPLAY_TOGGLE_BUTTON_PIN, (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL) == HIGH },
+#endif
+};
+
+// Returns false if it decided not to sleep, so the caller can fall back to a
+// plain delay rather than spinning.
+static bool enterLightNap() {
+    // GPS is gated out in powerSaveShouldNap(), so the only limit left on nap
+    // length is how much jitter scheduled TX can absorb — at a 15-minute
+    // nodeinfo interval, seconds are irrelevant. Longer naps also amortise the
+    // fixed entry/exit cost (PLL relock, cache restore) that made the old
+    // 200 ms period mostly overhead. Per-board because one target has no
+    // interrupt-capable text input; see NAP_MAX_MS in hal/board.h.
+    static constexpr uint32_t kNapMs = NAP_MAX_MS;
+
+    // The S3 only supports level-triggered GPIO wake in light sleep, so a line
+    // that is already asserted makes esp_light_sleep_start() return instantly.
+    // Spinning on that would cost more than staying awake; skip the nap until
+    // the line releases. A held key is about to wake the screen anyway.
+    for (const NapWakeLine &w : kNapWakeLines) {
+        if (digitalRead(w.pin) == (w.wakeOnHigh ? HIGH : LOW)) return false;
+    }
+
+    for (const NapWakeLine &w : kNapWakeLines) {
+        gpio_wakeup_enable((gpio_num_t)w.pin,
+                           w.wakeOnHigh ? GPIO_INTR_HIGH_LEVEL : GPIO_INTR_LOW_LEVEL);
+    }
+    esp_sleep_enable_gpio_wakeup();
     esp_sleep_enable_timer_wakeup((uint64_t)kNapMs * 1000ULL);
     esp_light_sleep_start();
+
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO && s_radioReady) {
         Radio.wakeRxCheck();              // service the packet on the next poll
     }
+
+    // Leave the lines unarmed while awake so an ordinary keypress isn't also
+    // sitting as a pending wake source.
+    for (const NapWakeLine &w : kNapWakeLines) {
+        gpio_wakeup_disable((gpio_num_t)w.pin);
+    }
+    return true;
 }
 
 // Boot update check. Runs at most once per boot, and only once WiFi has been up
@@ -23548,15 +23784,30 @@ void loop() {
         return;
     }
 
+    serviceCpuScaling();
     serviceSerialCommands();
     bootstrapStateMapsIfMissing();
     pumpKeyboardInput();
     processPendingThemeRebuild();
-    lv_timer_handler();
+    // lv_timer_handler() deliberately runs below the screen-asleep gate now —
+    // there is nothing to draw with the panel in SLPIN, and its indev timer
+    // would otherwise keep polling the touch controller over I2C the whole
+    // time the screen is off.
     if (webCfgRunning()) {
         webCfgLoop();
         serviceWebChatSend();
         serviceWebManualTime();
+        // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
+        // the flag is cleared and persisted too, so the device doesn't come
+        // back showing "Enabled" for a server that is no longer listening.
+        if (webCfgIdleExpired()) {
+            Serial.println("[web] idle timeout - stopping web config");
+            s_webCfgEnabled = false;
+            persistWebCfgEnabled();
+            webCfgEnd();
+            s_wifiStaKickMs = 0;   // re-associate the station right away
+            Channels.addMessage(0, "", "[web] config stopped (idle)", TFT_ORANGE);
+        }
     }
     if (s_sysStatsModal) refreshSysStatsModal(false);
     bool meshChanged = false;
@@ -23568,15 +23819,25 @@ void loop() {
     serviceOtaAutoCheck(now);
     mqttBridgeLoop(now);
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
+    // Mirrored every pass so a web save / YAML import / factory reset can never
+    // leave the duty cycle out of step with config, the same way
+    // nodeArchiveSetEnabled() below does.
+    gpsSetDutyCycle(s_cfg.gpsDutyCycleEnabled, s_cfg.gpsPollIntervalS);
     gpsLoop();
     serviceAutoTimeSync(now);
     serviceGpsTimeSync(now);
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {
-        uint32_t intervalMs = s_cfg.gpsPollIntervalS > 0
-            ? s_cfg.gpsPollIntervalS * 1000UL : 60000UL;
-        if ((uint32_t)(now - s_lastGpsSampleMs) >= intervalMs) {
+        // With duty cycling on, the wake/sleep cadence already *is* the sample
+        // interval, so take the fix the moment it appears. Keeping the interval
+        // gate as well would drop a cycle's position whenever acquisition
+        // happened to be quicker than the previous cycle's — the receiver would
+        // then be parked again before the gate opened.
+        uint32_t intervalMs = s_cfg.gpsDutyCycleEnabled
+            ? 0
+            : (s_cfg.gpsPollIntervalS > 0 ? s_cfg.gpsPollIntervalS * 1000UL : 60000UL);
+        if (intervalMs == 0 || (uint32_t)(now - s_lastGpsSampleMs) >= intervalMs) {
             s_cfg.latI = gpsLatI();
             s_cfg.lonI = gpsLonI();
             s_cfg.alt  = (int32_t)gpsAltM();
@@ -23599,32 +23860,82 @@ void loop() {
     nodeArchiveFlush();
 
     now = millis();
-    if (!s_screenAsleep && s_cfg.screenOnSecs > 0
-        && (uint32_t)(now - s_lastActivityMs) > (uint32_t)s_cfg.screenOnSecs * 1000UL) {
-        Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
-                      (unsigned long)((now - s_lastActivityMs) / 1000UL),
-                      (unsigned)s_cfg.screenOnSecs);
-        sleepScreen("timeout");
+    if (!s_screenAsleep && s_cfg.screenOnSecs > 0) {
+        const uint32_t idleMs    = (uint32_t)(now - s_lastActivityMs);
+        const uint32_t timeoutMs = (uint32_t)s_cfg.screenOnSecs * 1000UL;
+        if (idleMs > timeoutMs) {
+            Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
+                          (unsigned long)(idleMs / 1000UL),
+                          (unsigned)s_cfg.screenOnSecs);
+            sleepScreen("timeout");
+        } else {
+            // Step the backlight down for the tail of the timeout. Skipped
+            // entirely when the timeout is shorter than the dim window — there
+            // is no useful warning in dimming immediately on going idle.
+            const bool wantDim = (timeoutMs > kPreSleepDimMs)
+                              && (idleMs > timeoutMs - kPreSleepDimMs);
+            if (wantDim != s_preSleepDimmed) {
+                s_preSleepDimmed = wantDim;
+                if (wantDim) {
+                    const uint8_t full = cfgBrightnessDuty(s_cfg.brightness);
+                    uint8_t dim = (uint8_t)((uint32_t)full * kPreSleepDimPct / 100U);
+                    if (dim == 0) dim = 1;   // 0 reads as "off", not "dim"
+                    displayDev().setBrightness(dim);
+                } else {
+                    applyBrightness();       // any activity restores full level
+                }
+            }
+        }
     }
 
     if (s_screenAsleep) {
-        if (powerSaveShouldNap()) enterLightNap();
-        else delay(5);
+        // The touch poll normally rides on LVGL's indev timer, which no longer
+        // runs here — without this, a tap could not wake the display.
+        serviceTouchWakeWhileAsleep();
+        if (!powerSaveShouldNap() || !enterLightNap()) delay(5);
         return;   // loop re-enters and polls input/RX/announces on wake
     }
 
-    refreshChannelGlow(false);
-    refreshHeaderTime(false);
-    refreshHeaderStatus(false);
-    refreshDmAlertIndicator();
-    // Not forced: the content signature inside refreshChatView decides whether a
-    // rebuild is actually needed, so mesh packets that don't change the visible
-    // chat no longer trigger a full (bubble) teardown/rebuild every time.
-    refreshChatView(false);
-    refreshLiveView(meshChanged);
-    refreshChUtilChart(meshChanged);
-    refreshSnrRssiChart(meshChanged);
-    refreshDmModal(meshChanged);
+    // The refresh helpers below all dirty-check internally, but running them
+    // ~200x a second still burns a pile of comparisons per pass for a UI that
+    // only needs ~30 fps. The loop itself stays fast — T-Deck's keyboard needs
+    // a sub-12 ms poll cadence (see TDeckKeyboard::readKey) — so gate the
+    // redraw work rather than slowing the loop.
+    //
+    // meshChanged is latched across skipped passes: it is recomputed every
+    // iteration, so a packet landing between ticks would otherwise be dropped
+    // before the views that take it as a force flag ever saw it.
+    static uint32_t s_lastUiTickMs = 0;
+    static bool s_meshChangedPending = false;
+    if (meshChanged) s_meshChangedPending = true;
+
+    // Forced on a wake pass so the panel gets a full repaint before the
+    // backlight comes up, rather than briefly showing the pre-sleep frame the
+    // controller held across SLPIN/SLPOUT.
+    if ((uint32_t)(now - s_lastUiTickMs) >= kUiRefreshTickMs || s_backlightPendingOn) {
+        s_lastUiTickMs = now;
+        const bool meshDirty = s_meshChangedPending;
+        s_meshChangedPending = false;
+
+        refreshChannelGlow(false);
+        refreshHeaderTime(false);
+        refreshHeaderStatus(false);
+        refreshDmAlertIndicator();
+        // Not forced: the content signature inside refreshChatView decides whether a
+        // rebuild is actually needed, so mesh packets that don't change the visible
+        // chat no longer trigger a full (bubble) teardown/rebuild every time.
+        refreshChatView(false);
+        refreshLiveView(meshDirty);
+        refreshChUtilChart(meshDirty);
+        refreshSnrRssiChart(meshDirty);
+        refreshDmModal(meshDirty);
+    }
+
+    // Runs after the refresh block so the flush carries this pass's updates,
+    // and serviceBacklightWake() below only ever lights a panel that has
+    // already been repainted.
+    lv_timer_handler();
+    serviceBacklightWake();
     delay(5);
 }
 

@@ -42,7 +42,12 @@
 #define TFT_BL_INVERT           false
 #define TFT_BL_FREQ            44100
 #define TFT_BL_PWM_CH              7
-#define TFT_BRIGHTNESS_DEFAULT   220
+// Backlight is typically the largest draw while the screen is on, and this was
+// the highest default of any board by a wide margin (T-Deck 128, pager 130).
+// Lowered to trade a little headroom for battery; the user can raise it in
+// settings, and this also sets the default brightness percentage via
+// cfgBrightnessDuty() in config.h.
+#define TFT_BRIGHTNESS_DEFAULT   160
 #define TFT_RST                   18
 #define TFT_PANEL_WIDTH          240
 #define TFT_PANEL_HEIGHT         320

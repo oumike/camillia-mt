@@ -133,8 +133,35 @@ struct RhinoConfig {
     // into the front of the struct and anything newer keeps its default here.
     // Inserting or reordering a field silently misreads every existing device's
     // settings — add at the end, or bump the blob version.
+    //
+    // "At the end" is stricter than it looks: a new field must start at an
+    // offset >= the PREVIOUS sizeof(RhinoConfig), not merely after the previous
+    // last member. The stored blob is sizeof() bytes long, so it includes the
+    // old struct's *trailing padding*, and the load memcpy's all of it over the
+    // front of the struct. A field placed in those pad bytes is overwritten
+    // with the old padding value instead of keeping its compiled default.
+    //
+    // That is not hypothetical: loraRxBoostedGain was first added at offset 879
+    // against an old sizeof of 880, so it came back false on every device with
+    // saved settings and quietly disabled RX boosted gain. Hence the explicit
+    // pad below — keep new fields underneath it.
     uint8_t  volumePct;     // notification volume, 0..100 in 10% steps
     uint8_t  timeSource;    // TIME_SOURCE_AUTO / TIME_SOURCE_MANUAL
+    uint8_t  _reservedPad0; // was trailing padding when sizeof was 880
+    // SX1262 RX boosted gain. Worth ~2 dB of sensitivity for roughly 2 mA of
+    // extra receive current — and the radio is in RX essentially all the time,
+    // so this is a continuous cost. On by default to preserve existing range.
+    bool     loraRxBoostedGain;
+    // Stop the web config server after this many seconds with no HTTP request.
+    // A connected station with modem power-save disabled (which web config
+    // requires) is one of the largest continuous draws on the device, and it
+    // otherwise runs until the user remembers to turn it off. 0 disables the
+    // timeout.
+    uint32_t webCfgIdleTimeoutS;
+    // Park the GPS in standby between position samples (period = gpsPollIntervalS).
+    // Off by default: the standby command dialect cannot be probed at runtime,
+    // so this stays opt-in until verified on a given unit. See gpsSetDutyCycle().
+    bool     gpsDutyCycleEnabled;
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and

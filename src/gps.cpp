@@ -56,6 +56,27 @@ static bool pagerPrimeGpsRails(bool invertDirSense) {
                   expAddr, invertDirSense ? 1 : 0);
     return true;
 }
+
+// Drives GPS_EN only, read-modify-write so the other rails on the expander keep
+// whatever state the radio's own priming left them in. Used to actually cut
+// power when GPS is turned off, rather than just closing the UART on a module
+// that keeps drawing ~20-25 mA.
+static bool pagerSetGpsRail(bool on) {
+    Wire.begin(KB_SDA, KB_SCL);
+    int expAddr = xl9555FindAddr();
+    if (expAddr < 0) {
+        Serial.println("[gps] pager expander not found - cannot switch GPS rail");
+        return false;
+    }
+
+    uint8_t out0 = 0xFF, out1 = 0xFF, cfg0 = 0xFF, cfg1 = 0xFF;
+    if (!xl9555ReadAll((uint8_t)expAddr, out0, out1, cfg0, cfg1)) return false;
+    xl9555SetOutput(XL9555_PIN_GPS_EN, on, out0, out1, cfg0, cfg1);
+    if (!xl9555WriteAll((uint8_t)expAddr, out0, out1, cfg0, cfg1)) return false;
+
+    Serial.printf("[gps] pager GPS rail %s\n", on ? "on" : "off");
+    return true;
+}
 } // namespace
 #endif
 
@@ -143,6 +164,36 @@ static bool           _pagerRailInverted = false;
 static bool           _pagerRailRetried = false;
 static uint32_t       _pagerLastRailPrimeMs = 0;
 #endif
+// ── Duty cycling ─────────────────────────────────────────────────────────────
+// Opt-in. When on, the receiver is parked in a RAM-retained standby between
+// position samples instead of tracking continuously (~20-25 mA on these
+// modules, which on a screen-off device is the single largest draw left).
+// RAM-retained specifically: a hot start with valid ephemeris is seconds, while
+// a cold start is minutes and would spend more energy re-acquiring than the
+// standby ever saved.
+static bool           _dutyEnabled   = false;
+static uint32_t       _dutyPeriodS   = 0;
+static bool           _dutyAsleep    = false;
+static uint32_t       _dutySleptAtMs = 0;
+static uint32_t       _dutyWokeAtMs  = 0;
+// Set when a wake produces no NMEA at all. Duty cycling then disables itself
+// for the rest of the session and leaves the receiver running: an unverifiable
+// standby command that wedges the module must not be able to permanently cost
+// the user their GPS.
+static bool           _dutyFaulted   = false;
+// Only wakes that follow a standby we issued are eligible for the fault check.
+// A first start legitimately takes longer than the prove window when the baud
+// probe has to walk candidate port configs, and faulting on that would disable
+// duty cycling on exactly the boards that boot slowest.
+static bool           _dutyEverSlept = false;
+// Power state, tracked separately from _enabled. _enabled means "we are
+// parsing"; this means "the receiver has power". They are not the same thing —
+// the old gpsEnd() only closed the UART, so turning GPS off left the module
+// tracking satellites at ~20-25 mA with nobody listening. Starts true because
+// the module comes up powered from the board rail (and, on the pager, from the
+// radio's rail priming) before any of this runs.
+static bool           _powered       = true;
+
 static uint32_t       _lastProbeMs   = 0;
 static uint32_t       _lastByteMs    = 0;
 static uint32_t       _lastDataMs    = 0;
@@ -278,6 +329,7 @@ static bool gpsNextProbeConfig() {
 }
 
 void gpsBegin() {
+    _powered = true;   // priming below restores the rail on boards that gate it
 #if defined(DEVICE_TLORA_PAGER_TFT)
     _pagerRailInverted = false;
     _pagerRailRetried = false;
@@ -289,6 +341,15 @@ void gpsBegin() {
     _activeTx      = GPS_PORT_PROBE_LIST[0].tx;
     _activeBaud    = GPS_BAUD;
     gpsApplyPortAndBaud(_activeRx, _activeTx, _activeBaud);
+    // Nudge the module out of any standby a previous gpsEnd() left it in.
+    // Without this a re-enable would open the port onto a silent receiver and
+    // the baud prober would walk every candidate config looking for a stream
+    // that was never going to arrive. Harmless when it is already awake: it is
+    // not a valid sentence, so it is discarded. Placed here rather than in
+    // gpsApplyPortAndBaud() because the prober calls that repeatedly.
+    _serial.write((uint8_t)'\r');
+    _serial.write((uint8_t)'\n');
+    _serial.flush();
     _enabled       = true;
     _startMs       = millis();
     _firstFixMs    = 0;
@@ -306,23 +367,226 @@ void gpsBegin() {
     _nmeaSeen      = false;
     _streamConfigLocked = false;
     _everValidStreamSeen = false;
+    // Duty-cycle timers are relative to this start, not to a previous session:
+    // a stale _dutyWokeAtMs would make the first pass look like a wake that had
+    // already been awake for hours, and park (or fault) the receiver instantly.
+    _dutyAsleep    = false;
+    _dutyEverSlept = false;
+    _dutyFaulted   = false;
+    _dutyWokeAtMs  = _startMs;
+    _dutySleptAtMs = _startMs;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     _pagerLastRailPrimeMs = _startMs;
 #endif
-    debugLogGps("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
+    Serial.printf("[gps] started on UART1 baud=%lu rx=%d tx=%d\n",
                 (unsigned long)_activeBaud, (int)_activeRx, (int)_activeTx);
 }
 
+static void gpsSendNmea(const char *body);   // defined with the duty-cycle code
+
+#if !defined(DEVICE_TLORA_PAGER_TFT)
+// Indefinite standby, for boards with no GPS enable pin. PMTK161,0 is genuinely
+// open-ended. PCAS12 takes a duration and has no documented "forever", so it
+// gets a day — if a CASIC part self-wakes after that with GPS switched off it
+// will idle unheard until the next toggle, which is still strictly better than
+// the previous behaviour of never powering down at all. Scoped to the boards
+// that use it; the pager cuts the rail instead and never reads this.
+static const uint32_t GPS_STANDBY_INDEF_S = 86400;
+#endif
+
+static void gpsPowerDown() {
+    if (!_powered) return;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // The pager has a real switch, so use it — nothing beats cutting the rail.
+    // Except on the inverted-polarity revisions: there "enabled" is expressed
+    // by configuring the pin as an input, and driving it as an output to
+    // disable is a guess about hardware we cannot test. Those units keep the
+    // old always-on behaviour rather than risk a GPS that will not come back.
+    if (!_pagerRailInverted) {
+        (void)pagerSetGpsRail(false);
+    } else {
+        debugLogGps("[gps] inverted rail polarity - leaving GPS powered\n");
+        return;   // still powered; don't claim otherwise
+    }
+#else
+    // No GPS enable pin on these boards; the module is fed from the board rail.
+    // Standby is the only lever, and it has to be sent before the UART closes.
+    //
+    // The port may not be open at all: booting with GPS disabled never calls
+    // gpsBegin(), and that is precisely the case this needs to cover. Open it
+    // just long enough to speak. GPS_BAUD is the compile-time default rather
+    // than a probed rate — there is nothing to probe against a receiver we are
+    // about to silence, and a wrong guess only means the command is not
+    // understood, which is the behaviour we already had.
+    const bool hadPort = _enabled;
+    if (!hadPort) {
+        _serial.begin(GPS_BAUD, SERIAL_8N1, _activeRx, _activeTx);
+        delay(10);
+    }
+    char cmd[24];
+    snprintf(cmd, sizeof(cmd), "PCAS12,%lu", (unsigned long)GPS_STANDBY_INDEF_S);
+    gpsSendNmea(cmd);
+    delay(20);
+    gpsSendNmea("PMTK161,0");
+    delay(20);
+    if (!hadPort) _serial.end();
+#endif
+    _powered = false;
+    // Not debug-gated. Power state changes are rare, user-initiated, and the
+    // only externally visible evidence that turning GPS off did anything at
+    // all — on boards with no enable pin there is no rail message to go with
+    // it. Hiding this behind the debug flag made a successful power-down
+    // indistinguishable from the code never running.
+    Serial.println("[gps] powered down");
+}
+
+static void gpsPowerUp() {
+    if (_powered) return;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    (void)pagerSetGpsRail(true);
+    delay(20);   // let the rail settle before the module is probed
+#endif
+    // Non-pager boards need no action here: the module still has power, and
+    // gpsBegin() nudges it out of standby once the UART is open.
+    _powered = true;
+    Serial.println("[gps] powered up");
+}
+
 void gpsEnd() {
+    // Order matters: the standby command has to go out while the port is still
+    // open.
+    gpsPowerDown();
     _serial.end();
     _enabled = false;
-    debugLogGps("[gps] stopped\n");
+    _dutyAsleep = false;
+    Serial.println("[gps] stopped");
 }
+
+// ── Duty-cycle standby ───────────────────────────────────────────────────────
+// Two command dialects ship on these boards under the same "L76K" label, and
+// there is no reliable way to tell them apart at runtime:
+//   PCAS (CASIC / AT6558-class)   $PCAS12,<sec>  standby for N seconds
+//   PMTK (MediaTek L76-class)     $PMTK161,0     standby, RAM retained
+// Both are sent. An NMEA input sentence with a valid checksum that the receiver
+// does not recognise is discarded, so the one that does not apply is inert —
+// which is what makes sending both safe rather than a guess.
+//
+// Both forms retain RAM, so the next start is a hot one. Wake is serial
+// activity on the module's RX line in either dialect.
+static const uint32_t GPS_DUTY_MIN_PERIOD_S    = 120;     // below this, acquire cost dominates
+static const uint32_t GPS_DUTY_MAX_ACQUIRE_MS  = 120000;  // give up on a cycle after this
+static const uint32_t GPS_DUTY_WAKE_PROVE_MS   = 15000;   // NMEA must return within this
+
+static void gpsSendNmea(const char *body) {
+    uint8_t ck = 0;
+    for (const char *p = body; *p; ++p) ck ^= (uint8_t)*p;
+    _serial.printf("$%s*%02X\r\n", body, ck);
+    _serial.flush();
+}
+
+static void gpsDutySleep() {
+    if (_dutyAsleep || !_enabled) return;
+    // Ask for a standby slightly longer than our own timer so the module's
+    // internal wake (on the dialects that honour a duration) never beats us to
+    // it — our timer stays the source of truth either way.
+    char cmd[24];
+    snprintf(cmd, sizeof(cmd), "PCAS12,%lu", (unsigned long)(_dutyPeriodS + 5));
+    gpsSendNmea(cmd);
+    delay(20);
+    gpsSendNmea("PMTK161,0");
+
+    _dutyAsleep    = true;
+    _dutyEverSlept = true;
+    _dutySleptAtMs = millis();
+    _nmeaSeen      = false;
+    debugLogGps("[gps] duty: standby for %lus\n", (unsigned long)_dutyPeriodS);
+}
+
+static void gpsDutyWake() {
+    if (!_dutyAsleep) return;
+    // Any serial activity wakes both dialects. The newline is deliberately not
+    // a command — it just has to arrive on the module's RX line.
+    _serial.write((uint8_t)'\r');
+    _serial.write((uint8_t)'\n');
+    _serial.flush();
+
+    _dutyAsleep   = false;
+    _dutyWokeAtMs = millis();
+    // Re-arm the warm-up blanking: a hot start replays cached GGA with a stale
+    // quality flag exactly the way a cold boot does (see GPS_WARMUP_MS).
+    _startMs        = _dutyWokeAtMs;
+    _lastByteMs     = _dutyWokeAtMs;
+    _lastChecksumMs = _dutyWokeAtMs;
+    _nmeaSeen       = false;
+    debugLogGps("[gps] duty: wake\n");
+}
+
+static void gpsServiceDutyCycle(uint32_t now) {
+    if (_dutyFaulted || !_dutyEnabled || !_enabled) return;
+
+    if (_dutyAsleep) {
+        if ((uint32_t)(now - _dutySleptAtMs) < _dutyPeriodS * 1000UL) return;
+        gpsDutyWake();
+        return;
+    }
+
+    const uint32_t awakeMs = (uint32_t)(now - _dutyWokeAtMs);
+
+    // Fault check: if a wake never produces NMEA, the standby command wedged
+    // the receiver. Stop duty cycling and leave it awake — losing the battery
+    // saving is a far better outcome than losing GPS until a power cycle.
+    if (_dutyEverSlept && !_nmeaSeen && awakeMs >= GPS_DUTY_WAKE_PROVE_MS) {
+        _dutyFaulted = true;
+        Serial.println("[gps] duty: no NMEA after wake - disabling duty cycle for this session");
+        return;
+    }
+
+    // gpsHasFix() already withholds a verdict until GPS_WARMUP_MS has passed,
+    // so this cannot sleep on the stale hot-start cache.
+    if (gpsHasFix() || awakeMs >= GPS_DUTY_MAX_ACQUIRE_MS) {
+        if (!gpsHasFix()) {
+            debugLogGps("[gps] duty: no fix in %lums, sleeping anyway\n",
+                        (unsigned long)awakeMs);
+        }
+        gpsDutySleep();
+    }
+}
+
+void gpsSetDutyCycle(bool enabled, uint32_t periodS) {
+    // Below the floor the receiver would spend most of each cycle re-acquiring,
+    // which costs more than it saves — treat that as "off" rather than
+    // pretending to duty cycle.
+    const bool viable = enabled && periodS >= GPS_DUTY_MIN_PERIOD_S;
+    if (enabled && !viable) {
+        debugLogGps("[gps] duty: period %lus below %lus floor - staying always-on\n",
+                    (unsigned long)periodS, (unsigned long)GPS_DUTY_MIN_PERIOD_S);
+    }
+    if (viable == _dutyEnabled && periodS == _dutyPeriodS) return;
+
+    _dutyEnabled = viable;
+    _dutyPeriodS = periodS;
+    if (!viable) {
+        gpsDutyWake();          // no-op unless we were parked
+        _dutyFaulted = false;   // a config change earns a fresh attempt
+    } else if (_dutyWokeAtMs == 0) {
+        _dutyWokeAtMs = millis();
+    }
+}
+
+bool gpsIsAsleep() { return _dutyAsleep; }
 
 void gpsLoop() {
     if (!_enabled) return;
     static uint32_t _lastDbg = 0;
     uint32_t now = millis();
+
+    gpsServiceDutyCycle(now);
+    if (_dutyAsleep) {
+        // Nothing is arriving by design. Returning here also keeps the
+        // stale-checksum baud re-probe below from firing on the silence and
+        // walking the port through every candidate config while parked.
+        return;
+    }
 
     bool sawBytes = false;
     while (_serial.available()) {
@@ -467,8 +731,20 @@ void gpsLoop() {
 }
 
 void gpsSetEnabled(bool en) {
-    if (en && !_enabled) gpsBegin();
-    else if (!en && _enabled) gpsEnd();
+    if (en) {
+        gpsPowerUp();               // no-op unless a previous disable cut power
+        if (!_enabled) gpsBegin();
+        return;
+    }
+    if (_enabled) {
+        gpsEnd();
+    } else {
+        // Disabled and never started — the boot path. _enabled is already
+        // false, so the old code did nothing here and the module was left
+        // powered for the entire session on a device that had GPS switched
+        // off. _powered guards against repeating the work on every config save.
+        gpsPowerDown();
+    }
 }
 
 bool gpsIsEnabled() { return _enabled; }

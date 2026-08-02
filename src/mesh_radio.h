@@ -10,8 +10,16 @@
 
 class MeshRadio {
 public:
-    bool init();
+    // txPower/rxBoostedGain come from live config. They are passed in rather
+    // than read from a compile-time default because init() applies the PA
+    // setting explicitly, and hardcoding it there silently overrode whatever
+    // the user had configured.
+    bool init(uint8_t txPower = MESH_POWER, bool rxBoostedGain = (bool)MY_LORA_RX_BOOST);
     bool reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_t power);
+
+    // Applied live; also re-applied by init(). Safe to call before init(), in
+    // which case it only records the preference.
+    void setRxBoostedGain(bool enabled);
 
     // Called from loop() — returns true and fills pkt if a packet is ready.
     bool pollRx(MeshPacket &pkt);
@@ -37,6 +45,7 @@ public:
 
 private:
     bool    _ready = false;
+    bool    _rxBoostedGain = (bool)MY_LORA_RX_BOOST;
 #if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
     LR1121  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #else
