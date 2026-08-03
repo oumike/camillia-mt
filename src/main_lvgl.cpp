@@ -1,6 +1,7 @@
 #if defined(UI_LVGL_POC)
 
 #include <Arduino.h>
+#include <Wire.h>
 #include "config.h"
 #include "base64_util.h"
 #include "channel_mgr.h"
@@ -3390,6 +3391,70 @@ static constexpr uint32_t kPreSleepDimMs  = 5000;  // dim for the last 5 s
 static constexpr uint8_t  kPreSleepDimPct = 25;    // % of the configured level
 static bool s_preSleepDimmed = false;
 
+#if defined(DEVICE_TDECK) && HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
+// ── GT911 verified wake ──────────────────────────────────────────────────────
+// A GT911 that has been put to sleep only comes back when the host pulses its
+// INT line high, and that pulse is not guaranteed to land — Goodix's own
+// guidance is to confirm over I2C afterwards and retry, falling back to a
+// hardware reset. LovyanGFX's Touch_GT911::wakeup() does neither: it fires the
+// pulse and returns, holding INT high for delay(2), which on a 1 ms FreeRTOS
+// tick can round down to barely the documented 2 ms minimum. The T-Deck has no
+// touch reset line (TOUCH_RST is -1), so a pulse that misses leaves the panel
+// unresponsive until some later sleep/wake cycle happens to work. That is the
+// intermittent dead-touch-after-wake. So: pulse, probe, repeat.
+static constexpr uint32_t kGt911WakeReadyMs = 60;   // worst case before it answers I2C
+static constexpr int      kGt911WakeTries   = 4;
+
+// Product ID at 0x8140 reads "911" on a running GT911 and NACKs while it is
+// asleep, which is what makes it a liveness probe rather than just a read.
+// Goes through Wire because the keyboard already drives this bus with it —
+// same pins, same port — so nothing new is being shared here.
+static bool gt911IsAwake() {
+    Wire.beginTransmission((uint8_t)TOUCH_ADDR);
+    Wire.write(0x81);
+    Wire.write(0x40);
+    if (Wire.endTransmission() != 0) return false;
+    if (Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)3) != 3) return false;
+    const char id0 = (char)Wire.read();
+    const char id1 = (char)Wire.read();
+    const char id2 = (char)Wire.read();
+    return id0 == '9' && id1 == '1' && id2 == '1';
+}
+
+// Low first so the chip sees a clean edge (sleep() already left the pin driven
+// low, but a retry pass has not), then high well past the 2 ms minimum, then
+// released so the GT911 can drive it again.
+static void gt911WakePulse() {
+    pinMode(TOUCH_INT, OUTPUT);
+    digitalWrite(TOUCH_INT, LOW);
+    delay(5);
+    digitalWrite(TOUCH_INT, HIGH);
+    delay(10);
+    pinMode(TOUCH_INT, INPUT_PULLUP);
+}
+
+// Polled rather than a flat kGt911WakeReadyMs wait: the chip normally answers
+// well inside that window, so a good wake costs a few ms instead of the worst
+// case on every single wake.
+static bool gt911WakeVerified() {
+    for (int attempt = 1; attempt <= kGt911WakeTries; ++attempt) {
+        gt911WakePulse();
+        const uint32_t deadline = millis() + kGt911WakeReadyMs;
+        do {
+            if (gt911IsAwake()) {
+                if (attempt > 1) {
+                    Serial.printf("[touch] GT911 woke on attempt %d\n", attempt);
+                }
+                return true;
+            }
+            delay(5);
+        } while ((int32_t)(millis() - deadline) < 0);
+    }
+    Serial.println("[touch] GT911 did not wake; touch is dead until the next sleep/wake");
+    return false;
+}
+#endif
+
 // Puts the touch controller into its own low-power mode alongside the panel.
 // Only safe where touch is not a wake gesture: Touch_GT911::sleep() drives the
 // INT pin as an output, which is exactly the line serviceTouchWakeWhileAsleep()
@@ -3397,10 +3462,17 @@ static bool s_preSleepDimmed = false;
 // display this would silently break it, so it is gated on the same policy flag.
 static void setTouchSleep(bool asleep) {
 #if HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
-    if (lgfx::ITouch *t = displayDev().touch()) {
-        if (asleep) t->sleep();
-        else        t->wakeup();
+    lgfx::ITouch *t = displayDev().touch();
+    if (!t) return;
+    if (asleep) {
+        t->sleep();
+        return;
     }
+#if defined(DEVICE_TDECK)
+    (void)gt911WakeVerified();
+#else
+    t->wakeup();
+#endif
 #else
     LV_UNUSED(asleep);
 #endif
@@ -3453,8 +3525,13 @@ static void wakeScreen() {
     // ready is what produces corrupt wakes; ~120 ms once per wake is the cost.
     displayDev().wakeup();
     displayDev().setBrightness(0);
+    // The touch controller wakes on its own bus, so the time its handshake
+    // spends waiting counts against the panel's settle window rather than
+    // adding to it.
+    const uint32_t panelWakeStartMs = millis();
     setTouchSleep(false);
-    delay(kPanelWakeSettleMs);
+    const uint32_t settledMs = millis() - panelWakeStartMs;
+    if (settledMs < kPanelWakeSettleMs) delay(kPanelWakeSettleMs - settledMs);
     s_backlightPendingOn = true;
     s_preSleepDimmed = false;
 
