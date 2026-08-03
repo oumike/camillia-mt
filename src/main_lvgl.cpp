@@ -3170,10 +3170,15 @@ static bool runOtaWorkerModeIfRequested() {
     bool nvsRequested = isOtaWorkerModeRequestedOnce();
     if (!(rtcRequested || nvsRequested)) return false;
 
-    auto clearWorkerRequestFlags = []() {
-        (void)consumeOtaWorkerModeRtcOnce();
-        (void)consumeOtaWorkerModeOnce();
-    };
+    // Consume the request before doing any work, not after. The rest of this
+    // run lives in RAM, so clearing here costs nothing — and it means a reboot
+    // at any point during the update (power cut, watchdog, user pulling the
+    // plug on a stalled download) comes back up in normal firmware instead of
+    // landing in OTA minimal mode again. A partial download can't leave the
+    // device unbootable either: Update only flips the boot partition on a
+    // successful Update.end(), so an interrupted write keeps the running app.
+    (void)consumeOtaWorkerModeRtcOnce();
+    (void)consumeOtaWorkerModeOnce();
 
     otaSetNetworkAllowed(true);
 
@@ -3188,7 +3193,6 @@ static bool runOtaWorkerModeIfRequested() {
         setOtaWorkerBootNotice("OTA check failed: WiFi not connected");
         delay(1800);
         otaSetNetworkAllowed(false);
-        clearWorkerRequestFlags();
         return true;
     }
 
@@ -3214,7 +3218,6 @@ static bool runOtaWorkerModeIfRequested() {
         setOtaWorkerBootNotice(notice);
         delay(1800);
         otaSetNetworkAllowed(false);
-        clearWorkerRequestFlags();
         return true;
     }
 
@@ -3230,7 +3233,6 @@ static bool runOtaWorkerModeIfRequested() {
         setOtaWorkerBootNotice(notice);
         delay(1400);
         otaSetNetworkAllowed(false);
-        clearWorkerRequestFlags();
         return true;
     }
 
@@ -3298,7 +3300,6 @@ static bool runOtaWorkerModeIfRequested() {
         otaWorkerDrawStatus("OTA installed", "Rebooting...");
         delay(700);
         otaSetNetworkAllowed(false);
-        clearWorkerRequestFlags();
         flushConfigIfDirty();   // pending settings must reach NVS before we go
         ESP.restart();
         return true;
@@ -3326,7 +3327,6 @@ static bool runOtaWorkerModeIfRequested() {
     }
     delay(2200);
     otaSetNetworkAllowed(false);
-    clearWorkerRequestFlags();
     return true;
 #endif
 }
