@@ -433,6 +433,15 @@ static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
 static lv_obj_t *s_dmNodePickerHint = nullptr;
 static lv_obj_t *s_dmNodePickerRows[MAX_NODES] = {};
+// Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
+// Without it the picker built a button+label for every match — up to MAX_NODES
+// of them — and tore the whole lot down again on each arrow key, which is what
+// made the screen crawl on a populated mesh. Only the visible slice exists now,
+// and moving the highlight inside that slice restyles two rows instead of
+// rebuilding any.
+static int s_dmNodePickerRenderedIdx[MAX_NODES] = {};
+static int s_dmNodePickerRowCount = 0;
+static int s_dmNodePickerRenderStart = 0;
 
 // ── Shared node snapshot buffer ──────────────────────────────────────────────
 // The Nodes screen and the DM node picker each snapshot the node list so the UI
@@ -5009,8 +5018,17 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
-    const lv_coord_t composeInputH = (lv_coord_t)(lv_font_get_line_height(composeBodyFont) + 8);
-    const lv_coord_t composeInputPadTop = max<lv_coord_t>(1, (composeInputH - (lv_coord_t)lv_font_get_line_height(composeBodyFont)) / 2);
+    // Compose is full screen here, so the input gets four lines instead of the
+    // single one the old boxed modal had room for. 200 characters never fit on
+    // one 240 px line, and the text scrolled sideways out of view as you typed.
+    //
+    // Four is the ceiling, set by the reply layout rather than this one: a
+    // reply spends another 22 px on the quoted line, leaving the centre band
+    // ~79 px, and the band does not scroll. Five lines (81 px) would overflow
+    // it — the box is pinned to this height below, so it would clip instead of
+    // shrinking to fit.
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 4) + 6);
+    const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 4;
     const lv_coord_t composeModalRowPad = 1;
 #else
@@ -5150,13 +5168,19 @@ static void openComposePrompt(uint32_t replyPacketId,
 #elif defined(DEVICE_TDECK)
     modalH = isReply ? 126 : 104;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    modalH = isReply ? 88 : 70;
+    // Full screen. On a 240x135 panel a boxed modal spent most of its height on
+    // margin and border; composing is a modal activity anyway, so it takes the
+    // whole display and the room goes to the message.
+    modalW = lv_disp_get_hor_res(NULL);
+    modalH = lv_disp_get_ver_res(NULL);
 #endif
 
     s_composeModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_composeModal, modalW, modalH);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, -12);
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);   // full screen: no nudge
 #else
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 10);
 #endif
@@ -5207,12 +5231,11 @@ static void openComposePrompt(uint32_t replyPacketId,
 #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
-#if defined(DEVICE_TDECK)
+    // Both grow to take whatever the title and reply row leave. On Cardputer
+    // this is what keeps the bottom legend on the bottom edge now that the
+    // modal is full screen: the band eats the slack, so the legend stays the
+    // last thing in the column instead of floating up under the input.
     lv_obj_set_flex_grow(composeCenterBand, 1);
-#else
-    // Cardputer: avoid large flex slack above/below the input box.
-    lv_obj_set_height(composeCenterBand, composeInputH + 8);
-#endif
     lv_obj_clear_flag(composeCenterBand, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(composeCenterBand, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(composeCenterBand, 0, 0);
@@ -5244,7 +5267,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Wrap instead of scrolling sideways. The min/max height above pins the box
+    // to its fixed number of lines, so a longer message scrolls inside it
+    // rather than growing the box into the legend.
     lv_textarea_set_one_line(s_composeInput, false);
 #else
     lv_textarea_set_one_line(s_composeInput, true);
@@ -5255,7 +5281,14 @@ static void openComposePrompt(uint32_t replyPacketId,
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
     lv_obj_set_width(hint, lv_pct(100));
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // The legend is reference text, not content: at 10 it stops competing with
+    // the message for the narrow bottom line, and leaves the character count
+    // beside it room to sit without colliding.
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#else
     lv_obj_set_style_text_font(hint, composeBodyFont, 0);
+#endif
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -5268,7 +5301,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Emoji isn't a compose action anymore — it's the 'E' quick-send tray on the
     // chat/DM screen (see openEmojiPicker), so it's off the compose legend.
-    lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Delete");
+    lv_label_set_text(hint, "Enter=Send  Esc=Cancel  Bksp=Del");
 #else
     lv_label_set_text(hint, "Enter=Send  Bksp(empty)=Cancel");
 #endif
@@ -5284,9 +5317,20 @@ static void openComposePrompt(uint32_t replyPacketId,
     // bottom line with the hint legend (which is left-aligned).
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_add_flag(s_composeCharCount, LV_OBJ_FLAG_IGNORE_LAYOUT);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Matches the shrunk legend it shares the bottom line with.
+    lv_obj_set_style_text_font(s_composeCharCount, &lv_font_montserrat_10, 0);
+#else
     lv_obj_set_style_text_font(s_composeCharCount, composeBodyFont, 0);
+#endif
     lv_obj_set_style_text_color(s_composeCharCount, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Flush with the legend's line rather than lifted off it: the legend is the
+    // last item in the column, so its box already ends at the content bottom.
+    lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
+#else
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, -composeModalBottomPad);
+#endif
 #endif
 
     updateComposeCharCount();
@@ -5324,8 +5368,16 @@ static void updateComposeCharCount() {
     for (const char *p = txt; p && *p; p++) {
         if (!utf8util::isContinuationByte((uint8_t)*p)) used++;
     }
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // "200/200" rather than "200 of 200": the count shares its line with the
+    // key legend, and on a 240 px panel the long form runs into it once the
+    // message passes 100 characters.
+    lv_label_set_text_fmt(s_composeCharCount, "%u/%d",
+                          (unsigned)used, (int)MESH_TEXT_MAX_LEN);
+#else
     lv_label_set_text_fmt(s_composeCharCount, "%u of %d",
                           (unsigned)used, (int)MESH_TEXT_MAX_LEN);
+#endif
 }
 
 static void onComposeInputChanged(lv_event_t *e) {
@@ -5849,13 +5901,37 @@ static void applyCfgWifiSelection(int idx) {
 }
 
 // ── Own-message color picker ─────────────────────────────────────────────
-// A "Reset to Default" cell followed by a 4-wide grid of the 16 basic colors
-// in kUserMsgColors[]. Navigation index 0 is the reset cell (restores the
+// A "Reset to Default" cell followed by a grid of the 16 basic colors in
+// kUserMsgColors[]. Navigation index 0 is the reset cell (restores the
 // adaptive yellow default, s_cfg.userMsgColor = 0xFF); indices 1..N map to the
 // palette entries. The chosen value drives userMessageAccentColor565(), which
 // colors only the local user's own messages. Selecting reboots so the change
 // applies uniformly across every already-rendered view.
 static constexpr int kUserMsgColorNavCount = kUserMsgColorCount + 1;  // +1 reset cell
+
+// Grid geometry, shared by the builder and the renderer so the cell size and
+// the width they each derive from it cannot drift apart.
+//
+// Cardputer runs a smaller cell eight to a row rather than four. At 44x30 the
+// 16 colors need four rows, and that grid plus the title and the hint line came
+// to ~134 px inside a modal capped at 119 — the overflow is what clipped the
+// dialog at the top and bottom. Eight 20 px cells put the whole palette on two
+// rows that fit without scrolling.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static constexpr int kMsgColorSwatchW   = 20;
+static constexpr int kMsgColorSwatchH   = 20;
+static constexpr int kMsgColorSwatchGap = 4;
+static constexpr int kMsgColorCols      = 8;
+static constexpr int kMsgColorResetH    = 22;
+#else
+static constexpr int kMsgColorSwatchW   = 44;
+static constexpr int kMsgColorSwatchH   = 30;
+static constexpr int kMsgColorSwatchGap = 6;
+static constexpr int kMsgColorCols      = 4;
+static constexpr int kMsgColorResetH    = 26;
+#endif
+static constexpr int kMsgColorGridW =
+    kMsgColorSwatchW * kMsgColorCols + kMsgColorSwatchGap * (kMsgColorCols - 1);
 
 static void closeCfgColorPickerModal() {
     if (lvObjValid(s_cfgColorBackdrop)) {
@@ -5878,7 +5954,7 @@ static void refreshCfgColorPickerModal() {
         const bool sel = (s_cfgColorSelection == 0);
         lv_obj_t *reset = lv_obj_create(s_cfgColorGrid);
         lv_obj_remove_style_all(reset);
-        lv_obj_set_size(reset, 44 * 4 + 6 * 3, 26);
+        lv_obj_set_size(reset, kMsgColorGridW, kMsgColorResetH);
         lv_obj_clear_flag(reset, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(reset, 5, 0);
         lv_obj_set_style_bg_color(reset, lvColorFrom565(TFT_YELLOW), 0);
@@ -5901,7 +5977,7 @@ static void refreshCfgColorPickerModal() {
         const int nav = i + 1;
         lv_obj_t *sw = lv_obj_create(s_cfgColorGrid);
         lv_obj_remove_style_all(sw);
-        lv_obj_set_size(sw, 44, 30);
+        lv_obj_set_size(sw, kMsgColorSwatchW, kMsgColorSwatchH);
         lv_obj_clear_flag(sw, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(sw, 5, 0);
         lv_obj_set_style_bg_color(sw, lvColorFrom565(kUserMsgColors[i].color), 0);
@@ -8451,6 +8527,9 @@ static void openCfgColorPickerModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "My Message Color");
 
+    // Cardputer has no hint row: the line and its 6 px of padding are the space
+    // the swatch grid needs to fit between the title and the bottom edge.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_obj_t *hint = lv_label_create(s_cfgColorModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -8463,13 +8542,23 @@ static void openCfgColorPickerModal() {
                       "Arrows=Move  Enter=Select  Backspace=Cancel"
 #endif
     );
+#endif
 
     s_cfgColorGrid = lv_obj_create(s_cfgColorModal);
-    // 4 swatches (44px) + 3 gaps (6px) per row → keep the grid 4-wide. On short
-    // screens (e.g. Cardputer 135px tall) cap the height and let it scroll so
-    // the highlighted swatch is always brought into view.
-    lv_obj_set_width(s_cfgColorGrid, 44 * 4 + 6 * 3);
+    // kMsgColorCols swatches per row. The height is capped so a grid taller than
+    // the modal scrolls, with the highlighted swatch scrolled into view.
+    lv_obj_set_width(s_cfgColorGrid, kMsgColorGridW);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Derived, not guessed: the modal is capped at h-16, and border, padding,
+    // the title line and one row gap are all that sit above the grid. The old
+    // hardcoded h-60 assumed a hint row that is no longer built here, which
+    // left the grid 17 px taller than the modal could show.
+    int gridMaxH = h - 16 - 2 - 16
+                   - (int)lv_font_get_line_height(&lv_font_montserrat_16) - 6;
+    if (gridMaxH < 40) gridMaxH = 40;
+#else
     const int gridMaxH = (h > 60) ? (h - 60) : LV_SIZE_CONTENT;
+#endif
     lv_obj_set_height(s_cfgColorGrid, LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(s_cfgColorGrid, gridMaxH, 0);
     lv_obj_add_flag(s_cfgColorGrid, LV_OBJ_FLAG_SCROLLABLE);
@@ -8478,8 +8567,8 @@ static void openCfgColorPickerModal() {
     lv_obj_set_style_bg_opa(s_cfgColorGrid, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_cfgColorGrid, 0, 0);
     lv_obj_set_style_pad_all(s_cfgColorGrid, 0, 0);
-    lv_obj_set_style_pad_row(s_cfgColorGrid, 6, 0);
-    lv_obj_set_style_pad_column(s_cfgColorGrid, 6, 0);
+    lv_obj_set_style_pad_row(s_cfgColorGrid, kMsgColorSwatchGap, 0);
+    lv_obj_set_style_pad_column(s_cfgColorGrid, kMsgColorSwatchGap, 0);
     lv_obj_set_flex_flow(s_cfgColorGrid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(s_cfgColorGrid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -12797,7 +12886,14 @@ static void openLiveModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // No Back tooltip here. Esc leaves every modal on this build, and carrying
+    // it made the legend 239 px wide against 230 px of content — it wrapped to
+    // a second line and took 11 px off the feed. The rest fits on one line.
+    lv_label_set_text(hint, "C = Clear   U = ChUtil   S = SNR/RSSI");
+#else
     lv_label_set_text_fmt(hint, "%s = Back   C = Clear   U = ChUtil   S = SNR/RSSI", modalCloseKeyLabel());
+#endif
 #endif
 
     refreshLiveView(true);
@@ -13448,11 +13544,82 @@ static void onDmConversationPressState(lv_event_t *e) {
 #endif
 }
 
+// Keeps the rendered slice covering the selection, exactly as
+// nodesClampRenderWindow() does for the Nodes list.
+static void dmNodePickerClampRenderWindow() {
+    if (s_dmNodeFilteredCount <= 0) {
+        s_dmNodePickerRenderStart = 0;
+        return;
+    }
+
+    if (s_dmNodeSelection < 0) s_dmNodeSelection = 0;
+    if (s_dmNodeSelection >= s_dmNodeFilteredCount) s_dmNodeSelection = s_dmNodeFilteredCount - 1;
+
+    int renderRows = min(kNodesMaxRenderedRows, s_dmNodeFilteredCount);
+    if (renderRows < 1) renderRows = 1;
+    int maxStart = s_dmNodeFilteredCount - renderRows;
+    if (maxStart < 0) maxStart = 0;
+
+    if (s_dmNodePickerRenderStart > maxStart) s_dmNodePickerRenderStart = maxStart;
+    if (s_dmNodeSelection < s_dmNodePickerRenderStart) {
+        s_dmNodePickerRenderStart = s_dmNodeSelection;
+    } else if (s_dmNodeSelection >= (s_dmNodePickerRenderStart + renderRows)) {
+        s_dmNodePickerRenderStart = s_dmNodeSelection - renderRows + 1;
+    }
+
+    if (s_dmNodePickerRenderStart < 0) s_dmNodePickerRenderStart = 0;
+    if (s_dmNodePickerRenderStart > maxStart) s_dmNodePickerRenderStart = maxStart;
+}
+
+static lv_obj_t *selectedDmNodePickerRowObj() {
+    for (int i = 0; i < s_dmNodePickerRowCount; i++) {
+        if (s_dmNodePickerRenderedIdx[i] == s_dmNodeSelection) return s_dmNodePickerRows[i];
+    }
+    return nullptr;
+}
+
+// Repaints the highlight on the rows already on screen. This is the whole point
+// of the window: moving the selection is four style writes, not a rebuild.
+static void refreshDmNodePickerSelection() {
+    for (int i = 0; i < s_dmNodePickerRowCount; i++) {
+        lv_obj_t *row = s_dmNodePickerRows[i];
+        if (!row) continue;
+        bool selected = (s_dmNodePickerRenderedIdx[i] == s_dmNodeSelection);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row,
+                                      selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
+                                      0);
+        lv_obj_set_style_bg_color(row,
+                                  selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
+                                  0);
+        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
+    }
+}
+
+// Moves the highlight, rebuilding only when the window itself has to scroll.
+static void dmNodePickerMoveSelection(int next) {
+    if (s_dmNodeFilteredCount <= 0) return;
+    if (next < 0) next = 0;
+    if (next >= s_dmNodeFilteredCount) next = s_dmNodeFilteredCount - 1;
+    if (next == s_dmNodeSelection) return;
+
+    s_dmNodeSelection = next;
+    const int prevStart = s_dmNodePickerRenderStart;
+    dmNodePickerClampRenderWindow();
+    if (s_dmNodePickerRenderStart != prevStart) {
+        refreshDmNodePicker(true);   // window scrolled: the slice really changed
+    } else {
+        refreshDmNodePickerSelection();
+    }
+    if (lv_obj_t *row = selectedDmNodePickerRowObj()) {
+        lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
 static void onDmNodePressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= s_dmNodeFilteredCount) return;
-    s_dmNodeSelection = idx;
-    refreshDmNodePicker(true);
+    dmNodePickerMoveSelection(idx);
 }
 
 static char dmNodePickerAsciiLower(char c) {
@@ -13496,12 +13663,17 @@ static void dmNodePickerApplyFilter() {
     } else {
         s_dmNodeSelection = constrain(s_dmNodeSelection, 0, s_dmNodeFilteredCount - 1);
     }
+    // A filter keystroke can drop the selection anywhere in the new list, so the
+    // window has to follow it before the next render.
+    dmNodePickerClampRenderWindow();
 }
 
 static void snapshotNodesForDmPicker() {
     s_dmNodeSnapshotCount = 0;
     s_dmNodeFilteredCount = 0;
     s_dmNodeSelection = -1;
+    s_dmNodePickerRenderStart = 0;
+    s_dmNodePickerRowCount = 0;
     s_dmNodeFilterOpen = false;
     s_dmNodeFilterLen = 0;
     s_dmNodeFilter[0] = '\0';
@@ -13602,6 +13774,8 @@ static void refreshDmNodePicker(bool force) {
 
     lv_obj_clean(s_dmNodePickerList);
     memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
+    memset(s_dmNodePickerRenderedIdx, 0, sizeof(s_dmNodePickerRenderedIdx));
+    s_dmNodePickerRowCount = 0;
 
     if (s_dmNodeFilteredCount <= 0) {
         lv_obj_t *empty = lv_label_create(s_dmNodePickerList);
@@ -13618,7 +13792,18 @@ static void refreshDmNodePicker(bool force) {
         return;
     }
 
-    for (int i = 0; i < s_dmNodeFilteredCount; i++) {
+    dmNodePickerClampRenderWindow();
+    const int renderStart = s_dmNodePickerRenderStart;
+    const int renderLimit = min(kNodesMaxRenderedRows, s_dmNodeFilteredCount - renderStart);
+    for (int listIdx = 0; listIdx < renderLimit; listIdx++) {
+        lv_mem_monitor_t pickerMem;
+        lv_mem_monitor(&pickerMem);
+        if (pickerMem.free_biggest_size < 4096) {
+            logLvglMemDiag("dm node picker render stopped (low LVGL mem)");
+            break;
+        }
+
+        const int i = renderStart + listIdx;
         bool selected = (i == s_dmNodeSelection);
         int snapshotIdx = s_dmNodeFilteredIdx[i];
         if (snapshotIdx < 0 || snapshotIdx >= s_dmNodeSnapshotCount) continue;
@@ -13630,7 +13815,10 @@ static void refreshDmNodePicker(bool force) {
         snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
 
         lv_obj_t *row = lv_btn_create(s_dmNodePickerList);
-        s_dmNodePickerRows[i] = row;
+        if (!row) {
+            Serial.println("[dm] node picker row allocation failed");
+            break;
+        }
         lv_obj_set_width(row, lv_pct(97));
         lv_obj_set_height(row, 22);
         lv_obj_set_style_radius(row, 4, 0);
@@ -13650,6 +13838,11 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
 
         lv_obj_t *lbl = lv_label_create(row);
+        if (!lbl) {
+            lv_obj_del(row);
+            Serial.println("[dm] node picker label allocation failed");
+            break;
+        }
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(lbl, dmPickerTextColor, 0);
@@ -13668,6 +13861,18 @@ static void refreshDmNodePicker(bool force) {
              shortDisp);
         setLabelTextEmojiSafe(lbl, rowText);
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+        if (s_dmNodePickerRowCount < MAX_NODES) {
+            s_dmNodePickerRows[s_dmNodePickerRowCount] = row;
+            s_dmNodePickerRenderedIdx[s_dmNodePickerRowCount] = i;
+            s_dmNodePickerRowCount++;
+        }
+    }
+
+    // The picker never did this, so on a list taller than the panel the
+    // highlight simply walked off the bottom edge and out of sight.
+    if (lv_obj_t *selRow = selectedDmNodePickerRowObj()) {
+        lv_obj_scroll_to_view(selRow, LV_ANIM_OFF);
     }
 }
 
@@ -13750,9 +13955,12 @@ static void closeDmNodePicker() {
     s_dmNodeFilterOpen = false;
     s_dmNodeFilterLen = 0;
     s_dmNodeFilter[0] = '\0';
+    s_dmNodePickerRenderStart = 0;
+    s_dmNodePickerRowCount = 0;
     memset(s_dmNodeSnapshotIds, 0, sizeof(s_dmNodeSnapshotIds));
     memset(s_dmNodeFilteredIdx, 0, sizeof(s_dmNodeFilteredIdx));
     memset(s_dmNodePickerRows, 0, sizeof(s_dmNodePickerRows));
+    memset(s_dmNodePickerRenderedIdx, 0, sizeof(s_dmNodePickerRenderedIdx));
 }
 
 // ── DM bubble-style helpers ──────────────────────────────────────────────────
@@ -13995,10 +14203,12 @@ static void refreshDmModal(bool force) {
         lv_obj_set_width(empty, lv_pct(100));
         lv_obj_set_style_text_font(empty, dmMsgFont, 0);
         lv_obj_set_style_text_color(empty, dmPanelTextColor, 0);
-        lv_label_set_text(empty,
-                          (s_dmSelection == 0)
-                              ? "Backspace to return to Main Screen"
-                              : "Select a conversation");
+        // The message panel says what it is waiting for, not which key to
+        // press. The old text on the s_dmSelection == 0 branch taught a
+        // keybinding in the space messages occupy — and named the wrong key on
+        // builds where Esc closes modals (kModalCloseUsesEscape), which is
+        // every Cardputer.
+        lv_label_set_text(empty, "Select a conversation");
     } else {
         const DmLine *renderRows[MAX_DM_LINES] = {};
         int rowCount = 0;
@@ -14135,7 +14345,9 @@ static void refreshDmModal(bool force) {
         } else if (s_dmDeleteFlashMsg[0]) {
             lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
         } else {
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+            lv_label_set_text(s_dmHintLabel, "");   // no static legend here
+#elif defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
@@ -14152,6 +14364,14 @@ static void refreshDmModal(bool force) {
                                   modalCloseKeyLabel());
 #endif
         }
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        // The line exists only while the delete flow is talking. Hiding rather
+        // than blanking it hands the height back to the conversation list,
+        // which is the flex-grow child above.
+        const char *hintTxt = lv_label_get_text(s_dmHintLabel);
+        if (hintTxt && hintTxt[0]) lv_obj_clear_flag(s_dmHintLabel, LV_OBJ_FLAG_HIDDEN);
+        else                       lv_obj_add_flag(s_dmHintLabel, LV_OBJ_FLAG_HIDDEN);
+#endif
     }
 
     refreshDmPanelFocusStyles();
@@ -14313,7 +14533,15 @@ static void openDmModal() {
         hint,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF),
         0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // No static key legend on this build: a 240x135 panel cannot spare a
+    // permanent line for it. The label itself stays, because the delete flow
+    // has nowhere else to prompt — refreshDmModal() unhides it for "Confirm
+    // delete" and the result, then hides it again. A hidden object is skipped
+    // by the flex layout, so it costs no height while there is nothing to say.
+    lv_label_set_text(hint, "");
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
+#elif defined(DEVICE_TDECK)
     lv_label_set_text_fmt(hint,
                           "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
@@ -16836,8 +17064,9 @@ static void pumpKeyboardInput() {
             int delta = 0;
             if (k == KEY_SCROLL_UP)          delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN)     delta = invertScrollNav ? -1 : 1;
-            else if (k == KEY_PAGE_UP || k == KEY_PREV_CHAN) delta = -4;
-            else if (k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) delta = 4;
+            // A row, whatever a row is on this board (kMsgColorCols).
+            else if (k == KEY_PAGE_UP || k == KEY_PREV_CHAN) delta = -kMsgColorCols;
+            else if (k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) delta = kMsgColorCols;
             if (delta != 0) {
                 int next = s_cfgColorSelection + delta;
                 if (next < 0) next = 0;
@@ -17584,12 +17813,8 @@ static void pumpKeyboardInput() {
                         } else {
                             next += (k == KEY_SCROLL_UP) ? -1 : 1;
                         }
-                        if (next < 0) next = 0;
-                        if (next >= s_dmNodeFilteredCount) next = s_dmNodeFilteredCount - 1;
-                        if (next != s_dmNodeSelection) {
-                            s_dmNodeSelection = next;
-                            refreshDmNodePicker(true);
-                        }
+                        // Restyles in place unless the window has to scroll.
+                        dmNodePickerMoveSelection(next);
                     }
                     continue;
                 }
@@ -17913,12 +18138,16 @@ static void pumpKeyboardInput() {
                 openSnrRssiChartModal();
                 continue;
             }
+            // Up reveals content above, down reveals below — scrollListClamped's
+            // documented sign convention, and what the release notes, node info
+            // and legend surfaces already do. These two were swapped, so the
+            // whole feed scrolled backwards under the arrows and under j/k.
             if (k == KEY_SCROLL_UP && s_liveList) {
-                scrollListClamped(s_liveList, -18);
+                scrollListClamped(s_liveList, 18);
                 continue;
             }
             if (k == KEY_SCROLL_DN && s_liveList) {
-                scrollListClamped(s_liveList, 18);
+                scrollListClamped(s_liveList, -18);
                 continue;
             }
             continue;

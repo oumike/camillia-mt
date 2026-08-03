@@ -1,9 +1,9 @@
-### New
-- Web Config's LoRa section now has a **Custom** modem preset with editable Bandwidth (62.5–500 kHz, plus 31.25 kHz on radios that support it), Spreading Factor (SF7–SF12), Coding Rate (4/5–4/8), and Frequency Slot; every node in your mesh must match all four to talk.
-- Frequency Slot `0` derives the frequency from your primary channel's name like a preset does, while any other value pins a specific slot, and the Web Config readout shows the resulting frequency and how many slots your region has at that bandwidth.
-- Custom modem settings import and export directly with `meshtastic --export-config` YAML dumps, under `config.lora` as `usePreset`, `bandwidth`, `spreadFactor`, `codingRate`, and `channelNum`.
-
 ### Changed
-- On the T-Lora Pager TFT's LR1121 variant, 31.25 kHz bandwidth is omitted from the custom settings since that radio cannot produce it.
-- An unnamed primary channel is shown as `Custom` while custom settings are active, and switching back to a preset restores the preset's channel name (a channel you renamed yourself is left alone).
-- The device info screen shows the preset name (or "Custom") and now displays fractional bandwidths like 62.5 and 31.25 kHz correctly instead of rounding them to whole numbers.
+- Composing and replying to messages now uses the full screen with a four-line input area, and long messages wrap instead of scrolling off the side (M5Stack Cardputer).
+- The message color picker now shows the whole palette on two rows without scrolling, and the live-feed and compose legends were shortened to fit the narrow screen (M5Stack Cardputer).
+- The empty direct-message panel now reads "Select a conversation" instead of showing an incorrect key hint.
+
+### Fixed
+- Choosing a recipient in the direct-message node picker is no longer sluggish on a busy mesh, and the highlighted node stays on screen while you scroll through a long list.
+- The live signal feed scrolled the wrong way under the arrow and j/k keys; it now scrolls in the expected direction (all boards).
+- The message color picker no longer clipped off the top and bottom of the screen (M5Stack Cardputer).
