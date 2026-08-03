@@ -3392,66 +3392,48 @@ static constexpr uint8_t  kPreSleepDimPct = 25;    // % of the configured level
 static bool s_preSleepDimmed = false;
 
 #if defined(DEVICE_TDECK) && HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
-// ── GT911 verified wake ──────────────────────────────────────────────────────
-// A GT911 that has been put to sleep only comes back when the host pulses its
-// INT line high, and that pulse is not guaranteed to land — Goodix's own
-// guidance is to confirm over I2C afterwards and retry, falling back to a
-// hardware reset. LovyanGFX's Touch_GT911::wakeup() does neither: it fires the
-// pulse and returns, holding INT high for delay(2), which on a 1 ms FreeRTOS
-// tick can round down to barely the documented 2 ms minimum. The T-Deck has no
-// touch reset line (TOUCH_RST is -1), so a pulse that misses leaves the panel
-// unresponsive until some later sleep/wake cycle happens to work. That is the
-// intermittent dead-touch-after-wake. So: pulse, probe, repeat.
-static constexpr uint32_t kGt911WakeReadyMs = 60;   // worst case before it answers I2C
-static constexpr int      kGt911WakeTries   = 4;
+// One-shot boot diagnostic. LilyGO has shipped T-Deck boards whose GT911 latches
+// a different I2C address (0x14 vs 0x5D) depending on the INT level at power-on,
+// and the panel that comes up at 0x5D does not resume scanning after the
+// 0x8040=0x05 deep-sleep command — with no reset line (TOUCH_RST == -1) there is
+// no way to revive it, so setTouchSleep() no longer issues that command (see
+// below). This probe stays as a quick way to see what a given board actually is:
+// it prints every address that ACKs on the shared
+// touch/keyboard bus, flags the ones that map to known controllers, then tries
+// to read the GT911 product-ID + firmware registers. Runs through Wire because
+// the bus is already shared with the keyboard on the same pins.
+static void probeTouchController() {
+    Serial.println("[touch-probe] scanning shared I2C bus...");
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; ++addr) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() != 0) continue;
+        const char *hint = (addr == 0x5D || addr == 0x14) ? " GT911?"
+                         : (addr == 0x1A)                  ? " CST328?"
+                         : (addr == 0x15)                  ? " CST816?"
+                         : (addr == 0x38)                  ? " FT6x36?"
+                         : (addr == KB_ADDR)               ? " keyboard"
+                                                           : "";
+        Serial.printf("[touch-probe]   ACK 0x%02X%s\n", addr, hint);
+        ++found;
+    }
+    if (!found) Serial.println("[touch-probe]   nothing ACKed");
 
-// Product ID at 0x8140 reads "911" on a running GT911 and NACKs while it is
-// asleep, which is what makes it a liveness probe rather than just a read.
-// Goes through Wire because the keyboard already drives this bus with it —
-// same pins, same port — so nothing new is being shared here.
-static bool gt911IsAwake() {
     Wire.beginTransmission((uint8_t)TOUCH_ADDR);
     Wire.write(0x81);
     Wire.write(0x40);
-    if (Wire.endTransmission() != 0) return false;
-    if (Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)3) != 3) return false;
-    const char id0 = (char)Wire.read();
-    const char id1 = (char)Wire.read();
-    const char id2 = (char)Wire.read();
-    return id0 == '9' && id1 == '1' && id2 == '1';
-}
-
-// Low first so the chip sees a clean edge (sleep() already left the pin driven
-// low, but a retry pass has not), then high well past the 2 ms minimum, then
-// released so the GT911 can drive it again.
-static void gt911WakePulse() {
-    pinMode(TOUCH_INT, OUTPUT);
-    digitalWrite(TOUCH_INT, LOW);
-    delay(5);
-    digitalWrite(TOUCH_INT, HIGH);
-    delay(10);
-    pinMode(TOUCH_INT, INPUT_PULLUP);
-}
-
-// Polled rather than a flat kGt911WakeReadyMs wait: the chip normally answers
-// well inside that window, so a good wake costs a few ms instead of the worst
-// case on every single wake.
-static bool gt911WakeVerified() {
-    for (int attempt = 1; attempt <= kGt911WakeTries; ++attempt) {
-        gt911WakePulse();
-        const uint32_t deadline = millis() + kGt911WakeReadyMs;
-        do {
-            if (gt911IsAwake()) {
-                if (attempt > 1) {
-                    Serial.printf("[touch] GT911 woke on attempt %d\n", attempt);
-                }
-                return true;
-            }
-            delay(5);
-        } while ((int32_t)(millis() - deadline) < 0);
+    if (Wire.endTransmission() == 0
+        && Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)6) == 6) {
+        char id[5] = {0};
+        for (int i = 0; i < 4; ++i) id[i] = (char)Wire.read();
+        const uint8_t fwL = (uint8_t)Wire.read();
+        const uint8_t fwH = (uint8_t)Wire.read();
+        Serial.printf("[touch-probe] GT911 @0x%02X id=\"%s\" fw=0x%02X%02X\n",
+                      (uint8_t)TOUCH_ADDR, id, fwH, fwL);
+    } else {
+        Serial.printf("[touch-probe] no GT911 product-ID at 0x%02X"
+                      " (likely a different controller)\n", (uint8_t)TOUCH_ADDR);
     }
-    Serial.println("[touch] GT911 did not wake; touch is dead until the next sleep/wake");
-    return false;
 }
 #endif
 
@@ -3464,14 +3446,19 @@ static void setTouchSleep(bool asleep) {
 #if HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
     lgfx::ITouch *t = displayDev().touch();
     if (!t) return;
-    if (asleep) {
-        t->sleep();
-        return;
-    }
 #if defined(DEVICE_TDECK)
-    (void)gt911WakeVerified();
+    // Deliberately do NOT issue the GT911 deep-sleep (0x8040=0x05) here. The
+    // T-Deck has no touch reset line, and at least one panel revision (the unit
+    // that latches I2C address 0x5D) never resumes coordinate scanning from an
+    // INT-pulse wake afterwards — it still ACKs I2C, so it looks awake, but
+    // reports no touches. Skipping the command leaves the GT911 in its own
+    // low-power idle scanning, which recovers cleanly and costs only a little
+    // current while the screen is off. Nothing to wake.
+    (void)t;
+    (void)asleep;
 #else
-    t->wakeup();
+    if (asleep) t->sleep();
+    else        t->wakeup();
 #endif
 #else
     LV_UNUSED(asleep);
@@ -23736,6 +23723,9 @@ void setup() {
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
     displayDev().fillScreen(TFT_BLACK);
     s_keyboard.begin();
+#endif
+#if defined(DEVICE_TDECK) && HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
+    probeTouchController();   // one-shot: identify the touch controller at boot
 #endif
     setPagerKeyboardBacklight(true);
     s_otaWorkerUiReady = true;
