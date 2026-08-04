@@ -7,6 +7,7 @@ RELEASE_ENVS=(
     cardputer-cap
     heltec-v4
     heltec-v4-vertical
+    mesh-deck
 )
 
 # Lookups are functions rather than associative arrays so the script runs on
