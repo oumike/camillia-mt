@@ -12,6 +12,11 @@
 // job.
 #include <Arduino.h>
 #include <FS.h>
+// Must come before the HAS_SD_CARD test below: that macro is defined by the
+// board header this pulls in. Without it the test silently evaluates to 0 and
+// an SD board compiles the LittleFS branch — which fails at the first use of
+// SD, and would have picked the wrong backend if it had not.
+#include "config.h"
 
 #if HAS_SD_CARD
 #  include <SD.h>
