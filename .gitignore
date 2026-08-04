@@ -7,6 +7,7 @@
 builds
 resume-claude.sh
 dist/
+logs/
 
 # OTA image signing private key — NEVER commit; back this up securely.
 ota_signing_key.pem

@@ -4,7 +4,7 @@
 #include "base64_util.h"
 #include "utf8_utils.h"
 #include "ignore_list.h"
-#include <SD.h>
+#include "storage.h"
 #include <Preferences.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -517,9 +517,18 @@ bool sdCardMounted() { return sdReady; }
 
 bool sdBegin() {
 #if (SD_CS < 0)
+#if defined(HAS_INTERNAL_FS)
+    // No card slot, but this board keeps the same files in internal flash.
+    // Everything above this layer is written against sdBegin()/sdCardMounted(),
+    // so mounting LittleFS here lights up config export/import, DM history and
+    // the node archive without any of those call sites knowing the difference.
+    sdReady = storageBegin();
+    return sdReady;
+#else
     sdReady = false;
     Serial.println("[sd] disabled");
     return sdReady;
+#endif
 #else
     if (sdReady) return true;
 
@@ -1252,8 +1261,8 @@ bool cfgImportRestoredKeys() { return s_importRestoredKeys; }
 // ── Export to SD ──────────────────────────────────────────────
 bool cfgExport(const RhinoConfig &cfg) {
     if (!ensureSdMounted()) return false;
-    SD.mkdir("/camillia");
-    File f = SD.open(kPath, FILE_WRITE);
+    storageFs().mkdir("/camillia");
+    File f = storageFs().open(kPath, FILE_WRITE);
     if (!f) return false;
     String yaml;
     cfgToYaml(cfg, yaml);
@@ -1266,7 +1275,7 @@ bool cfgExport(const RhinoConfig &cfg) {
 // ── Import from SD ────────────────────────────────────────────
 bool cfgImport(RhinoConfig &cfg) {
     if (!ensureSdMounted()) return false;
-    File f = SD.open(kPath, FILE_READ);
+    File f = storageFs().open(kPath, FILE_READ);
     if (!f) return false;
     String content = f.readString();
     f.close();
@@ -1277,5 +1286,5 @@ bool cfgImport(RhinoConfig &cfg) {
 
 bool cfgSdConfigExists() {
     if (!ensureSdMounted()) return false;
-    return SD.exists(kPath);
+    return storageFs().exists(kPath);
 }

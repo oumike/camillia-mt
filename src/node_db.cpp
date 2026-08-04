@@ -2,7 +2,7 @@
 #include "utf8_utils.h"
 #include "config_io.h"   // sdBegin()
 #include <Preferences.h>
-#include <SD.h>
+#include "storage.h"
 #include <nvs.h>
 #include <time.h>
 
@@ -459,9 +459,9 @@ void nodeArchiveFlush() {
     s_archSdRetryAtMs = 0;
     s_archNoSdLogged = false;
 
-    SD.mkdir(kArchiveDir);
-    const bool needHeader = !SD.exists(kArchivePath);
-    File f = SD.open(kArchivePath, FILE_APPEND);
+    storageFs().mkdir(kArchiveDir);
+    const bool needHeader = !storageFs().exists(kArchivePath);
+    File f = storageFs().open(kArchivePath, FILE_APPEND);
     if (!f) {
         Serial.println("[nodedb] archive: open failed - dropping queued nodes");
         archiveDiscardAll();

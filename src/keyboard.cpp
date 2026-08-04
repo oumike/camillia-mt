@@ -424,7 +424,16 @@ static bool mdScanHalf(Aw9523 &dev, uint8_t rowsOut[5]) {
         delayMicroseconds(50);                  // let the column settle
         uint8_t cols = 0;
         if (!dev.readPort(0, cols)) return false;
-        rowsOut[r] = (uint8_t)(~cols & 0x1F);   // active low -> 1 means pressed
+        const uint8_t downBits = (uint8_t)(~cols & 0x1F);
+        // All five columns of one row reading pressed is not something fingers
+        // do — it is what a glitched I2C read looks like (0x00 back from the
+        // expander). Discarding the whole scan is right rather than reporting
+        // five keys: those become key events, and any key wakes the display,
+        // so a single bad read while the screen is off turns into a spurious
+        // wake. Light-sleep naps stop the I2C clock, which is exactly when
+        // this happens.
+        if (downBits == 0x1F) return false;
+        rowsOut[r] = downBits;
     }
     dev.writePort(1, kMdP1Idle);
     return true;
@@ -471,6 +480,10 @@ static char mdApplyShift(char k) {
     }
 }
 
+bool meshDeckKeyboardHalfPresent(int half) {
+    return half ? s_mdKbRight.present() : s_mdKbLeft.present();
+}
+
 // Returns the first newly-pressed key, or KEY_NONE.
 //
 // Both halves are scanned before any key is emitted. Shift lives in the matrix
@@ -501,6 +514,16 @@ static char mdReadKey() {
             for (uint8_t c = 0; c < 5; c++) {
                 if (!(downEdges & (1u << c))) continue;
                 const char k = half ? kMdKeymapRight[r][c] : kMdKeymapLeft[r][c];
+#if defined(MESH_DECK_TOUCH_TRACE)
+                // Announce presses on positions the map calls empty. Attaky's
+                // published key list does not say where Fn or the symbol key
+                // sit in the matrix, so this is how their coordinates get
+                // established: press the key, read the row/col, fill it in.
+                if (k == KEY_NONE) {
+                    Serial.printf("[meshdeck-kb] unmapped: %s half row %u col %u\n",
+                                  half ? "RIGHT" : "LEFT", r, c);
+                }
+#endif
                 if (k == KEY_NONE || k == MD_KEY_SHIFT) continue;   // shift is a state
                 if (shiftHeld) return mdApplyShift(k);
                 return k;
@@ -522,11 +545,45 @@ void TDeckKeyboard::begin() {
 #if (KB_INT_RIGHT >= 0)
     pinMode(KB_INT_RIGHT, INPUT_PULLUP);
 #endif
+#if defined(MESH_DECK_TOUCH_TRACE)
+    // Report *why* a half is missing: an address that does not ACK at all is a
+    // wiring/seating problem, whereas one that ACKs with the wrong ID means the
+    // chip is there but is not the AW9523 we assume.
+    auto probeHalf = [](uint8_t addr) -> const char * {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() != 0) return "no-ack";
+        Wire.beginTransmission(addr);
+        Wire.write((uint8_t)0x10);                 // CHIPID
+        if (Wire.endTransmission(false) != 0) return "ack-but-no-id-read";
+        if (Wire.requestFrom((int)addr, 1) != 1) return "ack-but-no-id-data";
+        const uint8_t id = (uint8_t)Wire.read();
+        return (id == 0x23) ? "id-ok" : "wrong-id";
+    };
+    const char *whyL = probeHalf(KB_LEFT_I2C_ADDR);
+    const char *whyR = probeHalf(KB_RIGHT_I2C_ADDR);
+#endif
+
     const bool okL = s_mdKbLeft.begin(KB_LEFT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbLeft);
     const bool okR = s_mdKbRight.begin(KB_RIGHT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbRight);
     Serial.printf("[meshdeck-kb] left(0x%02X)=%s right(0x%02X)=%s\n",
                   KB_LEFT_I2C_ADDR, okL ? "ok" : "MISSING",
                   KB_RIGHT_I2C_ADDR, okR ? "ok" : "MISSING");
+#if defined(MESH_DECK_TOUCH_TRACE)
+    Serial.printf("[meshdeck-kb] probe: left=%s right=%s\n", whyL, whyR);
+
+    // Whatever is actually on the bus, so a half sitting at an unexpected
+    // address is obvious rather than inferred.
+    // Bring-up only. A full 112-address sweep is cheap on a healthy bus and
+    // very expensive on a stuck one: every address hits the I2C timeout, and
+    // that much blocking in setup() can trip the watchdog before the UI ever
+    // starts. Not something to run on every boot once the halves are known.
+    Serial.print("[meshdeck-kb] I2C scan:");
+    for (uint8_t a = 0x08; a < 0x78; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+    }
+    Serial.println();
+#endif
     return;
 #endif
 

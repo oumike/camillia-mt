@@ -11,8 +11,8 @@
 #include "utf8_utils.h"
 #include <esp_heap_caps.h>
 #include <string.h>
-#if HAS_SD_CARD
-#include <SD.h>
+#if HAS_FILE_STORAGE
+#include "storage.h"
 #endif
 
 DmMgr DMs;
@@ -101,11 +101,11 @@ bool DmMgr::deleteConversation(uint32_t nodeId) {
     if (idx < 0) return false;
 
     // Remove persisted transcript if present.
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     char path[40];
     snprintf(path, sizeof(path), "%s/%08X.bin", "/camillia/dms", nodeId);
-    if (SD.exists(path)) {
-        SD.remove(path);
+    if (storageFs().exists(path)) {
+        storageFs().remove(path);
     }
 #endif
 
@@ -142,23 +142,23 @@ void DmMgr::clearAll(bool clearPersisted) {
     _count = 0;
     memset(_pendingTx, 0, sizeof(_pendingTx));
 
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!clearPersisted) return;
 
     static const char *kPersistDmDir = "/camillia/dms";
-    File dir = SD.open(kPersistDmDir);
+    File dir = storageFs().open(kPersistDmDir);
     if (dir && dir.isDirectory()) {
         File f = dir.openNextFile();
         while (f) {
             String fp = String(kPersistDmDir) + "/" + f.name();
             f.close();
-            SD.remove(fp.c_str());
+            storageFs().remove(fp.c_str());
             f = dir.openNextFile();
         }
         dir.close();
     }
-    if (SD.exists(kPersistDmDir)) {
-        (void)SD.rmdir(kPersistDmDir);
+    if (storageFs().exists(kPersistDmDir)) {
+        (void)storageFs().rmdir(kPersistDmDir);
     }
 #else
     (void)clearPersisted;
@@ -500,19 +500,19 @@ struct PersistDmLine {
 };
 
 void DmMgr::saveConv(const DmConv *c) {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     (void)c;
     return;
 #else
     if (!c || !c->lines || c->count == 0) return;
 
-    SD.mkdir("/camillia");
-    SD.mkdir(kDmDir);
+    storageFs().mkdir("/camillia");
+    storageFs().mkdir(kDmDir);
 
     char path[40];
     snprintf(path, sizeof(path), "%s/%08X.bin", kDmDir, c->nodeId);
 
-    File f = SD.open(path, FILE_WRITE);
+    File f = storageFs().open(path, FILE_WRITE);
     if (!f) {
         debugLogMessages("[dm] saveConv FAIL: can't open %s\n", path);
         return;
@@ -551,18 +551,18 @@ void DmMgr::saveConv(const DmConv *c) {
 }
 
 void DmMgr::loadAll() {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     return;
 #else
     // Ensure DM storage directories exist before opening to avoid noisy VFS errors.
-    SD.mkdir("/camillia");
-    if (!SD.exists(kDmDir)) {
-        SD.mkdir(kDmDir);
+    storageFs().mkdir("/camillia");
+    if (!storageFs().exists(kDmDir)) {
+        storageFs().mkdir(kDmDir);
         debugLogMessages("[dm] loadAll: created %s\n", kDmDir);
         return;
     }
 
-    File dir = SD.open(kDmDir);
+    File dir = storageFs().open(kDmDir);
     if (!dir || !dir.isDirectory()) {
         debugLogMessages("[dm] loadAll: no %s directory\n", kDmDir);
         return;

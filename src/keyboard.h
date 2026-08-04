@@ -28,6 +28,13 @@
 // plus how long it has been down. Pager builds report this from real press/
 // release events; other keyboard builds infer hold from repeated key sightings,
 // so callers must treat it as a best-effort enhancement.
+#if defined(DEVICE_MESH_DECK)
+// Whether each keyboard half's AW9523 answered at init. Exposed because the
+// boot-time report is printed before the USB bridge settles and is routinely
+// lost — a half that never came up looks exactly like a keymap bug otherwise.
+bool     meshDeckKeyboardHalfPresent(int half);   // 0 = left 0x5A, 1 = right 0x5B
+#endif
+
 char     keyboardHeldKey();
 uint32_t keyboardHeldMs();
 

@@ -10,7 +10,7 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <nvs_flash.h>
-#include <SD.h>
+#include "storage.h"
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
@@ -4036,7 +4036,7 @@ static void handleGetScreenshot() {
         return;
     }
 
-    File f = SD.open(kTmpScreenshotPath, FILE_READ);
+    File f = storageFs().open(kTmpScreenshotPath, FILE_READ);
     if (!f) {
         server.send(500, "text/plain", "Screenshot file unavailable.");
         return;
@@ -4084,7 +4084,7 @@ static void handlePostFactoryReset() {
     Nodes.clearPersisted();
 
     // Delete saved DM conversations from SD card (if supported on this board)
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     {
         const char *nodeFiles[] = {
             "/camillia/nodes.db",
@@ -4094,35 +4094,35 @@ static void handlePostFactoryReset() {
             "/camillia/node_db.json",
         };
         for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
-            if (SD.exists(nodeFiles[i])) {
-                SD.remove(nodeFiles[i]);
+            if (storageFs().exists(nodeFiles[i])) {
+                storageFs().remove(nodeFiles[i]);
             }
         }
 
-        File nodesDir = SD.open("/camillia/nodes");
+        File nodesDir = storageFs().open("/camillia/nodes");
         if (nodesDir && nodesDir.isDirectory()) {
             File f = nodesDir.openNextFile();
             while (f) {
                 String fp = String("/camillia/nodes/") + f.name();
                 f.close();
-                SD.remove(fp.c_str());
+                storageFs().remove(fp.c_str());
                 f = nodesDir.openNextFile();
             }
             nodesDir.close();
-            SD.rmdir("/camillia/nodes");
+            storageFs().rmdir("/camillia/nodes");
         }
 
-        File dir = SD.open("/camillia/dms");
+        File dir = storageFs().open("/camillia/dms");
         if (dir && dir.isDirectory()) {
             File f = dir.openNextFile();
             while (f) {
                 String fp = String("/camillia/dms/") + f.name();
                 f.close();
-                SD.remove(fp.c_str());
+                storageFs().remove(fp.c_str());
                 f = dir.openNextFile();
             }
             dir.close();
-            SD.rmdir("/camillia/dms");
+            storageFs().rmdir("/camillia/dms");
         }
     }
 #endif
@@ -4177,8 +4177,8 @@ static void handleGetNodesCsv() {
     // archivedEpoch followed by the shared columns, so only "archived," is
     // prepended. The file's own header line is skipped.
     const char *archPath = nodeArchiveFilePath();
-    if (archPath && sdBegin() && SD.exists(archPath)) {
-        File af = SD.open(archPath, FILE_READ);
+    if (archPath && sdBegin() && storageFs().exists(archPath)) {
+        File af = storageFs().open(archPath, FILE_READ);
         if (af) {
             bool firstLine = true;
             while (af.available()) {

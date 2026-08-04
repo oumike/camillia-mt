@@ -1,6 +1,7 @@
 #if defined(UI_LVGL_POC)
 
 #include <Arduino.h>
+#include <esp_system.h>   // esp_reset_reason() for the boot marker below
 #include <Wire.h>
 #include "config.h"
 #include "base64_util.h"
@@ -45,7 +46,7 @@
 #include <nvs.h>
 #include <esp_partition.h>
 #include <esp_ota_ops.h>
-#include <SD.h>
+#include "storage.h"
 #include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #include <AudioBoard.h>
@@ -1219,6 +1220,11 @@ static void onChannelSelectorPressed(lv_event_t *e);
 static void drawBootSplash();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
+#if defined(DEVICE_MESH_DECK)
+// Defined further down with the expander code; called from triggerMessageAlert()
+// above it.
+static void meshDeckLedNotify();
+#endif
 static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
 static void rebuildUiForThemeChange(bool reopenCfg);
@@ -1244,7 +1250,7 @@ static void onboardingPickerBack();
 static void onboardingSetStatus(const char *msg);
 
 static void stateMapBootstrapRestoreWifi() {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!s_stateMapBootstrapWifiTouched) return;
 
     switch (s_stateMapBootstrapPrevMode) {
@@ -2237,6 +2243,14 @@ static void triggerMessageAlert(bool bypassRateLimit = false) {
     debugLogMessages("[alert] play mode=%u vol=%u screenAsleep=%d cpu=%luMHz\n",
                      (unsigned)s_cfg.msgAlertSound, (unsigned)s_cfg.volumePct,
                      (int)s_screenAsleep, (unsigned long)getCpuFrequencyMhz());
+
+#if defined(DEVICE_MESH_DECK)
+    // Blink the front LED for any new message, channel or DM. Deliberately
+    // above the sound branches below, each of which returns early when the
+    // alert tone is off — a silent device is exactly when a visual cue matters,
+    // and it is the only notification available while the screen is asleep.
+    meshDeckLedNotify();
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
@@ -3416,6 +3430,7 @@ static bool s_preSleepDimmed = false;
 static Aw9523 s_mdButtons;
 static bool   s_mdButtonsReady = false;
 static uint8_t s_mdBtnPrev = 0xFF;   // active-low; all released
+static char    s_mdPendingKey = KEY_NONE;   // D-pad press awaiting the key pump
 
 // Pulls the FT6636 out of reset. Its RST line is expander 0x59 P13, held low at
 // power-up, so the controller is mute until this runs — which has to be before
@@ -3425,6 +3440,59 @@ static uint8_t s_mdBtnPrev = 0xFF;   // active-low; all released
 // put P13 in GPIO mode, make it an output, drive it low, then release. The
 // 300 ms tail is the FT6636's own boot; a shorter wait and the first probe
 // still finds nothing.
+// Frees an I2C bus left stuck by a reset.
+//
+// A CPU reset can land in the middle of a transfer, and a slave that was mid-
+// byte keeps driving SDA low waiting for clocks that never come. Every later
+// transfer then fails or times out, and nothing recovers it — except removing
+// power, which is why the device needs an off/on after a flash but not after a
+// clean boot. This board scans its keyboard matrix continuously, so a reset
+// landing mid-transaction is likely rather than exotic.
+//
+// The fix is the standard one: clock SCL by hand until the slave finishes the
+// byte it thinks it is sending and lets SDA go, then issue a STOP.
+static void meshDeckI2cBusRecover() {
+    pinMode(I2C_SDA, INPUT_PULLUP);
+    pinMode(I2C_SCL, INPUT_PULLUP);
+    delayMicroseconds(10);
+    const bool sdaLow = (digitalRead(I2C_SDA) == LOW);
+
+    // Clock unconditionally rather than only when SDA reads low. A slave caught
+    // mid-byte releases SDA for every 1 bit it is shifting out, so a high SDA
+    // does not mean the bus is idle — it may simply be between low bits. That
+    // is what the earlier check got wrong: it skipped recovery, and the next
+    // transfer to the chip that was mid-byte timed out (ESP_ERR_TIMEOUT 263).
+    //
+    // Nine clocks with no START are ignored by an idle slave, and the whole
+    // sequence costs about 100 us, so running it every boot is free insurance.
+    pinMode(I2C_SCL, OUTPUT_OPEN_DRAIN);
+    digitalWrite(I2C_SCL, HIGH);
+    for (int i = 0; i < 9; i++) {
+        digitalWrite(I2C_SCL, LOW);
+        delayMicroseconds(5);
+        digitalWrite(I2C_SCL, HIGH);
+        delayMicroseconds(5);
+    }
+
+    // STOP condition: SDA released while SCL is high.
+    pinMode(I2C_SDA, OUTPUT_OPEN_DRAIN);
+    digitalWrite(I2C_SDA, LOW);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SCL, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(I2C_SDA, HIGH);
+    delayMicroseconds(5);
+
+    pinMode(I2C_SDA, INPUT_PULLUP);
+    pinMode(I2C_SCL, INPUT_PULLUP);
+    delayMicroseconds(10);
+    if (sdaLow || digitalRead(I2C_SDA) != HIGH) {
+        Serial.printf("[meshdeck] I2C recovery: sda was %s, now %s\n",
+                      sdaLow ? "LOW" : "high",
+                      digitalRead(I2C_SDA) == HIGH ? "released" : "STILL LOW");
+    }
+}
+
 static void meshDeckReleaseTouchReset() {
     Aw9523 &exp = s_mdButtons;
     if (!exp.begin(TOUCH_RST_EXPANDER, Wire)) {
@@ -3571,13 +3639,107 @@ static void sleepScreen(const char *reason) {
 
 #if defined(DEVICE_MESH_DECK)
 // The front buttons hang off expander 0x59, not GPIO, so they are polled rather
-// than interrupt-driven. P07 is the top-right key; a short press toggles the
-// panel, which is what wadamesh binds it to as well. A long press is the
-// board's hardware power-cut and never reaches firmware.
+// than interrupt-driven. Per the Attaky docs the right shoulder is R1 = P06 and
+// Power = P07. P06 is bound here; P07 is left alone so Power keeps the meaning
+// wadamesh gives it, including the long-press hardware power-cut that never
+// reaches firmware.
 //
-// Deliberately not routed through the normal key path: those keys wake the
-// screen as a side effect, so a press would light the panel straight back up
-// and the button could never turn it off.
+// Deliberately not routed through the normal key path: every key there wakes
+// the screen as a side effect, so a press would light the panel straight back
+// up and the button could never turn it off.
+// ── RGB notification LED ────────────────────────────────────────────────────
+// Cathodes on expander 0x59 P10 (R) / P11 (G) / P12 (B), active low, common
+// anode. Two rules from Attaky's driver notes are load-bearing here:
+//
+//   * share the expander handle the buttons and CTP_RESET already use, and
+//   * read-modify-write — never write a whole port byte.
+//
+// P13 on this same port is the touch controller's reset line. A blanket write
+// would drop it and put the FT6636 back into reset, killing touch until the
+// next boot. So every access below masks itself to P10..P12.
+static constexpr uint8_t kMdLedMask = 0x07;          // P10 | P11 | P12
+
+static void meshDeckLedSet(bool r, bool g, bool b) {
+    if (!s_mdButtonsReady) return;
+
+    static bool configured = false;
+    if (!configured) {
+        uint8_t cfg = 0xFF;
+        if (!s_mdButtons.readReg(Aw9523::REG_CONFIG1, cfg)) return;
+        // Only the three LED bits become outputs; P13..P17 keep their direction.
+        if (!s_mdButtons.writeReg(Aw9523::REG_CONFIG1, (uint8_t)(cfg & ~kMdLedMask))) return;
+        configured = true;
+    }
+
+    uint8_t out = 0xFF;
+    if (!s_mdButtons.readReg(Aw9523::REG_OUTPUT1, out)) return;
+    out |= kMdLedMask;                               // all three off (active low)
+    if (r) out &= (uint8_t)~(1u << 0);
+    if (g) out &= (uint8_t)~(1u << 1);
+    if (b) out &= (uint8_t)~(1u << 2);
+    s_mdButtons.writeReg(Aw9523::REG_OUTPUT1, out);
+}
+
+// Blink pattern state. Non-blocking: an incoming message only arms the counter,
+// and the loop services it — a blocking blink would stall the UI and the radio.
+static uint8_t  s_mdLedPhasesLeft = 0;
+static uint32_t s_mdLedNextMs = 0;
+static uint32_t s_mdLedPatternEndMs = 0;
+static bool     s_mdLedLit = false;
+static constexpr uint8_t  kMdLedBlinks  = 2;         // a double blink
+static constexpr uint32_t kMdLedOnMs    = 60;
+static constexpr uint32_t kMdLedOffMs   = 90;
+// Gap between repeats while anything stays unread. Long enough to read as a
+// periodic reminder rather than a flashing light, short enough to catch the eye
+// from across a room.
+static constexpr uint32_t kMdLedRepeatMs = 4000;
+
+static void meshDeckLedStartPattern() {
+    s_mdLedPhasesLeft = (uint8_t)(kMdLedBlinks * 2);
+    s_mdLedNextMs = 0;                               // fire on the next service
+}
+
+// Called for every new message, channel or DM.
+static void meshDeckLedNotify() { meshDeckLedStartPattern(); }
+
+// True while any channel or DM still has something unread. Read from the state
+// the UI already maintains rather than counting messages separately, so marking
+// a channel read stops the LED by the same action that clears its badge.
+static bool meshDeckHasUnread() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) return true;
+    }
+    return DMs.hasUnread();
+}
+
+static void meshDeckServiceLed() {
+    const uint32_t now = millis();
+
+    if (s_mdLedPhasesLeft == 0) {
+        // Idle: re-arm periodically for as long as something is unread. Reading
+        // the messages clears the flags above and the reminder simply stops.
+        if (meshDeckHasUnread()
+            && (uint32_t)(now - s_mdLedPatternEndMs) >= kMdLedRepeatMs) {
+            meshDeckLedStartPattern();
+        } else {
+            return;
+        }
+    }
+
+    if (s_mdLedNextMs != 0 && (int32_t)(now - s_mdLedNextMs) < 0) return;
+
+    s_mdLedLit = !s_mdLedLit;
+    meshDeckLedSet(false, false, s_mdLedLit);        // blue reads as "message"
+    s_mdLedNextMs = now + (s_mdLedLit ? kMdLedOnMs : kMdLedOffMs);
+    s_mdLedPhasesLeft--;
+
+    if (s_mdLedPhasesLeft == 0) {
+        s_mdLedLit = false;
+        meshDeckLedSet(false, false, false);         // always end dark
+        s_mdLedPatternEndMs = now;                   // start the repeat gap here
+    }
+}
+
 static void meshDeckPollButtons() {
     if (!s_mdButtonsReady) return;
 
@@ -3589,15 +3751,44 @@ static void meshDeckPollButtons() {
     uint8_t p0 = 0xFF;
     if (!s_mdButtons.readPort(0, p0)) return;
 
-    constexpr uint8_t kPowerBit = (1u << 7);          // P07
-    const bool downNow  = !(p0 & kPowerBit);          // active low
-    const bool downPrev = !(s_mdBtnPrev & kPowerBit);
-    s_mdBtnPrev = p0;
-
-    if (downNow && !downPrev) {
-        if (s_screenAsleep) wakeScreen();
-        else                sleepScreen("power button");
+    // Same reasoning as the matrix scan: every button reading pressed at once
+    // is a bad read, not a hand. Acting on it would inject D-pad keys, and any
+    // key wakes the panel — which is how a glitched read while the screen is
+    // off becomes a screen that refuses to stay off.
+    if (p0 == 0x00) {
+        s_mdBtnPrev = 0xFF;   // resync; do not treat the recovery as presses
+        return;
     }
+
+    // Fresh press edges across the whole port, active low.
+    const uint8_t pressed = (uint8_t)(~p0 & (uint8_t)(s_mdBtnPrev));
+    s_mdBtnPrev = p0;
+    if (!pressed) return;
+
+    // BTN_R2 is deliberately unbound. Sleeping and waking the panel is the BOOT
+    // button's job (see pollUserButton) — that one is a real GPIO, so it can
+    // also wake the CPU out of a light-sleep nap, which an I2C expander button
+    // cannot. Having both do the same thing wasted the only other shoulder key.
+
+    // The D-pad folds onto the same navigation tokens the keyboard produces, so
+    // it drives every screen exactly as j/k and the arrows already do — no
+    // per-screen handling needed. These DO go through the key path, so they
+    // wake the display like any other key.
+    char k = KEY_NONE;
+    if      (pressed & (1u << 4)) k = KEY_SCROLL_UP;   // P04 UP
+    else if (pressed & (1u << 0)) k = KEY_SCROLL_DN;   // P00 DOWN
+    else if (pressed & (1u << 1)) k = KEY_PREV_CHAN;   // P01 LEFT
+    else if (pressed & (1u << 3)) k = KEY_NEXT_CHAN;   // P03 RIGHT
+    else if (pressed & (1u << 2)) k = KEY_ENTER;       // P02 SELECT
+    if (k != KEY_NONE) s_mdPendingKey = k;
+}
+
+// Handed to pumpKeyboardInput() so D-pad presses enter the same queue as the
+// matrix keys and need no special-casing anywhere downstream.
+static char meshDeckReadDpadKey() {
+    const char k = s_mdPendingKey;
+    s_mdPendingKey = KEY_NONE;
+    return k;
 }
 #endif
 
@@ -5001,10 +5192,22 @@ static void emojiPickerActivate(int idx) {
         sendQuickEmoji(s_pickerTray[idx], tapbackId);
         return;
     }
-    // Insert mode: append to the open compose box and keep the tray up for more.
+    // Insert mode: append to the open compose box.
     if (s_composeInput) {
         lv_textarea_add_text(s_composeInput, s_pickerTray[idx]);
         updateComposeCharCount();
+    }
+
+    // The symbol tray is one-shot: pick a symbol and you are back in the message
+    // you were typing. Emoji keep the tray up, because picking several in a row
+    // is the common case there — a symbol is usually a single character in the
+    // middle of a sentence, so staying open just means an extra keypress to
+    // dismiss before typing can continue.
+    //
+    // Compared by tray pointer rather than a separate flag so this cannot fall
+    // out of step with whatever openEmojiPicker() selected.
+    if (s_pickerTray == kSymbolTray) {
+        closeEmojiPicker();
     }
 }
 
@@ -5014,7 +5217,7 @@ static void onEmojiCellPressed(lv_event_t *e) {
         s_emojiPickerSelection = idx;
         refreshEmojiPickerSelection();
     }
-    emojiPickerActivate(idx);   // send-and-close, or insert-and-stay by mode
+    emojiPickerActivate(idx);   // sends, or inserts; closes except for the emoji tray
 }
 
 static void onEmojiBackdropPressed(lv_event_t *e) {
@@ -5215,6 +5418,17 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_MESH_DECK)
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
+    // Six lines. The panel is 320x240 and compose is a modal activity, so there
+    // is no reason to leave most of it empty — a 200-character message is about
+    // six lines at this width, meaning the whole thing is visible while typing.
+    // The centre band flex-grows around this, so the box stays vertically
+    // centred and the reply variant simply gets less slack rather than clipping.
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 6) + 6);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 4;
+    const lv_coord_t composeModalRowPad = 2;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     // Compose is full screen here, so the input gets four lines instead of the
@@ -5366,6 +5580,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     modalH = isReply ? 138 : 116;
 #elif defined(DEVICE_TDECK)
     modalH = isReply ? 126 : 104;
+#elif defined(DEVICE_MESH_DECK)
+    // Nearly the full panel height, centred, so it expands both up and down.
+    // The old size came from the shared default (76 px, or 100 for a reply),
+    // which was written for much smaller screens and left most of this one
+    // unused.
+    modalH = lv_disp_get_ver_res(NULL) - 36;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     // Full screen. On a 240x135 panel a boxed modal spent most of its height on
     // margin and border; composing is a modal activity anyway, so it takes the
@@ -5378,8 +5598,8 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_size(s_composeModal, modalW, modalH);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, -12);
-#elif defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);   // full screen: no nudge
+#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+    lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);   // centred, grows both ways
 #else
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 10);
 #endif
@@ -5427,7 +5647,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
     // Both grow to take whatever the title and reply row leave. On Cardputer
@@ -5452,7 +5672,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
     lv_obj_set_style_max_height(s_composeInput, composeInputH, 0);
 #endif
@@ -5466,7 +5686,8 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+    || defined(DEVICE_MESH_DECK)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
     // rather than growing the box into the legend.
@@ -5672,7 +5893,7 @@ static void initCfgActions() {
     // notes are baked into the image, so this needs neither OTA nor WiFi, and
     // the Cardputer (no OTA) still gets to see what its build contains.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RELEASE_NOTES;
-#if HAS_SD_CARD && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if HAS_FILE_STORAGE && !defined(DEVICE_HELTEC_V4_EXPANSION)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
@@ -6083,7 +6304,7 @@ static void applyCfgWifiSelection(int idx) {
     // to be restarted to move between the SoftAP and the station network.
     if (s_webCfgEnabled && webCfgRunning()) {
         webCfgEnd();
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -10911,7 +11132,7 @@ static void nodesPanelWifiRestore() {
 
 static bool nodesMapFsReadyCb(lv_fs_drv_t *drv) {
     LV_UNUSED(drv);
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     return sdBegin();
 #else
     return false;
@@ -10921,7 +11142,7 @@ static bool nodesMapFsReadyCb(lv_fs_drv_t *drv) {
 static void *nodesMapFsOpenCb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode) {
     LV_UNUSED(drv);
     LV_UNUSED(mode);
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!path || !path[0]) return nullptr;
     if (!sdBegin()) return nullptr;
 
@@ -10932,7 +11153,7 @@ static void *nodesMapFsOpenCb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t m
         fullPath += path;
     }
 
-    File *f = new File(SD.open(fullPath.c_str(), FILE_READ));
+    File *f = new File(storageFs().open(fullPath.c_str(), FILE_READ));
     if (!*f) {
         delete f;
         return nullptr;
@@ -11006,9 +11227,9 @@ static void nodesMapInitFsDriver() {
 }
 
 static bool nodesMapEnsureDir(const char *path) {
-#if HAS_SD_CARD
-    if (SD.exists(path)) return true;
-    return SD.mkdir(path);
+#if HAS_FILE_STORAGE
+    if (storageFs().exists(path)) return true;
+    return storageFs().mkdir(path);
 #else
     LV_UNUSED(path);
     return false;
@@ -11074,12 +11295,12 @@ static String nodesStateMapMetaPath(const char *stateCode) {
 }
 
 static bool nodesFileLooksLikePng(const char *path) {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     LV_UNUSED(path);
     return false;
 #else
     if (!path || !path[0]) return false;
-    File f = SD.open(path, FILE_READ);
+    File f = storageFs().open(path, FILE_READ);
     if (!f) return false;
 
     if (f.size() < 64) {
@@ -11100,12 +11321,12 @@ static bool nodesFileLooksLikePng(const char *path) {
 }
 
 static bool nodesStateMapMarkerMatchesVersion() {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     return false;
 #else
-    if (!SD.exists(kStateMapMarkerPath)) return false;
+    if (!storageFs().exists(kStateMapMarkerPath)) return false;
 
-    File marker = SD.open(kStateMapMarkerPath, FILE_READ);
+    File marker = storageFs().open(kStateMapMarkerPath, FILE_READ);
     if (!marker) return false;
     String line = marker.readStringUntil('\n');
     marker.close();
@@ -11115,10 +11336,10 @@ static bool nodesStateMapMarkerMatchesVersion() {
 }
 
 static void nodesResetStateMapCacheIfStale() {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!sdBegin()) return;
-    bool hasCurrentMarker = SD.exists(kStateMapMarkerPath);
-    bool hasLegacyMarker = SD.exists(kStateMapLegacyMarkerPath);
+    bool hasCurrentMarker = storageFs().exists(kStateMapMarkerPath);
+    bool hasLegacyMarker = storageFs().exists(kStateMapLegacyMarkerPath);
     if (!hasCurrentMarker && !hasLegacyMarker) return;
     if (nodesStateMapMarkerMatchesVersion()) return;
 
@@ -11126,14 +11347,14 @@ static void nodesResetStateMapCacheIfStale() {
     sdRmDirRecursive("/camillia/state_maps");
     nodesMapEnsureDir("/camillia");
     nodesMapEnsureDir("/camillia/state_maps");
-    if (SD.exists(kStateMapLegacyMarkerPath)) SD.remove(kStateMapLegacyMarkerPath);
+    if (storageFs().exists(kStateMapLegacyMarkerPath)) storageFs().remove(kStateMapLegacyMarkerPath);
 #endif
 }
 
 static bool nodesWriteStateMapMeta(const char *stateCode,
                                    float latMin, float latMax,
                                    float lonMin, float lonMax) {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     LV_UNUSED(stateCode);
     LV_UNUSED(latMin);
     LV_UNUSED(latMax);
@@ -11142,8 +11363,8 @@ static bool nodesWriteStateMapMeta(const char *stateCode,
     return false;
 #else
     String p = nodesStateMapMetaPath(stateCode);
-    if (SD.exists(p.c_str())) SD.remove(p.c_str());
-    File f = SD.open(p.c_str(), FILE_WRITE);
+    if (storageFs().exists(p.c_str())) storageFs().remove(p.c_str());
+    File f = storageFs().open(p.c_str(), FILE_WRITE);
     if (!f) return false;
     f.printf("%.6f,%.6f,%.6f,%.6f\n", (double)latMin, (double)latMax, (double)lonMin, (double)lonMax);
     f.close();
@@ -11154,7 +11375,7 @@ static bool nodesWriteStateMapMeta(const char *stateCode,
 static bool nodesReadStateMapMeta(const char *stateCode,
                                   float &latMin, float &latMax,
                                   float &lonMin, float &lonMax) {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     LV_UNUSED(stateCode);
     LV_UNUSED(latMin);
     LV_UNUSED(latMax);
@@ -11163,7 +11384,7 @@ static bool nodesReadStateMapMeta(const char *stateCode,
     return false;
 #else
     String p = nodesStateMapMetaPath(stateCode);
-    File f = SD.open(p.c_str(), FILE_READ);
+    File f = storageFs().open(p.c_str(), FILE_READ);
     if (!f) return false;
     String line = f.readStringUntil('\n');
     f.close();
@@ -11194,14 +11415,14 @@ static const UsStateMapSpec *nodesStateForCoords(float lat, float lon) {
 }
 
 static bool nodesStateMapCacheComplete() {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     return false;
 #else
     if (!sdBegin()) return false;
     if (!nodesStateMapMarkerMatchesVersion()) return false;
     for (int i = 0; i < kUsStateMapCount; i++) {
         String p = nodesStateMapPath(kUsStateMaps[i].code);
-        if (!SD.exists(p.c_str())) return false;
+        if (!storageFs().exists(p.c_str())) return false;
         if (!nodesFileLooksLikePng(p.c_str())) return false;
     }
     return true;
@@ -11232,7 +11453,7 @@ static void bootstrapStateMapsIfMissing() {
         return;
     }
 
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     return;
 #else
     if (!sdBegin()) return;
@@ -11328,11 +11549,11 @@ static void bootstrapStateMapsIfMissing() {
 
     while (s_stateMapBootstrapNextIndex < kUsStateMapCount) {
         String p = nodesStateMapPath(kUsStateMaps[s_stateMapBootstrapNextIndex].code);
-        if (!SD.exists(p.c_str())) break;
+        if (!storageFs().exists(p.c_str())) break;
         if (!nodesFileLooksLikePng(p.c_str())) {
-            SD.remove(p.c_str());
+            storageFs().remove(p.c_str());
             String meta = nodesStateMapMetaPath(kUsStateMaps[s_stateMapBootstrapNextIndex].code);
-            if (SD.exists(meta.c_str())) SD.remove(meta.c_str());
+            if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
             break;
         }
         s_stateMapBootstrapNextIndex++;
@@ -11344,8 +11565,8 @@ static void bootstrapStateMapsIfMissing() {
                       s_stateMapBootstrapFailed);
 
         if (s_stateMapBootstrapFailed == 0) {
-            if (SD.exists(kStateMapMarkerPath)) SD.remove(kStateMapMarkerPath);
-            File marker = SD.open(kStateMapMarkerPath, FILE_WRITE);
+            if (storageFs().exists(kStateMapMarkerPath)) storageFs().remove(kStateMapMarkerPath);
+            File marker = storageFs().open(kStateMapMarkerPath, FILE_WRITE);
             if (marker) {
                 marker.print(kStateMapCacheVersion);
                 marker.close();
@@ -11390,7 +11611,7 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
     lv_obj_set_size(s_nodesMapTileLayer, w, h);
     lv_obj_add_flag(s_nodesMapImage, LV_OBJ_FLAG_HIDDEN);
 
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     LV_UNUSED(lat);
     LV_UNUSED(lon);
     return 0;
@@ -11400,7 +11621,7 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
     if (!sdBegin()) return 0;
 
     String diskPath = nodesStateMapPath(state->code);
-    if (!SD.exists(diskPath.c_str())) {
+    if (!storageFs().exists(diskPath.c_str())) {
         uint32_t now = millis();
         bool sameState = (strncmp(s_stateMapOnDemandLastCode, state->code, 2) == 0);
         bool retryAllowed = !sameState || (uint32_t)(now - s_stateMapOnDemandLastTryMs) >= 5000UL;
@@ -11438,9 +11659,9 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
     }
 
     if (!nodesFileLooksLikePng(diskPath.c_str())) {
-        SD.remove(diskPath.c_str());
+        storageFs().remove(diskPath.c_str());
         String meta = nodesStateMapMetaPath(state->code);
-        if (SD.exists(meta.c_str())) SD.remove(meta.c_str());
+        if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
         s_stateMapCacheReady = false;
         s_stateMapBootstrapDone = false;
         Serial.printf("[map] invalid PNG removed: %s\n", diskPath.c_str());
@@ -11457,9 +11678,9 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
         srcW = header.w;
         srcH = header.h;
     } else {
-        SD.remove(diskPath.c_str());
+        storageFs().remove(diskPath.c_str());
         String meta = nodesStateMapMetaPath(state->code);
-        if (SD.exists(meta.c_str())) SD.remove(meta.c_str());
+        if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
         s_stateMapCacheReady = false;
         s_stateMapBootstrapDone = false;
         Serial.printf("[map] decode failed, removed: %s\n", diskPath.c_str());
@@ -11566,16 +11787,16 @@ static void refreshNodesMap(const NodeEntry *node) {
 }
 
 static void sdRmDirRecursive(const char *path) {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!path || !path[0]) return;
-    File dir = SD.open(path);
+    File dir = storageFs().open(path);
     if (!dir) {
-        SD.remove(path);
+        storageFs().remove(path);
         return;
     }
     if (!dir.isDirectory()) {
         dir.close();
-        SD.remove(path);
+        storageFs().remove(path);
         return;
     }
 
@@ -11592,19 +11813,19 @@ static void sdRmDirRecursive(const char *path) {
         if (childIsDir) {
             sdRmDirRecursive(childPath.c_str());
         } else {
-            SD.remove(childPath.c_str());
+            storageFs().remove(childPath.c_str());
         }
     }
 
     dir.close();
-    SD.rmdir(path);
+    storageFs().rmdir(path);
 #else
     LV_UNUSED(path);
 #endif
 }
 
 static void clearNodeDbOnSd() {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!sdBegin()) return;
 
     const char *nodeFiles[] = {
@@ -11615,12 +11836,12 @@ static void clearNodeDbOnSd() {
         "/camillia/node_db.json",
     };
     for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
-        if (SD.exists(nodeFiles[i])) {
-            SD.remove(nodeFiles[i]);
+        if (storageFs().exists(nodeFiles[i])) {
+            storageFs().remove(nodeFiles[i]);
         }
     }
 
-    if (SD.exists("/camillia/nodes")) {
+    if (storageFs().exists("/camillia/nodes")) {
         sdRmDirRecursive("/camillia/nodes");
     }
 #endif
@@ -15598,7 +15819,7 @@ static void performCfgAction(int actionId) {
                 persistWebCfgEnabled();
                 webCfgSetForceAp(wifiForceApMode());
 
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -17013,6 +17234,11 @@ static void pumpKeyboardInput() {
         char k = s_keyboard.readKey();
         bool fromTrackball = false;
         const char *src = "key";
+#if defined(DEVICE_MESH_DECK)
+        // D-pad presses arrive here as ordinary keys, so screen wake, the j/k
+        // remap and every per-screen handler treat them identically.
+        if (k == KEY_NONE) k = meshDeckReadDpadKey();
+#endif
         if (k == KEY_NONE) {
             k = s_keyboard.readTrackball();
             src = "track";
@@ -17081,13 +17307,34 @@ static void pumpKeyboardInput() {
         k = remapJkUiKey(k, !typingContext);
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
     // Cardputer parity rule: physical Up/Down arrows must behave exactly
     // like j/k anywhere j/k are used for navigation, so all downstream
     // navFromJk direction branches apply the same way.
+    //
+    // The Mesh Deck needs it for the same reason. Its D-pad arrives as
+    // KEY_SCROLL_UP/DN from the expander poller, and without this the
+    // direction branches that ask "did this come from j/k?" step the opposite
+    // way for the D-pad than for j and k — most visibly inside the channel
+    // dropdown, where the two inputs would scroll against each other.
     if (!typingContext && (rawKey == KEY_SCROLL_UP || rawKey == KEY_SCROLL_DN)) {
         navFromJk = true;
     }
+#endif
+
+#if defined(DEVICE_MESH_DECK) && defined(MESH_DECK_TOUCH_TRACE)
+        // Same discipline as the touch trace: log the key at the boundary
+        // rather than reasoning about which handler should have claimed it.
+        // Prints the code actually seen after every remap, so a key that never
+        // arrives looks different from one that arrives and is ignored.
+        if (k != KEY_NONE) {
+            Serial.printf("[key-trace] k=0x%02X '%c' jk=%d dropdown=%d compose=%d\n",
+                          (unsigned)(uint8_t)k,
+                          (k >= 0x20 && k < 0x7F) ? k : '.',
+                          navFromJk ? 1 : 0,
+                          isChannelDropdownVisible() ? 1 : 0,
+                          s_composeModal ? 1 : 0);
+        }
 #endif
 
         const bool invertScrollNav = kPagerWheelChatNav && !navFromJk;
@@ -17912,6 +18159,16 @@ static void pumpKeyboardInput() {
                 closeEmojiPicker();
                 continue;
             }
+#if defined(DEVICE_MESH_DECK)
+            // The symbol key toggles: pressing it again dismisses the tray it
+            // opened. Without this it is swallowed by the catch-all below, so
+            // the only way out is the close key — an odd asymmetry for a key
+            // whose whole job is showing and hiding this panel.
+            if (k == KEY_SYMBOL) {
+                closeEmojiPicker();
+                continue;
+            }
+#endif
             if (k == KEY_ENTER || k == KEY_ROLLER) {
                 emojiPickerActivate(s_emojiPickerSelection);
                 continue;
@@ -18774,6 +19031,12 @@ static void pumpKeyboardInput() {
             case KEY_ESCAPE:
                 closeComposePrompt();
                 break;
+            case KEY_SYMBOL:
+                // Mesh Deck's symbol key, main-screen compose. This is the
+                // compose the space bar opens from the chat view — the DM and
+                // Nodes screens each have their own copy of this switch.
+                openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+                break;
             case KEY_BACKSPACE:
             case KEY_BACKSPACE_HOLD:
                 if (s_composeInput) {
@@ -18971,7 +19234,7 @@ static bool pngWriteChunk(File &f, const char type[4], const uint8_t *data, uint
 }
 
 static bool captureWebScreenshotPng(const char *outPath) {
-#if !HAS_SD_CARD
+#if !HAS_FILE_STORAGE
     (void)outPath;
     return false;
 #else
@@ -19026,8 +19289,8 @@ static bool captureWebScreenshotPng(const char *outPath) {
     }
 #endif
 
-    if (SD.exists(outPath)) SD.remove(outPath);
-    File f = SD.open(outPath, FILE_WRITE);
+    if (storageFs().exists(outPath)) storageFs().remove(outPath);
+    File f = storageFs().open(outPath, FILE_WRITE);
     if (!f) {
 #if defined(DEVICE_TDECK)
         free(frame565);
@@ -19140,8 +19403,8 @@ static bool captureWebScreenshotPng(const char *outPath) {
     if (resumeRx) Radio.setRxPaused(false);
 
     f.close();
-    if (!ok && SD.exists(outPath)) {
-        SD.remove(outPath);
+    if (!ok && storageFs().exists(outPath)) {
+        storageFs().remove(outPath);
     }
 
 #if defined(DEVICE_TDECK)
@@ -19159,7 +19422,7 @@ static void startWebConfigAuto() {
     }
     if (webCfgRunning()) return;
     webCfgSetForceAp(wifiForceApMode());
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -19483,12 +19746,110 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
     lv_display_flush_ready(disp);
 }
 
+#if defined(DEVICE_MESH_DECK)
+// Reads the FT6636 over Arduino Wire instead of going through LovyanGFX.
+//
+// LovyanGFX drives its own I2C on port 0, and s_keyboard.begin() calls
+// Wire.begin()/setClock() on that same port after lcd.init() — so the panel's
+// touch handle is left talking to a bus another driver has re-initialised, and
+// every read comes back empty. The controller itself is fine: it ACKs at 0x38
+// on the Wire bus the expanders and keyboard use all session. So use that bus.
+//
+// Register layout is the FT6x36 standard: one 7-byte burst from 0x02 gives the
+// touch count and the first point's 12-bit X and Y.
+static bool meshDeckReadTouch(int32_t *outX, int32_t *outY) {
+    Wire.beginTransmission((uint8_t)TOUCH_ADDR);
+    Wire.write((uint8_t)0x02);                      // TD_STATUS
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)TOUCH_ADDR, 7) != 7) return false;
+
+    uint8_t b[7];
+    for (int i = 0; i < 7; i++) b[i] = (uint8_t)Wire.read();
+
+    const uint8_t points = (uint8_t)(b[0] & 0x0F);
+    if (points == 0 || points > 2) return false;    // 0xFF etc. = nothing valid
+
+    const uint16_t rawX = (uint16_t)(((b[1] & 0x0F) << 8) | b[2]);
+    const uint16_t rawY = (uint16_t)(((b[3] & 0x0F) << 8) | b[4]);
+
+    // Raw coordinates are in the panel's native portrait frame (240x320). The
+    // panel is mounted 180 degrees out, so the UI runs at rotation 3 — the same
+    // +2 correction Attaky documents for the display applies to touch.
+    const int32_t nativeW = TFT_PANEL_WIDTH;        // 240
+    const int32_t nativeH = TFT_PANEL_HEIGHT;       // 320
+    int32_t x = rawX, y = rawY;
+    if (x >= nativeW) x = nativeW - 1;
+    if (y >= nativeH) y = nativeH - 1;
+
+    // rotation 3 (landscape, 180 from rotation 1): screen x runs along native
+    // y reversed, screen y along native x.
+    *outX = (nativeH - 1) - y;
+    *outY = x;
+    return true;
+}
+#endif
+
 static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     LV_UNUSED(indev);
 #if TOUCH_POLL_ENABLED
     int32_t tx = 0;
     int32_t ty = 0;
-    if (displayDev().getTouch(&tx, &ty)) {
+#if defined(DEVICE_MESH_DECK)
+    const bool touched = meshDeckReadTouch(&tx, &ty);
+#else
+    const bool touched = displayDev().getTouch(&tx, &ty);
+#endif
+
+#if defined(DEVICE_MESH_DECK) && defined(MESH_DECK_TOUCH_TRACE)
+    // Instrumentation at the component boundary, per Attaky's touch bring-up
+    // guide: this one line splits a dead-touch fault in half. If it never
+    // prints, the read callback is not running at all and the fault is above
+    // the driver — LVGL not pumping its input subsystem, or the indev never
+    // registered. If it prints with touched=0 forever, the read path is alive
+    // and the fault is the controller or its transform.
+    //
+    // Rate-limited, and it must log every call rather than only on a touch —
+    // "never prints" is precisely the signal we are looking for.
+    {
+        static uint32_t lastTraceMs = 0;
+        static uint32_t calls = 0;
+        calls++;
+        const uint32_t nowMs = millis();
+        if ((uint32_t)(nowMs - lastTraceMs) >= 1000UL) {
+            lastTraceMs = nowMs;
+            // Probe the controller here too. The one-shot line at boot is
+            // printed before the USB bridge settles and gets lost, and with the
+            // read path proven alive this is the remaining question: does the
+            // FT6636 answer at all?
+            Wire.beginTransmission((uint8_t)TOUCH_ADDR);
+            const bool acked = (Wire.endTransmission() == 0);
+            Serial.printf("[touch-trace] read_cb calls=%lu touched=%d screen=(%ld,%ld) 0x%02X=%s"
+                          "  kb: L(0x5A)=%s R(0x5B)=%s\n",
+                          (unsigned long)calls, touched ? 1 : 0,
+                          (long)tx, (long)ty, (unsigned)TOUCH_ADDR,
+                          acked ? "ACK" : "no-ack",
+                          meshDeckKeyboardHalfPresent(0) ? "ok" : "MISSING",
+                          meshDeckKeyboardHalfPresent(1) ? "ok" : "MISSING");
+        }
+    }
+#endif
+
+#if defined(DEVICE_MESH_DECK) && defined(MESH_DECK_TOUCH_TRACE)
+    if (touched) {
+        // Unthrottled-per-tap: touch known corners to verify the rotation
+        // mapping without waiting for the 1 Hz trace.
+        static uint32_t lastHitMs = 0;
+        const uint32_t hitMs = millis();
+        if ((uint32_t)(hitMs - lastHitMs) >= 150UL) {
+            lastHitMs = hitMs;
+            Serial.printf("[touch-hit] screen=(%ld,%ld) of %dx%d\n",
+                          (long)tx, (long)ty,
+                          (int)lv_disp_get_hor_res(NULL), (int)lv_disp_get_ver_res(NULL));
+        }
+    }
+#endif
+
+    if (touched) {
         if (s_screenAsleep) {
             // Normally unreachable — loop() stops calling lv_timer_handler()
             // while the screen is off — but modal helpers do call it directly,
@@ -19866,12 +20227,13 @@ static void refreshChannelGlow(bool force) {
 
         bool active = (i == s_activeChannel);
         bool animate = s_channelNeedsAttention[i] && !active;
-    #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
-        bool dropdownCursor = (isChannelDropdownVisible()
-                       && s_cardputerDropdownSelection == i);
-    #else
-        bool dropdownCursor = false;
-    #endif
+        // Any board with the overlay dropdown needs the cursor drawn — without
+        // it the list opens with nothing highlighted, so up/down move an
+        // invisible selection and the list looks inert even though it isn't.
+        // The Pager has no dropdown, so there is no cursor to show there.
+        bool dropdownCursor = UI_CHANNEL_LIST_DROPDOWN
+                              && isChannelDropdownVisible()
+                              && s_cardputerDropdownSelection == i;
         anyUnread = anyUnread || animate;
         lv_obj_t *lbl = s_channelLabels[i];
         if (lbl) {
@@ -20110,13 +20472,13 @@ static bool isChannelDropdownVisible() {
 }
 
 static void refreshChannelSelectorLabel() {
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CHANNEL_LIST_DROPDOWN
     return;
 #endif
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
         && s_cardputerDropdownSelection < MESH_CHANNELS) {
@@ -20130,7 +20492,11 @@ static void refreshChannelSelectorLabel() {
     }
 #endif
 
-#if defined(DEVICE_TDECK)
+// No caret on these: the selector reads as a plain channel name, which is the
+// T-Deck presentation. It also buys the label the 14 px the caret reserved,
+// which matters more here than on the T-Deck — same 320x240 pixels, smaller
+// glass, so channel names have less room to be legible in.
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = useCompactVerticalHeltecSelector();
@@ -20237,7 +20603,7 @@ static void refreshChannelSelectorLabel() {
 }
 
 static void setChannelDropdownVisible(bool visible) {
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CHANNEL_LIST_DROPDOWN
     LV_UNUSED(visible);
     return;
 #endif
@@ -20246,7 +20612,7 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         lv_obj_clear_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_channelList);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
         }
@@ -20257,7 +20623,7 @@ static void setChannelDropdownVisible(bool visible) {
 #endif
     } else {
         lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
         s_cardputerDropdownSelection = -1;
 #endif
     }
@@ -20267,7 +20633,7 @@ static void setChannelDropdownVisible(bool visible) {
 }
 
 static void onChannelSelectorPressed(lv_event_t *e) {
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if !UI_CHANNEL_LIST_DROPDOWN
     LV_UNUSED(e);
     return;
 #endif
@@ -22798,7 +23164,11 @@ static void buildUi() {
     const int selectorBtnOffsetX = headerPadX;
 #endif
 
-#if defined(DEVICE_TDECK)
+// No caret on these: the selector reads as a plain channel name, which is the
+// T-Deck presentation. It also buys the label the 14 px the caret reserved,
+// which matters more here than on the T-Deck — same 320x240 pixels, smaller
+// glass, so channel names have less room to be legible in.
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = compactHeltecSelector;
@@ -22815,7 +23185,7 @@ static void buildUi() {
 #endif
 
     const lv_font_t *selectorTextFont = headerTextFont;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
@@ -22994,14 +23364,27 @@ static void buildUi() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
     {
+#if defined(DEVICE_MESH_DECK)
+        // Match the selector button exactly, so the list reads as that button
+        // opening downward rather than as a separate panel that happens to be
+        // nearby. Derived from selectorBtnW rather than recomputed, so the two
+        // cannot drift apart.
+        const int dropdownW = selectorBtnW;
+#else
         const int dropdownW = min(max(chatW / 2, 120), 260);
+#endif
         const int maxDropdownH = max(44, chatH - 8);
         const int desiredDropdownH = (kMainScreenChannelBtnHeight + 4) * MESH_CHANNELS + 8;
         const int dropdownH = min(maxDropdownH, desiredDropdownH);
 
         s_channelList = lv_obj_create(screen);
         lv_obj_set_size(s_channelList, dropdownW, dropdownH);
+#if defined(DEVICE_MESH_DECK)
+        // Same left edge as the button above it, for the same reason.
+        lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + selectorBtnOffsetX, chatY + 4);
+#else
         lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + 4, chatY + 4);
+#endif
         // v9 made lv_obj_flag_t a real enum, so an OR of two flags is an int in
         // C++ and needs the cast back.
         lv_obj_add_flag(s_channelList,
@@ -23103,7 +23486,11 @@ static void buildUi() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
     const lv_font_t *channelNavFont = kMainScreenFont;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_MESH_DECK)
+    // One step up from the small-screen default. The built-in Montserrat set
+    // jumps 10 -> 12, so this is the next size that exists.
+    channelNavFont = &lv_font_montserrat_12;
+#elif defined(DEVICE_TDECK)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
@@ -23804,6 +24191,13 @@ static void serviceSerialCommands() {
 void setup() {
     Serial.begin(115200);
     delay(120);
+    // First thing out of the door, before any peripheral is touched. If this
+    // line is missing while the panel shows something, the hang is below the
+    // application entirely — bootloader or early init — and no amount of
+    // driver-level work will move it. If it prints and the boot then stops,
+    // the next line to appear says where.
+    Serial.printf("\n[boot] setup() entered, reset reason=%d\n",
+                  (int)esp_reset_reason());
 
     // Match baseline firmware board-power bring-up so keyboard/touch I2C devices are powered.
 #if (BOARD_POWERON >= 0)
@@ -23873,6 +24267,9 @@ void setup() {
     // I2C up here because nothing else has yet (s_keyboard.begin() is below).
     // The 300 ms is the controller's own start-up time; probing sooner finds
     // nothing and touch stays dead for the session.
+    // Before the first transfer of the session: a warm reset may have left the
+    // bus wedged, and everything below depends on it.
+    meshDeckI2cBusRecover();
     Wire.begin(I2C_SDA, I2C_SCL, 100000UL);
     meshDeckReleaseTouchReset();
 #endif
@@ -24260,6 +24657,7 @@ void loop() {
     // Front buttons live on an I2C expander, so they need polling. Kept out of
     // the key path on purpose — see meshDeckPollButtons().
     meshDeckPollButtons();
+    meshDeckServiceLed();
 #endif
 
     serviceCpuScaling();

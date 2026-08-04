@@ -9,7 +9,7 @@
 #include "utf8_utils.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
-#include <SD.h>
+#include "storage.h"
 #include <time.h>
 #include <stdlib.h>
 
@@ -97,16 +97,16 @@ void ChannelMgr::clearAllMessages(bool clearPersisted) {
         clearChannel(i);
     }
 
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!clearPersisted) return;
 
     for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
         char path[48];
         channelPersistPath(chanIdx, path, sizeof(path));
-        if (SD.exists(path)) SD.remove(path);
+        if (storageFs().exists(path)) storageFs().remove(path);
     }
-    if (SD.exists(kChanPersistDir)) {
-        (void)SD.rmdir(kChanPersistDir);
+    if (storageFs().exists(kChanPersistDir)) {
+        (void)storageFs().rmdir(kChanPersistDir);
     }
     _persistDirReady = false;
 #else
@@ -289,7 +289,7 @@ void ChannelMgr::_wordWrap(int chanIdx, const char *prefix, const char *text,
 }
 
 void ChannelMgr::beginPersistence() {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     _persistReady = true;
 #else
     _persistReady = false;
@@ -297,11 +297,11 @@ void ChannelMgr::beginPersistence() {
 }
 
 void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!ch.lines) return;
     if (!_persistDirReady) {
-        (void)SD.mkdir("/camillia");
-        (void)SD.mkdir(kChanPersistDir);
+        (void)storageFs().mkdir("/camillia");
+        (void)storageFs().mkdir(kChanPersistDir);
         _persistDirReady = true;
     }
 
@@ -309,8 +309,8 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
     channelPersistPath(chanIdx, path, sizeof(path));
 
     // Rewrite bounded snapshot to keep storage and restore behavior predictable.
-    SD.remove(path);
-    File f = SD.open(path, FILE_WRITE);
+    storageFs().remove(path);
+    File f = storageFs().open(path, FILE_WRITE);
     if (!f) return;
 
     int stored = min(ch.count, MAX_MSG_LINES);
@@ -347,7 +347,7 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
 }
 
 void ChannelMgr::loadPersisted() {
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
     if (!_persistReady) return;
 
     _persistLoading = true;
@@ -355,11 +355,11 @@ void ChannelMgr::loadPersisted() {
         if (!_chans[chanIdx].lines) continue;
         char path[48];
         channelPersistPath(chanIdx, path, sizeof(path));
-        if (!SD.exists(path)) continue;
+        if (!storageFs().exists(path)) continue;
 
         int totalLines = 0;
         {
-            File countFile = SD.open(path, FILE_READ);
+            File countFile = storageFs().open(path, FILE_READ);
             if (!countFile) continue;
             while (countFile.available()) {
                 int c = countFile.read();
@@ -369,7 +369,7 @@ void ChannelMgr::loadPersisted() {
         }
         int skipLines = max(0, totalLines - kPersistMaxLines);
 
-        File f = SD.open(path, FILE_READ);
+        File f = storageFs().open(path, FILE_READ);
         if (!f) continue;
 
         char line[192];
