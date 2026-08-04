@@ -15,7 +15,12 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 // Default to T-Deck when no device is specified (useful for IDE code analysis).
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+//
+// Every DEVICE_* target must be listed here. A target missing from this list
+// still gets DEVICE_TDECK forced on underneath it, and because board.h tests
+// DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
+// map — the real target's header is never included at all.
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -75,6 +80,10 @@
 #define MESH_HW_MODEL_T_LORA_PAGER  103
 #define MESH_HW_MODEL_HELTEC_V4     110
 #define MESH_HW_MODEL_M5_CARDPUTER  112
+// The Mesh Deck has no HardwareModel of its own — it is not in the upstream
+// enum. PRIVATE_HW is the value Meshtastic reserves for exactly this case, so
+// the node advertises "custom hardware" instead of impersonating another board.
+#define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK
@@ -84,6 +93,8 @@
 #define MY_HW_MODEL MESH_HW_MODEL_M5_CARDPUTER
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
+#elif defined(DEVICE_MESH_DECK)
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #else
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK
 #endif

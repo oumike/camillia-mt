@@ -11,6 +11,7 @@ CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 TLORA_ENV_NAME="tlora-pager-tft"
+ATTAKY_ENV_NAME="mesh-deck"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 FULLCLEAN=false
@@ -62,6 +63,10 @@ prompt_for_device() {
 		options+=("$HELTEC_VERTICAL_ENV_NAME")
 		labels+=("Heltec V4 Expansion Kit (Vertical UI)")
 	fi
+	if has_env "$ATTAKY_ENV_NAME"; then
+		options+=("$ATTAKY_ENV_NAME")
+		labels+=("Attaky Mesh Deck")
+	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
 		echo "No supported device environments found in platformio.ini"
@@ -91,13 +96,14 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--erase|-E] [--fullclean|-F]"
+	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|-M] [--erase|-E] [--fullclean|-F]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME)"
 	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
+	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "  --fullclean, -F  Run PlatformIO fullclean before upload"
@@ -153,6 +159,9 @@ for arg in "$@"; do
 			;;
 		--heltec-vertical|--vertical|-V)
 			select_env_or_exit "$HELTEC_VERTICAL_ENV_NAME" "Environment '$HELTEC_VERTICAL_ENV_NAME' not found in platformio.ini"
+			;;
+		--mesh-deck|--attaky|-M)
+			select_env_or_exit "$ATTAKY_ENV_NAME" "Environment '$ATTAKY_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage

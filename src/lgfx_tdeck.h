@@ -97,6 +97,10 @@ class LGFX_TDeck : public lgfx::LGFX_Device {
 #if HAS_TOUCH
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     Touch_Heltec_CHSC6X _touch;
+#elif defined(DEVICE_MESH_DECK)
+    // FT6636 is an FT6x36-series part, which LovyanGFX drives with its
+    // FT5x06 driver — the register interface is shared across the family.
+    lgfx::Touch_FT5x06  _touch;
 #else
     lgfx::Touch_GT911   _touch;
 #endif

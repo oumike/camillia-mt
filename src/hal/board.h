@@ -22,6 +22,7 @@
 //   DEVICE_TLORA_PAGER_TFT      LilyGO T-LoRa Pager TFT
 //   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer + LoRa-1262 Cap
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
+//   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -32,9 +33,12 @@
 #  include "hw_cardputer.h"
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #  include "hw_heltec_v4.h"
+#elif defined(DEVICE_MESH_DECK)
+#  include "hw_mesh_deck.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, \
-DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION"
+DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
+DEVICE_MESH_DECK"
 #endif
 
 // ── TFT default rotation ──────────────────────────────────────────────────────
@@ -43,10 +47,29 @@ DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION"
 #  define TFT_ROTATION_DEFAULT 3
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #  define TFT_ROTATION_DEFAULT 3
+#elif defined(DEVICE_MESH_DECK)
+// The ST7789 is mounted rotated 180° from the usual landscape orientation, so
+// the default (1) comes out upside down on this frame.
+#  define TFT_ROTATION_DEFAULT 3
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
 #else
 #  define TFT_ROTATION_DEFAULT 1
+#endif
+
+// ── Channel list presentation ────────────────────────────────────────────────
+// Two layouts exist for the main screen. Boards with this set render channels
+// as an overlay dropdown that appears on demand, leaving the full width to the
+// chat; boards without it keep a permanently anchored channel list beside the
+// chat, which suits the Pager's wide 480px panel but wastes a squarer one.
+//
+// This used to be spelled out longhand as the same three-device condition at a
+// dozen call sites, which made adding a board a dozen chances to miss one.
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#  define UI_CHANNEL_LIST_DROPDOWN 1
+#else
+#  define UI_CHANNEL_LIST_DROPDOWN 0
 #endif
 
 // ── Panel offset defaults ─────────────────────────────────────────────────────

@@ -19,6 +19,10 @@
 #define KEY_ROLLER      0x86   // trackball click
 #define KEY_BACKSPACE_HOLD 0x87  // long-hold BACKSPACE (non-touch panel close)
 #define KEY_FN_ENTER    0x88   // Fn+Enter (Cardputer compose shortcut)
+// Mesh Deck symbol key. Its 48-key matrix reaches letters, digits, comma and
+// period and nothing else, so this opens the on-screen symbol tray rather than
+// typing a character of its own.
+#define KEY_SYMBOL      0x89
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

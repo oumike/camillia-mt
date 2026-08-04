@@ -187,6 +187,49 @@ static float batteryReadCardputerVolts() {
 } // namespace
 #endif
 
+#if defined(DEVICE_MESH_DECK)
+#include <Wire.h>
+namespace {
+// The Mesh Deck's Standard Cell carries a MAX17048 fuel gauge instead of a
+// divider to an ADC, so there is nothing analog to sample. The gauge tracks
+// charge by coulomb counting and reports state directly, which is strictly
+// better than inferring percentage from a resting voltage curve — its SOC
+// register is used as-is rather than being pushed back through
+// batteryVoltageToPct().
+//
+// VCELL (0x02) is 78.125 uV per LSB; SOC (0x04) is 1/256 % per LSB.
+constexpr uint8_t kMaxRegVCell = 0x02;
+constexpr uint8_t kMaxRegSoc   = 0x04;
+
+bool maxReadReg16(uint8_t reg, uint16_t &out) {
+    Wire.beginTransmission(BATT_FUEL_GAUGE_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)BATT_FUEL_GAUGE_ADDR, 2) != 2) return false;
+    const uint8_t hi = (uint8_t)Wire.read();
+    const uint8_t lo = (uint8_t)Wire.read();
+    out = (uint16_t)((hi << 8) | lo);
+    return true;
+}
+
+float batteryReadMeshDeckVolts() {
+    uint16_t raw = 0;
+    if (!maxReadReg16(kMaxRegVCell, raw)) return 0.0f;
+    return (float)raw * 0.000078125f;
+}
+
+// Returns -1 when the gauge does not answer, so callers can fall back.
+int batteryReadMeshDeckPct() {
+    uint16_t raw = 0;
+    if (!maxReadReg16(kMaxRegSoc, raw)) return -1;
+    int pct = (int)(raw >> 8);            // whole percent; low byte is fraction
+    if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+    return pct;
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && (BATT_SENSE_ENABLE_PIN >= 0)
 static int  sHeltecSenseLevel = BATT_SENSE_ENABLE_LEVEL;
 static bool sHeltecSenseLocked = false;
@@ -359,6 +402,8 @@ static float batteryReadVoltageRaw() {
 #if (BATT_ADC_PIN < 0)
 #if defined(DEVICE_TLORA_PAGER_TFT)
     return batteryReadPagerBqVolts();
+#elif defined(DEVICE_MESH_DECK)
+    return batteryReadMeshDeckVolts();
 #else
     return 0.0f;
 #endif
@@ -429,6 +474,15 @@ float batteryReadVoltage() {
 }
 
 uint8_t batteryReadPercent() {
+#if defined(DEVICE_MESH_DECK)
+    // Prefer the gauge's own state of charge. Everything else here derives a
+    // percentage from a filtered resting voltage because it has nothing better;
+    // this board does, and coulomb counting stays honest under load where the
+    // voltage curve sags and reads low.
+    const int gaugePct = batteryReadMeshDeckPct();
+    if (gaugePct >= 0) return (uint8_t)gaugePct;
+    // Gauge silent: fall through to the shared voltage-curve estimate.
+#endif
     batteryRefreshFilter(false);
     return sBatteryFilter.initialized ? sBatteryFilter.displayPct : 0;
 }

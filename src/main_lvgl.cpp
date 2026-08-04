@@ -21,6 +21,9 @@
 #include "env_sensor.h"
 #include "gps.h"
 #include "keyboard.h"
+#if defined(DEVICE_MESH_DECK)
+#include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
+#endif
 #include "web_config.h"
 #include "ota_update.h"
 #include "debug_flags.h"
@@ -741,6 +744,18 @@ static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = true;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 18;
+#elif defined(DEVICE_MESH_DECK)
+static constexpr bool kPagerWheelChatNav = false;
+// Scroll keys must drive main navigation here. The shared default below leaves
+// this false because it is written for the T-Deck, whose trackball moves the
+// main screen — this board has no trackball (HAS_TRACKBALL 0), so with it false
+// nothing navigates at all: j/k and the arrows all fold onto KEY_SCROLL_UP/DN,
+// and that is the only pointer this hardware has.
+static constexpr bool kUseScrollKeysForMainNav = true;
+// No Esc on the 48-key matrix; Backspace is the close key.
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
+static constexpr int kMainScreenChannelBtnHeight = 22;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -748,7 +763,9 @@ static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
 #endif
-#if defined(DEVICE_TDECK)
+// The Mesh Deck's panel is 320x240, the same as the T-Deck's, so it takes the
+// T-Deck's roomier chat font rather than the small-screen default.
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
 static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
 #else
 static const lv_font_t *kChannelChatFont = kMainScreenFont;
@@ -932,7 +949,7 @@ static void onComposeCancelPressed(lv_event_t *e);
 static void onComposeInputChanged(lv_event_t *e);
 static void updateComposeCharCount();
 static void refreshChatComposeButtonState();
-static void openEmojiPicker(bool sendMode = false);
+static void openEmojiPicker(bool sendMode = false, bool symbolTray = false);
 static void closeEmojiPicker();
 static void onChatMessagePressed(lv_event_t *e);
 static void recomputeChannelHashes();
@@ -3391,6 +3408,62 @@ static constexpr uint32_t kPreSleepDimMs  = 5000;  // dim for the last 5 s
 static constexpr uint8_t  kPreSleepDimPct = 25;    // % of the configured level
 static bool s_preSleepDimmed = false;
 
+#if defined(DEVICE_MESH_DECK)
+// One shared handle for expander 0x59. It carries both the FT6636 reset line
+// (P13) and the front buttons (P00-P07), and Aw9523::begin() issues a soft
+// reset — calling it a second time would drop P13 and put the touch controller
+// straight back into reset, so it is opened exactly once here.
+static Aw9523 s_mdButtons;
+static bool   s_mdButtonsReady = false;
+static uint8_t s_mdBtnPrev = 0xFF;   // active-low; all released
+
+// Pulls the FT6636 out of reset. Its RST line is expander 0x59 P13, held low at
+// power-up, so the controller is mute until this runs — which has to be before
+// LovyanGFX probes the touch bus in lcd.init().
+//
+// Sequence and timings follow the wadamesh port (GPL-3.0-or-later, as here):
+// put P13 in GPIO mode, make it an output, drive it low, then release. The
+// 300 ms tail is the FT6636's own boot; a shorter wait and the first probe
+// still finds nothing.
+static void meshDeckReleaseTouchReset() {
+    Aw9523 &exp = s_mdButtons;
+    if (!exp.begin(TOUCH_RST_EXPANDER, Wire)) {
+        Serial.printf("[meshdeck] touch reset expander 0x%02X not found\n",
+                      TOUCH_RST_EXPANDER);
+        return;
+    }
+    s_mdButtonsReady = true;   // same chip backs the front buttons
+    // begin() already put both ports in GPIO mode and made them inputs.
+    constexpr uint8_t kP13 = (1u << 3);
+    uint8_t cfg = 0xFF, out = 0xFF;
+    exp.readReg(Aw9523::REG_CONFIG1, cfg);
+    exp.readReg(Aw9523::REG_OUTPUT1, out);
+
+    exp.writeReg(Aw9523::REG_OUTPUT1, (uint8_t)(out & ~kP13));   // assert reset
+    exp.writeReg(Aw9523::REG_CONFIG1, (uint8_t)(cfg & ~kP13));   // P13 -> output
+    delay(10);
+    exp.writeReg(Aw9523::REG_OUTPUT1, (uint8_t)(out | kP13));    // release
+    delay(300);                                                  // controller boot
+
+    // Report whether the controller actually came up. LovyanGFX disables touch
+    // silently when its probe inside lcd.init() finds nothing, so without this
+    // a dead panel and a mis-wired one look identical from the outside.
+    Wire.beginTransmission((uint8_t)TOUCH_ADDR);
+    const bool acked = (Wire.endTransmission() == 0);
+    Serial.printf("[meshdeck] FT6636 out of reset, 0x%02X %s\n",
+                  (unsigned)TOUCH_ADDR, acked ? "ACK" : "NO ACK");
+    if (!acked) {
+        // Everything that answers, so a wrong address or a dead bus is obvious.
+        Serial.print("[meshdeck] I2C scan:");
+        for (uint8_t a = 0x08; a < 0x78; a++) {
+            Wire.beginTransmission(a);
+            if (Wire.endTransmission() == 0) Serial.printf(" 0x%02X", a);
+        }
+        Serial.println();
+    }
+}
+#endif
+
 #if defined(DEVICE_TDECK) && HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
 // One-shot boot diagnostic. LilyGO has shipped T-Deck boards whose GT911 latches
 // a different I2C address (0x14 vs 0x5D) depending on the INT level at power-on,
@@ -3402,6 +3475,7 @@ static bool s_preSleepDimmed = false;
 // touch/keyboard bus, flags the ones that map to known controllers, then tries
 // to read the GT911 product-ID + firmware registers. Runs through Wire because
 // the bus is already shared with the keyboard on the same pins.
+
 static void probeTouchController() {
     Serial.println("[touch-probe] scanning shared I2C bus...");
     int found = 0;
@@ -3494,6 +3568,38 @@ static void sleepScreen(const char *reason) {
         Serial.println("[screen] sleeping");
     }
 }
+
+#if defined(DEVICE_MESH_DECK)
+// The front buttons hang off expander 0x59, not GPIO, so they are polled rather
+// than interrupt-driven. P07 is the top-right key; a short press toggles the
+// panel, which is what wadamesh binds it to as well. A long press is the
+// board's hardware power-cut and never reaches firmware.
+//
+// Deliberately not routed through the normal key path: those keys wake the
+// screen as a side effect, so a press would light the panel straight back up
+// and the button could never turn it off.
+static void meshDeckPollButtons() {
+    if (!s_mdButtonsReady) return;
+
+    static uint32_t lastPollMs = 0;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastPollMs) < 40) return;   // debounce + bus courtesy
+    lastPollMs = now;
+
+    uint8_t p0 = 0xFF;
+    if (!s_mdButtons.readPort(0, p0)) return;
+
+    constexpr uint8_t kPowerBit = (1u << 7);          // P07
+    const bool downNow  = !(p0 & kPowerBit);          // active low
+    const bool downPrev = !(s_mdBtnPrev & kPowerBit);
+    s_mdBtnPrev = p0;
+
+    if (downNow && !downPrev) {
+        if (s_screenAsleep) wakeScreen();
+        else                sleepScreen("power button");
+    }
+}
+#endif
 
 static void wakeScreen() {
     if (!s_screenAsleep) {
@@ -4782,12 +4888,32 @@ constexpr int kEmojiTrayCount = kEmojiTrayTotal;
 static_assert(kEmojiTrayCount <= kEmojiTrayTotal,
               "emoji tray cap must not exceed the number of emoji defined");
 
+// Symbols the Mesh Deck's physical keyboard cannot reach. Its 48 keys cover
+// letters, digits, comma and period and nothing else, so without these the only
+// punctuation available on that board is "," and ".". Ordered roughly by how
+// often a message needs them.
+//
+// '#' is included even though it has its own key: that key is the symbol
+// button, so it opens this tray rather than typing the character.
+static const char *const kSymbolTray[] = {
+    "!", "?", ".", ",", ":", ";", "'", "\"",
+    "-", "_", "/", "@", "#", "&", "+", "=",
+    "(", ")", "[", "]", "{", "}", "<", ">",
+    "*", "%", "$", "|", "\\", "~", "^", "`",
+};
+constexpr int kSymbolTrayCount = (int)(sizeof(kSymbolTray) / sizeof(kSymbolTray[0]));
+
+// The picker renders whichever tray is active. Everything below — grid build,
+// selection, scrolling, insert — is shared; only the source array differs.
+static const char *const *s_pickerTray  = kEmojiTray;
+static int                s_pickerCount = kEmojiTrayCount;
+
 static void refreshEmojiPickerSelection() {
     if (!s_emojiPickerModal) return;
     lv_obj_t *grid = lv_obj_get_child(s_emojiPickerModal, 1);   // [0]=hint, [1]=grid
     if (!grid) return;
     const bool light = (s_cfg.uiMode == UI_MODE_LIGHT);
-    for (int i = 0; i < kEmojiTrayCount; i++) {
+    for (int i = 0; i < s_pickerCount; i++) {
         lv_obj_t *cell = lv_obj_get_child(grid, i);
         if (!cell) continue;
         const bool sel = (i == s_emojiPickerSelection);
@@ -4840,7 +4966,7 @@ static void emojiPickerStep(int delta) {
     if (delta == 0) return;
     int nxt = s_emojiPickerSelection + delta;
     if (nxt < 0) nxt = 0;
-    if (nxt >= kEmojiTrayCount) nxt = kEmojiTrayCount - 1;
+    if (nxt >= s_pickerCount) nxt = s_pickerCount - 1;
     if (nxt == s_emojiPickerSelection) return;
     s_emojiPickerSelection = nxt;
     refreshEmojiPickerSelection();
@@ -4868,16 +4994,16 @@ static void serviceEmojiPickerRepeat(uint32_t nowMs) {
 }
 
 static void emojiPickerActivate(int idx) {
-    if (idx < 0 || idx >= kEmojiTrayCount) return;
+    if (idx < 0 || idx >= s_pickerCount) return;
     if (s_emojiPickerSendMode) {
         const uint32_t tapbackId = s_emojiPickerTapbackId;   // survives the teardown
         closeEmojiPicker();   // one-shot: tear the tray down before the send refresh
-        sendQuickEmoji(kEmojiTray[idx], tapbackId);
+        sendQuickEmoji(s_pickerTray[idx], tapbackId);
         return;
     }
     // Insert mode: append to the open compose box and keep the tray up for more.
     if (s_composeInput) {
-        lv_textarea_add_text(s_composeInput, kEmojiTray[idx]);
+        lv_textarea_add_text(s_composeInput, s_pickerTray[idx]);
         updateComposeCharCount();
     }
 }
@@ -4925,8 +5051,14 @@ static void onEmojiGridScrolled(lv_event_t *e) {
     logLvglMemDiag("emoji scroll");
 }
 
-static void openEmojiPicker(bool sendMode) {
+static void openEmojiPicker(bool sendMode, bool symbolTray) {
     if (!s_rootScreen || s_emojiPickerModal) return;
+    // Pick the tray before anything reads it: the grid, the selection clamp and
+    // the insert path all go through s_pickerTray.
+    s_pickerTray  = symbolTray ? kSymbolTray : kEmojiTray;
+    s_pickerCount = symbolTray ? kSymbolTrayCount : kEmojiTrayCount;
+    // Symbols are text, never a reaction, so they only ever insert.
+    if (symbolTray) sendMode = false;
     s_emojiPickerSendMode = sendMode;
     s_emojiPickerSelection = 0;
     // Cursor parked on a chat message → this pick reacts to it. The DM screen has
@@ -4941,7 +5073,8 @@ static void openEmojiPicker(bool sendMode) {
 
     // Emoji glyphs come from the fallback face; a blank base label just carries
     // the fallback, so any Montserrat size works — pick one that reads well.
-    const lv_font_t *cellFont = emojiFont(&lv_font_montserrat_18);
+    const lv_font_t *cellFont = symbolTray ? &lv_font_montserrat_18
+                                          : emojiFont(&lv_font_montserrat_18);
     // Cell size follows the panel: big enough to tap on touch builds, small
     // enough that a couple of rows fit the Cardputer's 135px-tall screen.
     const int cell = (w <= 160) ? 24 : 30;
@@ -4980,11 +5113,13 @@ static void openEmojiPicker(bool sendMode) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(hint, tapback  ? "Tap to react • tap outside to close"
+    lv_label_set_text(hint, symbolTray ? "Tap a symbol • tap outside to close"
+                            : tapback  ? "Tap to react • tap outside to close"
                             : sendMode ? "Tap to send • tap outside to close"
                                        : "Tap to add • tap outside to close");
 #else
-    lv_label_set_text_fmt(hint, tapback  ? "Move • Enter=React • %s=Close"
+    lv_label_set_text_fmt(hint, symbolTray ? "Move • Enter=Insert • %s=Close"
+                                : tapback  ? "Move • Enter=React • %s=Close"
                                 : sendMode ? "Move • Enter=Send • %s=Close"
                                            : "Move • Enter=Add • %s=Close",
                           modalCloseKeyLabel());
@@ -5010,7 +5145,7 @@ static void openEmojiPicker(bool sendMode) {
     s_emojiPickerCols = (modalW - 12 + 2) / (cell + 2);
     if (s_emojiPickerCols < 1) s_emojiPickerCols = 1;
 
-    for (int i = 0; i < kEmojiTrayCount; i++) {
+    for (int i = 0; i < s_pickerCount; i++) {
         lv_obj_t *c = lv_obj_create(grid);
         // The whole tray is built up front, so this is the largest single burst
         // of allocations in the UI — and it lands on top of the chat/DM screen
@@ -5042,7 +5177,7 @@ static void openEmojiPicker(bool sendMode) {
                                         ? lv_color_hex(0x16233A)
                                         : lv_color_hex(0xFFFFFF),
                                     0);
-        setLabelTextEmojiSafe(g, kEmojiTray[i]);
+        setLabelTextEmojiSafe(g, s_pickerTray[i]);
         lv_obj_center(g);
     }
 
@@ -17819,6 +17954,11 @@ static void pumpKeyboardInput() {
                     case KEY_ESCAPE:
                         closeComposePrompt();
                         break;
+                    case KEY_SYMBOL:
+                        // Mesh Deck's symbol key. Insert-mode tray, so the
+                        // picked character lands in the box being typed.
+                        openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+                        break;
                     case KEY_BACKSPACE:
                     case KEY_BACKSPACE_HOLD:
                         if (s_composeInput) {
@@ -18021,6 +18161,11 @@ static void pumpKeyboardInput() {
                         break;
                     case KEY_ESCAPE:
                         closeComposePrompt();
+                        break;
+                    case KEY_SYMBOL:
+                        // Mesh Deck's symbol key. Insert-mode tray, so the
+                        // picked character lands in the box being typed.
+                        openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
                         break;
                     case KEY_BACKSPACE:
                     case KEY_BACKSPACE_HOLD:
@@ -19784,7 +19929,7 @@ static void refreshChannelGlow(bool force) {
 
     if (s_channelSelectorBtn) {
         bool selectorShouldGlow = anyUnread;
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
         selectorShouldGlow = anyUnread && !isChannelDropdownVisible();
 #endif
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -19957,7 +20102,7 @@ static bool useCompactVerticalHeltecSelector() {
 }
 
 static bool isChannelDropdownVisible() {
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     return s_channelList && !lv_obj_has_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
 #else
     return false;
@@ -20013,7 +20158,7 @@ static void refreshChannelSelectorLabel() {
         }
     }
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     bool allowDynamicSelectorWidth = true;
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     allowDynamicSelectorWidth = !useCompactVerticalHeltecSelector();
@@ -20178,7 +20323,7 @@ static void sizeChannelButtonToLabel(int idx) {
 }
 
 static void fitChannelDropdownToButtonContent() {
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     // This fitter applies only to the floating channel dropdown list.
     if (!s_channelList || s_channelStrip) return;
 
@@ -20347,7 +20492,7 @@ static void refreshHeaderTime(bool force) {
 
     if (!force && strcmp(buf, s_lastHeaderTime) == 0) return;
     lv_label_set_text(s_chatHeaderTime, buf);
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif
     strncpy(s_lastHeaderTime, buf, sizeof(s_lastHeaderTime) - 1);
@@ -20355,7 +20500,7 @@ static void refreshHeaderTime(bool force) {
 }
 
 static void layoutHeaderInlineItems() {
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     if (!s_chatHeaderTime || !s_chatHeaderBattBar) return;
     if (!s_channelSelectorBtn || !s_chatHeaderBattText || !s_chatHeaderBar) return;
 
@@ -20517,7 +20662,7 @@ static void refreshHeaderStatus(bool force) {
             lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
         }
     }
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif
 
@@ -22535,8 +22680,11 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     lv_obj_t *panel = nullptr;
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
-#if defined(DEVICE_TDECK)
+// Full-width chat, no side panel: these boards put channels in the overlay
+// dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
+// a column for one leaves an empty strip down the side.
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     const int panelMargin = 6;
     const int chatGap = 6;
     const int chatLegendH = 14;
@@ -22631,7 +22779,7 @@ static void buildUi() {
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     s_channelStrip = nullptr;
     s_channelList = nullptr;
 
@@ -22793,7 +22941,7 @@ static void buildUi() {
     s_chatHeaderWifi = nullptr;
     s_chatDmAlert = nullptr;
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif
 
@@ -22844,7 +22992,7 @@ static void buildUi() {
     // Load older history when the user scrolls to the top of the render window.
     lv_obj_add_event_cb(s_chatList, onChatListScroll, LV_EVENT_SCROLL, nullptr);
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     {
         const int dropdownW = min(max(chatW / 2, 120), 260);
         const int maxDropdownH = max(44, chatH - 8);
@@ -22953,7 +23101,7 @@ static void buildUi() {
     lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
 #endif
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
     const lv_font_t *channelNavFont = kMainScreenFont;
 #if defined(DEVICE_TDECK)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
@@ -22963,7 +23111,7 @@ static void buildUi() {
 #endif
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if UI_CHANNEL_LIST_DROPDOWN
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
         s_channelBtns[i] = btn;
         lv_obj_set_width(btn, lv_pct(100));
@@ -23718,6 +23866,16 @@ void setup() {
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
     displayDev().fillScreen(TFT_BLACK);
 #else
+#if defined(DEVICE_MESH_DECK)
+    // The FT6636's reset is not a GPIO — it hangs off expander 0x59 P13 and
+    // comes up asserted, so the controller is held in reset and never answers
+    // the probe LovyanGFX does inside lcd.init(). Release it first, and bring
+    // I2C up here because nothing else has yet (s_keyboard.begin() is below).
+    // The 300 ms is the controller's own start-up time; probing sooner finds
+    // nothing and touch stays dead for the session.
+    Wire.begin(I2C_SDA, I2C_SCL, 100000UL);
+    meshDeckReleaseTouchReset();
+#endif
     lcd.init();
     displayDev().setRotation(TFT_ROTATION_DEFAULT);
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
@@ -24098,6 +24256,11 @@ void loop() {
         delay(5);
         return;
     }
+#if defined(DEVICE_MESH_DECK)
+    // Front buttons live on an I2C expander, so they need polling. Kept out of
+    // the key path on purpose — see meshDeckPollButtons().
+    meshDeckPollButtons();
+#endif
 
     serviceCpuScaling();
     serviceSerialCommands();

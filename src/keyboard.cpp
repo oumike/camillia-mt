@@ -347,7 +347,189 @@ char tloraReadMappedKey() {
 
 TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 
+#if defined(DEVICE_MESH_DECK)
+// ── Attaky Mesh Deck keyboard ───────────────────────────────────────────────
+// Two AW9523 expanders, one per half, each scanning its own 5x5 matrix: rows
+// P10..P14 (port 1 bits 0..4) are pulled low one at a time and columns
+// P00..P04 (port 0 bits 0..4) are read back. A key reads pressed when its
+// row x column intersection pulls a column low.
+//
+// Only one row is an output at a time; the others are left as inputs rather
+// than driven high. Two keys held in the same column would otherwise short a
+// driven-high row against a driven-low one through the matrix.
+#include "aw9523.h"
+
+static Aw9523  s_mdKbLeft, s_mdKbRight;
+static uint8_t s_mdPrev[2][5] = {};      // last debounced column bits per row
+static uint8_t s_mdStable[2][5] = {};
+static uint8_t s_mdStableCount[2][5] = {};
+
+// Matrix positions, taken from the wadamesh MeshCore port's attaky_mesh_series
+// variant (GPL-3.0-or-later, as is this project), which runs on this hardware:
+// https://github.com/ALLFATHER-BV/wadamesh
+//
+// Worth keeping rather than re-deriving: Attaky's published key list cannot
+// produce this. It names N and M under both halves and gives the left half more
+// keys than it has positions, whereas the real layout puts B/N/M on the RIGHT
+// half at row 3, and leaves seven positions empty.
+#define MESH_DECK_KEYMAP_KNOWN 1
+
+// Shift is a key in the matrix (left half, row 3, col 0), not a modifier line.
+#define MD_KEY_SHIFT  0x01
+static const uint8_t kMdShiftHalf = 0, kMdShiftRow = 3, kMdShiftCol = 0;
+
+static const char kMdKeymapLeft[5][5] = {
+    {'1', '2', '3', '4', '5'},
+    {'q', 'w', 'e', 'r', 't'},
+    {'a', 's', 'd', 'f', 'g'},
+    {MD_KEY_SHIFT, 'z', 'x', 'c', 'v'},
+    {KEY_NONE, KEY_TAB, KEY_NONE, ',', ' '},
+};
+static const char kMdKeymapRight[5][5] = {
+    {'6', '7', '8', '9', '0'},
+    {'y', 'u', 'i', 'o', 'p'},
+    {'h', 'j', 'k', 'l', KEY_BACKSPACE},
+    {'b', 'n', 'm', KEY_NONE, KEY_ENTER},
+    // wadamesh types a literal '#' here. This is the physical symbol key, and
+    // with no other punctuation on the matrix a single '#' is worth far less
+    // than a way to reach the rest — so it opens the symbol tray instead, and
+    // '#' lives in that tray.
+    {KEY_NONE, '.', KEY_NONE, KEY_SYMBOL, KEY_NONE},
+};
+
+// Port 1 resting state: all five rows high, and P15..P17 (unused) held high.
+static constexpr uint8_t kMdP1Idle = 0xE0;
+
+// Puts a half into scanning shape: columns in, rows out. Aw9523::begin() leaves
+// everything as inputs, which is the safe default but cannot drive a matrix.
+static bool mdConfigureHalf(Aw9523 &dev) {
+    if (!dev.present()) return false;
+    return dev.configPort(0, 0xFF)          // port 0 = columns, inputs
+        && dev.configPort(1, 0x00)          // port 1 = rows, outputs
+        && dev.writePort(0, 0x00)
+        && dev.writePort(1, kMdP1Idle);
+}
+
+// Drives each row low in turn and returns a pressed-bit mask per row.
+//
+// The other four rows are driven HIGH rather than left floating. Floating them
+// would be gentler on simultaneous presses, but it only reads correctly if the
+// columns have pull-ups, and whether this module has them is not documented.
+// Driving high is what the working wadamesh port does, so it is known good.
+static bool mdScanHalf(Aw9523 &dev, uint8_t rowsOut[5]) {
+    if (!dev.present()) return false;
+    for (uint8_t r = 0; r < 5; r++) {
+        const uint8_t out = (uint8_t)(~(1u << r) | kMdP1Idle);
+        if (!dev.writePort(1, out)) return false;
+        delayMicroseconds(50);                  // let the column settle
+        uint8_t cols = 0;
+        if (!dev.readPort(0, cols)) return false;
+        rowsOut[r] = (uint8_t)(~cols & 0x1F);   // active low -> 1 means pressed
+    }
+    dev.writePort(1, kMdP1Idle);
+    return true;
+}
+
+// Two consecutive identical reads before a change counts, which is enough to
+// reject contact bounce at this scan rate without adding latency worth noticing.
+static void mdDebounce(uint8_t half, const uint8_t fresh[5]) {
+    for (uint8_t r = 0; r < 5; r++) {
+        if (fresh[r] == s_mdStable[half][r]) {
+            s_mdStableCount[half][r] = 2;
+            continue;
+        }
+        if (s_mdStableCount[half][r] > 0) {
+            s_mdStableCount[half][r]--;
+        } else {
+            s_mdStable[half][r] = fresh[r];
+            s_mdStableCount[half][r] = 2;
+        }
+    }
+}
+
+// Shifted form of a key. Letters uppercase; the number row and the two
+// punctuation keys follow the US QWERTY legends, which is muscle memory for
+// anyone and puts the ten most-used symbols one chord away instead of behind
+// the symbol tray. wadamesh shifts letters only, so its firmware cannot type
+// any of these at all.
+static char mdApplyShift(char k) {
+    if (k >= 'a' && k <= 'z') return (char)(k - 'a' + 'A');
+    switch (k) {
+        case '1': return '!';
+        case '2': return '@';
+        case '3': return '#';
+        case '4': return '$';
+        case '5': return '%';
+        case '6': return '^';
+        case '7': return '&';
+        case '8': return '*';
+        case '9': return '(';
+        case '0': return ')';
+        case ',': return '<';
+        case '.': return '>';
+        default:  return k;
+    }
+}
+
+// Returns the first newly-pressed key, or KEY_NONE.
+//
+// Both halves are scanned before any key is emitted. Shift lives in the matrix
+// rather than on its own line, so its held state has to be known for this same
+// pass — resolving a keypress against the previous pass's shift would drop the
+// capital on a fast shift-then-letter.
+static char mdReadKey() {
+    uint8_t fresh[5];
+
+    for (uint8_t half = 0; half < 2; half++) {
+        Aw9523 &dev = half ? s_mdKbRight : s_mdKbLeft;
+        if (!dev.present()) continue;
+        if (!mdScanHalf(dev, fresh)) continue;
+        mdDebounce(half, fresh);
+    }
+
+    const bool shiftHeld =
+        (s_mdStable[kMdShiftHalf][kMdShiftRow] & (1u << kMdShiftCol)) != 0;
+
+    for (uint8_t half = 0; half < 2; half++) {
+        if (!(half ? s_mdKbRight : s_mdKbLeft).present()) continue;
+        for (uint8_t r = 0; r < 5; r++) {
+            const uint8_t now = s_mdStable[half][r];
+            const uint8_t downEdges = (uint8_t)(now & ~s_mdPrev[half][r]);
+            s_mdPrev[half][r] = now;
+            if (!downEdges) continue;
+
+            for (uint8_t c = 0; c < 5; c++) {
+                if (!(downEdges & (1u << c))) continue;
+                const char k = half ? kMdKeymapRight[r][c] : kMdKeymapLeft[r][c];
+                if (k == KEY_NONE || k == MD_KEY_SHIFT) continue;   // shift is a state
+                if (shiftHeld) return mdApplyShift(k);
+                return k;
+            }
+        }
+    }
+    return KEY_NONE;
+}
+#endif  // DEVICE_MESH_DECK
+
 void TDeckKeyboard::begin() {
+#if defined(DEVICE_MESH_DECK)
+    Wire.begin(KB_SDA, KB_SCL, 100000UL);
+    Wire.setClock(400000UL);
+    delay(30);
+#if (KB_INT_LEFT >= 0)
+    pinMode(KB_INT_LEFT, INPUT_PULLUP);
+#endif
+#if (KB_INT_RIGHT >= 0)
+    pinMode(KB_INT_RIGHT, INPUT_PULLUP);
+#endif
+    const bool okL = s_mdKbLeft.begin(KB_LEFT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbLeft);
+    const bool okR = s_mdKbRight.begin(KB_RIGHT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbRight);
+    Serial.printf("[meshdeck-kb] left(0x%02X)=%s right(0x%02X)=%s\n",
+                  KB_LEFT_I2C_ADDR, okL ? "ok" : "MISSING",
+                  KB_RIGHT_I2C_ADDR, okR ? "ok" : "MISSING");
+    return;
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     M5Cardputer.begin(true);
     return;
@@ -509,7 +691,25 @@ char TDeckKeyboard::readTrackball() {
 }
 
 char TDeckKeyboard::readKey() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_MESH_DECK)
+    // Both halves raise an interrupt on a change, so the matrix only has to be
+    // walked when something moved. The idle fallback still runs occasionally in
+    // case a press is missed while the lines are already asserted.
+    static uint32_t lastScanMs = 0;
+    const uint32_t nowMs = millis();
+    bool irqActive = false;
+#if (KB_INT_LEFT >= 0)
+    irqActive = irqActive || (digitalRead(KB_INT_LEFT) == LOW);
+#endif
+#if (KB_INT_RIGHT >= 0)
+    irqActive = irqActive || (digitalRead(KB_INT_RIGHT) == LOW);
+#endif
+    if (!irqActive) {
+        if (nowMs - lastScanMs < 30) return KEY_NONE;
+    }
+    lastScanMs = nowMs;
+    return mdReadKey();
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
     pumpCardputerKeys();
     if (_cardputerCount == 0) return KEY_NONE;
     return dequeueCardputerKey();
