@@ -246,10 +246,52 @@
 #define VOLUME_PCT_STEP  10
 #define MY_VOLUME_PCT    50
 
+// Whether the board can make a sound at all. Mirrors the branches that actually
+// exist in triggerMessageAlert() and playSplashStartupRiff(): the three boards
+// with an audio path, plus anything with a passive buzzer on a GPIO. The Mesh
+// Deck has neither — BOARD_BUZZER is -1 and no I2S/codec path is wired — so
+// every tone call there compiles to nothing, and the alert-sound, splash-melody
+// and volume settings were UI for hardware that does not exist.
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || (BOARD_BUZZER >= 0)
+#define HAS_AUDIO_ALERTS 1
+#else
+#define HAS_AUDIO_ALERTS 0
+#endif
+
 // A passive buzzer driven by tone() has no amplitude control — only boards that
 // synthesize or route audio can honor a volume setting. Gate the UI on this so
 // the option is absent where it would do nothing rather than present and inert.
-#define HAS_VOLUME_CONTROL (BOARD_BUZZER < 0)
+//
+// The HAS_AUDIO_ALERTS term matters: this used to be "no buzzer", which is true
+// of a board with a codec *and* of a board with no audio hardware whatsoever,
+// so the Mesh Deck was offered a volume slider for silence.
+#define HAS_VOLUME_CONTROL (HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0))
+
+// Offer a scroll-direction preference for the trackball. Named by board rather
+// than derived from HAS_TRACKBALL on purpose: the T-Deck is the only build this
+// is wanted on for now, and a capability test would silently hand the option to
+// the next board that declares a trackball. The Pager has one and is excluded —
+// its wheel already carries direction logic of its own (kPagerWheelChatNav flips
+// wheel input against j/k), so a second inversion stacked on that needs testing
+// on that hardware first. Add boards here deliberately, one at a time.
+#if defined(DEVICE_TDECK)
+#define HAS_SCROLL_INVERT 1
+#else
+#define HAS_SCROLL_INVERT 0
+#endif
+#define MY_INVERT_SCROLL 0
+
+// A notification LED that blinks while messages are unread. Only the Mesh Deck
+// has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
+// meshDeckServiceLed). Gate the setting on this so it is absent, not inert,
+// everywhere else.
+#if defined(DEVICE_MESH_DECK)
+#define HAS_NOTIFY_LED 1
+#else
+#define HAS_NOTIFY_LED 0
+#endif
+#define MY_NOTIFY_LED_ENABLED 1
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

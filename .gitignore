@@ -8,6 +8,9 @@ builds
 resume-claude.sh
 dist/
 logs/
+# Device backups from backup.sh. Multi-megabyte flash images, and nvs.bin holds
+# the node's private identity key — not something to push anywhere.
+backups/
 
 # OTA image signing private key — NEVER commit; back this up securely.
 ota_signing_key.pem

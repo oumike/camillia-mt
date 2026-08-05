@@ -202,6 +202,16 @@ struct RhinoConfig {
     // assignment at once. 0 is the original mapping, so devices that never ask
     // for a reshuffle keep the colors they have always had.
     uint32_t chatColorSalt;
+    // Blink the notification LED while anything is unread. Only meaningful
+    // where HAS_NOTIFY_LED; the field is unconditional so the blob layout does
+    // not differ between boards. Defaults on, which is the behavior every unit
+    // had before the setting existed.
+    bool     notifyLedEnabled;
+    // Flip the trackball's scroll direction (HAS_SCROLL_INVERT boards). Applied
+    // where the trackball is read, so it moves lists, the chat and every slider
+    // together and leaves j/k alone — those are letters with a fixed meaning,
+    // not a pointing device.
+    bool     invertScroll;
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and

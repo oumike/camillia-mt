@@ -1532,6 +1532,9 @@ enum CfgActionId {
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_BRIGHTNESS,
+    #if HAS_SCROLL_INVERT
+    CFG_ACTION_INVERT_SCROLL,
+    #endif
     CFG_ACTION_BATT_CAL,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
@@ -1542,6 +1545,9 @@ enum CfgActionId {
     CFG_ACTION_VOLUME,
     #endif
     CFG_ACTION_MSG_ALERT,
+    #if HAS_NOTIFY_LED
+    CFG_ACTION_NOTIFY_LED,
+    #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
     CFG_ACTION_RELEASE_NOTES,
@@ -2803,6 +2809,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_BRIGHTNESS:
             snprintf(buf, bufLen, "Brightness: %u%%", (unsigned)s_cfg.brightness);
             break;
+        #if HAS_SCROLL_INVERT
+        case CFG_ACTION_INVERT_SCROLL:
+            snprintf(buf, bufLen, "Invert Scrolling: %s", s_cfg.invertScroll ? "On" : "Off");
+            break;
+        #endif
         case CFG_ACTION_BATT_CAL:
             if (s_cfg.battCalTrim == 0) {
                 snprintf(buf, bufLen, "Battery Calibration: Off");
@@ -2837,6 +2848,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         #if HAS_VOLUME_CONTROL
         case CFG_ACTION_VOLUME:
             snprintf(buf, bufLen, "Volume: %u%%", (unsigned)s_cfg.volumePct);
+            break;
+        #endif
+        #if HAS_NOTIFY_LED
+        case CFG_ACTION_NOTIFY_LED:
+            snprintf(buf, bufLen, "Notification LED: %s", s_cfg.notifyLedEnabled ? "On" : "Off");
             break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
@@ -3724,23 +3740,35 @@ static void meshDeckLedSet(bool r, bool g, bool b) {
 // and the loop services it — a blocking blink would stall the UI and the radio.
 static uint8_t  s_mdLedPhasesLeft = 0;
 static uint32_t s_mdLedNextMs = 0;
-static uint32_t s_mdLedPatternEndMs = 0;
+static uint32_t s_mdLedPatternStartMs = 0;
 static bool     s_mdLedLit = false;
 static constexpr uint8_t  kMdLedBlinks  = 2;         // a double blink
 static constexpr uint32_t kMdLedOnMs    = 60;
 static constexpr uint32_t kMdLedOffMs   = 90;
-// Gap between repeats while anything stays unread. Long enough to read as a
-// periodic reminder rather than a flashing light, short enough to catch the eye
-// from across a room.
-static constexpr uint32_t kMdLedRepeatMs = 4000;
+// Period of the unread reminder, measured start-to-start rather than as a gap
+// after the previous blink: the double blink itself runs 300 ms, so timing from
+// the end would put the visible cadence at 1.3 s instead of 1 s.
+static constexpr uint32_t kMdLedRepeatMs = 1000;
 
 static void meshDeckLedStartPattern() {
+    if (!s_cfg.notifyLedEnabled) return;
     s_mdLedPhasesLeft = (uint8_t)(kMdLedBlinks * 2);
     s_mdLedNextMs = 0;                               // fire on the next service
+    s_mdLedPatternStartMs = millis();
 }
 
 // Called for every new message, channel or DM.
 static void meshDeckLedNotify() { meshDeckLedStartPattern(); }
+
+// Turning the setting off mid-pattern has to darken the LED now — the service
+// loop below returns early once disabled, so it would otherwise leave the light
+// stuck in whichever half of a blink it was in.
+static void meshDeckLedApplySetting() {
+    if (s_cfg.notifyLedEnabled) return;
+    s_mdLedPhasesLeft = 0;
+    s_mdLedLit = false;
+    meshDeckLedSet(false, false, false);
+}
 
 // True while any channel or DM still has something unread. Read from the state
 // the UI already maintains rather than counting messages separately, so marking
@@ -3753,13 +3781,20 @@ static bool meshDeckHasUnread() {
 }
 
 static void meshDeckServiceLed() {
+    if (!s_cfg.notifyLedEnabled) {
+        // Self-correcting rather than relying on whoever flipped the setting to
+        // clean up: the web form and a YAML import can both turn this off, and
+        // neither goes through the settings screen's handler.
+        if (s_mdLedPhasesLeft != 0 || s_mdLedLit) meshDeckLedApplySetting();
+        return;
+    }
     const uint32_t now = millis();
 
     if (s_mdLedPhasesLeft == 0) {
         // Idle: re-arm periodically for as long as something is unread. Reading
         // the messages clears the flags above and the reminder simply stops.
         if (meshDeckHasUnread()
-            && (uint32_t)(now - s_mdLedPatternEndMs) >= kMdLedRepeatMs) {
+            && (uint32_t)(now - s_mdLedPatternStartMs) >= kMdLedRepeatMs) {
             meshDeckLedStartPattern();
         } else {
             return;
@@ -3776,7 +3811,6 @@ static void meshDeckServiceLed() {
     if (s_mdLedPhasesLeft == 0) {
         s_mdLedLit = false;
         meshDeckLedSet(false, false, false);         // always end dark
-        s_mdLedPatternEndMs = now;                   // start the repeat gap here
     }
 }
 
@@ -5920,6 +5954,12 @@ static void initCfgActions() {
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
+    // Sits with the display preferences rather than the maintenance actions:
+    // it is a comfort setting, changed once to taste. Only on boards with a
+    // trackball to invert.
+    #if HAS_SCROLL_INVERT
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_INVERT_SCROLL;
+    #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
     // Sound settings sit with the other presentation options rather than down
@@ -5927,8 +5967,19 @@ static void initCfgActions() {
     #if HAS_VOLUME_CONTROL
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VOLUME;
     #endif
+    // Both play a tone, so both are absent where nothing can play one — the
+    // rows would otherwise be settings for hardware the board does not have.
+    #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
+    #endif
+    // Under the sound it accompanies where there is one, and the only alert
+    // setting at all where there is not. Absent on boards with no LED wired.
+    #if HAS_NOTIFY_LED
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED;
+    #endif
+    #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
+    #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
@@ -16268,6 +16319,17 @@ static void performCfgAction(int actionId) {
             openCfgBrightnessModal();   // previews live, no reboot
             break;
 
+#if HAS_SCROLL_INVERT
+        case CFG_ACTION_INVERT_SCROLL:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec INVERT_SCROLL");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.invertScroll = !s_cfg.invertScroll;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Invert Scrolling: %s",
+                     s_cfg.invertScroll ? "On" : "Off");
+            break;
+#endif
+
         case CFG_ACTION_BATT_CAL:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BATT_CAL");
             showActionPopup = false;
@@ -16366,6 +16428,18 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;
             openAlertSoundModal();   // pick directly; navigating previews each tone
             break;
+
+#if HAS_NOTIFY_LED
+        case CFG_ACTION_NOTIFY_LED:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.notifyLedEnabled = !s_cfg.notifyLedEnabled;
+            persistConfigToPrefs();
+            meshDeckLedApplySetting();   // darken now if it was mid-blink
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification LED: %s",
+                     s_cfg.notifyLedEnabled ? "On" : "Off");
+            break;
+#endif
 
         case CFG_ACTION_SPLASH_MELODY:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SPLASH_MELODY");
@@ -17574,6 +17648,17 @@ static void pumpKeyboardInput() {
             k = s_keyboard.readTrackball();
             src = "track";
             fromTrackball = true;
+#if HAS_SCROLL_INVERT
+            // Swapped here, at the one point trackball scroll enters the
+            // pipeline, rather than in the twenty downstream branches that read
+            // KEY_SCROLL_UP/DN. Everything past this — chat, lists, the
+            // dropdown, the sliders — sees a single consistent direction, and
+            // j/k are untouched because they never come through this call.
+            if (s_cfg.invertScroll) {
+                if (k == KEY_SCROLL_UP)      k = KEY_SCROLL_DN;
+                else if (k == KEY_SCROLL_DN) k = KEY_SCROLL_UP;
+            }
+#endif
         }
         if (k == KEY_NONE) {
             if (s_cfgModal && s_cfgAwaitEnterRelease) {

@@ -2006,6 +2006,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
             "</select></label></div>";
+#if HAS_SCROLL_INVERT
+    // Trackball direction. Sits in Display rather than getting a section of its
+    // own: it is a comfort preference like brightness, and one heading is heap
+    // the AP-mode lite page cannot spare.
+    html += "<div class='row2'>";
+    html += "<label>Invert Scrolling (trackball)<select name='invert_scroll'>"
+            "<option value='0'"; if (!gCfg->invertScroll) html += " selected"; html += ">Off</option>"
+            "<option value='1'"; if ( gCfg->invertScroll) html += " selected"; html += ">On</option>"
+            "</select></label></div>";
+#endif
     html += "<div class='row2'>";
     html += "<label>Chat Style<select name='chat_style'>"
             "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>"
@@ -2076,7 +2086,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // ── Sound ─────────────────────────────────────────────────
     // Everything the device can make noise with, in one place rather than split
     // between Display (volume) and Modules (alert tones).
+#if HAS_AUDIO_ALERTS
     section(html, lite, "Sound", false);
+#else
+    // Nothing here makes a noise on this board; the section holds the
+    // notification LED alone, so name it for what it is.
+    section(html, lite, "Notifications", false);
+#endif
 #if HAS_VOLUME_CONTROL
     // Same shape as the brightness slider. Compiled out where the board alerts
     // through a passive buzzer: amplitude is not controllable there, so the
@@ -2103,10 +2119,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
             "</select></label>";
 #endif
+#if HAS_NOTIFY_LED
+    // Kept in this section rather than given its own: it is the same question
+    // as the alert tone — how the device gets your attention — and one more
+    // heading is heap the AP-mode lite page cannot spare. Compiled out on boards
+    // with no notification LED wired.
+    html += "<label>Notification LED<select name='notify_led'>"
+            "<option value='1'"; if ( gCfg->notifyLedEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->notifyLedEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+#endif
+#if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
             "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->splashMelodyEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
+#endif
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -3639,7 +3667,25 @@ static void handlePostSave() {
         && cfgAutoFavRangeIsDefault(gCfg->autoFavoriteRangeM)) {
         gCfg->autoFavoriteRangeM = cfgDefaultAutoFavRangeM(gCfg->displayUnits);
     }
-    gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
+    // hasArg-guarded like the other conditional controls. Unguarded, a form
+    // rendered without this control (a board with no audio) posted an empty
+    // string here, which reads back as 0 and turned the setting off on every
+    // save.
+    if (server.hasArg("splash_melody")) {
+        gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
+    }
+#if HAS_NOTIFY_LED
+    // hasArg-guarded like the other conditional controls: a form rendered
+    // without it (or an older cached page) must not silently disable the LED.
+    if (server.hasArg("notify_led")) {
+        gCfg->notifyLedEnabled = server.arg("notify_led").toInt() != 0;
+    }
+#endif
+#if HAS_SCROLL_INVERT
+    if (server.hasArg("invert_scroll")) {   // absent on boards with no trackball
+        gCfg->invertScroll = server.arg("invert_scroll").toInt() != 0;
+    }
+#endif
     // Legacy compatibility: only apply chat spacing if an older web form sends it.
     if (server.hasArg("chat_space")) {
         gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
@@ -3711,7 +3757,9 @@ static void handlePostSave() {
         gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;
     }
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
-    gCfg->msgAlertSound      = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
+    if (server.hasArg("msg_alert_sound")) {   // same guard, same reason
+        gCfg->msgAlertSound  = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
+    }
 #endif
     // WiFi credentials — save directly to NVS (not part of gCfg)
     {
