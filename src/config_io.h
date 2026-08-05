@@ -18,13 +18,18 @@ enum UiThemeFamily : uint8_t {
     UI_THEME_QUIET_LUXURY = 9,
     UI_THEME_MORNING_DEW = 10,
     UI_THEME_WINTER_CHILL = 11,
-    UI_THEME_COUNT = 12
+    UI_THEME_CAMELLIA_BLACK = 12,
+    UI_THEME_COUNT = 13
 };
 
 enum UiThemeMode : uint8_t {
     UI_MODE_DARK = 0,
     UI_MODE_LIGHT = 1
 };
+
+static inline bool uiThemeForcesDark(uint8_t theme) {
+    return theme == UI_THEME_CAMELLIA_BLACK;
+}
 
 // Runtime config (loaded from SD or defaulted from compile-time #defines)
 struct RhinoConfig {
@@ -175,6 +180,28 @@ struct RhinoConfig {
     uint8_t  loraCustomCr;     // LORA_CR_MIN..LORA_CR_MAX (denominator of 4/n)
     uint8_t  loraCustomSlot;   // 1-based frequency slot; 0 = hash channel name
     uint16_t loraCustomBwKhz;  // Meshtastic bandwidth code (31 = 31.25, 62 = 62.5)
+    // Same trap as _reservedPad0/_reservedPad1: the struct's alignment is 4, so
+    // it ended with up to 3 bytes of trailing padding that the stored blob
+    // includes. Four bytes clears that whatever the exact old sizeof was, so the
+    // field below starts past it and keeps its default on an upgrade.
+    uint8_t  _reservedPad2[4];
+    // User battery-voltage trim, in parts per thousand away from the measured
+    // value: 0 = uncalibrated, +25 reads 2.5% high. Set on-device by comparing
+    // the reading against a meter (Battery Calibration in Settings). This is the
+    // per-unit companion to the board-level BATT_CAL: divider tolerance and ADC
+    // offset differ from unit to unit, and a voltage read a tenth of a volt off
+    // moves the displayed percentage by tens of points on the flat part of the
+    // Li-ion curve.
+    int16_t  battCalTrim;
+    // Covers the trailing padding that followed battCalTrim, same trap as the
+    // pads above.
+    uint8_t  _reservedPad3[2];
+    // Shuffles which palette entry each node id hashes to for its chat color.
+    // The palette has ten entries and node ids are arbitrary, so two nodes you
+    // talk to can land on the same color; changing this re-rolls every
+    // assignment at once. 0 is the original mapping, so devices that never ask
+    // for a reshuffle keep the colors they have always had.
+    uint32_t chatColorSalt;
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
@@ -205,6 +232,47 @@ static inline uint8_t cfgCoerceBrightness(int pct) {
     if (pct > BRIGHTNESS_PCT_MAX) return BRIGHTNESS_PCT_MAX;
     return (uint8_t)(((pct + BRIGHTNESS_PCT_STEP / 2) / BRIGHTNESS_PCT_STEP)
                      * BRIGHTNESS_PCT_STEP);
+}
+
+// The auto-favorite radius is stored in meters but always entered and shown in
+// the display's own units, so its default is whichever round value reads as
+// "1.00" there: 1 km metric, 1 mile imperial.
+static inline uint32_t cfgDefaultAutoFavRangeM(uint8_t displayUnits) {
+    return (displayUnits != 0) ? MY_AUTOFAV_RANGE_MI_M : MY_AUTOFAV_RANGE_KM_M;
+}
+
+// True while the radius is still one of the two defaults — i.e. nobody has
+// typed a value of their own. Only then may a units change re-round it; a
+// deliberate 2.5 mi has to survive becoming 4.02 km.
+static inline bool cfgAutoFavRangeIsDefault(uint32_t rangeM) {
+    return rangeM == MY_AUTOFAV_RANGE_KM_M || rangeM == MY_AUTOFAV_RANGE_MI_M;
+}
+
+// Next value for RhinoConfig::chatColorSalt. The increment is the golden-ratio
+// constant: odd, so repeated presses walk 2^32 distinct salts rather than
+// cycling back, and large enough that consecutive salts scatter node ids
+// differently instead of shifting them by one palette slot.
+static inline uint32_t cfgNextChatColorSalt(uint32_t current) {
+    return current + 0x9E3779B9u;
+}
+
+// Battery-voltage trim, in parts per thousand. The range is wide enough for a
+// bad divider (a 1% resistor pair plus ADC offset lands within a few percent;
+// 20% covers a wrong-value resistor) and narrow enough that a fat-fingered
+// setting cannot turn a 3.7 V cell into a plausible-looking 2 V one.
+#define BATT_CAL_TRIM_MIN   (-200)
+#define BATT_CAL_TRIM_MAX   (200)
+#define BATT_CAL_TRIM_STEP  (5)     // 0.5% per key press
+
+static inline int16_t cfgCoerceBattCalTrim(int permille) {
+    if (permille < BATT_CAL_TRIM_MIN) return BATT_CAL_TRIM_MIN;
+    if (permille > BATT_CAL_TRIM_MAX) return BATT_CAL_TRIM_MAX;
+    return (int16_t)permille;
+}
+
+// Trim -> the multiplier applied to a measured battery voltage.
+static inline float cfgBattCalScale(int16_t trim) {
+    return 1.0f + (float)cfgCoerceBattCalTrim(trim) / 1000.0f;
 }
 
 // Backlight percent -> LGFX setBrightness() duty (0-255).

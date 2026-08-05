@@ -360,9 +360,10 @@ TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 #include "aw9523.h"
 
 static Aw9523  s_mdKbLeft, s_mdKbRight;
-static uint8_t s_mdPrev[2][5] = {};      // last debounced column bits per row
-static uint8_t s_mdStable[2][5] = {};
-static uint8_t s_mdStableCount[2][5] = {};
+static uint8_t s_mdPrev[2][5] = {};      // column bits already reported as down
+static uint8_t s_mdStable[2][5] = {};    // debounced column bits per row
+static uint8_t s_mdCandidate[2][5] = {}; // value waiting to be confirmed
+static uint8_t s_mdCandCount[2][5] = {}; // consecutive reads backing it
 
 // Matrix positions, taken from the wadamesh MeshCore port's attaky_mesh_series
 // variant (GPL-3.0-or-later, as is this project), which runs on this hardware:
@@ -441,17 +442,35 @@ static bool mdScanHalf(Aw9523 &dev, uint8_t rowsOut[5]) {
 
 // Two consecutive identical reads before a change counts, which is enough to
 // reject contact bounce at this scan rate without adding latency worth noticing.
+//
+// "Identical" is the point, and the previous version of this did not do it: it
+// counted down on any read that merely *differed* from the stable value and
+// needed three of them, so a key had to survive three whole scans to register
+// and a bouncing contact could have its reads credited to whatever value
+// happened to land last. At the scan interval below that made the minimum
+// registered press about 90 ms — longer than a quick tap, which is why keys
+// went missing at speed rather than at random.
+static constexpr uint8_t kMdDebounceScans = 2;
+
 static void mdDebounce(uint8_t half, const uint8_t fresh[5]) {
     for (uint8_t r = 0; r < 5; r++) {
         if (fresh[r] == s_mdStable[half][r]) {
-            s_mdStableCount[half][r] = 2;
+            // Already the settled value; nothing pending for this row.
+            s_mdCandidate[half][r] = fresh[r];
+            s_mdCandCount[half][r] = 0;
             continue;
         }
-        if (s_mdStableCount[half][r] > 0) {
-            s_mdStableCount[half][r]--;
-        } else {
+        if (fresh[r] != s_mdCandidate[half][r]) {
+            // A different value than the one being counted: start over on this
+            // one rather than letting a bounce inherit the earlier tally.
+            s_mdCandidate[half][r] = fresh[r];
+            s_mdCandCount[half][r] = 1;
+            continue;
+        }
+        if (s_mdCandCount[half][r] < 0xFF) s_mdCandCount[half][r]++;
+        if (s_mdCandCount[half][r] >= kMdDebounceScans) {
             s_mdStable[half][r] = fresh[r];
-            s_mdStableCount[half][r] = 2;
+            s_mdCandCount[half][r] = 0;
         }
     }
 }
@@ -507,12 +526,18 @@ static char mdReadKey() {
         if (!(half ? s_mdKbRight : s_mdKbLeft).present()) continue;
         for (uint8_t r = 0; r < 5; r++) {
             const uint8_t now = s_mdStable[half][r];
+            // Releases are always consumed; presses are consumed one at a time,
+            // as they are reported. Marking the whole row reported (prev = now)
+            // was losing the second of two keys pressed in the same row within
+            // one debounce window, because this function returns after the
+            // first one and the other's edge was already cleared.
+            s_mdPrev[half][r] &= now;
             const uint8_t downEdges = (uint8_t)(now & ~s_mdPrev[half][r]);
-            s_mdPrev[half][r] = now;
             if (!downEdges) continue;
 
             for (uint8_t c = 0; c < 5; c++) {
                 if (!(downEdges & (1u << c))) continue;
+                s_mdPrev[half][r] |= (uint8_t)(1u << c);
                 const char k = half ? kMdKeymapRight[r][c] : kMdKeymapLeft[r][c];
 #if defined(MESH_DECK_TOUCH_TRACE)
                 // Announce presses on positions the map calls empty. Attaky's
@@ -749,9 +774,19 @@ char TDeckKeyboard::readTrackball() {
 
 char TDeckKeyboard::readKey() {
 #if defined(DEVICE_MESH_DECK)
-    // Both halves raise an interrupt on a change, so the matrix only has to be
-    // walked when something moved. The idle fallback still runs occasionally in
-    // case a press is missed while the lines are already asserted.
+    // The halves do raise an interrupt on a change — but on this board neither
+    // INT line reaches a GPIO (both land on expander 0x58, see KB_INT_LEFT /
+    // KB_INT_RIGHT), so both reads below compile out and irqActive is always
+    // false. The matrix is walked on a timer, and this interval is therefore the
+    // real scan rate, not an idle fallback.
+    //
+    // It used to be 30 ms. With the debounce above that put the shortest
+    // registered press at ~60-90 ms, which is longer than a fast keystroke — so
+    // typing at speed dropped characters and quick taps on Enter did nothing.
+    // At 10 ms a press is confirmed within ~20 ms. One walk is ten I2C
+    // transactions plus 250 us of row settling, about 2.5 ms, so this is the
+    // point where the bus cost stops being free; going faster is not worth it.
+    static constexpr uint32_t kMdScanIntervalMs = 10;
     static uint32_t lastScanMs = 0;
     const uint32_t nowMs = millis();
     bool irqActive = false;
@@ -762,7 +797,7 @@ char TDeckKeyboard::readKey() {
     irqActive = irqActive || (digitalRead(KB_INT_RIGHT) == LOW);
 #endif
     if (!irqActive) {
-        if (nowMs - lastScanMs < 30) return KEY_NONE;
+        if ((uint32_t)(nowMs - lastScanMs) < kMdScanIntervalMs) return KEY_NONE;
     }
     lastScanMs = nowMs;
     return mdReadKey();

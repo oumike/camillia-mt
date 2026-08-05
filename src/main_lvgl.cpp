@@ -260,6 +260,13 @@ static lv_obj_t *s_cfgBrightModal = nullptr;
 static lv_obj_t *s_cfgBrightSlider = nullptr;
 static lv_obj_t *s_cfgBrightValue = nullptr;
 static uint8_t   s_cfgBrightOriginal = 0;   // restored if the user cancels
+// Battery voltage trim, reachable from the CFG screen.
+static lv_obj_t *s_cfgBattCalBackdrop = nullptr;
+static lv_obj_t *s_cfgBattCalModal = nullptr;
+static lv_obj_t *s_cfgBattCalSlider = nullptr;
+static lv_obj_t *s_cfgBattCalValue = nullptr;   // live "4.05 V   82%"
+static lv_obj_t *s_cfgBattCalDetail = nullptr;  // untrimmed reading + trim
+static int16_t   s_cfgBattCalOriginal = 0;      // restored if the user cancels
 #if HAS_VOLUME_CONTROL
 static lv_obj_t *s_cfgVolBackdrop = nullptr;
 static lv_obj_t *s_cfgVolModal = nullptr;
@@ -606,7 +613,9 @@ static int s_cfgActionCount = 0;
 // Sized well above the longest build's action list (initCfgActions appends
 // without a bounds check, so headroom here is the only thing standing between
 // a new entry and a silent stack-adjacent write).
-static int s_cfgActions[32] = {};
+// 30 entries on the fullest build as of Battery Calibration, so 32 was one
+// addition away from being the bug this comment warns about.
+static int s_cfgActions[40] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -978,6 +987,14 @@ static void cancelCfgVolume();
 static void applyCfgVolume();
 #endif
 static void revertCfgBrightnessPreview();
+static const char *battTrimText(int trim, char *buf, size_t bufLen);
+static void openCfgBattCalModal();
+static void closeCfgBattCalModal();
+static void revertCfgBattCalPreview();
+static void refreshCfgBattCalReadout(bool force);
+static void stepCfgBattCal(int steps);
+static void cancelCfgBattCal();
+static void applyCfgBattCal();
 static void applyBrightness();
 static void onCfgBrightSliderChanged(lv_event_t *e);
 static void onCfgBrightBackdropPressed(lv_event_t *e);
@@ -1515,6 +1532,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_BRIGHTNESS,
+    CFG_ACTION_BATT_CAL,
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
@@ -1529,6 +1547,7 @@ enum CfgActionId {
     CFG_ACTION_RELEASE_NOTES,
     CFG_ACTION_TIME_DATE,
     CFG_ACTION_CHANNEL_CFG,
+    CFG_ACTION_RESET_CHAT_COLORS,
     CFG_ACTION_CLEAR_MSGS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
@@ -1613,6 +1632,9 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
     {UI_THEME_WINTER_CHILL, UI_MODE_LIGHT,
         rgb565(0xF1, 0xF7, 0xFC), rgb565(0xFF, 0xFF, 0xFF), rgb565(0xDF, 0xEB, 0xF6), rgb565(0x5C, 0x86, 0xB2),
         "Winter Chill Light"},
+    {UI_THEME_CAMELLIA_BLACK, UI_MODE_DARK,
+        rgb565(0x00, 0x00, 0x00), rgb565(0x00, 0x00, 0x00), rgb565(0x0A, 0x0A, 0x0A), rgb565(0xFF, 0xFF, 0xFF),
+        "Camillia Black"},
 };
 
 static constexpr int kUiThemePresetCount =
@@ -2365,9 +2387,11 @@ static void playSplashStartupRiff() {
 }
 
 static int uiThemePresetIndexFromCfg() {
+    uint8_t mode = s_cfg.uiMode;
+    if (uiThemeForcesDark(s_cfg.uiTheme)) mode = UI_MODE_DARK;
     for (int i = 0; i < kUiThemePresetCount; i++) {
         if (kUiThemePresets[i].theme == s_cfg.uiTheme
-            && kUiThemePresets[i].mode == s_cfg.uiMode) {
+            && kUiThemePresets[i].mode == mode) {
             return i;
         }
     }
@@ -2389,7 +2413,11 @@ static void persistSplashMelodySetting() { markConfigDirty(); }
 
 static void applyUiThemePalette() {
     s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
-    s_cfg.uiMode  = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+    if (uiThemeForcesDark(s_cfg.uiTheme)) {
+        s_cfg.uiMode = UI_MODE_DARK;
+    } else {
+        s_cfg.uiMode = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+    }
 
     const UiThemePresetLite *preset = &kUiThemePresets[0];
     for (int i = 0; i < kUiThemePresetCount; i++) {
@@ -2775,6 +2803,15 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_BRIGHTNESS:
             snprintf(buf, bufLen, "Brightness: %u%%", (unsigned)s_cfg.brightness);
             break;
+        case CFG_ACTION_BATT_CAL:
+            if (s_cfg.battCalTrim == 0) {
+                snprintf(buf, bufLen, "Battery Calibration: Off");
+            } else {
+                char trimBuf[12];
+                snprintf(buf, bufLen, "Battery Calibration: %s",
+                         battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
+            }
+            break;
         case CFG_ACTION_ANNOUNCE:
             snprintf(buf, bufLen, "Send NODEINFO Broadcast");
             break;
@@ -2821,6 +2858,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_TIME_DATE:
             snprintf(buf, bufLen, "Time and Date: %s",
                      (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? "Manual" : "Auto");
+            break;
+        case CFG_ACTION_RESET_CHAT_COLORS:
+            snprintf(buf, bufLen, "Reset Chat Colors");
             break;
         case CFG_ACTION_CLEAR_MSGS:
             snprintf(buf, bufLen, "Clear Messages");
@@ -4237,6 +4277,9 @@ static void applyLoadedConfigInvariants() {
     }
     // Anything but a known source would silently disable both NTP and GPS.
     s_cfg.timeSource = cfgCoerceTimeSource(s_cfg.timeSource);
+    // A trim out of range would scale the battery reading into nonsense; an
+    // imported YAML or a hand-edited value is enough to get there.
+    s_cfg.battCalTrim = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim);
     applyPresetParams(s_cfg);
 }
 
@@ -4480,7 +4523,8 @@ static void loadConfigFromPrefs() {
     if (prefs.isKey("nodeArchive")) s_cfg.nodeArchiveEnabled = prefs.getBool("nodeArchive");
     if (prefs.isKey("autoFav")) s_cfg.autoFavoriteEnabled = prefs.getBool("autoFav");
     if (prefs.isKey("autoFavRange")) {
-        uint32_t r = prefs.getULong("autoFavRange", MY_AUTOFAV_RANGE_M);
+        uint32_t r = prefs.getULong("autoFavRange",
+                                    cfgDefaultAutoFavRangeM(s_cfg.displayUnits));
         if (r > 0) s_cfg.autoFavoriteRangeM = r;
     }
     String canned = getStringIfKey("cannedMsgs");
@@ -5902,6 +5946,12 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
+    // Hardware trim, so it sits with the maintenance entries rather than up
+    // among the display settings — it is set once per unit, not adjusted.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
+    // Sits with the maintenance actions, directly above Clear Messages: it is
+    // the mildest of the "undo something about the stored chat" group.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
@@ -6059,6 +6109,14 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 3;
     const int cfgPadBottom = 3;
+#elif defined(DEVICE_MESH_DECK)
+    // Same 320x240 panel as the T-Deck but smaller glass, so it takes the
+    // T-Deck's row font and a little more height on top: rows here are tapped as
+    // often as they are scrolled to. The list scrolls, so the cost is only that
+    // fewer rows are on screen at once.
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
+    const int cfgPadTop = 6;
+    const int cfgPadBottom = 6;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     // Touch-only build: tall rows give a comfortable tap target. The action list
     // scrolls, so the extra height just means a bit more scrolling.
@@ -6755,6 +6813,238 @@ static void openCfgVolumeModal() {
     setCfgVolumePreview(s_cfgVolOriginal, false);
 }
 #endif  // HAS_VOLUME_CONTROL
+
+// ── Battery calibration ──────────────────────────────────────────────────────
+// Same slider shape as brightness, trimming the measured battery voltage by
+// +/-20% in 0.5% steps. The reading updates live while the slider moves, so the
+// procedure is: measure the pack with a meter, adjust until the number here
+// agrees, save.
+//
+// Worth being clear about what this does and does not fix, because the reason
+// people reach for it is usually "my percentage is wrong". Displayed percent
+// comes from a resting-voltage curve, so a voltage read even 50 mV off moves it
+// by several points across the flat middle of the Li-ion curve — that this
+// corrects. It does not scale with pack capacity: a 1000 mAh and an 8000 mAh
+// cell at 3.9 V are both at the same state of charge, they just hold it for
+// different lengths of time. Two units disagreeing at the same charge level is
+// a divider/ADC difference, which is exactly what this trims out.
+#if defined(DEVICE_MESH_DECK)
+// The MAX17048 reports state of charge itself (see batteryReadPercent), so the
+// trim moves the voltage readout but not the percentage.
+static constexpr bool kBattPctFromGauge = true;
+#else
+static constexpr bool kBattPctFromGauge = false;
+#endif
+
+// Tenths of a percent with an explicit sign. Not "%+d.%d": integer division
+// truncates toward zero, so a trim of -5 would print as "+0.5%".
+static const char *battTrimText(int trim, char *buf, size_t bufLen) {
+    const int mag = (trim < 0) ? -trim : trim;
+    snprintf(buf, bufLen, "%s%d.%d%%", (trim < 0) ? "-" : "+", mag / 10, mag % 10);
+    return buf;
+}
+
+// force: redraw now because the trim just moved. Otherwise this is the UI tick
+// asking, and it is rate-limited — batteryReadVoltageUntrimmed() goes to the
+// hardware every call, which on the Pager means driving the charger's one-shot
+// ADC over I2C. At tick rate that would be ~30 conversions a second competing
+// with the sampler that feeds the actual battery display.
+static void refreshCfgBattCalReadout(bool force) {
+    if (!s_cfgBattCalModal) return;
+
+    static uint32_t lastMs = 0;
+    const uint32_t now = millis();
+    if (!force && (uint32_t)(now - lastMs) < 700) return;
+    lastMs = now;
+
+    if (lvObjValid(s_cfgBattCalValue)) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.2f V   %u%%",
+                 (double)batteryReadVoltage(), (unsigned)batteryReadPercent());
+        lv_label_set_text(s_cfgBattCalValue, buf);
+    }
+    if (lvObjValid(s_cfgBattCalDetail)) {
+        char trimBuf[12];
+        char buf[48];
+        snprintf(buf, sizeof(buf), "sensor %.2f V    trim %s",
+                 (double)batteryReadVoltageUntrimmed(),
+                 battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
+        lv_label_set_text(s_cfgBattCalDetail, buf);
+    }
+}
+
+static void setCfgBattCalPreview(int trim) {
+    s_cfg.battCalTrim = cfgCoerceBattCalTrim(trim);
+    batterySetCalibrationTrim((int)s_cfg.battCalTrim);
+    refreshCfgBattCalReadout(true);
+}
+
+static void closeCfgBattCalModal() {
+    if (lvObjValid(s_cfgBattCalBackdrop)) {
+        lv_obj_del(s_cfgBattCalBackdrop);
+    } else if (lvObjValid(s_cfgBattCalModal)) {
+        lv_obj_del(s_cfgBattCalModal);
+    }
+    s_cfgBattCalBackdrop = nullptr;
+    s_cfgBattCalModal = nullptr;
+    s_cfgBattCalSlider = nullptr;
+    s_cfgBattCalValue = nullptr;
+    s_cfgBattCalDetail = nullptr;
+}
+
+// Teardown-safe like the brightness and volume previews: the settings screen can
+// close with this modal open, and an unapplied trim must not linger in s_cfg
+// where the next unrelated save would persist it.
+static void revertCfgBattCalPreview() {
+    if (!s_cfgBattCalModal && !s_cfgBattCalBackdrop) return;
+    s_cfg.battCalTrim = s_cfgBattCalOriginal;
+    batterySetCalibrationTrim((int)s_cfgBattCalOriginal);
+    closeCfgBattCalModal();
+}
+
+static void cancelCfgBattCal() {
+    revertCfgBattCalPreview();
+    refreshCfgModal();
+}
+
+static void applyCfgBattCal() {
+    persistConfigToPrefs();
+    char trimBuf[12];
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Battery trim: %s",
+             battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
+    closeCfgBattCalModal();
+    refreshCfgModal();
+}
+
+// Nudge by whole steps; used by the key handler on non-touch boards.
+static void stepCfgBattCal(int steps) {
+    if (!steps) return;
+    const int16_t next = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim + steps * BATT_CAL_TRIM_STEP);
+    if (next == s_cfg.battCalTrim) return;
+    setCfgBattCalPreview(next);
+    if (lvObjValid(s_cfgBattCalSlider)) {
+        lv_slider_set_value(s_cfgBattCalSlider, next, LV_ANIM_OFF);
+    }
+}
+
+static void onCfgBattCalSliderChanged(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target_obj(e);
+    if (!slider) return;
+    // Snap to the same step the keys use, so dragging and stepping cannot leave
+    // the trim on a value the keys can never return to.
+    const int raw = (int)lv_slider_get_value(slider);
+    const int snapped = ((raw < 0 ? raw - BATT_CAL_TRIM_STEP / 2 : raw + BATT_CAL_TRIM_STEP / 2)
+                         / BATT_CAL_TRIM_STEP) * BATT_CAL_TRIM_STEP;
+    setCfgBattCalPreview(snapped);
+}
+
+static void onCfgBattCalBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgBattCalBackdrop) return;
+    cancelCfgBattCal();
+}
+
+static void openCfgBattCalModal() {
+    if (!s_rootScreen || s_cfgBattCalModal || s_cfgBattCalBackdrop) return;
+
+    s_cfgBattCalOriginal = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgBattCalBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgBattCalBackdrop, w, h);
+    lv_obj_align(s_cfgBattCalBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgBattCalBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgBattCalBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBattCalBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgBattCalBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgBattCalBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgBattCalBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgBattCalBackdrop, onCfgBattCalBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgBattCalModal = lv_obj_create(s_cfgBattCalBackdrop);
+    lv_obj_set_size(s_cfgBattCalModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgBattCalModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgBattCalModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_cfgBattCalModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgBattCalModal, LV_DIR_VER);
+    lv_obj_add_flag(s_cfgBattCalModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBattCalModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgBattCalModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgBattCalModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgBattCalModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgBattCalModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgBattCalModal, 5, 0);
+    lv_obj_set_flex_flow(s_cfgBattCalModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgBattCalModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgBattCalBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgBattCalModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Battery Calibration");
+
+    s_cfgBattCalValue = lv_label_create(s_cfgBattCalModal);
+    lv_obj_set_width(s_cfgBattCalValue, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBattCalValue, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_cfgBattCalValue, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_cfgBattCalValue, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgBattCalDetail = lv_label_create(s_cfgBattCalModal);
+    lv_obj_set_width(s_cfgBattCalDetail, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBattCalDetail, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgBattCalDetail, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgBattCalDetail, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgBattCalSlider = lv_slider_create(s_cfgBattCalModal);
+    lv_obj_set_width(s_cfgBattCalSlider, modalW - 40);
+    lv_slider_set_range(s_cfgBattCalSlider, BATT_CAL_TRIM_MIN, BATT_CAL_TRIM_MAX);
+    lv_slider_set_value(s_cfgBattCalSlider, s_cfgBattCalOriginal, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_cfgBattCalSlider, lv_color_hex(0x123266), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_cfgBattCalSlider, lvColorFrom565(s_ui.selectAccent), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_cfgBattCalSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_cfgBattCalSlider, onCfgBattCalSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // The instructions are the first thing to go on a short panel: the modal
+    // would otherwise outgrow its height cap and start scrolling, hiding the
+    // slider and the reading it exists to show. Two lines of prose are not worth
+    // that on a 135 px display.
+    if (h >= 200) {
+        lv_obj_t *how = lv_label_create(s_cfgBattCalModal);
+        lv_obj_set_width(how, lv_pct(100));
+        lv_obj_set_style_text_font(how, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(how, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_text_align(how, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(how, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(how,
+                          kBattPctFromGauge
+                              ? "Match the voltage to a meter reading.\n"
+                                "Percent comes from the fuel gauge and does not change."
+                              : "Match the voltage to a meter reading.\n"
+                                "Percent follows it. 0% = uncalibrated.");
+    }
+
+    lv_obj_t *hint = lv_label_create(s_cfgBattCalModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                      "Drag to adjust"
+#else
+                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+#endif
+    );
+
+    setCfgBattCalPreview(s_cfgBattCalOriginal);
+}
 
 // ── Chat-style picker ─────────────────────────────────────────────────────────
 // A small in-CFG modal to pick Classic / Bubbles / Outline directly, replacing
@@ -9628,8 +9918,9 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
 
 static void closeCfgModal() {
     revertCfgBrightnessPreview();
+    revertCfgBattCalPreview();  // same reason: an unapplied preview must not persist
 #if HAS_VOLUME_CONTROL
-    revertCfgVolumePreview();   // same reason: an unapplied preview must not persist
+    revertCfgVolumePreview();
 #endif
     closeCfgWifiPickerModal();
     closeCfgConfirmModal();
@@ -10125,10 +10416,25 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
 }
 
 static lv_color_t chatPanelBackgroundColor() {
+    // Camillia Black means black. Its panelBg already is, but the accent blend
+    // below would lift the chat area to a grey — the accent on this theme is
+    // white — which is the one thing this theme exists to avoid. Not routed
+    // through lv_color_hex(): that macro is the theme remapper, and here we
+    // want the literal.
+    if (s_cfg.uiTheme == UI_THEME_CAMELLIA_BLACK) {
+        return lv_color_make(0x00, 0x00, 0x00);
+    }
     if (s_cfg.uiMode == UI_MODE_LIGHT) {
         return lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, 52));
     }
     return lvColorFrom565(blend565(s_ui.panelBg, s_ui.accent, 34));
+}
+
+// The chat panel is normally translucent over the screen background. On the
+// black theme that alpha is a liability rather than a look: anything that ever
+// sits behind it would tint the "black", so it covers instead.
+static lv_opa_t chatPanelBackgroundOpa() {
+    return (s_cfg.uiTheme == UI_THEME_CAMELLIA_BLACK) ? LV_OPA_COVER : LV_OPA_60;
 }
 
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
@@ -15624,7 +15930,7 @@ static void openCfgModal() {
     lv_obj_t *title = lv_label_create(header);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 #else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
@@ -15640,7 +15946,7 @@ static void openCfgModal() {
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_14, 0);
 #else
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
@@ -15750,7 +16056,7 @@ static void openCfgModal() {
     lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_pad_top(hint, 0, 0);
     lv_obj_set_style_pad_bottom(hint, 0, 0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -15914,6 +16220,12 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
             showActionPopup = false;   // row already reads Imperial/Metric
             s_cfg.displayUnits = (uint8_t)(s_cfg.displayUnits ? 0 : 1);
+            // The radius is entered in the display's units, so an untouched one
+            // re-rounds to the new system's 1 km / 1 mi instead of reading back
+            // as 0.62 or 1.61. A value the user typed is left alone.
+            if (cfgAutoFavRangeIsDefault(s_cfg.autoFavoriteRangeM)) {
+                s_cfg.autoFavoriteRangeM = cfgDefaultAutoFavRangeM(s_cfg.displayUnits);
+            }
             persistConfigToPrefs();
             refreshNodesDetails();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Units: %s",
@@ -15954,6 +16266,12 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BRIGHTNESS");
             showActionPopup = false;
             openCfgBrightnessModal();   // previews live, no reboot
+            break;
+
+        case CFG_ACTION_BATT_CAL:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BATT_CAL");
+            showActionPopup = false;
+            openCfgBattCalModal();      // previews live, no reboot
             break;
 
 #if HAS_VOLUME_CONTROL
@@ -16143,6 +16461,19 @@ static void performCfgAction(int actionId) {
             flushConfigIfDirty();   // pending settings must reach NVS before we go
             ESP.restart();
         } break;
+
+        case CFG_ACTION_RESET_CHAT_COLORS:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec RESET_CHAT_COLORS");
+            showActionPopup = false;   // the row and the status line say it all
+            s_cfg.chatColorSalt = cfgNextChatColorSalt(s_cfg.chatColorSalt);
+            persistConfigToPrefs();
+            // Colors are computed per row at render time, so a forced rebuild is
+            // the whole of "reassign" — nothing is stored per node.
+            s_lastRenderedChannel = -1;
+            s_lastRenderedCount = -1;
+            refreshChatView(true);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat colors reassigned");
+            break;
 
         case CFG_ACTION_CLEAR_MSGS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_MSGS");
@@ -17465,6 +17796,27 @@ static void pumpKeyboardInput() {
             else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
             else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
             stepCfgBrightness(steps);
+            continue;
+        }
+
+        // Battery trim slider: same keys as brightness, one 0.5% step each.
+        if (s_cfgBattCalModal) {
+            if (isModalCloseKey(k)) {
+                cancelCfgBattCal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyCfgBattCal();
+                continue;
+            }
+            int steps = 0;
+            if (k == 'j' || k == 'J')            steps = -1;   // reads lower
+            else if (k == 'k' || k == 'K')       steps = 1;    // reads higher
+            else if (k == KEY_SCROLL_UP)         steps = (invertScrollNav || navFromJk) ? -1 : 1;
+            else if (k == KEY_SCROLL_DN)         steps = (invertScrollNav || navFromJk) ? 1 : -1;
+            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
+            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
+            stepCfgBattCal(steps);
             continue;
         }
 
@@ -20705,15 +21057,42 @@ static void fitChannelDropdownToButtonContent() {
     }
     if (maxLabelW <= 0) return;
 
+#if defined(DEVICE_MESH_DECK)
+    // Tighter than the shared values below, and deliberately so: 2+2 panel pad,
+    // 4 of gutter and 2+2 inside the row spend 12 px between the panel edge and
+    // the text — the same 12 px the selector button spends on its own 6 px side
+    // padding. That is what lets the panel be exactly as wide as the button
+    // while still fitting every name the button fits.
+    const lv_coord_t listPadLeft = 2;
+    const lv_coord_t listPadRight = 2;
+    const lv_coord_t buttonTextPad = 4;
+    const lv_coord_t scrollbarGutter = 4;
+#else
     const lv_coord_t listPadLeft = 4;
     const lv_coord_t listPadRight = 4;
     const lv_coord_t buttonTextPad = 8; // 4px left + 4px right, matching button inner padding
     const lv_coord_t scrollbarGutter = 8; // keep scrollbar between panel edge and buttons
+#endif
 
     lv_coord_t buttonW = maxLabelW + buttonTextPad;
     if (buttonW < 56) buttonW = 56;
 
     lv_coord_t dropdownW = listPadLeft + buttonW + scrollbarGutter + listPadRight;
+
+#if defined(DEVICE_MESH_DECK)
+    // Take the selector button's width outright when it is the larger of the
+    // two: the list is that button opening downward, so anything short of its
+    // edges reads as a separate panel. The selector sizes itself once from the
+    // widest channel name (refreshChannelSelectorLabel), which is why this runs
+    // after the first setActiveChannel rather than at build time.
+    lv_coord_t selectorW = s_channelSelectorFixedBtnW;
+    if (selectorW <= 0 && s_channelSelectorBtn) selectorW = lv_obj_get_width(s_channelSelectorBtn);
+    if (selectorW > dropdownW) {
+        dropdownW = selectorW;
+        buttonW = dropdownW - listPadLeft - listPadRight - scrollbarGutter;
+    }
+#endif
+
     lv_obj_t *parent = lv_obj_get_parent(s_channelList);
     if (parent) {
         lv_coord_t maxW = lv_obj_get_width(parent) - 8;
@@ -20736,7 +21115,9 @@ static void fitChannelDropdownToButtonContent() {
         if (!btn || !lbl) continue;
 
         lv_obj_set_width(btn, buttonW);
-        lv_obj_set_width(lbl, max((lv_coord_t)1, (lv_coord_t)(buttonW - 8)));
+        // Same padding the row was built with, or the label is sized for room
+        // the row does not have and every name ellipsizes.
+        lv_obj_set_width(lbl, max((lv_coord_t)1, (lv_coord_t)(buttonW - buttonTextPad)));
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_obj_center(lbl);
     }
@@ -22248,7 +22629,9 @@ static uint16_t nodeBubbleColor565(uint32_t nodeId) {
         {243,156, 18}, { 52, 73, 94},
     };
     const int n = (int)(sizeof(pal) / sizeof(pal[0]));
-    uint32_t h = nodeId * 2654435761u;
+    // The salt is what "Reset Chat Colors" changes. It defaults to 0, which
+    // leaves the mapping exactly as it was before the salt existed.
+    uint32_t h = (nodeId ^ s_cfg.chatColorSalt) * 2654435761u;
     const uint8_t *c = pal[(h >> 24) % n];
     return rgb565(c[0], c[1], c[2]);
 }
@@ -22680,6 +23063,10 @@ static uint32_t chatRenderContextSignature() {
     mix((uint32_t)s_cfg.fontSize);
     mix((uint32_t)s_cfg.chatSpacing);
     mix((uint32_t)s_cfg.chatColorsEnabled);
+    // Reshuffling node colors from the web form has to repaint the chat too,
+    // and this signature is the only thing that notices a config change made
+    // from outside the settings screen.
+    mix(s_cfg.chatColorSalt);
     mix((uint32_t)s_cfg.uiMode);
     mix((uint32_t)(s_pagerChatCursorMode ? 1u : 0u));
     mix((uint32_t)s_pagerChatCursorDisplayIndex);
@@ -23120,6 +23507,11 @@ static void buildUi() {
     const int chatH = panelH - chatHeaderH - chatGap - chatLegendH - 3;
 #endif
 
+    // Children align to the header's content area, so anything that has to line
+    // up with a header child from outside the bar owes it these pixels.
+    const int kChatHeaderBorderW = 1;
+    const int kChatHeaderPad = 2;
+
     s_chatHeaderBar = lv_obj_create(screen);
     lv_obj_set_size(s_chatHeaderBar, chatW, chatHeaderH);
     lv_obj_align(s_chatHeaderBar, LV_ALIGN_TOP_LEFT, chatX, panelMargin);
@@ -23129,9 +23521,9 @@ static void buildUi() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
         0);
     lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
-    lv_obj_set_style_border_width(s_chatHeaderBar, 1, 0);
+    lv_obj_set_style_border_width(s_chatHeaderBar, kChatHeaderBorderW, 0);
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
-    lv_obj_set_style_pad_all(s_chatHeaderBar, 2, 0);
+    lv_obj_set_style_pad_all(s_chatHeaderBar, kChatHeaderPad, 0);
 
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
     // Clock gets a larger font than the other header items so the time reads at a glance.
@@ -23323,7 +23715,7 @@ static void buildUi() {
         s_chatPanel,
         chatPanelBackgroundColor(),
         0);
-    lv_obj_set_style_bg_opa(s_chatPanel, LV_OPA_60, 0);
+    lv_obj_set_style_bg_opa(s_chatPanel, chatPanelBackgroundOpa(), 0);
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
     lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatPanel, 4, 0);
@@ -23363,25 +23755,48 @@ static void buildUi() {
     lv_obj_add_event_cb(s_chatList, onChatListScroll, LV_EVENT_SCROLL, nullptr);
 
 #if UI_CHANNEL_LIST_DROPDOWN
+    const lv_font_t *channelNavFont = kMainScreenFont;
+#if defined(DEVICE_MESH_DECK)
+    // Same size as the selector button's own label, so the open list reads as
+    // that button unfolded rather than as a smaller menu below it.
+    channelNavFont = &lv_font_montserrat_14;
+#elif defined(DEVICE_TDECK)
+    channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
+#endif
+#if defined(DEVICE_MESH_DECK)
+    // Rows have to clear the larger font: a row spends 2 px of padding and up to
+    // 2 px of border per side, and anything shorter clips the glyphs.
+    const int channelNavBtnH =
+        max(kMainScreenChannelBtnHeight, (int)lv_font_get_line_height(channelNavFont) + 8);
+#else
+    const int channelNavBtnH = kMainScreenChannelBtnHeight;
+#endif
+
     {
 #if defined(DEVICE_MESH_DECK)
-        // Match the selector button exactly, so the list reads as that button
-        // opening downward rather than as a separate panel that happens to be
-        // nearby. Derived from selectorBtnW rather than recomputed, so the two
-        // cannot drift apart.
+        // Placeholder only. The real width is the selector button's, which is
+        // measured from the channel names after this point, so
+        // fitChannelDropdownToButtonContent() sets the final width once the
+        // button has settled.
         const int dropdownW = selectorBtnW;
 #else
         const int dropdownW = min(max(chatW / 2, 120), 260);
 #endif
         const int maxDropdownH = max(44, chatH - 8);
-        const int desiredDropdownH = (kMainScreenChannelBtnHeight + 4) * MESH_CHANNELS + 8;
+        const int desiredDropdownH = (channelNavBtnH + 4) * MESH_CHANNELS + 8;
         const int dropdownH = min(maxDropdownH, desiredDropdownH);
 
         s_channelList = lv_obj_create(screen);
         lv_obj_set_size(s_channelList, dropdownW, dropdownH);
 #if defined(DEVICE_MESH_DECK)
-        // Same left edge as the button above it, for the same reason.
-        lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + selectorBtnOffsetX, chatY + 4);
+        // Same left edge as the button above it, for the same reason. The
+        // selector sits inside the header bar, so its left edge is the header's
+        // own border and padding further in than the bar itself.
+        lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT,
+                     chatX + kChatHeaderBorderW + kChatHeaderPad + selectorBtnOffsetX,
+                     chatY + 4);
 #else
         lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, chatX + 4, chatY + 4);
 #endif
@@ -23484,28 +23899,22 @@ static void buildUi() {
     lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
 #endif
 
-#if UI_CHANNEL_LIST_DROPDOWN
-    const lv_font_t *channelNavFont = kMainScreenFont;
-#if defined(DEVICE_MESH_DECK)
-    // One step up from the small-screen default. The built-in Montserrat set
-    // jumps 10 -> 12, so this is the next size that exists.
-    channelNavFont = &lv_font_montserrat_12;
-#elif defined(DEVICE_TDECK)
-    channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
-    if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
-#endif
-#endif
-
     for (int i = 0; i < MESH_CHANNELS; i++) {
 #if UI_CHANNEL_LIST_DROPDOWN
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
         s_channelBtns[i] = btn;
         lv_obj_set_width(btn, lv_pct(100));
-        lv_obj_set_height(btn, max(kMainScreenChannelBtnHeight, 20));
+        lv_obj_set_height(btn, max(channelNavBtnH, 20));
         lv_obj_set_style_radius(btn, 6, 0);
+#if defined(DEVICE_MESH_DECK)
+        // Half the usual side padding, spent on the panel matching the selector
+        // button's width instead — see fitChannelDropdownToButtonContent().
+        lv_obj_set_style_pad_left(btn, 2, 0);
+        lv_obj_set_style_pad_right(btn, 2, 0);
+#else
         lv_obj_set_style_pad_left(btn, 4, 0);
         lv_obj_set_style_pad_right(btn, 4, 0);
+#endif
         lv_obj_set_style_pad_top(btn, 2, 0);
         lv_obj_set_style_pad_bottom(btn, 2, 0);
         lv_obj_set_style_outline_width(btn, 0, 0);
@@ -23598,12 +24007,13 @@ static void buildUi() {
 #endif
     }
 
-    fitChannelDropdownToButtonContent();
-
     refreshChatComposeButtonState();
 
     int initialChannel = constrain(s_activeChannel, 0, MESH_CHANNELS - 1);
     setActiveChannel(initialChannel);
+    // After setActiveChannel, so the selector button has already measured itself
+    // and the dropdown can match its width.
+    fitChannelDropdownToButtonContent();
     refreshHeaderTime(true);
     refreshHeaderStatus(true);
     lv_scr_load(screen);
@@ -23746,6 +24156,7 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
             s_chatPanel,
             chatPanelBackgroundColor(),
             0);
+        lv_obj_set_style_bg_opa(s_chatPanel, chatPanelBackgroundOpa(), 0);
         lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatList) {
@@ -24386,6 +24797,9 @@ void setup() {
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
     bootstrapStateMapsIfMissing();
+    // Before batteryInitAdc(), which takes the first sample: the trim has to be
+    // in place for it, or boot's opening reading is the uncalibrated one.
+    batterySetCalibrationTrim((int)s_cfg.battCalTrim);
     batteryInitAdc();
     Nodes.init();
     // Runs after init() so the RAM copy is already loaded: on a partition that a
@@ -24796,6 +25210,9 @@ void loop() {
         refreshChannelGlow(false);
         refreshHeaderTime(false);
         refreshHeaderStatus(false);
+        // Cheap no-op unless the calibration modal is open, where the reading
+        // has to keep moving on its own so a trim can be judged against a meter.
+        refreshCfgBattCalReadout(false);
         refreshDmAlertIndicator();
         // Not forced: the content signature inside refreshChatView decides whether a
         // rebuild is actually needed, so mesh packets that don't change the visible

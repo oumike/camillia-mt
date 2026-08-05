@@ -298,6 +298,11 @@ static void batteryResetFilter() {
 
 static void batteryRefreshFilter(bool forceSample);
 
+// User trim from settings, applied on top of BATT_CAL. Kept here rather than
+// read from the config struct so this file stays independent of the UI layer;
+// main_lvgl pushes it at boot and whenever the calibration screen saves.
+static float sBatteryCalTrimScale = 1.0f;
+
 #if (BATT_ADC_PIN >= 0)
 static int32_t batteryReadAdcMilliVoltsOnce() {
     int mv = analogReadMilliVolts(BATT_ADC_PIN);
@@ -398,7 +403,9 @@ void batteryInitAdc() {
     batteryRefreshFilter(true);
 }
 
-static float batteryReadVoltageRaw() {
+// Whatever the hardware reports, before the user's trim: charger register, fuel
+// gauge, or divider-scaled ADC.
+static float batteryReadVoltageHw() {
 #if (BATT_ADC_PIN < 0)
 #if defined(DEVICE_TLORA_PAGER_TFT)
     return batteryReadPagerBqVolts();
@@ -423,6 +430,14 @@ static float batteryReadVoltageRaw() {
     return vadc * BATT_DIV * BATT_CAL;
 #endif
 #endif
+}
+
+// The hardware reading with the user's trim applied. Everything downstream —
+// the filter, the percentage, the header gauge — sees only this.
+static float batteryReadVoltageRaw() {
+    const float v = batteryReadVoltageHw();
+    if (v <= 0.0f) return 0.0f;   // unknown stays unknown; the filter holds
+    return v * sBatteryCalTrimScale;
 }
 
 static void batteryRefreshFilter(bool forceSample) {
@@ -473,6 +488,25 @@ float batteryReadVoltage() {
     return sBatteryFilter.initialized ? sBatteryFilter.filteredVoltage : 0.0f;
 }
 
+float batteryReadVoltageUntrimmed() {
+    return batteryReadVoltageHw();
+}
+
+void batterySetCalibrationTrim(int trimPermille) {
+    if (trimPermille < -500) trimPermille = -500;
+    if (trimPermille > 500) trimPermille = 500;
+    const float scale = 1.0f + (trimPermille / 1000.0f);
+    if (scale > sBatteryCalTrimScale - 0.0001f && scale < sBatteryCalTrimScale + 0.0001f) {
+        return;
+    }
+    sBatteryCalTrimScale = scale;
+    // The filter holds a voltage measured under the old trim, and it eases
+    // toward new values a fraction at a time. Drop it rather than let the
+    // display crawl toward the corrected reading over the next several seconds.
+    batteryResetFilter();
+    batteryRefreshFilter(true);
+}
+
 uint8_t batteryReadPercent() {
 #if defined(DEVICE_MESH_DECK)
     // Prefer the gauge's own state of charge. Everything else here derives a
@@ -500,19 +534,21 @@ void batteryDebugSnapshot(char *out, size_t outLen) {
     // means the voltage can only ever be 2304 + 20n mV.
     snprintf(out, outLen,
              "[batt] BQ25896 present=%d pending=%d reg0x0E=0x%02X raw=%u -> %umV | "
-             "filtered=%.3fV shown=%d%% (curve=%d%%)",
+             "trim=x%.3f filtered=%.3fV shown=%d%% (curve=%d%%)",
              sBqPresent ? 1 : 0,
              sBqConversionPending ? 1 : 0,
              sBqLastRawReg,
              (unsigned)(sBqLastRawReg & 0x7F),
              (unsigned)sBqLastMv,
+             (double)sBatteryCalTrimScale,
              (double)filtered,
              shown,
              batteryVoltageToPct(filtered));
 #else
-    const float rawV = batteryReadVoltageRaw();
+    const float hwV = batteryReadVoltageHw();
     snprintf(out, outLen,
-             "[batt] raw=%.3fV | filtered=%.3fV shown=%d%% (curve=%d%%)",
-             (double)rawV, (double)filtered, shown, batteryVoltageToPct(filtered));
+             "[batt] raw=%.3fV trim=x%.3f | filtered=%.3fV shown=%d%% (curve=%d%%)",
+             (double)hwV, (double)sBatteryCalTrimScale,
+             (double)filtered, shown, batteryVoltageToPct(filtered));
 #endif
 }

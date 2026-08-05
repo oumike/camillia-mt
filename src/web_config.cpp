@@ -750,8 +750,8 @@ static const char kCustomLoraFields[] =
         "any other value pins the slot. Every node in your mesh has to match.</p>"
         "</div>";
 
-// Theme preset names, ordered dark/light per family — the same list the swatch
-// picker's NAMES array carries in JS; lite renders them as a plain select.
+// Theme preset names used by both the lite select and the swatch picker.
+// Most families offer dark+light; Camillia Black is dark-only.
 static const char *kThemePresetNames[] = {
     "Camillia Dark",        "Camillia Light",
     "Evergreen Dark",       "Evergreen Light",
@@ -765,9 +765,33 @@ static const char *kThemePresetNames[] = {
     "Quiet Luxury Dark",    "Quiet Luxury Light",
     "Morning Dew Dark",     "Morning Dew Light",
     "Winter Chill Dark",    "Winter Chill Light",
+    "Camillia Black",
 };
 static const uint8_t kThemePresetCount =
     (uint8_t)(sizeof(kThemePresetNames) / sizeof(kThemePresetNames[0]));
+
+static uint8_t themePresetFromConfig(const RhinoConfig &cfg) {
+    uint8_t themeBase = (uint8_t)constrain((int)cfg.uiTheme, 0, UI_THEME_COUNT - 1);
+    if (themeBase == UI_THEME_CAMELLIA_BLACK) {
+        return (uint8_t)(kThemePresetCount - 1);
+    }
+
+    uint8_t mode = (cfg.uiMode == UI_MODE_LIGHT) ? UI_MODE_LIGHT : UI_MODE_DARK;
+    return (uint8_t)constrain((int)(themeBase * 2 + mode), 0, (int)kThemePresetCount - 1);
+}
+
+static void themePresetToConfig(uint8_t preset, uint8_t &themeOut, uint8_t &modeOut) {
+    preset = (uint8_t)constrain((int)preset, 0, (int)kThemePresetCount - 1);
+    if (preset == (uint8_t)(kThemePresetCount - 1)) {
+        themeOut = UI_THEME_CAMELLIA_BLACK;
+        modeOut = UI_MODE_DARK;
+        return;
+    }
+
+    themeOut = (uint8_t)constrain((int)(preset / 2), 0, UI_THEME_COUNT - 1);
+    modeOut = (uint8_t)((preset & 1) ? UI_MODE_LIGHT : UI_MODE_DARK);
+    if (uiThemeForcesDark(themeOut)) modeOut = UI_MODE_DARK;
+}
 
 // The remaining constants below are the config pane's fat static blobs, pulled
 // out of the build-a-String path. Appending a multi-KB literal forces a
@@ -905,15 +929,17 @@ static const char kThemePicker[] =
                         "'19':{bg:'#faf4ea',panel:'#fffdf8',panel2:'#f1e7d5',line:'#cdbfa8',text:'#3b2f24',dim:'#7b6b57',accent:'#a8844f',ink:'#ffffff'},"
                         "'20':{bg:'#12282a',panel:'#1a3638',panel2:'#234345',line:'#4d7072',text:'#ebf7f5',dim:'#b3d0cc',accent:'#9cd8c8',ink:'#123130'},"
                         "'21':{bg:'#eef9f6',panel:'#ffffff',panel2:'#ddf1ec',line:'#b5d5cd',text:'#213531',dim:'#5f7c76',accent:'#4e9c8a',ink:'#ffffff'},"
-                        "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
-                        "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'}"
+                                                "'22':{bg:'#151f2b',panel:'#1c2a3a',panel2:'#243649',line:'#4c637c',text:'#ecf3fa',dim:'#b5c5d6',accent:'#8fb3d9',ink:'#132030'},"
+                                                "'23':{bg:'#f1f7fc',panel:'#ffffff',panel2:'#dfebf6',line:'#b6c9dd',text:'#22354a',dim:'#607891',accent:'#5c86b2',ink:'#ffffff'},"
+                                                "'24':{bg:'#000000',panel:'#000000',panel2:'#0a0a0a',line:'#666666',text:'#f3f6fa',dim:'#b7c0cc',accent:'#ffffff',ink:'#080d14'}"
         "};"
         "var NAMES=['Camillia Dark','Camillia Light','Evergreen Dark','Evergreen Light',"
           "'Earthy Dark','Earthy Light','Solarized Dark','Solarized Light',"
           "'Crimson Blue Dark','Crimson Blue Light','Scarlet Pop Dark','Scarlet Pop Light',"
           "'Ink Wash Dark','Ink Wash Light','Lavendar Fields Dark','Lavendar Fields Light',"
           "'Wild Flowers Dark','Wild Flowers Light','Quiet Luxury Dark','Quiet Luxury Light',"
-          "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light'];"
+                    "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light',"
+                    "'Camillia Black'];"
         "var input=document.getElementById('themeInput');"
         "function apply(){"
           "var k=input.value;var p=P[k]||P['0'];"
@@ -1160,8 +1186,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // allocation that size is exactly what a fragmented heap can't provide.
     sendFlash(lite ? kLiteHead : kHead);
     String html;
-    uint8_t themeBase = (uint8_t)constrain((int)gCfg->uiTheme, 0, UI_THEME_COUNT - 1);
-    uint8_t themePreset = (uint8_t)(themeBase * 2 + (gCfg->uiMode == UI_MODE_LIGHT ? 1 : 0));
+    uint8_t themePreset = themePresetFromConfig(*gCfg);
     // Zero in lite mode: the node loops below accumulate tens of KB of options
     // and detail panels, which AP mode has no room for and lite never shows.
     int totalNodes = lite ? 0 : Nodes.count();
@@ -2305,6 +2330,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     if (lite) {
+        // Restore, but not backup. Import streams the upload into a static
+        // buffer and parses it on the stack, so it costs AP mode nothing;
+        // export has to build the whole YAML in one String, which is the sort
+        // of multi-KB contiguous allocation this mode cannot promise. Outside
+        // the form above rather than inside it — a nested form would submit to
+        // /save instead.
+        html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid #3a4553'>"
+                "<h3 style='margin:.2em 0 .4em'>Restore Config</h3>"
+                "<form method='POST' action='/import' enctype='multipart/form-data'>"
+                "<label>Import a YAML config file"
+                "<input type='file' name='f' accept='.yaml,.yml'></label>"
+                "<button type='submit' style='width:100%;margin-top:.6em'>"
+                "Upload &amp; Apply</button></form>"
+                "<p style='font-size:.82em;color:#888'>Applies the file and reboots. "
+                "Files over 8 KB are rejected rather than partly applied. Export is "
+                "available once the device is on your WiFi.</p>";
         // No further tabs in AP mode — close the document.
         html += "</body></html>";
         sendChunk(html);
@@ -2401,6 +2442,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         sectionEnd(html, false);
         sendChunk(html);
     }
+
+    // Above the Danger Zone rather than inside it: it changes nothing but which
+    // palette entry each node draws in, and nothing about it needs a confirm.
+    section(html, false, "Chat Colors", false);
+    html +=
+        "<form method='POST' action='/reset-chat-colors'>"
+        "<button type='submit'>&#127912; Reset Chat Colors</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Each node's chat color comes from its node ID, so two nodes can end up "
+        "sharing one. This re-rolls every assignment at once &mdash; press again "
+        "for another arrangement. Messages are not touched.</p>";
+    sectionEnd(html, false);
+    sendChunk(html);
 
     // Written out rather than using section(): the helper has no way to carry
     // the red, and losing it would make the destructive actions read like any
@@ -3535,6 +3590,10 @@ static void handlePostSave() {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
+    // Kept because the auto-favorite radius below is submitted in whatever units
+    // the page was *rendered* in, which is not necessarily the units this same
+    // POST is switching to.
+    const uint8_t prevUnits = gCfg->displayUnits;
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     if (server.hasArg("chat_style")) {
@@ -3560,15 +3619,25 @@ static void handlePostSave() {
     }
     gCfg->autoFavoriteEnabled = server.hasArg("autofav");
     if (server.hasArg("autofav_range")) {
-        // Shown in km or miles per the Units setting; stored in meters.
+        // Shown in km or miles per the Units setting; stored in meters. Read in
+        // prevUnits: the number in the box is the one the browser was shown, so
+        // switching Metric -> Imperial in this same save must not reinterpret a
+        // "1.00" that meant kilometres as miles.
         const double v = server.arg("autofav_range").toDouble();
         if (v > 0.0) {
-            const double perUnit = (gCfg->displayUnits != 0) ? 1609.344 : 1000.0;
+            const double perUnit = (prevUnits != 0) ? 1609.344 : 1000.0;
             double meters = v * perUnit;
             if (meters < 50.0) meters = 50.0;             // below this GPS noise dominates
             if (meters > 800000.0) meters = 800000.0;     // 800 km / ~500 mi ceiling
             gCfg->autoFavoriteRangeM = (uint32_t)(meters + 0.5);
         }
+    }
+    // Units changed and the radius is still stock: re-round it to the new
+    // system's 1 km / 1 mi so the field doesn't come back reading 0.62 or 1.61.
+    // Anything the user typed is left exactly where they put it.
+    if (gCfg->displayUnits != prevUnits
+        && cfgAutoFavRangeIsDefault(gCfg->autoFavoriteRangeM)) {
+        gCfg->autoFavoriteRangeM = cfgDefaultAutoFavRangeM(gCfg->displayUnits);
     }
     gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     // Legacy compatibility: only apply chat spacing if an older web form sends it.
@@ -3576,13 +3645,15 @@ static void handlePostSave() {
         gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     }
     if (server.hasArg("ui_theme_preset")) {
-        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(), 0, 23);
-        gCfg->uiTheme = (uint8_t)constrain((int)(preset / 2), 0, UI_THEME_COUNT - 1);
-        gCfg->uiMode = (uint8_t)((preset & 1) ? UI_MODE_LIGHT : UI_MODE_DARK);
+        uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(),
+                                            0,
+                                            (int)kThemePresetCount - 1);
+        themePresetToConfig(preset, gCfg->uiTheme, gCfg->uiMode);
     } else {
         // Backward-compatible fallback for older forms.
         gCfg->uiTheme = (uint8_t)constrain(server.arg("ui_theme").toInt(), 0, UI_THEME_COUNT - 1);
         gCfg->uiMode  = (uint8_t)(server.arg("ui_mode").toInt() != 0 ? UI_MODE_LIGHT : UI_MODE_DARK);
+        if (uiThemeForcesDark(gCfg->uiTheme)) gCfg->uiMode = UI_MODE_DARK;
     }
 
     // Power
@@ -4061,6 +4132,19 @@ static void handlePostClearMessages() {
     redirectHomeWithFlash("All stored messages cleared.");
 }
 
+// ── Reset Chat Colors ─────────────────────────────────────────
+//
+// Nothing per-node is stored: the color is a hash of the node id, and this
+// re-rolls the salt that hash is mixed with. gOnSave persists it; the chat
+// repaints on its own because the salt is part of the render signature.
+static void handlePostResetChatColors() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!gCfg) { redirect("/"); return; }
+    gCfg->chatColorSalt = cfgNextChatColorSalt(gCfg->chatColorSalt);
+    if (gOnSave) gOnSave();
+    redirectHomeWithFlash("Chat colors reassigned.");
+}
+
 // ── Clear Nodes ───────────────────────────────────────────────
 
 static void handlePostClearNodes() {
@@ -4215,35 +4299,70 @@ static void handleGetExport() {
     server.send(200, "text/x-yaml", yaml);
 }
 
+// Static, not heap: 8 KB is more than AP mode could allocate contiguously, and
+// the buffer exists either way since both route sets share these handlers.
 static char   importBuf[8192];
 static size_t importLen = 0;
 static bool   importOk  = false;
+static bool   importOverflow = false;
 
 static void handleImportUpload() {
     HTTPUpload &upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         importLen = 0;
         importOk  = false;
+        importOverflow = false;
     } else if (upload.status == UPLOAD_FILE_WRITE) {
-        size_t space = sizeof(importBuf) - importLen - 1;
-        size_t chunk = upload.currentSize < space ? upload.currentSize : space;
-        memcpy(importBuf + importLen, upload.buf, chunk);
-        importLen += chunk;
+        // Refuse the file rather than fill the buffer and parse what fit: a
+        // truncated YAML still parses, so the old clamp applied the first N
+        // settings of the file and silently dropped the rest.
+        if (importOverflow) return;              // keep draining the socket
+        const size_t space = sizeof(importBuf) - importLen - 1;
+        if (upload.currentSize > space) {
+            importOverflow = true;
+            return;
+        }
+        memcpy(importBuf + importLen, upload.buf, upload.currentSize);
+        importLen += upload.currentSize;
     } else if (upload.status == UPLOAD_FILE_END) {
+        if (importOverflow) return;
         importBuf[importLen] = '\0';
         importOk = true;
     }
 }
 
+// AP mode answers inline instead of redirecting home. A 302 to "/" makes the
+// browser pull the whole lite config page again — the largest allocation this
+// mode makes — and on success it would do that while a reboot is already
+// scheduled. A couple hundred bytes says the same thing for none of the heap.
+static void sendImportResult(const char *msg) {
+    if (!webCfgUseLite()) {
+        redirectHomeWithFlash(msg);
+        return;
+    }
+    String page;
+    page.reserve(320);
+    page = "<!doctype html><meta name='viewport' content='width=device-width,"
+           "initial-scale=1'><body style='font-family:sans-serif;background:#12161c;"
+           "color:#e6e6e6;padding:1.2em'><p>";
+    page += msg;
+    page += "</p><p><a href='/' style='color:#6cf'>Back to config</a></p></body>";
+    server.send(200, "text/html", page);
+}
+
 static void handleImportDone() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { redirect("/"); return; }
+    if (importOverflow) {
+        sendImportResult("Import failed: file larger than 8 KB.");
+        return;
+    }
     if (!importOk || importLen == 0) {
-        redirectHomeWithFlash("Import failed: no data received.");
+        sendImportResult("Import failed: no data received.");
         return;
     }
     if (!cfgImportFromBuf(importBuf, importLen, *gCfg)) {
-        redirectHomeWithFlash("Import failed: parse error.");
+        sendImportResult("Import failed: parse error.");
         return;
     }
     if (!gCfg->webCfgPass[0]) {
@@ -4266,7 +4385,7 @@ static void handleImportDone() {
 
     if (gOnSave) gOnSave();
     scheduleReboot(900);
-    redirectHomeWithFlash("Import complete. Rebooting now...");
+    sendImportResult("Import complete. Rebooting now...");
 }
 
 static void handleGetLogout() {
@@ -4342,6 +4461,13 @@ static void registerLiteRoutes() {
     onRoute("/login",      HTTP_GET,  handleGetLogin);
     onRoute("/login",      HTTP_POST, handlePostLogin);
     onRoute("/logout",     HTTP_GET,  handleGetLogout);
+    // The one heavy-sounding endpoint lite does carry. Restoring a config is
+    // exactly what someone stuck on the AP with a misconfigured device needs,
+    // and the cost is a route registration plus WebServer's ~2 KB multipart
+    // buffer during the POST — the handler parses out of a static buffer on the
+    // stack. Its sibling /export stays out: building the YAML needs one large
+    // contiguous String.
+    onRoute("/import",     HTTP_POST, handleImportDone, handleImportUpload);
     registerNotFound();
 }
 
@@ -4369,6 +4495,7 @@ static void registerCommonRoutes() {
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/export",            HTTP_GET,  handleGetExport);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
+    onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);

@@ -358,9 +358,10 @@ static const int kNumRebroadModes = 5;
 
 static const char *kThemeNames[] = {
     "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON", "SCARLET_POP",
-    "INK_WASH", "LAVENDAR_FIELDS", "WILD_FLOWERS", "QUIET_LUXURY", "MORNING_DEW", "WINTER_CHILL"
+    "INK_WASH", "LAVENDAR_FIELDS", "WILD_FLOWERS", "QUIET_LUXURY", "MORNING_DEW", "WINTER_CHILL",
+    "CAMELLIA_BLACK"
 };
-static const int kNumThemes = 12;
+static const int kNumThemes = 13;
 
 static const char *kThemeModeNames[] = {
     "DARK", "LIGHT"
@@ -504,9 +505,12 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.volumePct           = MY_VOLUME_PCT;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
-    cfg.autoFavoriteRangeM  = MY_AUTOFAV_RANGE_M;
+    // After cfg.displayUnits above, which decides which round value this is.
+    cfg.autoFavoriteRangeM  = cfgDefaultAutoFavRangeM(cfg.displayUnits);
     cfg.chatSpacing        = MY_CHAT_SPACING;
     cfg.fontSize           = MY_FONT_SIZE;
+    cfg.battCalTrim        = 0;   // uncalibrated; the board's BATT_CAL still applies
+    cfg.chatColorSalt      = 0;   // original node-color mapping
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -693,14 +697,21 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    splashMelodyEnabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    volume: %u\n", (unsigned)cfg.volumePct); out += tmp;
+    // Per-unit hardware trim, so it rides along with a config backup/restore of
+    // the same device. Restoring this file onto a different unit is the one case
+    // where it should be dropped by hand.
+    snprintf(tmp, sizeof(tmp), "    batteryCalTrim: %d\n", (int)cfg.battCalTrim); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    chatColorSalt: %lu\n", (unsigned long)cfg.chatColorSalt); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
     out += "    theme: ";
     out += (cfg.uiTheme < kNumThemes) ? kThemeNames[cfg.uiTheme] : kThemeNames[0];
     out += "\n";
+    uint8_t themeMode = cfg.uiMode;
+    if (uiThemeForcesDark(cfg.uiTheme)) themeMode = UI_MODE_DARK;
     out += "    themeMode: ";
-    out += (cfg.uiMode < kNumThemeModes) ? kThemeModeNames[cfg.uiMode] : kThemeModeNames[0];
+    out += (themeMode < kNumThemeModes) ? kThemeModeNames[themeMode] : kThemeModeNames[0];
     out += "\n";
     out += "    chatStyle: ";
     out += (cfg.chatStyle == CHAT_STYLE_BUBBLES ? "BUBBLES"
@@ -1125,6 +1136,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
                 else if (!strcmp(key, "splashMelodyEnabled")) cfg.splashMelodyEnabled = (!strcmp(val,"true"));
                 else if (!strcmp(key, "volume"))          cfg.volumePct = cfgCoerceVolume(atoi(val));
+                else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));
+                else if (!strcmp(key, "chatColorSalt"))   cfg.chatColorSalt = (uint32_t)strtoul(val, nullptr, 10);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)
@@ -1238,6 +1251,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     cfg.msgAlertSound = (uint8_t)constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1);
     cfg.fontSize = (uint8_t)constrain((int)cfg.fontSize, 0, FONT_SIZE_MAX);
     cfg.volumePct = cfgCoerceVolume((int)cfg.volumePct);
+    cfg.battCalTrim = cfgCoerceBattCalTrim((int)cfg.battCalTrim);
+    if (uiThemeForcesDark(cfg.uiTheme)) cfg.uiMode = UI_MODE_DARK;
     if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
     if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;
     if (cfg.neighborInfoIntervalS < NEIGHBORINFO_MIN_INTERVAL_S) {

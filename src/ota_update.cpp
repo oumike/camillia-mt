@@ -231,9 +231,14 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
 static void buildAssetUrl(const char *tag, char *outUrl, size_t outLen) {
     if (!outUrl || outLen == 0) return;
     const char *useTag = (tag && tag[0]) ? tag : "";
+    const char *slug = otaCurrentDeviceAssetSlug();
+    if (!slug || !slug[0]) {
+        outUrl[0] = '\0';
+        return;
+    }
     snprintf(outUrl, outLen,
              "%s/firmware/%s/camillia-mt-%s-%s-ota.bin",
-             s_otaBaseUrl, useTag, otaCurrentDeviceAssetSlug(), useTag);
+             s_otaBaseUrl, useTag, slug, useTag);
 }
 
 // Fetch a small binary body (the detached signature) into buf over plain HTTP.
@@ -326,6 +331,8 @@ const char *otaCurrentDeviceAssetSlug() {
     return "tlora-pager-tft";
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     return "cardputer-cap";
+#elif defined(DEVICE_MESH_DECK)
+    return "mesh-deck";
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
   #if defined(DEVICE_UI_VERTICAL) && (DEVICE_UI_VERTICAL)
     return "heltec-vertical";
@@ -333,12 +340,20 @@ const char *otaCurrentDeviceAssetSlug() {
     return "heltec";
   #endif
 #else
-    return "tdeck";
+    return "";
 #endif
 }
 
 bool otaCheckLatestRelease(OtaCheckResult &out) {
     clearCheckResult(out);
+
+    if (!otaCurrentDeviceAssetSlug()[0]) {
+        out.ok = false;
+        copyStringToBuf(out.error,
+                        sizeof(out.error),
+                        "OTA unsupported for this device build");
+        return false;
+    }
 
     if (g_otaNetworkGate != kOtaNetworkGateMagic) {
         out.ok = false;
@@ -358,6 +373,13 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
 
     copyStringToBuf(out.latestTag, sizeof(out.latestTag), latestTag.c_str());
     buildAssetUrl(out.latestTag, out.downloadUrl, sizeof(out.downloadUrl));
+    if (!out.downloadUrl[0]) {
+        out.ok = false;
+        copyStringToBuf(out.error,
+                        sizeof(out.error),
+                        "OTA unsupported for this device build");
+        return false;
+    }
 
     if (isPrereleaseTag(out.latestTag)) {
         // Never auto-update onto an alpha/prerelease. /releases/latest already
@@ -409,6 +431,10 @@ bool otaInstallLatestRelease(const char *tag,
                              char *errOut,
                              size_t errLen,
                              OtaInstallProgressCb progressCb) {
+    if (!otaCurrentDeviceAssetSlug()[0]) {
+        return setErr(errOut, errLen, "OTA unsupported for this device build");
+    }
+
     if (g_otaNetworkGate != kOtaNetworkGateMagic) {
         return setErr(errOut, errLen, "OTA network blocked (non-worker mode)");
     }
@@ -449,6 +475,9 @@ bool otaInstallLatestRelease(const char *tag,
 
     char url[256] = {};
     buildAssetUrl(tagBuf, url, sizeof(url));
+    if (!url[0]) {
+        return setErr(errOut, errLen, "OTA unsupported for this device build");
+    }
 
     // Fetch the detached signature up front so a missing/short signature aborts
     // before we touch the OTA partition. Fail-closed: no valid signature later

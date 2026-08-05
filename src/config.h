@@ -137,7 +137,7 @@
 #define MY_DISPLAY_UNITS    0      // METRIC
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
-#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL
+#define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL, 12=CAMELLIA_BLACK
 #define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
 
 // Chat rendering style (applied at boot; change requires a reboot)
@@ -207,7 +207,11 @@
 #define MY_OTA_AUTOCHECK    1
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
-#define MY_AUTOFAV_RANGE_M  1609   // auto-favorite threshold, meters (1 mile)
+// Auto-favorite threshold, in meters. One round unit in whichever system the
+// display is set to, so the field reads "1.00" rather than "0.62" or "1.61"
+// until someone changes it. See cfgDefaultAutoFavRangeM().
+#define MY_AUTOFAV_RANGE_KM_M  1000   // 1 km, metric default
+#define MY_AUTOFAV_RANGE_MI_M  1609   // 1 mile, imperial default
 #define MY_CHAT_SPACING     1   // 0=Tight(8px), 1=Normal(10px), 2=Loose(12px)
 
 // Chat/DM message font size. Medium matches the built-in size; Small/Large step
