@@ -124,7 +124,23 @@ candidate_ports() {
 # ── restore ──────────────────────────────────────────────────────────────────
 if [[ -n "$RESTORE_DIR" ]]; then
     IMG="$RESTORE_DIR/flash-full.bin"
-    [[ -f "$IMG" ]] || { echo "No flash-full.bin in $RESTORE_DIR" >&2; exit 1; }
+    if [[ ! -f "$IMG" ]]; then
+        echo "No flash-full.bin in $RESTORE_DIR" >&2
+        if [[ -f "$RESTORE_DIR/INCOMPLETE.txt" ]]; then
+            echo "" >&2
+            sed 's/^/  /' "$RESTORE_DIR/INCOMPLETE.txt" >&2
+        else
+            echo "Either the backup was taken with --no-full, or it did not finish." >&2
+            echo "Take a fresh one before relying on it." >&2
+        fi
+        exit 1
+    fi
+    if [[ -f "$RESTORE_DIR/INCOMPLETE.txt" && "$FORCE" != "1" ]]; then
+        echo "Refusing: $RESTORE_DIR is marked incomplete." >&2
+        sed 's/^/  /' "$RESTORE_DIR/INCOMPLETE.txt" >&2
+        echo "Pass --force to write it anyway." >&2
+        exit 1
+    fi
 
     if [[ -z "$PORT" ]]; then
         # Deliberately not auto-picking here: writing to the wrong board of
@@ -157,6 +173,140 @@ if [[ -n "$RESTORE_DIR" ]]; then
     echo "Restored. The device is running the backed-up image."
     exit 0
 fi
+
+# ── reads ────────────────────────────────────────────────────────────────────
+# Every read goes through read_region, and every read is checked. This is not
+# belt-and-braces: `set -e` does NOT apply inside a function whose exit status is
+# being inspected by the caller, which backup_device's is. An earlier version
+# relied on errexit there and sent read_flash output to /dev/null, so a failed
+# dump printed nothing, did not stop the run, and still produced a MANIFEST and
+# a RESTORE.md — a backup that reported success while missing flash-full.bin and
+# nvs.bin. Nothing here may depend on errexit.
+
+# Expected size in bytes from a partitions.csv field, which is hex (0x10000).
+expected_bytes() { printf '%d' "$(( $1 ))"; }
+
+file_bytes() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+
+# Seconds of no progress output before a transfer is declared stuck.
+# esptool prints a line every 4 KB, which is under half a second even at 115200,
+# so this is generous.
+STALL_SECS=30
+
+# Run one esptool read under a watchdog, echoing progress when asked.
+#
+# The watchdog is the point. A USB-UART bridge that cannot sustain a long
+# transfer does not always fail — it can simply stop, leaving esptool blocked on
+# a read that never returns. Observed on the Mesh Deck: dead at 46% of 16 MB,
+# zero CPU, no output, and it would have sat there forever. A hang returns no
+# status, so the baud ladder below never gets its turn; without this, "try
+# slower" is unreachable in exactly the case it exists for.
+#
+# macOS has no timeout(1) in base, hence polling the log for growth rather than
+# wrapping the command in something that can already do this.
+run_watched() {
+    local show="$1" port="$2" baud="$3" off="$4" size="$5" dest="$6"
+    local pid last cur idle status line
+
+    : > "$LOG"
+    # esptool is invoked directly rather than through esp(): backgrounding a
+    # shell function makes $! the wrapping subshell, so killing it leaves the
+    # real esptool running — still holding the serial port, which would make
+    # every retry in the ladder fail with "port is busy". A simple command
+    # backgrounded here gives $! the process that actually needs killing.
+    "$ESPTOOL" --chip auto --port "$port" --baud "$baud" \
+        --before default_reset --after no_reset \
+        read_flash "$off" "$size" "$dest" >"$LOG" 2>&1 &
+    pid=$!
+
+    last=0
+    idle=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 2
+        cur="$(file_bytes "$LOG")"
+        if [[ "$cur" == "$last" ]]; then
+            idle=$((idle + 2))
+        else
+            idle=0
+            last="$cur"
+            if [[ "$show" == "1" ]]; then
+                # esptool separates updates with \r, so the last line is the
+                # current percentage.
+                line="$(tail -c 120 "$LOG" | tr '\r' '\n' | tail -1)"
+                printf '\r    %-40s' "$line"
+            fi
+        fi
+        if [[ "$idle" -ge "$STALL_SECS" ]]; then
+            # TERM first, then insist. A wedged esptool blocked on a serial read
+            # does not always take the hint, and anything left alive keeps the
+            # port and defeats the retry it is about to trigger.
+            kill "$pid" 2>/dev/null || true
+            for _ in 1 2 3; do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 1
+            done
+            kill -9 "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            [[ "$show" == "1" ]] && echo ""
+            echo "    no progress for ${STALL_SECS}s at $baud baud — transfer stuck" >>"$LOG"
+            return 1
+        fi
+    done
+
+    wait "$pid"
+    status=$?
+    [[ "$show" == "1" ]] && echo ""
+    return "$status"
+}
+
+# Read a region, verifying the file that comes back is the full requested size.
+# On failure, drop to a slower rate and try again: a link that negotiates at
+# 460800 for a 4 KB probe can still drop a 9 MB transfer, which is exactly what
+# happened on the Mesh Deck's USB-UART bridge. DEV_BAUD is updated on success so
+# the rest of the backup stays at whatever rate actually works.
+read_region() {
+    local port="$1" off="$2" size="$3" dest="$4"
+    local want b ladder actual
+    want="$(expected_bytes "$size")"
+
+    ladder=("$DEV_BAUD")
+    if [[ "$BAUD_EXPLICIT" != "1" ]]; then
+        for b in 460800 230400 115200; do
+            [[ "$b" -lt "$DEV_BAUD" ]] && ladder+=("$b")
+        done
+    fi
+
+    # Reads big enough to take a while show esptool's own running percentage;
+    # short ones stay quiet. Capturing output is what lets a failure be reported
+    # properly, but applying that to the 16 MB dump made the longest step of the
+    # run the only one with no sign of life — indistinguishable from a hang.
+    local show=0 ok
+    [[ "$want" -gt 1048576 ]] && show=1
+
+    for b in "${ladder[@]}"; do
+        rm -f "$dest"
+        ok=0
+        if run_watched "$show" "$port" "$b" "$off" "$size" "$dest"; then
+            ok=1
+        fi
+
+        if [[ "$ok" == "1" ]]; then
+            actual="$(file_bytes "$dest")"
+            if [[ "$actual" == "$want" ]]; then
+                DEV_BAUD="$b"
+                return 0
+            fi
+            echo "" >&2
+            echo "    short read at $b baud: got $actual of $want bytes" >&2
+        else
+            echo "" >&2
+            echo "    read failed at $b baud:" >&2
+            tail -3 "$LOG" | sed 's/^/      /' >&2
+        fi
+    done
+    rm -f "$dest"
+    return 1
+}
 
 # ── one device ───────────────────────────────────────────────────────────────
 # Returns 0 on a completed backup, 1 on a real failure, 2 when the port simply
@@ -236,9 +386,15 @@ backup_device() {
     echo "  ${chip:-ESP}, MAC ${mac:-unknown}, $flash_size, $baud baud"
     echo "  -> $out"
 
+    DEV_BAUD="$baud"
+    local failures=0
+
     # 0x8000 is fixed by the ROM bootloader. One 4 KB sector covers the table
     # (entries are 32 bytes and the format caps at 95 of them).
-    esp "$port" "$baud" read_flash 0x8000 0x1000 "$out/partition-table.bin" >/dev/null
+    if ! read_region "$port" 0x8000 0x1000 "$out/partition-table.bin"; then
+        echo "  could not read the partition table; nothing else can be trusted" >&2
+        return 1
+    fi
     python3 - "$out/partition-table.bin" "$out/partitions.csv" <<'PY'
 # Parse the on-device table rather than shelling out to gen_esp32part.py, whose
 # path moves with the Arduino core version. The format is stable and trivial:
@@ -275,10 +431,14 @@ PY
         # Rough estimate at 10 bits per byte on the wire. Worth printing: the
         # difference between rates is minutes vs. half an hour, and a silent 25
         # minute wait looks like a hang.
-        est=$(( flash_bytes / (baud / 10) ))
+        est=$(( flash_bytes / (DEV_BAUD / 10) ))
         printf '  dumping %s of flash (~%d min) ... ' "$flash_size" $(( (est + 59) / 60 ))
-        esp "$port" "$baud" read_flash 0x0 "$flash_bytes" "$out/flash-full.bin" >/dev/null
-        echo "done"
+        if read_region "$port" 0x0 "$flash_bytes" "$out/flash-full.bin"; then
+            echo "done"
+        else
+            echo "FAILED"
+            failures=$((failures + 1))
+        fi
     fi
 
     # App partitions are skipped: they are megabytes each and already inside
@@ -290,17 +450,22 @@ PY
         [[ "$label" == \#* || -z "$label" ]] && continue
         [[ "$tname" == "data" ]] || continue
         printf '  dumping %-10s %s @ %s ... ' "$label" "$p_size" "$p_off"
-        esp "$port" "$baud" read_flash "$p_off" "$p_size" "$out/$label.bin" >/dev/null
-        echo "done"
+        if read_region "$port" "$p_off" "$p_size" "$out/$label.bin"; then
+            echo "done"
+        else
+            echo "FAILED"
+            failures=$((failures + 1))
+        fi
     done < "$out/partitions.csv"
 
     {
         echo "Taken:      $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        [[ "$failures" -gt 0 ]] && echo "INCOMPLETE: $failures region(s) failed to read"
         echo "Chip:       ${chip:-unknown}"
         echo "MAC:        ${mac:-unknown}"
         echo "Port:       $port"
         echo "Flash size: $flash_size"
-        echo "Baud:       $baud"
+        echo "Baud:       $DEV_BAUD"
         echo "esptool:    $ESPTOOL_VER"
         echo "Repo:       $(git rev-parse --short HEAD 2>/dev/null || echo n/a) ($(cat VERSION 2>/dev/null || echo '?'))"
         echo ""
@@ -313,13 +478,38 @@ PY
         done
     } > "$out/MANIFEST.txt"
 
-    write_restore_doc "$out" "$baud"
+    write_restore_doc "$out" "$DEV_BAUD"
 
     # Every read above runs with --after no_reset so the stub survives between
     # calls; without this the board is left halted in the stub when the backup
     # ends, looking bricked until it is power-cycled by hand.
     "$ESPTOOL" --chip auto --port "$port" --baud 115200 \
         --before no_reset --after hard_reset read_mac >/dev/null 2>&1 || true
+
+    if [[ "$failures" -gt 0 ]]; then
+        # Marked in the directory as well as on stdout: the whole point of a
+        # backup is being trusted months later, by which time nobody remembers
+        # what scrolled past. RESTORE.md is left in place but is not to be
+        # believed for the regions listed here.
+        {
+            echo "This backup is INCOMPLETE. $failures region(s) could not be read."
+            echo "Taken $(date '+%Y-%m-%d %H:%M:%S %Z') from $port."
+            echo ""
+            echo "Missing (compare against partitions.csv in this directory):"
+            [[ "$DUMP_FULL" == "1" && ! -f "$out/flash-full.bin" ]] && echo "  flash-full.bin  <- the restorable whole-device image"
+            local l t s o z
+            while IFS=, read -r l t s o z; do
+                [[ "$l" == \#* || -z "$l" ]] && continue
+                [[ "$t" == "data" ]] || continue
+                [[ -f "$out/$l.bin" ]] || echo "  $l.bin"
+            done < "$out/partitions.csv"
+            echo ""
+            echo "Re-run the backup. If it fails again at the same place, force a"
+            echo "slower link: ./backup.sh --port $port --baud 115200"
+        } > "$out/INCOMPLETE.txt"
+        echo "  INCOMPLETE: $failures region(s) failed — see $out/INCOMPLETE.txt" >&2
+        return 1
+    fi
 
     return 0
 }

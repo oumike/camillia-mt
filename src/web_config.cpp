@@ -770,6 +770,12 @@ static const char *kThemePresetNames[] = {
 static const uint8_t kThemePresetCount =
     (uint8_t)(sizeof(kThemePresetNames) / sizeof(kThemePresetNames[0]));
 
+static const char *kNotifyLedColorNames[] = {
+    "Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Off"
+};
+static const uint8_t kNotifyLedColorCount =
+    (uint8_t)(sizeof(kNotifyLedColorNames) / sizeof(kNotifyLedColorNames[0]));
+
 static uint8_t themePresetFromConfig(const RhinoConfig &cfg) {
     uint8_t themeBase = (uint8_t)constrain((int)cfg.uiTheme, 0, UI_THEME_COUNT - 1);
     if (themeBase == UI_THEME_CAMELLIA_BLACK) {
@@ -2119,15 +2125,38 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='3'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_OFF) html += " selected"; html += ">Off</option>"
             "</select></label>";
 #endif
-#if HAS_NOTIFY_LED
+#if defined(DEVICE_MESH_DECK)
     // Kept in this section rather than given its own: it is the same question
     // as the alert tone — how the device gets your attention — and one more
     // heading is heap the AP-mode lite page cannot spare. Compiled out on boards
     // with no notification LED wired.
-    html += "<label>Notification LED<select name='notify_led'>"
-            "<option value='1'"; if ( gCfg->notifyLedEnabled) html += " selected"; html += ">Enabled</option>"
-            "<option value='0'"; if (!gCfg->notifyLedEnabled) html += " selected"; html += ">Disabled</option>"
-            "</select></label>";
+    html += "<label>Channel Message LED Color<select name='notify_led_channel_color'>";
+    {
+        const uint8_t selected = cfgCoerceNotifyLedColor((int)gCfg->notifyLedColorChannel);
+        for (uint8_t i = 0; i < kNotifyLedColorCount; i++) {
+            char opt[96];
+            snprintf(opt, sizeof(opt), "<option value='%u'%s>%s</option>",
+                     (unsigned)i,
+                     (i == selected) ? " selected" : "",
+                     kNotifyLedColorNames[i]);
+            html += opt;
+        }
+    }
+    html += "</select></label>";
+
+    html += "<label>Direct Message LED Color<select name='notify_led_dm_color'>";
+    {
+        const uint8_t selected = cfgCoerceNotifyLedColor((int)gCfg->notifyLedColorDm);
+        for (uint8_t i = 0; i < kNotifyLedColorCount; i++) {
+            char opt[96];
+            snprintf(opt, sizeof(opt), "<option value='%u'%s>%s</option>",
+                     (unsigned)i,
+                     (i == selected) ? " selected" : "",
+                     kNotifyLedColorNames[i]);
+            html += opt;
+        }
+    }
+    html += "</select></label>";
 #endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
@@ -3674,11 +3703,21 @@ static void handlePostSave() {
     if (server.hasArg("splash_melody")) {
         gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
     }
-#if HAS_NOTIFY_LED
-    // hasArg-guarded like the other conditional controls: a form rendered
-    // without it (or an older cached page) must not silently disable the LED.
-    if (server.hasArg("notify_led")) {
-        gCfg->notifyLedEnabled = server.arg("notify_led").toInt() != 0;
+#if defined(DEVICE_MESH_DECK)
+    // Legacy compatibility for older cached pages that still post notify_led:
+    // the new model is per-type control, so turning the old global toggle off
+    // means both types become Off.
+    if (server.hasArg("notify_led") && server.arg("notify_led").toInt() == 0) {
+        gCfg->notifyLedColorChannel = NOTIFY_LED_COLOR_OFF;
+        gCfg->notifyLedColorDm = NOTIFY_LED_COLOR_OFF;
+    }
+    if (server.hasArg("notify_led_channel_color")) {
+        gCfg->notifyLedColorChannel =
+            cfgCoerceNotifyLedColor(server.arg("notify_led_channel_color").toInt());
+    }
+    if (server.hasArg("notify_led_dm_color")) {
+        gCfg->notifyLedColorDm =
+            cfgCoerceNotifyLedColor(server.arg("notify_led_dm_color").toInt());
     }
 #endif
 #if HAS_SCROLL_INVERT

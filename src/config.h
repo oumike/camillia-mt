@@ -292,6 +292,10 @@
 #define HAS_NOTIFY_LED 0
 #endif
 #define MY_NOTIFY_LED_ENABLED 1
+// Mesh Deck RGB notification LED defaults.
+// 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
+#define MY_NOTIFY_LED_COLOR_CHANNEL 2
+#define MY_NOTIFY_LED_COLOR_DM      5
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

@@ -292,6 +292,22 @@ static lv_obj_t *s_alertSoundRows[MSG_ALERT_SOUND_MAX + 1] = {};
 static int s_alertSoundSelection = 0;
 static uint8_t s_alertSoundOriginal = 0;   // restored if the picker is cancelled
 
+#if defined(DEVICE_MESH_DECK)
+static constexpr int kNotifyLedColorOptionCount = (int)NOTIFY_LED_COLOR_OFF + 1;
+static constexpr int kNotifyLedColorCols = 3;
+static constexpr int kNotifyLedColorCellW = 52;
+static constexpr int kNotifyLedColorCellH = 34;
+static constexpr int kNotifyLedColorCellGap = 6;
+static constexpr int kNotifyLedColorGridW =
+    kNotifyLedColorCols * kNotifyLedColorCellW
+    + (kNotifyLedColorCols - 1) * kNotifyLedColorCellGap;
+static lv_obj_t *s_notifyLedColorBackdrop = nullptr;
+static lv_obj_t *s_notifyLedColorModal = nullptr;
+static lv_obj_t *s_notifyLedColorRows[kNotifyLedColorOptionCount] = {};
+static int s_notifyLedColorSelection = NOTIFY_LED_COLOR_BLUE;
+static bool s_notifyLedColorTargetDm = false;
+#endif
+
 static lv_obj_t *s_chatNameBackdrop = nullptr;
 static lv_obj_t *s_chatNameModal = nullptr;
 static lv_obj_t *s_chatNameRows[CHAT_NAME_MAX + 1] = {};
@@ -1009,6 +1025,14 @@ static void refreshAlertSoundSelection();
 static void applyAlertSoundSelection(int mode);
 static void onAlertSoundRowPressed(lv_event_t *e);
 static void onAlertSoundBackdropPressed(lv_event_t *e);
+#if defined(DEVICE_MESH_DECK)
+static void openNotifyLedColorModal(bool forDm);
+static void closeNotifyLedColorModal();
+static void refreshNotifyLedColorSelection();
+static void applyNotifyLedColorSelection(int color);
+static void onNotifyLedColorRowPressed(lv_event_t *e);
+static void onNotifyLedColorBackdropPressed(lv_event_t *e);
+#endif
 static void openChatStyleModal();
 static void closeChatStyleModal();
 static void refreshChatStyleSelection();
@@ -1240,7 +1264,7 @@ static bool pollUserButton(uint32_t nowMs);
 #if defined(DEVICE_MESH_DECK)
 // Defined further down with the expander code; called from triggerMessageAlert()
 // above it.
-static void meshDeckLedNotify();
+static void meshDeckLedNotify(bool isDm);
 #endif
 static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
@@ -1545,8 +1569,9 @@ enum CfgActionId {
     CFG_ACTION_VOLUME,
     #endif
     CFG_ACTION_MSG_ALERT,
-    #if HAS_NOTIFY_LED
-    CFG_ACTION_NOTIFY_LED,
+    #if defined(DEVICE_MESH_DECK)
+    CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR,
+    CFG_ACTION_NOTIFY_LED_DM_COLOR,
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -1727,6 +1752,36 @@ static const char *msgAlertSoundName(uint8_t mode) {
         default:                     return "Default";
     }
 }
+
+static const char *notifyLedColorName(uint8_t color) {
+    switch (cfgCoerceNotifyLedColor((int)color)) {
+        case NOTIFY_LED_COLOR_RED:     return "Red";
+        case NOTIFY_LED_COLOR_GREEN:   return "Green";
+        case NOTIFY_LED_COLOR_BLUE:    return "Blue";
+        case NOTIFY_LED_COLOR_YELLOW:  return "Yellow";
+        case NOTIFY_LED_COLOR_CYAN:    return "Cyan";
+        case NOTIFY_LED_COLOR_MAGENTA: return "Magenta";
+        case NOTIFY_LED_COLOR_WHITE:   return "White";
+        case NOTIFY_LED_COLOR_OFF:     return "Off";
+        default:                       return "Blue";
+    }
+}
+
+#if defined(DEVICE_MESH_DECK)
+static uint16_t notifyLedColorPreview565(uint8_t color) {
+    switch (cfgCoerceNotifyLedColor((int)color)) {
+        case NOTIFY_LED_COLOR_RED:     return TFT_RED;
+        case NOTIFY_LED_COLOR_GREEN:   return TFT_GREEN;
+        case NOTIFY_LED_COLOR_BLUE:    return TFT_BLUE;
+        case NOTIFY_LED_COLOR_YELLOW:  return TFT_YELLOW;
+        case NOTIFY_LED_COLOR_CYAN:    return TFT_CYAN;
+        case NOTIFY_LED_COLOR_MAGENTA: return TFT_MAGENTA;
+        case NOTIFY_LED_COLOR_WHITE:   return TFT_WHITE;
+        case NOTIFY_LED_COLOR_OFF:     return TFT_BLACK;
+        default:                       return TFT_BLUE;
+    }
+}
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
@@ -2257,7 +2312,13 @@ static void cardputerPlayBassPattern() {
 } // namespace
 #endif
 
-static void triggerMessageAlert(bool bypassRateLimit = false) {
+enum : uint8_t {
+    MSG_ALERT_VISUAL_CHANNEL = 0,
+    MSG_ALERT_VISUAL_DM = 1,
+};
+
+static void triggerMessageAlert(bool bypassRateLimit = false,
+                                uint8_t visualSource = MSG_ALERT_VISUAL_CHANNEL) {
     static uint32_t lastAlertMs = 0;
     uint32_t nowMs = millis();
     if (!bypassRateLimit && nowMs - lastAlertMs < 120) {
@@ -2277,7 +2338,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false) {
     // above the sound branches below, each of which returns early when the
     // alert tone is off — a silent device is exactly when a visual cue matters,
     // and it is the only notification available while the screen is asleep.
-    meshDeckLedNotify();
+    meshDeckLedNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -2850,9 +2911,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Volume: %u%%", (unsigned)s_cfg.volumePct);
             break;
         #endif
-        #if HAS_NOTIFY_LED
-        case CFG_ACTION_NOTIFY_LED:
-            snprintf(buf, bufLen, "Notification LED: %s", s_cfg.notifyLedEnabled ? "On" : "Off");
+        #if defined(DEVICE_MESH_DECK)
+        case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
+            snprintf(buf, bufLen, "Channel Message LED: %s",
+                     notifyLedColorName(s_cfg.notifyLedColorChannel));
+            break;
+        case CFG_ACTION_NOTIFY_LED_DM_COLOR:
+            snprintf(buf, bufLen, "Direct Message LED: %s",
+                     notifyLedColorName(s_cfg.notifyLedColorDm));
             break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
@@ -3749,53 +3815,121 @@ static constexpr uint32_t kMdLedOffMs   = 90;
 // after the previous blink: the double blink itself runs 300 ms, so timing from
 // the end would put the visible cadence at 1.3 s instead of 1 s.
 static constexpr uint32_t kMdLedRepeatMs = 1000;
+static uint8_t s_mdLedColor = NOTIFY_LED_COLOR_BLUE;
+static uint8_t s_mdLedColorFirst = NOTIFY_LED_COLOR_BLUE;
+static uint8_t s_mdLedColorSecond = NOTIFY_LED_COLOR_BLUE;
 
-static void meshDeckLedStartPattern() {
-    if (!s_cfg.notifyLedEnabled) return;
+static bool meshDeckLedColorEnabled(uint8_t color) {
+    return cfgCoerceNotifyLedColor((int)color) != NOTIFY_LED_COLOR_OFF;
+}
+
+static bool meshDeckHasUnreadChannels() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) return true;
+    }
+    return false;
+}
+
+static bool meshDeckLedDualColorEnabled() {
+    const uint8_t chColor = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorChannel);
+    const uint8_t dmColor = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorDm);
+    // Dual-color only makes sense when both categories are actually unread.
+    return meshDeckLedColorEnabled(chColor)
+           && meshDeckLedColorEnabled(dmColor)
+           && meshDeckHasUnreadChannels()
+           && DMs.hasUnread();
+}
+
+static void meshDeckLedSetColor(uint8_t color, bool on) {
+    const uint8_t c = cfgCoerceNotifyLedColor((int)color);
+    if (!on || c == NOTIFY_LED_COLOR_OFF) {
+        meshDeckLedSet(false, false, false);
+        return;
+    }
+
+    bool r = false, g = false, b = false;
+    switch (c) {
+        case NOTIFY_LED_COLOR_RED:     r = true; break;
+        case NOTIFY_LED_COLOR_GREEN:   g = true; break;
+        case NOTIFY_LED_COLOR_BLUE:    b = true; break;
+        case NOTIFY_LED_COLOR_YELLOW:  r = true; g = true; break;
+        case NOTIFY_LED_COLOR_CYAN:    g = true; b = true; break;
+        case NOTIFY_LED_COLOR_MAGENTA: r = true; b = true; break;
+        case NOTIFY_LED_COLOR_WHITE:   r = true; g = true; b = true; break;
+        case NOTIFY_LED_COLOR_OFF:     break;
+        default:                       b = true; break;
+    }
+    meshDeckLedSet(r, g, b);
+}
+
+static uint8_t meshDeckUnreadColor() {
+    const uint8_t dmColor = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorDm);
+    const uint8_t chColor = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorChannel);
+
+    if (DMs.hasUnread() && meshDeckLedColorEnabled(dmColor)) return dmColor;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i] && meshDeckLedColorEnabled(chColor)) {
+            return chColor;
+        }
+    }
+    return NOTIFY_LED_COLOR_OFF;
+}
+
+static void meshDeckLedStartPattern(uint8_t color) {
+    const uint8_t c = cfgCoerceNotifyLedColor((int)color);
+    if (!meshDeckLedColorEnabled(c)) return;
+
+    if (meshDeckLedDualColorEnabled()) {
+        // Requested behavior: with both types enabled, double-blink as
+        // Channel color first, then DM color.
+        s_mdLedColorFirst = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorChannel);
+        s_mdLedColorSecond = cfgCoerceNotifyLedColor((int)s_cfg.notifyLedColorDm);
+    } else {
+        // Otherwise both blinks stay on the triggering notification type.
+        s_mdLedColorFirst = c;
+        s_mdLedColorSecond = c;
+    }
+
+    s_mdLedColor = s_mdLedColorFirst;
     s_mdLedPhasesLeft = (uint8_t)(kMdLedBlinks * 2);
     s_mdLedNextMs = 0;                               // fire on the next service
     s_mdLedPatternStartMs = millis();
 }
 
 // Called for every new message, channel or DM.
-static void meshDeckLedNotify() { meshDeckLedStartPattern(); }
+static void meshDeckLedNotify(bool isDm) {
+    meshDeckLedStartPattern(isDm ? s_cfg.notifyLedColorDm
+                                 : s_cfg.notifyLedColorChannel);
+}
 
 // Turning the setting off mid-pattern has to darken the LED now — the service
 // loop below returns early once disabled, so it would otherwise leave the light
 // stuck in whichever half of a blink it was in.
 static void meshDeckLedApplySetting() {
-    if (s_cfg.notifyLedEnabled) return;
     s_mdLedPhasesLeft = 0;
     s_mdLedLit = false;
-    meshDeckLedSet(false, false, false);
+    meshDeckLedSetColor(s_mdLedColor, false);
 }
 
 // True while any channel or DM still has something unread. Read from the state
 // the UI already maintains rather than counting messages separately, so marking
 // a channel read stops the LED by the same action that clears its badge.
-static bool meshDeckHasUnread() {
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        if (s_channelNeedsAttention[i]) return true;
-    }
-    return DMs.hasUnread();
-}
+static bool meshDeckHasUnread() { return meshDeckHasUnreadChannels() || DMs.hasUnread(); }
 
 static void meshDeckServiceLed() {
-    if (!s_cfg.notifyLedEnabled) {
-        // Self-correcting rather than relying on whoever flipped the setting to
-        // clean up: the web form and a YAML import can both turn this off, and
-        // neither goes through the settings screen's handler.
+    const uint8_t unreadColor = meshDeckUnreadColor();
+    if (!meshDeckLedColorEnabled(unreadColor)) {
         if (s_mdLedPhasesLeft != 0 || s_mdLedLit) meshDeckLedApplySetting();
         return;
     }
+
     const uint32_t now = millis();
 
     if (s_mdLedPhasesLeft == 0) {
         // Idle: re-arm periodically for as long as something is unread. Reading
         // the messages clears the flags above and the reminder simply stops.
-        if (meshDeckHasUnread()
-            && (uint32_t)(now - s_mdLedPatternStartMs) >= kMdLedRepeatMs) {
-            meshDeckLedStartPattern();
+        if ((uint32_t)(now - s_mdLedPatternStartMs) >= kMdLedRepeatMs) {
+            meshDeckLedStartPattern(unreadColor);
         } else {
             return;
         }
@@ -3804,13 +3938,20 @@ static void meshDeckServiceLed() {
     if (s_mdLedNextMs != 0 && (int32_t)(now - s_mdLedNextMs) < 0) return;
 
     s_mdLedLit = !s_mdLedLit;
-    meshDeckLedSet(false, false, s_mdLedLit);        // blue reads as "message"
+    if (s_mdLedLit) {
+        // Two blinks total: first ON pulse gets index 0, second gets index 1.
+        const uint8_t onPulseIndex = (uint8_t)(((kMdLedBlinks * 2) - s_mdLedPhasesLeft) / 2);
+        s_mdLedColor = (onPulseIndex == 0) ? s_mdLedColorFirst : s_mdLedColorSecond;
+        meshDeckLedSetColor(s_mdLedColor, true);
+    } else {
+        meshDeckLedSetColor(s_mdLedColor, false);
+    }
     s_mdLedNextMs = now + (s_mdLedLit ? kMdLedOnMs : kMdLedOffMs);
     s_mdLedPhasesLeft--;
 
     if (s_mdLedPhasesLeft == 0) {
         s_mdLedLit = false;
-        meshDeckLedSet(false, false, false);         // always end dark
+        meshDeckLedSetColor(s_mdLedColor, false);    // always end dark
     }
 }
 
@@ -5974,8 +6115,9 @@ static void initCfgActions() {
     #endif
     // Under the sound it accompanies where there is one, and the only alert
     // setting at all where there is not. Absent on boards with no LED wired.
-    #if HAS_NOTIFY_LED
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED;
+    #if defined(DEVICE_MESH_DECK)
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_DM_COLOR;
     #endif
     #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
@@ -9241,6 +9383,187 @@ static void openAlertSoundModal() {
     refreshAlertSoundSelection();
 }
 
+#if defined(DEVICE_MESH_DECK)
+static void closeNotifyLedColorModal() {
+    if (lvObjValid(s_notifyLedColorBackdrop)) {
+        lv_obj_del(s_notifyLedColorBackdrop);
+    } else if (lvObjValid(s_notifyLedColorModal)) {
+        lv_obj_del(s_notifyLedColorModal);
+    }
+    s_notifyLedColorBackdrop = nullptr;
+    s_notifyLedColorModal = nullptr;
+    memset(s_notifyLedColorRows, 0, sizeof(s_notifyLedColorRows));
+}
+
+static void refreshNotifyLedColorSelection() {
+    if (!s_notifyLedColorModal) return;
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBorder  = isLight ? lv_color_hex(0x111111) : lv_color_hex(0xF4F7FF);
+    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    for (int i = 0; i < kNotifyLedColorOptionCount; i++) {
+        lv_obj_t *row = s_notifyLedColorRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_notifyLedColorSelection);
+        lv_obj_set_style_border_width(row, sel ? 3 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        lv_obj_set_style_outline_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_outline_color(row, sel ? selBorder : idleBorder, 0);
+        lv_obj_set_style_outline_opa(row, sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void applyNotifyLedColorSelection(int color) {
+    const uint8_t chosen = cfgCoerceNotifyLedColor(color);
+    uint8_t *target = s_notifyLedColorTargetDm ? &s_cfg.notifyLedColorDm
+                                                : &s_cfg.notifyLedColorChannel;
+    const uint8_t prior = cfgCoerceNotifyLedColor((int)*target);
+    *target = chosen;
+    if (prior != chosen) {
+        persistConfigToPrefs();
+    }
+
+    snprintf(s_cfgStatus,
+             sizeof(s_cfgStatus),
+             "%s: %s",
+             s_notifyLedColorTargetDm ? "Direct Message LED" : "Channel Message LED",
+             notifyLedColorName(chosen));
+    closeNotifyLedColorModal();
+    refreshCfgModal();
+}
+
+static void onNotifyLedColorRowPressed(lv_event_t *e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= kNotifyLedColorOptionCount) return;
+
+    // First tap previews by selecting the swatch; second tap commits.
+    if (idx != s_notifyLedColorSelection) {
+        s_notifyLedColorSelection = idx;
+        refreshNotifyLedColorSelection();
+        return;
+    }
+    applyNotifyLedColorSelection(idx);
+}
+
+static void onNotifyLedColorBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_notifyLedColorBackdrop) return;
+    closeNotifyLedColorModal();
+    refreshCfgModal();
+}
+
+static void openNotifyLedColorModal(bool forDm) {
+    if (!s_rootScreen || s_notifyLedColorModal || s_notifyLedColorBackdrop) return;
+
+    s_notifyLedColorTargetDm = forDm;
+    s_notifyLedColorSelection = cfgCoerceNotifyLedColor(
+        forDm ? (int)s_cfg.notifyLedColorDm : (int)s_cfg.notifyLedColorChannel);
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 40;
+    if (modalW < 180) modalW = w - 10;
+    if (modalW > 220) modalW = 220;
+
+    s_notifyLedColorBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_notifyLedColorBackdrop, w, h);
+    lv_obj_align(s_notifyLedColorBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_notifyLedColorBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_notifyLedColorBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_notifyLedColorBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_notifyLedColorBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_notifyLedColorBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_notifyLedColorBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_notifyLedColorBackdrop,
+                        onNotifyLedColorBackdropPressed,
+                        LV_EVENT_CLICKED,
+                        nullptr);
+
+    s_notifyLedColorModal = lv_obj_create(s_notifyLedColorBackdrop);
+    lv_obj_set_size(s_notifyLedColorModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_notifyLedColorModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_notifyLedColorModal, LV_ALIGN_CENTER, 0, 0);
+    setupVScroll(s_notifyLedColorModal);
+    lv_obj_set_scrollbar_mode(s_notifyLedColorModal, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(s_notifyLedColorModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_notifyLedColorModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_notifyLedColorModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_notifyLedColorModal, 1, 0);
+    lv_obj_set_style_border_color(s_notifyLedColorModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_notifyLedColorModal, 8, 0);
+    lv_obj_set_style_pad_row(s_notifyLedColorModal, 6, 0);
+    lv_obj_set_flex_flow(s_notifyLedColorModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_notifyLedColorModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_notifyLedColorBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_notifyLedColorModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, forDm ? "Direct Message LED" : "Channel Message LED");
+
+    lv_obj_t *hint = lv_label_create(s_notifyLedColorModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Move=Preview  Enter=OK  %s=Cancel",
+                          modalCloseKeyLabel());
+
+    lv_obj_t *grid = lv_obj_create(s_notifyLedColorModal);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_width(grid, kNotifyLedColorGridW);
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(grid, kNotifyLedColorCellGap, 0);
+    lv_obj_set_style_pad_column(grid, kNotifyLedColorCellGap, 0);
+
+    const uint8_t kNotifyLedDisplayOrder[kNotifyLedColorOptionCount] = {
+        NOTIFY_LED_COLOR_OFF,
+        NOTIFY_LED_COLOR_RED,
+        NOTIFY_LED_COLOR_GREEN,
+        NOTIFY_LED_COLOR_BLUE,
+        NOTIFY_LED_COLOR_YELLOW,
+        NOTIFY_LED_COLOR_CYAN,
+        NOTIFY_LED_COLOR_MAGENTA,
+        NOTIFY_LED_COLOR_WHITE,
+    };
+
+    for (int pos = 0; pos < kNotifyLedColorOptionCount; pos++) {
+        const uint8_t color = kNotifyLedDisplayOrder[pos];
+        lv_obj_t *row = lv_btn_create(grid);
+        s_notifyLedColorRows[color] = row;
+        lv_obj_set_size(row, kNotifyLedColorCellW, kNotifyLedColorCellH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_add_event_cb(row,
+                            onNotifyLedColorRowPressed,
+                            LV_EVENT_CLICKED,
+                            (void *)(intptr_t)color);
+
+        if (color == NOTIFY_LED_COLOR_OFF) {
+            lv_obj_set_style_bg_color(row, lv_color_hex(0x101820), 0);
+            lv_obj_t *off = lv_label_create(row);
+            lv_obj_set_style_text_font(off, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(off, lv_color_hex(0xE8F1FF), 0);
+            lv_label_set_text(off, "OFF");
+            lv_obj_center(off);
+        } else {
+            lv_obj_set_style_bg_color(row, tftColorToLv(notifyLedColorPreview565(color)), 0);
+        }
+    }
+
+    refreshNotifyLedColorSelection();
+}
+#endif
+
 static void openCfgColorPickerModal() {
     if (!s_rootScreen || s_cfgColorModal || s_cfgColorBackdrop) return;
 
@@ -9979,6 +10302,9 @@ static void closeCfgModal() {
     closeSysStatsModal();
     closeReleaseNotesModal();
     closeTimeCfgModal();
+#if defined(DEVICE_MESH_DECK)
+    closeNotifyLedColorModal();
+#endif
 #if !defined(DEVICE_TLORA_PAGER_TFT)
     closeNodeInfoModal();
 #endif
@@ -16429,15 +16755,17 @@ static void performCfgAction(int actionId) {
             openAlertSoundModal();   // pick directly; navigating previews each tone
             break;
 
-#if HAS_NOTIFY_LED
-        case CFG_ACTION_NOTIFY_LED:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED");
-            showActionPopup = false;   // row already reads On/Off
-            s_cfg.notifyLedEnabled = !s_cfg.notifyLedEnabled;
-            persistConfigToPrefs();
-            meshDeckLedApplySetting();   // darken now if it was mid-blink
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Notification LED: %s",
-                     s_cfg.notifyLedEnabled ? "On" : "Off");
+#if defined(DEVICE_MESH_DECK)
+        case CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED_CHANNEL_COLOR");
+            showActionPopup = false;
+            openNotifyLedColorModal(false);
+            break;
+
+        case CFG_ACTION_NOTIFY_LED_DM_COLOR:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED_DM_COLOR");
+            showActionPopup = false;
+            openNotifyLedColorModal(true);
             break;
 #endif
 
@@ -18149,6 +18477,35 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+#if defined(DEVICE_MESH_DECK)
+        if (s_notifyLedColorModal) {
+            if (isModalCloseKey(k)) {
+                closeNotifyLedColorModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyNotifyLedColorSelection(s_notifyLedColorSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)           delta = invertScrollNav ? kNotifyLedColorCols : -kNotifyLedColorCols;
+            else if (k == KEY_SCROLL_DN)      delta = invertScrollNav ? -kNotifyLedColorCols : kNotifyLedColorCols;
+            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) delta = -1;
+            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) delta = 1;
+            if (delta != 0) {
+                int next = s_notifyLedColorSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= kNotifyLedColorOptionCount) next = kNotifyLedColorOptionCount - 1;
+                if (next != s_notifyLedColorSelection) {
+                    s_notifyLedColorSelection = next;
+                    refreshNotifyLedColorSelection();
+                }
+            }
+            continue;
+        }
+#endif
 
         if (s_alertSoundModal) {
             if (isModalCloseKey(k)) {
@@ -21936,7 +22293,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 }
 
                 if (isDirectToMe || !channelIsMuted(chanIdx)) {
-                    triggerMessageAlert();
+                    triggerMessageAlert(false,
+                                        isDirectToMe ? MSG_ALERT_VISUAL_DM
+                                                     : MSG_ALERT_VISUAL_CHANNEL);
                 }
                 if (wantsAck && isDirectToMe) {
                     (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
@@ -22060,7 +22419,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     }
 
                     if (isDirectToMe || !channelIsMuted(chanIdx)) {
-                        triggerMessageAlert();
+                        triggerMessageAlert(false,
+                                            isDirectToMe ? MSG_ALERT_VISUAL_DM
+                                                         : MSG_ALERT_VISUAL_CHANNEL);
                     }
                     appendLiveRxSummary(pkt, chanIdx, "F");
                     return isDirectToMe ? (s_dmModal != nullptr) : (chanIdx == s_activeChannel);

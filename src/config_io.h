@@ -212,6 +212,14 @@ struct RhinoConfig {
     // together and leaves j/k alone — those are letters with a fixed meaning,
     // not a pointing device.
     bool     invertScroll;
+    // Covers the trailing padding that followed invertScroll in older blobs.
+    // Keep this pad ahead of new fields so appended settings start after the
+    // previous struct size and retain their compiled defaults on upgrade.
+    uint8_t  _reservedPad4[4];
+    // Mesh Deck RGB notification LED colors.
+    // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
+    uint8_t  notifyLedColorChannel;
+    uint8_t  notifyLedColorDm;
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
@@ -223,6 +231,23 @@ enum : uint8_t {
 
 static inline uint8_t cfgCoerceTimeSource(int v) {
     return (v == TIME_SOURCE_MANUAL) ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
+}
+
+enum : uint8_t {
+    NOTIFY_LED_COLOR_RED = 0,
+    NOTIFY_LED_COLOR_GREEN = 1,
+    NOTIFY_LED_COLOR_BLUE = 2,
+    NOTIFY_LED_COLOR_YELLOW = 3,
+    NOTIFY_LED_COLOR_CYAN = 4,
+    NOTIFY_LED_COLOR_MAGENTA = 5,
+    NOTIFY_LED_COLOR_WHITE = 6,
+    NOTIFY_LED_COLOR_OFF = 7,
+};
+
+static inline uint8_t cfgCoerceNotifyLedColor(int v) {
+    if (v < NOTIFY_LED_COLOR_RED) return NOTIFY_LED_COLOR_BLUE;
+    if (v > NOTIFY_LED_COLOR_OFF) return NOTIFY_LED_COLOR_BLUE;
+    return (uint8_t)v;
 }
 
 // Clamps a notification volume to range and snaps it to the nearest 10% step,

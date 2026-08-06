@@ -373,6 +373,11 @@ static const char *kMsgAlertSoundNames[] = {
 };
 static const int kNumMsgAlertSounds = 4;
 
+static const char *kNotifyLedColorNames[] = {
+    "RED", "GREEN", "BLUE", "YELLOW", "CYAN", "MAGENTA", "WHITE", "OFF"
+};
+static const int kNumNotifyLedColors = 8;
+
 static uint8_t findName(const char *val, const char **table, int n) {
     for (int i = 0; i < n; i++)
         if (!strcmp(val, table[i])) return (uint8_t)i;
@@ -385,6 +390,15 @@ static uint8_t parseMsgAlertSound(const char *val) {
         return (uint8_t)constrain(atoi(val), 0, kNumMsgAlertSounds - 1);
     }
     return findName(val, kMsgAlertSoundNames, kNumMsgAlertSounds);
+}
+
+static uint8_t parseNotifyLedColor(const char *val) {
+    if (!val || !val[0]) return NOTIFY_LED_COLOR_BLUE;
+    if (isdigit((unsigned char)val[0])) {
+        return cfgCoerceNotifyLedColor(atoi(val));
+    }
+    return cfgCoerceNotifyLedColor((int)findName(val, kNotifyLedColorNames,
+                                                kNumNotifyLedColors));
 }
 
 static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
@@ -513,6 +527,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.chatColorSalt      = 0;   // original node-color mapping
     cfg.notifyLedEnabled   = MY_NOTIFY_LED_ENABLED;
     cfg.invertScroll       = MY_INVERT_SCROLL;
+    cfg.notifyLedColorChannel = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_CHANNEL);
+    cfg.notifyLedColorDm      = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_DM);
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -704,7 +720,12 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // where it should be dropped by hand.
     snprintf(tmp, sizeof(tmp), "    batteryCalTrim: %d\n", (int)cfg.battCalTrim); out += tmp;
     snprintf(tmp, sizeof(tmp), "    chatColorSalt: %lu\n", (unsigned long)cfg.chatColorSalt); out += tmp;
-    snprintf(tmp, sizeof(tmp), "    notifyLed: %s\n", cfg.notifyLedEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    notifyLedColorChannel: %s\n",
+             kNotifyLedColorNames[cfgCoerceNotifyLedColor((int)cfg.notifyLedColorChannel)]);
+    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    notifyLedColorDm: %s\n",
+             kNotifyLedColorNames[cfgCoerceNotifyLedColor((int)cfg.notifyLedColorDm)]);
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
@@ -1142,7 +1163,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "volume"))          cfg.volumePct = cfgCoerceVolume(atoi(val));
                 else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));
                 else if (!strcmp(key, "chatColorSalt"))   cfg.chatColorSalt = (uint32_t)strtoul(val, nullptr, 10);
-                else if (!strcmp(key, "notifyLed"))       cfg.notifyLedEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "notifyLed")) {
+                    cfg.notifyLedEnabled = parseBoolValue(val);
+                    if (!cfg.notifyLedEnabled) {
+                        cfg.notifyLedColorChannel = NOTIFY_LED_COLOR_OFF;
+                        cfg.notifyLedColorDm = NOTIFY_LED_COLOR_OFF;
+                    }
+                }
+                else if (!strcmp(key, "notifyLedColorChannel")) cfg.notifyLedColorChannel = parseNotifyLedColor(val);
+                else if (!strcmp(key, "notifyLedColorDm")) cfg.notifyLedColorDm = parseNotifyLedColor(val);
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
