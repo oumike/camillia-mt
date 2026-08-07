@@ -30,6 +30,12 @@ struct PendingAck {
     int      lineIdx;         // which line in channel buffer holds this message
     uint32_t destNodeId;      // intended recipient (0xFFFFFFFF = broadcast)
     bool     active;
+    // Broadcast only: the settle window has passed and the line already reads
+    // ACKED_RELAY. The record deliberately stays active afterwards so a routing
+    // ACK arriving later can still upgrade it — on LongFast a round trip does
+    // not fit inside that window, so finalising there discarded every real ACK.
+    // Left out of the aggregate initialisers on purpose; value-initialises false.
+    bool     softAcked;
 };
 
 class ChannelMgr {
@@ -123,6 +129,10 @@ private:
                    uint32_t packetId, DisplayLine::AckState ack,
                    uint32_t epoch, uint32_t senderNodeId);
     void _persistChannel(int chanIdx, const Channel &ch);
+    // Stamp an ack state onto a message's lines without retiring its pending
+    // record. Only call on a real state change — it forces a redraw and a
+    // channel persist.
+    void _applyAckToLines(int chanIdx, uint32_t packetId, DisplayLine::AckState state);
 };
 
 extern ChannelMgr Channels;

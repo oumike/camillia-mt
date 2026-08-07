@@ -1452,6 +1452,48 @@ static size_t appendTextLiteral(char *dst, size_t dstLen, size_t writePos, const
     return writePos;
 }
 
+// Codepoints that carry ordinary punctuation meaning but sit outside what the
+// built-in Montserrat faces can draw (ASCII 0x20-0x7F, plus degree and bullet).
+// The emoji fallback face is no help — it holds emoji, not Latin punctuation —
+// so anything left in this range reaches LVGL's missing-glyph box. Phone
+// keyboards and desktop autocorrect emit these constantly: an iOS "..." becomes
+// a single U+2026, and quotes are curled on the way out.
+//
+// An empty replacement drops the codepoint, which is what the zero-width
+// formatting marks deserve — they have no visible width to preserve, and a box
+// is the worst possible rendering of a character meant to be invisible.
+struct AsciiFold {
+    uint32_t cp;
+    const char *ascii;
+};
+static const AsciiFold kAsciiFolds[] = {
+    // Apostrophes / single quotes / prime
+    {0x2018, "'"}, {0x2019, "'"}, {0x02BC, "'"}, {0xFF07, "'"}, {0x2032, "'"},
+    {0x201A, "'"}, {0x201B, "'"},
+    // Double quotes / double prime
+    {0x201C, "\""}, {0x201D, "\""}, {0x201E, "\""}, {0x201F, "\""},
+    {0x2033, "\""}, {0xFF02, "\""},
+    // Em dash and horizontal bar read as a break, so they get two hyphens.
+    {0x2014, "--"}, {0x2015, "--"},
+    // Every other dash-like mark is a single hyphen.
+    {0x2010, "-"}, {0x2011, "-"}, {0x2012, "-"}, {0x2013, "-"},
+    {0x2212, "-"}, {0xFE58, "-"}, {0xFE63, "-"}, {0xFF0D, "-"},
+    // Ellipsis — one codepoint, three dots.
+    {0x2026, "..."},
+    // Spaces that are not U+0020.
+    {0x00A0, " "}, {0x2002, " "}, {0x2003, " "}, {0x2007, " "}, {0x2009, " "},
+    {0x202F, " "}, {0x3000, " "},
+    // Zero-width marks: drop entirely.
+    {0x200B, ""}, {0x200C, ""}, {0x2060, ""}, {0xFEFF, ""},
+};
+
+static const char *asciiFoldFor(uint32_t cp) {
+    for (const AsciiFold &f : kAsciiFolds) {
+        if (f.cp == cp) return f.ascii;
+    }
+    return nullptr;
+}
+
 static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
     if (!dst || dstLen == 0) return;
     dst[0] = '\0';
@@ -1474,35 +1516,10 @@ static void renderEmojiSafeText(const char *src, char *dst, size_t dstLen) {
             continue;
         }
 
-        // Normalize common apostrophe variants to ASCII for font-consistent rendering.
-        if (cp == 0x2018 || cp == 0x2019 || cp == 0x02BC || cp == 0xFF07 || cp == 0x2032) {
-            if (writePos + 1 < dstLen) {
-                dst[writePos++] = '\'';
-                dst[writePos] = '\0';
-            }
-            i += n;
-            continue;
-        }
-
-        // Normalize common dash variants for font-consistent rendering.
-        if (cp == 0x2014 || cp == 0x2015) { // em dash, horizontal bar
-            if (writePos + 2 < dstLen) {
-                dst[writePos++] = '-';
-                dst[writePos++] = '-';
-                dst[writePos] = '\0';
-            } else if (writePos + 1 < dstLen) {
-                dst[writePos++] = '-';
-                dst[writePos] = '\0';
-            }
-            i += n;
-            continue;
-        }
-        if (cp == 0x2010 || cp == 0x2011 || cp == 0x2012 || cp == 0x2013
-            || cp == 0x2212 || cp == 0xFE58 || cp == 0xFE63 || cp == 0xFF0D) {
-            if (writePos + 1 < dstLen) {
-                dst[writePos++] = '-';
-                dst[writePos] = '\0';
-            }
+        // Normalize punctuation the text face cannot draw. One table for quotes,
+        // dashes, the ellipsis and exotic spaces — see kAsciiFolds.
+        if (const char *fold = asciiFoldFor(cp)) {
+            writePos = appendTextLiteral(dst, dstLen, writePos, fold);
             i += n;
             continue;
         }
@@ -23163,6 +23180,11 @@ static bool pollMeshRx() {
     if (Channels.expireAcks()) {
         changed = true;
     }
+    // DMs are transmitted straight from DmMgr and never enter ChannelMgr's
+    // pending table, so they need their own sweep or they never time out at all.
+    if (DMs.expireAcks()) {
+        changed = true;
+    }
 
     return changed;
 }
@@ -23871,12 +23893,21 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 
     // Header line: time then who. One label rather than two, because the bubble
     // is a column flex — separate labels would stack, and the time belongs on
-    // the same line as the name. Own messages use the ME/ME(SENT) tag as the
-    // "who", so every bubble carries a time, not just received ones.
+    // the same line as the name. Own messages use the ME/ME(ACK)/ME(SENT) tag as
+    // the "who", so every bubble carries a time, not just received ones.
+    // ACKED and ACKED_RELAY are not the same claim and must not read the same.
+    // ACKED means the node we addressed returned a routing ACK — end-to-end
+    // delivery. ACKED_RELAY means either an intermediate node acked the relay
+    // rather than the recipient, or, for channel broadcasts, simply that
+    // expireAcks() gave up waiting 1.5 s after transmit (nobody owes a broadcast
+    // an ACK). Collapsing both into "SENT" made a real delivery confirmation
+    // indistinguishable from a timeout unless you noticed the bubble color.
     const char *stateTag = nullptr;
     if (isMe) {
         switch (ackState) {
             case DisplayLine::ACKED:
+                stateTag = "ME (ACK)";
+                break;
             case DisplayLine::ACKED_RELAY:
                 stateTag = "ME (SENT)";
                 break;

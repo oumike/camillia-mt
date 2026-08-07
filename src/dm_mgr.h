@@ -76,6 +76,11 @@ public:
     // Returns true when requestId matched a tracked DM transmit.
     bool handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_t errorReason);
 
+    // Time out DM transmits that were never answered, mirroring
+    // ChannelMgr::expireAcks(). Call from loop(); returns true when any line
+    // changed state, so the caller knows to redraw.
+    bool expireAcks();
+
     // Scroll-aware line fetch for rendering.
     // visibleRow: 0 = newest line at top. visibleRows = total rows available.
     const DmLine *getLine(const DmConv *conv, int visibleRow, int visibleRows) const;

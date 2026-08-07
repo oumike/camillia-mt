@@ -462,27 +462,37 @@ const DisplayLine *ChannelMgr::getLine(int chanIdx, int row) const {
     return &ch.lines[lineIdx % MAX_MSG_LINES];
 }
 
+// Stamp a state onto every wrapped line of one message, without touching the
+// pending record. Split out of setAckState() so the broadcast settle in
+// expireAcks() can show ACKED_RELAY while continuing to wait for a real ACK.
+// Callers must only invoke this on an actual state change: it bumps the channel
+// revision (a redraw) and rewrites the persisted channel.
+void ChannelMgr::_applyAckToLines(int chanIdx, uint32_t packetId, DisplayLine::AckState state) {
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return;
+    Channel &ch = _chans[chanIdx];
+    if (!ch.lines) return;
+
+    // Update every wrapped line for this packet so ACK color/status applies to
+    // the full message block, not just the first segment.
+    bool updated = false;
+    for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
+        if (ch.lines[j].packetId == packetId) {
+            ch.lines[j].ack = state;
+            updated = true;
+        }
+    }
+    if (updated) ch.revision++;
+    if (_persistReady && !_persistLoading) {
+        _persistChannel(chanIdx, ch);
+    }
+}
+
 void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {
     // Find pending ack entry
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
             _pending[i].active = false;
-            // Update every wrapped line for this packet so ACK color/status
-            // applies to the full message block, not just the first segment.
-            Channel &ch = _chans[_pending[i].chanIdx];
-            int chanIdx = _pending[i].chanIdx;
-            if (!ch.lines) return;
-            bool updated = false;
-            for (int j = 0; j < min(ch.count, MAX_MSG_LINES); j++) {
-                if (ch.lines[j].packetId == packetId) {
-                    ch.lines[j].ack = state;
-                    updated = true;
-                }
-            }
-            if (updated) ch.revision++;
-            if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
-                _persistChannel(chanIdx, ch);
-            }
+            _applyAckToLines(_pending[i].chanIdx, packetId, state);
             return;
         }
     }
@@ -492,7 +502,13 @@ void ChannelMgr::setAckStateFrom(uint32_t packetId, uint32_t fromNodeId) {
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (_pending[i].active && _pending[i].packetId == packetId) {
             if (_pending[i].destNodeId == 0xFFFFFFFF) {
-                setAckState(packetId, DisplayLine::ACKED_RELAY);
+                // Channel text goes out as a broadcast with want_ack set, so
+                // there is no single addressee to compare against — but a node
+                // did return an explicit routing ACK, which is strictly more
+                // than the settle window in expireAcks() infers. Promote it.
+                // The settle exists to avoid claiming delivery with no ACK at
+                // all; honouring a real one is what it was protecting.
+                setAckState(packetId, DisplayLine::ACKED);
             } else {
                 bool isDirect = (_pending[i].destNodeId == fromNodeId);
                 setAckState(packetId, isDirect ? DisplayLine::ACKED : DisplayLine::ACKED_RELAY);
@@ -506,6 +522,8 @@ bool ChannelMgr::expireAcks() {
     uint32_t now = millis();
     bool changed = false;
     static constexpr uint32_t kBroadcastConfirmMs = 1500;
+    // How long a broadcast keeps its slot waiting for an ACK that may upgrade it.
+    static constexpr uint32_t kBroadcastAckWaitMs = 15000;
     for (int i = 0; i < MAX_PENDING_ACK; i++) {
         if (!_pending[i].active) continue;
         uint32_t ageMs = now - _pending[i].sentMs;
@@ -513,9 +531,27 @@ bool ChannelMgr::expireAcks() {
             // Channel text is broadcast; many peers do not return explicit routing ACKs.
             // After a short settle window, move to a softer relay-style status.
             // Avoid showing hard-delivered green when no explicit routing ACK exists.
-            if (ageMs > kBroadcastConfirmMs) {
-                setAckState(_pending[i].packetId, DisplayLine::ACKED_RELAY);
+            if (!_pending[i].softAcked && ageMs > kBroadcastConfirmMs) {
+                _applyAckToLines(_pending[i].chanIdx, _pending[i].packetId,
+                                 DisplayLine::ACKED_RELAY);
+                _pending[i].softAcked = true;
                 changed = true;
+            }
+            // Keep waiting after the settle rather than retiring the record.
+            // 1500 ms is shorter than a LongFast round trip, so finalising here
+            // meant setAckStateFrom() found nothing to match and every genuine
+            // ACK was dropped on the floor. The line already reads ACKED_RELAY;
+            // a real ACK arriving now upgrades it to ACKED.
+            //
+            // Its own window rather than ACK_TIMEOUT_MS: that constant is sized
+            // for a peer's full retransmission schedule, but an ACK to our
+            // broadcast is one round trip from a node that already has the
+            // message — seconds, not a minute. Holding records for 60 s would
+            // put real pressure on an 8-entry table for no added coverage.
+            if (ageMs > kBroadcastAckWaitMs) {
+                // Give up quietly: no ACK was owed, so silence is not a failure
+                // and the line keeps the relay-style status it already has.
+                _pending[i].active = false;
             }
         } else {
             if (ageMs > ACK_TIMEOUT_MS) {
@@ -610,12 +646,30 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     // Add to display first so ACK updates always have a visible line to target.
     int firstLine = addMessage(txChan, prefix, text, TFT_WHITE, packetId, true, myNodeId);
 
-    // Register ACK tracking
-    for (int i = 0; i < MAX_PENDING_ACK; i++) {
-        if (!_pending[i].active) {
-            _pending[i] = { packetId, millis(), txChan, firstLine, 0xFFFFFFFF, true };
-            break;
+    // Register ACK tracking. Records now hold their slot for seconds rather than
+    // until the 1.5 s settle, so a burst of chat can fill all MAX_PENDING_ACK
+    // entries. Evict the oldest instead of silently dropping the new message's
+    // tracking — untracked, its line would sit at PENDING ("ME") forever, since
+    // nothing else ever stamps it.
+    {
+        int slot = -1;
+        int oldest = 0;
+        for (int i = 0; i < MAX_PENDING_ACK; i++) {
+            if (!_pending[i].active) { slot = i; break; }
+            if (_pending[i].sentMs < _pending[oldest].sentMs) oldest = i;
         }
+        if (slot < 0) {
+            slot = oldest;
+            // The evicted message loses its chance at an ACK upgrade, so settle
+            // it now rather than leaving it stuck mid-flight. Every record here
+            // is a broadcast (sendText is the only registrar), so relay status
+            // is the honest end state.
+            if (!_pending[slot].softAcked) {
+                _applyAckToLines(_pending[slot].chanIdx, _pending[slot].packetId,
+                                 DisplayLine::ACKED_RELAY);
+            }
+        }
+        _pending[slot] = { packetId, millis(), txChan, firstLine, 0xFFFFFFFF, true };
     }
 
     return true;

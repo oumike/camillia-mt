@@ -473,4 +473,15 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 
 // ── Timing ───────────────────────────────────────────────────
 #define CURSOR_BLINK_MS   500
-#define ACK_TIMEOUT_MS  30000   // give up waiting for ACK after 30s
+// How long a unicast waits for a routing ACK before it is shown as failed.
+//
+// Sized against what the peer is actually doing rather than picked round. A
+// Meshtastic sender retries a reliable packet NUM_RELIABLE_RETX (3) times, and
+// recomputes the gap before each attempt as
+//   2*airtime + (2^CWsize + 2*CWmax + 2^((CWmax+CWmin)/2))*slotTime + 4500 ms
+// where CWsize scales with channel utilization. On LongFast that is roughly 7 s
+// per attempt on an idle channel (~22 s to give up) but around 14 s on a
+// saturated one (~43 s). The old 30 s sat inside that upper range, so a busy
+// mesh could show NAKED while the peer was still legitimately retrying, and a
+// later ACK would land against a record already written off.
+#define ACK_TIMEOUT_MS  60000   // give up waiting for ACK after 60s

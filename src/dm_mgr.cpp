@@ -414,6 +414,31 @@ void DmMgr::_setAckState(uint32_t packetId, DmLine::AckState state) {
     }
 }
 
+bool DmMgr::expireAcks() {
+    const uint32_t now = millis();
+    bool changed = false;
+    for (int i = 0; i < MAX_DM_PENDING_TX; i++) {
+        if (!_pendingTx[i].active) continue;
+        if ((uint32_t)(now - _pendingTx[i].sentMs) <= ACK_TIMEOUT_MS) continue;
+
+        // Nothing else will ever close this out. A DM is transmitted once, from
+        // here, and the only other exit from PENDING is a routing result coming
+        // back — but the MAX_RETRANSMIT NAK that upstream Meshtastic generates
+        // when it gives up is produced by the *originating* node's router for its
+        // own packets, so no peer will ever send us one for ours. Without this
+        // sweep a DM to an unreachable node stays PENDING forever, rendering as
+        // a plain "ME" that is indistinguishable from one still in flight.
+        _pendingTx[i].active = false;
+        _setAckState(_pendingTx[i].packetId, DmLine::NAKED);
+        changed = true;
+        debugLogMessages("[dm] ack timeout id=0x%08lx to=!%08lx after %lums\n",
+                         (unsigned long)_pendingTx[i].packetId,
+                         (unsigned long)_pendingTx[i].nodeId,
+                         (unsigned long)(now - _pendingTx[i].sentMs));
+    }
+    return changed;
+}
+
 bool DmMgr::handleRoutingResult(uint32_t fromNodeId, uint32_t requestId, uint32_t errorReason) {
     int match = -1;
 

@@ -6,11 +6,13 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Share Location: a single on/off switch, directly under GPS in Settings and on the web config page, that decides whether the device puts its coordinates on the mesh at all - off silences the scheduled position broadcast and the manual announce alike, whether the fix would have come from live GPS, the last known position, or fixed coordinates; on by default, so existing devices keep behaving as before.
-- Keyboard backlight blinks on new messages while the screen is off (T-Deck and T-Lora Pager TFT) - one blink for a channel message, two for a DM, repeating about once a second until the message is read; these boards have no notification LED, so it is the only cue for a message arriving with the screen asleep. Toggle it under "Keyboard Blink" in Settings or on the web config page.
-- Saved WiFi networks can be deleted from the Choose WiFi list: highlight an entry, press D, confirm with Y. Deleting the network you are on is called out before you confirm, and the device then switches to the next usable network, or falls back to AP mode when none is left.
+- Channel messages you send now show a separate "ME (ACK)" tag when a node actually confirms delivery, so a real confirmation is no longer displayed the same way as a message that just timed out waiting.
+
+Changed
+- Direct messages now wait a full 60 seconds (up from 30) before being marked failed, which matches how long a peer keeps retrying on a busy mesh and stops good messages from being written off early.
 
 Fixed
-- The letters "j" and "k" can now be typed into the WiFi password field and the channel name/PSK fields - they were being read as scroll commands and dropped.
-- The "config stopped (idle)" notice from the web config server no longer appears as a message in the first channel's chat history; it goes to the live feed with the other status lines.
-- Pressing announce with location sharing off now says so in the live feed instead of reporting a missing GPS fix.)CAMNOTES";
+- Delivery confirmations for channel messages are no longer thrown away - the firmware keeps listening for up to 15 seconds after sending, long enough for an ACK to make the round trip on LongFast.
+- Direct messages to a node that never answers now settle into a failed state instead of sitting at "ME" indefinitely, where they looked identical to a message still in flight.
+- Sending several channel messages in quick succession no longer leaves the newest ones stuck at "ME" with no status ever appearing.
+- Curly double quotes, the single-character ellipsis, non-breaking and other unusual spaces, and invisible formatting marks now display as plain text instead of empty boxes - messages typed on a phone or pasted from a desktop read correctly.)CAMNOTES";
