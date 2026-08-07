@@ -38,6 +38,16 @@ bool     meshDeckKeyboardHalfPresent(int half);   // 0 = left 0x5A, 1 = right 0x
 char     keyboardHeldKey();
 uint32_t keyboardHeldMs();
 
+#if defined(DEVICE_TDECK)
+// Sets the T-Deck keyboard backlight (0 = off, 255 = full). The LEDs belong to
+// the keyboard's own ESP32-C3, so this is an I2C command to it rather than a
+// pin: LILYGO_KB_BRIGHTNESS_CMD, supported by keyboard firmware from 2024-12-25
+// on. Older controllers ignore the write, which makes the call a no-op rather
+// than an error. There is no way to read the level back — the C3 answers reads
+// with key data only — so callers own whatever they last set.
+void tdeckKeyboardSetBacklight(uint8_t duty);
+#endif
+
 class TDeckKeyboard {
 public:
     void begin();

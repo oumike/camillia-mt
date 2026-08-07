@@ -118,6 +118,10 @@
 #define MY_REBROADCAST      0      // ALL
 #define MY_NODEINFO_INTV  900      // 15 min (seconds)
 #define MY_POS_INTV      1800      // 30 min (seconds)
+// Master switch for putting our coordinates on the mesh. On by default: every
+// build before this setting existed broadcast position, and a device that
+// silently stopped after an update would be the surprise, not the reverse.
+#define MY_SHARE_LOCATION   1
 #define MY_GPS_POLL_S      60      // seconds between GPS position samples into s_cfg
 #define MY_REGION        "US"
 #define MY_TZ_DEF        "EST5EDT,M3.2.0,M11.1.0"   // Eastern (Detroit)
@@ -296,6 +300,18 @@
 // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
 #define MY_NOTIFY_LED_COLOR_CHANNEL 2
 #define MY_NOTIFY_LED_COLOR_DM      5
+
+// Blinking the keyboard backlight as a message notification. Two boards have a
+// backlight to blink, and they drive it very differently: the T-Deck's is
+// PWM-owned by the keyboard's own ESP32-C3 and set over I2C, the Pager's is a
+// plain KB_BL GPIO. They also differ in resting state, which is why the Pager
+// only blinks with the screen asleep — see kbBlinkAllowedNow().
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+#define HAS_KB_BLINK 1
+#else
+#define HAS_KB_BLINK 0
+#endif
+#define MY_KB_BLINK_ENABLED 1
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

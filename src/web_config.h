@@ -86,6 +86,12 @@ bool webCfgChatPaused();
 const char *webCfgWifiSsid();
 const char *webCfgWifiPass();
 
+// Forgets the cached credentials above. persistConfigToPrefs() folds them back
+// into the settings blob whenever they are non-empty, so anything that deletes
+// the configured network has to clear them here too or the next save restores
+// what was just removed.
+void webCfgClearWifiCreds();
+
 // ── Live chart history snapshot API ───────────────────────────────
 // Allows the web UI to render the same channel-utilization and SNR/RSSI
 // sparklines as the on-device live feed (keyboard shortcuts u/s).

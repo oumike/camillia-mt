@@ -220,6 +220,17 @@ struct RhinoConfig {
     // 0=Red, 1=Green, 2=Blue, 3=Yellow, 4=Cyan, 5=Magenta, 6=White
     uint8_t  notifyLedColorChannel;
     uint8_t  notifyLedColorDm;
+    // Whether this node puts its coordinates on the mesh at all. Off suppresses
+    // every POSITION_APP transmission — the scheduled broadcast and the manual
+    // announce alike — regardless of where the fix would have come from (live
+    // GPS, the last-known self position, or the configured fixed coordinates).
+    // Distinct from gpsEnabled, which only chooses whether the GPS hardware is
+    // one of those sources. Defaults on, matching every build before it existed.
+    bool     shareLocation;
+    // Blink the keyboard backlight while a message or DM is unread. Only
+    // meaningful where HAS_KB_BLINK; the field is unconditional so the blob
+    // layout does not differ between boards, same as notifyLedEnabled.
+    bool     kbBlinkEnabled;
 };
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and

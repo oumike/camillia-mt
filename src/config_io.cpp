@@ -458,6 +458,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.ignoreMqtt        = false;  // process all packets regardless of via_mqtt flag
     cfg.nodeInfoIntervalS = MY_NODEINFO_INTV;
     cfg.posIntervalS      = MY_POS_INTV;
+    cfg.shareLocation     = (bool)MY_SHARE_LOCATION;
     cfg.gpsPollIntervalS  = MY_GPS_POLL_S;
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
     cfg.region[sizeof(cfg.region) - 1] = '\0';
@@ -529,6 +530,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.invertScroll       = MY_INVERT_SCROLL;
     cfg.notifyLedColorChannel = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_CHANNEL);
     cfg.notifyLedColorDm      = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_DM);
+    cfg.kbBlinkEnabled     = (bool)MY_KB_BLINK_ENABLED;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -726,6 +728,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    notifyLedColorDm: %s\n",
              kNotifyLedColorNames[cfgCoerceNotifyLedColor((int)cfg.notifyLedColorDm)]);
     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    keyboardBlinkEnabled: %s\n", cfg.kbBlinkEnabled ? "true" : "false");
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
@@ -796,6 +800,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    gpsMode: "; out += (cfg.gpsEnabled ? "ENABLED" : "DISABLED"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    gpsDutyCycle: %s\n",
              cfg.gpsDutyCycleEnabled ? "true" : "false");                     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", cfg.shareLocation ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    positionBroadcastSecs: %lu\n", (unsigned long)cfg.posIntervalS); out += tmp;
     snprintf(tmp, sizeof(tmp), "    gpsPollIntervalSecs: %lu\n", (unsigned long)cfg.gpsPollIntervalS); out += tmp;
     // power
@@ -1126,7 +1131,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
                 else if (!strcmp(key, "otaAutoCheck")) cfg.otaAutoCheckEnabled = parseBoolValue(val);
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
-                if (!strcmp(key, "positionBroadcastSecs"))
+                if (!strcmp(key, "shareLocation"))
+                    cfg.shareLocation = parseBoolValue(val);
+                else if (!strcmp(key, "positionBroadcastSecs"))
                     cfg.posIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "gpsPollIntervalSecs"))
                     cfg.gpsPollIntervalS = (uint32_t)atol(val);
@@ -1172,6 +1179,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "notifyLedColorChannel")) cfg.notifyLedColorChannel = parseNotifyLedColor(val);
                 else if (!strcmp(key, "notifyLedColorDm")) cfg.notifyLedColorDm = parseNotifyLedColor(val);
+                else if (!strcmp(key, "keyboardBlinkEnabled")) cfg.kbBlinkEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {

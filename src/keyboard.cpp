@@ -559,6 +559,20 @@ static char mdReadKey() {
 }
 #endif  // DEVICE_MESH_DECK
 
+#if defined(DEVICE_TDECK)
+void tdeckKeyboardSetBacklight(uint8_t duty) {
+    // Exactly two bytes, one command per transmission. The stock C3 firmware's
+    // onReceive() switch falls through from LILYGO_KB_BRIGHTNESS_CMD into the
+    // Alt+B default-brightness case, so a second command batched behind this one
+    // would be read as that case's argument instead of as a command.
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write((uint8_t)0x01);          // LILYGO_KB_BRIGHTNESS_CMD
+    Wire.write(duty);
+    // Return value ignored on purpose — see the boot probe in begin().
+    (void)Wire.endTransmission();
+}
+#endif
+
 void TDeckKeyboard::begin() {
 #if defined(DEVICE_MESH_DECK)
     Wire.begin(KB_SDA, KB_SCL, 100000UL);
@@ -638,6 +652,18 @@ void TDeckKeyboard::begin() {
     delay(50);
 #if (KB_INT >= 0)
     pinMode(KB_INT, INPUT_PULLUP);
+#endif
+#if defined(DEVICE_TDECK)
+    // One probe write, logged. A keyboard whose firmware predates the backlight
+    // commands behaves exactly like one whose blink logic is broken — silence —
+    // and this line is the only thing that tells the two apart afterwards. The
+    // result is deliberately not used to gate anything: the C3 is documented as
+    // not answering write requests in the ordinary way, so a non-zero code here
+    // is not proof that the command was ignored.
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write((uint8_t)0x01);          // LILYGO_KB_BRIGHTNESS_CMD
+    Wire.write((uint8_t)0x00);          // start dark, matching the C3's own boot duty
+    Serial.printf("[kb-bl] brightness probe ack=%d\n", (int)Wire.endTransmission());
 #endif
 #endif
 

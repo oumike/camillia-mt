@@ -1791,6 +1791,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // ── Position ──────────────────────────────────────────────
     section(html, lite, "Position", false);
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
+            "<input type='checkbox' name='shareLocation' value='1'";
+    if (gCfg->shareLocation) html += " checked";
+    html += "> Share Location (broadcast position to the mesh)</label>";
+    html += "<p class='gps-hint'>Off suppresses every position transmission, including "
+            "the manual announce, whatever the settings below say. Nothing else on this "
+            "page stops the broadcast: GPS Enabled only chooses where the coordinates "
+            "come from.</p>";
+    html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
     html += "> GPS Enabled (L76K hardware GPS)</label>";
@@ -2157,6 +2165,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         }
     }
     html += "</select></label>";
+#endif
+#if HAS_KB_BLINK
+    // Sits with the LED colors above for the same reason they sit here: it
+    // answers the same question on a board whose only notification light is the
+    // keyboard.
+    html += "<label>Keyboard Blink on Message<select name='kb_blink'>"
+            "<option value='1'"; if ( gCfg->kbBlinkEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->kbBlinkEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
 #endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
@@ -3532,6 +3549,7 @@ static void handlePostSave() {
     }
 
     // Position
+    gCfg->shareLocation = (server.arg("shareLocation") == "1");
     gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
     gCfg->latI = (int32_t)(server.arg("lat").toFloat() * 1e7f);
     gCfg->lonI = (int32_t)(server.arg("lon").toFloat() * 1e7f);
@@ -3718,6 +3736,11 @@ static void handlePostSave() {
     if (server.hasArg("notify_led_dm_color")) {
         gCfg->notifyLedColorDm =
             cfgCoerceNotifyLedColor(server.arg("notify_led_dm_color").toInt());
+    }
+#endif
+#if HAS_KB_BLINK
+    if (server.hasArg("kb_blink")) {
+        gCfg->kbBlinkEnabled = server.arg("kb_blink").toInt() != 0;
     }
 #endif
 #if HAS_SCROLL_INVERT
@@ -4839,6 +4862,11 @@ bool webCfgChatPaused() { return running && gWebBuffersReclaimed; }
 void webCfgSetForceAp(bool force) { gForceAp = force; }
 const char *webCfgWifiSsid() { return gWifiSsid; }
 const char *webCfgWifiPass() { return gWifiPass; }
+
+void webCfgClearWifiCreds() {
+    memset(gWifiSsid, 0, sizeof(gWifiSsid));
+    memset(gWifiPass, 0, sizeof(gWifiPass));
+}
 
 void webCfgLoop() {
     if (!running) return;

@@ -230,6 +230,15 @@ static lv_obj_t *s_cfgHeaderStatus = nullptr;
 static lv_obj_t *s_cfgWifiBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiModal = nullptr;
 static lv_obj_t *s_cfgWifiList = nullptr;
+// The shortcut line under the title. Doubles as the picker's status line: a
+// delete has no other place to report itself, and the row simply vanishing is
+// not feedback when the entry deleted was already "(not set)".
+static lv_obj_t *s_cfgWifiHint = nullptr;
+// Delete confirmation, layered over the picker. Its own dialog rather than
+// openCfgConfirmModal(): that one is keyed to CFG_ACTION ids and returns to the
+// CFG screen on either answer, which would tear down the picker underneath.
+static lv_obj_t *s_cfgWifiDelBackdrop = nullptr;
+static lv_obj_t *s_cfgWifiDelModal = nullptr;
 static lv_obj_t *s_cfgWifiScanBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiScanModal = nullptr;
 static lv_obj_t *s_cfgWifiScanList = nullptr;
@@ -1266,6 +1275,11 @@ static bool pollUserButton(uint32_t nowMs);
 // above it.
 static void meshDeckLedNotify(bool isDm);
 #endif
+#if HAS_KB_BLINK
+// Same arrangement as meshDeckLedNotify above: defined further down with the
+// keyboard-backlight code, called from triggerMessageAlert().
+static void kbBlinkNotify(bool isDm);
+#endif
 static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
 static void rebuildUiForThemeChange(bool reopenCfg);
@@ -1546,6 +1560,7 @@ enum CfgActionId {
     CFG_ACTION_WIFI_TOGGLE,
     CFG_ACTION_CHOOSE_WIFI,
     CFG_ACTION_GPS_TOGGLE,
+    CFG_ACTION_SHARE_LOCATION,
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
@@ -1572,6 +1587,9 @@ enum CfgActionId {
     #if defined(DEVICE_MESH_DECK)
     CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR,
     CFG_ACTION_NOTIFY_LED_DM_COLOR,
+    #endif
+    #if HAS_KB_BLINK
+    CFG_ACTION_KB_BLINK,
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -2341,6 +2359,15 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     meshDeckLedNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
+#if HAS_KB_BLINK
+    // Above the sound branches for the same reason as the Mesh Deck LED: each of
+    // them returns early when the alert tone is off, and a silent device is
+    // exactly when a visual cue matters. Called for every message; it decides
+    // for itself whether to blink, and only does so with the screen off — where
+    // it is the only notification these boards have.
+    kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
 
@@ -2836,6 +2863,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "GPS: Disabled (Default Coords)");
             }
             break;
+        case CFG_ACTION_SHARE_LOCATION:
+            snprintf(buf, bufLen, "Share Location: %s", s_cfg.shareLocation ? "On" : "Off");
+            break;
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "Export Config");
             break;
@@ -2919,6 +2949,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_NOTIFY_LED_DM_COLOR:
             snprintf(buf, bufLen, "Direct Message LED: %s",
                      notifyLedColorName(s_cfg.notifyLedColorDm));
+            break;
+        #endif
+        #if HAS_KB_BLINK
+        case CFG_ACTION_KB_BLINK:
+            snprintf(buf, bufLen, "Keyboard Blink: %s", s_cfg.kbBlinkEnabled ? "On" : "Off");
             break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
@@ -4006,6 +4041,142 @@ static char meshDeckReadDpadKey() {
     return k;
 }
 #endif
+
+#if HAS_KB_BLINK
+// ── Keyboard-backlight notification blink ────────────────────────────────────
+// Neither of these boards has a notification LED, so a message arriving with the
+// screen off left no trace at all. The keyboard backlight is the light they do
+// have, and screen-off is the only state it blinks in — see kbBlinkAllowedNow().
+//
+// Shape and timing follow the Mesh Deck's RGB LED above deliberately: arm on
+// arrival, re-arm every second while anything stays unread, and never block —
+// the service call below does the toggling, because a blocking blink would stall
+// the UI and the radio for the length of the pattern.
+//
+// Channel messages get one blink per cycle and DMs two. Colour is what separates
+// them on the Mesh Deck; here the only thing to vary is the count.
+static constexpr uint32_t kKbBlinkOnMs     = 60;
+static constexpr uint32_t kKbBlinkOffMs    = 90;
+// Start-to-start, matching kMdLedRepeatMs: measured from the end, a two-blink DM
+// pattern would drift to a slower cadence than a one-blink channel pattern.
+static constexpr uint32_t kKbBlinkRepeatMs = 1000;
+static constexpr uint8_t  kKbBlinkDuty     = 255;
+
+static uint8_t  s_kbBlinkPhasesLeft = 0;
+static uint32_t s_kbBlinkNextMs = 0;
+static uint32_t s_kbBlinkPatternStartMs = 0;
+static bool     s_kbBlinkLit = false;
+
+// Whether the backlight is ours to pulse right now: only with the screen off.
+// Awake, the chat updates in front of you and the alert tone still plays, so the
+// blink would be noise — and on the Pager it could not be a bright pulse anyway,
+// because wakeScreen() has already lit the keyboard.
+static bool kbBlinkAllowedNow() { return s_screenAsleep; }
+
+static void kbBlinkSetLit(bool lit) {
+    s_kbBlinkLit = lit;
+#if defined(DEVICE_TDECK)
+    tdeckKeyboardSetBacklight(lit ? kKbBlinkDuty : 0);
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    setPagerKeyboardBacklight(lit);
+#else
+    LV_UNUSED(lit);
+#endif
+}
+
+static bool kbBlinkHasUnreadChannels() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) return true;
+    }
+    return false;
+}
+
+// Read from the state the UI already maintains rather than counting messages
+// separately, so marking a channel read stops the blink by the same action that
+// clears its badge.
+static bool kbBlinkHasUnread() { return kbBlinkHasUnreadChannels() || DMs.hasUnread(); }
+
+// DMs win when both are pending: the longer pattern is the one worth noticing,
+// and it is the same precedence meshDeckUnreadColor() applies.
+static uint8_t kbBlinkCount(bool isDm) { return isDm ? 2 : 1; }
+
+static void kbBlinkStartPattern(bool isDm) {
+    if (!s_cfg.kbBlinkEnabled || !kbBlinkAllowedNow()) return;
+    s_kbBlinkPhasesLeft = (uint8_t)(kbBlinkCount(isDm) * 2);
+    s_kbBlinkNextMs = 0;                             // fire on the next service
+    s_kbBlinkPatternStartMs = millis();
+}
+
+// Called for every new message, channel or DM.
+static void kbBlinkNotify(bool isDm) {
+    kbBlinkStartPattern(isDm);
+}
+
+// Ends the pattern and puts the backlight back where it belongs. Called whenever
+// a pattern is cut short rather than run out: the screen waking, or the setting
+// being switched off mid-blink — without this the light would stay stuck in
+// whichever half of a blink it was in.
+//
+// Who "puts it back" differs. On the T-Deck nothing else drives this backlight,
+// so this code owns it and rests it dark. On the Pager KB_BL belongs to
+// sleepScreen()/wakeScreen(); by the time a pattern is interrupted there the
+// screen state has already written the pin, and a trailing write from here would
+// either fight it or black out a keyboard the user is about to type on.
+static void kbBlinkRelease(bool forceDark) {
+    s_kbBlinkPhasesLeft = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    LV_UNUSED(forceDark);
+    s_kbBlinkLit = false;
+#else
+    if (s_kbBlinkLit || forceDark) kbBlinkSetLit(false);
+#endif
+}
+
+static void kbBlinkApplySetting() {
+    kbBlinkRelease(!s_cfg.kbBlinkEnabled);
+}
+
+// True only while a pattern is mid-flight. The nap gate consults this so a
+// 1500 ms light sleep cannot land inside a 60 ms blink and stretch it into a
+// glow; between patterns the device is free to nap as usual.
+static bool kbBlinkBusy() { return s_kbBlinkPhasesLeft != 0; }
+
+static void serviceKbBlink() {
+    if (!s_cfg.kbBlinkEnabled) {
+        if (s_kbBlinkPhasesLeft != 0 || s_kbBlinkLit) kbBlinkApplySetting();
+        return;
+    }
+
+    if (!kbBlinkAllowedNow()) {
+        // Screen just woke mid-pattern. On the T-Deck that leaves a lit keyboard
+        // nobody else will turn off, so kbBlinkRelease() darkens it; on the Pager
+        // wakeScreen() has already set the awake state and it stays out of the
+        // way. Either way the pattern ends here rather than resuming later.
+        kbBlinkRelease(false);
+        return;
+    }
+
+    const uint32_t now = millis();
+
+    if (s_kbBlinkPhasesLeft == 0) {
+        // Idle: re-arm periodically for as long as something is unread. Reading
+        // the messages clears the flags and the reminder simply stops.
+        if (!kbBlinkHasUnread()) return;
+        if ((uint32_t)(now - s_kbBlinkPatternStartMs) < kKbBlinkRepeatMs) return;
+        kbBlinkStartPattern(DMs.hasUnread());
+    }
+
+    if (s_kbBlinkNextMs != 0 && (int32_t)(now - s_kbBlinkNextMs) < 0) return;
+
+    kbBlinkSetLit(!s_kbBlinkLit);
+    s_kbBlinkNextMs = now + (s_kbBlinkLit ? kKbBlinkOnMs : kKbBlinkOffMs);
+    s_kbBlinkPhasesLeft--;
+
+    if (s_kbBlinkPhasesLeft == 0 && s_kbBlinkLit) {
+        kbBlinkSetLit(false);                        // always end dark
+    }
+}
+#endif  // HAS_KB_BLINK
 
 static void wakeScreen() {
     if (!s_screenAsleep) {
@@ -6083,6 +6254,10 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
+    // Directly under GPS, because that row is where people look for this and
+    // the two are routinely confused: GPS picks whether the hardware is one of
+    // the position sources, this decides whether any of them leave the device.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHARE_LOCATION;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
     // Keep Chat Style near the top so it's visible without deep scrolling on
     // compact config layouts (notably the Pager's split action/info screen).
@@ -6118,6 +6293,11 @@ static void initCfgActions() {
     #if defined(DEVICE_MESH_DECK)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_DM_COLOR;
+    #endif
+    // The same job as those LED rows on the two boards whose only notification
+    // light is the keyboard. Absent where no keyboard backlight can be driven.
+    #if HAS_KB_BLINK
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK;
     #endif
     #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
@@ -6461,7 +6641,21 @@ static void closeCfgWifiScanModal() {
     s_cfgWifiScanStatus = nullptr;
 }
 
+static void closeCfgWifiDeleteConfirm() {
+    if (lvObjValid(s_cfgWifiDelBackdrop)) {
+        lv_obj_del(s_cfgWifiDelBackdrop);
+    } else if (lvObjValid(s_cfgWifiDelModal)) {
+        lv_obj_del(s_cfgWifiDelModal);
+    }
+    s_cfgWifiDelBackdrop = nullptr;
+    s_cfgWifiDelModal = nullptr;
+}
+
 static void closeCfgWifiPickerModal() {
+    // Ahead of the picker's own teardown: the prompt is parented to the root
+    // screen, so closing the picker under it would leave it on screen owning
+    // the keyboard with nothing behind it.
+    closeCfgWifiDeleteConfirm();
     closeCfgWifiScanModal();
     if (lvObjValid(s_cfgWifiBackdrop)) {
         lv_obj_del(s_cfgWifiBackdrop);
@@ -6471,7 +6665,14 @@ static void closeCfgWifiPickerModal() {
     s_cfgWifiBackdrop = nullptr;
     s_cfgWifiModal = nullptr;
     s_cfgWifiList = nullptr;
+    s_cfgWifiHint = nullptr;
     s_cfgWifiPickerOnboardingMode = false;
+}
+
+// Replaces the shortcut line with a one-off message. Reverts on the next open,
+// which is the whole lifetime that matters here.
+static void setCfgWifiPickerNotice(const char *msg) {
+    if (lvObjValid(s_cfgWifiHint)) lv_label_set_text(s_cfgWifiHint, msg);
 }
 
 static void refreshCfgWifiPickerModal() {
@@ -6569,6 +6770,288 @@ static void applyCfgWifiSelection(int idx) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config start failed");
         }
     }
+}
+
+// The AP row's fixed position in the picker. It is a mode, not a network, so it
+// is the floor of the fallback search below rather than a candidate.
+static constexpr int kForceApWifiIndex = 1;
+
+// True when the row can actually be deleted. Shared by the D shortcut and the
+// confirmation prompt, so the prompt is never raised for a row that the delete
+// would then refuse — the reason comes back for the picker's notice line.
+static bool knownWifiEntryDeletable(int idx, const char **whyNot) {
+    if (idx < 0 || idx >= s_cfgKnownWifiCount) {
+        if (whyNot) *whyNot = "No network selected";
+        return false;
+    }
+    if (strncmp(s_cfgKnownWifi[idx].ssid, kForceApSsid, sizeof(kForceApSsid)) == 0) {
+        if (whyNot) *whyNot = "AP mode cannot be removed";
+        return false;
+    }
+    if (!s_cfgKnownWifi[idx].ssid[0]) {
+        if (whyNot) *whyNot = "No network in that slot";
+        return false;
+    }
+    return true;
+}
+
+// Where to go when the network being deleted is the one in use: the configured
+// slot first, then the session-learned entries in order, and forced AP mode only
+// when nothing joinable is left.
+static int nextUsableKnownWifiIndex() {
+    if (s_cfgKnownWifiCount > 0 && s_cfgKnownWifi[0].ssid[0]) return 0;
+    for (int i = kForceApWifiIndex + 1; i < s_cfgKnownWifiCount; i++) {
+        if (s_cfgKnownWifi[i].ssid[0]) return i;
+    }
+    return kForceApWifiIndex;
+}
+
+// Removes the highlighted entry from the Choose WiFi list (the D shortcut,
+// after the confirmation prompt).
+//
+// The row kinds delete differently. Slot 0 is the configured credential pair, so
+// removing it has to clear the blob *and* the pre-blob standalone NVS keys —
+// loadConfigFromPrefs() still reads those as a migration fallback and would
+// otherwise hand the deleted SSID straight back on the next boot — *and* the
+// copies web config keeps, which persistConfigToPrefs() folds back in whenever
+// they are non-empty. Everything below slot 1 is a session-scoped entry learned
+// from a scan/connect, so for those the array is the only storage there is.
+static void deleteSelectedKnownWifi() {
+    const int idx = s_cfgWifiSelection;
+    const char *whyNot = nullptr;
+    if (!knownWifiEntryDeletable(idx, &whyNot)) {
+        setCfgWifiPickerNotice(whyNot);
+        return;
+    }
+
+    char ssid[sizeof(s_cfgKnownWifi[0].ssid)];
+    utf8util::copyTruncate(ssid, sizeof(ssid), s_cfgKnownWifi[idx].ssid);
+
+    // Whether this is the entry currently supplying credentials — captured
+    // before anything is mutated, and true for either source: the configured
+    // slot when no override is set, or the override itself.
+    const char *activeSsid = nullptr;
+    wifiGetActiveCreds(&activeSsid, nullptr);
+    const bool wasActive = activeSsid && activeSsid[0]
+                           && strncmp(activeSsid, ssid, sizeof(ssid)) == 0;
+
+    if (idx == 0) {
+        memset(s_cfg.wifiSsid, 0, sizeof(s_cfg.wifiSsid));
+        memset(s_cfg.wifiPass, 0, sizeof(s_cfg.wifiPass));
+        webCfgClearWifiCreds();
+
+        Preferences p;
+        if (p.begin("camillia", false)) {
+            p.remove("wifiSsid");
+            p.remove("wifiPass");
+            p.end();
+        }
+        // Written now rather than through markConfigDirty(): a deletion that
+        // only reaches flash 1.5 s later is a deletion that a reset in between
+        // silently undoes.
+        persistConfigToPrefs();
+    } else {
+        for (int i = 0; i < s_cfgKnownWifiAddedCount; i++) {
+            if (strncmp(s_cfgKnownWifiAdded[i].ssid, ssid,
+                        sizeof(s_cfgKnownWifiAdded[i].ssid)) != 0) {
+                continue;
+            }
+            for (int j = i + 1; j < s_cfgKnownWifiAddedCount; j++) {
+                s_cfgKnownWifiAdded[j - 1] = s_cfgKnownWifiAdded[j];
+            }
+            s_cfgKnownWifiAddedCount--;
+            memset(&s_cfgKnownWifiAdded[s_cfgKnownWifiAddedCount], 0,
+                   sizeof(s_cfgKnownWifiAdded[0]));
+            break;
+        }
+    }
+
+    // The credentials in use just stopped existing, so the association has to go
+    // with them — leaving it up would keep the device on a network it can no
+    // longer describe, and an override still naming the deleted entry would go
+    // on feeding wifiGetActiveCreds() after the row is gone.
+    if (wasActive) {
+        s_wifiUsingKnownOverride = false;
+        memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+        memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+        if (s_cfg.wifiEnabled) WiFi.disconnect(false);
+    }
+
+    populateKnownWifiEntries();
+
+    char notice[96];
+    if (wasActive) {
+        // Hand the fallback to the picker's own selection path rather than
+        // reimplementing it: forced-AP bookkeeping and the web-config restart
+        // that a radio-mode change needs both live in there.
+        const int fallback = nextUsableKnownWifiIndex();
+        applyCfgWifiSelection(fallback);
+        // applyCfgWifiSelection() clears the kick timestamp but not the backoff
+        // it grew, and a network that had been unreachable for a while can carry
+        // an interval of minutes — which the replacement network would then have
+        // to serve out before its first association attempt.
+        s_wifiStaKickIntervalMs = kWifiKickMinMs;
+
+        if (fallback == kForceApWifiIndex) {
+            snprintf(notice, sizeof(notice), "Removed %s - no networks left, AP mode", ssid);
+        } else {
+            snprintf(notice, sizeof(notice), "Removed %s - now %s",
+                     ssid, s_cfgKnownWifi[fallback].ssid);
+        }
+    } else {
+        if (s_cfgWifiSelection >= s_cfgKnownWifiCount) s_cfgWifiSelection = s_cfgKnownWifiCount - 1;
+        if (s_cfgWifiSelection < 0) s_cfgWifiSelection = 0;
+        snprintf(notice, sizeof(notice), "Removed %s", ssid);
+    }
+
+    refreshCfgWifiPickerModal();
+    setCfgWifiPickerNotice(notice);
+}
+
+// ── Delete confirmation ──────────────────────────────────────────────────
+// Deleting is one keystroke on a list, and for the configured slot it discards a
+// password that only the user can type back in, so it asks first. Y/Enter
+// confirms, N/close cancels; the answer is the only thing this dialog consumes.
+static void cfgWifiDeleteConfirmAccept() {
+    closeCfgWifiDeleteConfirm();
+    deleteSelectedKnownWifi();
+}
+
+static void cfgWifiDeleteConfirmReject() {
+    closeCfgWifiDeleteConfirm();
+}
+
+static void onCfgWifiDelYesPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgWifiDeleteConfirmAccept();
+}
+
+static void onCfgWifiDelNoPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgWifiDeleteConfirmReject();
+}
+
+static void onCfgWifiDelBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgWifiDelBackdrop) return;
+    cfgWifiDeleteConfirmReject();
+}
+
+static void openCfgWifiDeleteConfirm() {
+    if (!s_rootScreen || s_cfgWifiDelModal || s_cfgWifiDelBackdrop) return;
+
+    // Refused rows report on the picker's notice line instead of raising a
+    // prompt for something that was never going to be deleted.
+    const char *whyNot = nullptr;
+    if (!knownWifiEntryDeletable(s_cfgWifiSelection, &whyNot)) {
+        setCfgWifiPickerNotice(whyNot);
+        return;
+    }
+
+    const char *ssid = s_cfgKnownWifi[s_cfgWifiSelection].ssid;
+    const char *activeSsid = nullptr;
+    wifiGetActiveCreds(&activeSsid, nullptr);
+    const bool isActive = activeSsid && activeSsid[0]
+                          && strncmp(activeSsid, ssid,
+                                     sizeof(s_cfgKnownWifi[0].ssid)) == 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 40;
+    if (modalW < 160) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
+    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
+
+    s_cfgWifiDelBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgWifiDelBackdrop, w, h);
+    lv_obj_align(s_cfgWifiDelBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiDelBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiDelBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiDelBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiDelBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgWifiDelBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgWifiDelBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgWifiDelBackdrop, onCfgWifiDelBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgWifiDelModal = lv_obj_create(s_cfgWifiDelBackdrop);
+    lv_obj_set_size(s_cfgWifiDelModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgWifiDelModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgWifiDelModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgWifiDelModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgWifiDelModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_cfgWifiDelModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgWifiDelModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgWifiDelModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_cfgWifiDelModal, 10, 0);
+    lv_obj_set_style_pad_row(s_cfgWifiDelModal, 8, 0);
+    lv_obj_set_flex_flow(s_cfgWifiDelModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgWifiDelModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgWifiDelBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgWifiDelModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, titleTextColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Delete WiFi?");
+
+    lv_obj_t *body = lv_label_create(s_cfgWifiDelModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(body, bodyTextColor, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    // Says what else the delete will do while it can still be called off — the
+    // reconnect is the part nobody expects from a list keystroke.
+    if (isActive) {
+        const int fallback = nextUsableKnownWifiIndex();
+        if (fallback == kForceApWifiIndex) {
+            lv_label_set_text_fmt(body, "%s\nIn use - will disconnect and start AP mode", ssid);
+        } else {
+            lv_label_set_text_fmt(body, "%s\nIn use - will switch to %s", ssid,
+                                  s_cfgKnownWifi[fallback].ssid);
+        }
+    } else {
+        lv_label_set_text(body, ssid);
+    }
+
+    lv_obj_t *btnRow = lv_obj_create(s_cfgWifiDelModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 14, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+                         lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 32);
+        lv_obj_set_style_min_width(btn, 78, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+        return btn;
+    };
+    makeDelBtn(btnRow, "(N)o", noBtnBg, onCfgWifiDelNoPressed);
+    makeDelBtn(btnRow, "(Y)es", yesBtnBg, onCfgWifiDelYesPressed);
 }
 
 // ── Own-message color picker ─────────────────────────────────────────────
@@ -10227,16 +10710,16 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Choose WiFi");
 
-    lv_obj_t *hint = lv_label_create(s_cfgWifiModal);
-    lv_obj_set_width(hint, lv_pct(100));
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
+    s_cfgWifiHint = lv_label_create(s_cfgWifiModal);
+    lv_obj_set_width(s_cfgWifiHint, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgWifiHint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgWifiHint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgWifiHint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_cfgWifiHint,
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
                       "Pick known WiFi or tap New"
 #else
-                      "Enter=Select  N=New  Backspace=Cancel"
+                      "Enter=Select  N=New  D=Delete  Bksp=Cancel"
 #endif
     );
 
@@ -16549,6 +17032,16 @@ static void performCfgAction(int actionId) {
             refreshHeaderStatus(true);
         } break;
 
+        case CFG_ACTION_SHARE_LOCATION: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SHARE_LOCATION");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.shareLocation = !s_cfg.shareLocation;
+            markConfigDirty();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     s_cfg.shareLocation ? "Location sharing on"
+                                         : "Location sharing off (no position sent)");
+        } break;
+
         case CFG_ACTION_EXPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec EXPORT");
             bool ok = cfgExport(s_cfg);
@@ -16766,6 +17259,18 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LED_DM_COLOR");
             showActionPopup = false;
             openNotifyLedColorModal(true);
+            break;
+#endif
+
+#if HAS_KB_BLINK
+        case CFG_ACTION_KB_BLINK:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec KB_BLINK");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.kbBlinkEnabled = !s_cfg.kbBlinkEnabled;
+            kbBlinkApplySetting();
+            markConfigDirty();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard blink: %s",
+                     s_cfg.kbBlinkEnabled ? "On" : "Off");
             break;
 #endif
 
@@ -18026,8 +18531,15 @@ static void pumpKeyboardInput() {
 
         char rawKey = k;
 
+        // Every modal that feeds keys into a textarea belongs here. Anything
+        // left out has its j and k folded into KEY_SCROLL_UP/DN below and then
+        // dropped by the printable-character branch, so those two letters
+        // silently cannot be typed — which is exactly what happened to the WiFi
+        // password and channel name/PSK fields.
         bool typingContext = (s_composeModal && !s_emojiPickerModal)
                              || (s_dmNodePickerModal && s_dmNodeFilterOpen)
+                             || s_cfgWifiPassModal
+                             || s_chanTextModal
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
@@ -18160,6 +18672,17 @@ static void pumpKeyboardInput() {
                 otaPromptAccept();
             } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
                 otaPromptDecline();
+            }
+            continue;
+        }
+
+        // Ahead of the WiFi picker below, which would otherwise keep consuming
+        // keys while its own delete prompt is on top of it.
+        if (s_cfgWifiDelModal) {
+            if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
+                cfgWifiDeleteConfirmAccept();
+            } else if (k == 'n' || k == 'N' || isBackspaceKey(k) || isModalCloseKey(k)) {
+                cfgWifiDeleteConfirmReject();
             }
             continue;
         }
@@ -18661,6 +19184,10 @@ static void pumpKeyboardInput() {
             }
             if (k == 'n' || k == 'N') {
                 openCfgWifiScanModal();
+                continue;
+            }
+            if (k == 'd' || k == 'D') {
+                openCfgWifiDeleteConfirm();
                 continue;
             }
             if (k == KEY_SCROLL_UP) {
@@ -22735,6 +23262,13 @@ static void scheduleAnnounceRetry(uint32_t &nextMs, uint32_t nowMs) {
 }
 
 static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM) {
+    // The one place every source of our coordinates converges, which is why the
+    // switch lives here rather than beside the scheduler: turning it off has to
+    // silence the live GPS fix, the last-known self position and the configured
+    // fixed coordinates alike, and it has to hold for the manual announce, which
+    // bypasses the broadcast interval entirely.
+    if (!s_cfg.shareLocation) return false;
+
     if (gpsIsEnabled() && gpsHasFix()) {
         latI = gpsLatI();
         lonI = gpsLonI();
@@ -22795,7 +23329,12 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         } else {
             scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
             if (forceAnnounce) {
-                liveFeedAddPrefixed("", "[position] skip: no fix/fallback", TFT_DARKGREY, 0, false);
+                // "Off" and "nothing to send" look identical from the outside,
+                // and the announce button is exactly where someone checks.
+                liveFeedAddPrefixed("",
+                                    s_cfg.shareLocation ? "[position] skip: no fix/fallback"
+                                                        : "[position] skip: location sharing off",
+                                    TFT_DARKGREY, 0, false);
             }
         }
     }
@@ -25353,6 +25892,16 @@ static bool powerSaveShouldNap() {
     return s_cfg.isPowerSaving
         && s_screenAsleep                 // only after screen-off inactivity
         && !webCfgRunning()               // never while the web-config server is up
+#if HAS_KB_BLINK
+        // A nap is up to NAP_MAX_MS (1500 ms here) and the loop cannot service
+        // the blink while it is asleep, so one landing mid-pattern would stretch
+        // a 60 ms blink into a second-long glow. Only the burst holds the CPU
+        // up; the gap between reminders still naps, which does mean the reminder
+        // cadence drifts toward the nap length while the screen is off. That is
+        // the trade — holding the CPU through the idle gap too would disable
+        // power saving outright for as long as anything stayed unread.
+        && !kbBlinkBusy()
+#endif
         && WiFi.getMode() == WIFI_OFF     // light sleep + active Wi-Fi don't mix
         // Light sleep stops the UART ISR, so the RX FIFO (128 B) overruns after
         // ~33 ms at 38400 baud and the NMEA stream is shredded. Napping is only
@@ -25519,6 +26068,9 @@ void loop() {
     meshDeckPollButtons();
     meshDeckServiceLed();
 #endif
+#if HAS_KB_BLINK
+    serviceKbBlink();
+#endif
 
     serviceCpuScaling();
     serviceSerialCommands();
@@ -25542,7 +26094,7 @@ void loop() {
             persistWebCfgEnabled();
             webCfgEnd();
             s_wifiStaKickMs = 0;   // re-associate the station right away
-            Channels.addMessage(0, "", "[web] config stopped (idle)", TFT_ORANGE);
+            liveFeedAddLine("[web] config stopped (idle)", TFT_ORANGE);
         }
     }
     if (s_sysStatsModal) refreshSysStatsModal(false);
