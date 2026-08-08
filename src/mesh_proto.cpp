@@ -687,8 +687,29 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     return n;
 }
 
+void applyPositionPrecision(int32_t &latI, int32_t &lonI, uint8_t precisionBits) {
+    if (precisionBits >= 32) return;
+    if (precisionBits == 0) {
+        // Zeroing both would put us on Null Island, which reads as a real fix
+        // to every receiver. "Send nothing" is the caller's decision to make by
+        // not calling at all, so the safe reading of 0 here is "no coarsening".
+        return;
+    }
+
+    // Mask through uint32_t: latI/lonI are signed, and a right-shifted signed
+    // mask would sign-extend into the bits we mean to clear.
+    const uint32_t keep = (uint32_t)0xFFFFFFFFu << (32 - precisionBits);
+    // Half a cell, so the reported point is the centre of the possible area
+    // rather than its corner — the same +1<<(31-precision) Meshtastic adds.
+    const int32_t halfCell = (int32_t)((uint32_t)1u << (31 - precisionBits));
+
+    latI = (int32_t)(((uint32_t)latI & keep)) + halfCell;
+    lonI = (int32_t)(((uint32_t)lonI & keep)) + halfCell;
+}
+
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
-                      uint8_t *buf, size_t bufLen, uint32_t bitfield) {
+                      uint8_t *buf, size_t bufLen, uint32_t bitfield,
+                      uint8_t precisionBits) {
     uint8_t pos[32]; size_t p = 0;
 
     // Meshtastic Position.latitude_i/longitude_i are sfixed32.
@@ -708,6 +729,15 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     // altitude is int32 — plain varint (two's complement for negatives)
     if (p + 6 > sizeof(pos)) return 0;
     p += pbWriteVarint(pos + p, (3 << 3) | 0); p += pbWriteVarint(pos + p, (uint32_t)alt);
+
+    // Position.precision_bits (field 22, varint). Only sent when the coordinate
+    // has actually been coarsened: an exact fix omits it, which is what every
+    // build before imprecise location sent and what stock firmware does too.
+    if (precisionBits > 0 && precisionBits < 32) {
+        if (p + 4 > sizeof(pos)) return 0;
+        p += pbWriteVarint(pos + p, (22 << 3) | 0);
+        p += pbWriteVarint(pos + p, precisionBits);
+    }
 
     // Wrap in Data message
     size_t n = 0;

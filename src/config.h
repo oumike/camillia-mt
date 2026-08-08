@@ -122,6 +122,12 @@
 // build before this setting existed broadcast position, and a device that
 // silently stopped after an update would be the surprise, not the reverse.
 #define MY_SHARE_LOCATION   1
+// How much of our coordinates actually goes on the air, in bits kept per
+// coordinate (Meshtastic's position_precision). 32 = exact. Defaults to exact
+// because every build before this setting broadcast exact coordinates, and
+// quietly starting to lie about where a device is would be the surprise.
+// Coarsening is a decision the operator makes; see kPositionPrecisions.
+#define MY_POSITION_PRECISION 32
 #define MY_GPS_POLL_S      60      // seconds between GPS position samples into s_cfg
 #define MY_REGION        "US"
 #define MY_TZ_DEF        "EST5EDT,M3.2.0,M11.1.0"   // Eastern (Detroit)

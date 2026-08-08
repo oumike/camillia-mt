@@ -244,7 +244,49 @@ struct RhinoConfig {
     // settings.
     uint8_t  kbBlinkChanFlashes;
     uint8_t  kbBlinkDmFlashes;
+    // Covers the trailing padding that followed kbBlinkDmFlashes — same trap as
+    // the pads above. Two uint8_t at the end of a 4-aligned struct leave up to
+    // three bytes the old blob still carries, and positionPrecision landing in
+    // them would load as 0 on every existing device. Zero is not a harmless
+    // value here: it would read as "keep no bits of the coordinate".
+    uint8_t  _reservedPad6[3];
+    // Bits of latitude/longitude actually transmitted, Meshtastic's
+    // position_precision. 32 = exact; lower values round the coordinate to a
+    // coarser grid before it leaves the device. See kPositionPrecisions.
+    uint8_t  positionPrecision;
 };
+
+// ── Position precision (imprecise location) ──────────────────────────────────
+// Meshtastic's imprecise-location scheme, and deliberately bit-compatible with
+// it: keeping N of the 32 bits of a degrees*1e7 coordinate snaps it to a grid
+// of 2^(32-N) units, and the transmitted point is re-centred in that cell so
+// the error is symmetric rather than always north-east of the truth. The
+// receiving node is told how many bits are real via Position.precision_bits, so
+// other firmware can draw the uncertainty instead of trusting a false fix.
+//
+// Distances are the cell size at the equator for latitude (1 degree ~ 111 km);
+// longitude cells narrow toward the poles, so the real error is never worse
+// than the label says.
+//
+// One difference from Meshtastic worth knowing: theirs is per channel
+// (ChannelSettings.module_settings.position_precision), so a node can be exact
+// on a private channel and coarse on a public one. Ours is one device-wide
+// setting applied to every position we send.
+struct PositionPrecisionOption {
+    uint8_t     bits;
+    const char *label;
+};
+extern const PositionPrecisionOption kPositionPrecisions[];
+extern const int kPositionPrecisionCount;
+
+// Label for a stored precision value; falls back to the exact-location label so
+// an unknown value never renders as blank.
+const char *positionPrecisionLabel(uint8_t bits);
+
+// Nearest supported value, for anything that arrives from outside (YAML, the
+// web form, an older blob). Never returns 0: "share nothing" is shareLocation's
+// job, and having two settings mean it invites them to disagree.
+uint8_t positionPrecisionCoerce(uint8_t bits);
 
 // Keyboard-blink flash counts. Three is the practical ceiling: at 60 ms lit and
 // 90 ms dark a fourth flash runs the pattern past 500 ms, and the whole cycle

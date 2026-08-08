@@ -137,6 +137,31 @@ Config includes Web Config controls, export and import, the theme picker, announ
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
 
+### Location precision
+
+**Share Location** decides whether this node puts its coordinates on the mesh at
+all. **Location Precision**, the row underneath it, decides how exact those
+coordinates are when it does.
+
+Anything below Precise rounds the position to a grid before it is transmitted,
+so the mesh learns roughly where you are without learning exactly where you are.
+The choices run from ~50 m to ~23 km; the label is the width of the grid square,
+and the transmitted point is the middle of it, so the error is never more than
+half that in any direction. The device goes on using your real fix locally — the
+compass, distances and the nodes list are unaffected.
+
+Transmitted packets carry how many bits of the coordinate are real
+(`Position.precision_bits`), which is the same mechanism stock Meshtastic uses,
+so other clients can render an area instead of a false pinpoint.
+
+Enter cycles the row: Precise, then finest to coarsest, then back. The same
+setting is under Position in web config, and it defaults to Precise — a firmware
+update never starts obfuscating a position on its own.
+
+One difference from stock Meshtastic: theirs is a per-channel setting, so a node
+can be exact on a private channel and coarse on a public one. Ours is one
+device-wide value applied to every channel this node shares position on.
+
 ### Theme
 
 The **Theme** action opens a picker rather than cycling. Each theme/mode preset

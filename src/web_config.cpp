@@ -1828,6 +1828,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "the manual announce, whatever the settings below say. Nothing else on this "
             "page stops the broadcast: GPS Enabled only chooses where the coordinates "
             "come from.</p>";
+    html += "<label>Location Precision<select name='pos_precision'>";
+    for (int i = 0; i < kPositionPrecisionCount; i++) {
+        snprintf(tmp, sizeof(tmp), "%u", (unsigned)kPositionPrecisions[i].bits);
+        html += "<option value='"; html += tmp; html += "'";
+        if (gCfg->positionPrecision == kPositionPrecisions[i].bits) html += " selected";
+        html += ">"; html += kPositionPrecisions[i].label; html += "</option>";
+    }
+    html += "</select></label>";
+    html += "<p class='gps-hint'>Rounds the coordinates before they are transmitted, so "
+            "the mesh sees the area you are in rather than the spot you are standing on. "
+            "The device still uses your exact position locally. Receiving nodes are told "
+            "how coarse the value is, so other Meshtastic clients can show it as an area. "
+            "Applies to every channel this node shares position on.</p>";
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='gpsEnabled' value='1'";
     if (gCfg->gpsEnabled) html += " checked";
@@ -3655,6 +3668,17 @@ static void handlePostSave() {
 
     // Position
     gCfg->shareLocation = (server.arg("shareLocation") == "1");
+    // hasArg-guarded, unlike the checkbox above: a checkbox that posts nothing
+    // means "off", but a select that posts nothing means the field was never on
+    // the page. Reading it unconditionally would turn any partial form — a lite
+    // render, a truncated send — into a silent reset to exact coordinates,
+    // which is the one direction this setting must never move on its own.
+    // Coerced rather than trusted: it decides how much of the operator's real
+    // position goes on the air.
+    if (server.hasArg("pos_precision")) {
+        gCfg->positionPrecision =
+            positionPrecisionCoerce((uint8_t)server.arg("pos_precision").toInt());
+    }
     gCfg->gpsEnabled = (server.arg("gpsEnabled") == "1");
     gCfg->latI = (int32_t)(server.arg("lat").toFloat() * 1e7f);
     gCfg->lonI = (int32_t)(server.arg("lon").toFloat() * 1e7f);

@@ -96,8 +96,14 @@ public:
     // Broadcast a POSITION_APP packet with the given coordinates. chanIdx selects
     // the channel it goes out on; the caller decides which channels share
     // position (see channelSharesLocation()), this only sends where told.
+    // precisionBits is RhinoConfig::positionPrecision: 32 sends the exact fix,
+    // lower values coarsen the coordinates before they leave the device and tag
+    // the packet with how many bits are real. Defaulted to exact so a caller
+    // that does not care cannot accidentally send a coarser position than the
+    // operator asked for — but every real caller should pass the setting.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                      bool unusedCompat = false, int chanIdx = 0);
+                      bool unusedCompat = false, int chanIdx = 0,
+                      uint8_t precisionBits = 32);
 
     // Send a unicast POSITION_APP request to a peer (empty payload + want_response).
     // Peer should reply with its current Position broadcast.

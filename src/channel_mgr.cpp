@@ -676,13 +676,20 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 }
 
 bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                              bool unusedCompat, int chanIdx) {
+                              bool unusedCompat, int chanIdx, uint8_t precisionBits) {
     (void)unusedCompat;
     if (!Radio.isReady()) return false;
     if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return false;
 
+    // Coarsened here rather than at the caller: this is the only path a
+    // position takes onto the air, so it is the only place that cannot be
+    // bypassed by a new caller forgetting to obfuscate. latI/lonI are by value,
+    // so the caller's copy — and anything it later displays locally — still
+    // holds the real fix.
+    applyPositionPrecision(latI, lonI, precisionBits);
+
     uint8_t proto[64], cipher[64];
-    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto));
+    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), 0, precisionBits);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[chanIdx];

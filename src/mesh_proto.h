@@ -207,11 +207,25 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       uint8_t *buf, size_t bufLen,
                       bool wantResponse = true, uint32_t bitfield = 0);
 
+// Coarsen a coordinate pair to `precisionBits` of latitude/longitude, in place.
+// No-op at 32 or above. This is Meshtastic's imprecise-location transform: mask
+// off the low bits, then add half a cell so the transmitted point sits in the
+// middle of the area it could be in rather than at its south-west corner.
+//
+// Call it once, on the way out. Applying it twice is not idempotent — the
+// second pass re-centres an already-centred point and walks it half a cell
+// further each time.
+void applyPositionPrecision(int32_t &latI, int32_t &lonI, uint8_t precisionBits);
+
 // Encode a POSITION_APP Data message. lat/lon are sfixed32 (degrees * 1e7),
 // alt is int32 (meters). Returns encoded length.
 // bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
+// precisionBits fills Position.precision_bits so the receiver knows how much of
+// the coordinate is real; it does not itself coarsen anything — pass the
+// coordinates through applyPositionPrecision() first.
 size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
-                      uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
+                      uint8_t *buf, size_t bufLen, uint32_t bitfield = 0,
+                      uint8_t precisionBits = 32);
 
 // Encode TELEMETRY_APP Data messages.
 // timeEpoch sets Telemetry.time (field 1, Unix seconds); pass 0 to omit it when

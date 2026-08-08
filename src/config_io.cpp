@@ -356,6 +356,40 @@ static const char *kRebroadNames[] = {
 };
 static const int kNumRebroadModes = 5;
 
+// Ordered exact-first: the device row cycles through this array, and the first
+// step off "Precise" should be the smallest amount of lying, not the largest.
+const PositionPrecisionOption kPositionPrecisions[] = {
+    { 32, "Precise"  },
+    { 20, "~50 m"    },
+    { 19, "~90 m"    },
+    { 18, "~200 m"   },
+    { 17, "~350 m"   },
+    { 16, "~700 m"   },
+    { 15, "~1.5 km"  },
+    { 14, "~2.9 km"  },
+    { 13, "~5.8 km"  },
+    { 12, "~12 km"   },
+    { 11, "~23 km"   },
+};
+const int kPositionPrecisionCount =
+    (int)(sizeof(kPositionPrecisions) / sizeof(kPositionPrecisions[0]));
+
+const char *positionPrecisionLabel(uint8_t bits) {
+    for (int i = 0; i < kPositionPrecisionCount; i++) {
+        if (kPositionPrecisions[i].bits == bits) return kPositionPrecisions[i].label;
+    }
+    return kPositionPrecisions[0].label;
+}
+
+uint8_t positionPrecisionCoerce(uint8_t bits) {
+    for (int i = 0; i < kPositionPrecisionCount; i++) {
+        if (kPositionPrecisions[i].bits == bits) return bits;
+    }
+    // Anything unrecognised — including 0 from a blob written before this
+    // existed — becomes exact, which is what those builds actually sent.
+    return kPositionPrecisions[0].bits;
+}
+
 static const char *kThemeNames[] = {
     "CAMELLIA", "EVERGREEN", "EARTHEN", "SOLARIZED", "CRIMSON", "SCARLET_POP",
     "INK_WASH", "LAVENDAR_FIELDS", "WILD_FLOWERS", "QUIET_LUXURY", "MORNING_DEW", "WINTER_CHILL",
@@ -459,6 +493,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.nodeInfoIntervalS = MY_NODEINFO_INTV;
     cfg.posIntervalS      = MY_POS_INTV;
     cfg.shareLocation     = (bool)MY_SHARE_LOCATION;
+    cfg.positionPrecision = positionPrecisionCoerce(MY_POSITION_PRECISION);
     cfg.gpsPollIntervalS  = MY_GPS_POLL_S;
     strncpy(cfg.region, MY_REGION, sizeof(cfg.region) - 1);
     cfg.region[sizeof(cfg.region) - 1] = '\0';
@@ -809,6 +844,11 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    gpsDutyCycle: %s\n",
              cfg.gpsDutyCycleEnabled ? "true" : "false");                     out += tmp;
     snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", cfg.shareLocation ? "true" : "false"); out += tmp;
+    // Bits, not the label: the label is a rounded distance for humans, and a
+    // config file that round-trips has to carry the value that goes on the air.
+    snprintf(tmp, sizeof(tmp), "    positionPrecision: %u   # bits, 32 = exact (%s)\n",
+             (unsigned)cfg.positionPrecision,
+             positionPrecisionLabel(cfg.positionPrecision));                  out += tmp;
     snprintf(tmp, sizeof(tmp), "    positionBroadcastSecs: %lu\n", (unsigned long)cfg.posIntervalS); out += tmp;
     snprintf(tmp, sizeof(tmp), "    gpsPollIntervalSecs: %lu\n", (unsigned long)cfg.gpsPollIntervalS); out += tmp;
     // power
@@ -1145,6 +1185,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "shareLocation"))
                     cfg.shareLocation = parseBoolValue(val);
+                else if (!strcmp(key, "positionPrecision"))
+                    cfg.positionPrecision = positionPrecisionCoerce((uint8_t)atoi(val));
                 else if (!strcmp(key, "positionBroadcastSecs"))
                     cfg.posIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "gpsPollIntervalSecs"))

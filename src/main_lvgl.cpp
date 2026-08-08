@@ -1598,6 +1598,7 @@ enum CfgActionId {
     CFG_ACTION_CHOOSE_WIFI,
     CFG_ACTION_GPS_TOGGLE,
     CFG_ACTION_SHARE_LOCATION,
+    CFG_ACTION_POSITION_PRECISION,
     CFG_ACTION_EXPORT,
     CFG_ACTION_IMPORT,
     CFG_ACTION_THEME,
@@ -2904,6 +2905,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_SHARE_LOCATION:
             snprintf(buf, bufLen, "Share Location: %s", s_cfg.shareLocation ? "On" : "Off");
+            break;
+        case CFG_ACTION_POSITION_PRECISION:
+            snprintf(buf, bufLen, "Location Precision: %s",
+                     positionPrecisionLabel(s_cfg.positionPrecision));
             break;
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "Export Config");
@@ -4716,6 +4721,11 @@ static void applyLoadedConfigInvariants() {
     // no flashes at all, which reads as the feature being off.
     s_cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes);
     s_cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes);
+    // An unrecognised precision would decide how much of the operator's
+    // location goes on the air, so it is coerced rather than trusted. 0 in
+    // particular must not survive: applyPositionPrecision() treats it as "do
+    // not coarsen", which is the opposite of what a stray 0 looks like.
+    s_cfg.positionPrecision = positionPrecisionCoerce(s_cfg.positionPrecision);
     applyPresetParams(s_cfg);
 }
 
@@ -6353,6 +6363,9 @@ static void initCfgActions() {
     // the two are routinely confused: GPS picks whether the hardware is one of
     // the position sources, this decides whether any of them leave the device.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHARE_LOCATION;
+    // Immediately after it: this row only means anything while sharing is on,
+    // and someone turning sharing off is often really looking for this instead.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
     // Keep Chat Style near the top so it's visible without deep scrolling on
     // compact config layouts (notably the Pager's split action/info screen).
@@ -18011,6 +18024,26 @@ static void performCfgAction(int actionId) {
                                          : "Location sharing off (no position sent)");
         } break;
 
+        case CFG_ACTION_POSITION_PRECISION: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec POSITION_PRECISION");
+            showActionPopup = false;   // row already reads the new value
+            // Cycles exact -> finest -> coarsest -> exact. The list is ordered
+            // so the first step off Precise is the smallest loss of accuracy.
+            int idx = 0;
+            for (int i = 0; i < kPositionPrecisionCount; i++) {
+                if (kPositionPrecisions[i].bits == s_cfg.positionPrecision) { idx = i; break; }
+            }
+            idx = (idx + 1) % kPositionPrecisionCount;
+            s_cfg.positionPrecision = kPositionPrecisions[idx].bits;
+            markConfigDirty();
+            if (s_cfg.positionPrecision >= 32) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location sent exactly");
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location rounded to %s",
+                         positionPrecisionLabel(s_cfg.positionPrecision));
+            }
+        } break;
+
         case CFG_ACTION_EXPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec EXPORT");
             bool ok = cfgExport(s_cfg);
@@ -24429,7 +24462,8 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
             for (int i = 0; i < MESH_CHANNELS; i++) {
                 if (!channelSharesLocation(i)) continue;
                 attempted++;
-                if (Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt, i)) sent++;
+                if (Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt, i,
+                                          s_cfg.positionPrecision)) sent++;
             }
             if (sent > 0 || attempted == 0) {
                 scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
