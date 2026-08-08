@@ -28,7 +28,7 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   selected channel's messages; in the DM list it focuses the conversation's
   messages. Enter never opens compose.
 - Note: inside the compose box, Enter still **sends** the message.
-- Live modal shortcuts: C clears the log, U opens channel-util chart, S opens SNR/RSSI chart
+- Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI, ChUtil, and Discovery except on Cardputer); S sweeps inside Discovery
 
 ### LilyGo T-Deck (tdeck)
 
@@ -89,6 +89,40 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - Open from the main screen (L on keyboard builds, Live bottom-nav button on Heltec)
 - Scroll with Up and Down input
 - Press C to clear the log
+- Press T for Tools (on Heltec, the Tools button in the Live header) — a
+  two-column picker holding the SNR/RSSI chart, the channel-utilization chart,
+  and Discovery. Enter opens the selected tool, and S, U or D jumps straight to
+  one. Backing out of a tool returns to Live, not to Tools.
+
+### Discovery
+
+Not available on Cardputer: the neighbor table and result buffer cost about 3 KB
+of internal RAM, and first-boot onboarding there (WiFi AP plus the lite web
+config) has less headroom than that. The Tools modal on Cardputer holds the two
+charts only. Cardputer still broadcasts its own NeighborInfo and still answers
+other nodes' discovery sweeps — it just does not keep or display the map.
+
+Discovery answers what the Nodes screen cannot: not just who we have heard from,
+but how the mesh is shaped around us. It groups every node we know of into
+direct neighbors (with the SNR we measured), nodes by hop count, nodes whose
+packets never said how far away they are, and — the group nothing else shows —
+nodes we have only ever heard *about*, because a neighbor listed them in its own
+neighbor report.
+
+- Open from Live → Tools → Discovery
+- Scroll with Up and Down input
+- Results are laid out to suit the panel: three columns on the T-Lora Pager
+  (direct / distance / heard about), two on the T-Deck and Mesh Deck (heard
+  about on the right), and a single stacked column on Cardputer and Heltec,
+  where Heltec uses a larger result font
+- Everything above is passive: it is built from NeighborInfo broadcasts that were
+  already arriving, and costs no extra airtime
+- Press S (Heltec: the Sweep button) to sweep: **one** NodeInfo broadcast asking
+  nodes within 3 hops to answer, and replies are counted for 45 s. Never
+  automatic. A sweep is refused, with the reason on screen, when one ran less
+  than 60 s ago, when channel utilization is at or above 25%, or when the radio
+  is not ready.
+- We answer other nodes' sweeps too, at most once per requester per hour
 - Close with the device close key (see device sections below)
 
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)

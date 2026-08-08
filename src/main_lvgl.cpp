@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_system.h>   // esp_reset_reason() for the boot marker below
+#include <stdarg.h>       // discoveryAppend() takes a format
 #include <Wire.h>
 #include "config.h"
 #include "base64_util.h"
@@ -601,6 +602,11 @@ static uint32_t s_traceroutePacketId = 0;
 static uint32_t s_tracerouteStartedMs = 0;
 static bool s_tracerouteAwaitingRouting = false;
 static bool s_tracerouteAwaitingReply = false;
+// Set once a terminal status is on screen. A Camillia responder answers with both a
+// TRACEROUTE_APP reply and a ROUTING_APP ack, and the reply usually wins the race —
+// without this the trailing ack would re-arm the wait and time out over a rendered
+// route. Also absorbs duplicate acks and post-reply NAKs from rebroadcast/MQTT echo.
+static bool s_tracerouteResolved = false;
 static int s_activeChannel = 0;
 static int s_lastRenderedChannel = -1;
 static int s_lastRenderedCount = -1;
@@ -1113,6 +1119,13 @@ static void refreshChUtilChart(bool force = false);
 static void openSnrRssiChartModal();
 static void closeSnrRssiChartModal();
 static void refreshSnrRssiChart(bool force = false);
+static void openLiveToolsModal();
+static void closeLiveToolsModal();
+#if FEATURE_DISCOVERY
+static void openDiscoveryModal();
+static void closeDiscoveryModal();
+static void refreshDiscoveryModal(bool force = false);
+#endif
 static void chartPushSample(ChartHist &h, float value);
 static void openDmModal();
 static void closeDmModal();
@@ -3074,6 +3087,25 @@ static void cfgDebugSelection(const char *tag, int actionId) {
                   s_cfgSelection,
                   actionId,
                   cfgActionLabel(actionId, actionText, sizeof(actionText)));
+}
+
+// Single mover for every config-screen navigation input — the keyboard arrows,
+// j/k, the pager wheel and the expander buttons all fold onto KEY_SCROLL_UP/DN
+// before they get here, so wrapping once covers all of them. The list is long
+// enough that walking it end to end to reach the last item is the common case.
+static void cfgMoveSelection(int delta, const char *tag) {
+    if (s_cfgActionCount <= 0) return;
+    int next = s_cfgSelection + delta;
+    // Modulo rather than a clamp: past the last item lands on the first.
+    next %= s_cfgActionCount;
+    if (next < 0) next += s_cfgActionCount;
+    if (next == s_cfgSelection) return;
+    s_cfgSelection = next;
+    s_cfgLastScrollMs = millis();
+    s_cfgConfirmAction = -1;
+    s_cfgConfirmMs = 0;
+    cfgDebugSelection(tag, s_cfgActions[s_cfgSelection]);
+    refreshCfgModal();
 }
 
 static void syncWifiCredsToPrefs() {
@@ -8565,6 +8597,126 @@ static constexpr int kChanModalRowsPerCol =
 // the gutter that pad_column draws between them.
 static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
 
+// ── Live Tools ───────────────────────────────────────────────────────────────
+// The Live screen's chart surfaces used to cost one keyboard letter and one
+// header button each, which does not scale past two. They sit behind a single
+// (T)ools modal now, built on the channel grid metrics just above: same two
+// columns, same column-major fill, so a step of one walks down a column here
+// too. Laid out, that is:
+//     SNR/RSSI | Discovery
+//     ChUtil   |
+enum LiveTool : uint8_t {
+    LIVE_TOOL_SNR = 0,
+    LIVE_TOOL_CHUTIL,
+#if FEATURE_DISCOVERY
+    LIVE_TOOL_DISCOVERY,
+#endif
+    LIVE_TOOL_COUNT
+};
+static constexpr int kLiveToolRowsPerCol =
+    (LIVE_TOOL_COUNT + kChanModalCols - 1) / kChanModalCols;
+
+// Keeps the letter keys in step with the "(S)NR/RSSI" style labels below.
+static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
+    'S', 'U',
+#if FEATURE_DISCOVERY
+    'D',
+#endif
+};
+
+static lv_obj_t *s_liveToolsBackdrop = nullptr;
+static lv_obj_t *s_liveToolsModal    = nullptr;
+static lv_obj_t *s_liveToolsRows[LIVE_TOOL_COUNT] = {};
+static int       s_liveToolsSelection = LIVE_TOOL_SNR;
+
+// ── Discovery ────────────────────────────────────────────────────────────────
+// Compiled out on the Cardputer, where the ~3 KB it holds costs more than the
+// feature is worth on a 240x135 panel — see FEATURE_DISCOVERY in config.h. The
+// NodeInfo reply below it is not part of that: it costs nothing and is how
+// other people's sweeps see us.
+//
+// Two questions the rest of the UI cannot answer: who is out there, and how are
+// they attached to us. The Nodes screen lists who we have heard *from*; this
+// adds the shape — direct neighbors, nodes by hop count, and nodes that only
+// appear in somebody else's neighbor list, which we have heard *about* and
+// never from.
+//
+// The passive half costs nothing: NEIGHBORINFO_APP reports were already
+// arriving and being thrown away. The active half is one broadcast, on demand.
+
+// Per-requester throttle on answering a NodeInfo want_response. Meshtastic
+// suppresses for 12 h (NodeInfoModule.cpp:15-21); 1 h is a deliberate local
+// divergence — our node table is far smaller and evicts sooner, so a peer that
+// aged out and came back should not be invisible to us for half a day.
+static constexpr uint32_t kNodeInfoReplyThrottleMs = 3600000UL;
+
+#if FEATURE_DISCOVERY
+// One sweep per minute. Meshtastic's floor for an interactive, user-triggered
+// NodeInfo request (NodeInfoModule.cpp:168-172, the shorterTimeout path).
+static constexpr uint32_t kDiscoverySweepMinGapMs = 60000UL;
+
+// How long replies are counted against a sweep before it is called done. Same
+// order as the traceroute window — long enough for a 3-hop round trip with
+// relay backoff, short enough that a dead sweep stops looking live.
+static constexpr uint32_t kDiscoverySweepWindowMs = 45000UL;
+
+// Meshtastic's *polite* channel-utilization threshold (airtime.h:70-72); its
+// hard refusal is 40%. A sweep is discretionary and asks others to transmit, so
+// it is held to the polite one. Measured locally by Radio.channelUtilPercent()
+// over a rolling hour — slower to react than Meshtastic's shorter periods, so
+// it errs toward refusing after a busy spell rather than during one.
+static constexpr float kDiscoverySweepMaxChUtil = 25.0f;
+
+// The single most dangerous number in the feature: every node inside this many
+// hops answers a sweep. See ChannelMgr::sendDiscoverySweep().
+static constexpr uint8_t kDiscoverySweepHopLimit = 3;
+
+// Which column each group renders into. Wide panels have the room to put the
+// groups side by side instead of making the user scroll past one to reach the
+// next; narrow ones stack them in a single column as before. The column count
+// falls out of the highest index used, so a board is described by these three
+// numbers alone.
+//
+//   Pager (480 wide): DIRECT | distance | HEARD ABOUT
+//   T-Deck, Mesh Deck (320): DIRECT + distance | HEARD ABOUT
+//   Cardputer, Heltec: one column, everything stacked
+static constexpr int kDiscoveryColDirect = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int kDiscoveryColDistance = 1;
+static constexpr int kDiscoveryColHeard    = 2;
+#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+static constexpr int kDiscoveryColDistance = 0;
+static constexpr int kDiscoveryColHeard    = 1;
+#else
+static constexpr int kDiscoveryColDistance = 0;
+static constexpr int kDiscoveryColHeard    = 0;
+#endif
+static constexpr int kDiscoveryCols = kDiscoveryColHeard + 1;
+
+// Per-column text budget. One column holds every group, so it gets more.
+static constexpr size_t kDiscoveryColCap = (kDiscoveryCols == 1) ? 1400 : 800;
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// Touch build with no keyboard and one column of results: it has the width to
+// spend on legibility, and nothing competing for it.
+static const lv_font_t *kDiscoveryBodyFont = &lv_font_montserrat_12;
+#else
+static const lv_font_t *kDiscoveryBodyFont = &lv_font_montserrat_10;
+#endif
+
+static lv_obj_t *s_discoveryModal = nullptr;
+static lv_obj_t *s_discoveryStatusLabel = nullptr;
+static lv_obj_t *s_discoveryList = nullptr;
+static lv_obj_t *s_discoveryColLabels[kDiscoveryCols] = {};
+// 0 = no sweep in flight. Survives the modal closing so a sweep cannot be
+// restarted by closing and reopening, and so its result is there on return.
+static uint32_t s_discoverySweepStartedMs = 0;
+static uint32_t s_discoveryLastSweepMs = 0;
+static int      s_discoverySweepBaseNodes = 0;
+static char     s_discoveryStatus[72] = {};
+static uint32_t s_discoveryRenderedSig = 0;
+#endif  // FEATURE_DISCOVERY
+
 
 static lv_obj_t *s_chanCfgBackdrop = nullptr;
 static lv_obj_t *s_chanCfgModal    = nullptr;
@@ -11904,7 +12056,22 @@ static lv_color_t tftColorToLv(uint16_t c) {
     return lv_color_make(r, g, b);
 }
 
+static void closeLiveToolsModal() {
+    if (lvObjValid(s_liveToolsBackdrop)) {
+        lv_obj_del(s_liveToolsBackdrop);       // takes the modal and rows with it
+    } else if (lvObjValid(s_liveToolsModal)) {
+        lv_obj_del(s_liveToolsModal);
+    }
+    s_liveToolsBackdrop = nullptr;
+    s_liveToolsModal = nullptr;
+    memset(s_liveToolsRows, 0, sizeof(s_liveToolsRows));
+    s_liveToolsSelection = LIVE_TOOL_SNR;      // first enabled tool
+}
+
 static void closeLiveModal() {
+    // Tools is parented to the root screen, not to the Live modal, so nothing
+    // else would take it down with the screen it belongs to.
+    closeLiveToolsModal();
     if (s_liveModal && lv_obj_is_valid(s_liveModal)) {
         lv_obj_del(s_liveModal);
     }
@@ -13458,6 +13625,7 @@ static void closeTracerouteProgressModal() {
     s_tracerouteStartedMs = 0;
     s_tracerouteAwaitingRouting = false;
     s_tracerouteAwaitingReply = false;
+    s_tracerouteResolved = false;
 }
 
 static void onTracerouteBackdropPressed(lv_event_t *e) {
@@ -13608,11 +13776,19 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
     char text[420];
     text[0] = '\0';
 
+    // We are one end of every path we draw, and our own node is not in the node
+    // DB — so the plain label renders us as !hex next to everyone else's short
+    // name. Feed our configured short name in as the hint for that one id.
+    auto hopLabel = [](uint32_t node, char *out, size_t outLen) {
+        const char *hint = (node != 0 && node == s_myNodeId) ? s_cfg.nodeShort : nullptr;
+        liveNodeLabelWithHint(node, hint, out, outLen, true);
+    };
+
     for (int idx = 0; idx < edgeCount; idx++) {
         char from[20];
         char to[20];
-        liveNodeLabel(edges[idx].from, from, sizeof(from), true);
-        liveNodeLabel(edges[idx].to, to, sizeof(to), true);
+        hopLabel(edges[idx].from, from, sizeof(from));
+        hopLabel(edges[idx].to, to, sizeof(to));
 
         const char *sep = "";
         if (idx > 0) {
@@ -13662,6 +13838,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     s_tracerouteStartedMs = millis();
     s_tracerouteAwaitingRouting = true;
     s_tracerouteAwaitingReply = false;
+    s_tracerouteResolved = false;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -13772,6 +13949,7 @@ static void tracerouteProgressSetTxResult(bool ok) {
     if (!ok) {
         s_tracerouteAwaitingRouting = false;
         s_tracerouteAwaitingReply = false;
+        s_tracerouteResolved = true;
         tracerouteProgressSetStatus("Send failed", lv_color_hex(0xFF8080));
         return;
     }
@@ -13785,6 +13963,7 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
                                         bool viaMqtt) {
     if (!s_tracerouteModal) return;
     if (requestId == 0 || requestId != s_traceroutePacketId) return;
+    if (s_tracerouteResolved) return;
 
     char who[20];
     liveNodeLabel(fromNode, who, sizeof(who), false);
@@ -13793,6 +13972,7 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
         if (routeReplyPayload && routeReplyLen > 0) {
             s_tracerouteAwaitingRouting = false;
             s_tracerouteAwaitingReply = false;
+            s_tracerouteResolved = true;
             char status[72];
             snprintf(status, sizeof(status), "Reply from %s", who);
             tracerouteProgressSetStatus(status, lv_color_hex(0xB8FFB8));
@@ -13810,6 +13990,7 @@ static void tracerouteProgressOnRouting(uint32_t fromNode, uint32_t requestId, u
 
     s_tracerouteAwaitingRouting = false;
     s_tracerouteAwaitingReply = false;
+    s_tracerouteResolved = true;
     const char *errName = routingErrorName(errorReason);
     char status[80];
     if (errName) {
@@ -13827,6 +14008,7 @@ static void tracerouteProgressOnResponse(const MeshPacket &pkt) {
 
     s_tracerouteAwaitingRouting = false;
     s_tracerouteAwaitingReply = false;
+    s_tracerouteResolved = true;
     char who[20];
     liveNodeLabel(pkt.hdr.from, who, sizeof(who), false);
     uint32_t elapsedMs = (s_tracerouteStartedMs != 0) ? (millis() - s_tracerouteStartedMs) : 0;
@@ -13860,6 +14042,7 @@ static void serviceTracerouteTimeout() {
     const bool ackedButSilent = s_tracerouteAwaitingReply;
     s_tracerouteAwaitingRouting = false;
     s_tracerouteAwaitingReply = false;
+    s_tracerouteResolved = true;
 
     const unsigned long secs = (unsigned long)(elapsedMs / 1000UL);
     char status[64];
@@ -14563,17 +14746,17 @@ static void openLiveModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "LIVE");
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    // Vertical Heltec is narrow; the right-anchored chart buttons would
-    // overdraw a centered title. Left-align with a small inset instead.
+    // Vertical Heltec is narrow; the right-anchored Tools button would overdraw
+    // a centered title. Left-align with a small inset instead.
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 #else
     lv_obj_center(title);
 #endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Dedicated header buttons (Heltec touch) for the two live charts.
-    auto makeLiveChartBtn = [](lv_obj_t *parent, const char *text, int xOffset,
-                               lv_event_cb_t cb) {
+    // Single header button (Heltec touch) into the Tools modal.
+    auto makeLiveHeaderBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+                                lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_size(btn, 52, 20);
         lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
@@ -14595,11 +14778,8 @@ static void openLiveModal() {
         lv_obj_center(lbl);
         return btn;
     };
-    // Rightmost: SNR/RSSI. To its left: ChUtil.
-    makeLiveChartBtn(header, "SNR", -4,
-                     [](lv_event_t *e) { LV_UNUSED(e); openSnrRssiChartModal(); });
-    makeLiveChartBtn(header, "ChUtil", -60,
-                     [](lv_event_t *e) { LV_UNUSED(e); openChUtilChartModal(); });
+    makeLiveHeaderBtn(header, "Tools", -4,
+                      [](lv_event_t *e) { LV_UNUSED(e); openLiveToolsModal(); });
 #endif
 
     s_liveList = lv_obj_create(s_liveModal);
@@ -14633,13 +14813,195 @@ static void openLiveModal() {
     // No Back tooltip here. Esc leaves every modal on this build, and carrying
     // it made the legend 239 px wide against 230 px of content — it wrapped to
     // a second line and took 11 px off the feed. The rest fits on one line.
-    lv_label_set_text(hint, "C = Clear   U = ChUtil   S = SNR/RSSI");
+    lv_label_set_text(hint, "C = Clear   T = Tools");
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   U = ChUtil   S = SNR/RSSI", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   T = Tools", modalCloseKeyLabel());
 #endif
 #endif
 
     refreshLiveView(true);
+}
+
+// ── Live Tools modal ─────────────────────────────────────────────────────────
+static void refreshLiveToolsSelection() {
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+        lv_obj_t *row = s_liveToolsRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_liveToolsSelection);
+        lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
+    }
+}
+
+// Opening a tool drops Tools rather than stacking it underneath: backing out of
+// one then lands on Live, which is where the charts have always returned to.
+static void liveToolsActivate(int tool) {
+    if (tool < 0 || tool >= LIVE_TOOL_COUNT) return;
+    closeLiveToolsModal();
+    switch (tool) {
+        case LIVE_TOOL_SNR:       openSnrRssiChartModal(); break;
+        case LIVE_TOOL_CHUTIL:    openChUtilChartModal();  break;
+#if FEATURE_DISCOVERY
+        case LIVE_TOOL_DISCOVERY: openDiscoveryModal();    break;
+#endif
+        default: break;
+    }
+}
+
+static void onLiveToolRowPressed(lv_event_t *e) {
+    liveToolsActivate((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void onLiveToolsBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_liveToolsBackdrop) return;
+    closeLiveToolsModal();
+}
+
+static void openLiveToolsModal() {
+    if (!s_rootScreen || !s_liveModal) return;
+    if (s_liveToolsModal) closeLiveToolsModal();
+
+    s_liveToolsSelection = LIVE_TOOL_SNR;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    const int modalW = min(kChanModalMaxW, w - 14);
+
+    s_liveToolsBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_liveToolsBackdrop, w, h);
+    lv_obj_align(s_liveToolsBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_liveToolsBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_liveToolsBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_liveToolsBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_liveToolsBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_liveToolsBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_liveToolsBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_liveToolsBackdrop, onLiveToolsBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_liveToolsModal = lv_obj_create(s_liveToolsBackdrop);
+    lv_obj_set_size(s_liveToolsModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_liveToolsModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_liveToolsModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_liveToolsModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_liveToolsModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_liveToolsModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_liveToolsModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_liveToolsModal, 1, 0);
+    lv_obj_set_style_border_color(s_liveToolsModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_liveToolsModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_liveToolsModal, kChanModalGap, 0);
+    lv_obj_set_flex_flow(s_liveToolsModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_liveToolsModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_liveToolsBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_liveToolsModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Tools");
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    static const char *kToolLabels[LIVE_TOOL_COUNT] = {
+        "SNR/RSSI", "ChUtil",
+#if FEATURE_DISCOVERY
+        "Discovery",
+#endif
+    };
+#else
+    lv_obj_t *hint = lv_label_create(s_liveToolsModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Move  Enter=Open  %s=Back", modalCloseKeyLabel());
+
+    static const char *kToolLabels[LIVE_TOOL_COUNT] = {
+        "(S)NR/RSSI", "Ch(U)til",
+#if FEATURE_DISCOVERY
+        "(D)iscovery",
+#endif
+    };
+#endif
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    lv_obj_t *grid = lv_obj_create(s_liveToolsModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
+    for (int pos = 0; pos < LIVE_TOOL_COUNT; pos++) {
+        // Column-major, as in the channel grids: left column first, then right.
+        const int i = (pos % kChanModalCols) * kLiveToolRowsPerCol + (pos / kChanModalCols);
+        if (i >= LIVE_TOOL_COUNT) continue;
+
+        lv_obj_t *row = lv_btn_create(grid);
+        s_liveToolsRows[i] = row;
+        lv_obj_set_width(row, lv_pct(kChanModalCellPct));
+        lv_obj_set_height(row, kChanModalRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onLiveToolRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(lbl, kToolLabels[i]);
+        lv_obj_center(lbl);
+    }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // No close key on this build, so the way out has to be on screen. The chart
+    // modals hang this off a header bar; this modal has none, so it goes in the
+    // flex flow under the grid where it is also a bigger tap target.
+    lv_obj_t *closeBtn = lv_btn_create(s_liveToolsModal);
+    lv_obj_set_size(closeBtn, 72, 22);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 0, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(closeBtn, 1, 0);
+    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(closeBtn,
+                        [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); },
+                        LV_EVENT_CLICKED,
+                        nullptr);
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#endif
+
+    refreshLiveToolsSelection();
 }
 
 static int16_t chartClampInt(float v, int16_t lo, int16_t hi) {
@@ -15109,6 +15471,456 @@ static void openSnrRssiChartModal() {
     s_rssiRenderedSeq = 0;
     refreshSnrRssiChart(true);
 }
+
+// True when this node's packets have told us it is one hop away. Anything that
+// never carried hop_start is "unknown", not "direct" — see NodeEntry::hasHops.
+// Outside the Discovery guard below: the NeighborInfo announce decides what to
+// advertise with it, and that runs on every board.
+static inline bool nodeIsDirectNeighbor(const NodeEntry &e) {
+    return e.hasHops && e.hops == 0 && e.lastHeardMs != 0;
+}
+
+// ── Discovery modal ──────────────────────────────────────────────────────────
+#if FEATURE_DISCOVERY
+
+static void closeDiscoveryModal() {
+    lvObjDeleteSafe(s_discoveryModal);
+    s_discoveryStatusLabel = nullptr;
+    s_discoveryList = nullptr;
+    memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+    s_discoveryRenderedSig = 0;
+    // s_discoverySweepStartedMs is deliberately left alone: a sweep already on
+    // the air keeps running, and serviceDiscoverySweep() still closes it out.
+}
+
+// Nodes we have actually received a packet from, as opposed to ones we only
+// know about because a neighbor listed them.
+static inline bool nodeHeardFrom(const NodeEntry &e) {
+    return e.nodeId != 0 && e.lastHeardMs != 0;
+}
+
+// Appends to a fixed buffer, reporting whether it still fits. Every row here is
+// optional detail, so running out of room truncates the list rather than
+// dropping the groups that were already written.
+static bool discoveryAppend(char *buf, size_t cap, const char *fmt, ...) {
+    size_t used = strlen(buf);
+    if (used + 1 >= cap) return false;
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(buf + used, cap - used, fmt, ap);
+    va_end(ap);
+    if (n < 0) return false;
+    if ((size_t)n >= cap - used) {
+        // Roll back the truncation: half a row reads as corrupt data, where a
+        // list that simply stops reads as a list that ran out of room.
+        buf[used] = '\0';
+        return false;
+    }
+    return true;
+}
+
+// Each group appends to whatever is already in its column, so several can share
+// one on narrow boards. Every group prints its header even when empty: in a
+// multi-column layout a blank column reads as a bug, not as "nothing here".
+
+// Direct neighbors, with the SNR we measured ourselves — the one number here
+// that is our own reading, so it keeps its decimal.
+static void discoveryBuildDirect(char *out, size_t cap) {
+    const int total = Nodes.count();
+    char label[20];
+    if (!discoveryAppend(out, cap, "DIRECT\n")) return;
+    int direct = 0;
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if (!nodeIsDirectNeighbor(*e)) continue;
+        direct++;
+        liveNodeLabel(e->nodeId, label, sizeof(label), true);
+        if (!discoveryAppend(out, cap, "  %-8s %.1f dB\n", label, e->snr)) return;
+    }
+    if (direct == 0) discoveryAppend(out, cap, "  (none)\n");
+}
+
+// Everything else we have heard, bucketed by distance, then the ones whose
+// packets never said. hop_limit is 3 bits on the wire, so 7 is the ceiling.
+static void discoveryBuildDistance(char *out, size_t cap) {
+    const int total = Nodes.count();
+    char label[20];
+    int listed = 0;
+
+    for (int hop = 1; hop <= 7; hop++) {
+        int inBucket = 0;
+        for (int i = 0; i < total; i++) {
+            const NodeEntry *e = Nodes.at(i);
+            if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+            if (!nodeHeardFrom(*e) || !e->hasHops || e->hops != hop) continue;
+            if (inBucket == 0
+                && !discoveryAppend(out, cap, "%d HOP%s\n", hop, hop == 1 ? "" : "S")) return;
+            inBucket++;
+            listed++;
+            liveNodeLabel(e->nodeId, label, sizeof(label), true);
+            if (!discoveryAppend(out, cap, "  %s\n", label)) return;
+        }
+    }
+
+    int unknown = 0;
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if (!nodeHeardFrom(*e) || e->hasHops) continue;
+        if (unknown == 0 && !discoveryAppend(out, cap, "DISTANCE UNKNOWN\n")) return;
+        unknown++;
+        listed++;
+        liveNodeLabel(e->nodeId, label, sizeof(label), true);
+        if (!discoveryAppend(out, cap, "  %s\n", label)) return;
+    }
+
+    if (listed == 0) discoveryAppend(out, cap, "MULTI-HOP\n  (none)\n");
+}
+
+// The group nothing else in the UI can show: nodes that exist in a neighbor's
+// report and have never sent us anything. Deduplicated against a small seen
+// list — a node named by three reporters is still one node.
+static void discoveryBuildHeardAbout(char *out, size_t cap) {
+    constexpr int kMaxHeardAbout = 24;
+    uint32_t seen[kMaxHeardAbout];
+    int seenCount = 0;
+    int heardAbout = 0;
+    char label[20];
+    char via[20];
+
+    if (!discoveryAppend(out, cap, "HEARD ABOUT\n")) return;
+    for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
+        const NeighborReport *rep = Nodes.neighborReportAt(r);
+        if (!rep) continue;
+        for (int j = 0; j < rep->count; j++) {
+            const uint32_t id = rep->ids[j];
+            if (id == 0 || id == s_myNodeId) continue;
+            const NodeEntry *known = Nodes.find(id);
+            if (known && nodeHeardFrom(*known)) continue;   // already grouped above
+            bool dup = false;
+            for (int s = 0; s < seenCount; s++) {
+                if (seen[s] == id) { dup = true; break; }
+            }
+            if (dup) continue;
+            if (seenCount < kMaxHeardAbout) seen[seenCount++] = id;
+
+            heardAbout++;
+            liveNodeLabel(id, label, sizeof(label), true);
+            liveNodeLabel(rep->nodeId, via, sizeof(via), true);
+            // Whole dB, and no column padding: this group gets a third of the
+            // Pager and half a T-Deck, and a wrapped row costs more than the
+            // quarter-dB does. It is the reporter's reading of that link, not
+            // ours, so the precision was never worth much here anyway.
+            if (!discoveryAppend(out, cap, "  %s via %s (%.0f dB)\n",
+                                 label, via, (float)rep->snrQ4[j] / 4.0f)) return;
+        }
+    }
+    if (heardAbout == 0) discoveryAppend(out, cap, "  (none)\n");
+}
+
+// Fills every column for the current board. The summary rides on the DIRECT
+// column, which is column 0 on every layout.
+static void discoveryBuildColumns(char cols[kDiscoveryCols][kDiscoveryColCap]) {
+    for (int i = 0; i < kDiscoveryCols; i++) cols[i][0] = '\0';
+
+    // Counts live here rather than on the status line, which belongs to the
+    // sweep: a refusal message must not cost the user the summary.
+    discoveryAppend(cols[kDiscoveryColDirect], kDiscoveryColCap,
+                    "%d node(s), %d report(s)\n",
+                    Nodes.count(), Nodes.neighborReportCount());
+
+    discoveryBuildDirect(cols[kDiscoveryColDirect], kDiscoveryColCap);
+    discoveryBuildDistance(cols[kDiscoveryColDistance], kDiscoveryColCap);
+    discoveryBuildHeardAbout(cols[kDiscoveryColHeard], kDiscoveryColCap);
+}
+
+static void discoverySetStatus(const char *text) {
+    snprintf(s_discoveryStatus, sizeof(s_discoveryStatus), "%s", text ? text : "");
+    if (s_discoveryStatusLabel) {
+        lv_label_set_text(s_discoveryStatusLabel, s_discoveryStatus);
+    }
+}
+
+// One NODEINFO_APP broadcast with want_response, and never more than that.
+// Every guard here maps to a specific Meshtastic rule; each refusal says why,
+// because a Sweep button that silently does nothing is indistinguishable from
+// a broken one.
+static void discoveryStartSweep() {
+    if (s_discoverySweepStartedMs != 0) {
+        discoverySetStatus("Sweep already running");
+        return;
+    }
+    if (!Radio.isReady() || s_myNodeId == 0) {
+        discoverySetStatus("Radio not ready");
+        return;
+    }
+    if (s_discoveryLastSweepMs != 0) {
+        const uint32_t since = millis() - s_discoveryLastSweepMs;
+        if (since < kDiscoverySweepMinGapMs) {
+            char msg[72];
+            snprintf(msg, sizeof(msg), "Wait %lus between sweeps",
+                     (unsigned long)((kDiscoverySweepMinGapMs - since + 999UL) / 1000UL));
+            discoverySetStatus(msg);
+            return;
+        }
+    }
+    const float chUtil = Radio.channelUtilPercent();
+    if (chUtil >= kDiscoverySweepMaxChUtil) {
+        char msg[72];
+        snprintf(msg, sizeof(msg), "Channel busy (%.0f%%) - not sweeping", chUtil);
+        discoverySetStatus(msg);
+        return;
+    }
+
+    // Every NODEINFO broadcast shares one 15 s window, and the periodic announce
+    // opens it on the first loop pass after boot — so the very first sweep after
+    // powering on lands inside it. That is a wait, not a failure, and saying
+    // "send failed" for it sends people looking for a radio problem that is not
+    // there. Checked before sending so the message can name the remaining time.
+    const uint32_t cooldownMs = Channels.nodeInfoBroadcastCooldownMs();
+    if (cooldownMs > 0) {
+        char msg[72];
+        snprintf(msg, sizeof(msg), "Radio busy - retry in %lus",
+                 (unsigned long)((cooldownMs + 999UL) / 1000UL));
+        discoverySetStatus(msg);
+        return;
+    }
+
+    const bool ok = Channels.sendDiscoverySweep(s_myNodeId,
+                                                s_cfg.nodeLong,
+                                                s_cfg.nodeShort,
+                                                kDiscoverySweepHopLimit);
+    if (!ok) {
+        discoverySetStatus("Sweep send failed");
+        return;
+    }
+
+    // Sampled only after the send, never before the guards — same reason
+    // serviceTracerouteTimeout() takes no `now`: a start time even a few
+    // milliseconds in the future wraps the unsigned subtraction below to ~49
+    // days and expires the sweep the instant it starts.
+    uint32_t now = millis();
+    if (now == 0) now = 1;   // 0 is the "no sweep in flight" sentinel
+    s_discoverySweepStartedMs = now;
+    s_discoveryLastSweepMs = now;
+    s_discoverySweepBaseNodes = Nodes.count();
+    discoverySetStatus("Sweeping...");
+}
+
+// Closes out a sweep once its collection window has passed. Runs from the main
+// loop whether or not the modal is open, so a sweep started and then abandoned
+// still clears and still counts.
+static void serviceDiscoverySweep() {
+    if (s_discoverySweepStartedMs == 0) return;
+    const uint32_t elapsedMs = millis() - s_discoverySweepStartedMs;
+    if (elapsedMs < kDiscoverySweepWindowMs) return;
+
+    int found = Nodes.count() - s_discoverySweepBaseNodes;
+    if (found < 0) found = 0;   // the table evicts; a shrinking count is not -2 nodes
+    s_discoverySweepStartedMs = 0;
+
+    char msg[72];
+    snprintf(msg, sizeof(msg), "Sweep done: %d new (%lus)",
+             found, (unsigned long)(elapsedMs / 1000UL));
+    discoverySetStatus(msg);
+    refreshDiscoveryModal(true);
+}
+
+static void refreshDiscoveryModal(bool force) {
+    if (!s_discoveryModal || !s_discoveryColLabels[0] || !s_discoveryStatusLabel) return;
+    if (!lvObjValid(s_discoveryModal)) {
+        s_discoveryModal = nullptr;
+        s_discoveryStatusLabel = nullptr;
+        s_discoveryList = nullptr;
+        memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+        return;
+    }
+
+    // Rebuilding the body walks the whole node table several times, so it is
+    // gated on something actually having changed. The sweep's seconds counter
+    // is folded in so the countdown still ticks while nothing else moves.
+    uint32_t sig = (uint32_t)Nodes.count() * 131u
+                 + (uint32_t)Nodes.neighborReportCount() * 7919u;
+    if (s_discoverySweepStartedMs != 0) {
+        sig += ((millis() - s_discoverySweepStartedMs) / 1000UL) * 17u;
+    }
+    if (!force && sig == s_discoveryRenderedSig) return;
+    s_discoveryRenderedSig = sig;
+
+    if (s_discoverySweepStartedMs != 0) {
+        const uint32_t elapsedS = (millis() - s_discoverySweepStartedMs) / 1000UL;
+        char msg[72];
+        snprintf(msg, sizeof(msg), "Sweeping... (%lus)", (unsigned long)elapsedS);
+        discoverySetStatus(msg);
+    } else if (!s_discoveryStatus[0]) {
+        discoverySetStatus("Ready");
+    }
+
+    // One label per column rather than a row per node: the Live screen already
+    // aborts on a low LVGL pool, and a 250-node mesh would be 250 objects
+    // rebuilt per tick. Static because the buffers are far too big for a stack
+    // this deep in the loop.
+    static char cols[kDiscoveryCols][kDiscoveryColCap];
+    discoveryBuildColumns(cols);
+    for (int i = 0; i < kDiscoveryCols; i++) {
+        if (s_discoveryColLabels[i]) lv_label_set_text(s_discoveryColLabels[i], cols[i]);
+    }
+}
+
+static void openDiscoveryModal() {
+    // A theme rebuild deletes the root screen out from under us; without this
+    // the stale pointer would lock the surface shut for the rest of the boot.
+    if (s_discoveryModal && !lvObjAlive(s_discoveryModal)) {
+        s_discoveryModal = nullptr;
+        s_discoveryStatusLabel = nullptr;
+        s_discoveryList = nullptr;
+        memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+    }
+    if (!s_rootScreen || s_discoveryModal) return;
+
+    // Drop a stale sweep message, but keep one from a sweep that is running or
+    // that just finished — closing and reopening is exactly what someone does
+    // while waiting for the window to close.
+    const bool sweepIsCurrent = s_discoverySweepStartedMs != 0
+        || (s_discoveryLastSweepMs != 0
+            && (uint32_t)(millis() - s_discoveryLastSweepMs)
+                   < kDiscoverySweepWindowMs + kDiscoverySweepMinGapMs);
+    if (!sweepIsCurrent) s_discoveryStatus[0] = '\0';
+
+    int modalW = lv_disp_get_hor_res(NULL);
+    int modalH = lv_disp_get_ver_res(NULL);
+
+    s_discoveryModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_discoveryModal, modalW, modalH);
+    lv_obj_align(s_discoveryModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_discoveryModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_discoveryModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_discoveryModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_discoveryModal, 1, 0);
+    lv_obj_set_style_border_color(s_discoveryModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_discoveryModal, 4, 0);
+    lv_obj_set_style_pad_row(s_discoveryModal, 4, 0);
+    lv_obj_set_flex_flow(s_discoveryModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_discoveryModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_discoveryModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(header, 4, 0);
+    lv_obj_set_style_pad_right(header, 4, 0);
+    lv_obj_set_style_pad_top(header, 1, 0);
+    lv_obj_set_style_pad_bottom(header, 1, 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "Discovery");
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+
+    // Touch build: Sweep and Close both live in the header, as on the charts.
+    auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+                               lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 48, 20);
+        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makeDiscoveryBtn(header, "Close", 0,
+                     [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); });
+    makeDiscoveryBtn(header, "Sweep", -52, [](lv_event_t *e) {
+        LV_UNUSED(e);
+        discoveryStartSweep();
+        refreshDiscoveryModal(true);
+    });
+#else
+    lv_obj_center(title);
+#endif
+
+    s_discoveryStatusLabel = lv_label_create(s_discoveryModal);
+    lv_obj_set_width(s_discoveryStatusLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_discoveryStatusLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_discoveryStatusLabel, lv_color_hex(0xB8D4FF), 0);
+    lv_obj_set_style_text_align(s_discoveryStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_discoveryStatusLabel, s_discoveryStatus[0] ? s_discoveryStatus : "-");
+
+    s_discoveryList = lv_obj_create(s_discoveryModal);
+    lv_obj_set_width(s_discoveryList, lv_pct(100));
+    lv_obj_set_flex_grow(s_discoveryList, 1);
+    lv_obj_add_flag(s_discoveryList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_discoveryList);
+    lv_obj_set_scrollbar_mode(s_discoveryList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_discoveryList, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(s_discoveryList, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_discoveryList, 1, 0);
+    lv_obj_set_style_border_color(s_discoveryList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_discoveryList, 3, 0);
+    lv_obj_set_style_width(s_discoveryList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_discoveryList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_discoveryList, LV_OPA_70, LV_PART_SCROLLBAR);
+
+    // Columns are laid out by a flex row inside the scroller, so the tallest
+    // one sets the scroll height and short ones simply end early.
+    lv_obj_t *colRow = s_discoveryList;
+    if (kDiscoveryCols > 1) {
+        colRow = lv_obj_create(s_discoveryList);
+        lv_obj_set_width(colRow, lv_pct(100));
+        lv_obj_set_height(colRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(colRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(colRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(colRow, 0, 0);
+        lv_obj_set_style_pad_all(colRow, 0, 0);
+        lv_obj_set_style_pad_column(colRow, 6, 0);
+        lv_obj_set_flex_flow(colRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(colRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+    }
+
+    for (int i = 0; i < kDiscoveryCols; i++) {
+        lv_obj_t *lbl = lv_label_create(colRow);
+        s_discoveryColLabels[i] = lbl;
+        if (kDiscoveryCols > 1) {
+            lv_obj_set_flex_grow(lbl, 1);   // equal shares of the row
+        } else {
+            lv_obj_set_width(lbl, lv_pct(100));
+        }
+        lv_obj_set_style_text_font(lbl, kDiscoveryBodyFont, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(lbl, "");
+    }
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_discoveryModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "S = Sweep   %s = Back", modalCloseKeyLabel());
+#endif
+
+    refreshDiscoveryModal(true);
+}
+
+#endif  // FEATURE_DISCOVERY
 
 static DmConv *selectedDmConversation() {
     if (s_dmSelection <= 0) return nullptr;
@@ -19588,25 +20400,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 #endif
-                if (invertScrollNav) {
-                    if (s_cfgSelection + 1 < s_cfgActionCount) {
-                        s_cfgSelection++;
-                        s_cfgLastScrollMs = millis();
-                        s_cfgConfirmAction = -1;
-                        s_cfgConfirmMs = 0;
-                        cfgDebugSelection("scroll-up", s_cfgActions[s_cfgSelection]);
-                        refreshCfgModal();
-                    }
-                } else {
-                    if (s_cfgSelection > 0) {
-                        s_cfgSelection--;
-                        s_cfgLastScrollMs = millis();
-                        s_cfgConfirmAction = -1;
-                        s_cfgConfirmMs = 0;
-                        cfgDebugSelection("scroll-up", s_cfgActions[s_cfgSelection]);
-                        refreshCfgModal();
-                    }
-                }
+                cfgMoveSelection(invertScrollNav ? 1 : -1, "scroll-up");
                 continue;
             }
             if (k == KEY_SCROLL_DN) {
@@ -19618,25 +20412,7 @@ static void pumpKeyboardInput() {
                     continue;
                 }
 #endif
-                if (invertScrollNav) {
-                    if (s_cfgSelection > 0) {
-                        s_cfgSelection--;
-                        s_cfgLastScrollMs = millis();
-                        s_cfgConfirmAction = -1;
-                        s_cfgConfirmMs = 0;
-                        cfgDebugSelection("scroll-dn", s_cfgActions[s_cfgSelection]);
-                        refreshCfgModal();
-                    }
-                } else {
-                    if (s_cfgSelection + 1 < s_cfgActionCount) {
-                        s_cfgSelection++;
-                        s_cfgLastScrollMs = millis();
-                        s_cfgConfirmAction = -1;
-                        s_cfgConfirmMs = 0;
-                        cfgDebugSelection("scroll-dn", s_cfgActions[s_cfgSelection]);
-                        refreshCfgModal();
-                    }
-                }
+                cfgMoveSelection(invertScrollNav ? -1 : 1, "scroll-dn");
                 continue;
             }
             if (k == KEY_ENTER) {
@@ -20102,6 +20878,77 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+#if FEATURE_DISCOVERY
+        if (s_discoveryModal) {
+            if (isModalCloseKey(k)) {
+                closeDiscoveryModal();
+                continue;
+            }
+            if (k == 's' || k == 'S') {
+                discoveryStartSweep();          // refuses, with a reason, when it must
+                refreshDiscoveryModal(true);
+                continue;
+            }
+            if (k == KEY_SCROLL_UP && s_discoveryList) {
+                scrollListClamped(s_discoveryList, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN && s_discoveryList) {
+                scrollListClamped(s_discoveryList, -18);
+                continue;
+            }
+            continue;
+        }
+#endif
+
+        // Below the tool surfaces, above Live: a tool opened from here keeps the
+        // keys while it is up, and Tools keeps them while it is the topmost one.
+        if (s_liveToolsModal) {
+            if (isModalCloseKey(k)) {
+                closeLiveToolsModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                liveToolsActivate(s_liveToolsSelection);
+                continue;
+            }
+            // The letters in the row labels jump straight to their tool.
+            {
+                bool handled = false;
+                for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+                    const char shortcut = kLiveToolShortcuts[i];
+                    if (k != shortcut && k != (char)(shortcut - 'A' + 'a')) continue;
+                    s_liveToolsSelection = i;
+                    liveToolsActivate(i);
+                    handled = true;
+                    break;
+                }
+                if (handled) continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            // Tools fill column-major, so a step of one is already a vertical
+            // move and left/right hops the column, as in the channel editor.
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kLiveToolRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kLiveToolRowsPerCol;
+                }
+            }
+            if (delta != 0) {
+                int next = s_liveToolsSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= LIVE_TOOL_COUNT) next = LIVE_TOOL_COUNT - 1;
+                if (next != s_liveToolsSelection) {
+                    s_liveToolsSelection = next;
+                    refreshLiveToolsSelection();
+                }
+            }
+            continue;
+        }
+
         if (s_liveModal) {
             if (isModalCloseKey(k)) {
                 closeLiveModal();
@@ -20114,12 +20961,8 @@ static void pumpKeyboardInput() {
                 refreshLiveView(true);
                 continue;
             }
-            if (k == 'u' || k == 'U') {
-                openChUtilChartModal();
-                continue;
-            }
-            if (k == 's' || k == 'S') {
-                openSnrRssiChartModal();
+            if (k == 't' || k == 'T') {
+                openLiveToolsModal();
                 continue;
             }
             // Up reveals content above, down reveals below — scrollListClamped's
@@ -23258,6 +24101,33 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             if (decodeUser(pkt.payload, pkt.payloadLen, u)) {
                 Nodes.updateUser(pkt.hdr.from, u);
             }
+            // Answer a discovery ping. Discovery is symmetric: we sweep the mesh
+            // with want_response, so we owe other nodes the same answer.
+            //
+            // Throttled per requester off lastSentInfoMs. Meshtastic suppresses
+            // for 12 h (NodeInfoModule.cpp:15-21); we use 1 h deliberately —
+            // our node table is much smaller and evicts faster, so a peer that
+            // fell out of it and came back should not wait half a day to be
+            // seen again. The unicast reply also skips sendNodeInfo()'s 15 s
+            // broadcast window, so this throttle is the only thing bounding it.
+            if (pkt.wantResponse && Radio.isReady() && s_myNodeId != 0
+                && pkt.hdr.from != 0 && pkt.hdr.from != s_myNodeId) {
+                NodeEntry *requester = Nodes.find(pkt.hdr.from);
+                const uint32_t now = millis();
+                const bool throttled = requester && requester->lastSentInfoMs != 0
+                    && (uint32_t)(now - requester->lastSentInfoMs) < kNodeInfoReplyThrottleMs;
+                if (!throttled) {
+                    // want_response false on the reply: theirs was the question,
+                    // and answering a question with one is how a ping-pong starts.
+                    const bool ok = Channels.sendNodeInfo(s_myNodeId,
+                                                          s_cfg.nodeLong,
+                                                          s_cfg.nodeShort,
+                                                          pkt.hdr.from,
+                                                          /*wantResponse=*/false,
+                                                          s_cfg.okToMqtt);
+                    if (ok && requester) requester->lastSentInfoMs = now;
+                }
+            }
             if (wantsAck && addressedToMe) {
                 (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
             }
@@ -23296,6 +24166,13 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         case NEIGHBORINFO_APP: {
             NeighborInfoPayload n = {};
             if (decodeNeighborInfo(pkt.payload, pkt.payloadLen, n)) {
+#if FEATURE_DISCOVERY
+                // The only view we get of links that do not touch us, and so of
+                // nodes we have heard about but never heard from. Discovery is
+                // built on it; nothing else consumes it, which is why storing it
+                // goes away with Discovery rather than costing RAM for nothing.
+                Nodes.updateNeighbors(pkt.hdr.from, n);
+#endif
                 debugLogMessages("[neighborinfo] from=!%08lx node=!%08lx neighbors=%u interval=%lus\n",
                                  (unsigned long)pkt.hdr.from,
                                  (unsigned long)n.nodeId,
@@ -23721,8 +24598,10 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     for (int rank = 0; rank < totalNodes && neighborCount < MESH_NEIGHBOR_MAX; rank++) {
         NodeEntry *entry = Nodes.getByRank(rank);
         if (!entry || entry->nodeId == 0 || entry->nodeId == s_myNodeId) continue;
-        if (entry->hops != 0) continue;
-        if (entry->lastHeardMs == 0) continue;
+        // Same definition of "direct" that Discovery renders, and for the same
+        // reason: without hop_start, "0 hops" is just an absent field, and
+        // advertising those puts links on other people's maps that may not exist.
+        if (!nodeIsDirectNeighbor(*entry)) continue;
 
         neighbors[neighborCount].nodeId = entry->nodeId;
         neighbors[neighborCount].snr = entry->snr;
@@ -25572,6 +26451,7 @@ static void seedNodesForRepro(int requestedCount) {
         e->lastHeardMs = now - (uint32_t)((target - i) * 25U);
         e->snr = -12.0f + (float)(i % 30) * 0.8f;
         e->hops = (uint8_t)(i % 4);
+        e->hasHops = true;   // seeded distances are known ones, not absent fields
 
         PositionInfo p = {};
         p.latI = 404000000 + (i * 131);
@@ -26374,6 +27254,10 @@ void loop() {
     serviceConfigFlush(now);
     serviceEmojiPickerRepeat(now);
     serviceTracerouteTimeout();
+#if FEATURE_DISCOVERY
+    // Runs regardless of which surface is open: a sweep outlives its modal.
+    serviceDiscoverySweep();
+#endif
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.
@@ -26454,6 +27338,9 @@ void loop() {
         refreshLiveView(meshDirty);
         refreshChUtilChart(meshDirty);
         refreshSnrRssiChart(meshDirty);
+#if FEATURE_DISCOVERY
+        refreshDiscoveryModal(meshDirty);
+#endif
         refreshDmModal(meshDirty);
     }
 

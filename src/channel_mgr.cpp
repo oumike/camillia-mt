@@ -884,21 +884,35 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
     return ok;
 }
 
-bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
+// Rate-limit broadcast NODEINFO to at most once per 15s. The periodic announce,
+// request replies, the discovery sweep and manual sends all funnel through
+// sendNodeInfoFrame(), so this is the single chokepoint that keeps a device from
+// flooding the mesh. Unicast replies to a requester are not throttled.
+//
+// File scope rather than a function-local static so callers can ask how long is
+// left: being inside the window is a wait, not a failure, and a caller that
+// cannot tell the two apart reports the wrong thing to the user.
+static constexpr uint32_t kNodeInfoBroadcastGapMs = 15000UL;
+static uint32_t sLastNodeInfoBroadcastMs = 0;
+
+// Shared body for both NODEINFO senders. hopLimit is a parameter because the
+// discovery sweep deliberately runs shorter than MESH_HOP_LIMIT; reqReply is
+// resolved by the callers, which is where the "no want_response on a broadcast"
+// rule and its one sanctioned exception live.
+static bool sendNodeInfoFrame(uint32_t myNodeId,
                               const char *longName, const char *shortName,
-                              uint32_t toNodeId, bool wantResponse,
-                              bool unusedCompat) {
-    (void)unusedCompat;
+                              uint32_t toNodeId, bool reqReply, uint8_t hopLimit) {
     if (!Radio.isReady()) return false;
 
-    // Rate-limit broadcast NODEINFO to at most once per 15s. The periodic
-    // announce, request replies, and manual sends all funnel through here, so
-    // this is the single chokepoint that keeps a device from flooding the mesh.
-    // Unicast replies to a specific requester are not throttled.
     bool isUnicast = (toNodeId != 0xFFFFFFFF);
-    static uint32_t sLastNodeInfoBroadcastMs = 0;
     if (!isUnicast && sLastNodeInfoBroadcastMs != 0 &&
-        (uint32_t)(millis() - sLastNodeInfoBroadcastMs) < 15000UL) {
+        (uint32_t)(millis() - sLastNodeInfoBroadcastMs) < kNodeInfoBroadcastGapMs) {
+        // Logged because this used to be the one silent refusal in the path:
+        // the caller only saw false and had to guess between "throttled" and
+        // "the radio would not transmit".
+        debugLogMessages("[nodeinfo] broadcast held: %lums left in the 15s window\n",
+                         (unsigned long)(kNodeInfoBroadcastGapMs
+                                         - (millis() - sLastNodeInfoBroadcastMs)));
         return false;
     }
 
@@ -915,9 +929,6 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
         (uint8_t)(myNodeId      )
     };
 
-    // Never set want_response on broadcast NODEINFO — that would trigger
-    // a reply storm. For unicast, allow requesting peer NODEINFO.
-    bool reqReply = isUnicast && wantResponse;
     uint8_t proto[256], cipher[256];
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
                                      mac, proto, sizeof(proto), reqReply);
@@ -935,14 +946,15 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = (uint8_t)(hopLimit & 0x07) |
+                  ((hopLimit & 0x07) << 5);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
-    debugLogMessages("[nodeinfo] %s to !%08X  proto=%u bytes\n",
-                     isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen);
+    debugLogMessages("[nodeinfo] %s to !%08X  proto=%u bytes hops=%u reply=%d\n",
+                     isUnicast ? "unicast" : "broadcast", toNodeId, (unsigned)protoLen,
+                     (unsigned)hopLimit, (int)reqReply);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[nodeinfo] transmit %s\n", ok ? "OK" : "FAILED");
@@ -953,11 +965,52 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
         char dst[16];
         liveNodeLabel(toNodeId, dst, sizeof(dst), true);
         char live[64];
-        snprintf(live, sizeof(live), "T NOD %s %s %s",
-                 isUnicast ? "U" : "B",
-                 dst,
-                 ok ? "OK" : "ER");
+        // A want_response broadcast is the discovery sweep and nothing else, so
+        // it gets its own tag rather than reading as one more periodic NOD B.
+        const bool isSweep = (!isUnicast && reqReply);
+        if (isSweep) {
+            snprintf(live, sizeof(live), "T DSC B %s h%u %s",
+                     dst, (unsigned)hopLimit, ok ? "OK" : "ER");
+        } else {
+            snprintf(live, sizeof(live), "T NOD %s %s %s",
+                     isUnicast ? "U" : "B",
+                     dst,
+                     ok ? "OK" : "ER");
+        }
         liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;
+}
+
+bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
+                              const char *longName, const char *shortName,
+                              uint32_t toNodeId, bool wantResponse,
+                              bool unusedCompat) {
+    (void)unusedCompat;
+    // Never set want_response on broadcast NODEINFO — that would trigger a
+    // reply storm. For unicast, allow requesting peer NODEINFO. The one
+    // sanctioned broadcast exception goes through sendDiscoverySweep().
+    const bool isUnicast = (toNodeId != 0xFFFFFFFF);
+    return sendNodeInfoFrame(myNodeId, longName, shortName, toNodeId,
+                             isUnicast && wantResponse, MESH_HOP_LIMIT);
+}
+
+uint32_t ChannelMgr::nodeInfoBroadcastCooldownMs() const {
+    if (sLastNodeInfoBroadcastMs == 0) return 0;
+    const uint32_t since = millis() - sLastNodeInfoBroadcastMs;
+    return (since >= kNodeInfoBroadcastGapMs) ? 0 : (kNodeInfoBroadcastGapMs - since);
+}
+
+bool ChannelMgr::sendDiscoverySweep(uint32_t myNodeId,
+                                    const char *longName, const char *shortName,
+                                    uint8_t hopLimit) {
+    // The only broadcast in the firmware that asks the mesh to answer. Every
+    // node that hears it replies, so the blast radius is set by hop limit and
+    // nothing else: 3 hops reaches a useful neighborhood, MESH_HOP_LIMIT (7)
+    // would ask a very large number of nodes to transmit at once. Callers own
+    // the rate limit and the channel-utilization check — this only refuses to
+    // send an unbounded one.
+    if (hopLimit == 0 || hopLimit > 3) hopLimit = 3;
+    return sendNodeInfoFrame(myNodeId, longName, shortName, 0xFFFFFFFF,
+                             /*reqReply=*/true, hopLimit);
 }

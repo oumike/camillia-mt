@@ -17,7 +17,13 @@ struct NodeEntry {
     float    temperatureC;
     float    humidityPct;
     float    pressureHpa;
-    uint8_t  hops;            // hop_start - hop_limit of last packet
+    uint8_t  hops;            // hop_start - hop_limit of last packet; only meaningful when hasHops
+    // Older firmware and MQTT-injected packets arrive with hop_start == 0, which
+    // makes the subtraction above yield 0 — indistinguishable from a genuine
+    // direct neighbor. Mirrors Meshtastic's has_hops_away: without it, "0 hops"
+    // means either "next to us" or "no idea", and Discovery cannot tell them
+    // apart. RAM only, like everything below it.
+    bool     hasHops;
     uint32_t lastHeardMs;
     bool     hasPosition;
     bool     hasTelemetry;
@@ -36,6 +42,37 @@ struct NodeEntry {
     uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths
 };
+
+#if FEATURE_DISCOVERY
+// ── Neighbor reports (topology, RAM only) ────────────────────────────────────
+// One node's advertised list of *its* direct neighbors, from a NEIGHBORINFO_APP
+// broadcast. This is the only source we have for links that do not touch us,
+// and so for nodes we have heard *about* but never heard *from*.
+//
+// Held in a small side table rather than as fields on NodeEntry: only a handful
+// of nodes ever broadcast NeighborInfo, while NodeEntry is allocated MAX_NODES
+// (250) times over. Hanging a 10-entry neighbor list off every node record
+// would cost ~14 KB of DRAM to hold data for a dozen of them, on boards where
+// the heap is already tight enough that web config has an AP-mode lite page.
+//
+// Never persisted: the graph is stale the moment the mesh moves, and node
+// records are already the NVS pressure point (see releaseNvsForSettings()).
+struct NeighborReport {
+    uint32_t nodeId;                     // reporter; 0 = empty slot
+    uint32_t updatedMs;                  // millis() of the last report
+    uint32_t intervalS;                  // reporter's advertised broadcast interval
+    uint8_t  count;
+    uint32_t ids[MESH_NEIGHBOR_MAX];
+    // Quarter-dB, as Meshtastic puts SNR on the wire. Whole dB would lose a
+    // quarter of the resolution the packet actually carried.
+    int8_t   snrQ4[MESH_NEIGHBOR_MAX];
+};
+
+// Reporters tracked at once. Well past the number of nodes within earshot on a
+// normal mesh, and the table evicts the stalest entry rather than dropping new
+// reports, so an unusually busy one degrades instead of going blind.
+static constexpr int MAX_NEIGHBOR_REPORTS = 24;
+#endif  // FEATURE_DISCOVERY
 
 class NodeDB {
 public:
@@ -67,6 +104,20 @@ public:
     int        count() const { return _count; }
 
     void updateFromPacket(const MeshPacket &pkt);
+
+#if FEATURE_DISCOVERY
+    // Record a NEIGHBORINFO_APP report. reporterId is the packet sender; the
+    // payload's own node_id wins when it is set, matching how Meshtastic
+    // attributes a report that reached it through a relay.
+    void updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n);
+
+    // Iteration over live reports. Expired ones are skipped, so the index space
+    // is sparse: check for null rather than assuming a contiguous run.
+    const NeighborReport *neighborReportAt(int idx) const;
+    // Live reports right now. O(MAX_NEIGHBOR_REPORTS); not a cached counter.
+    int neighborReportCount() const;
+#endif
+
     void updateUser(uint32_t nodeId, const UserInfo &u);
     void updatePosition(uint32_t nodeId, const PositionInfo &p);
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
@@ -75,6 +126,13 @@ public:
 private:
     NodeEntry _nodes[MAX_NODES];
     int       _count = 0;
+#if FEATURE_DISCOVERY
+    NeighborReport _neighbors[MAX_NEIGHBOR_REPORTS] = {};
+    // A report is dropped at 2x the reporter's own advertised interval, the
+    // rule Meshtastic's cleanUpNeighbors() uses: one missed broadcast is a lost
+    // packet, two is a node that is gone.
+    static bool _neighborExpired(const NeighborReport &r, uint32_t nowMs);
+#endif
     void      _sort();
     void      _save(uint32_t nodeId);   // write one node blob to NVS
     void      _saveIds();               // rewrite the nodeId index in NVS

@@ -77,6 +77,22 @@ public:
                       uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false,
                       bool unusedCompat = false);
 
+    // Discovery sweep: one NODEINFO_APP broadcast with want_response, so every
+    // node that hears it answers with its own. This is the deliberate exception
+    // to the no-want_response-on-broadcast rule above, and hopLimit (capped at
+    // 3) is what bounds how much of the mesh is asked to reply. Never call it
+    // automatically — the caller must rate-limit it and check channel
+    // utilization first; see discoveryStartSweep() in main_lvgl.cpp.
+    bool sendDiscoverySweep(uint32_t myNodeId, const char *longName, const char *shortName,
+                            uint8_t hopLimit = 3);
+
+    // Milliseconds until a NODEINFO *broadcast* is allowed again; 0 = now. Every
+    // NODEINFO broadcast shares one 15 s window, so the periodic announce — which
+    // fires on the first loop pass after boot — can hold off a sweep the user just
+    // asked for. Check this first if the refusal needs to read as "wait" rather
+    // than "failed".
+    uint32_t nodeInfoBroadcastCooldownMs() const;
+
     // Broadcast a POSITION_APP packet with the given coordinates. chanIdx selects
     // the channel it goes out on; the caller decides which channels share
     // position (see channelSharesLocation()), this only sends where told.

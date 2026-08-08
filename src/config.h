@@ -202,6 +202,22 @@
 #define MY_NEIGHBORINFO_INTV 21600
 #define MY_NEIGHBORINFO_LORA 1
 #define NEIGHBORINFO_MIN_INTERVAL_S 14400
+
+// Discovery (Live -> Tools -> Discovery) costs ~3 KB of internal DRAM: a
+// 24-entry neighbor-report table in NodeDB plus the buffer its results are
+// rendered into. Everywhere else that is nothing; on the Cardputer it is the
+// difference between booting and not. First-boot onboarding there brings up a
+// WiFi AP and the lite web config with under 8 KB of heap free and a largest
+// free block near 6.6 KB, and those 3 KB pushed the display flush into a null
+// DMA descriptor — a boot loop, with mbedtls failing to allocate alongside it.
+// The 240x135 panel is also the worst place to read a topology list. Off there,
+// on everywhere else. NeighborInfo TX and the NodeInfo request reply are not
+// gated by this: they cost no RAM and are how other nodes see us.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define FEATURE_DISCOVERY 0
+#else
+#define FEATURE_DISCOVERY 1
+#endif
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)

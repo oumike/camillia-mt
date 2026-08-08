@@ -291,8 +291,13 @@ void NodeDB::clearPersisted() {
     p.clear();
     p.end();
 
-    // Keep runtime state consistent with storage immediately.
+    // Keep runtime state consistent with storage immediately. The neighbor
+    // graph is only ever RAM, but it describes the nodes just dropped, so it
+    // goes with them rather than outliving the table it points into.
     memset(_nodes, 0, sizeof(_nodes));
+#if FEATURE_DISCOVERY
+    memset(_neighbors, 0, sizeof(_neighbors));
+#endif
     _count = 0;
 }
 
@@ -603,9 +608,97 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     }
     uint8_t hopLimit = pkt.hdr.flags & 0x07;
     uint8_t hopStart = (pkt.hdr.flags >> 5) & 0x07;
-    e->hops = (hopStart > hopLimit) ? (hopStart - hopLimit) : 0;
+    // hop_start == 0 is "this sender never told us", not "zero hops away" —
+    // older firmware and anything arriving over MQTT looks like that. Leave the
+    // previous reading in place rather than overwriting a known distance with a
+    // guess, and only claim a direct neighbor (hopLimit == hopStart) when the
+    // packet actually carried the field.
+    if (hopStart > 0) {
+        e->hops = (hopStart > hopLimit) ? (uint8_t)(hopStart - hopLimit) : 0;
+        e->hasHops = true;
+    }
     // Don't save on every packet — only on meaningful data changes below.
 }
+
+// ── Neighbor reports ─────────────────────────────────────────────────────────
+#if FEATURE_DISCOVERY
+
+bool NodeDB::_neighborExpired(const NeighborReport &r, uint32_t nowMs) {
+    if (r.nodeId == 0) return true;
+    // A reporter that did not advertise an interval is held to our own floor;
+    // the alternative is either expiring it instantly or keeping it forever.
+    uint32_t intervalS = r.intervalS ? r.intervalS : (uint32_t)NEIGHBORINFO_MIN_INTERVAL_S;
+    // 2x the interval in ms, clamped so a hostile or garbled interval cannot
+    // overflow the comparison into "never expires".
+    uint64_t lifetimeMs = (uint64_t)intervalS * 2000ULL;
+    if (lifetimeMs > 0xFFFFFFFFULL) lifetimeMs = 0xFFFFFFFFULL;
+    return (uint32_t)(nowMs - r.updatedMs) > (uint32_t)lifetimeMs;
+}
+
+void NodeDB::updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n) {
+    uint32_t id = n.nodeId ? n.nodeId : reporterId;
+    if (id == 0) return;
+
+    const uint32_t now = millis();
+
+    // Existing report for this node, else a free or expired slot, else the
+    // stalest one. Refreshing in place keeps one chatty node from filling the
+    // table with copies of itself.
+    NeighborReport *slot = nullptr;
+    for (int i = 0; i < MAX_NEIGHBOR_REPORTS; i++) {
+        if (_neighbors[i].nodeId == id) { slot = &_neighbors[i]; break; }
+    }
+    if (!slot) {
+        for (int i = 0; i < MAX_NEIGHBOR_REPORTS; i++) {
+            if (_neighbors[i].nodeId == 0 || _neighborExpired(_neighbors[i], now)) {
+                slot = &_neighbors[i];
+                break;
+            }
+        }
+    }
+    if (!slot) {
+        slot = &_neighbors[0];
+        for (int i = 1; i < MAX_NEIGHBOR_REPORTS; i++) {
+            if ((uint32_t)(now - _neighbors[i].updatedMs) >
+                (uint32_t)(now - slot->updatedMs)) {
+                slot = &_neighbors[i];
+            }
+        }
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->nodeId = id;
+    slot->updatedMs = now;
+    slot->intervalS = n.nodeBroadcastIntervalS;
+    for (int i = 0; i < (int)n.neighborCount && slot->count < MESH_NEIGHBOR_MAX; i++) {
+        uint32_t neighborId = n.neighbors[i].nodeId;
+        if (neighborId == 0 || neighborId == id) continue;
+        float q4 = n.neighbors[i].snr * 4.0f;
+        if (q4 > 127.0f) q4 = 127.0f;
+        if (q4 < -128.0f) q4 = -128.0f;
+        slot->ids[slot->count] = neighborId;
+        slot->snrQ4[slot->count] = (int8_t)(q4 >= 0.0f ? (q4 + 0.5f) : (q4 - 0.5f));
+        slot->count++;
+    }
+}
+
+const NeighborReport *NodeDB::neighborReportAt(int idx) const {
+    if (idx < 0 || idx >= MAX_NEIGHBOR_REPORTS) return nullptr;
+    const NeighborReport &r = _neighbors[idx];
+    if (r.nodeId == 0 || _neighborExpired(r, millis())) return nullptr;
+    return &r;
+}
+
+int NodeDB::neighborReportCount() const {
+    const uint32_t now = millis();
+    int live = 0;
+    for (int i = 0; i < MAX_NEIGHBOR_REPORTS; i++) {
+        if (_neighbors[i].nodeId != 0 && !_neighborExpired(_neighbors[i], now)) live++;
+    }
+    return live;
+}
+
+#endif  // FEATURE_DISCOVERY
 
 void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     NodeEntry *e = upsert(nodeId);
