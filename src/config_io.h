@@ -231,7 +231,32 @@ struct RhinoConfig {
     // meaningful where HAS_KB_BLINK; the field is unconditional so the blob
     // layout does not differ between boards, same as notifyLedEnabled.
     bool     kbBlinkEnabled;
+    // Covers the trailing padding that followed kbBlinkEnabled. The struct
+    // aligns to 4 and kbBlinkEnabled is one byte at some offset X, so the old
+    // sizeof was at most X+4 — three pad bytes put the fields below at X+4 or
+    // later either way, which is what keeps their defaults on an upgrade. Same
+    // trap as the pads above.
+    uint8_t  _reservedPad5[3];
+    // How many times the keyboard backlight flashes per notification cycle,
+    // 1..3 (KB_FLASHES_MIN..MAX). Split by kind because the count is the only
+    // thing telling the two apart on a board with no notification LED: the
+    // defaults, 1 and 2, are the counts that were hardcoded before these were
+    // settings.
+    uint8_t  kbBlinkChanFlashes;
+    uint8_t  kbBlinkDmFlashes;
 };
+
+// Keyboard-blink flash counts. Three is the practical ceiling: at 60 ms lit and
+// 90 ms dark a fourth flash runs the pattern past 500 ms, and the whole cycle
+// repeats every second.
+#define KB_FLASHES_MIN 1
+#define KB_FLASHES_MAX 3
+
+static inline uint8_t cfgCoerceKbFlashes(int n) {
+    if (n < KB_FLASHES_MIN) return KB_FLASHES_MIN;
+    if (n > KB_FLASHES_MAX) return KB_FLASHES_MAX;
+    return (uint8_t)n;
+}
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
 // GPS otherwise; MANUAL means the user set it and nothing may overwrite it.

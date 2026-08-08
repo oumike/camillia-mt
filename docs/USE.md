@@ -20,7 +20,8 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - C opens Config
 - N opens Nodes
 - L opens Live
-- A opens Channel Actions
+- A opens Channel Actions — M mutes/unmutes the channel, L toggles whether this
+  node broadcasts its position on it (Share Location in Config gates all channels)
 - **Space opens compose** — a new message, or a reply when a chat row is
   selected. Space replaced Enter for this on both the chat and DM screens.
 - **Enter moves the cursor into the messages** — on chat it drops into the

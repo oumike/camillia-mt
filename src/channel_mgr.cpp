@@ -676,15 +676,16 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 }
 
 bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                              bool unusedCompat) {
+                              bool unusedCompat, int chanIdx) {
     (void)unusedCompat;
     if (!Radio.isReady()) return false;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return false;
 
     uint8_t proto[64], cipher[64];
     size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto));
     if (protoLen == 0) return false;
 
-    const ChannelKey &ck = CHANNEL_KEYS[0]; // always LongFast
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
     uint32_t packetId = nextMeshPacketId();
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;
@@ -702,11 +703,14 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
-    debugLogMessages("[position] transmit %s\n", ok ? "OK" : "FAILED");
+    debugLogMessages("[position] transmit ch%d %s\n", chanIdx, ok ? "OK" : "FAILED");
     {
+        // Position can now go out on several channels in one announce, so the
+        // channel index is part of the line — otherwise the burst reads as a
+        // duplicate transmission.
         char live[56];
-        snprintf(live, sizeof(live), "T POS B %08X %s",
-                 packetId, ok ? "OK" : "ER");
+        snprintf(live, sizeof(live), "T POS B%d %08X %s",
+                 chanIdx, packetId, ok ? "OK" : "ER");
         liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
     }
     return ok;

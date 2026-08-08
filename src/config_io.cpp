@@ -531,6 +531,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.notifyLedColorChannel = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_CHANNEL);
     cfg.notifyLedColorDm      = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_DM);
     cfg.kbBlinkEnabled     = (bool)MY_KB_BLINK_ENABLED;
+    cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(MY_KB_BLINK_CHAN_FLASHES);
+    cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -730,6 +732,12 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    keyboardBlinkEnabled: %s\n", cfg.kbBlinkEnabled ? "true" : "false");
     out += tmp;
+    snprintf(tmp, sizeof(tmp), "    keyboardBlinkChannelFlashes: %u\n",
+             (unsigned)cfgCoerceKbFlashes((int)cfg.kbBlinkChanFlashes));
+    out += tmp;
+    snprintf(tmp, sizeof(tmp), "    keyboardBlinkDmFlashes: %u\n",
+             (unsigned)cfgCoerceKbFlashes((int)cfg.kbBlinkDmFlashes));
+    out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
@@ -864,6 +872,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         snprintf(tmp, sizeof(tmp), "    downlink: %s\n", ch.downlinkEnabled ? "true" : "false");
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    mute: %s\n", ch.muted ? "true" : "false");
+        out += tmp;
+        snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", ch.shareLocation ? "true" : "false");
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
@@ -1093,6 +1103,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].downlinkEnabled = parseBoolValue(val);
                 } else if (!strcmp(key, "mute")) {
                     CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
+                } else if (!strcmp(key, "shareLocation")) {
+                    CHANNEL_KEYS[chanIdx].shareLocation = parseBoolValue(val);
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
                 // Meshtastic CLI format. bandwidth/spreadFactor/codingRate also
@@ -1180,6 +1192,10 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "notifyLedColorChannel")) cfg.notifyLedColorChannel = parseNotifyLedColor(val);
                 else if (!strcmp(key, "notifyLedColorDm")) cfg.notifyLedColorDm = parseNotifyLedColor(val);
                 else if (!strcmp(key, "keyboardBlinkEnabled")) cfg.kbBlinkEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "keyboardBlinkChannelFlashes"))
+                    cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(atoi(val));
+                else if (!strcmp(key, "keyboardBlinkDmFlashes"))
+                    cfg.kbBlinkDmFlashes = cfgCoerceKbFlashes(atoi(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {

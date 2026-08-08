@@ -645,10 +645,22 @@ static const char kHead[] =
     "summary::-webkit-details-marker{display:none}"
     "summary::before{content:'\\25B6\\00A0';font-size:.8em}"
     "details[open] summary::before{content:'\\25BC\\00A0';font-size:.8em}"
-    ".ch-row{display:grid;grid-template-columns:auto 1fr 2fr auto;gap:.4em;align-items:end;margin:.4em 0}"
+    // One card per channel. The old four-column grid predated the uplink,
+    // downlink and location toggles: with seven children in four tracks the
+    // fields wrapped into implicit rows that lined up with nothing.
+    ".ch-row{border:1px solid var(--line);border-radius:6px;background:var(--bg);"
+         "padding:.45em .6em;margin:.5em 0}"
     ".ch-row label{margin:0;font-size:.85em}"
-    ".ch-clear{margin:0;padding:.45em .7em;font-size:.85em;background:#c0392b;color:#fff}"
-        "@media (max-width:560px){.row2{grid-template-columns:1fr}}"
+    ".ch-hd{display:flex;align-items:center;gap:.35em;margin-bottom:.4em}"
+    ".ch-no{font-weight:600;font-size:.85em;color:var(--accent);margin-right:auto}"
+    ".ch-fields{display:grid;grid-template-columns:1fr 2fr 1fr;gap:.4em;align-items:end}"
+    ".ch-tog{display:flex;flex-wrap:wrap;gap:.15em .9em;margin-top:.45em}"
+    ".ch-tog label{display:flex;align-items:center;gap:.3em}"
+    ".ch-btn{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;cursor:pointer;"
+         "background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px}"
+    ".ch-btn[disabled]{opacity:.35;cursor:default}"
+    ".ch-clear{margin:0;padding:.3em .6em;font-size:.8em;line-height:1.15;background:#c0392b;color:#fff}"
+        "@media (max-width:560px){.row2,.ch-fields{grid-template-columns:1fr}}"
     "</style></head><body>";
 
 // Head for the AP-mode pages (web config lite and its /setup form). AP mode
@@ -1108,6 +1120,24 @@ static void sendFlash(const char *progmem) {
 // a pbuf allocation that fails mid-write wedges the main loop.
 static void sendChunkIfBig(String &html, size_t threshold = 700) {
     if (html.length() >= threshold) sendChunk(html);
+}
+
+// Appends text into a single-quoted HTML attribute. Channel names are free text
+// typed on the device or imported from YAML, and one apostrophe in a name would
+// otherwise close the value= attribute and mangle the rest of the form — the
+// name field would come back truncated on the next save.
+static void appendAttr(String &html, const char *s) {
+    if (!s) return;
+    for (; *s; ++s) {
+        switch (*s) {
+            case '&':  html += "&amp;";  break;
+            case '<':  html += "&lt;";   break;
+            case '>':  html += "&gt;";   break;
+            case '\'': html += "&#39;";  break;
+            case '"':  html += "&quot;"; break;
+            default:   html += *s;       break;
+        }
+    }
 }
 
 // Config-pane section wrappers. The full page folds each section into a
@@ -1832,53 +1862,112 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<p class='gps-hint'>Key: base64 (e.g. \"AQ==\" or \"MA==\"). "
             "Hash is recomputed automatically on save. "
             "Uplink publishes this channel's traffic to MQTT; downlink re-broadcasts "
-            "MQTT traffic for it onto LoRa.</p>";
+            "MQTT traffic for it onto LoRa. Location broadcasts this node's position "
+            "on the channel &mdash; only where Share Location above is on, and never "
+            "on an unnamed or disabled channel.</p>";
     // Marker so the POST handler applies per-channel checkbox state (an unchecked
     // box submits nothing) only when this section was rendered.
     html += "<input type='hidden' name='ch_flags' value='1'>";
+    if (!lite) {
+        html += "<p class='gps-hint'>Use &#9650;/&#9660; to move a channel between "
+                "slots. Channel 0 is the primary and stays where it is.</p>";
+    }
+    html += "<div id='ch-list'>";
     char b64buf[48];
+    // Channel roles, not the device role list kRoles above — same function scope.
+    static const char *kChanRoles[] = {"PRIMARY", "SECONDARY", "DISABLED"};
+    // Field name, label, and current state for the three per-channel toggles, so
+    // the three near-identical blocks this replaced cannot drift apart.
+    struct ChanToggle { const char *suffix; const char *label; bool on; };
     for (int i = 0; i < MESH_CHANNELS; i++) {
         const ChannelKey &ch = CHANNEL_KEYS[i];
         base64Encode(ch.key, ch.keyLen, b64buf);
         html += "<div class='ch-row'>";
-        // Clear button — blanks this channel's name + key inputs (client-side).
-        html += "<button type='button' class='ch-clear' "
-                "onclick=\"this.closest('.ch-row').querySelectorAll('input')"
-                ".forEach(function(el){el.value=''})\">Clear</button>";
-        // Name
+
+        // Header: slot number, reorder controls, Clear.
+        snprintf(tmp, sizeof(tmp), "<div class='ch-hd'><span class='ch-no'>Channel %d</span>", i);
+        html += tmp;
+        if (!lite) {
+            // Slot 0 is the primary and never moves, so its buttons are present
+            // but disabled — dropping them would leave its header a different
+            // shape from the other seven. Slot 1 cannot move up into 0, and the
+            // last slot cannot move down: those limits are fixed by position, so
+            // they are baked in here rather than recomputed after every swap.
+            const bool canUp   = (i > 1);
+            const bool canDown = (i > 0 && i < MESH_CHANNELS - 1);
+            html += "<button type='button' class='ch-btn' data-mv='-1' title='Move up'";
+            if (!canUp) html += " disabled";
+            html += ">&#9650;</button>";
+            html += "<button type='button' class='ch-btn' data-mv='1' title='Move down'";
+            if (!canDown) html += " disabled";
+            html += ">&#9660;</button>";
+        }
+        // Clear stays a self-contained inline handler: web config lite ships no
+        // script at all, and this button works there too. It now unchecks the
+        // toggles instead of blanking their value attribute — that left the box
+        // ticked while submitting an empty value, which the POST handler read as
+        // off, so the form and the device disagreed.
+        html += "<button type='button' class='ch-clear' onclick=\""
+                "this.closest('.ch-row').querySelectorAll('input').forEach(function(el){"
+                "if(el.type=='checkbox')el.checked=false;else el.value='';})\">Clear</button></div>";
+
+        // Name / Key / Role
+        html += "<div class='ch-fields'>";
         snprintf(tmp, sizeof(tmp), "ch%d_name", i);
-        html += "<label>"; snprintf(tmp+20, 20, "%d", i); html += "Ch "; html += (tmp+20);
-        snprintf(tmp, sizeof(tmp), "ch%d_name", i);
-        html += "<input name='"; html += tmp; html += "' type='text' maxlength='11' value='";
-        html += ch.name; html += "'></label>";
-        // Key
+        html += "<label>Name<input name='"; html += tmp;
+        html += "' type='text' maxlength='11' value='";
+        appendAttr(html, ch.name);
+        html += "'></label>";
         snprintf(tmp, sizeof(tmp), "ch%d_key", i);
         html += "<label>Key<input name='"; html += tmp;
         html += "' type='text' value='"; html += b64buf; html += "'></label>";
-        // Role
         snprintf(tmp, sizeof(tmp), "ch%d_role", i);
         html += "<label>Role<select name='"; html += tmp; html += "'>";
-        const char *roles[] = {"PRIMARY","SECONDARY","DISABLED"};
         for (int r = 0; r < 3; r++) {
-            snprintf(tmp, sizeof(tmp), "%d", r);
-            html += "<option value='"; html += tmp; html += "'";
-            if (ch.role == r) html += " selected";
-            html += ">"; html += roles[r]; html += "</option>";
+            snprintf(tmp, sizeof(tmp), "<option value='%d'%s>%s</option>",
+                     r, (ch.role == r) ? " selected" : "", kChanRoles[r]);
+            html += tmp;
         }
-        html += "</select></label>";
-        // Uplink / Downlink toggles
-        snprintf(tmp, sizeof(tmp), "ch%d_up", i);
-        html += "<label style='display:flex;align-items:center;gap:.4em'>"
-                "<input type='checkbox' name='"; html += tmp; html += "' value='1'";
-        if (ch.uplinkEnabled) html += " checked";
-        html += "> Uplink</label>";
-        snprintf(tmp, sizeof(tmp), "ch%d_down", i);
-        html += "<label style='display:flex;align-items:center;gap:.4em'>"
-                "<input type='checkbox' name='"; html += tmp; html += "' value='1'";
-        if (ch.downlinkEnabled) html += " checked";
-        html += "> Downlink</label>";
-        html += "</div>";
+        html += "</select></label></div>";
+
+        // Toggles
+        const ChanToggle toggles[] = {
+            { "up",   "Uplink",   ch.uplinkEnabled },
+            { "down", "Downlink", ch.downlinkEnabled },
+            { "loc",  "Location", ch.shareLocation },
+        };
+        html += "<div class='ch-tog'>";
+        for (const ChanToggle &t : toggles) {
+            snprintf(tmp, sizeof(tmp), "<label><input type='checkbox' name='ch%d_%s' value='1'%s>%s</label>",
+                     i, t.suffix, t.on ? " checked" : "", t.label);
+            html += tmp;
+        }
+        html += "</div></div>";
         sendChunkIfBig(html);
+    }
+    html += "</div>";
+    if (!lite) {
+        // Reordering swaps the two rows' field values rather than moving the rows
+        // themselves: the slot number a channel occupies is what the mesh sees,
+        // so the headers have to stay put and the definitions move between them.
+        // That also keeps every ch<N>_* input name bound to its own slot, so the
+        // POST handler needs no idea any of this happened.
+        html += "<script>"
+                "(function(){"
+                "var L=document.getElementById('ch-list');"
+                "L.addEventListener('click',function(e){"
+                "var b=e.target.closest('button[data-mv]');if(!b)return;"
+                "var rows=Array.prototype.slice.call(L.children);"
+                "var i=rows.indexOf(b.closest('.ch-row')),j=i+(+b.dataset.mv);"
+                "if(i<1||j<1||j>=rows.length)return;"
+                "var a=rows[i].querySelectorAll('input,select');"
+                "var c=rows[j].querySelectorAll('input,select');"
+                "for(var k=0;k<a.length;k++){"
+                "if(a[k].type=='checkbox'){var t=a[k].checked;a[k].checked=c[k].checked;c[k].checked=t;}"
+                "else{var v=a[k].value;a[k].value=c[k].value;c[k].value=v;}}"
+                "});"
+                "})();"
+                "</script>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -2097,16 +2186,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, lite);
     sendChunk(html);
 
-    // ── Sound ─────────────────────────────────────────────────
-    // Everything the device can make noise with, in one place rather than split
-    // between Display (volume) and Modules (alert tones).
-#if HAS_AUDIO_ALERTS
-    section(html, lite, "Sound", false);
-#else
-    // Nothing here makes a noise on this board; the section holds the
-    // notification LED alone, so name it for what it is.
+    // ── Notifications ─────────────────────────────────────────
+    // Every way the device can get your attention, in one place rather than
+    // split between Display (volume) and Modules (alert tones). The name holds
+    // on every board: where there is no audio hardware the section is the
+    // notification LED and keyboard blink alone.
     section(html, lite, "Notifications", false);
-#endif
 #if HAS_VOLUME_CONTROL
     // Same shape as the brightness slider. Compiled out where the board alerts
     // through a passive buzzer: amplitude is not controllable there, so the
@@ -2174,6 +2259,26 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->kbBlinkEnabled) html += " selected"; html += ">Enabled</option>"
             "<option value='0'"; if (!gCfg->kbBlinkEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
+    // Flash counts. Separate per kind because with no notification LED on these
+    // boards the length of the pattern is the only thing telling a DM from a
+    // channel message.
+    html += "<div class='row2'>";
+    for (int f = 0; f < 2; f++) {
+        const bool isDm = (f == 1);
+        const uint8_t cur = cfgCoerceKbFlashes(
+            (int)(isDm ? gCfg->kbBlinkDmFlashes : gCfg->kbBlinkChanFlashes));
+        html += isDm ? "<label>Blink Flashes (DM)<select name='kb_flash_dm'>"
+                     : "<label>Blink Flashes (Channel)<select name='kb_flash_chan'>";
+        for (int n = KB_FLASHES_MIN; n <= KB_FLASHES_MAX; n++) {
+            snprintf(tmp, sizeof(tmp), "<option value='%d'%s>%d flash%s</option>",
+                     n, (n == cur) ? " selected" : "", n, (n == 1) ? "" : "es");
+            html += tmp;
+        }
+        html += "</select></label>";
+    }
+    html += "</div>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+            "Only used while the screen is off.</p>";
 #endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
@@ -3581,13 +3686,16 @@ static void handlePostSave() {
         }
         snprintf(field, sizeof(field), "ch%d_role", i);
         CHANNEL_KEYS[i].role = (uint8_t)constrain(server.arg(field).toInt(), 0, 2);
-        // MQTT uplink/downlink — apply only when the channels section was rendered
-        // (unchecked boxes submit nothing, so we can't distinguish off from absent).
+        // MQTT uplink/downlink and position sharing — apply only when the channels
+        // section was rendered (unchecked boxes submit nothing, so we can't
+        // distinguish off from absent).
         if (server.hasArg("ch_flags")) {
             snprintf(field, sizeof(field), "ch%d_up", i);
             CHANNEL_KEYS[i].uplinkEnabled = (server.arg(field) == "1");
             snprintf(field, sizeof(field), "ch%d_down", i);
             CHANNEL_KEYS[i].downlinkEnabled = (server.arg(field) == "1");
+            snprintf(field, sizeof(field), "ch%d_loc", i);
+            CHANNEL_KEYS[i].shareLocation = (server.arg(field) == "1");
         }
         // Recompute on-air hash from current name + key
         const char *nm2 = CHANNEL_KEYS[i].name_buf[0] ? CHANNEL_KEYS[i].name_buf : CHANNEL_KEYS[i].name;
@@ -3741,6 +3849,12 @@ static void handlePostSave() {
 #if HAS_KB_BLINK
     if (server.hasArg("kb_blink")) {
         gCfg->kbBlinkEnabled = server.arg("kb_blink").toInt() != 0;
+    }
+    if (server.hasArg("kb_flash_chan")) {
+        gCfg->kbBlinkChanFlashes = cfgCoerceKbFlashes(server.arg("kb_flash_chan").toInt());
+    }
+    if (server.hasArg("kb_flash_dm")) {
+        gCfg->kbBlinkDmFlashes = cfgCoerceKbFlashes(server.arg("kb_flash_dm").toInt());
     }
 #endif
 #if HAS_SCROLL_INVERT

@@ -312,6 +312,10 @@
 #define HAS_KB_BLINK 0
 #endif
 #define MY_KB_BLINK_ENABLED 1
+// Flashes per notification cycle. DMs get the longer pattern: with no
+// notification LED on either board, length is what distinguishes them.
+#define MY_KB_BLINK_CHAN_FLASHES 1
+#define MY_KB_BLINK_DM_FLASHES   2
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

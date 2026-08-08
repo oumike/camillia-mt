@@ -18,6 +18,11 @@ struct ChannelKey {
     bool    uplinkEnabled;    // publish packets heard on this channel to MQTT
     bool    downlinkEnabled;  // re-inject MQTT traffic for this channel onto LoRa
     bool    muted;            // suppress visual + audio notifications for this channel
+    // Broadcast our position on this channel. Subordinate to RhinoConfig::
+    // shareLocation: with the global switch off nothing is transmitted whatever
+    // this says. Defaults on for the primary channel and off for the rest, which
+    // is exactly what the firmware did before the flag existed.
+    bool    shareLocation;
 };
 
 // Inline definitions so the table lives in mesh_proto.cpp (extern declared below)

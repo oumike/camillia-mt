@@ -77,9 +77,11 @@ public:
                       uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false,
                       bool unusedCompat = false);
 
-    // Broadcast a POSITION_APP packet on LongFast with the given coordinates.
+    // Broadcast a POSITION_APP packet with the given coordinates. chanIdx selects
+    // the channel it goes out on; the caller decides which channels share
+    // position (see channelSharesLocation()), this only sends where told.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                      bool unusedCompat = false);
+                      bool unusedCompat = false, int chanIdx = 0);
 
     // Send a unicast POSITION_APP request to a peer (empty payload + want_response).
     // Peer should reply with its current Position broadcast.

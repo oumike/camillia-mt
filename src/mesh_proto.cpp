@@ -53,17 +53,20 @@ uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen)
 // 1-byte PSK keys are stored as a single byte and expanded at runtime via expandPsk().
 // role: 0=PRIMARY, 1=SECONDARY, 2=DISABLED
 ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
-    //           name          PSK       len  hash  name_buf  role  up     down
-    { "LongFast", { 0x01 },    1, 0x08, {}, 0, true,  false },  // PRIMARY  (AQ==)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false },  // SECONDARY (unconfigured)
-    { "DM",       { 0 },       0, 0xFF, {}, 2, false, false },  // DISABLED  (virtual, direct messages)
-    { "ANN",      { 0 },       0, 0xFF, {}, 2, false, false },  // DISABLED  (virtual, announcements)
+    // Position sharing starts on for the primary channel only: that is where
+    // every build before the per-channel flag sent POSITION_APP, and a secondary
+    // channel that silently began announcing coordinates would be a surprise.
+    //           name          PSK       len  hash  name_buf  role  up     down    muted  share
+    { "LongFast", { 0x01 },    1, 0x08, {}, 0, true,  false, false, true  },  // PRIMARY  (AQ==)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "DM",       { 0 },       0, 0xFF, {}, 2, false, false, false, false },  // DISABLED  (virtual, direct messages)
+    { "ANN",      { 0 },       0, 0xFF, {}, 2, false, false, false, false },  // DISABLED  (virtual, announcements)
 };
 
 // ── Protobuf helpers ──────────────────────────────────────────

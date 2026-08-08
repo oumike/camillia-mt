@@ -583,11 +583,13 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
 };
 
 // Channel Actions modal: overlay opened with (A) from the main screen. Acts on
-// the active channel. Currently a single (M)ute/Un(m)ute toggle, activatable by
-// touch or keyboard.
+// the active channel. Holds the (M)ute/Un(m)ute and (L)ocation toggles,
+// activatable by touch or keyboard.
 static lv_obj_t *s_channelActionsModal = nullptr;
 static lv_obj_t *s_channelActionsMuteBtn = nullptr;
 static lv_obj_t *s_channelActionsMuteLabel = nullptr;
+static lv_obj_t *s_channelActionsShareBtn = nullptr;
+static lv_obj_t *s_channelActionsShareLabel = nullptr;
 static int s_channelActionsChanIdx = -1;
 static lv_obj_t *s_tracerouteBackdrop = nullptr;
 static lv_obj_t *s_tracerouteModal = nullptr;
@@ -639,8 +641,10 @@ static int s_cfgActionCount = 0;
 // without a bounds check, so headroom here is the only thing standing between
 // a new entry and a silent stack-adjacent write).
 // 30 entries on the fullest build as of Battery Calibration, so 32 was one
-// addition away from being the bug this comment warns about.
-static int s_cfgActions[40] = {};
+// addition away from being the bug this comment warns about. There are now 38
+// append sites in total — fewer than that on any one build, since several are
+// mutually exclusive by board, but 40 no longer looked like headroom.
+static int s_cfgActions[56] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -1090,11 +1094,14 @@ static void closeSysStatsModal();
 static void refreshSysStatsModal(bool force);
 static void buildSysStatsColumns(char *cpuOut, char *memOut, char *stoOut, size_t sz);
 static inline bool channelIsMuted(int chanIdx);
+static bool channelSharesLocation(int chanIdx);
 static void openChannelActionsModal();
 static void closeChannelActionsModal();
 static void refreshChannelActionsModal();
 static void toggleActiveChannelMute();
+static void toggleActiveChannelShareLocation();
 static void onChannelActionMutePressed(lv_event_t *e);
+static void onChannelActionSharePressed(lv_event_t *e);
 static void logLvglMemDiag(const char *tag);
 static void onHeltecBottomNavPressed(lv_event_t *e);
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget);
@@ -1607,6 +1614,8 @@ enum CfgActionId {
     #endif
     #if HAS_KB_BLINK
     CFG_ACTION_KB_BLINK,
+    CFG_ACTION_KB_BLINK_CHAN_FLASHES,
+    CFG_ACTION_KB_BLINK_DM_FLASHES,
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -2972,6 +2981,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_KB_BLINK:
             snprintf(buf, bufLen, "Keyboard Blink: %s", s_cfg.kbBlinkEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_KB_BLINK_CHAN_FLASHES:
+            snprintf(buf, bufLen, "Blink Flashes (Channel): %u",
+                     (unsigned)cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes));
+            break;
+        case CFG_ACTION_KB_BLINK_DM_FLASHES:
+            snprintf(buf, bufLen, "Blink Flashes (DM): %u",
+                     (unsigned)cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes));
+            break;
         #endif
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
@@ -4070,8 +4087,10 @@ static char meshDeckReadDpadKey() {
 // the service call below does the toggling, because a blocking blink would stall
 // the UI and the radio for the length of the pattern.
 //
-// Channel messages get one blink per cycle and DMs two. Colour is what separates
-// them on the Mesh Deck; here the only thing to vary is the count.
+// Colour is what separates a channel message from a DM on the Mesh Deck; here
+// the only thing to vary is the count, so each kind carries its own (1..3,
+// defaulting to the 1 and 2 that were hardcoded before they were settings).
+// Three flashes at 60/90 ms still finish well inside kKbBlinkRepeatMs.
 static constexpr uint32_t kKbBlinkOnMs     = 60;
 static constexpr uint32_t kKbBlinkOffMs    = 90;
 // Start-to-start, matching kMdLedRepeatMs: measured from the end, a two-blink DM
@@ -4114,8 +4133,12 @@ static bool kbBlinkHasUnreadChannels() {
 static bool kbBlinkHasUnread() { return kbBlinkHasUnreadChannels() || DMs.hasUnread(); }
 
 // DMs win when both are pending: the longer pattern is the one worth noticing,
-// and it is the same precedence meshDeckUnreadColor() applies.
-static uint8_t kbBlinkCount(bool isDm) { return isDm ? 2 : 1; }
+// and it is the same precedence meshDeckUnreadColor() applies. Both counts are
+// user-settable (1..3); coerced here so a bad stored value cannot run the
+// pattern forever or make it vanish.
+static uint8_t kbBlinkCount(bool isDm) {
+    return cfgCoerceKbFlashes((int)(isDm ? s_cfg.kbBlinkDmFlashes : s_cfg.kbBlinkChanFlashes));
+}
 
 static void kbBlinkStartPattern(bool isDm) {
     if (!s_cfg.kbBlinkEnabled || !kbBlinkAllowedNow()) return;
@@ -4546,7 +4569,18 @@ struct ChanBlobRecord {
     uint8_t keyLen;
     uint8_t role;
     uint8_t flags;       // bit0 uplink, bit1 downlink, bit2 muted
-    uint8_t reserved;
+    // Was `reserved`, so every blob written before per-channel location sharing
+    // has it at 0. Position sharing therefore cannot simply be another bit in
+    // `flags`: a 0 there is indistinguishable from "never stored", and it
+    // defaults ON for the primary channel — every upgraded device would quietly
+    // stop announcing its position. Bit0 marks the byte as written; only then is
+    // bit1 believed, and an older blob keeps the compiled defaults instead.
+    uint8_t extFlags;    // bit0 extFlags valid, bit1 shareLocation
+};
+
+enum : uint8_t {
+    CHAN_EXT_VALID          = 0x01,
+    CHAN_EXT_SHARE_LOCATION = 0x02,
 };
 
 struct ChanBlob {
@@ -4577,6 +4611,8 @@ static void persistChannelsToPrefs() {
         blob.chans[i].flags  = (uint8_t)((ck.uplinkEnabled   ? 1 : 0)
                                        | (ck.downlinkEnabled ? 2 : 0)
                                        | (ck.muted           ? 4 : 0));
+        blob.chans[i].extFlags = (uint8_t)(CHAN_EXT_VALID
+                                         | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0));
     }
 
     Preferences cp;
@@ -4643,6 +4679,11 @@ static void applyLoadedConfigInvariants() {
     // A trim out of range would scale the battery reading into nonsense; an
     // imported YAML or a hand-edited value is enough to get there.
     s_cfg.battCalTrim = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim);
+    // A zero here — from an import, or from a blob written before these were
+    // settings if the append-only rule is ever broken — would mean a pattern of
+    // no flashes at all, which reads as the feature being off.
+    s_cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes);
+    s_cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes);
     applyPresetParams(s_cfg);
 }
 
@@ -5007,6 +5048,11 @@ static void loadChannelsFromPrefs() {
             CHANNEL_KEYS[i].uplinkEnabled   = (r.flags & 1) != 0;
             CHANNEL_KEYS[i].downlinkEnabled = (r.flags & 2) != 0;
             CHANNEL_KEYS[i].muted           = (r.flags & 4) != 0;
+            // Blobs written before the flag existed leave shareLocation on its
+            // compiled default (primary on, secondary off) — see ChanBlobRecord.
+            if (r.extFlags & CHAN_EXT_VALID) {
+                CHANNEL_KEYS[i].shareLocation = (r.extFlags & CHAN_EXT_SHARE_LOCATION) != 0;
+            }
         }
         return;
     }
@@ -6315,6 +6361,8 @@ static void initCfgActions() {
     // light is the keyboard. Absent where no keyboard backlight can be driven.
     #if HAS_KB_BLINK
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK_CHAN_FLASHES;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK_DM_FLASHES;
     #endif
     #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
@@ -8460,15 +8508,16 @@ enum ChanEncType : uint8_t {
 };
 
 // Channel-modal layout. Eight slots stacked one per row, each with its name and
-// encryption on separate lines, came to roughly 420px of content: the Pager
-// (480x222) showed five slots at a time and the Cardputer (240x135) three, so
-// picking a channel meant scrolling a list short enough to fit on screen. Both
-// lay the slots out in two columns of single-line rows instead, which puts all
-// eight in view. The Pager's wide panel keeps the encryption label on that line;
-// the Cardputer has no room for it and shows names only, matching how
-// kModalRowDescriptions already drops per-row helper text there.
+// encryption on separate lines, came to roughly 420px of content — every panel
+// had to scroll to pick a channel. Both modals now lay their buttons out in two
+// columns of single-line rows, which puts all eight slots (and the whole editor)
+// in view on every board.
 //
-// Slots fill column-major (left column 0-3, right column 4-7) so stepping the
+// The picker rows carry the slot name alone. They used to append the encryption
+// type, but that is the one field the list cannot act on, it is the editor's
+// second row anyway, and dropping it is what buys the second column its width.
+//
+// Cells fill column-major (left column 0-3, right column 4-7) so stepping the
 // selection by one still walks straight down a column — the Pager's wheel is the
 // only way to move on that board, and a row-major fill would have left it
 // zig-zagging across the grid.
@@ -8481,27 +8530,33 @@ static constexpr int  kChanModalMaxW  = 236;
 static constexpr int  kChanModalPad   = 3;
 static constexpr int  kChanModalGap   = 3;
 static constexpr int  kChanModalRowH  = 19;
-static constexpr bool kChanCfgShowEnc = false;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
+// A half-width cell here is ~112px. "Encryption" plus its value does not fit,
+// and an ellipsised field name is worse than a short one.
+#define CHAN_EDIT_LABELS { "Name", "Enc", "Save", "Loc", "Key" }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 448;
 static constexpr int  kChanModalPad   = 8;
 static constexpr int  kChanModalGap   = 5;
 static constexpr int  kChanModalRowH  = 28;
-static constexpr bool kChanCfgShowEnc = true;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
+#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key" }
 #else
-static constexpr int  kChanModalCols  = 1;
+// 320x240 boards (T-Deck, Heltec V4, Mesh Deck). At 300px wide a 49% cell is
+// ~138px, which holds "0  LongFast" at montserrat_12 with room to spare.
+static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 300;
 static constexpr int  kChanModalPad   = 8;
 static constexpr int  kChanModalGap   = 6;
 static constexpr int  kChanModalRowH  = 28;
-static constexpr bool kChanCfgShowEnc = true;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
+// ~138px cells at montserrat_12: "Location" plus "Off" fits, "Encryption" plus
+// "AES-256" is the tightest pairing and ellipsises its value, not its name.
+#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key" }
 #endif
 static constexpr int kChanModalRowsPerCol =
     (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
@@ -8515,17 +8570,30 @@ static lv_obj_t *s_chanCfgBackdrop = nullptr;
 static lv_obj_t *s_chanCfgModal    = nullptr;
 static lv_obj_t *s_chanCfgRows[MESH_CHANNELS]  = {};
 static lv_obj_t *s_chanCfgNames[MESH_CHANNELS] = {};
-static lv_obj_t *s_chanCfgDescs[MESH_CHANNELS] = {};
 static int       s_chanCfgSelection = 0;
 
-// Editor rows are fixed; the enum doubles as the navigation index.
+// Editor rows are fixed; the enum doubles as the navigation index AND, through
+// the column-major fill below, as the on-screen order — left column first, then
+// right. Reordering these values moves the buttons, so keep CHAN_EDIT_LABELS in
+// step with them. Laid out, that is:
+//     Name  | Location
+//     Enc   | Key
+//     Save  |
 enum ChanEditRow : uint8_t {
     CHAN_EDIT_NAME = 0,
     CHAN_EDIT_ENC,
-    CHAN_EDIT_KEY,
     CHAN_EDIT_SAVE,
+    CHAN_EDIT_LOCATION,
+    CHAN_EDIT_KEY,
     CHAN_EDIT_ROW_COUNT
 };
+
+// The editor uses the picker's grid, so its rows fill column-major too and a
+// step of one keeps walking down a column. Five rows over two columns leaves the
+// last cell empty rather than a gap mid-grid, which is why the build loop can
+// use the same index mapping without special-casing the short column.
+static constexpr int kChanEditRowsPerCol =
+    (CHAN_EDIT_ROW_COUNT + kChanModalCols - 1) / kChanModalCols;
 
 static lv_obj_t *s_chanEditBackdrop = nullptr;
 static lv_obj_t *s_chanEditModal    = nullptr;
@@ -8538,6 +8606,7 @@ static int       s_chanEditSlot      = -1;
 static char    s_chanEditName[16] = {};
 static uint8_t s_chanEditKey[32]  = {};
 static uint8_t s_chanEditKeyLen   = 0;
+static bool    s_chanEditShareLoc = false;
 
 // Text-entry sub-modal, shared by the name and key fields.
 static lv_obj_t *s_chanTextBackdrop = nullptr;
@@ -8654,6 +8723,7 @@ static void chanEditSave() {
     memset(ck.key, 0, sizeof(ck.key));
     memcpy(ck.key, s_chanEditKey, s_chanEditKeyLen);
     ck.keyLen = s_chanEditKeyLen;
+    ck.shareLocation = s_chanEditShareLoc;
 
     // Role is deliberately untouched — the web config owns it, and an empty
     // secondary slot already ships as SECONDARY, so naming one is enough to put
@@ -8695,7 +8765,6 @@ static void closeChanCfgModal() {
     s_chanCfgModal = nullptr;
     memset(s_chanCfgRows, 0, sizeof(s_chanCfgRows));
     memset(s_chanCfgNames, 0, sizeof(s_chanCfgNames));
-    memset(s_chanCfgDescs, 0, sizeof(s_chanCfgDescs));
 }
 
 // Re-reads the live channel plan into the picker rows. Used after a save so the
@@ -8704,16 +8773,10 @@ static void closeChanCfgModal() {
 static void refreshChanCfgLabels() {
     if (!s_chanCfgModal) return;
     for (int i = 0; i < MESH_CHANNELS; i++) {
-        if (s_chanCfgNames[i]) {
-            char slotText[28];
-            chanCfgRowLabel(i, slotText, sizeof(slotText));
-            lv_label_set_text(s_chanCfgNames[i], slotText);
-        }
-        if (s_chanCfgDescs[i]) {
-            char encText[24];
-            chanEncLabel(CHANNEL_KEYS[i].key, CHANNEL_KEYS[i].keyLen, encText, sizeof(encText));
-            lv_label_set_text(s_chanCfgDescs[i], encText);
-        }
+        if (!s_chanCfgNames[i]) continue;
+        char slotText[28];
+        chanCfgRowLabel(i, slotText, sizeof(slotText));
+        lv_label_set_text(s_chanCfgNames[i], slotText);
     }
 }
 
@@ -8839,14 +8902,6 @@ static void openChanCfgModal() {
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(name, kChanModalRowFont, 0);
         lv_obj_set_style_text_color(name, rowTextColor, 0);
-
-        if (kChanCfgShowEnc) {
-            lv_obj_t *desc = lv_label_create(row);
-            s_chanCfgDescs[i] = desc;
-            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
-            lv_obj_set_style_text_color(desc, rowTextColor, 0);
-            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
-        }
     }
 
     refreshChanCfgLabels();
@@ -8886,9 +8941,7 @@ static void refreshChanEditRows() {
     const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
 
     char encText[24];
-    char keyText[48];
     chanEncLabel(s_chanEditKey, s_chanEditKeyLen, encText, sizeof(encText));
-    base64Encode(s_chanEditKey, s_chanEditKeyLen, keyText);
 
     for (int i = 0; i < CHAN_EDIT_ROW_COUNT; i++) {
         lv_obj_t *row = s_chanEditRows[i];
@@ -8898,7 +8951,9 @@ static void refreshChanEditRows() {
         lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
         lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
         lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        // Recursive: with the rows in a grid the scrollable object is the modal,
+        // two levels up.
+        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
 
         lv_obj_t *val = s_chanEditValues[i];
         if (!val) continue;
@@ -8909,13 +8964,18 @@ static void refreshChanEditRows() {
             case CHAN_EDIT_ENC:
                 lv_label_set_text(val, encText);
                 break;
-            case CHAN_EDIT_KEY:
-                lv_label_set_text(val, keyText);
+            case CHAN_EDIT_LOCATION:
+                lv_label_set_text(val, s_chanEditShareLoc ? "On" : "Off");
                 break;
             default:
                 break;
         }
     }
+}
+
+static void chanEditToggleShareLoc() {
+    s_chanEditShareLoc = !s_chanEditShareLoc;
+    refreshChanEditRows();
 }
 
 static void chanEditActivateRow(int row) {
@@ -8926,6 +8986,9 @@ static void chanEditActivateRow(int row) {
             break;
         case CHAN_EDIT_ENC:
             chanEditCycleEncType(1);
+            break;
+        case CHAN_EDIT_LOCATION:
+            chanEditToggleShareLoc();
             break;
         case CHAN_EDIT_SAVE:
             chanEditSave();
@@ -8960,6 +9023,7 @@ static void openChanEditModal(int slot) {
                                                             : (uint8_t)sizeof(s_chanEditKey);
     memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
     memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
+    s_chanEditShareLoc = ck.shareLocation;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -9018,18 +9082,34 @@ static void openChanEditModal(int slot) {
     lv_label_set_text_fmt(hint, "Move  Enter=Change  %s=Cancel", modalCloseKeyLabel());
 #endif
 
-    static const char *kRowLabel[CHAN_EDIT_ROW_COUNT] = {
-        "Name", "Encryption", "Key", "Save"
-    };
+    static const char *kRowLabel[CHAN_EDIT_ROW_COUNT] = CHAN_EDIT_LABELS;
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
-    for (int i = 0; i < CHAN_EDIT_ROW_COUNT; i++) {
-        lv_obj_t *row = lv_btn_create(s_chanEditModal);
+    lv_obj_t *grid = lv_obj_create(s_chanEditModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
+    for (int pos = 0; pos < CHAN_EDIT_ROW_COUNT; pos++) {
+        // Same column-major mapping as the picker grid, so a step of one walks
+        // down a column: left holds Name/Encryption/Key, right Location/Save.
+        const int i = (pos % kChanModalCols) * kChanEditRowsPerCol + (pos / kChanModalCols);
+        if (i >= CHAN_EDIT_ROW_COUNT) continue;
+
+        lv_obj_t *row = lv_btn_create(grid);
         s_chanEditRows[i] = row;
-        lv_obj_set_width(row, lv_pct(100));
-        // Label and value share one line: stacked, the four rows plus the header
-        // ran past the bottom of both small panels.
+        lv_obj_set_width(row, lv_pct(kChanModalCellPct));
+        // Label and value share one line: stacked, the rows plus the header ran
+        // past the bottom of both small panels.
         lv_obj_set_height(row, kChanModalRowH);
         lv_obj_set_style_radius(row, 4, 0);
         lv_obj_set_style_pad_left(row, 5, 0);
@@ -9047,13 +9127,14 @@ static void openChanEditModal(int slot) {
         lv_obj_set_style_text_color(label, rowTextColor, 0);
         lv_label_set_text(label, kRowLabel[i]);
 
-        if (i == CHAN_EDIT_SAVE) {
+        // Key is a plain button into the text editor: its base64 runs to 44
+        // characters, which no half-width cell can show, and a truncated key
+        // reads as a wrong one. The editor displays it in full, which is where a
+        // key gets checked anyway. Save has nothing to show either.
+        if (i == CHAN_EDIT_SAVE || i == CHAN_EDIT_KEY) {
             s_chanEditValues[i] = nullptr;
             continue;
         }
-        // The key's base64 runs to 44 characters. That fits on the Pager's line
-        // but not the Cardputer's, where it ellipsises — the text-entry modal
-        // shows the whole thing, which is where a key gets checked anyway.
         lv_obj_t *val = lv_label_create(row);
         s_chanEditValues[i] = val;
         lv_obj_set_flex_grow(val, 1);
@@ -14091,6 +14172,30 @@ static void refreshChannelActionsModal() {
     const lv_color_t mutedBg  = isLight ? lv_color_hex(0xF3E0C4) : lv_color_hex(0x6E4A18);
     lv_obj_set_style_bg_color(s_channelActionsMuteBtn, muted ? mutedBg : activeBg, 0);
     lv_obj_set_style_bg_opa(s_channelActionsMuteBtn, LV_OPA_COVER, 0);
+
+    if (!s_channelActionsShareLabel || !s_channelActionsShareBtn) return;
+    // The per-channel flag, not channelSharesLocation(): the button has to keep
+    // showing what this channel is set to even while the global switch is what
+    // is actually stopping the transmission. That case gets called out in the
+    // label rather than a line of its own — on a 135px-tall panel this modal has
+    // no room for a fifth child.
+    const bool share = (s_channelActionsChanIdx >= 0 && s_channelActionsChanIdx < MESH_CHANNELS)
+                       && CHANNEL_KEYS[s_channelActionsChanIdx].shareLocation;
+    const char *shareState = !share            ? "Off"
+                             : s_cfg.shareLocation ? "On"
+                                                   : "On (global off)";
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text_fmt(s_channelActionsShareLabel, "Location: %s", shareState);
+#else
+    lv_label_set_text_fmt(s_channelActionsShareLabel, "(L)ocation: %s", shareState);
+#endif
+    // Sharing is the state worth spotting at a glance, so it takes the
+    // emphasised tint — but only when it is actually in effect: sharing the
+    // global switch is suppressing is not the "on" state.
+    const lv_color_t shareBg = isLight ? lv_color_hex(0xCFE9D6) : lv_color_hex(0x1F5A35);
+    lv_obj_set_style_bg_color(s_channelActionsShareBtn,
+                              (share && s_cfg.shareLocation) ? shareBg : activeBg, 0);
+    lv_obj_set_style_bg_opa(s_channelActionsShareBtn, LV_OPA_COVER, 0);
 }
 
 static void toggleActiveChannelMute() {
@@ -14104,9 +14209,22 @@ static void toggleActiveChannelMute() {
     refreshChannelGlow(true);
 }
 
+static void toggleActiveChannelShareLocation() {
+    if (s_channelActionsChanIdx < 0 || s_channelActionsChanIdx >= MESH_CHANNELS) return;
+    ChannelKey &ch = CHANNEL_KEYS[s_channelActionsChanIdx];
+    ch.shareLocation = !ch.shareLocation;
+    persistChannelsToPrefs();
+    refreshChannelActionsModal();
+}
+
 static void onChannelActionMutePressed(lv_event_t *e) {
     LV_UNUSED(e);
     toggleActiveChannelMute();
+}
+
+static void onChannelActionSharePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    toggleActiveChannelShareLocation();
 }
 
 static void onChannelActionClosePressed(lv_event_t *e) {
@@ -14119,6 +14237,8 @@ static void closeChannelActionsModal() {
     s_channelActionsModal = nullptr;
     s_channelActionsMuteBtn = nullptr;
     s_channelActionsMuteLabel = nullptr;
+    s_channelActionsShareBtn = nullptr;
+    s_channelActionsShareLabel = nullptr;
     s_channelActionsChanIdx = -1;
 }
 
@@ -14137,6 +14257,10 @@ static void openChannelActionsModal() {
     s_channelActionsChanIdx = s_activeChannel;
 
     const int modalW = min(220, lv_disp_get_hor_res(NULL) - 14);
+    // Two 30px buttons plus the two-line title and the close hint overflow a
+    // 135px-tall panel (Cardputer), and the modal is LV_SIZE_CONTENT — it would
+    // simply run off the screen. Short panels get the compact button instead.
+    const int btnH = (lv_disp_get_ver_res(NULL) <= 160) ? 24 : 30;
     lv_obj_t *parent = s_rootScreen ? s_rootScreen : lv_scr_act();
     s_channelActionsModal = lv_obj_create(parent);
     lv_obj_set_width(s_channelActionsModal, modalW);
@@ -14170,7 +14294,7 @@ static void openChannelActionsModal() {
     lv_obj_t *btn = lv_btn_create(s_channelActionsModal);
     s_channelActionsMuteBtn = btn;
     lv_obj_set_width(btn, lv_pct(100));
-    lv_obj_set_height(btn, 30);
+    lv_obj_set_height(btn, btnH);
     lv_obj_set_style_radius(btn, 4, 0);
     lv_obj_set_style_pad_all(btn, 2, 0);
     lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -14183,11 +14307,27 @@ static void openChannelActionsModal() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
     lv_obj_center(lbl);
 
+    lv_obj_t *shareBtn = lv_btn_create(s_channelActionsModal);
+    s_channelActionsShareBtn = shareBtn;
+    lv_obj_set_width(shareBtn, lv_pct(100));
+    lv_obj_set_height(shareBtn, btnH);
+    lv_obj_set_style_radius(shareBtn, 4, 0);
+    lv_obj_set_style_pad_all(shareBtn, 2, 0);
+    lv_obj_set_style_shadow_width(shareBtn, 0, 0);
+    lv_obj_add_event_cb(shareBtn, onChannelActionSharePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *shareLbl = lv_label_create(shareBtn);
+    s_channelActionsShareLabel = shareLbl;
+    lv_obj_set_style_text_font(shareLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(shareLbl,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
+    lv_obj_center(shareLbl);
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     // Touch-only board: provide an explicit Close button instead of a keyboard hint.
     lv_obj_t *closeBtn = lv_btn_create(s_channelActionsModal);
     lv_obj_set_width(closeBtn, lv_pct(100));
-    lv_obj_set_height(closeBtn, 30);
+    lv_obj_set_height(closeBtn, btnH);
     lv_obj_set_style_radius(closeBtn, 4, 0);
     lv_obj_set_style_pad_all(closeBtn, 2, 0);
     lv_obj_set_style_shadow_width(closeBtn, 0, 0);
@@ -17289,6 +17429,31 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard blink: %s",
                      s_cfg.kbBlinkEnabled ? "On" : "Off");
             break;
+
+        // Both counts cycle 1 -> 2 -> 3 -> 1 in place, like the other small
+        // enumerated rows: three values do not earn a modal. A pattern already
+        // running keeps its length; the next one picks the new count up.
+        case CFG_ACTION_KB_BLINK_CHAN_FLASHES:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec KB_BLINK_CHAN_FLASHES");
+            showActionPopup = false;   // row already reads the count
+            s_cfg.kbBlinkChanFlashes =
+                cfgCoerceKbFlashes((int)s_cfg.kbBlinkChanFlashes % KB_FLASHES_MAX + 1);
+            markConfigDirty();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Channel blink: %u flash%s",
+                     (unsigned)s_cfg.kbBlinkChanFlashes,
+                     (s_cfg.kbBlinkChanFlashes == 1) ? "" : "es");
+            break;
+
+        case CFG_ACTION_KB_BLINK_DM_FLASHES:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec KB_BLINK_DM_FLASHES");
+            showActionPopup = false;   // row already reads the count
+            s_cfg.kbBlinkDmFlashes =
+                cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes % KB_FLASHES_MAX + 1);
+            markConfigDirty();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "DM blink: %u flash%s",
+                     (unsigned)s_cfg.kbBlinkDmFlashes,
+                     (s_cfg.kbBlinkDmFlashes == 1) ? "" : "es");
+            break;
 #endif
 
         case CFG_ACTION_SPLASH_MELODY:
@@ -18962,15 +19127,30 @@ static void pumpKeyboardInput() {
                 chanEditActivateRow(s_chanEditSelection);
                 continue;
             }
-            // Left/right cycle the encryption type in place, so the type can be
-            // changed without stepping into a sub-modal.
+            // Left/right change the value in place on the two rows that have one
+            // to cycle, so neither needs a sub-modal. Both consume the key, so
+            // the column hop below is unreachable from these rows — the same
+            // trade the encryption row has always made.
             if (s_chanEditSelection == CHAN_EDIT_ENC) {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP)  { chanEditCycleEncType(-1); continue; }
                 if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN)  { chanEditCycleEncType(1);  continue; }
             }
+            if (s_chanEditSelection == CHAN_EDIT_LOCATION) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
+                    || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleShareLoc(); continue; }
+            }
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            // Rows run down one column and into the next, so a step of one is
+            // already a vertical move; left/right hop between the columns.
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kChanEditRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kChanEditRowsPerCol;
+                }
+            }
             if (delta != 0) {
                 int next = s_chanEditSelection + delta;
                 if (next < 0) next = 0;
@@ -20003,6 +20183,10 @@ static void pumpKeyboardInput() {
             }
             if (k == 'm' || k == 'M' || k == KEY_ENTER) {
                 toggleActiveChannelMute();
+                continue;
+            }
+            if (k == 'l' || k == 'L') {
+                toggleActiveChannelShareLocation();
                 continue;
             }
             continue;
@@ -22438,6 +22622,20 @@ static inline bool channelIsMuted(int chanIdx) {
     return chanIdx >= 0 && chanIdx < MESH_CHANNELS && CHANNEL_KEYS[chanIdx].muted;
 }
 
+// True when our position should actually go out on this channel. The global
+// switch wins: with Share Location off in Settings no channel qualifies,
+// whatever its own flag says. A disabled or unnamed slot never qualifies either
+// — those are empty channel slots, not places to announce coordinates.
+static bool channelSharesLocation(int chanIdx) {
+    if (!s_cfg.shareLocation) return false;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return false;
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    if (!ck.shareLocation) return false;
+    if (ck.role == 2) return false;              // DISABLED
+    const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+    return nm && nm[0];
+}
+
 static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
     char timePrefix[12];
     char sender[48];
@@ -23345,9 +23543,28 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         int32_t lonI = 0;
         int32_t altM = 0;
         if (resolveAnnouncePosition(latI, lonI, altM)) {
-            bool ok = Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt);
-            if (ok) scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
-            else scheduleAnnounceRetry(s_nextPositionTxMs, nowMs);
+            // One announce, one packet per sharing channel. Reschedule as soon as
+            // any of them made it out: a retry resends to all of them, so letting
+            // a single failed channel force one would keep re-announcing to the
+            // channels that already heard us.
+            int attempted = 0;
+            int sent = 0;
+            for (int i = 0; i < MESH_CHANNELS; i++) {
+                if (!channelSharesLocation(i)) continue;
+                attempted++;
+                if (Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt, i)) sent++;
+            }
+            if (sent > 0 || attempted == 0) {
+                scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
+            } else {
+                scheduleAnnounceRetry(s_nextPositionTxMs, nowMs);
+            }
+            if (attempted == 0 && forceAnnounce) {
+                // Sharing is on and we have coordinates, but no channel is set to
+                // carry them — otherwise the announce button looks broken.
+                liveFeedAddPrefixed("", "[position] skip: no channel shares location",
+                                    TFT_DARKGREY, 0, false);
+            }
         } else {
             scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
             if (forceAnnounce) {
@@ -23891,25 +24108,12 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         bodyColor = tagColor;
     }
 
-    // Header line: time then who. One label rather than two, because the bubble
-    // is a column flex — separate labels would stack, and the time belongs on
-    // the same line as the name. Own messages use the ME/ME(ACK)/ME(SENT) tag as
-    // the "who", so every bubble carries a time, not just received ones.
-    // ACKED and ACKED_RELAY are not the same claim and must not read the same.
-    // ACKED means the node we addressed returned a routing ACK — end-to-end
-    // delivery. ACKED_RELAY means either an intermediate node acked the relay
-    // rather than the recipient, or, for channel broadcasts, simply that
-    // expireAcks() gave up waiting 1.5 s after transmit (nobody owes a broadcast
-    // an ACK). Collapsing both into "SENT" made a real delivery confirmation
-    // indistinguishable from a timeout unless you noticed the bubble color.
     const char *stateTag = nullptr;
     if (isMe) {
         switch (ackState) {
             case DisplayLine::ACKED:
-                stateTag = "ME (ACK)";
-                break;
             case DisplayLine::ACKED_RELAY:
-                stateTag = "ME (SENT)";
+                stateTag = "ME (ACK)";
                 break;
             default:
                 stateTag = "ME";
