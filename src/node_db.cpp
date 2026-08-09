@@ -698,6 +698,12 @@ int NodeDB::neighborReportCount() const {
     return live;
 }
 
+int NodeDB::clearNeighbors() {
+    const int dropped = neighborReportCount();
+    memset(_neighbors, 0, sizeof(_neighbors));
+    return dropped;
+}
+
 #endif  // FEATURE_DISCOVERY
 
 void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {

@@ -116,6 +116,12 @@ public:
     const NeighborReport *neighborReportAt(int idx) const;
     // Live reports right now. O(MAX_NEIGHBOR_REPORTS); not a cached counter.
     int neighborReportCount() const;
+
+    // Forget every stored report. Returns how many were dropped. The graph
+    // rebuilds itself from the next NeighborInfo broadcast each node makes, so
+    // this costs nothing permanent — it just stops a stale picture of the mesh
+    // from lingering for the hours a broadcast interval can run to.
+    int clearNeighbors();
 #endif
 
     void updateUser(uint32_t nodeId, const UserInfo &u);

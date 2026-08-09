@@ -113,16 +113,37 @@ neighbor report.
 - Scroll with Up and Down input
 - Results are laid out to suit the panel: three columns on the T-Lora Pager
   (direct / distance / heard about), two on the T-Deck and Mesh Deck (heard
-  about on the right), and a single stacked column on Cardputer and Heltec,
-  where Heltec uses a larger result font
+  about on the right), and a single stacked column on Heltec, which uses a
+  larger result font
+- Nodes show their long name when one is known, falling back to the short name
+  and then the hex id. Names are clipped to the column width rather than
+  wrapped, so the list stays scannable — the full name is on the Nodes screen
+- Group headings (DIRECT, 1 HOP, HEARD ABOUT, …) are drawn larger and in amber
+  so the groups separate at a glance
 - Everything above is passive: it is built from NeighborInfo broadcasts that were
   already arriving, and costs no extra airtime
-- Press S (Heltec: the Sweep button) to sweep: **one** NodeInfo broadcast asking
+- Press W (Heltec: the Sweep button) to sweep: **one** NodeInfo broadcast asking
   nodes within 3 hops to answer, and replies are counted for 45 s. Never
   automatic. A sweep is refused, with the reason on screen, when one ran less
   than 60 s ago, when channel utilization is at or above 25%, or when the radio
   is not ready.
 - We answer other nodes' sweeps too, at most once per requester per hour
+- Press C (Heltec: the Clear button) to clear. Every group empties, and the
+  screen refills from live traffic — a node reappears the moment it next
+  transmits, and a neighbor report when that node next broadcasts one. That
+  turns the screen into "who is out there right now" rather than everything
+  this device has ever met, which is the useful question after moving.
+  Clearing is not destructive and does not touch the Nodes screen: stored
+  neighbor reports really are dropped, but the rest is hidden by a timestamp,
+  not deleted. Node records, names and last-heard times are all untouched —
+  discarding those is Config → Clear Nodes.
+- Press S to save a snapshot, on boards with an SD card (T-Deck and T-Lora
+  Pager). Writes `/camillia/discovery-YYYYMMDD-HHMMSS.json` — timestamped, so
+  saves never overwrite each other, and suffixed `-2`, `-3`… if two land in the
+  same second. With no clock set yet the name falls back to uptime
+  (`discovery-boot-123s.json`) and the file's `generated` field is `null`
+  rather than a made-up date. The JSON carries every group the screen draws
+  plus the raw neighbor reports, so the graph can be rebuilt from the file.
 - Close with the device close key (see device sections below)
 
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)

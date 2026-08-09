@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_system.h>   // esp_reset_reason() for the boot marker below
-#include <stdarg.h>       // discoveryAppend() takes a format
+#include <stdarg.h>       // discoverySectionRow() takes a format
 #include <Wire.h>
 #include "config.h"
 #include "base64_util.h"
@@ -8706,21 +8706,31 @@ static constexpr int kDiscoveryColHeard    = 0;
 #endif
 static constexpr int kDiscoveryCols = kDiscoveryColHeard + 1;
 
-// Per-column text budget. One column holds every group, so it gets more.
-static constexpr size_t kDiscoveryColCap = (kDiscoveryCols == 1) ? 1400 : 800;
-
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
 // Touch build with no keyboard and one column of results: it has the width to
 // spend on legibility, and nothing competing for it.
-static const lv_font_t *kDiscoveryBodyFont = &lv_font_montserrat_12;
+static const lv_font_t *kDiscoveryBodyFont   = &lv_font_montserrat_12;
+static const lv_font_t *kDiscoveryHeaderFont = &lv_font_montserrat_14;
 #else
-static const lv_font_t *kDiscoveryBodyFont = &lv_font_montserrat_10;
+static const lv_font_t *kDiscoveryBodyFont   = &lv_font_montserrat_10;
+static const lv_font_t *kDiscoveryHeaderFont = &lv_font_montserrat_12;
 #endif
+
+// Group headings are amber against the body's pale blue. Deliberately not one
+// of the status colours used elsewhere in this modal — green and red mean
+// "worked" and "failed" here, and a heading means neither.
+static constexpr uint32_t kDiscoveryHeaderColor = 0xFFC98A;
+static constexpr uint32_t kDiscoveryBodyColor   = 0xD9E8FF;
+
+// Longest node name a row will print, including the terminator. Long names run
+// to 40 characters, which would wrap every row of a three-column Pager; one
+// column has the width to show far more of one.
+static constexpr size_t kDiscoveryNameMax = (kDiscoveryCols == 1) ? 29 : 19;
 
 static lv_obj_t *s_discoveryModal = nullptr;
 static lv_obj_t *s_discoveryStatusLabel = nullptr;
 static lv_obj_t *s_discoveryList = nullptr;
-static lv_obj_t *s_discoveryColLabels[kDiscoveryCols] = {};
+static lv_obj_t *s_discoveryColBoxes[kDiscoveryCols] = {};
 // 0 = no sweep in flight. Survives the modal closing so a sweep cannot be
 // restarted by closing and reopening, and so its result is there on return.
 static uint32_t s_discoverySweepStartedMs = 0;
@@ -15500,109 +15510,190 @@ static void closeDiscoveryModal() {
     lvObjDeleteSafe(s_discoveryModal);
     s_discoveryStatusLabel = nullptr;
     s_discoveryList = nullptr;
-    memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+    memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
     s_discoveryRenderedSig = 0;
     // s_discoverySweepStartedMs is deliberately left alone: a sweep already on
     // the air keeps running, and serviceDiscoverySweep() still closes it out.
 }
 
-// Nodes we have actually received a packet from, as opposed to ones we only
-// know about because a neighbor listed them.
-static inline bool nodeHeardFrom(const NodeEntry &e) {
-    return e.nodeId != 0 && e.lastHeardMs != 0;
+// Clear watermark: Discovery ignores anything it has not heard since this
+// moment. 0 = never cleared.
+//
+// A watermark rather than wiping the node table, because the two overlap but
+// are not the same thing. Discovery reads live state that the Nodes screen, the
+// recency sort and the NeighborInfo announce all read too — clearing "this
+// screen" must not throw away when we last heard from someone. Everything here
+// repopulates from the next packet each node sends, which is what makes the
+// button useful: it answers "who is out there *now*", not "who has this device
+// ever met".
+static uint32_t s_discoveryClearedMs = 0;
+
+// Nodes we have actually received a packet from — as opposed to ones we only
+// know about because a neighbor listed them — and heard from since the last
+// clear. Signed difference so the comparison survives the millis() wrap.
+static inline bool discoveryHeardFrom(const NodeEntry &e) {
+    if (e.nodeId == 0 || e.lastHeardMs == 0) return false;
+    if (s_discoveryClearedMs == 0) return true;
+    return (int32_t)(e.lastHeardMs - s_discoveryClearedMs) >= 0;
 }
 
-// Appends to a fixed buffer, reporting whether it still fits. Every row here is
-// optional detail, so running out of room truncates the list rather than
-// dropping the groups that were already written.
-static bool discoveryAppend(char *buf, size_t cap, const char *fmt, ...) {
-    size_t used = strlen(buf);
-    if (used + 1 >= cap) return false;
+// Direct as Discovery counts it: one hop away, and heard since the last clear.
+// nodeIsDirectNeighbor() stays watermark-free for the NeighborInfo announce,
+// which advertises real neighbors regardless of what this screen is showing.
+static inline bool discoveryIsDirect(const NodeEntry &e) {
+    return discoveryHeardFrom(e) && e.hasHops && e.hops == 0;
+}
+
+// A group is a header label plus one body label holding its rows, because LVGL
+// cannot mix font sizes inside a single label. Rows accumulate into one shared
+// scratch buffer — the labels copy their text, so the buffer is free again the
+// moment a section is closed.
+static char s_discoverySectionText[720];
+
+static lv_obj_t *discoveryMakeLabel(lv_obj_t *parent, const char *text, bool header) {
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_width(lbl, lv_pct(100));
+    lv_obj_set_style_text_font(lbl, header ? kDiscoveryHeaderFont : kDiscoveryBodyFont, 0);
+    lv_obj_set_style_text_color(lbl,
+                                header ? lv_color_hex(kDiscoveryHeaderColor)
+                                       : lv_color_hex(kDiscoveryBodyColor), 0);
+    // A little air above a heading, none above the rows it introduces, so the
+    // groups read as blocks rather than as one continuous list.
+    lv_obj_set_style_pad_top(lbl, header ? 4 : 0, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(lbl, text);
+    return lbl;
+}
+
+// One group under construction. The header label is created on the first row
+// rather than up front, which is what lets an empty group decide for itself
+// whether it is worth drawing — and still keeps the header above its rows,
+// since the body label is only added when the group is finished.
+struct DiscoverySection {
+    lv_obj_t   *col;
+    const char *header;
+    int         rows;
+};
+
+static void discoverySectionRow(DiscoverySection &s, const char *fmt, ...) {
+    if (s.rows == 0) {
+        discoveryMakeLabel(s.col, s.header, true);
+        s_discoverySectionText[0] = '\0';
+    }
+    s.rows++;
+
+    size_t used = strlen(s_discoverySectionText);
+    const size_t cap = sizeof(s_discoverySectionText);
+    if (used + 1 >= cap) return;
     va_list ap;
     va_start(ap, fmt);
-    const int n = vsnprintf(buf + used, cap - used, fmt, ap);
+    const int n = vsnprintf(s_discoverySectionText + used, cap - used, fmt, ap);
     va_end(ap);
-    if (n < 0) return false;
-    if ((size_t)n >= cap - used) {
-        // Roll back the truncation: half a row reads as corrupt data, where a
-        // list that simply stops reads as a list that ran out of room.
-        buf[used] = '\0';
-        return false;
-    }
-    return true;
+    // Roll back a truncated row: half a row reads as corrupt data, where a list
+    // that simply stops reads as a list that ran out of room.
+    if (n < 0 || (size_t)n >= cap - used) s_discoverySectionText[used] = '\0';
 }
 
-// Each group appends to whatever is already in its column, so several can share
-// one on narrow boards. Every group prints its header even when empty: in a
-// multi-column layout a blank column reads as a bug, not as "nothing here".
+// emptyText draws when nothing was added; pass null to leave the group out
+// entirely, which is what the per-hop buckets want.
+static void discoverySectionFinish(DiscoverySection &s, const char *emptyText) {
+    if (s.rows > 0) {
+        // Drop the last row's newline: kept, it draws an empty line under every
+        // group, which the header's own top padding already provides.
+        size_t len = strlen(s_discoverySectionText);
+        if (len > 0 && s_discoverySectionText[len - 1] == '\n') {
+            s_discoverySectionText[len - 1] = '\0';
+        }
+        discoveryMakeLabel(s.col, s_discoverySectionText, false);
+        return;
+    }
+    if (!emptyText) return;
+    discoveryMakeLabel(s.col, s.header, true);
+    discoveryMakeLabel(s.col, emptyText, false);
+}
+
+// Long name when we have one, short name otherwise, hex as the last resort.
+// Truncated to what a column can actually hold: a 40-character name would wrap
+// every row on a three-column Pager, and a wrapped list is harder to scan than
+// a clipped one.
+// Takes the entry rather than the id: every caller already has one in hand, and
+// Nodes.find() is a linear scan — looking it up again once per row would make
+// drawing the list quadratic in the size of the node table.
+static void discoveryNodeLabel(const NodeEntry &e, char *out, size_t outLen) {
+    if (e.hasName && e.longName[0]) {
+        utf8util::copyTruncate(out, outLen, e.longName);
+        return;
+    }
+    liveNodeLabel(e.nodeId, out, outLen, true);
+}
 
 // Direct neighbors, with the SNR we measured ourselves — the one number here
 // that is our own reading, so it keeps its decimal.
-static void discoveryBuildDirect(char *out, size_t cap) {
+static void discoveryBuildDirect(lv_obj_t *col) {
+    DiscoverySection s = { col, "DIRECT", 0 };
     const int total = Nodes.count();
-    char label[20];
-    if (!discoveryAppend(out, cap, "DIRECT\n")) return;
-    int direct = 0;
+    char label[kDiscoveryNameMax];
     for (int i = 0; i < total; i++) {
         const NodeEntry *e = Nodes.at(i);
         if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
-        if (!nodeIsDirectNeighbor(*e)) continue;
-        direct++;
-        liveNodeLabel(e->nodeId, label, sizeof(label), true);
-        if (!discoveryAppend(out, cap, "  %-8s %.1f dB\n", label, e->snr)) return;
+        if (!discoveryIsDirect(*e)) continue;
+        discoveryNodeLabel(*e, label, sizeof(label));
+        discoverySectionRow(s, "  %s  %.1f dB\n", label, e->snr);
     }
-    if (direct == 0) discoveryAppend(out, cap, "  (none)\n");
+    discoverySectionFinish(s, "  (none)");
 }
 
 // Everything else we have heard, bucketed by distance, then the ones whose
 // packets never said. hop_limit is 3 bits on the wire, so 7 is the ceiling.
-static void discoveryBuildDistance(char *out, size_t cap) {
+static void discoveryBuildDistance(lv_obj_t *col) {
     const int total = Nodes.count();
-    char label[20];
+    char label[kDiscoveryNameMax];
+    char header[12];
     int listed = 0;
 
     for (int hop = 1; hop <= 7; hop++) {
-        int inBucket = 0;
+        snprintf(header, sizeof(header), "%d HOP%s", hop, hop == 1 ? "" : "S");
+        DiscoverySection s = { col, header, 0 };
         for (int i = 0; i < total; i++) {
             const NodeEntry *e = Nodes.at(i);
             if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
-            if (!nodeHeardFrom(*e) || !e->hasHops || e->hops != hop) continue;
-            if (inBucket == 0
-                && !discoveryAppend(out, cap, "%d HOP%s\n", hop, hop == 1 ? "" : "S")) return;
-            inBucket++;
+            if (!discoveryHeardFrom(*e) || !e->hasHops || e->hops != hop) continue;
+            discoveryNodeLabel(*e, label, sizeof(label));
+            discoverySectionRow(s, "  %s\n", label);
             listed++;
-            liveNodeLabel(e->nodeId, label, sizeof(label), true);
-            if (!discoveryAppend(out, cap, "  %s\n", label)) return;
         }
+        // No empty text: an unused hop distance is not a fact worth a heading.
+        discoverySectionFinish(s, nullptr);
     }
 
-    int unknown = 0;
+    DiscoverySection unknown = { col, "DISTANCE UNKNOWN", 0 };
     for (int i = 0; i < total; i++) {
         const NodeEntry *e = Nodes.at(i);
         if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
-        if (!nodeHeardFrom(*e) || e->hasHops) continue;
-        if (unknown == 0 && !discoveryAppend(out, cap, "DISTANCE UNKNOWN\n")) return;
-        unknown++;
+        if (!discoveryHeardFrom(*e) || e->hasHops) continue;
+        discoveryNodeLabel(*e, label, sizeof(label));
+        discoverySectionRow(unknown, "  %s\n", label);
         listed++;
-        liveNodeLabel(e->nodeId, label, sizeof(label), true);
-        if (!discoveryAppend(out, cap, "  %s\n", label)) return;
     }
+    discoverySectionFinish(unknown, nullptr);
 
-    if (listed == 0) discoveryAppend(out, cap, "MULTI-HOP\n  (none)\n");
+    if (listed == 0) {
+        DiscoverySection none = { col, "MULTI-HOP", 0 };
+        discoverySectionFinish(none, "  (none)");
+    }
 }
 
 // The group nothing else in the UI can show: nodes that exist in a neighbor's
 // report and have never sent us anything. Deduplicated against a small seen
 // list — a node named by three reporters is still one node.
-static void discoveryBuildHeardAbout(char *out, size_t cap) {
+static void discoveryBuildHeardAbout(lv_obj_t *col) {
+    DiscoverySection s = { col, "HEARD ABOUT", 0 };
     constexpr int kMaxHeardAbout = 24;
     uint32_t seen[kMaxHeardAbout];
     int seenCount = 0;
-    int heardAbout = 0;
-    char label[20];
+    char label[kDiscoveryNameMax];
     char via[20];
 
-    if (!discoveryAppend(out, cap, "HEARD ABOUT\n")) return;
     for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
         const NeighborReport *rep = Nodes.neighborReportAt(r);
         if (!rep) continue;
@@ -15610,42 +15701,50 @@ static void discoveryBuildHeardAbout(char *out, size_t cap) {
             const uint32_t id = rep->ids[j];
             if (id == 0 || id == s_myNodeId) continue;
             const NodeEntry *known = Nodes.find(id);
-            if (known && nodeHeardFrom(*known)) continue;   // already grouped above
+            if (known && discoveryHeardFrom(*known)) continue;   // already grouped above
             bool dup = false;
-            for (int s = 0; s < seenCount; s++) {
-                if (seen[s] == id) { dup = true; break; }
+            for (int k = 0; k < seenCount; k++) {
+                if (seen[k] == id) { dup = true; break; }
             }
             if (dup) continue;
             if (seenCount < kMaxHeardAbout) seen[seenCount++] = id;
 
-            heardAbout++;
-            liveNodeLabel(id, label, sizeof(label), true);
+            // known is null for a node only ever named by someone else, which
+            // is the usual case in this group — it falls back to the hex id.
+            if (known) discoveryNodeLabel(*known, label, sizeof(label));
+            else       liveNodeLabel(id, label, sizeof(label), true);
+            // The reporter stays a short name: it is the secondary half of the
+            // row, and two long names would wrap every line in this group.
             liveNodeLabel(rep->nodeId, via, sizeof(via), true);
             // Whole dB, and no column padding: this group gets a third of the
             // Pager and half a T-Deck, and a wrapped row costs more than the
             // quarter-dB does. It is the reporter's reading of that link, not
             // ours, so the precision was never worth much here anyway.
-            if (!discoveryAppend(out, cap, "  %s via %s (%.0f dB)\n",
-                                 label, via, (float)rep->snrQ4[j] / 4.0f)) return;
+            discoverySectionRow(s, "  %s via %s (%.0f dB)\n",
+                                label, via, (float)rep->snrQ4[j] / 4.0f);
         }
     }
-    if (heardAbout == 0) discoveryAppend(out, cap, "  (none)\n");
+    discoverySectionFinish(s, "  (none)");
 }
 
-// Fills every column for the current board. The summary rides on the DIRECT
-// column, which is column 0 on every layout.
-static void discoveryBuildColumns(char cols[kDiscoveryCols][kDiscoveryColCap]) {
-    for (int i = 0; i < kDiscoveryCols; i++) cols[i][0] = '\0';
+// Rebuilds every column's contents. The summary rides on the DIRECT column,
+// which is column 0 on every layout.
+static void discoveryBuildColumns() {
+    for (int i = 0; i < kDiscoveryCols; i++) {
+        if (s_discoveryColBoxes[i]) lv_obj_clean(s_discoveryColBoxes[i]);
+    }
+    if (!s_discoveryColBoxes[kDiscoveryColDirect]) return;
 
-    // Counts live here rather than on the status line, which belongs to the
+    // Counts sit here rather than on the status line, which belongs to the
     // sweep: a refusal message must not cost the user the summary.
-    discoveryAppend(cols[kDiscoveryColDirect], kDiscoveryColCap,
-                    "%d node(s), %d report(s)\n",
-                    Nodes.count(), Nodes.neighborReportCount());
+    char summary[48];
+    snprintf(summary, sizeof(summary), "%d node(s), %d report(s)",
+             Nodes.count(), Nodes.neighborReportCount());
+    discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
 
-    discoveryBuildDirect(cols[kDiscoveryColDirect], kDiscoveryColCap);
-    discoveryBuildDistance(cols[kDiscoveryColDistance], kDiscoveryColCap);
-    discoveryBuildHeardAbout(cols[kDiscoveryColHeard], kDiscoveryColCap);
+    discoveryBuildDirect(s_discoveryColBoxes[kDiscoveryColDirect]);
+    discoveryBuildDistance(s_discoveryColBoxes[kDiscoveryColDistance]);
+    discoveryBuildHeardAbout(s_discoveryColBoxes[kDiscoveryColHeard]);
 }
 
 static void discoverySetStatus(const char *text) {
@@ -15653,6 +15752,226 @@ static void discoverySetStatus(const char *text) {
     if (s_discoveryStatusLabel) {
         lv_label_set_text(s_discoveryStatusLabel, s_discoveryStatus);
     }
+}
+
+#if HAS_SD_CARD
+// ── Saving a snapshot ────────────────────────────────────────────────────────
+// SD-card boards only. Boards with just internal flash could write the same
+// file, but these snapshots accumulate one per press and a small internal
+// partition is the wrong place to let that happen unattended.
+
+// Minimal JSON string escaping. Quote and backslash get escaped; anything below
+// 0x20 becomes a space rather than \uXXXX, which keeps the worst case at 2x the
+// input and lets the caller size a buffer without guessing. UTF-8 above 0x7F
+// passes through untouched — JSON strings are UTF-8 already.
+static void discoveryJsonEscape(const char *in, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 2 < outLen; i++) {
+        const unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            out[o++] = ' ';
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+// One node, as a JSON object. `extra` appends already-formatted fields. The
+// separator is written before the element rather than after it, so no caller
+// has to know which element is last.
+static void discoveryJsonNode(File &f, bool &first, const NodeEntry *e,
+                              uint32_t nodeId, const char *extra) {
+    char shortEsc[24] = {};
+    char longEsc[96]  = {};
+    if (e) {
+        discoveryJsonEscape(e->shortName, shortEsc, sizeof(shortEsc));
+        discoveryJsonEscape(e->longName, longEsc, sizeof(longEsc));
+    }
+    if (!first) f.print(",\n");
+    first = false;
+    f.printf("    {\"id\": \"!%08lX\", \"short\": \"%s\", \"long\": \"%s\"%s}",
+             (unsigned long)nodeId, shortEsc, longEsc, extra ? extra : "");
+}
+
+// Writes the current picture to /camillia/discovery-<stamp>.json. Fills msg
+// with what to put on the status line either way.
+static bool discoverySaveJson(char *msg, size_t msgLen) {
+    if (!storageBegin()) {
+        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        return false;
+    }
+    storageFs().mkdir("/camillia");
+
+    // Wall clock when we have one; uptime otherwise. Either way the name has to
+    // be unique, so a same-second second press does not silently overwrite the
+    // first — hence the suffix probe below.
+    char stamp[32];
+    const time_t nowEpoch = time(nullptr);
+    if (nowEpoch >= 1700000000) {
+        struct tm lt;
+        localtime_r(&nowEpoch, &lt);
+        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &lt);
+    } else {
+        snprintf(stamp, sizeof(stamp), "boot-%lus", (unsigned long)(millis() / 1000UL));
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/camillia/discovery-%s.json", stamp);
+    for (int attempt = 2; attempt <= 9 && storageFs().exists(path); attempt++) {
+        snprintf(path, sizeof(path), "/camillia/discovery-%s-%d.json", stamp, attempt);
+    }
+    if (storageFs().exists(path)) {
+        snprintf(msg, msgLen, "Save failed - too many this second");
+        return false;
+    }
+
+    File f = storageFs().open(path, FILE_WRITE);
+    if (!f) {
+        snprintf(msg, msgLen, "Save failed - cannot write %s", storageName());
+        return false;
+    }
+
+    const int total = Nodes.count();
+    char extra[48];
+
+    f.print("{\n");
+    f.printf("  \"node\": \"!%08lX\",\n", (unsigned long)s_myNodeId);
+    if (nowEpoch >= 1700000000) {
+        char iso[32];
+        struct tm lt;
+        localtime_r(&nowEpoch, &lt);
+        strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%S", &lt);
+        f.printf("  \"generated\": \"%s\",\n", iso);
+    } else {
+        // Explicitly null rather than a fabricated date: the clock was not set,
+        // and a snapshot that lies about when it was taken is worse than one
+        // that admits it does not know.
+        f.print("  \"generated\": null,\n");
+    }
+    f.printf("  \"uptimeMs\": %lu,\n", (unsigned long)millis());
+    f.printf("  \"counts\": {\"nodes\": %d, \"reports\": %d},\n",
+             total, Nodes.neighborReportCount());
+
+    // direct
+    bool first = true;
+    f.print("  \"direct\": [\n");
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if (!discoveryIsDirect(*e)) continue;
+        snprintf(extra, sizeof(extra), ", \"snr\": %.2f", e->snr);
+        discoveryJsonNode(f, first, e, e->nodeId, extra);
+    }
+    f.print("\n  ],\n");
+
+    // by hop count
+    first = true;
+    f.print("  \"hops\": [\n");
+    for (int hop = 1; hop <= 7; hop++) {
+        for (int i = 0; i < total; i++) {
+            const NodeEntry *e = Nodes.at(i);
+            if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+            if (!discoveryHeardFrom(*e) || !e->hasHops || e->hops != hop) continue;
+            snprintf(extra, sizeof(extra), ", \"hops\": %d, \"snr\": %.2f", hop, e->snr);
+            discoveryJsonNode(f, first, e, e->nodeId, extra);
+        }
+    }
+    f.print("\n  ],\n");
+
+    // heard from, distance unknown
+    first = true;
+    f.print("  \"distanceUnknown\": [\n");
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if (!discoveryHeardFrom(*e) || e->hasHops) continue;
+        snprintf(extra, sizeof(extra), ", \"snr\": %.2f", e->snr);
+        discoveryJsonNode(f, first, e, e->nodeId, extra);
+    }
+    f.print("\n  ],\n");
+
+    // heard about only, with who reported them
+    first = true;
+    f.print("  \"heardAbout\": [\n");
+    for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
+        const NeighborReport *rep = Nodes.neighborReportAt(r);
+        if (!rep) continue;
+        for (int j = 0; j < rep->count; j++) {
+            const uint32_t id = rep->ids[j];
+            if (id == 0 || id == s_myNodeId) continue;
+            const NodeEntry *known = Nodes.find(id);
+            if (known && discoveryHeardFrom(*known)) continue;
+            snprintf(extra, sizeof(extra), ", \"via\": \"!%08lX\", \"snr\": %.2f",
+                     (unsigned long)rep->nodeId, (float)rep->snrQ4[j] / 4.0f);
+            discoveryJsonNode(f, first, known, id, extra);
+        }
+    }
+    f.print("\n  ],\n");
+
+    // The raw reports, so the graph can be rebuilt from the file rather than
+    // only the grouping this screen happened to draw.
+    first = true;
+    f.print("  \"reports\": [\n");
+    for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
+        const NeighborReport *rep = Nodes.neighborReportAt(r);
+        if (!rep) continue;
+        if (!first) f.print(",\n");
+        first = false;
+        f.printf("    {\"id\": \"!%08lX\", \"intervalS\": %lu, \"ageMs\": %lu, "
+                 "\"neighbors\": [",
+                 (unsigned long)rep->nodeId,
+                 (unsigned long)rep->intervalS,
+                 (unsigned long)(millis() - rep->updatedMs));
+        for (int j = 0; j < rep->count; j++) {
+            f.printf("%s{\"id\": \"!%08lX\", \"snr\": %.2f}",
+                     (j == 0) ? "" : ", ",
+                     (unsigned long)rep->ids[j],
+                     (float)rep->snrQ4[j] / 4.0f);
+        }
+        f.print("]}");
+    }
+    f.print("\n  ]\n}\n");
+
+    // position(), not size(): the write handle knows exactly how much went out,
+    // where size() can lag until the card is flushed.
+    const size_t bytes = (size_t)f.position();
+    f.close();
+
+    Serial.printf("[discovery] saved %s (%u bytes)\n", path, (unsigned)bytes);
+    // Name only: the full path does not fit the status line, and it is always
+    // the same directory.
+    const char *name = strrchr(path, '/');
+    snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
+    return true;
+}
+#endif  // HAS_SD_CARD
+
+// Empties the screen — every group, not just the one Discovery stores itself.
+//
+// The neighbor reports are dropped outright, because Discovery owns them. The
+// other groups are a live read of the node table, which Discovery does not own
+// and must not damage: the Nodes screen, the recency sort and the NeighborInfo
+// announce all read the same records. So rather than deleting anything there,
+// the clear drops a watermark and Discovery stops counting whatever it has not
+// heard since. The screen goes blank and refills from live traffic, which is
+// the question it is really being asked — who is out there *now*.
+//
+// Nothing here is destructive: nodes reappear as they transmit, and reports as
+// each node makes its next NeighborInfo broadcast.
+static void discoveryClear() {
+    const int droppedReports = Nodes.clearNeighbors();
+    s_discoveryClearedMs = millis();
+    if (s_discoveryClearedMs == 0) s_discoveryClearedMs = 1;   // 0 means "never cleared"
+
+    char msg[72];
+    snprintf(msg, sizeof(msg), "Cleared (%d report(s)) - rebuilding from traffic",
+             droppedReports);
+    discoverySetStatus(msg);
 }
 
 // One NODEINFO_APP broadcast with want_response, and never more than that.
@@ -15741,26 +16060,19 @@ static void serviceDiscoverySweep() {
 }
 
 static void refreshDiscoveryModal(bool force) {
-    if (!s_discoveryModal || !s_discoveryColLabels[0] || !s_discoveryStatusLabel) return;
+    if (!s_discoveryModal || !s_discoveryColBoxes[0] || !s_discoveryStatusLabel) return;
     if (!lvObjValid(s_discoveryModal)) {
         s_discoveryModal = nullptr;
         s_discoveryStatusLabel = nullptr;
         s_discoveryList = nullptr;
-        memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+        memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
         return;
     }
 
-    // Rebuilding the body walks the whole node table several times, so it is
-    // gated on something actually having changed. The sweep's seconds counter
-    // is folded in so the countdown still ticks while nothing else moves.
-    uint32_t sig = (uint32_t)Nodes.count() * 131u
-                 + (uint32_t)Nodes.neighborReportCount() * 7919u;
-    if (s_discoverySweepStartedMs != 0) {
-        sig += ((millis() - s_discoverySweepStartedMs) / 1000UL) * 17u;
-    }
-    if (!force && sig == s_discoveryRenderedSig) return;
-    s_discoveryRenderedSig = sig;
-
+    // The sweep counter ticks once a second and changes nothing in the list, so
+    // it drives the status line only. Rebuilding the columns tears down and
+    // recreates every label in them, which is not something to do to a screen
+    // the user is reading just because a timer moved.
     if (s_discoverySweepStartedMs != 0) {
         const uint32_t elapsedS = (millis() - s_discoverySweepStartedMs) / 1000UL;
         char msg[72];
@@ -15770,15 +16082,34 @@ static void refreshDiscoveryModal(bool force) {
         discoverySetStatus("Ready");
     }
 
-    // One label per column rather than a row per node: the Live screen already
-    // aborts on a low LVGL pool, and a 250-node mesh would be 250 objects
-    // rebuilt per tick. Static because the buffers are far too big for a stack
-    // this deep in the loop.
-    static char cols[kDiscoveryCols][kDiscoveryColCap];
-    discoveryBuildColumns(cols);
-    for (int i = 0; i < kDiscoveryCols; i++) {
-        if (s_discoveryColLabels[i]) lv_label_set_text(s_discoveryColLabels[i], cols[i]);
+    // Rebuilding tears down and recreates every label in the columns, so it is
+    // gated on the visible set actually having changed.
+    //
+    // This has to hash the nodes themselves, not just count them. The obvious
+    // cheap signature — node count plus report count — misses the case that
+    // matters most: after a Clear, a node reappears by being *heard from*
+    // again, which changes neither count. `meshDirty` does not save us either,
+    // because processMeshPacket() returns false for NodeInfo, Position,
+    // Telemetry and NeighborInfo — precisely the packets that refill this
+    // screen. So the scan is the price of the screen being live at all. It is
+    // one cheap pass over the node table, and only while the modal is open.
+    uint32_t sig = (uint32_t)Nodes.neighborReportCount() * 7919u
+                 + s_discoveryClearedMs;
+    const int total = Nodes.count();
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || !discoveryHeardFrom(*e)) continue;
+        // Whole-dB SNR: the reading jitters constantly, and rebuilding the tree
+        // under the user for a tenth of a dB is not worth it.
+        sig += e->nodeId
+             ^ ((uint32_t)e->hops << 24)
+             ^ (e->hasHops ? 0x5A5A5A5Au : 0u)
+             ^ ((uint32_t)(int32_t)e->snr << 8);
     }
+    if (!force && sig == s_discoveryRenderedSig) return;
+    s_discoveryRenderedSig = sig;
+
+    discoveryBuildColumns();
 }
 
 static void openDiscoveryModal() {
@@ -15788,7 +16119,7 @@ static void openDiscoveryModal() {
         s_discoveryModal = nullptr;
         s_discoveryStatusLabel = nullptr;
         s_discoveryList = nullptr;
-        memset(s_discoveryColLabels, 0, sizeof(s_discoveryColLabels));
+        memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
     }
     if (!s_rootScreen || s_discoveryModal) return;
 
@@ -15839,10 +16170,13 @@ static void openDiscoveryModal() {
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     // Touch build: Sweep and Close both live in the header, as on the charts.
+    // 44px rather than the charts' 48: three buttons plus their gaps have to
+    // clear the title, and the vertical build only has 240px of header to
+    // spend. Heltec has no SD slot, so there is no Save button to fit as well.
     auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, int xOffset,
                                lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
-        lv_obj_set_size(btn, 48, 20);
+        lv_obj_set_size(btn, 44, 20);
         lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
         lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_pad_all(btn, 0, 0);
@@ -15860,9 +16194,14 @@ static void openDiscoveryModal() {
     };
     makeDiscoveryBtn(header, "Close", 0,
                      [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); });
-    makeDiscoveryBtn(header, "Sweep", -52, [](lv_event_t *e) {
+    makeDiscoveryBtn(header, "Sweep", -48, [](lv_event_t *e) {
         LV_UNUSED(e);
         discoveryStartSweep();
+        refreshDiscoveryModal(true);
+    });
+    makeDiscoveryBtn(header, "Clear", -96, [](lv_event_t *e) {
+        LV_UNUSED(e);
+        discoveryClear();
         refreshDiscoveryModal(true);
     });
 #else
@@ -15908,18 +16247,27 @@ static void openDiscoveryModal() {
                               LV_FLEX_ALIGN_START);
     }
 
+    // Each column is a container, not a label: a group's heading and its rows
+    // are separate labels so they can carry different fonts, and only a
+    // container can stack them. refreshDiscoveryModal() empties and refills
+    // these, so nothing outside holds a pointer to what is inside them.
     for (int i = 0; i < kDiscoveryCols; i++) {
-        lv_obj_t *lbl = lv_label_create(colRow);
-        s_discoveryColLabels[i] = lbl;
+        lv_obj_t *box = lv_obj_create(colRow);
+        s_discoveryColBoxes[i] = box;
         if (kDiscoveryCols > 1) {
-            lv_obj_set_flex_grow(lbl, 1);   // equal shares of the row
+            lv_obj_set_flex_grow(box, 1);   // equal shares of the row
         } else {
-            lv_obj_set_width(lbl, lv_pct(100));
+            lv_obj_set_width(box, lv_pct(100));
         }
-        lv_obj_set_style_text_font(lbl, kDiscoveryBodyFont, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lbl, "");
+        lv_obj_set_height(box, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(box, 0, 0);
+        lv_obj_set_style_pad_all(box, 0, 0);
+        lv_obj_set_style_pad_row(box, 0, 0);
+        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
     }
 
 #if !defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -15927,7 +16275,12 @@ static void openDiscoveryModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "S = Sweep   %s = Back", modalCloseKeyLabel());
+#if HAS_SD_CARD
+    lv_label_set_text_fmt(hint, "W = Sweep   C = Clear   S = Save   %s = Back",
+                          modalCloseKeyLabel());
+#else
+    lv_label_set_text_fmt(hint, "W = Sweep   C = Clear   %s = Back", modalCloseKeyLabel());
+#endif
 #endif
 
     refreshDiscoveryModal(true);
@@ -20917,11 +21270,27 @@ static void pumpKeyboardInput() {
                 closeDiscoveryModal();
                 continue;
             }
-            if (k == 's' || k == 'S') {
+            // Sweep is (W)  because Save took S. It is the one key here that
+            // transmits, so it is also the one worth not putting under a finger
+            // that was reaching for something else.
+            if (k == 'w' || k == 'W') {
                 discoveryStartSweep();          // refuses, with a reason, when it must
                 refreshDiscoveryModal(true);
                 continue;
             }
+            if (k == 'c' || k == 'C') {
+                discoveryClear();
+                refreshDiscoveryModal(true);
+                continue;
+            }
+#if HAS_SD_CARD
+            if (k == 's' || k == 'S') {
+                char msg[72];
+                (void)discoverySaveJson(msg, sizeof(msg));   // msg says which way it went
+                discoverySetStatus(msg);
+                continue;
+            }
+#endif
             if (k == KEY_SCROLL_UP && s_discoveryList) {
                 scrollListClamped(s_discoveryList, 18);
                 continue;
@@ -27373,7 +27742,9 @@ void loop() {
         refreshChUtilChart(meshDirty);
         refreshSnrRssiChart(meshDirty);
 #if FEATURE_DISCOVERY
-        refreshDiscoveryModal(meshDirty);
+        // No meshDirty force: its own signature covers the packets that change
+        // this screen, and meshDirty misses most of them anyway.
+        refreshDiscoveryModal();
 #endif
         refreshDmModal(meshDirty);
     }

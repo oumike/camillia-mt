@@ -6,6 +6,14 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Location Precision: position broadcasts can be rounded to a grid before they leave the device - Precise, or anything from ~50 m to ~23 km. Set it on the device under Config, on the row below Share Location, or under Position in web config.
-- Coarsened positions are tagged with how exact they are, so other Meshtastic clients show an area rather than a false pinpoint; the device keeps using your real fix locally for the compass, distances and the nodes list.
-- Location Precision is saved with the rest of your settings and survives export and import; it defaults to Precise, so updating does not change what your node transmits until you pick a coarser setting.)CAMNOTES";
+- Discovery: press C (or the Clear button) to empty every group and refill the screen from live traffic, so it shows who is on the air now instead of everything the device has ever met - nodes and names on the Nodes screen are untouched.
+- Discovery: press S to save a timestamped JSON snapshot to `/camillia/discovery-YYYYMMDD-HHMMSS.json` on boards with an SD card (T-Deck, T-Lora Pager), including the raw neighbor reports; with no clock set yet the file is named by uptime instead.
+
+Changed
+- Discovery lists each node by its long name when one is known, clipped to fit the column instead of wrapping, falling back to the short name and then the hex ID.
+- Discovery group headings (DIRECT, 1 HOP, HEARD ABOUT, ...) are drawn larger and in amber so the groups separate at a glance.
+- Discovery sweep moved from S to W to make room for Save; the Heltec V4 sweep button is unchanged.
+
+Fixed
+- Discovery now redraws when a node's hop distance or signal changes, not only when a node is added or a new neighbor report arrives.
+- Discovery no longer rebuilds the whole list once a second while a sweep counts down; the countdown updates on the status line only.)CAMNOTES";
