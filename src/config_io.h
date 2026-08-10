@@ -254,6 +254,14 @@ struct RhinoConfig {
     // position_precision. 32 = exact; lower values round the coordinate to a
     // coarser grid before it leaves the device. See kPositionPrecisions.
     uint8_t  positionPrecision;
+    // Same trailing-padding trap as every pad above: positionPrecision is one
+    // byte at the end of a 4-aligned struct, so the stored blob carries up to
+    // three bytes past it that the load memcpy's straight over anything placed
+    // there. Three pad bytes put the field below at or past the old sizeof.
+    uint8_t  _reservedPad7[3];
+    // How long the notification LED / keyboard backlight keeps reminding after
+    // a message arrives, in seconds. 0 = never stop. See kNotifyLightTimeouts.
+    uint16_t notifyLightTimeoutS;
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -299,6 +307,31 @@ static inline uint8_t cfgCoerceKbFlashes(int n) {
     if (n > KB_FLASHES_MAX) return KB_FLASHES_MAX;
     return (uint8_t)n;
 }
+
+// ── Light-notification timeout ───────────────────────────────────────────────
+// How long the notification LED or keyboard backlight keeps reminding after a
+// message lands. Never (0) is the default and is what the firmware has always
+// done: repeat until the message is read.
+//
+// The clock restarts on every arrival, so a busy channel keeps the light going
+// and silence lets it lapse.
+struct NotifyLightTimeoutOption {
+    uint16_t    secs;
+    const char *label;
+};
+extern const NotifyLightTimeoutOption kNotifyLightTimeouts[];
+extern const int kNotifyLightTimeoutCount;
+
+// Label for a stored value; falls back to the Never label so an unrecognised
+// value never renders blank.
+const char *notifyLightTimeoutName(uint16_t secs);
+
+// Snaps to the nearest listed value. A hand-edited YAML saying 120 comes back
+// as 60, which is the price of a row that can always reproduce what it shows:
+// an arbitrary value would display as something the user could not cycle back
+// to. Never (0) is only chosen by an exact 0, so no small number rounds a
+// timeout away into "never stop".
+uint16_t cfgCoerceNotifyLightTimeout(long secs);
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
 // GPS otherwise; MANUAL means the user set it and nothing may overwrite it.

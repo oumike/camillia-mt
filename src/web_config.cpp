@@ -2293,6 +2293,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
             "Only used while the screen is off.</p>";
 #endif
+#if HAS_LIGHT_NOTIFY
+    // One field for whichever light the board has: the notification LED and the
+    // keyboard backlight never coexist, and the question is the same either way.
+    html += "<label>Light Timeout<select name='light_timeout'>";
+    for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
+        snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                 (unsigned)kNotifyLightTimeouts[i].secs,
+                 (gCfg->notifyLightTimeoutS == kNotifyLightTimeouts[i].secs) ? " selected" : "",
+                 kNotifyLightTimeouts[i].label);
+        html += tmp;
+    }
+    html += "</select></label>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+            "How long the light keeps reminding you after a message arrives. The "
+            "clock restarts on each new message, and reading the message stops it "
+            "immediately either way. Never means it keeps reminding until read.</p>";
+#endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
             "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
@@ -3392,9 +3409,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var ae=document.activeElement;if(ae&&ae.id==='chat-input')return;"
                             "var atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<40;"
                             "var h='';var i=0;var L=chatLines;"
-                            "while(i<L.length){var pid=L[i].pid,mine=!!L[i].mine,txt=L[i].t;var j=i+1;"
-                                "if(pid!==0){while(j<L.length&&L[j].pid===pid){var seg=L[j].t.replace(/^\\s{1,2}/,'');if(seg)txt+=' '+seg;j++;}}"
-                                "h+=chatBubble(pid,mine,txt);i=j;}"
+                            // A wrapped message is stored one line per wrap, and
+                            // ChannelMgr::_wordWrap() pushes those lines LAST SEGMENT
+                            // FIRST — the device draws its feed newest-at-top, so
+                            // reversed in storage is correct order on the glass. Read
+                            // the group back to front to put it together again.
+                            // L[j-1] is the opening line: it carries the "HH:MM [id] "
+                            // prefix and is the only line given an ack state, so it is
+                            // also where `mine` has to come from.
+                            "while(i<L.length){var pid=L[i].pid;var j=i+1;"
+                                "if(pid!==0){while(j<L.length&&L[j].pid===pid)j++;}"
+                                "var head=L[j-1];var txt=head.t;"
+                                "for(var k=j-2;k>=i;k--){var seg=L[k].t.replace(/^\\s{1,2}/,'');if(seg)txt+=' '+seg;}"
+                                "h+=chatBubble(pid,!!head.mine,txt);i=j;}"
                             "feed.innerHTML=h;if(atBottom)feed.scrollTop=feed.scrollHeight;"
                         "}"
                         "function chatReply(pid){"
@@ -3879,6 +3906,12 @@ static void handlePostSave() {
     }
     if (server.hasArg("kb_flash_dm")) {
         gCfg->kbBlinkDmFlashes = cfgCoerceKbFlashes(server.arg("kb_flash_dm").toInt());
+    }
+#endif
+#if HAS_LIGHT_NOTIFY
+    if (server.hasArg("light_timeout")) {
+        gCfg->notifyLightTimeoutS =
+            cfgCoerceNotifyLightTimeout(server.arg("light_timeout").toInt());
     }
 #endif
 #if HAS_SCROLL_INVERT

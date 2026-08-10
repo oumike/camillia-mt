@@ -338,6 +338,17 @@
 // notification LED on either board, length is what distinguishes them.
 #define MY_KB_BLINK_CHAN_FLASHES 1
 #define MY_KB_BLINK_DM_FLASHES   2
+
+// True on any board with a light to blink. The notification LED and the
+// keyboard backlight never coexist — HAS_NOTIFY_LED is the Mesh Deck and
+// HAS_KB_BLINK is the T-Deck and Pager — so the timeout below is one setting
+// covering whichever of the two a board actually has.
+#define HAS_LIGHT_NOTIFY (HAS_KB_BLINK || HAS_NOTIFY_LED)
+// How long the light keeps reminding after a message arrives, in seconds.
+// 0 = never stop, which is what every build before this setting did: blink
+// until the message is read. Defaulting to anything else would silently change
+// what a device in the field does the moment it takes an update.
+#define MY_NOTIFY_LIGHT_TIMEOUT_S 0
 #define MY_DEBUG_MONITOR    0
 #define MY_DBG_ACKS         MY_DEBUG_MONITOR
 #define MY_DBG_MESSAGES     MY_DEBUG_MONITOR

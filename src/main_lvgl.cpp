@@ -227,6 +227,14 @@ static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
 static lv_obj_t *s_cfgHeaderStatus = nullptr;
+// Config row filter, driven exactly like the Nodes one: the spacebar arms it,
+// printable keys narrow it, backspace edits and then disarms it. Rows are
+// matched on the label the user can actually see, so what they type is what
+// they are reading.
+static constexpr int kCfgFilterMax = 20;
+static char s_cfgFilter[kCfgFilterMax + 1] = {};
+static int  s_cfgFilterLen = 0;
+static bool s_cfgFilterOpen = false;
 // WiFi picker modal layered over CFG for selecting preferred known network.
 static lv_obj_t *s_cfgWifiBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiModal = nullptr;
@@ -277,6 +285,36 @@ static lv_obj_t *s_cfgBattCalSlider = nullptr;
 static lv_obj_t *s_cfgBattCalValue = nullptr;   // live "4.05 V   82%"
 static lv_obj_t *s_cfgBattCalDetail = nullptr;  // untrimmed reading + trim
 static int16_t   s_cfgBattCalOriginal = 0;      // restored if the user cancels
+// Shared "pick one stop from an ordered list" modal. Two settings use it —
+// location precision and the light timeout — and both are a scale rather than a
+// set of unrelated choices, which is what makes a slider the right control and
+// a cycling row the wrong one. The slider's range is list indices, so it can
+// never land between two real values.
+// Deliberately outside HAS_VOLUME_CONTROL: neither setting is audio-gated, so
+// the boards without a volume control still build and use this.
+struct CfgSliderPicker {
+    const char *title;
+    int         count;
+    // Text for the big value label at the stop. Returns a pointer to storage
+    // owned by the callee — the label copies it immediately.
+    const char *(*labelFor)(int idx);
+    // Commit. Called only from the Save path, never while dragging.
+    void        (*apply)(int idx);
+    const char *leftEnd;    // caption under the low end
+    const char *rightEnd;   // caption under the high end
+};
+
+static lv_obj_t *s_cfgSliderBackdrop = nullptr;
+static lv_obj_t *s_cfgSliderModal = nullptr;
+static lv_obj_t *s_cfgSliderCtl = nullptr;
+static lv_obj_t *s_cfgSliderValue = nullptr;
+static const CfgSliderPicker *s_cfgSliderSpec = nullptr;
+// Index while the slider is open. Staged rather than written straight into
+// s_cfg: for location precision a scheduled announce can fire mid-drag, and it
+// must go out at the value the user actually chose, not at whatever the knob
+// happens to be resting on.
+static int       s_cfgSliderStaged = 0;
+
 #if HAS_VOLUME_CONTROL
 static lv_obj_t *s_cfgVolBackdrop = nullptr;
 static lv_obj_t *s_cfgVolModal = nullptr;
@@ -1000,6 +1038,8 @@ static void onChatMessagePressed(lv_event_t *e);
 static void recomputeChannelHashes();
 static void initCfgActions();
 static void refreshCfgModal();
+// Repaints the existing rows for a moved selection, without rebuilding them.
+static void refreshCfgSelection();
 static void openCfgModal();
 static void closeCfgModal();
 static void activateCfgSelection();
@@ -1017,6 +1057,8 @@ static void closeCfgBrightnessModal();
 static void openCfgVolumeModal();
 static void closeCfgVolumeModal();
 static void revertCfgVolumePreview();
+static void closeCfgSliderModal();
+static void cancelCfgSlider();
 static void stepCfgVolume(int steps);
 static void cancelCfgVolume();
 static void applyCfgVolume();
@@ -1630,6 +1672,9 @@ enum CfgActionId {
     CFG_ACTION_KB_BLINK,
     CFG_ACTION_KB_BLINK_CHAN_FLASHES,
     CFG_ACTION_KB_BLINK_DM_FLASHES,
+    #endif
+    #if HAS_LIGHT_NOTIFY
+    CFG_ACTION_NOTIFY_LIGHT_TIMEOUT,
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
@@ -2375,6 +2420,37 @@ enum : uint8_t {
     MSG_ALERT_VISUAL_DM = 1,
 };
 
+#if HAS_LIGHT_NOTIFY
+// ── Light-notification window ────────────────────────────────────────────────
+// The LED and the keyboard blink both repeat once a second for as long as
+// something is unread, which means overnight they repeat all night. This is the
+// clock that lets them stop: armed on arrival, checked only where a pattern is
+// about to be re-armed, so a blink already in flight always finishes dark.
+//
+// Timed from the most recent arrival rather than from when the unread state
+// began — a busy channel keeps the light alive, silence lets it lapse, and a
+// new message starts the window over.
+static uint32_t s_lightNotifyArmedMs = 0;
+
+// Armed on arrival rather than inside the blink itself, because on HAS_KB_BLINK
+// boards the blink declines to run while the screen is awake. Arming there
+// would leave a message that landed with the screen on unarmed, and the light
+// would then start up whenever the screen happened to sleep — hours later, past
+// any window the user set.
+static void lightNotifyArm() {
+    s_lightNotifyArmedMs = millis();
+    if (s_lightNotifyArmedMs == 0) s_lightNotifyArmedMs = 1;   // 0 is the boot value
+}
+
+static bool lightNotifyWindowOpen() {
+    if (s_cfg.notifyLightTimeoutS == 0) return true;   // never stop: the default
+    if (s_lightNotifyArmedMs == 0) return false;       // nothing has arrived yet
+    // Unsigned subtraction, so the ~49-day millis() wrap takes care of itself.
+    return (uint32_t)(millis() - s_lightNotifyArmedMs)
+           < (uint32_t)s_cfg.notifyLightTimeoutS * 1000UL;
+}
+#endif
+
 static void triggerMessageAlert(bool bypassRateLimit = false,
                                 uint8_t visualSource = MSG_ALERT_VISUAL_CHANNEL) {
     static uint32_t lastAlertMs = 0;
@@ -2390,6 +2466,12 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     debugLogMessages("[alert] play mode=%u vol=%u screenAsleep=%d cpu=%luMHz\n",
                      (unsigned)s_cfg.msgAlertSound, (unsigned)s_cfg.volumePct,
                      (int)s_screenAsleep, (unsigned long)getCpuFrequencyMhz());
+
+#if HAS_LIGHT_NOTIFY
+    // Restart the reminder window. Below the rate limit above on purpose: a
+    // burst inside 120 ms is one arrival as far as the window is concerned.
+    lightNotifyArm();
+#endif
 
 #if defined(DEVICE_MESH_DECK)
     // Blink the front LED for any new message, channel or DM. Deliberately
@@ -3008,6 +3090,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      (unsigned)cfgCoerceKbFlashes((int)s_cfg.kbBlinkDmFlashes));
             break;
         #endif
+        #if HAS_LIGHT_NOTIFY
+        case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT:
+            snprintf(buf, bufLen, "Light Timeout: %s",
+                     notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
+            break;
+        #endif
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
@@ -3110,6 +3198,18 @@ static void cfgMoveSelection(int delta, const char *tag) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
     cfgDebugSelection(tag, s_cfgActions[s_cfgSelection]);
+    // Repaint, not rebuild: only the highlight moved. See refreshCfgSelection().
+    refreshCfgSelection();
+}
+
+// Rebuilds the row list for the current filter and puts the selection back at
+// the top. Keeping the old index would land on an unrelated row, since the list
+// it indexed into no longer exists.
+static void cfgApplyFilter() {
+    initCfgActions();
+    s_cfgSelection = 0;
+    s_cfgConfirmAction = -1;   // a pending confirmation is about a row that may be gone
+    s_cfgConfirmMs = 0;
     refreshCfgModal();
 }
 
@@ -4034,6 +4134,11 @@ static void meshDeckServiceLed() {
     if (s_mdLedPhasesLeft == 0) {
         // Idle: re-arm periodically for as long as something is unread. Reading
         // the messages clears the flags above and the reminder simply stops.
+        //
+        // The timeout is checked only here, in the idle branch, so a pattern
+        // already running always finishes and leaves the LED dark — the same
+        // way it behaves when a channel is marked read mid-blink.
+        if (!lightNotifyWindowOpen()) return;
         if ((uint32_t)(now - s_mdLedPatternStartMs) >= kMdLedRepeatMs) {
             meshDeckLedStartPattern(unreadColor);
         } else {
@@ -4238,7 +4343,11 @@ static void serviceKbBlink() {
     if (s_kbBlinkPhasesLeft == 0) {
         // Idle: re-arm periodically for as long as something is unread. Reading
         // the messages clears the flags and the reminder simply stops.
+        //
+        // The timeout is checked only here, in the idle branch, so a pattern
+        // already running always finishes and leaves the backlight dark.
         if (!kbBlinkHasUnread()) return;
+        if (!lightNotifyWindowOpen()) return;
         if ((uint32_t)(now - s_kbBlinkPatternStartMs) < kKbBlinkRepeatMs) return;
         kbBlinkStartPattern(DMs.hasUnread());
     }
@@ -4726,6 +4835,9 @@ static void applyLoadedConfigInvariants() {
     // particular must not survive: applyPositionPrecision() treats it as "do
     // not coarsen", which is the opposite of what a stray 0 looks like.
     s_cfg.positionPrecision = positionPrecisionCoerce(s_cfg.positionPrecision);
+    // An off-list value would show on the row as "Never" while behaving as
+    // something else entirely, and the row could not cycle back to it.
+    s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
     applyPresetParams(s_cfg);
 }
 
@@ -6409,6 +6521,11 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK_CHAN_FLASHES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BLINK_DM_FLASHES;
     #endif
+    // Last of the notification group, and it governs whichever light this board
+    // has — the LED rows above on the Mesh Deck, the blink rows on the other two.
+    #if HAS_LIGHT_NOTIFY
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LIGHT_TIMEOUT;
+    #endif
     #if HAS_AUDIO_ALERTS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     #endif
@@ -6438,6 +6555,24 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
+
+    // Narrow to the rows matching the filter, in place and last so the whole
+    // list above stays a plain statement of what exists and in what order —
+    // every #if there already says enough without a filter test as well.
+    //
+    // Matched against the rendered label, so "wifi" finds "WiFi: On (...)" and
+    // typing part of a *value* works too: the label is what is on screen, and
+    // matching anything else would look broken.
+    if (s_cfgFilterOpen && s_cfgFilterLen > 0) {
+        int kept = 0;
+        for (int i = 0; i < s_cfgActionCount; i++) {
+            char label[80];
+            cfgActionLabel(s_cfgActions[i], label, sizeof(label));
+            if (!dmNodePickerContainsNoCase(label, s_cfgFilter)) continue;
+            s_cfgActions[kept++] = s_cfgActions[i];
+        }
+        s_cfgActionCount = kept;
+    }
 }
 
 static void refreshCfgPanelFocusStyles() {
@@ -6548,6 +6683,110 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     return n;
 }
 
+static lv_color_t cfgContrastColorFor565(uint16_t c) {
+    uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
+    uint8_t g = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);
+    uint8_t b = (uint8_t)(((c & 0x1F) * 255) / 31);
+    // Relative luminance approximation for robust light/dark contrast choice.
+    uint16_t luma = (uint16_t)((30U * r + 59U * g + 11U * b) / 100U);
+    return (luma >= 128U) ? lv_color_make(0x00, 0x00, 0x00)
+                          : lv_color_make(0xFF, 0xFF, 0xFF);
+}
+
+// Paints one row for its current state. Every visual property a row can carry
+// is written on every call — nothing is left to whatever the row happened to
+// look like before — so this can repaint an existing row rather than only
+// dress a freshly built one.
+static void cfgStyleRow(lv_obj_t *row, int i, bool disabled, bool selected) {
+    if (!row) return;
+    const lv_color_t selectionOutlineColor = cfgContrastColorFor565(s_ui.selectBg);
+    const lv_color_t selectionBgColor = lvColorFrom565(s_ui.selectBg);
+    const lv_color_t selectionTextColor = cfgContrastColorFor565(s_ui.selectBg);
+    const lv_opa_t selectionBgOpa = (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80;
+    const bool oddRow = (i & 1) != 0;
+
+    if (disabled) {
+        // Muted, and never drawn selected: keep the alternating-row hint only.
+        lv_obj_set_style_text_color(row, lv_color_hex(0x5A6B85), 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
+        lv_obj_set_style_bg_opa(row, oddRow ? LV_OPA_20 : LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_outline_width(row, 0, 0);
+        lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
+        return;
+    }
+    if (selected) {
+        lv_obj_set_style_text_color(row, selectionTextColor, 0);
+        lv_obj_set_style_bg_color(row, selectionBgColor, 0);
+        lv_obj_set_style_bg_opa(row, selectionBgOpa, 0);
+        lv_obj_set_style_border_width(row, 2, 0);
+        lv_obj_set_style_border_color(row, selectionOutlineColor, 0);
+        lv_obj_set_style_outline_width(row, 1, 0);
+        lv_obj_set_style_outline_color(row, selectionOutlineColor, 0);
+        lv_obj_set_style_outline_pad(row, 0, 0);
+        lv_obj_set_style_outline_opa(row, LV_OPA_70, 0);
+        return;
+    }
+    lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(row, oddRow ? LV_OPA_40 : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_outline_width(row, 0, 0);
+    lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
+}
+
+// Moving the selection changes which row is highlighted and nothing else, so it
+// repaints the existing rows instead of going through refreshCfgModal().
+//
+// That full rebuild deletes and recreates every row label — around fifty of
+// them, each with a cfgActionLabel() call behind it, and on the Pager it also
+// wipes the info panel and re-runs buildDeviceInfoLines(), which walks the
+// whole node table. Doing all that per keypress is what made holding a
+// direction key on the Pager feel like wading.
+// Index whose row currently carries the highlight, so moving it only has to
+// repaint two rows. -1 when the list has just been rebuilt or torn down.
+static int s_cfgPaintedSelection = -1;
+
+static void refreshCfgSelection() {
+    if (!s_cfgActionList) return;
+    const int rows = (int)lv_obj_get_child_cnt(s_cfgActionList);
+    // Out of step with the model — the list has not been built for the current
+    // action set. Nothing to repaint; the next full refresh will do it.
+    if (rows != s_cfgActionCount) return;
+
+    // Rows carry live values ("WiFi: On (connecting ...)"), and before this
+    // split they were re-rendered on every selection move. Keep that, but only
+    // touch a label whose text actually changed — an unchanged set_text still
+    // invalidates the row and would redraw the whole list per keypress.
+    for (int i = 0; i < rows; i++) {
+        lv_obj_t *row = lv_obj_get_child(s_cfgActionList, i);
+        if (!row) continue;
+        char rowText[80];
+        cfgActionLabel(s_cfgActions[i], rowText, sizeof(rowText));
+        const char *shown = lv_label_get_text(row);
+        if (!shown || strcmp(shown, rowText) != 0) lv_label_set_text(row, rowText);
+    }
+
+    auto paint = [&](int i) {
+        if (i < 0 || i >= rows) return (lv_obj_t *)nullptr;
+        lv_obj_t *row = lv_obj_get_child(s_cfgActionList, i);
+        if (!row) return (lv_obj_t *)nullptr;
+        const bool disabled = cfgActionDisabled(s_cfgActions[i]);
+        const bool selected = (i == s_cfgSelection) && !disabled;
+        cfgStyleRow(row, i, disabled, selected);
+        return selected ? row : (lv_obj_t *)nullptr;
+    };
+
+    // Only the row losing the highlight and the one gaining it change
+    // appearance. Restyling all of them would invalidate the whole list and
+    // redraw it on every keypress, which is most of what made this slow.
+    if (s_cfgPaintedSelection != s_cfgSelection) paint(s_cfgPaintedSelection);
+    lv_obj_t *selectedRowObj = paint(s_cfgSelection);
+    s_cfgPaintedSelection = s_cfgSelection;
+
+    if (selectedRowObj) lv_obj_scroll_to_view(selectedRowObj, LV_ANIM_OFF);
+}
+
 static void refreshCfgModal() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (!s_cfgModal || !s_cfgActionList || !s_cfgInfoList || !s_cfgHeaderStatus) return;
@@ -6555,27 +6794,25 @@ static void refreshCfgModal() {
     if (!s_cfgModal || !s_cfgActionList || !s_cfgHeaderStatus) return;
 #endif
 
-    auto contrastColorFor565 = [](uint16_t c) -> lv_color_t {
-        uint8_t r = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
-        uint8_t g = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);
-        uint8_t b = (uint8_t)(((c & 0x1F) * 255) / 31);
-        // Relative luminance approximation for robust light/dark contrast choice.
-        uint16_t luma = (uint16_t)((30U * r + 59U * g + 11U * b) / 100U);
-        return (luma >= 128U) ? lv_color_make(0x00, 0x00, 0x00)
-                              : lv_color_make(0xFF, 0xFF, 0xFF);
-    };
-    const lv_color_t selectionOutlineColor = contrastColorFor565(s_ui.selectBg);
-    const lv_color_t selectionBgColor = lvColorFrom565(s_ui.selectBg);
-    const lv_color_t selectionTextColor = contrastColorFor565(s_ui.selectBg);
-    const lv_opa_t selectionBgOpa = (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80;
-
     if (s_cfgActionCount <= 0) {
         initCfgActions();
     }
     if (s_cfgSelection < 0) s_cfgSelection = 0;
     if (s_cfgSelection >= s_cfgActionCount) s_cfgSelection = s_cfgActionCount - 1;
 
-    lv_label_set_text(s_cfgHeaderStatus, "Ready");
+    if (s_cfgFilterOpen) {
+        // Brackets show as soon as the filter is armed, even while empty, so
+        // there is a visible reason the list just changed. Same cue as Nodes.
+        char headerText[48];
+        if (s_cfgActionCount == 0) {
+            snprintf(headerText, sizeof(headerText), "[%s] no match", s_cfgFilter);
+        } else {
+            snprintf(headerText, sizeof(headerText), "[%s] %d", s_cfgFilter, s_cfgActionCount);
+        }
+        lv_label_set_text(s_cfgHeaderStatus, headerText);
+    } else {
+        lv_label_set_text(s_cfgHeaderStatus, "Ready");
+    }
 
     lv_obj_clean(s_cfgActionList);
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -6620,16 +6857,11 @@ static void refreshCfgModal() {
         lv_obj_t *row = lv_label_create(s_cfgActionList);
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_style_text_font(row, cfgRowFont, 0);
-        lv_obj_set_style_text_color(row, lv_color_hex(disabled ? 0x5A6B85 : 0xD9E8FF), 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
         lv_obj_set_style_pad_left(row, 4, 0);
         lv_obj_set_style_pad_right(row, 4, 0);
         lv_obj_set_style_pad_top(row, cfgPadTop, 0);
         lv_obj_set_style_pad_bottom(row, cfgPadBottom, 0);
         lv_obj_set_style_radius(row, 3, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_outline_width(row, 0, 0);
-        lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
         // Greyed rows are non-interactive on touch; keyboard activation is gated
         // separately in activateCfgSelection().
         if (!disabled) {
@@ -6642,29 +6874,12 @@ static void refreshCfgModal() {
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, cfgActionLabel(actionId, rowText, sizeof(rowText)));
 
-        if (disabled) {
-            // muted; keep the alternating-row hint but no selection emphasis
-            if (i & 1) {
-                lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
-                lv_obj_set_style_bg_opa(row, LV_OPA_20, 0);
-            }
-        } else if (i == s_cfgSelection) {
-            lv_obj_set_style_bg_color(row, selectionBgColor, 0);
-            lv_obj_set_style_bg_opa(row, selectionBgOpa, 0);
-            lv_obj_set_style_text_color(row, selectionTextColor, 0);
-            lv_obj_set_style_border_width(row, 2, 0);
-            lv_obj_set_style_border_color(row, selectionOutlineColor, 0);
-            lv_obj_set_style_outline_width(row, 1, 0);
-            lv_obj_set_style_outline_color(row, selectionOutlineColor, 0);
-            lv_obj_set_style_outline_pad(row, 0, 0);
-            lv_obj_set_style_outline_opa(row, LV_OPA_70, 0);
-            selectedRowObj = row;
-        } else if (i & 1) {
-            lv_obj_set_style_bg_color(row, lv_color_hex(0x123266), 0);
-            lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
-        }
+        const bool selected = (i == s_cfgSelection) && !disabled;
+        cfgStyleRow(row, i, disabled, selected);
+        if (selected) selectedRowObj = row;
     }
 
+    s_cfgPaintedSelection = s_cfgSelection;
     if (selectedRowObj) {
         lv_obj_scroll_to_view(selectedRowObj, LV_ANIM_OFF);
     }
@@ -7599,6 +7814,285 @@ static void openCfgVolumeModal() {
     setCfgVolumePreview(s_cfgVolOriginal, false);
 }
 #endif  // HAS_VOLUME_CONTROL
+
+// ── Ordered-list slider picker ───────────────────────────────────────────────
+// Nothing is applied until Save. Both settings behind this change what the
+// device puts on the air or how it behaves when unattended, which is not
+// something to do to someone on the way past a row.
+
+static void cfgSliderShow(int idx) {
+    if (!s_cfgSliderSpec) return;
+    if (idx < 0) idx = 0;
+    if (idx >= s_cfgSliderSpec->count) idx = s_cfgSliderSpec->count - 1;
+    s_cfgSliderStaged = idx;
+    if (lvObjValid(s_cfgSliderValue) && s_cfgSliderSpec->labelFor) {
+        lv_label_set_text(s_cfgSliderValue, s_cfgSliderSpec->labelFor(idx));
+    }
+}
+
+static void closeCfgSliderModal() {
+    if (lvObjValid(s_cfgSliderBackdrop)) {
+        lv_obj_del(s_cfgSliderBackdrop);
+    } else if (lvObjValid(s_cfgSliderModal)) {
+        lv_obj_del(s_cfgSliderModal);
+    }
+    s_cfgSliderBackdrop = nullptr;
+    s_cfgSliderModal = nullptr;
+    s_cfgSliderCtl = nullptr;
+    s_cfgSliderValue = nullptr;
+    s_cfgSliderSpec = nullptr;
+}
+
+// Teardown-safe, like the brightness and volume equivalents: the settings
+// screen can close with this open. Nothing has to be restored — the slider only
+// ever moved s_cfgSliderStaged — so this is just the close.
+static void cancelCfgSlider() {
+    if (!s_cfgSliderModal && !s_cfgSliderBackdrop) return;
+    closeCfgSliderModal();
+}
+
+static void cancelCfgSliderAndRefresh() {
+    cancelCfgSlider();
+    refreshCfgModal();
+}
+
+static void applyCfgSlider() {
+    const CfgSliderPicker *spec = s_cfgSliderSpec;
+    if (!spec) { closeCfgSliderModal(); return; }
+    const int idx = (s_cfgSliderStaged >= 0 && s_cfgSliderStaged < spec->count)
+                        ? s_cfgSliderStaged : 0;
+    // Close first: apply() writes s_cfgStatus, and refreshCfgModal() below has
+    // to see the modal already gone.
+    closeCfgSliderModal();
+    if (spec->apply) spec->apply(idx);
+    refreshCfgModal();
+}
+
+static void stepCfgSlider(int steps) {
+    if (!steps || !s_cfgSliderSpec) return;
+    const int next = s_cfgSliderStaged + steps;
+    if (next < 0 || next >= s_cfgSliderSpec->count) return;
+    cfgSliderShow(next);
+    if (lvObjValid(s_cfgSliderCtl)) {
+        lv_slider_set_value(s_cfgSliderCtl, next, LV_ANIM_OFF);
+    }
+}
+
+static void onCfgSliderChanged(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target_obj(e);
+    if (!slider) return;
+    cfgSliderShow((int)lv_slider_get_value(slider));
+}
+
+static void onCfgSliderBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgSliderBackdrop) return;
+    cancelCfgSliderAndRefresh();
+}
+
+static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
+    if (!s_rootScreen || s_cfgSliderModal || s_cfgSliderBackdrop) return;
+    if (!spec || spec->count <= 0) return;
+
+    s_cfgSliderSpec = spec;
+    if (startIdx < 0) startIdx = 0;
+    if (startIdx >= spec->count) startIdx = spec->count - 1;
+    s_cfgSliderStaged = startIdx;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 260) modalW = 260;
+
+    s_cfgSliderBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgSliderBackdrop, w, h);
+    lv_obj_align(s_cfgSliderBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgSliderBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgSliderBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgSliderBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgSliderBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgSliderBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgSliderBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgSliderBackdrop, onCfgSliderBackdropPressed,
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_cfgSliderModal = lv_obj_create(s_cfgSliderBackdrop);
+    lv_obj_set_size(s_cfgSliderModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgSliderModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgSliderModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_cfgSliderModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_cfgSliderModal, LV_DIR_VER);
+    lv_obj_add_flag(s_cfgSliderModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgSliderModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgSliderModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgSliderModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgSliderModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgSliderModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgSliderModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgSliderModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgSliderModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgSliderBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgSliderModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, spec->title);
+
+    s_cfgSliderValue = lv_label_create(s_cfgSliderModal);
+    lv_obj_set_width(s_cfgSliderValue, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgSliderValue, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_cfgSliderValue, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_cfgSliderValue, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgSliderCtl = lv_slider_create(s_cfgSliderModal);
+    lv_obj_set_width(s_cfgSliderCtl, modalW - 40);
+    // One stop per list entry: the slider cannot land between two real values.
+    lv_slider_set_range(s_cfgSliderCtl, 0, spec->count - 1);
+    lv_slider_set_value(s_cfgSliderCtl, startIdx, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0x123266), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_cfgSliderCtl, lvColorFrom565(s_ui.selectAccent),
+                              LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_cfgSliderCtl, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_cfgSliderCtl, onCfgSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    // Which end is which. The value label above names the current stop, so
+    // these only have to anchor the direction of travel.
+    if (spec->leftEnd && spec->rightEnd) {
+        lv_obj_t *ends = lv_label_create(s_cfgSliderModal);
+        lv_obj_set_width(ends, lv_pct(100));
+        lv_obj_set_style_text_font(ends, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(ends, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_set_style_text_align(ends, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text_fmt(ends, "%s  <->  %s", spec->leftEnd, spec->rightEnd);
+    }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch build: the slider alone can only stage a value, so committing needs
+    // a button. Tapping outside cancels, as everywhere else.
+    lv_obj_t *row = lv_obj_create(s_cfgSliderModal);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 8, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 78, 26);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makeBtn(row, "Cancel", [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); });
+    makeBtn(row, "Save",   [](lv_event_t *e) { LV_UNUSED(e); applyCfgSlider(); });
+#else
+    lv_obj_t *hint = lv_label_create(s_cfgSliderModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Move=Adjust  Enter=Save  %s=Cancel", modalCloseKeyLabel());
+#endif
+
+    cfgSliderShow(startIdx);
+}
+
+// ── Location precision ───────────────────────────────────────────────────────
+
+static const char *cfgPosPrecLabelFor(int idx) {
+    static char buf[24];
+    if (idx < 0 || idx >= kPositionPrecisionCount) idx = 0;
+    if (kPositionPrecisions[idx].bits >= 32) return "Precise";
+    snprintf(buf, sizeof(buf), "Within %s", kPositionPrecisions[idx].label);
+    return buf;
+}
+
+static void cfgPosPrecApply(int idx) {
+    if (idx < 0 || idx >= kPositionPrecisionCount) idx = 0;
+    const uint8_t chosen = positionPrecisionCoerce(kPositionPrecisions[idx].bits);
+    s_cfg.positionPrecision = chosen;
+    persistConfigToPrefs();
+    if (chosen >= 32) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location sent exactly");
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location rounded to %s",
+                 positionPrecisionLabel(chosen));
+    }
+}
+
+static void openCfgPosPrecModal() {
+    int startIdx = 0;
+    const uint8_t cur = positionPrecisionCoerce(s_cfg.positionPrecision);
+    for (int i = 0; i < kPositionPrecisionCount; i++) {
+        if (kPositionPrecisions[i].bits == cur) { startIdx = i; break; }
+    }
+    static const CfgSliderPicker kSpec = {
+        "Location Precision",
+        kPositionPrecisionCount,
+        cfgPosPrecLabelFor,
+        cfgPosPrecApply,
+        "exact",
+        "vague",
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+
+#if HAS_LIGHT_NOTIFY
+// ── Light timeout ────────────────────────────────────────────────────────────
+
+static const char *cfgLightTimeoutLabelFor(int idx) {
+    if (idx < 0 || idx >= kNotifyLightTimeoutCount) idx = 0;
+    if (kNotifyLightTimeouts[idx].secs == 0) return "Until read";
+    return kNotifyLightTimeouts[idx].label;
+}
+
+static void cfgLightTimeoutApply(int idx) {
+    if (idx < 0 || idx >= kNotifyLightTimeoutCount) idx = 0;
+    s_cfg.notifyLightTimeoutS = kNotifyLightTimeouts[idx].secs;
+    persistConfigToPrefs();
+    if (s_cfg.notifyLightTimeoutS == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Light reminds until read");
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Light reminds for %s",
+                 notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
+    }
+}
+
+static void openCfgLightTimeoutModal() {
+    int startIdx = 0;
+    for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
+        if (kNotifyLightTimeouts[i].secs == s_cfg.notifyLightTimeoutS) { startIdx = i; break; }
+    }
+    static const CfgSliderPicker kSpec = {
+        "Light Timeout",
+        kNotifyLightTimeoutCount,
+        cfgLightTimeoutLabelFor,
+        cfgLightTimeoutApply,
+        "30 sec",
+        "until read",
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_LIGHT_NOTIFY
+
 
 // ── Battery calibration ──────────────────────────────────────────────────────
 // Same slider shape as brightness, trimming the measured battery voltage by
@@ -11052,6 +11546,12 @@ static void closeCfgModal() {
 #if HAS_VOLUME_CONTROL
     revertCfgVolumePreview();
 #endif
+    cancelCfgSlider();    // an unapplied slider position must not persist either
+    // Reopening Config should show all of it. A filter left armed from last
+    // time reads as rows having gone missing.
+    s_cfgFilterOpen = false;
+    s_cfgFilterLen = 0;
+    s_cfgFilter[0] = '\0';
     closeCfgWifiPickerModal();
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
@@ -11068,6 +11568,7 @@ static void closeCfgModal() {
     s_cfgActionList = nullptr;
     s_cfgInfoList = nullptr;
     s_cfgHeaderStatus = nullptr;
+    s_cfgPaintedSelection = -1;   // rows are gone; nothing carries the highlight
     s_cfgAwaitEnterRelease = false;
     s_cfgInfoPanelFocused = false;
 }
@@ -18379,22 +18880,11 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_POSITION_PRECISION: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec POSITION_PRECISION");
-            showActionPopup = false;   // row already reads the new value
-            // Cycles exact -> finest -> coarsest -> exact. The list is ordered
-            // so the first step off Precise is the smallest loss of accuracy.
-            int idx = 0;
-            for (int i = 0; i < kPositionPrecisionCount; i++) {
-                if (kPositionPrecisions[i].bits == s_cfg.positionPrecision) { idx = i; break; }
-            }
-            idx = (idx + 1) % kPositionPrecisionCount;
-            s_cfg.positionPrecision = kPositionPrecisions[idx].bits;
-            markConfigDirty();
-            if (s_cfg.positionPrecision >= 32) {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location sent exactly");
-            } else {
-                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Location rounded to %s",
-                         positionPrecisionLabel(s_cfg.positionPrecision));
-            }
+            showActionPopup = false;   // the picker is the feedback
+            // A slider rather than a cycling row: eleven ordered stops is a
+            // scale, and cycling past ten of them to reach the eleventh is not
+            // how anyone would choose one.
+            openCfgPosPrecModal();
         } break;
 
         case CFG_ACTION_EXPORT: {
@@ -18652,6 +19142,16 @@ static void performCfgAction(int actionId) {
                      (unsigned)s_cfg.kbBlinkDmFlashes,
                      (s_cfg.kbBlinkDmFlashes == 1) ? "" : "es");
             break;
+#endif
+
+#if HAS_LIGHT_NOTIFY
+        // A slider, like location precision: the values are a scale from "stops
+        // soonest" to "never stops", and a scale is picked, not cycled through.
+        case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LIGHT_TIMEOUT");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgLightTimeoutModal();
+        } break;
 #endif
 
         case CFG_ACTION_SPLASH_MELODY:
@@ -20162,6 +20662,28 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+        // Ordered-list slider picker (location precision, light timeout): same
+        // shape as the volume slider above.
+        if (s_cfgSliderModal) {
+            if (isModalCloseKey(k)) {
+                cancelCfgSliderAndRefresh();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                applyCfgSlider();
+                continue;
+            }
+            int steps = 0;
+            if (k == 'j' || k == 'J')            steps = -1;
+            else if (k == 'k' || k == 'K')       steps = 1;
+            else if (k == KEY_SCROLL_UP)         steps = (invertScrollNav || navFromJk) ? -1 : 1;
+            else if (k == KEY_SCROLL_DN)         steps = (invertScrollNav || navFromJk) ? 1 : -1;
+            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
+            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
+            stepCfgSlider(steps);
+            continue;
+        }
+
         // Own-message color picker: arrows/scroll move through the 16-swatch
         // grid (one step, or a whole row via page/channel keys), Enter applies
         // and reboots, a close key cancels.
@@ -20754,8 +21276,38 @@ static void pumpKeyboardInput() {
                 continue;
             }
 #endif
+            // Backspace edits the filter before it closes the screen — it is
+            // the close key on some builds, so this has to come first, exactly
+            // as it does on the Nodes screen. An empty filter disarms.
+            if (isBackspaceKey(k) && s_cfgFilterOpen) {
+                if (s_cfgFilterLen > 0) {
+                    s_cfgFilter[--s_cfgFilterLen] = '\0';
+                } else {
+                    s_cfgFilterOpen = false;
+                }
+                cfgApplyFilter();
+                continue;
+            }
             if (isModalCloseKey(k)) {
                 closeCfgModal();
+                continue;
+            }
+            // Space arms the filter and is never part of it. Letters only
+            // append once it is armed, so (I)nfo and the rest keep working
+            // until the user actually asks to filter.
+            if (k == ' ') {
+                if (!s_cfgFilterOpen) {
+                    s_cfgFilterOpen = true;
+                    cfgApplyFilter();
+                }
+                continue;
+            }
+            if (k > 0x20 && k < 0x7F && s_cfgFilterOpen) {
+                if (s_cfgFilterLen < kCfgFilterMax) {
+                    s_cfgFilter[s_cfgFilterLen++] = k;
+                    s_cfgFilter[s_cfgFilterLen] = '\0';
+                }
+                cfgApplyFilter();
                 continue;
             }
 #if !defined(DEVICE_TLORA_PAGER_TFT)

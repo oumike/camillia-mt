@@ -381,6 +381,48 @@ const char *positionPrecisionLabel(uint8_t bits) {
     return kPositionPrecisions[0].label;
 }
 
+// Ascending, with Never last: the picker is a slider, and left-to-right has to
+// mean "reminds for longer" the whole way across. Never is the far end of that
+// scale, not a special case sitting before the shortest value.
+//
+// Order is presentation only — everything looks values up rather than indices,
+// so this can be rearranged without touching what any stored setting means.
+const NotifyLightTimeoutOption kNotifyLightTimeouts[] = {
+    {   30, "30 sec" },
+    {   60, "1 min"  },
+    {  300, "5 min"  },
+    { 1800, "30 min" },
+    {    0, "Never"  },
+};
+const int kNotifyLightTimeoutCount =
+    (int)(sizeof(kNotifyLightTimeouts) / sizeof(kNotifyLightTimeouts[0]));
+
+const char *notifyLightTimeoutName(uint16_t secs) {
+    for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
+        if (kNotifyLightTimeouts[i].secs == secs) return kNotifyLightTimeouts[i].label;
+    }
+    return "Never";   // the default, and what an unrecognised value coerces to
+}
+
+uint16_t cfgCoerceNotifyLightTimeout(long secs) {
+    if (secs <= 0) return 0;   // only an exact 0 (or nonsense) means "never"
+    // Nearest listed value. Never (0) is skipped by value, not by index, so the
+    // table above stays free to be reordered: a stray 5 should become 30
+    // seconds, not switch the reminder off entirely.
+    uint16_t best = 0;
+    long bestDelta = -1;
+    for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
+        if (kNotifyLightTimeouts[i].secs == 0) continue;
+        long delta = (long)kNotifyLightTimeouts[i].secs - secs;
+        if (delta < 0) delta = -delta;
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            best = kNotifyLightTimeouts[i].secs;
+        }
+    }
+    return (bestDelta < 0) ? 0 : best;
+}
+
 uint8_t positionPrecisionCoerce(uint8_t bits) {
     for (int i = 0; i < kPositionPrecisionCount; i++) {
         if (kPositionPrecisions[i].bits == bits) return bits;
@@ -568,6 +610,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.kbBlinkEnabled     = (bool)MY_KB_BLINK_ENABLED;
     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(MY_KB_BLINK_CHAN_FLASHES);
     cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
+    cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -772,6 +815,12 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    keyboardBlinkDmFlashes: %u\n",
              (unsigned)cfgCoerceKbFlashes((int)cfg.kbBlinkDmFlashes));
+    out += tmp;
+    // Seconds, not the label: a config file has to carry the value, and the
+    // label is only there so the file reads sensibly.
+    snprintf(tmp, sizeof(tmp), "    lightNotifyTimeoutSecs: %u   # 0 = never (%s)\n",
+             (unsigned)cfg.notifyLightTimeoutS,
+             notifyLightTimeoutName(cfg.notifyLightTimeoutS));
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
@@ -1238,6 +1287,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(atoi(val));
                 else if (!strcmp(key, "keyboardBlinkDmFlashes"))
                     cfg.kbBlinkDmFlashes = cfgCoerceKbFlashes(atoi(val));
+                else if (!strcmp(key, "lightNotifyTimeoutSecs"))
+                    cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {

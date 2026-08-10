@@ -157,6 +157,13 @@ Config includes Web Config controls, export and import, the theme picker, announ
 - Enter runs the selected action
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
+- **Space filters the rows**, the same way it does on the Nodes screen. Press
+  Space to arm the filter, then type to narrow the list; the header shows
+  `[what you typed]` and how many rows match. Backspace edits the filter and
+  disarms it once empty, Up/Down and Enter work normally on whatever is left,
+  and closing Config clears the filter. Rows are matched on the label you can
+  see, so typing part of a value works too — `on` finds every setting currently
+  switched on. Keyboard builds only; the touch-only Heltec has no Space to press.
 
 ### Location precision
 
@@ -175,9 +182,15 @@ Transmitted packets carry how many bits of the coordinate are real
 (`Position.precision_bits`), which is the same mechanism stock Meshtastic uses,
 so other clients can render an area instead of a false pinpoint.
 
-Enter cycles the row: Precise, then finest to coarsest, then back. The same
-setting is under Position in web config, and it defaults to Precise — a firmware
-update never starts obfuscating a position on its own.
+Enter on the row opens a slider whose stops are the available precisions, so it
+cannot land between two of them. The label above it names the current stop
+("Precise", "Within ~350 m"). Move with the usual up/down input, Enter saves,
+Backspace/Esc cancels; on touch builds drag the slider and press Save. Nothing
+is applied until you save — a position broadcast that happens while the slider
+is open still goes out at the precision you last committed.
+
+The same setting is under Position in web config, and it defaults to Precise —
+a firmware update never starts obfuscating a position on its own.
 
 One difference from stock Meshtastic: theirs is a per-channel setting, so a node
 can be exact on a private channel and coarse on a public one. Ours is one
@@ -217,6 +230,38 @@ touch builds, tapping a row previews it and tapping it again applies it.
 
 Notification Sound and Splash Melody now sit directly under My Message Color,
 with the other presentation settings.
+
+### Light timeout
+
+On boards with a notification light — the Mesh Deck's RGB LED, and the T-Deck
+and T-Lora Pager's keyboard backlight — that light repeats once a second for as
+long as anything is unread. A message that lands overnight blinks all night, and
+on the keyboard-blink boards it also keeps the device out of light sleep, so it
+costs battery as well as attention.
+
+**Light Timeout** stops that after a set time: Never, 30 sec, 1 min, 5 min, or
+30 min. It is a single setting because no board has both lights.
+
+- The clock restarts on every new message, so a busy channel keeps the light
+  going and silence lets it lapse. A fresh message re-arms it.
+- Reading the message stops the light immediately, exactly as before.
+- A blink already in flight is never cut off mid-pattern; the light always
+  finishes and ends dark.
+- The default is **Never**, which is what every earlier build did, so an update
+  changes nothing until you pick a timeout.
+- The row is on the Config screen next to the other notification settings, and
+  in web config under Notifications. It is absent on Cardputer and Heltec, which
+  have no light to blink.
+- Enter on the row opens a slider whose stops are the available timeouts, the
+  same picker Location Precision uses. It runs shortest to longest left to
+  right, ending at "Until read". Enter saves, Backspace/Esc cancels, and nothing
+  is applied until you save.
+
+One behaviour change on the keyboard-blink boards: a message that arrives while
+the screen is awake produces no blink at the time, and previously it would start
+blinking whenever the screen next slept — however many hours later. With a
+timeout set, the window is measured from when the message *arrived*, so if the
+screen sleeps after it has expired the light stays dark.
 
 ### Node management
 
