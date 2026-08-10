@@ -142,10 +142,82 @@ else
     exit 1
 fi
 
-# ── Clean up any existing release/tag for this version ───────────────────────
+# ── Recreating an existing release? ──────────────────────────────────────────
+# Only decided here — the deletion itself is deferred until the replacement is
+# built and committed (see "Commit, push, and tag"). Tearing down a published
+# release and then failing to build its successor would leave users with no
+# download at all.
+RECREATE_RELEASE=false
 if remote_tag_exists "$TAG" || git tag | grep -q "^${TAG}$"; then
-    delete_existing_release_and_tags "$TAG"
+    RECREATE_RELEASE=true
+    echo "Tag ${TAG} already exists — it will be replaced once the build succeeds."
 fi
+
+# ── Failure guard ─────────────────────────────────────────────────────────────
+# VERSION, RELEASE_NOTES.md and the generated pubkey header are all written
+# before the build, because the build bakes them into the firmware — so they
+# cannot simply be reordered to after it. Snapshot them here instead and roll
+# back on any failure or interrupt, so a build that dies halfway through never
+# costs a hand-edited set of release notes.
+# Disarmed once the release commit exists: past that point the new contents are
+# the release, and restoring them would only leave the tree out of step with it.
+PUBKEY_HEADER="src/ota_signing_pubkey.h"
+GUARD_FILES=(VERSION RELEASE_NOTES.md "$PUBKEY_HEADER")
+GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/camillia-release.XXXXXX")"
+GUARD_ARMED=true
+GUARD_STAGED=false   # set once git add has run, so rollback can resync the index
+
+guard_snapshot() {
+    local f
+    for f in "${GUARD_FILES[@]}"; do
+        mkdir -p "$GUARD_DIR/$(dirname "$f")"
+        if [[ -f "$f" ]]; then
+            cp -p "$f" "$GUARD_DIR/$f"
+        else
+            # Record the absence too, so a file this run creates from nothing
+            # (first release, freshly generated signing key) is removed again on
+            # rollback rather than left behind as a stray artifact.
+            : > "$GUARD_DIR/$f.absent"
+        fi
+    done
+}
+
+guard_rollback() {
+    local f
+    for f in "${GUARD_FILES[@]}"; do
+        if [[ -f "$GUARD_DIR/$f.absent" ]]; then
+            rm -f "$f"
+        elif [[ -f "$GUARD_DIR/$f" ]]; then
+            cp -p "$GUARD_DIR/$f" "$f"
+        fi
+    done
+    # If the commit failed after `git add -A`, the index still holds the copies
+    # just rolled back. Re-add so it agrees with what is now on disk.
+    if [[ "$GUARD_STAGED" == true ]]; then
+        git add -- "${GUARD_FILES[@]}" 2>/dev/null || true
+    fi
+}
+
+on_exit() {
+    local status=$?
+    if [[ "$GUARD_ARMED" == true && $status -ne 0 ]]; then
+        echo "" >&2
+        echo "Release failed (exit $status) — rolling back." >&2
+        guard_rollback || true
+        echo "Restored: ${GUARD_FILES[*]}" >&2
+        echo "Nothing was committed, tagged, or published." >&2
+        if [[ "$RECREATE_RELEASE" == true ]]; then
+            echo "Existing release ${TAG} was left untouched." >&2
+        fi
+    fi
+    rm -rf "$GUARD_DIR"
+}
+# INT/TERM exit non-zero, which then runs the EXIT trap and rolls back.
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+guard_snapshot
 
 # ── Update VERSION file ───────────────────────────────────────────────────────
 echo "$TAG" > VERSION
@@ -331,7 +403,7 @@ fi
 # baked into the firmware via src/ota_signing_pubkey.h, regenerated here so the
 # build always embeds the key that will sign these images.
 SIGNING_KEY="ota_signing_key.pem"
-PUBKEY_HEADER="src/ota_signing_pubkey.h"
+# PUBKEY_HEADER is set up with the failure guard, which covers this file too.
 if ! command -v openssl >/dev/null 2>&1; then
     echo "Error: openssl is required to sign OTA images. Install it and retry." >&2
     exit 1
@@ -366,11 +438,24 @@ echo "Running full clean for release environments..."
 echo "Build successful."
 
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
+GUARD_STAGED=true
 git add -A
 git commit -m "Release $TAG"
+
+# Point of no return. VERSION and the notes are part of a commit now, so the
+# pre-release copies are no longer the ones that should win.
+GUARD_ARMED=false
+
 git push
 
 echo "Changes committed and pushed."
+
+# Deferred from the preflight: drop the superseded release and tag only now that
+# the replacement is built, committed and pushed, so the window in which neither
+# exists is as short as it can be.
+if [[ "$RECREATE_RELEASE" == true ]]; then
+    delete_existing_release_and_tags "$TAG"
+fi
 
 if git tag | grep -q "^$TAG$"; then
     git tag -d "$TAG"
