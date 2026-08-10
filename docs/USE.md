@@ -281,6 +281,24 @@ The same section has an **Export Node List (CSV)** button, which downloads every
 node the device currently knows about plus any previously archived nodes. A
 `source` column marks each row as `live` or `archived`.
 
+### Backing up messages
+
+Web Config has a **Messages** section, directly above the Danger Zone, with an
+**Export Messages (CSV)** button. It downloads every channel message and direct
+message the device still holds — one row each, with the channel or peer,
+timestamp, sender, packet ID and delivery state.
+
+- The file goes to the browser you are using and **nothing is written to the
+  device's SD card**. Chat is already persisted so it survives a reboot; this is
+  for taking a copy off the device.
+- Long messages come out as a single row. The device stores them one line per
+  wrap, in reverse, so the export reassembles them the way the chat view does.
+- History is bounded by what the device keeps in memory — the oldest messages
+  have already been dropped from the ring by the time they age out. Export
+  before using Clear Messages below it.
+- Web Config only, and only once the device is on your WiFi: the button and the
+  endpoint are both absent from the AP-mode Lite page.
+
 The Config info panel also shows the **Newest** and **Oldest** node heard since
 boot, with the node name and the time it was last heard.
 

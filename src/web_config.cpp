@@ -1039,6 +1039,14 @@ static const size_t kFlashChunkBytes = 512;
 // and ACKs stop arriving, a single sendContent() blocks the main loop for a full
 // 10 s, taking the UI and radio down with it. Checking writability ourselves
 // first means we never enter that loop unless the socket is ready.
+// How long a single write may wait for the socket to accept anything before the
+// response is written off. Was 250 ms, which the logs showed abandoning pages
+// over chunks that merely took 307 ms — a slow link should give a slow page,
+// not no page. A dead client is still caught immediately by connected(), and a
+// reset arrives as an error from write(), so this only bounds genuine
+// slowness.
+static const uint32_t kWriteWindowMs = 1000;
+
 static bool clientWritable(uint32_t timeoutMs) {
     const int sock = server.client().fd();
     if (sock < 0) return false;
@@ -1059,7 +1067,7 @@ static bool clientWritable(uint32_t timeoutMs) {
 static bool sendStalled() {
     if (gSendAborted) return true;
     if (!server.client().connected()) { gSendAborted = true; return true; }
-    if (!clientWritable(250)) {
+    if (!clientWritable(kWriteWindowMs)) {
         Serial.println("[web] socket not draining — abandoning response");
         gSendAborted = true;
         return true;
@@ -1067,25 +1075,102 @@ static bool sendStalled() {
     return false;
 }
 
-static void sendChunk(String &html) {
-    const size_t len = html.length();
-    if (!len) return;
+// Writes every byte or gives up and marks the response aborted.
+//
+// This exists because WiFiClient::write() is allowed to write *less* than asked:
+// it retries WIFI_CLIENT_MAX_WRITE_RETRY times and then returns however many
+// bytes it managed. WebServer::sendContent() throws that return value away, and
+// in chunked mode it has already announced the full length in the chunk header
+// — so a short write leaves the browser reading the next chunk's size line as
+// payload. The stream desyncs and the rest of the page renders as garbage
+// (stray tag fragments and interleaved text), which is not obviously a network
+// problem when you are looking at it.
+//
+// Looping on the return value is the whole fix. A write that cannot finish is
+// then an abandoned response, which the page builder already copes with,
+// instead of a corrupt one.
+static bool writeAllRaw(const char *data, size_t len) {
+    // Bound once: client() returns by value, and the copy shares the socket
+    // through a refcounted handle. Fetching it per iteration would be correct
+    // but pointless churn.
+    WiFiClient c = server.client();
+    size_t off = 0;
+    while (off < len) {
+        if (!c.connected()) return false;
+        if (!clientWritable(kWriteWindowMs)) return false;
+        const size_t n = c.write((const uint8_t *)(data + off), len - off);
+        if (n == 0) return false;
+        off += n;
+    }
+    return true;
+}
 
-    // Sliced for the same reason as sendFlash(): keep any single write inside
-    // what the socket just said it could take.
-    const char *data = html.c_str();
+// One chunked-transfer chunk, framed by hand so the size header can never
+// disagree with what actually went out — and emitted as a SINGLE write.
+//
+// The single write matters as much as the framing. Sending the size header, the
+// payload and the trailing CRLF as three writes makes three tiny TCP segments,
+// and with Nagle enabled the second and third are held until the client ACKs
+// the first. The client's delayed-ACK timer is ~100-200 ms, so the page went
+// out at one ACK round-trip per 512 bytes — measured at 107-307 ms per chunk,
+// which is both glacial and enough to trip the writability check and abandon
+// the response. Coalescing costs one 512-byte memcpy and removes the round trip
+// entirely.
+//
+// Static rather than stack: this is called for every chunk of every page, and
+// half a KB of stack in a WebServer handler is not worth the risk. Single
+// request at a time, so there is nothing to share it with.
+static char sChunkFrame[kFlashChunkBytes + 24];
+
+static bool sendChunkedRaw(const char *data, size_t len) {
+    if (!len) return true;
+    if (len > kFlashChunkBytes) return false;   // caller slices; never happens
+    const int hn = snprintf(sChunkFrame, sizeof(sChunkFrame), "%x\r\n", (unsigned)len);
+    if (hn <= 0) return false;
+    memcpy(sChunkFrame + hn, data, len);
+    sChunkFrame[hn + len]     = '\r';
+    sChunkFrame[hn + len + 1] = '\n';
+    return writeAllRaw(sChunkFrame, (size_t)hn + len + 2);
+}
+
+// Slices, frames and sends. Returns false once the response has been abandoned.
+static bool sendSliced(const char *data, size_t len, const char *what) {
+    // Nagle is the other half of the stall above: it holds a small write back
+    // waiting for an ACK that the client is itself delaying. Off for the whole
+    // response — every page here is a stream of modest chunks, which is exactly
+    // the traffic pattern Nagle penalises. Idempotent, so setting it per slice
+    // rather than plumbing a response-start hook costs a setsockopt per section.
+    server.client().setNoDelay(true);
     for (size_t off = 0; off < len; ) {
-        if (sendStalled()) break;
+        if (sendStalled()) return false;
         const size_t n = (len - off > kFlashChunkBytes) ? kFlashChunkBytes
                                                         : (len - off);
         const uint32_t t0 = millis();
-        server.sendContent(data + off, n);
+        const bool ok = sendChunkedRaw(data + off, n);
         const uint32_t dt = millis() - t0;
-        if (dt > 100) Serial.printf("[web] slow chunk: %u bytes in %u ms\n",
-                                    (unsigned)n, (unsigned)dt);
+        if (dt > 100) Serial.printf("[web] slow %s: %u bytes in %u ms\n",
+                                    what, (unsigned)n, (unsigned)dt);
+        if (!ok) {
+            // Half a chunk may already be on the wire, so the stream cannot be
+            // trusted from here. Drop the socket rather than let the browser
+            // parse the wreckage as content.
+            Serial.printf("[web] short write in %s — dropping response\n", what);
+            gSendAborted = true;
+            server.client().stop();
+            return false;
+        }
         off += n;
         delay(1);   // let the TCP stack push data out and take ACKs
     }
+    return true;
+}
+
+static void sendChunk(String &html) {
+    const size_t len = html.length();
+    if (!len) return;
+    // Sliced for the same reason as sendFlash(): keep any single write inside
+    // what the socket just said it could take.
+    sendSliced(html.c_str(), len, "chunk");
     html = "";
 }
 
@@ -1097,19 +1182,10 @@ static void sendChunk(String &html) {
 // 10 s — exactly the stall the writability check was meant to prevent. Writing
 // in small pieces keeps that check meaningful, since it runs again before each.
 static void sendFlash(const char *progmem) {
-    const size_t total = strlen(progmem);   // ESP32 maps flash, so plain strlen
-    for (size_t off = 0; off < total; ) {
-        if (sendStalled()) return;
-        const size_t n = (total - off > kFlashChunkBytes) ? kFlashChunkBytes
-                                                          : (total - off);
-        const uint32_t t0 = millis();
-        server.sendContent_P(progmem + off, n);
-        const uint32_t dt = millis() - t0;
-        if (dt > 100) Serial.printf("[web] slow flash chunk: %u bytes in %u ms\n",
-                                    (unsigned)n, (unsigned)dt);
-        off += n;
-        delay(1);
-    }
+    // ESP32 maps flash into the address space, so these constants can be read
+    // and written straight through — no _P copy step, and the same framed
+    // writer as everything else.
+    sendSliced(progmem, strlen(progmem), "flash chunk");
 }
 
 // Flush only once the buffer is worth a TCP segment. Chunk size is a balance
@@ -1241,15 +1317,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     else if (!gpsNmea) snprintf(gpsChip, sizeof(gpsChip), "GPS NO DATA");
     else snprintf(gpsChip, sizeof(gpsChip), "GPS SEARCH %u", (unsigned)gpsSat);
     int mapPointCount = 0;
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Boards with PSRAM accumulate the node lists in RAM then emit them below.
-    // The Cardputer (no PSRAM) can't hold these — with 64 nodes they run to
-    // ~30 KB — so it streams each list directly to the client instead (see the
-    // streamNode* lambdas and the emit points further down).
-    String mapPoints = "[";
-    String nodeOptions = "";   // <option> per node for the Nodes Seen dropdown
-    String nodeDetails = "";   // hidden per-node info panels (shown on selection)
-#endif
     uint32_t nowMs = millis();
     auto unzz = [](uint32_t v) -> int32_t {
         return (int32_t)((v >> 1) ^ (uint32_t)-(int32_t)(v & 1));
@@ -1278,9 +1345,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         return true;
     };
     const bool useImperialUnits = (gCfg && gCfg->displayUnits != 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    // No PSRAM: only the map-point count is needed up front (for the header);
-    // the option/detail/point lists are streamed at the emit points below.
+    // Only the map-point count is needed up front (for the header); the
+    // option/detail/point lists are streamed at the emit points below.
     for (int i = 0; i < totalNodes; i++) {
         NodeEntry *n = Nodes.getByRank(i);
         if (!n) continue;
@@ -1290,6 +1356,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // Stream the "Nodes Seen" <option> list directly to the client, batching
     // into ~1 KB chunks so no large contiguous String is ever allocated.
+    //
+    // This used to be the no-PSRAM path only; boards with PSRAM accumulated the
+    // whole list into Strings and appended them to the page at the end. That
+    // does not survive a full node table: at 250 nodes the detail panels alone
+    // come to ~114 KB, and `html += nodeDetails` then asks for a ~126 KB
+    // contiguous String. The grow does not produce usable memory at that size —
+    // the String reported length 126863 with only 12791 real bytes and the rest
+    // reading as zeros, which went out as ~30 KB of NUL bytes and a page the
+    // browser rendered as garbage. Streaming has no such ceiling, so every
+    // board now uses it and the accumulate path is gone.
     auto streamNodeOptions = [&]() {
         String buf;
         for (int i = 0; i < totalNodes; i++) {
@@ -1474,164 +1550,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         }
         if (buf.length()) sendChunk(buf);
     };
-#else
-    for (int i = 0; i < totalNodes; i++) {
-        NodeEntry *n = Nodes.getByRank(i);
-        if (!n) continue;
-
-        float lat = 0.0f;
-        float lon = 0.0f;
-        bool hasLocation = extractNodeCoords(n, lat, lon);
-        if (hasLocation) {
-            if (mapPointCount > 0) mapPoints += ",";
-            snprintf(tmp, sizeof(tmp), "{\"lat\":%.7f,\"lon\":%.7f}", lat, lon);
-            mapPoints += tmp;
-            mapPointCount++;
-        }
-
-        char idBuf[16];
-        snprintf(idBuf, sizeof(idBuf), "!%08X", n->nodeId);
-        const char *shortName = n->shortName[0] ? n->shortName : "----";
-        const char *longName  = n->longName[0]  ? n->longName  : "(unnamed)";
-        const char *chanName = "-";
-        if (n->chanIdx >= 0 && n->chanIdx < MAX_CHANNELS) {
-            const ChannelKey &ck = CHANNEL_KEYS[n->chanIdx];
-            const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
-            if (nm && nm[0]) chanName = nm;
-        }
-
-        char heardBuf[40];
-        if (n->lastHeardMs == 0 || nowMs < n->lastHeardMs) {
-            snprintf(heardBuf, sizeof(heardBuf), "unknown");
-        } else {
-            snprintf(heardBuf, sizeof(heardBuf), "%lus ago",
-                     (unsigned long)((nowMs - n->lastHeardMs) / 1000UL));
-        }
-
-        char locBuf[96];
-        if (hasLocation) {
-            snprintf(locBuf, sizeof(locBuf), "%.6f, %.6f (alt %dm)", lat, lon, (int)n->alt);
-        } else {
-            snprintf(locBuf, sizeof(locBuf), "unknown");
-        }
-
-        char posSeenBuf[40];
-        if (n->lastPosMs == 0 || nowMs < n->lastPosMs) {
-            snprintf(posSeenBuf, sizeof(posSeenBuf), "never");
-        } else {
-            snprintf(posSeenBuf, sizeof(posSeenBuf), "%lus ago",
-                     (unsigned long)((nowMs - n->lastPosMs) / 1000UL));
-        }
-
-        char posStateBuf[48];
-        if (n->lastPosMs == 0) {
-            snprintf(posStateBuf, sizeof(posStateBuf), "no POSITION packets");
-        } else if (n->hasPosition) {
-            snprintf(posStateBuf, sizeof(posStateBuf), "position valid");
-        } else {
-            snprintf(posStateBuf, sizeof(posStateBuf), "packet seen, no fix");
-        }
-
-        char rawPosBuf[64];
-        snprintf(rawPosBuf, sizeof(rawPosBuf), "%ld, %ld", (long)n->latI, (long)n->lonI);
-
-        char telemBuf[180];
-        if (n->hasTelemetry) {
-            telemBuf[0] = '\0';
-            if (n->hasDeviceTelemetry) {
-                snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
-                         "%.0f%% / %.2fV", n->battPct, n->voltage);
-            }
-            if (n->hasEnvironmentTelemetry) {
-                if (telemBuf[0]) {
-                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf), " | ");
-                }
-                if (useImperialUnits) {
-                    float tempF = n->temperatureC * (9.0f / 5.0f) + 32.0f;
-                    float pressureInHg = n->pressureHpa * 0.0295299831f;
-                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
-                             "%.1fF %.1f%% %.2finHg",
-                             (double)tempF,
-                             (double)n->humidityPct,
-                             (double)pressureInHg);
-                } else {
-                    snprintf(telemBuf + strlen(telemBuf), sizeof(telemBuf) - strlen(telemBuf),
-                             "%.1fC %.1f%% %.1fhPa",
-                             (double)n->temperatureC,
-                             (double)n->humidityPct,
-                             (double)n->pressureHpa);
-                }
-            }
-            if (!telemBuf[0]) {
-                snprintf(telemBuf, sizeof(telemBuf), "none");
-            }
-        } else {
-            snprintf(telemBuf, sizeof(telemBuf), "none");
-        }
-
-        char linkBuf[72];
-        if (n->lastHeardMs != 0) {
-            snprintf(linkBuf, sizeof(linkBuf), "SNR %.1f dB, hops %u", n->snr, (unsigned)n->hops);
-        } else {
-            snprintf(linkBuf, sizeof(linkBuf), "unknown");
-        }
-
-        // Dropdown option (value = node index).
-        nodeOptions += "<option value='";
-        nodeOptions += String(i);
-        nodeOptions += "'>";
-        nodeOptions += shortName;
-        nodeOptions += " -- ";
-        nodeOptions += longName;
-        nodeOptions += "</option>";
-
-        // Hidden detail panel for this node; shown in #node-info on selection.
-        // Location goes into data attributes so the mini-map can pin it.
-        char latAttr[24], lonAttr[24];
-        snprintf(latAttr, sizeof(latAttr), "%.7f", lat);
-        snprintf(lonAttr, sizeof(lonAttr), "%.7f", lon);
-        nodeDetails += "<div class='node-detail' id='nd-";
-        nodeDetails += String(i);
-        nodeDetails += "' data-loc='";
-        nodeDetails += hasLocation ? "1" : "0";
-        nodeDetails += "' data-lat='";
-        nodeDetails += latAttr;
-        nodeDetails += "' data-lon='";
-        nodeDetails += lonAttr;
-        nodeDetails += "'>";
-        nodeDetails += "<div class='node-card'>";
-        nodeDetails += "<div class='node-title'>";
-        nodeDetails += shortName;
-        nodeDetails += " -- ";
-        nodeDetails += longName;
-        nodeDetails += "</div>";
-        nodeDetails += "<div class='node-meta'><b>ID:</b> ";
-        nodeDetails += idBuf;
-        nodeDetails += "  <b>Channel:</b> ";
-        nodeDetails += chanName;
-        nodeDetails += "  <b>Last Heard:</b> ";
-        nodeDetails += heardBuf;
-        nodeDetails += "</div>";
-        nodeDetails += "<div class='node-meta'><b>Location:</b> ";
-        nodeDetails += locBuf;
-        nodeDetails += "</div>";
-        nodeDetails += "<div class='node-meta'><b>Position Pkt:</b> ";
-        nodeDetails += posSeenBuf;
-        nodeDetails += "  <b>State:</b> ";
-        nodeDetails += posStateBuf;
-        nodeDetails += "  <b>Raw:</b> ";
-        nodeDetails += rawPosBuf;
-        nodeDetails += "</div>";
-        nodeDetails += "<div class='node-meta'><b>Telemetry:</b> ";
-        nodeDetails += telemBuf;
-        nodeDetails += "  <b>Link:</b> ";
-        nodeDetails += linkBuf;
-        nodeDetails += "</div>";
-        nodeDetails += "</div>";   // .node-card
-        nodeDetails += "</div>";   // .node-detail
-    }
-    mapPoints += "]";
-#endif  // !DEVICE_CARDPUTER_LORA_HAT
     // Everything above this point is the node list: on the full page it walks
     // every known node and builds the dropdown and detail panels in RAM before
     // a single byte goes out. If a render stalls between "serving config page"
@@ -2666,6 +2584,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
+    // Directly above the Danger Zone, which is where Clear Messages lives:
+    // someone reading that button is exactly the person who wants this first.
+    section(html, false, "Messages", false);
+    html += "<p style='margin:.2em 0 1em'><a href='/messages.csv'"
+            " style='display:inline-block;padding:.4em 1.2em;background:#3b82f6;"
+            "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
+            "&#11015; Export Messages (CSV)</a></p>"
+            "<p style='font-size:.82em;color:#888;margin:-.6em 0 1em'>"
+            "Downloads every channel message and direct message the device still "
+            "holds, one row each, with the channel or peer, timestamp, sender and "
+            "delivery state. Long messages are joined back into one row. The file "
+            "is sent to this browser only &mdash; nothing is written to the "
+            "device's SD card. History is limited by what the device keeps in "
+            "memory, so take a copy before clearing anything below.</p>";
+    sectionEnd(html, false);
+    sendChunk(html);
+
     // Written out rather than using section(): the helper has no way to carry
     // the red, and losing it would make the destructive actions read like any
     // other group. Collapsed like the rest, which also puts a deliberate click
@@ -2775,7 +2710,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div class='map-legend'><span>Drag to pan, scroll/pinch to zoom</span><span id='map-status'></span></div>"
             "</div>";
     html += "<h3 style='margin-top:1em'>Nodes Seen</h3>";
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (totalNodes > 0) {
         html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
         html += "<select id='node-select' onchange='selectNode()'>";
@@ -2797,26 +2731,6 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);                // flush before streaming the points array
     streamMapPoints();
     html += ";var NODE_ME_POINT=";
-#else
-    if (nodeOptions.length() > 0) {
-        html += "<p class='gps-hint'>Select a node to see its details and location.</p>";
-        html += "<select id='node-select' onchange='selectNode()'>";
-        html += "<option value=''>-- select a node --</option>";
-        html += nodeOptions;
-        html += "</select>";
-        html += "<div id='node-info' style='margin-top:.6em'></div>";
-        html += "<div class='map-wrap' style='margin-top:.6em'>"
-                "<div id='node-mini-map' class='map-canvas' style='height:220px'></div></div>";
-        html += "<div id='node-detail-store' style='display:none'>";
-        html += nodeDetails;
-        html += "</div>";
-    } else {
-        html += "<p class='gps-hint'>No nodes discovered yet.</p>";
-    }
-    html += "<script>var NODE_HEAT_POINTS=";
-    html += mapPoints;
-    html += ";var NODE_ME_POINT=";
-#endif
     if (mapHasMe) {
         snprintf(tmp, sizeof(tmp), "{lat:%.7f,lon:%.7f}", mapMeLat, mapMeLon);
         html += tmp;
@@ -3519,7 +3433,7 @@ static void sendOnboardingPage(const char *err = "") {
         html += "</p>";
     }
     html += "</form></body></html>";
-    server.sendContent(html);
+    sendChunk(html);
     server.sendContent("");   // terminate chunked response
 }
 
@@ -3583,7 +3497,7 @@ static void handlePostOnboard() {
     html +=
         "</b>.</p>"
         "</body></html>";
-    server.sendContent(html);
+    sendChunk(html);
     server.sendContent("");   // terminate chunked response
     server.stop();
     delay(500);
@@ -4534,9 +4448,9 @@ static void handleGetNodesCsv() {
         out += "live,,";
         out += rec;
         out += "\n";
-        if (out.length() > 1024) { server.sendContent(out); out = ""; }
+        if (out.length() > 1024) { sendChunk(out); }
     }
-    if (out.length()) { server.sendContent(out); out = ""; }
+    if (out.length()) { sendChunk(out); }
 
     // Archived rows are streamed through verbatim: each already begins with its
     // archivedEpoch followed by the shared columns, so only "archived," is
@@ -4557,13 +4471,147 @@ static void handleGetNodesCsv() {
                 out += "archived,";
                 out += line;
                 out += "\n";
-                if (out.length() > 1024) { server.sendContent(out); out = ""; }
+                if (out.length() > 1024) { sendChunk(out); }
             }
             af.close();
         }
     }
 
-    if (out.length()) server.sendContent(out);
+    if (out.length()) sendChunk(out);
+    server.sendContent("");   // terminate the chunked response
+}
+
+// Export every stored message as CSV, streamed straight to the browser. Web
+// config only, and deliberately never written to the card: the device already
+// persists chat to keep it across reboots, and a second copy sitting in the
+// filesystem would be one more thing to manage on a device whose storage is
+// shared with the radio. A backup you take is a backup you have.
+//
+// Wrapped channel messages are put back together here. ChannelMgr::_wordWrap()
+// stores one line per wrap and pushes them last-segment-first (the device draws
+// newest at the top), so a raw dump of the ring would come out with every
+// multi-line message reversed. Same reassembly the web chat view does.
+static void csvAppendQuoted(String &out, const char *text) {
+    out += '"';
+    for (const char *p = text ? text : ""; *p; p++) {
+        if (*p == '"') out += '"';        // doubled, per RFC 4180
+        if (*p == '\r') continue;         // CR would confuse the line ending
+        out += *p;
+    }
+    out += '"';
+}
+
+static const char *msgAckName(uint8_t ack) {
+    switch (ack) {
+        case DisplayLine::PENDING:     return "PENDING";
+        case DisplayLine::ACKED:       return "ACKED";
+        case DisplayLine::ACKED_RELAY: return "ACKED_RELAY";
+        case DisplayLine::NAKED:       return "NAKED";
+        case DisplayLine::TX_FAILED:   return "TX_FAILED";
+        default:                       return "";
+    }
+}
+
+// Local calendar time for an epoch, or empty when the clock was not set when
+// the message arrived. Never invents a date for a 0 epoch.
+static void msgIsoTime(uint32_t epoch, char *out, size_t outLen) {
+    if (epoch < 1700000000UL) { out[0] = '\0'; return; }
+    time_t t = (time_t)epoch;
+    struct tm lt;
+    localtime_r(&t, &lt);
+    strftime(out, outLen, "%Y-%m-%d %H:%M:%S", &lt);
+}
+
+static void handleGetMessagesCsv() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+
+    char fileName[64];
+    snprintf(fileName, sizeof(fileName), "camillia-messages-%s.csv",
+             (gCfg && gCfg->nodeShort[0]) ? gCfg->nodeShort : "node");
+    char cd[128];
+    snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
+    server.sendHeader("Content-Disposition", cd);
+    server.sendHeader("Cache-Control", "no-store");
+
+    // Chunked for the same reason as the node CSV: eight channels of history
+    // plus every DM is far too much to assemble in one String here.
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/csv", "");
+
+    String out;
+    out.reserve(1024);
+    out = "source,channel,peer,epoch,localTime,sender,packetId,ack,text\n";
+
+    char iso[24];
+
+    for (int ch = 0; ch < MESH_CHANNELS; ch++) {
+        Channel &c = Channels.get(ch);
+        if (!c.lines || c.count <= 0) continue;
+        const char *chanName = c.name ? c.name : "";
+        const int oldest = max(0, c.count - MAX_MSG_LINES);
+
+        int i = oldest;
+        while (i < c.count) {
+            const DisplayLine &head0 = c.lines[i % MAX_MSG_LINES];
+            const uint32_t pid = head0.packetId;
+            int j = i + 1;
+            if (pid != 0) {
+                while (j < c.count && c.lines[j % MAX_MSG_LINES].packetId == pid) j++;
+            }
+            // Back to front: the last stored segment is the start of the
+            // message, and it is the line carrying the prefix and the ack.
+            const DisplayLine &head = c.lines[(j - 1) % MAX_MSG_LINES];
+            String text = head.text;
+            for (int k = j - 2; k >= i; k--) {
+                const char *seg = c.lines[k % MAX_MSG_LINES].text;
+                while (*seg == ' ') seg++;      // drop the continuation indent
+                if (*seg) { text += ' '; text += seg; }
+            }
+
+            msgIsoTime(head.epoch, iso, sizeof(iso));
+            char meta[128];
+            snprintf(meta, sizeof(meta), "channel,%d %s,,%lu,%s,!%08lX,%lu,%s,",
+                     ch, chanName,
+                     (unsigned long)head.epoch, iso,
+                     (unsigned long)head.senderNodeId,
+                     (unsigned long)head.packetId,
+                     msgAckName((uint8_t)head.ack));
+            out += meta;
+            csvAppendQuoted(out, text.c_str());
+            out += "\n";
+            if (out.length() > 1024) { sendChunk(out); }
+            i = j;
+        }
+    }
+    if (out.length()) { sendChunk(out); }
+
+    // DMs store one line per message — DmMgr does no wrapping, it lets the UI
+    // wrap the label — so these need no reassembly.
+    const int convCount = DMs.count();
+    for (int ci = 0; ci < convCount; ci++) {
+        DmConv *conv = DMs.getByRank(ci);
+        if (!conv || !conv->lines || conv->count <= 0) continue;
+        char peer[32];
+        snprintf(peer, sizeof(peer), "!%08lX %s",
+                 (unsigned long)conv->nodeId, conv->shortName);
+        const int oldest = max(0, conv->count - MAX_DM_LINES);
+        for (int i = oldest; i < conv->count; i++) {
+            const DmLine &dl = conv->lines[i % MAX_DM_LINES];
+            msgIsoTime(dl.epoch, iso, sizeof(iso));
+            char meta[160];
+            snprintf(meta, sizeof(meta), "dm,,%s,%lu,%s,,%lu,%s,",
+                     peer,
+                     (unsigned long)dl.epoch, iso,
+                     (unsigned long)dl.packetId,
+                     msgAckName((uint8_t)dl.ack));
+            out += meta;
+            csvAppendQuoted(out, dl.text);
+            out += "\n";
+            if (out.length() > 1024) { sendChunk(out); }
+        }
+    }
+
+    if (out.length()) sendChunk(out);
     server.sendContent("");   // terminate the chunked response
 }
 
@@ -4774,6 +4822,7 @@ static void registerCommonRoutes() {
         onRoute("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
+    onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
     onRoute("/export",            HTTP_GET,  handleGetExport);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
