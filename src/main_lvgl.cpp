@@ -421,6 +421,23 @@ enum OnboardingStage : uint8_t {
 static uint8_t s_onboardingStage = ONBOARD_STAGE_ENTER_LONG;
 static bool s_onboardingSdConfigPresent = false;
 static bool s_firstBoot = false;
+
+// A freshly flashed device has no identity of its own yet: it would announce
+// the compiled-in defaults — long name "Camillia", short "CaMi", and the
+// hardcoded fallback coordinates in config.h — to the whole mesh, and to MQTT
+// through any uplinking gateway. Nothing automatic goes on the air until the
+// user has finished onboarding or restored a config.
+//
+// s_firstBoot is exactly that condition: set at boot when no persisted
+// nodeLong exists, and both completion paths (onboardingFinalize() and
+// onboardingAcceptImport()) persist and reboot, so it is false from the next
+// boot onwards. The Heltec build that skips onboarding clears it itself.
+//
+// Receiving and relaying are untouched — a relayed packet carries other
+// people's identities, not ours, and a device is useful as a relay during
+// setup. This is only about what the device says it is.
+static inline bool announceHeldForOnboarding() { return s_firstBoot; }
+
 // Node name / region / role / WiFi are buffered in scratch while the user steps
 // through the wizard, so s_cfg isn't touched until everything is confirmed at
 // the final stage (which then persists and reboots).
@@ -5295,6 +5312,30 @@ static void persistPkiPair(Preferences &prefs, const uint8_t pubKey[32], const u
     // an older device keeps its identity, but they are no longer written: two
     // more 32-byte blobs cost entries a 16 KB partition cannot spare, and
     // nothing downstream of this build reads them.
+}
+
+// An imported config can carry the node's identity keypair. cfgImportFromBuf()
+// restores it into RAM only, and every import path reboots straight afterwards,
+// so it has to reach NVS here — otherwise initPki() finds nothing stored on the
+// next boot and generates a fresh identity, silently discarding the one that
+// was just restored. Peers holding the old public key can then no longer send
+// this node a PKI DM, which is most of the reason to restore a backup at all.
+//
+// Shared by every import path so they cannot drift: this was previously inline
+// in onWebCfgSaved(), and the onboarding importer — the one path that matters
+// most, since it runs on a fresh device with no keypair of its own — never had
+// a copy of it.
+static void persistImportedIdentityKeys(const char *tag) {
+    if (!cfgImportRestoredKeys()) return;
+    Preferences pkiPrefs;
+    if (pkiPrefs.begin("camillia", false)) {
+        persistPkiPair(pkiPrefs, myPubKey, myPrivKey);
+        pkiPrefs.end();
+        Serial.printf("[pki] restored identity keypair from imported config (%s)\n",
+                      tag ? tag : "import");
+    } else {
+        Serial.println("[pki] restore FAILED: cannot open NVS namespace");
+    }
 }
 
 static void initPkiIdentity() {
@@ -20230,6 +20271,10 @@ static void onboardingAcceptImport() {
     // reboot; otherwise the user had to re-import after boot to restore them.
     syncPrimaryChannelName();
     persistChannelsToPrefs();
+    // And the identity keypair, for the same reason. This device has none of
+    // its own yet, so without this the reboot below mints a new one and the
+    // restore quietly loses the node's identity.
+    persistImportedIdentityKeys("onboarding");
     Serial.println("[onboarding] imported OK - rebooting");
     lv_timer_handler();
     delay(500);
@@ -22440,19 +22485,7 @@ static void onWebCfgSaved() {
     }
 
     persistConfigToPrefs();
-    // An import can carry the node's identity keypair. The parser restores it
-    // into RAM only, and every import path reboots straight after this, so the
-    // pair has to reach NVS here or the device comes back as a new identity.
-    if (cfgImportRestoredKeys()) {
-        Preferences pkiPrefs;
-        if (pkiPrefs.begin("camillia", false)) {
-            persistPkiPair(pkiPrefs, myPubKey, myPrivKey);
-            pkiPrefs.end();
-            Serial.println("[pki] restored identity keypair from imported config");
-        } else {
-            Serial.println("[pki] restore FAILED: cannot open NVS namespace");
-        }
-    }
+    persistImportedIdentityKeys("web/config-screen");
     syncPrimaryChannelName();
     // Same reason as at boot: the automatic custom slot hashes channel 0's
     // name, which this save may have just changed, and the Radio.reconfigure()
@@ -24745,7 +24778,9 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             uint32_t err = (pkt.hdr.channel == 0) ? 35u : 6u;  // PKI_UNKNOWN_PUBKEY / NO_CHANNEL
             (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, err);
 
-            if (err == 35) {
+            // Same hold as the announces: this path answers with our NodeInfo,
+            // which on a fresh device is still the compiled-in default identity.
+            if (err == 35 && !announceHeldForOnboarding()) {
                 static uint32_t sLastNodeInfoReqNode = 0;
                 static uint32_t sLastNodeInfoReqMs = 0;
                 uint32_t now = millis();
@@ -25065,6 +25100,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             // seen again. The unicast reply also skips sendNodeInfo()'s 15 s
             // broadcast window, so this throttle is the only thing bounding it.
             if (pkt.wantResponse && Radio.isReady() && s_myNodeId != 0
+                && !announceHeldForOnboarding()
                 && pkt.hdr.from != 0 && pkt.hdr.from != s_myNodeId) {
                 NodeEntry *requester = Nodes.find(pkt.hdr.from);
                 const uint32_t now = millis();
@@ -25347,6 +25383,9 @@ static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM)
 
 static void serviceNodeInfoAnnounce(uint32_t nowMs) {
     bool forceAnnounce = webCfgAnnounceRequested();
+    // An explicit Announce press is a deliberate instruction and still goes
+    // out; a button that silently did nothing would read as broken.
+    if (announceHeldForOnboarding() && !forceAnnounce) return;
 
     bool nodeInfoDue = forceAnnounce || announceDue(nowMs, s_nextNodeInfoTxMs, s_cfg.nodeInfoIntervalS);
     bool positionDue = forceAnnounce || announceDue(nowMs, s_nextPositionTxMs, s_cfg.posIntervalS);
@@ -25425,6 +25464,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
 }
 
 static void serviceTelemetryAnnounce(uint32_t nowMs) {
+    if (announceHeldForOnboarding()) return;   // see announceHeldForOnboarding()
     bool forceTelemetry = webCfgTelemetryRequested();
 
     bool devDue = forceTelemetry || (s_cfg.telDeviceEnabled
@@ -25540,6 +25580,7 @@ static void serviceAutoFavorite(uint32_t nowMs) {
 }
 
 static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
+    if (announceHeldForOnboarding()) return;   // see announceHeldForOnboarding()
     bool due = s_cfg.neighborInfoEnabled
         && s_cfg.neighborInfoOverLora
         && announceDue(nowMs, s_nextNeighborInfoTxMs, s_cfg.neighborInfoIntervalS);

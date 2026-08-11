@@ -1,7 +1,3 @@
-### New
-- Web Config can save a copy of your messages: a new Export Messages (CSV) button downloads every channel message and direct message the device still holds — one row each with the channel or peer, timestamp, sender and delivery state — and long wrapped messages are joined back into a single row. The file goes to your browser only; nothing is written to the device's SD card. Web Config only, not the AP-mode Lite page.
-
 ### Fixed
-- Web Config pages now load in about two seconds instead of crawling for tens of seconds or giving up before they finish.
-- On the T-Deck, T-Lora Pager and Heltec, Web Config pages came out garbled once the device had heard from a lot of nodes, with node details and stray markup running into each other; a full 250-node list now renders correctly.
-- Web Config pages could be cut off partway through and show as junk in the browser; a page that cannot be sent in full is now dropped so the browser reports a failed load instead of displaying a broken page.
+- Restoring a config during first-boot setup no longer loses the node's identity — the saved keypair is now written to storage, so the device keeps its old public key and peers can still reach it with encrypted direct messages. Imports from the Config screen and web config were already correct and remain so.
+- A freshly flashed device no longer announces itself to the mesh before setup is finished — NodeInfo, position and telemetry are held back instead of going out with the default "Camillia"/"CaMi" name and the firmware's fallback coordinates, and the device stays quiet to other nodes' NodeInfo requests until onboarding completes or a config is imported. Receiving and relaying still work throughout, and pressing Announce in web config sends immediately.
