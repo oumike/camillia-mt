@@ -205,6 +205,12 @@
 #define MY_TEL_ENV_EN       0
 #define MY_TEL_ENV_INTV     3600
 #define MY_NEIGHBORINFO_EN  0
+// Listen for Meshtastic MeshBeacon packets (port 37) — advertisements from
+// other meshes carrying a channel/preset/region offer. Purely passive: it
+// decodes what already arrived and never transmits, and an offer is only ever
+// shown, never applied. Off by default because it is an opt-in curiosity, not
+// something a device needs in order to work on its own mesh.
+#define MY_MESH_BEACON_LISTEN 0
 #define MY_NEIGHBORINFO_INTV 21600
 #define MY_NEIGHBORINFO_LORA 1
 #define NEIGHBORINFO_MIN_INTERVAL_S 14400

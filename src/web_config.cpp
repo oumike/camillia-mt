@@ -2285,6 +2285,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
     html += "</div>";
 
+    html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Mesh Beacons</h3>";
+    html += "<label>Listen for beacons<select name='mesh_beacon_listen'>"
+            "<option value='1'"; if ( gCfg->meshBeaconListen) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->meshBeaconListen) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    html += "<p style='font-size:.82em;color:var(--muted);margin:.2em 0 0'>"
+            "Meshtastic 2.7 nodes can retune briefly to advertise a different mesh, "
+            "naming a channel, preset and region. With this on, any such beacon that "
+            "reaches this device is listed on the Beacons screen, under Live &rarr; "
+            "Tools. Receive-only &mdash; nothing "
+            "is transmitted, and an offer is never applied to your radio. Off by default.</p>";
+
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Neighborhood Info</h3>";
     html += "<div class='row2'>";
     html += "<label>Enabled<select name='neighbor_info_en'>"
@@ -2642,7 +2654,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<div id='live-feed' class='live-feed'></div>"
             "</div>"
             "<h3 style='margin-top:1.2em'>Live Charts</h3>"
-            "<p class='gps-hint'>Same data shown on-device via the live feed shortcuts (U / S). Last 60 samples, newest on the right.</p>"
+            "<p class='gps-hint'>Same data shown on-device under Live &rarr; Tools. Last 60 samples, newest on the right.</p>"
             "<div class='chart-wrap'>"
               "<div class='chart-box'>"
                 "<div class='chart-head'><strong>Channel Utilization (%)</strong>"
@@ -3891,6 +3903,9 @@ static void handlePostSave() {
     }
     if (server.hasArg("neighbor_info_en")) {
         gCfg->neighborInfoEnabled = server.arg("neighbor_info_en").toInt() != 0;
+    }
+    if (server.hasArg("mesh_beacon_listen")) {
+        gCfg->meshBeaconListen = server.arg("mesh_beacon_listen").toInt() != 0;
     }
     gCfg->neighborInfoIntervalS = neighborInfoIntervalS;
     if (server.hasArg("neighbor_info_lora")) {

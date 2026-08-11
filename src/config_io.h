@@ -262,6 +262,14 @@ struct RhinoConfig {
     // How long the notification LED / keyboard backlight keeps reminding after
     // a message arrives, in seconds. 0 = never stop. See kNotifyLightTimeouts.
     uint16_t notifyLightTimeoutS;
+    // Two pad bytes for the same trailing-padding reason as every pad above:
+    // notifyLightTimeoutS is a uint16_t at the end of a 4-aligned struct, so the
+    // stored blob can carry two bytes past it. This puts the flag below at or
+    // past the old sizeof either way.
+    uint8_t  _reservedPad8[2];
+    // Decode and display MeshBeacon (port 37) advertisements from other meshes.
+    // Receive-only; see MY_MESH_BEACON_LISTEN.
+    bool     meshBeaconListen;
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

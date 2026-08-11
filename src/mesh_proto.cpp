@@ -261,6 +261,103 @@ bool decodeTelemetry(const uint8_t *buf, size_t len, TelemetryInfo &out) {
     return true;
 }
 
+bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out) {
+    memset(&out, 0, sizeof(out));
+    size_t i = 0;
+
+    // ChannelSettings submessage: we want name (field 3) and psk (field 2).
+    // channel_num and the uplink/downlink flags describe how the *sender's*
+    // mesh is arranged and are not ours to act on.
+    auto parseOfferChannel = [&](const uint8_t *sub, size_t subLen) {
+        size_t j = 0;
+        while (j < subLen) {
+            uint64_t tag = 0;
+            j = pbReadVarint(sub, subLen, j, tag);
+            if (!j) return;
+            const uint32_t f = (uint32_t)(tag >> 3);
+            const uint32_t wt = (uint32_t)(tag & 7);
+            if (wt == 2) {
+                uint64_t sz = 0;
+                size_t k = pbReadVarint(sub, subLen, j, sz);
+                if (!k || k + sz > subLen) return;
+                if (f == 2) {                       // psk
+                    size_t n = (size_t)sz;
+                    if (n > sizeof(out.offerPsk)) n = sizeof(out.offerPsk);
+                    memcpy(out.offerPsk, sub + k, n);
+                    out.offerPskLen = (uint8_t)n;
+                } else if (f == 3) {                // name
+                    size_t n = (size_t)sz;
+                    if (n > sizeof(out.offerChannelName) - 1) n = sizeof(out.offerChannelName) - 1;
+                    memcpy(out.offerChannelName, sub + k, n);
+                    out.offerChannelName[n] = '\0';
+                }
+                j = k + (size_t)sz;
+            } else if (wt == 0) {
+                uint64_t v = 0;
+                j = pbReadVarint(sub, subLen, j, v);
+                if (!j) return;
+            } else if (wt == 5) {
+                if (j + 4 > subLen) return;
+                j += 4;
+            } else if (wt == 1) {
+                if (j + 8 > subLen) return;
+                j += 8;
+            } else {
+                return;
+            }
+        }
+    };
+
+    while (i < len) {
+        uint64_t tag = 0;
+        i = pbReadVarint(buf, len, i, tag);
+        if (!i) break;
+
+        const uint32_t field = (uint32_t)(tag >> 3);
+        const uint32_t wt = (uint32_t)(tag & 7);
+
+        if (wt == 2) {
+            uint64_t sz = 0;
+            size_t j = pbReadVarint(buf, len, i, sz);
+            if (!j || j + sz > len) break;
+            if (field == 1) {                       // message
+                size_t n = (size_t)sz;
+                if (n > sizeof(out.message) - 1) n = sizeof(out.message) - 1;
+                memcpy(out.message, buf + j, n);
+                out.message[n] = '\0';
+            } else if (field == 2) {                // offer_channel
+                out.hasOfferChannel = true;
+                parseOfferChannel(buf + j, (size_t)sz);
+            }
+            i = j + (size_t)sz;
+        } else if (wt == 0) {
+            uint64_t v = 0;
+            i = pbReadVarint(buf, len, i, v);
+            if (!i) break;
+            if (field == 3) {                       // offer_region
+                out.offerRegion = (uint8_t)v;
+            } else if (field == 4) {                // offer_preset
+                out.offerPreset = (uint8_t)v;
+                out.hasOfferPreset = true;
+            }
+        } else if (wt == 5) {
+            if (i + 4 > len) break;
+            i += 4;
+        } else if (wt == 1) {
+            if (i + 8 > len) break;
+            i += 8;
+        } else {
+            break;
+        }
+    }
+
+    // An empty beacon carrying neither text nor an offer says nothing; the same
+    // test Meshtastic's listener applies before caching one.
+    out.valid = out.message[0] != '\0' || out.hasOfferChannel
+             || out.offerRegion != 0 || out.hasOfferPreset;
+    return out.valid;
+}
+
 bool decodeNeighborInfo(const uint8_t *buf, size_t len, NeighborInfoPayload &out) {
     memset(&out, 0, sizeof(out));
     size_t i = 0;

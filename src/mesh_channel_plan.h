@@ -40,6 +40,21 @@ extern const uint8_t      kRegionCount;
 // Returns preset index for name, or PRESET_LONG_FAST if not found.
 uint8_t presetFromName(const char *name);
 
+// ── Meshtastic enum translation ─────────────────────────────────────────────
+// Received MeshBeacon offers carry Meshtastic's own ModemPreset and RegionCode
+// enums. These must be translated, never cast: the two preset orderings differ
+// from index 1 onward (Meshtastic LONG_SLOW=1, ours PRESET_LONG_MODERATE=1), so
+// a cast would quietly report the wrong preset to the user.
+//
+// Returns -1 for a preset with no local equivalent (Meshtastic's deprecated
+// VERY_LONG_SLOW), so callers can say "unknown" rather than guess.
+int presetFromMeshtastic(uint8_t meshtasticPreset);
+
+// Region code string ("US", "EU_868", ...) for a Meshtastic RegionCode enum, or
+// nullptr when unset/unknown. Our kRegions[].code strings already use the same
+// names as the Meshtastic enum, so this is the whole translation.
+const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion);
+
 // ── Custom (non-preset) modem settings ──────────────────────────────────────
 // Bandwidth is stored the way Meshtastic stores it: an integer count of kHz,
 // where two values are shorthand for a fractional bandwidth the radio actually

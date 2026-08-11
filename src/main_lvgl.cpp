@@ -1185,6 +1185,9 @@ static void openDiscoveryModal();
 static void closeDiscoveryModal();
 static void refreshDiscoveryModal(bool force = false);
 #endif
+static void openBeaconsModal();
+static void closeBeaconsModal();
+static void refreshBeaconsModal(bool force = false);
 static void chartPushSample(ChartHist &h, float value);
 static void openDmModal();
 static void closeDmModal();
@@ -1675,6 +1678,7 @@ enum CfgActionId {
     CFG_ACTION_ANNOUNCE,
     CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
+    CFG_ACTION_MESH_BEACON,
     CFG_ACTION_SNF_CLIENT,
     CFG_ACTION_MQTT_TOGGLE,
     #if HAS_VOLUME_CONTROL
@@ -3065,6 +3069,9 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_NEIGHBOR_INFO:
             snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
+            break;
+        case CFG_ACTION_MESH_BEACON:
+            snprintf(buf, bufLen, "Mesh Beacons: %s", s_cfg.meshBeaconListen ? "On" : "Off");
             break;
         case CFG_ACTION_SNF_CLIENT:
             snprintf(buf, bufLen, "Store&Fwd Client: %s", s_cfg.snfClientEnabled ? "On" : "Off");
@@ -6586,6 +6593,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
     // Hardware trim, so it sits with the maintenance entries rather than up
     // among the display settings — it is set once per unit, not adjusted.
@@ -9152,13 +9160,15 @@ static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
 // columns, same column-major fill, so a step of one walks down a column here
 // too. Laid out, that is:
 //     SNR/RSSI | Discovery
-//     ChUtil   |
+//     ChUtil   | Beacons
+// (Cardputer has no Discovery, so Beacons takes its cell.)
 enum LiveTool : uint8_t {
     LIVE_TOOL_SNR = 0,
     LIVE_TOOL_CHUTIL,
 #if FEATURE_DISCOVERY
     LIVE_TOOL_DISCOVERY,
 #endif
+    LIVE_TOOL_BEACONS,
     LIVE_TOOL_COUNT
 };
 static constexpr int kLiveToolRowsPerCol =
@@ -9170,12 +9180,134 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
 #if FEATURE_DISCOVERY
     'D',
 #endif
+    'B',
 };
 
 static lv_obj_t *s_liveToolsBackdrop = nullptr;
 static lv_obj_t *s_liveToolsModal    = nullptr;
 static lv_obj_t *s_liveToolsRows[LIVE_TOOL_COUNT] = {};
 static int       s_liveToolsSelection = LIVE_TOOL_SNR;
+
+// ── MeshBeacon offers (port 37) ──────────────────────────────────────────────
+// Beacons from other meshes: a node over there retuned its radio to our config
+// long enough to say "there is a mesh on this channel/preset/region". We keep
+// the last few and show them on the Beacons tool; we never act on one.
+//
+// Not gated on a config flag. Meshtastic gates listening behind
+// FLAG_LISTEN_ENABLED, but that is a knob for a module that also transmits —
+// decoding a packet that already arrived costs no airtime and a few hundred
+// bytes of RAM, and a beacon nobody sees is a beacon that may as well not have
+// been sent.
+//
+// Eight senders, because the whole point of the Beacons screen is that these
+// arrive minutes or hours apart and a short list quietly loses the one you were
+// waiting for. Cardputer keeps the original four: an entry is ~160 bytes of
+// .bss, and first-boot onboarding there has almost none to spare.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static constexpr int kBeaconOfferMax = 4;
+#else
+static constexpr int kBeaconOfferMax = 8;
+#endif
+
+struct BeaconOffer {
+    uint32_t sender;
+    uint32_t rxMs;              // millis() of the most recent one from this sender
+    uint32_t firstMs;           // millis() of the first, for the repeat interval
+    uint16_t hits;              // how many we have heard from this sender
+    float    snr;
+    float    rssi;
+    uint8_t  hops;              // only meaningful when hasHops
+    bool     hasHops;
+    char     message[101];
+    bool     hasChannel;
+    char     channelName[16];
+    bool     channelHasPsk;
+    int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
+    char     region[12];        // "" when not offered
+};
+
+static BeaconOffer s_beaconOffers[kBeaconOfferMax] = {};
+static int         s_beaconOfferCount = 0;
+// Bumped on every stored beacon, so the Beacons screen can tell "same list" from
+// "same list, one of them just repeated" without hashing the whole table.
+static uint32_t    s_beaconOfferSeq = 0;
+
+// Newest first, one entry per sender: a beacon repeats on an interval and the
+// latest one is the only one worth keeping. The repeat itself is not thrown
+// away though — the count and the first-heard stamp survive the overwrite, and
+// together they are what lets the screen say how often this sender beacons.
+static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b) {
+    int slot = -1;
+    for (int i = 0; i < s_beaconOfferCount; i++) {
+        if (s_beaconOffers[i].sender == pkt.hdr.from) { slot = i; break; }
+    }
+    const bool repeat = (slot >= 0);
+    uint32_t firstMs = repeat ? s_beaconOffers[slot].firstMs : pkt.rxMs;
+    uint16_t hits    = repeat ? s_beaconOffers[slot].hits : 0;
+    if (slot < 0) {
+        if (s_beaconOfferCount < kBeaconOfferMax) slot = s_beaconOfferCount++;
+        else slot = kBeaconOfferMax - 1;          // evict the oldest
+    }
+    // Move to the front so index 0 is always the most recent.
+    for (int i = slot; i > 0; i--) s_beaconOffers[i] = s_beaconOffers[i - 1];
+    BeaconOffer &o = s_beaconOffers[0];
+
+    memset(&o, 0, sizeof(o));
+    o.sender  = pkt.hdr.from;
+    o.rxMs    = pkt.rxMs;
+    o.firstMs = firstMs;
+    o.hits    = (hits < 0xFFFFu) ? (uint16_t)(hits + 1) : hits;
+    o.snr     = pkt.snr;
+    o.rssi    = pkt.rssi;
+    // Same derivation the node table uses: without hop_start, "0 hops" is an
+    // absent field rather than a direct neighbor.
+    {
+        const uint8_t hopStart = (uint8_t)((pkt.hdr.flags >> 5) & 0x07);
+        const uint8_t hopLimit = (uint8_t)(pkt.hdr.flags & 0x07);
+        if (hopStart > 0) {
+            o.hops = (hopStart > hopLimit) ? (uint8_t)(hopStart - hopLimit) : 0;
+            o.hasHops = true;
+        }
+    }
+    utf8util::copyTruncate(o.message, sizeof(o.message), b.message);
+    o.hasChannel = b.hasOfferChannel;
+    if (b.hasOfferChannel) {
+        utf8util::copyTruncate(o.channelName, sizeof(o.channelName), b.offerChannelName);
+        o.channelHasPsk = (b.offerPskLen > 0);
+    }
+    o.preset = b.hasOfferPreset ? presetFromMeshtastic(b.offerPreset) : -1;
+    const char *rc = regionCodeFromMeshtastic(b.offerRegion);
+    if (rc) utf8util::copyTruncate(o.region, sizeof(o.region), rc);
+    s_beaconOfferSeq++;
+}
+
+// The Beacons tool's own surface. Beacons used to be a group on Discovery,
+// which was the wrong home for them: Discovery answers "who is out there right
+// now" and is built around a sweep whose window is 45 s, where a beacon repeats
+// on the sender's schedule — minutes or hours apart. A group that is empty
+// nearly every time you look at it teaches you to stop looking, so they get a
+// screen that is only ever about them, and that keeps what it has heard until
+// you clear it.
+static lv_obj_t *s_beaconsModal = nullptr;
+static lv_obj_t *s_beaconsList = nullptr;
+static lv_obj_t *s_beaconsStatusLabel = nullptr;
+// One per card, holding the only text that moves on its own. Kept so a ticking
+// age does not cost a full teardown of a list the user may be reading.
+static lv_obj_t *s_beaconAgeLabels[kBeaconOfferMax] = {};
+static uint32_t  s_beaconsRenderedSig = 0;
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static const lv_font_t *kBeaconsBodyFont  = &lv_font_montserrat_12;
+static const lv_font_t *kBeaconsTitleFont = &lv_font_montserrat_14;
+#else
+static const lv_font_t *kBeaconsBodyFont  = &lv_font_montserrat_10;
+static const lv_font_t *kBeaconsTitleFont = &lv_font_montserrat_12;
+#endif
+
+// Same amber-on-pale-blue split Discovery uses for headings and rows.
+static constexpr uint32_t kBeaconsTitleColor = 0xFFC98A;
+static constexpr uint32_t kBeaconsBodyColor  = 0xD9E8FF;
+static constexpr uint32_t kBeaconsDimColor   = 0xA7C7FF;
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 // Compiled out on the Cardputer, where the ~3 KB it holds costs more than the
@@ -15417,6 +15549,7 @@ static void liveToolsActivate(int tool) {
 #if FEATURE_DISCOVERY
         case LIVE_TOOL_DISCOVERY: openDiscoveryModal();    break;
 #endif
+        case LIVE_TOOL_BEACONS:   openBeaconsModal();      break;
         default: break;
     }
 }
@@ -15482,6 +15615,7 @@ static void openLiveToolsModal() {
 #if FEATURE_DISCOVERY
         "Discovery",
 #endif
+        "Beacons",
     };
 #else
     lv_obj_t *hint = lv_label_create(s_liveToolsModal);
@@ -15496,6 +15630,7 @@ static void openLiveToolsModal() {
 #if FEATURE_DISCOVERY
         "(D)iscovery",
 #endif
+        "(B)eacons",
     };
 #endif
 
@@ -16045,6 +16180,342 @@ static inline bool nodeIsDirectNeighbor(const NodeEntry &e) {
     return e.hasHops && e.hops == 0 && e.lastHeardMs != 0;
 }
 
+// ── Beacons modal ────────────────────────────────────────────────────────────
+// One card per sender, holding everything that beacon carried. Available on
+// every board, Cardputer included: unlike Discovery there is no neighbor table
+// behind it, just the handful of records the RX path already fills in.
+
+static void closeBeaconsModal() {
+    lvObjDeleteSafe(s_beaconsModal);
+    s_beaconsList = nullptr;
+    s_beaconsStatusLabel = nullptr;
+    memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
+    s_beaconsRenderedSig = 0;
+}
+
+// Compact elapsed time. Coarse on purpose: these gaps are minutes to hours, and
+// a second-by-second readout on an hours-old beacon is noise, not information.
+static void beaconsFormatSpan(uint32_t ms, char *out, size_t outLen) {
+    const uint32_t s = ms / 1000UL;
+    if (s < 60UL) {
+        snprintf(out, outLen, "%lus", (unsigned long)s);
+    } else if (s < 3600UL) {
+        snprintf(out, outLen, "%lum", (unsigned long)(s / 60UL));
+    } else if (s < 86400UL) {
+        snprintf(out, outLen, "%luh%lum",
+                 (unsigned long)(s / 3600UL), (unsigned long)((s % 3600UL) / 60UL));
+    } else {
+        snprintf(out, outLen, "%lud", (unsigned long)(s / 86400UL));
+    }
+}
+
+// "Heard 4m ago" plus, once a sender has repeated, how far apart the repeats
+// have been — the number that says when it is worth looking again.
+static void beaconsFormatHeard(const BeaconOffer &o, char *out, size_t outLen) {
+    const uint32_t now = millis();
+    char age[16];
+    beaconsFormatSpan((uint32_t)(now - o.rxMs), age, sizeof(age));
+    if (o.hits > 1) {
+        char gap[16];
+        beaconsFormatSpan((uint32_t)(o.rxMs - o.firstMs) / (uint32_t)(o.hits - 1),
+                          gap, sizeof(gap));
+        snprintf(out, outLen, "Heard %s ago   %u seen, ~%s apart",
+                 age, (unsigned)o.hits, gap);
+    } else {
+        snprintf(out, outLen, "Heard %s ago   1 seen", age);
+    }
+}
+
+// The sender's own name when our node table happens to know it. Usually it does
+// not — a beaconing node lives on another mesh and its NodeInfo never reaches
+// us — so the hex id is the normal case here rather than the fallback.
+static void beaconsSenderLabel(uint32_t id, char *out, size_t outLen) {
+    const NodeEntry *e = Nodes.find(id);
+    if (e && e->hasName && e->longName[0]) {
+        utf8util::copyTruncate(out, outLen, e->longName);
+        return;
+    }
+    liveNodeLabel(id, out, outLen, true);
+}
+
+static lv_obj_t *beaconsMakeLabel(lv_obj_t *parent, const lv_font_t *font,
+                                  uint32_t color, const char *text) {
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_width(lbl, lv_pct(100));
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(color), 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(lbl, text);
+    return lbl;
+}
+
+// Rebuilds every card. Called only when the set actually changed — the ages
+// inside them are refreshed in place, see refreshBeaconsModal().
+static void beaconsBuildList() {
+    if (!s_beaconsList) return;
+    lv_obj_clean(s_beaconsList);
+    memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
+
+    if (s_beaconOfferCount == 0) {
+        // Two different silences, and telling them apart is the whole value of
+        // this text: nothing to hear, versus not listening.
+        beaconsMakeLabel(s_beaconsList, kBeaconsBodyFont, kBeaconsBodyColor,
+                         s_cfg.meshBeaconListen
+                             ? "No beacons heard yet.\n\n"
+                               "A beacon is only audible while its sender has retuned onto "
+                               "this channel, preset and region, and it repeats on that "
+                               "node's own schedule - minutes to hours apart. This list "
+                               "keeps what it hears until you clear it."
+                             : "Mesh Beacons is off.\n\n"
+                               "Turn it on in Config (or under Modules in web config) to "
+                               "decode beacons from other meshes. Receive-only: nothing is "
+                               "transmitted, and an offer is never applied to your radio.");
+        return;
+    }
+
+    char name[40];
+    char line[112];
+
+    for (int i = 0; i < s_beaconOfferCount; i++) {
+        const BeaconOffer &o = s_beaconOffers[i];
+
+        lv_obj_t *card = lv_obj_create(s_beaconsList);
+        lv_obj_set_width(card, lv_pct(100));
+        lv_obj_set_height(card, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_radius(card, 4, 0);
+        lv_obj_set_style_pad_all(card, 4, 0);
+        lv_obj_set_style_pad_row(card, 1, 0);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        beaconsSenderLabel(o.sender, name, sizeof(name));
+        beaconsMakeLabel(card, kBeaconsTitleFont, kBeaconsTitleColor, name);
+
+        // Wrapped, not clipped: the message is the one field the sender wrote by
+        // hand, and half of it is worth less than the two lines it costs.
+        if (o.message[0]) {
+            snprintf(line, sizeof(line), "\"%s\"", o.message);
+            beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsBodyColor, line);
+        }
+
+        // What is on offer: channel, preset, region — whichever the beacon
+        // carried. A trailing * means the channel came with a key. Shown even
+        // when empty, because "this beacon offered nothing" is itself an answer.
+        char offer[64] = {};
+        int n = 0;
+        if (o.hasChannel) {
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
+                          o.channelName[0] ? o.channelName : "(unnamed)",
+                          o.channelHasPsk ? "*" : "");
+        }
+        if (o.preset >= 0 && o.preset < PRESET_COUNT) {
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s",
+                          n ? " / " : "", kPresets[o.preset].channelName);
+        }
+        if (o.region[0]) {
+            n += snprintf(offer + n, sizeof(offer) - n, "%s%s", n ? " / " : "", o.region);
+        }
+        snprintf(line, sizeof(line), "Offers: %s", offer[0] ? offer : "(nothing)");
+        beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsBodyColor, line);
+
+        // How it reached us. The id is here rather than in the title so a known
+        // name does not push it off the card entirely.
+        char hops[16];
+        if (o.hasHops) snprintf(hops, sizeof(hops), "%u hop%s",
+                                (unsigned)o.hops, (o.hops == 1) ? "" : "s");
+        else           snprintf(hops, sizeof(hops), "? hops");
+        snprintf(line, sizeof(line), "!%08lx   %.1f dB   %.0f dBm   %s",
+                 (unsigned long)o.sender, o.snr, o.rssi, hops);
+        beaconsMakeLabel(card, kBeaconsBodyFont, kBeaconsDimColor, line);
+
+        beaconsFormatHeard(o, line, sizeof(line));
+        s_beaconAgeLabels[i] = beaconsMakeLabel(card, kBeaconsBodyFont,
+                                                kBeaconsDimColor, line);
+    }
+}
+
+static void refreshBeaconsModal(bool force) {
+    if (!s_beaconsModal || !s_beaconsList) return;
+    if (!lvObjValid(s_beaconsModal)) {
+        s_beaconsModal = nullptr;
+        s_beaconsList = nullptr;
+        s_beaconsStatusLabel = nullptr;
+        memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
+        return;
+    }
+
+    // One counter covers every change worth a rebuild: a new sender, a repeat
+    // from a known one, and a clear all bump it.
+    const uint32_t sig = s_beaconOfferSeq * 31u
+                       + (uint32_t)s_beaconOfferCount
+                       + (s_cfg.meshBeaconListen ? 0x8000u : 0u);
+    if (force || sig != s_beaconsRenderedSig) {
+        s_beaconsRenderedSig = sig;
+        if (s_beaconsStatusLabel) {
+            char status[64];
+            if (!s_cfg.meshBeaconListen) {
+                snprintf(status, sizeof(status), "Listening: off");
+            } else {
+                snprintf(status, sizeof(status), "Listening   %d sender%s heard",
+                         s_beaconOfferCount, (s_beaconOfferCount == 1) ? "" : "s");
+            }
+            lv_label_set_text(s_beaconsStatusLabel, status);
+        }
+        beaconsBuildList();
+        return;
+    }
+
+    // Nothing new arrived, so only the clocks moved. Rewriting just those labels
+    // leaves the cards — and the scroll position — alone.
+    //
+    // Once a second, and only when the text actually changed. lv_label_set_text
+    // invalidates unconditionally, so doing this on every UI tick would put the
+    // whole list into a full redraw ~30 times a second to move a number that
+    // changes at most once a second, and usually once a minute.
+    static uint32_t s_lastAgeTickMs = 0;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - s_lastAgeTickMs) < 1000UL) return;
+    s_lastAgeTickMs = now;
+
+    char line[112];
+    for (int i = 0; i < s_beaconOfferCount && i < kBeaconOfferMax; i++) {
+        if (!s_beaconAgeLabels[i]) continue;
+        beaconsFormatHeard(s_beaconOffers[i], line, sizeof(line));
+        const char *shown = lv_label_get_text(s_beaconAgeLabels[i]);
+        if (shown && strcmp(shown, line) == 0) continue;
+        lv_label_set_text(s_beaconAgeLabels[i], line);
+    }
+}
+
+// Drops the collected beacons. Nothing else holds them, so unlike Discovery's
+// clear there is no watermark to keep and nothing to rebuild from: the list
+// refills only as senders beacon again.
+static void beaconsClear() {
+    s_beaconOfferCount = 0;
+    s_beaconOfferSeq++;
+    refreshBeaconsModal(true);
+}
+
+static void openBeaconsModal() {
+    // A theme rebuild deletes the root screen out from under us; without this
+    // the stale pointer would lock the surface shut for the rest of the boot.
+    if (s_beaconsModal && !lvObjAlive(s_beaconsModal)) {
+        s_beaconsModal = nullptr;
+        s_beaconsList = nullptr;
+        s_beaconsStatusLabel = nullptr;
+        memset(s_beaconAgeLabels, 0, sizeof(s_beaconAgeLabels));
+    }
+    if (!s_rootScreen || s_beaconsModal) return;
+
+    const int modalW = lv_disp_get_hor_res(NULL);
+    const int modalH = lv_disp_get_ver_res(NULL);
+
+    s_beaconsModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_beaconsModal, modalW, modalH);
+    lv_obj_align(s_beaconsModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_beaconsModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_beaconsModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_beaconsModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_beaconsModal, 1, 0);
+    lv_obj_set_style_border_color(s_beaconsModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_beaconsModal, 4, 0);
+    lv_obj_set_style_pad_row(s_beaconsModal, 4, 0);
+    lv_obj_set_flex_flow(s_beaconsModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_beaconsModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_beaconsModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(header, 4, 0);
+    lv_obj_set_style_pad_right(header, 4, 0);
+    lv_obj_set_style_pad_top(header, 1, 0);
+    lv_obj_set_style_pad_bottom(header, 1, 0);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "Beacons");
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+
+    // Touch build: no keyboard, so the way out and the only action both have to
+    // be on screen, as on Discovery.
+    auto makeBeaconsBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+                             lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 44, 20);
+        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makeBeaconsBtn(header, "Close", 0,
+                   [](lv_event_t *e) { LV_UNUSED(e); closeBeaconsModal(); });
+    makeBeaconsBtn(header, "Clear", -48,
+                   [](lv_event_t *e) { LV_UNUSED(e); beaconsClear(); });
+#else
+    lv_obj_center(title);
+#endif
+
+    s_beaconsStatusLabel = lv_label_create(s_beaconsModal);
+    lv_obj_set_width(s_beaconsStatusLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_beaconsStatusLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_beaconsStatusLabel, lv_color_hex(0xB8D4FF), 0);
+    lv_obj_set_style_text_align(s_beaconsStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_beaconsStatusLabel, "-");
+
+    s_beaconsList = lv_obj_create(s_beaconsModal);
+    lv_obj_set_width(s_beaconsList, lv_pct(100));
+    lv_obj_set_flex_grow(s_beaconsList, 1);
+    lv_obj_add_flag(s_beaconsList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_beaconsList);
+    lv_obj_set_scrollbar_mode(s_beaconsList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_beaconsList, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(s_beaconsList, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_beaconsList, 1, 0);
+    lv_obj_set_style_border_color(s_beaconsList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_beaconsList, 3, 0);
+    lv_obj_set_style_pad_row(s_beaconsList, 4, 0);
+    lv_obj_set_style_width(s_beaconsList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_beaconsList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_beaconsList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_beaconsList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_beaconsList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_beaconsModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "C = Clear   %s = Back", modalCloseKeyLabel());
+#endif
+
+    refreshBeaconsModal(true);
+}
+
 // ── Discovery modal ──────────────────────────────────────────────────────────
 #if FEATURE_DISCOVERY
 
@@ -16507,6 +16978,9 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
 // each node makes its next NeighborInfo broadcast.
 static void discoveryClear() {
     const int droppedReports = Nodes.clearNeighbors();
+    // Beacons are not touched here: they live on the Beacons tool now, and they
+    // arrive far too rarely to be worth throwing away with a screen that is
+    // deliberately about the last few minutes.
     s_discoveryClearedMs = millis();
     if (s_discoveryClearedMs == 0) s_discoveryClearedMs = 1;   // 0 means "never cleared"
 
@@ -19073,6 +19547,19 @@ static void performCfgAction(int actionId) {
                      sizeof(s_cfgStatus),
                      "Neighborhood info: %s",
                      s_cfg.neighborInfoEnabled ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_MESH_BEACON:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec MESH_BEACON");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.meshBeaconListen = !s_cfg.meshBeaconListen;
+            persistConfigToPrefs();
+            // Turning it off drops what was already collected: leaving stale
+            // offers on the Beacons screen after switching the feature off
+            // would read as the switch not having worked.
+            if (!s_cfg.meshBeaconListen) s_beaconOfferCount = 0;
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Mesh beacons: %s",
+                     s_cfg.meshBeaconListen ? "On (listening)" : "Off");
             break;
 
         case CFG_ACTION_SNF_CLIENT:
@@ -21900,6 +22387,26 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+        if (s_beaconsModal) {
+            if (isModalCloseKey(k)) {
+                closeBeaconsModal();
+                continue;
+            }
+            if (k == 'c' || k == 'C') {
+                beaconsClear();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP && s_beaconsList) {
+                scrollListClamped(s_beaconsList, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN && s_beaconsList) {
+                scrollListClamped(s_beaconsList, -18);
+                continue;
+            }
+            continue;
+        }
+
         // Below the tool surfaces, above Live: a tool opened from here keeps the
         // keys while it is up, and Tools keeps them while it is the topmost one.
         if (s_liveToolsModal) {
@@ -24633,7 +25140,7 @@ static bool rebroadcastModeAllows(const MeshPacket &pkt) {
             switch (pkt.portnum) {
                 case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
                 case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
-                case TRACEROUTE_APP: return true;
+                case TRACEROUTE_APP: case MESH_BEACON_APP: return true;
                 default: return false;
             }
         default: // ALL / ALL_SKIP_DECODING — relay raw regardless of decode
@@ -25173,6 +25680,26 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
             }
             appendLiveRxSummary(pkt, chanIdx, "G");
+            return false;
+        }
+
+        case MESH_BEACON_APP: {
+            // Off by default and gated here rather than at the display: with the
+            // setting off nothing is decoded, cached or shown. The live-feed tag
+            // below still fires — Live is a traffic monitor, and a packet that
+            // arrived did arrive.
+            MeshBeaconPayload b = {};
+            if (s_cfg.meshBeaconListen && decodeMeshBeacon(pkt.payload, pkt.payloadLen, b)) {
+                beaconOfferStore(pkt, b);
+                debugLogMessages("[beacon] from=!%08lx msg=\"%.40s\" chan=%s preset=%u region=%u\n",
+                                 (unsigned long)pkt.hdr.from, b.message,
+                                 b.hasOfferChannel ? b.offerChannelName : "-",
+                                 (unsigned)b.offerPreset, (unsigned)b.offerRegion);
+            }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
+            appendLiveRxSummary(pkt, chanIdx, "B");
             return false;
         }
 
@@ -28339,6 +28866,8 @@ void loop() {
         // this screen, and meshDirty misses most of them anyway.
         refreshDiscoveryModal();
 #endif
+        // Same reasoning, plus the ages on the cards, which move on their own.
+        refreshBeaconsModal();
         refreshDmModal(meshDirty);
     }
 

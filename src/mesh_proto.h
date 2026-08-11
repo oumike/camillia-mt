@@ -50,6 +50,7 @@ enum PortNum : uint32_t {
     TELEMETRY_APP    = 67,
     NEIGHBORINFO_APP = 71,
     TRACEROUTE_APP   = 70,   // traceroute (not ACK)
+    MESH_BEACON_APP  = 37,   // Meshtastic 2.7 MeshBeacon: cross-mesh advertisement
 };
 
 // ── Decoded incoming packet ───────────────────────────────────
@@ -121,6 +122,31 @@ struct NeighborInfoPayload {
     NeighborEdgeInfo neighbors[MESH_NEIGHBOR_MAX];
     uint8_t  neighborCount;
 };
+
+// ── MeshBeacon (port 37) ──────────────────────────────────────
+// Meshtastic 2.7's cross-mesh advertisement. A node retunes its radio to
+// another preset/region/channel and broadcasts a short message plus an optional
+// "offer" naming a channel, preset and region — so nodes on *that* mesh learn a
+// different mesh exists. We decode what arrives on our own config; the offer is
+// only ever shown to the user, never applied. Meshtastic is equally firm about
+// that ("firmware never applies it automatically"), and silently retuning
+// someone's radio out from under them would be a hostile thing for a stranger's
+// packet to be able to do.
+struct MeshBeaconPayload {
+    char     message[101];       // MeshBeacon.message, field 1 (<=100 bytes on the wire)
+    bool     hasOfferChannel;    // field 2 present
+    char     offerChannelName[16];
+    uint8_t  offerPsk[32];
+    uint8_t  offerPskLen;
+    uint8_t  offerRegion;        // Meshtastic RegionCode enum; 0 = UNSET
+    bool     hasOfferPreset;
+    uint8_t  offerPreset;        // Meshtastic ModemPreset enum — NOT camillia's
+    bool     valid;
+};
+
+// Decode a MESH_BEACON_APP payload. The offer_channel submessage is parsed for
+// name and PSK only; the rest of ChannelSettings is not something we act on.
+bool decodeMeshBeacon(const uint8_t *buf, size_t len, MeshBeaconPayload &out);
 
 // ── Protobuf helpers ──────────────────────────────────────────
 size_t pbReadVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val);

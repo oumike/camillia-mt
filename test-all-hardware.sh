@@ -67,11 +67,13 @@ for i in "${!TARGET_ENVS[@]}"; do
   echo ""
   echo "[UPLOAD] Next target: ${label} (${env_name})"
   while true; do
-    echo "  1) Upload"
+    echo "  1) Erase + Upload"
     echo "  2) Skip"
     read -r -p "Choose [1-2]: " choice
     case "$choice" in
       1)
+        echo "[ERASE] Erasing flash on ${label} (${env_name})..."
+        pio run -e "$env_name" -t erase
         pio run -e "$env_name" -t upload
         break
         ;;
@@ -80,7 +82,7 @@ for i in "${!TARGET_ENVS[@]}"; do
         break
         ;;
       *)
-        echo "Invalid choice. Enter 1 to upload or 2 to skip."
+        echo "Invalid choice. Enter 1 to erase and upload, or 2 to skip."
         ;;
     esac
   done

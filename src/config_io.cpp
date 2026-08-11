@@ -159,6 +159,55 @@ static const char *primaryChannelNameForHash() {
     return CUSTOM_CHANNEL_NAME;
 }
 
+// Meshtastic ModemPreset enum -> our PRESET_* index. Deliberately a table, not
+// a cast: the orderings diverge at index 1 (theirs LONG_SLOW, ours
+// LONG_MODERATE) and again at 3, 5 and 7. Index into this by their value.
+// -1 marks a preset we have no equivalent for.
+static const int8_t kPresetFromMeshtastic[] = {
+    PRESET_LONG_FAST,      // 0 LONG_FAST
+    PRESET_LONG_SLOW,      // 1 LONG_SLOW
+    -1,                    // 2 VERY_LONG_SLOW (deprecated in 2.5, no local equivalent)
+    PRESET_MEDIUM_SLOW,    // 3 MEDIUM_SLOW
+    PRESET_MEDIUM_FAST,    // 4 MEDIUM_FAST
+    PRESET_SHORT_SLOW,     // 5 SHORT_SLOW
+    PRESET_SHORT_FAST,     // 6 SHORT_FAST
+    PRESET_LONG_MODERATE,  // 7 LONG_MODERATE
+    PRESET_SHORT_TURBO,    // 8 SHORT_TURBO
+};
+
+int presetFromMeshtastic(uint8_t meshtasticPreset) {
+    if (meshtasticPreset >= (sizeof(kPresetFromMeshtastic) / sizeof(kPresetFromMeshtastic[0]))) return -1;
+    return (int)kPresetFromMeshtastic[meshtasticPreset];
+}
+
+// Meshtastic RegionCode enum -> region code string. Index is their enum value;
+// 0 is UNSET. Entries we have no band plan for still return their name, so the
+// UI can say what was offered even when we could not tune to it.
+static const char *const kRegionFromMeshtastic[] = {
+    nullptr,    // 0  UNSET
+    "US",       // 1
+    "EU_433",   // 2
+    "EU_868",   // 3
+    "CN",       // 4
+    "JP",       // 5
+    "ANZ",      // 6
+    "KR",       // 7
+    "TW",       // 8
+    "RU",       // 9
+    "IN",       // 10
+    "NZ_865",   // 11
+    "TH",       // 12
+    "LORA_24",  // 13
+    "UA_433",   // 14
+    "UA_868",   // 15
+    "MY_433",   // 16
+};
+
+const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion) {
+    if (meshtasticRegion >= (sizeof(kRegionFromMeshtastic) / sizeof(kRegionFromMeshtastic[0]))) return nullptr;
+    return kRegionFromMeshtastic[meshtasticRegion];
+}
+
 void applyPresetParams(RhinoConfig &cfg) {
     if (cfg.modemPreset >= PRESET_COUNT) cfg.modemPreset = PRESET_LONG_FAST;
 
@@ -611,6 +660,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(MY_KB_BLINK_CHAN_FLASHES);
     cfg.kbBlinkDmFlashes   = cfgCoerceKbFlashes(MY_KB_BLINK_DM_FLASHES);
     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(MY_NOTIFY_LIGHT_TIMEOUT_S);
+    cfg.meshBeaconListen  = (bool)MY_MESH_BEACON_LISTEN;
     cfg.debugAcks          = MY_DBG_ACKS;
     cfg.debugMessages      = MY_DBG_MESSAGES;
     cfg.debugGps           = MY_DBG_GPS;
@@ -942,6 +992,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    enabled: %s\n", cfg.neighborInfoEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    update_interval: %lu\n", (unsigned long)cfg.neighborInfoIntervalS); out += tmp;
     snprintf(tmp, sizeof(tmp), "    transmit_over_lora: %s\n", cfg.neighborInfoOverLora ? "true" : "false"); out += tmp;
+    // Receive-only module, so it has just the one switch. Sits with the other
+    // module toggles rather than under display, where it first landed.
+    out += "  mesh_beacon:\n";
+    snprintf(tmp, sizeof(tmp), "    listen_enabled: %s\n", cfg.meshBeaconListen ? "true" : "false"); out += tmp;
     // owner
     out += "owner: ";       out += cfg.nodeLong;  out += "\n";
     out += "owner_short: "; out += cfg.nodeShort; out += "\n";
@@ -1386,6 +1440,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 if      (!strcmp(key, "enabled"))            cfg.neighborInfoEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "update_interval"))    cfg.neighborInfoIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "transmit_over_lora")) cfg.neighborInfoOverLora = parseBoolValue(val);
+            } else if (!strcmp(section, "module_config") && !strcmp(subsection, "mesh_beacon")) {
+                if (!strcmp(key, "listen_enabled")) cfg.meshBeaconListen = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {

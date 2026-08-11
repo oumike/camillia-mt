@@ -2,6 +2,23 @@
 
 This guide reflects current firmware navigation and controls.
 
+## First boot
+
+A freshly flashed device shows a setup screen before anything else. If a
+`config.yaml` from a previous device is on the SD card, it offers to import that
+instead of asking you to type a name.
+
+**Nothing is transmitted until setup is finished.** Until you complete onboarding
+or import a config, the device does not announce itself to the mesh — no
+NodeInfo, no position, no telemetry — and it does not answer other nodes asking
+who it is. Otherwise a new device would spend its first minutes telling the mesh
+it was called "Camillia" and sitting at the firmware's built-in fallback
+coordinates, which are a real place and almost certainly not yours.
+
+It still listens the whole time, and still relays other people's traffic — a
+relayed packet carries their identity, not yours. Pressing **Announce** in web
+config does transmit, because that is you asking for it deliberately.
+
 ## Main screen
 
 The main screen is channel chat. Use it to read traffic, select reply targets, and start compose.
@@ -28,7 +45,9 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   selected channel's messages; in the DM list it focuses the conversation's
   messages. Enter never opens compose.
 - Note: inside the compose box, Enter still **sends** the message.
-- Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI, ChUtil, and Discovery except on Cardputer); S sweeps inside Discovery
+- Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI,
+  ChUtil, Beacons, and Discovery except on Cardputer). Inside Discovery: W
+  sweeps, C clears, S saves a snapshot to SD. Inside Beacons: C clears
 
 ### LilyGo T-Deck (tdeck)
 
@@ -91,16 +110,16 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - Press C to clear the log
 - Press T for Tools (on Heltec, the Tools button in the Live header) — a
   two-column picker holding the SNR/RSSI chart, the channel-utilization chart,
-  and Discovery. Enter opens the selected tool, and S, U or D jumps straight to
-  one. Backing out of a tool returns to Live, not to Tools.
+  Discovery, and Beacons. Enter opens the selected tool, and S, U, D or B jumps
+  straight to one. Backing out of a tool returns to Live, not to Tools.
 
 ### Discovery
 
 Not available on Cardputer: the neighbor table and result buffer cost about 3 KB
 of internal RAM, and first-boot onboarding there (WiFi AP plus the lite web
 config) has less headroom than that. The Tools modal on Cardputer holds the two
-charts only. Cardputer still broadcasts its own NeighborInfo and still answers
-other nodes' discovery sweeps — it just does not keep or display the map.
+charts and Beacons. Cardputer still broadcasts its own NeighborInfo and still
+answers other nodes' discovery sweeps — it just does not keep or display the map.
 
 Discovery answers what the Nodes screen cannot: not just who we have heard from,
 but how the mesh is shaped around us. It groups every node we know of into
@@ -146,6 +165,42 @@ neighbor report.
   plus the raw neighbor reports, so the graph can be rebuilt from the file.
 - Close with the device close key (see device sections below)
 
+### Beacons
+
+Beacons are advertisements from *other* meshes — see [Mesh beacons](#mesh-beacons)
+for what they are and for the setting that turns listening on. This screen is
+where the ones this device heard are shown. It is available on every board,
+Cardputer included: there is no neighbor table behind it, just the handful of
+records the receive path fills in.
+
+They get a screen of their own rather than a group on Discovery because of the
+timing. A sender only beacons on its own schedule, minutes or hours apart, and
+only while it has retuned onto your channel, preset and region — so a group on a
+screen built around a 45-second sweep was empty nearly every time you looked at
+it.
+
+- Open from Live → Tools → Beacons (B), or the Beacons cell on Heltec
+- Scroll with Up and Down input
+- One card per sender, newest first, holding everything that beacon carried: the
+  sender (its name if this device happens to know it, otherwise the hex id), the
+  message it sent, what it offered, the SNR, RSSI and hop count it arrived with,
+  and when it was last heard
+- The offer line reads *channel / preset / region* — whichever parts the beacon
+  carried, `(nothing)` when it carried none. A `*` after a channel name means the
+  offer included a key. Nothing here is ever applied to your radio; acting on an
+  offer is manual, on the Config screen
+- Once a sender has beaconed twice, its card also says how many have been heard
+  and roughly how far apart they have been — which is the number that tells you
+  when it is worth looking again
+- Eight senders are kept (four on Cardputer). A repeat from a known sender
+  updates its card rather than taking a second slot; a ninth sender pushes out
+  the one heard longest ago
+- Press C (Heltec: the Clear button) to clear. The list refills only as senders
+  beacon again, which can be a long wait — nothing else is affected
+- The list also empties when Mesh Beacons is switched off, so an old offer can
+  never sit on screen after the feature has been turned off
+- Close with the device close key (see device sections below)
+
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)
 
 ## Config screen
@@ -153,7 +208,8 @@ neighbor report.
 Config includes Web Config controls, export and import, the theme picker, announce, and reset actions.
 
 - Open from the main screen (C on keyboard builds, Config bottom-nav button on Heltec)
-- Navigate action rows with Up and Down input
+- Navigate action rows with Up and Down input. The list wraps: going up from
+  the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, Clear Nodes, and Factory Reset require a second Enter confirmation
@@ -280,6 +336,47 @@ Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
 The same section has an **Export Node List (CSV)** button, which downloads every
 node the device currently knows about plus any previously archived nodes. A
 `source` column marks each row as `live` or `archived`.
+
+### Mesh beacons
+
+Meshtastic 2.7 nodes can briefly retune their radio to advertise a *different*
+mesh — a short message plus an optional offer naming a channel, preset and
+region. **Mesh Beacons** on the Config screen (and under Modules in web config)
+decides whether this device pays attention to them.
+
+- **Off by default.** Turning it on is the only thing that makes it do anything.
+- **Receive-only.** Nothing is transmitted. This device does not beacon.
+- An offer is **only ever shown, never applied** — nothing retunes your radio or
+  adds a channel on the say-so of a stranger's packet. Acting on one is manual.
+- Beacons that arrive are listed on the [Beacons](#beacons) screen, under
+  Live → Tools, with the sender, its message, whatever it offered, and how often
+  it has repeated.
+- Turning the setting off clears anything already collected.
+- The setting travels with config export and import, under
+  `module_config: mesh_beacon: listen_enabled`.
+
+A beacon can only be heard if the sender retuned onto *your* channel, preset and
+region — so an empty list usually just means nobody nearby is beaconing at you.
+
+### Backing up settings
+
+**Export Config** on the Config screen writes `/camillia/config.yaml` to the SD
+card, and web config has the same export plus an upload to restore one. What the
+file carries:
+
+- Every setting in this guide, and the channel list including channel keys
+- The node's **identity keypair**, so a restored device keeps the same PKI
+  identity and peers holding its public key can still send it encrypted DMs
+- **Not** the node ID. That is derived from the board's MAC address, so a backup
+  restored onto *different* hardware comes up with the same name, channels and
+  keys under a **new node ID** — other nodes will treat it as a new node
+
+Because it contains the private key and your channel keys, **an exported config
+is a secret, not just a settings file.** Treat it like a password.
+
+A config can be restored three ways, all equivalent: the Import row on the
+Config screen, an upload in web config, or the prompt during first-boot setup
+when a `config.yaml` is already on the card. Each one reboots afterwards.
 
 ### Backing up messages
 

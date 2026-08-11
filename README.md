@@ -89,37 +89,7 @@ Publishes a release. On-device OTA and the website flasher both track GitHub's
 
 ## Roadmap
 
-### Done
-
-- [x] Tabs for channels
-- [x] Tab for announcements
-- [x] Tab for settings display
-- [x] Web-based configuration UI (Wi-Fi AP + HTTP server)
-- [x] YAML config import/export via microSD
-- [x] Pretty IRC like interface
-- [x] GPS
-- [x] Consistent Node Information Storage
-- [x] Direct messaging
-- [x] Re-enable web config session authentication
-- [x] Gate web config auto-start behind onboarding/settings/button
-- [x] Themes
-- [x] Traceroute (RouteDiscovery request + hop rendering)
-- [x] Request NodeInfo from a peer (nodes-action menu)
-- [x] Request Position from a peer (nodes-action menu)
-- [x] Date markers in chat + DM history
-- [x] Persistent message history across reboots
-- [x] Position sharing (configurable interval, manual override)
-- [x] Re-enable web config session authentication
-- [x] Wireless MQTT uplink/downlink support (may keep radio-only by default)
-
-
-### In Progress
-
-
-### Planned
-- [ ] Theme builder through web config
-
-### Thinking About
+- Theme builder through web config
 
 
 
