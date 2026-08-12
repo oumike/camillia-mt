@@ -24090,6 +24090,64 @@ static void drawBootSplash() {
     displayDev().fillScreen(TFT_BLACK);
 }
 
+// ── Channel-button paint cache ───────────────────────────────────────────────
+// Everything refreshChannelGlow() writes to a channel button, remembered so the
+// next pass can skip the writes when nothing about that button changed.
+//
+// This is not a micro-optimisation. LVGL invalidates on every
+// lv_obj_set_style_*() and lv_label_set_text() call whether or not the value
+// differs, and lv_obj_set_style_border_width() carries LV_STYLE_PROP_LAYOUT_REFR
+// — so re-asserting an unchanged border marked the list's flex layout dirty.
+// This function runs every 70 ms, so with the dropdown open (buttons visible,
+// invalidations no longer discarded) it was forcing a full re-layout and
+// repaint of the channel list seven times more often than anything changed.
+// Measured cost: loop() fell from ~55 passes/s to 6-20 while the list was open,
+// which starved the keyboard scan in readKey() and is what made Enter feel
+// late — and, at 166 ms per pass, sometimes miss entirely.
+//
+// Buttons that are genuinely pulsing still get written every pass; that is the
+// animation. In the common case nothing is unread, nothing pulses, and the
+// whole loop becomes a set of comparisons.
+struct ChannelGlowPaint {
+    lv_obj_t *btn;
+    lv_obj_t *lbl;
+    bool      valid;
+    bool      active;
+    bool      animate;
+    bool      dropdownCursor;
+    uint8_t   uiMode;
+    uint8_t   pulseOpa;
+    uint8_t   outlineW;
+    uint8_t   shadowW;
+    char      text[48];
+};
+static ChannelGlowPaint s_channelGlowPaint[MESH_CHANNELS] = {};
+
+struct SelectorGlowPaint {
+    lv_obj_t *btn;
+    bool      valid;
+    bool      glow;
+    bool      navCursor;
+    uint8_t   uiMode;
+    uint8_t   pulseOpa;
+    uint8_t   outlineW;
+    uint8_t   shadowW;
+};
+static SelectorGlowPaint s_selectorGlowPaint = {};
+
+// Forces the next refreshChannelGlow() to re-assert every property.
+//
+// Needed because applyChannelButtonTheme() writes some of the same properties
+// (border width and colour) from its own rules. Without this, a theme change
+// would leave the buttons carrying that function's idea of the border while the
+// cache still believed the glow's version was on screen — visible as a dropdown
+// cursor that vanishes on a theme switch. Object-pointer changes are caught by
+// the cache itself, so a UI rebuild does not need to call this.
+static void invalidateChannelGlowPaint() {
+    for (int i = 0; i < MESH_CHANNELS; i++) s_channelGlowPaint[i].valid = false;
+    s_selectorGlowPaint.valid = false;
+}
+
 static void refreshChannelGlow(bool force) {
     uint32_t now = millis();
     if (!force && (uint32_t)(now - s_lastChannelGlowAnimMs) < 70) return;
@@ -24119,28 +24177,71 @@ static void refreshChannelGlow(bool force) {
                               && s_cardputerDropdownSelection == i;
         anyUnread = anyUnread || animate;
         lv_obj_t *lbl = s_channelLabels[i];
+
+        ChannelGlowPaint &paint = s_channelGlowPaint[i];
+        const uint8_t uiMode = (uint8_t)s_cfg.uiMode;
+        // A pulsing button is the one case where an unchanged input set still
+        // has to be repainted — the pulse values below move on their own.
+        const bool pulsing = animate && !dropdownCursor;
+        const bool objsSame = paint.valid && paint.btn == btn && paint.lbl == lbl;
+        const bool stateSame = objsSame
+                               && paint.active == active
+                               && paint.animate == animate
+                               && paint.dropdownCursor == dropdownCursor
+                               && paint.uiMode == uiMode;
+        const bool pulseSame = !pulsing
+                               || (paint.pulseOpa == pulseOpa
+                                   && paint.outlineW == outlineW
+                                   && paint.shadowW == shadowW);
+
+        char text[48];
+        const char *name = channelName(i);
+        if (!name || !name[0]) name = "Channel";
+        if (s_channelNeedsAttention[i] && !active) {
+            snprintf(text, sizeof(text), "%s *", name);
+        } else {
+            snprintf(text, sizeof(text), "%s", name);
+        }
+        const bool textSame = objsSame && strcmp(paint.text, text) == 0;
+
+        if (stateSame && pulseSame && textSame) continue;
+
+        paint.btn = btn;
+        paint.lbl = lbl;
+        paint.valid = true;
+        paint.active = active;
+        paint.animate = animate;
+        paint.dropdownCursor = dropdownCursor;
+        paint.uiMode = uiMode;
+        paint.pulseOpa = pulseOpa;
+        paint.outlineW = outlineW;
+        paint.shadowW = shadowW;
+        snprintf(paint.text, sizeof(paint.text), "%s", text);
+
         if (lbl) {
-            char text[48];
-            const char *name = channelName(i);
-            if (!name || !name[0]) name = "Channel";
-            if (s_channelNeedsAttention[i] && !active) {
-                snprintf(text, sizeof(text), "%s *", name);
-            } else {
-                snprintf(text, sizeof(text), "%s", name);
-            }
-            lv_label_set_text(lbl, text);
+            // Split from the style block: the name changes far less often than
+            // the pulse, and lv_label_set_text() reflows the label.
+            if (!textSame) {
+                lv_label_set_text(lbl, text);
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
-            sizeChannelButtonToLabel(i);
+                sizeChannelButtonToLabel(i);
 #endif
-            lv_obj_set_style_text_color(
-                lbl,
-                active
-                    ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xD9E8FF))
-                    : lv_color_hex(0xD9E8FF),
-                0);
+            }
+            if (!stateSame) {
+                lv_obj_set_style_text_color(
+                    lbl,
+                    active
+                        ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xD9E8FF))
+                        : lv_color_hex(0xD9E8FF),
+                    0);
+            }
         }
 
-        if (animate && !dropdownCursor) {
+        // Border width marks the layout dirty, so leave the whole block alone
+        // unless the shape actually moved or the pulse advanced.
+        if (stateSame && pulseSame) continue;
+
+        if (pulsing) {
             lv_obj_set_style_border_width(btn, 2, 0);
             lv_obj_set_style_border_color(btn, lv_color_hex(0x8EEBFF), 0);
 
@@ -24189,6 +24290,40 @@ static void refreshChannelGlow(bool force) {
                         && !s_dmModal
                         && !s_dmNodePickerModal
                         && !s_nodesModal);
+    #else
+        const bool selectorNavCursor = false;
+    #endif
+
+        // Same reasoning as the buttons above: the idle branch below is fully
+        // static, and re-asserting it every 70 ms was invalidating the selector
+        // (and marking the header layout dirty) for nothing. Only the glowing
+        // branch has to be rewritten each pass.
+        {
+            SelectorGlowPaint &sp = s_selectorGlowPaint;
+            const uint8_t uiMode = (uint8_t)s_cfg.uiMode;
+            const bool stateSame = sp.valid
+                                   && sp.btn == s_channelSelectorBtn
+                                   && sp.glow == selectorShouldGlow
+                                   && sp.navCursor == selectorNavCursor
+                                   && sp.uiMode == uiMode;
+            const bool pulsing = selectorShouldGlow && !selectorNavCursor;
+            const bool pulseSame = !pulsing
+                                   || (sp.pulseOpa == pulseOpa
+                                       && sp.outlineW == outlineW
+                                       && sp.shadowW == shadowW);
+            if (stateSame && pulseSame) return;
+
+            sp.btn = s_channelSelectorBtn;
+            sp.valid = true;
+            sp.glow = selectorShouldGlow;
+            sp.navCursor = selectorNavCursor;
+            sp.uiMode = uiMode;
+            sp.pulseOpa = pulseOpa;
+            sp.outlineW = outlineW;
+            sp.shadowW = shadowW;
+        }
+
+    #if defined(DEVICE_CARDPUTER_LORA_HAT)
         if (selectorNavCursor) {
             lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
             lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0xF4D35E), 0);
@@ -24242,6 +24377,12 @@ static void refreshChannelGlow(bool force) {
 }
 
 static void applyChannelButtonTheme() {
+    // This writes border width and colour from its own rules, over the top of
+    // whatever refreshChannelGlow() last put there. Drop that function's cache
+    // so the next pass re-asserts the glow/cursor state instead of trusting a
+    // record of pixels this loop is about to overwrite.
+    invalidateChannelGlowPaint();
+
     for (int i = 0; i < MESH_CHANNELS; i++) {
         lv_obj_t *btn = s_channelBtns[i];
         if (!btn) continue;
@@ -27723,6 +27864,12 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     closeCfgModal();
 
     lvObjDeleteSafe(s_rootScreen);
+
+    // Explicitly, rather than leaning on the cache's object-pointer check: the
+    // rebuild below allocates new buttons immediately after these are freed, so
+    // LVGL can hand back the same addresses. A recycled pointer would read as
+    // "same object, already painted" and leave a button unstyled.
+    invalidateChannelGlowPaint();
 
     memset(s_channelBtns, 0, sizeof(s_channelBtns));
     memset(s_channelLabels, 0, sizeof(s_channelLabels));

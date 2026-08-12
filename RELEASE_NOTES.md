@@ -1,16 +1,4 @@
-### New
-- Added a middle-finger emoji to the emoji picker, available on every board.
-
-### Changed
-- Chat and DM transcripts are now written in batches a moment after activity settles instead of once per line, so a busy channel no longer stutters the screen while messages arrive.
-- Saves are held off while you are typing or scrolling and land in the gaps, keeping input responsive on boards where the display and SD card share a bus.
-- T-Lora Pager: stepping through messages with the wheel now redraws only the messages around the cursor, so selecting and replying stays fast in long channels.
-- Node list ordering is now recalculated only when something actually changes, speeding up screens that walk the whole node table.
-
 ### Fixed
-- T-Deck, Cardputer and T-Lora Pager: direct message conversations were never saved to storage and were lost on every reboot — they now persist and reload like channel history.
-- Losing power partway through a save no longer destroys a channel transcript or DM conversation; the previous saved copy survives, and a save interrupted at the last moment is recovered on the next boot.
-- Cardputer: opening web config no longer discards the last few seconds of chat.
-- Recent messages now reach storage before a reboot, factory reset, onboarding, settings change or OTA update, instead of being lost inside the save delay.
-- Clearing messages no longer leaves the old transcript to reappear after a restart.
-- A deleted DM conversation no longer comes back after a reboot.
+- Mesh Deck: quick keystrokes no longer go missing — a key press now registers the instant it is seen instead of having to be held across two scans, so fast typing and short taps on Enter land reliably.
+- Mesh Deck: when a single scan catches two keys at once, both are delivered right away rather than one being held back until the next pass.
+- Opening the channel list no longer bogs the interface down; the channel buttons are only redrawn when something about them actually changes, keeping key presses responsive while the list is on screen.
