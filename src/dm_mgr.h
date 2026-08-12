@@ -41,6 +41,12 @@ struct DmConv {
     bool     unread;          // true if there are messages not yet viewed
     uint16_t unreadCount;     // unread message count for this conversation
     int      rxChanIdx;       // channel index last message was received on (-1 = unknown)
+    // Debounced persistence. Held per conversation rather than in a side table
+    // keyed by slot because _sort() moves these structs around the array; kept
+    // here they travel with the conversation they describe. RAM only — saveConv()
+    // does not write them. Zero in dirtySinceMs means clean.
+    uint32_t dirtySinceMs;
+    uint32_t dirtyTouchedMs;
 };
 
 class DmMgr {
@@ -89,6 +95,19 @@ public:
     void saveConv(const DmConv *c);
     void loadAll();
 
+    // Debounced counterparts to saveConv(), mirroring ChannelMgr. Every save is
+    // a full rewrite of the conversation, so a run of messages is coalesced into
+    // one write instead of one per message. Call servicePersistence() every loop
+    // pass; call flushPersistence() before reboot or anything that frees the
+    // line buffers.
+    //
+    // inputIdle: see ChannelMgr::servicePersistence(). It matters more here —
+    // a full conversation is ~14.6 KB on PSRAM boards, well over twice a channel
+    // snapshot, because every record is written at full DM_LINE_LEN width.
+    void servicePersistence(uint32_t nowMs, bool inputIdle);
+    void flushPersistence();
+    bool persistenceDirty() const;
+
 private:
     struct PendingTx {
         uint32_t packetId;
@@ -103,6 +122,7 @@ private:
     PendingTx _pendingTx[MAX_DM_PENDING_TX];
 
     void _sort();
+    void _markPersistDirty(DmConv &c);
     void _pushLine(DmConv &c, const char *text, uint16_t color,
                    uint32_t packetId, DmLine::AckState ack,
                    uint32_t epoch);

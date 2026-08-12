@@ -678,6 +678,12 @@ static uint32_t s_lastChatContextSignature = 0;
 // steady-state cost stays bounded while full history stays reachable on demand.
 static constexpr int kChatWindowBaseMsgs = 40;   // messages a channel opens with
 static constexpr int kChatWindowGrowMsgs = 40;   // added each scroll-to-top load
+// Messages kept rendered around the Pager's message cursor. Every cursor step
+// rebuilds the list (the cursor index feeds the render context signature), so
+// this is the per-detent cost and wants to stay small — but large enough that
+// the selected message keeps context above and below it and lv_obj_scroll_to_view
+// has somewhere to move, rather than the list jumping a screenful each step.
+static constexpr int kChatCursorWindowMsgs = 24;
 static constexpr lv_coord_t kChatWindowGrowScrollMargin = 12;  // px-from-top that loads older
 static int      s_chatWindowChannel      = -1;   // channel the window below belongs to
 static int      s_chatRenderWindowMsgs   = kChatWindowBaseMsgs;
@@ -780,6 +786,11 @@ static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
 static bool s_screenAsleep = false;
 static uint32_t s_lastActivityMs = 0;
+// Quiet gap after the last keypress/touch before a debounced transcript
+// snapshot is allowed to take the SPI bus. Comfortably longer than the gap
+// between scroll detents during a fast scroll, so a continuous scroll reads as
+// "still interacting" rather than repeatedly opening a window for a write.
+static constexpr uint32_t kPersistInputIdleMs = 250UL;
 static constexpr uint32_t kScreenWakeInputDelayMs = 3000UL;
 static uint32_t s_screenWakeBlockedUntilMs = 0;
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
@@ -1320,6 +1331,7 @@ static void persistConfigToPrefs();
 // write and is flushed by serviceConfigFlush() (and before reboot/sleep).
 static void markConfigDirty();
 static void flushConfigIfDirty();
+static void flushPersistentState();   // config + debounced transcripts, before reboot
 static void persistWebCfgEnabled();
 static void persistWifiForceAp();
 static void requestSkipWebAutoStartOnce();
@@ -3683,7 +3695,7 @@ static bool runOtaWorkerModeIfRequested() {
         otaWorkerDrawStatus("OTA installed", "Rebooting...");
         delay(700);
         otaSetNetworkAllowed(false);
-        flushConfigIfDirty();   // pending settings must reach NVS before we go
+        flushPersistentState();   // settings and transcripts must land before we go
         ESP.restart();
         return true;
     }
@@ -4721,6 +4733,17 @@ static void flushConfigIfDirty() {
     persistConfigToPrefs();
 }
 
+// Everything debounced that must survive the reboot about to happen. Config was
+// always flushed here; chat and DM transcripts are debounced the same way now,
+// and would otherwise lose whatever landed inside the last quiet window. No-op
+// when nothing is pending, so it is cheap to call on every restart path —
+// including OTA worker mode, where the transcript managers are never allocated.
+static void flushPersistentState() {
+    flushConfigIfDirty();
+    Channels.flushPersistence();
+    DMs.flushPersistence();
+}
+
 static void serviceConfigFlush(uint32_t nowMs) {
     if (!s_configDirty) return;
     if ((uint32_t)(nowMs - s_configDirtyAtMs) < kConfigFlushDelayMs) return;
@@ -5658,8 +5681,8 @@ static void pagerExitChatCursorMode(bool clearSelection) {
     s_pagerChatCursorMode = false;
     s_pagerChatCursorDisplayIndex = -1;
     s_chatScrollToLatestOnce = true;
-    // Cursor mode renders full history; on exit we should not reuse any
-    // pending window-growth anchor from an earlier windowed pass.
+    // Cursor mode runs its own window centred on the cursor; on exit we should
+    // not reuse any pending window-growth anchor from an earlier scroll-back pass.
     s_chatWindowGrowPending = false;
     s_chatWindowAnchorActive = false;
     if (clearSelection) {
@@ -5699,6 +5722,7 @@ static const char *const kEmojiTray[] = {
     // Hands & people
     "\U0001F44D", "\U0001F44E", "\U0001F44C", "\U0001F44B", "\U0001F44F",
     "\U0001F64F", "\U0001F4AA", "\U0001F91D", "\U0000270C", "\U0001F44A",
+    "\U0001F595",
     // Symbols
     "\U00002764", "\U0001F494", "\U0001F525", "\U00002B50", "\U00002705",
     "\U0000274C", "\U00002757", "\U00002753", "\U0001F4A1", "\U0001F4AF",
@@ -7538,7 +7562,7 @@ static void applyCfgColorSelection(int navIdx) {
     refreshCfgModal();
     lv_timer_handler();
     delay(1000);
-    flushConfigIfDirty();   // pending settings must reach NVS before we go
+    flushPersistentState();   // settings and transcripts must land before we go
     ESP.restart();
 }
 
@@ -19427,7 +19451,7 @@ static void performCfgAction(int actionId) {
                 refreshCfgModal();
                 lv_timer_handler();
                 delay(1000);
-                flushConfigIfDirty();   // pending settings must reach NVS before we go
+                flushPersistentState();   // settings and transcripts must land before we go
                 ESP.restart();
             } else {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Import FAILED (no file?)");
@@ -19611,7 +19635,7 @@ static void performCfgAction(int actionId) {
             refreshCfgModal();
             lv_timer_handler();
             delay(1000);
-            flushConfigIfDirty();   // pending settings must reach NVS before we go
+            flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             break;
 
@@ -19773,7 +19797,7 @@ static void performCfgAction(int actionId) {
             refreshCfgModal();
             openCfgActionMessageModal(s_cfgStatus);
             delay(800);
-            flushConfigIfDirty();   // pending settings must reach NVS before we go
+            flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
         } break;
 
@@ -19800,7 +19824,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Messages cleared - rebooting...");
             refreshCfgModal();
             delay(1000);
-            flushConfigIfDirty();   // pending settings must reach NVS before we go
+            flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             refreshChatView(true);
             break;
@@ -19812,7 +19836,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Node DB cleared - rebooting...");
             refreshCfgModal();
             delay(1000);
-            flushConfigIfDirty();   // pending settings must reach NVS before we go
+            flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             break;
 
@@ -19828,7 +19852,7 @@ static void performCfgAction(int actionId) {
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Factory reset - rebooting...");
             refreshCfgModal();
             delay(1000);
-            flushConfigIfDirty();   // pending settings must reach NVS before we go
+            flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             break;
     }
@@ -20765,7 +20789,7 @@ static void onboardingAcceptImport() {
     Serial.println("[onboarding] imported OK - rebooting");
     lv_timer_handler();
     delay(500);
-    flushConfigIfDirty();   // pending settings must reach NVS before we go
+    flushPersistentState();   // settings and transcripts must land before we go
     ESP.restart();
 }
 
@@ -20873,7 +20897,7 @@ static void onboardingFinalize() {
     Serial.println("[onboarding] complete - rebooting");
     lv_timer_handler();
     delay(500);
-    flushConfigIfDirty();   // pending settings must reach NVS before we go
+    flushPersistentState();   // settings and transcripts must land before we go
     ESP.restart();
 }
 
@@ -26086,9 +26110,10 @@ static void serviceAutoFavorite(uint32_t nowMs) {
 
     const float rangeM = (float)s_cfg.autoFavoriteRangeM;
     const int count = Nodes.count();
-    // Nodes.at() rather than getByRank(): getByRank() re-sorts on every call and
-    // favorites sort first, so promoting one mid-scan would shuffle the table
-    // underneath this loop and skip entries.
+    // Nodes.at() rather than getByRank(): setFavorite() below marks the ranking
+    // dirty, so the next getByRank() would re-sort and float the just-promoted
+    // node to the top — shuffling the table underneath this loop and skipping
+    // entries. at() is storage order and never moves.
     for (int i = 0; i < count; i++) {
         NodeEntry *e = Nodes.at(i);
         if (!e || e->nodeId == 0 || e->favorite) continue;
@@ -26574,13 +26599,14 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
 // Render the chat rows as per-node colored bubbles (Bubbles chat style).
 static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
                                    const int *displayOrder, int displayCount,
-                                   int startFrom,
+                                   int startFrom, int endAt,
                                    lv_obj_t **lastMsgObj, lv_obj_t **selectedMsgObj,
                                    lv_obj_t **anchorObj) {
+    if (endAt > displayCount) endAt = displayCount;   // never walk past the order
     chatBubbleBeginRender(s_chatList);
     uint32_t lastDateBucket = 0;
     int n = startFrom;
-    while (n < displayCount) {
+    while (n < endAt) {
         int i = displayOrder[n];
 
         // Remember whether this message is the saved scroll anchor before n
@@ -26621,7 +26647,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
         const char *b0 = chatStripPrefix(rows[i]->text);
         bl += (size_t)snprintf(body + bl, sizeof(body) - bl, "%s", b0);
         n++;
-        while (n < displayCount) {
+        while (n < endAt) {
             int j = displayOrder[n];
             const char *t = rows[j]->text;
             if (!(t[0] == ' ' && t[1] == ' ')) break;   // not a continuation line
@@ -26695,16 +26721,26 @@ static uint32_t chatRenderContextSignature() {
     return h;
 }
 
-// Returns the displayOrder index at which rendering should begin so that at most
-// `maxMessages` most-recent logical messages are emitted. Logical-message
-// boundaries mirror buildChatCursorOrder (same packetId run, else two-space
-// continuation lines) so the window never splits a wrapped/grouped message.
-// Sets *moreAbove when older messages remain above the window.
-static int chatWindowStartIndex(const DisplayLine *const *rows,
-                                const int *displayOrder, int displayCount,
-                                int maxMessages, bool *moreAbove) {
+// Picks a window of at most `maxMessages` logical messages out of displayOrder.
+// Logical-message boundaries mirror buildChatCursorOrder (same packetId run,
+// else two-space continuation lines) so the window never splits a wrapped or
+// grouped message. Sets *moreAbove when older messages remain above it.
+//
+// focusMsg picks where the window sits. -1 anchors it to the newest message,
+// which is the scroll-back reading position. Any other value is a logical
+// message index the window must contain, and it is centred so the message has
+// context on both sides; that index shares its space with buildChatCursorOrder's
+// cursorOrder, so the Pager cursor can be handed straight in.
+//
+// Writes the displayOrder range to render as [*startOut, *endOut).
+static void chatWindowRange(const DisplayLine *const *rows,
+                            const int *displayOrder, int displayCount,
+                            int maxMessages, int focusMsg,
+                            int *startOut, int *endOut, bool *moreAbove) {
+    if (startOut)  *startOut  = 0;
+    if (endOut)    *endOut    = displayCount;
     if (moreAbove) *moreAbove = false;
-    if (maxMessages <= 0 || displayCount <= 0) return 0;
+    if (maxMessages <= 0 || displayCount <= 0) return;
 
     // displayOrder index where each logical message starts. Only the UI thread
     // calls this (never re-entrant), so a static keeps it off the stack.
@@ -26729,9 +26765,22 @@ static int chatWindowStartIndex(const DisplayLine *const *rows,
         }
     }
 
-    if (msgCount <= maxMessages) return 0;
-    if (moreAbove) *moreAbove = true;
-    return starts[msgCount - maxMessages];
+    if (msgCount <= maxMessages) return;   // whole history already fits
+
+    int firstMsg;
+    if (focusMsg < 0) {
+        firstMsg = msgCount - maxMessages;
+    } else {
+        if (focusMsg >= msgCount) focusMsg = msgCount - 1;
+        firstMsg = focusMsg - maxMessages / 2;
+        if (firstMsg < 0) firstMsg = 0;
+        if (firstMsg > msgCount - maxMessages) firstMsg = msgCount - maxMessages;
+    }
+    const int lastMsg = firstMsg + maxMessages;   // exclusive
+
+    if (startOut)  *startOut  = starts[firstMsg];
+    if (endOut)    *endOut    = (lastMsg >= msgCount) ? displayCount : starts[lastMsg];
+    if (moreAbove) *moreAbove = (firstMsg > 0);
 }
 
 // Scroll handler on s_chatList: when the user reaches the top and older messages
@@ -26811,17 +26860,29 @@ static void refreshChatView(bool force) {
         buildChatDisplayOrder(rows, rowCount, displayOrder, displayCount);
 
         // Keyboard cursor navigation (Pager) can select any message in the full
-        // history, so its target must exist as an object — render everything and
-        // suspend windowing while the cursor is active.
-        const bool windowed = !s_pagerChatCursorMode;
+        // history, and its target must exist as an object. This used to be met by
+        // suspending windowing outright — but the cursor index feeds
+        // chatRenderContextSignature(), so every detent invalidated the cache and
+        // rebuilt the entire channel. That made each step cost O(history) on the
+        // one board that navigates by cursor. Centring a fixed window on the
+        // cursor satisfies the same requirement at constant cost.
+        const bool cursorFocused = s_pagerChatCursorMode
+                                   && s_pagerChatCursorDisplayIndex >= 0;
+        const int focusMsg = cursorFocused ? s_pagerChatCursorDisplayIndex : -1;
+        const int windowMsgs = cursorFocused ? kChatCursorWindowMsgs
+                                             : s_chatRenderWindowMsgs;
 
         // Honor a pending scroll-to-top "load older" request: remember the message
         // currently at the top of the window, then widen it. The anchor lets us
         // restore the viewport to that message after older history is prepended.
-        if (windowed && s_chatWindowGrowPending) {
+        // Cursor mode never grows — there the window tracks the cursor rather
+        // than the scroll position, so widening it would only add objects the
+        // user did not ask for.
+        if (!cursorFocused && s_chatWindowGrowPending) {
             s_chatWindowGrowPending = false;
-            int prevStart = chatWindowStartIndex(rows, displayOrder, displayCount,
-                                                 s_chatRenderWindowMsgs, nullptr);
+            int prevStart = 0;
+            chatWindowRange(rows, displayOrder, displayCount,
+                            s_chatRenderWindowMsgs, -1, &prevStart, nullptr, nullptr);
             const DisplayLine *top = (prevStart < displayCount)
                                      ? rows[displayOrder[prevStart]] : nullptr;
             if (top) {
@@ -26834,11 +26895,14 @@ static void refreshChatView(bool force) {
         }
 
         bool moreAbove = false;
-        int startN = windowed
-            ? chatWindowStartIndex(rows, displayOrder, displayCount,
-                                   s_chatRenderWindowMsgs, &moreAbove)
-            : 0;
-        s_chatWindowMoreAbove = moreAbove;
+        int startN = 0;
+        int endN = displayCount;
+        chatWindowRange(rows, displayOrder, displayCount,
+                        windowMsgs, focusMsg, &startN, &endN, &moreAbove);
+        // Only the scroll-back path can load older history, so only it advertises
+        // that there is any. In cursor mode the wheel moves the cursor and the
+        // window follows it, and latching a grow there would fight that.
+        s_chatWindowMoreAbove = cursorFocused ? false : moreAbove;
 
         // True when the message starting at displayOrder[n] is the saved anchor.
         auto isAnchorAt = [&](int n) -> bool {
@@ -26855,7 +26919,7 @@ static void refreshChatView(bool force) {
                                && s_activeChannel < MESH_CHANNELS);
         if (useBubbleStyle) {
             refreshChatViewBubbles(rows, rowCount, displayOrder, displayCount,
-                                   startN, &lastMsgObj, &selectedMsgObj,
+                                   startN, endN, &lastMsgObj, &selectedMsgObj,
                                    &anchorObj);
         } else {
             // One label per logical message, not per stored line.
@@ -26872,7 +26936,7 @@ static void refreshChatView(bool force) {
             // survives untouched.
             uint32_t lastDateBucket = 0;
             int n = startN;
-            while (n < displayCount) {
+            while (n < endN) {
                 int i = displayOrder[n];
                 const bool anchorHere = !anchorObj && isAnchorAt(n);
 
@@ -26890,7 +26954,7 @@ static void refreshChatView(bool force) {
                 size_t ml = 0;
                 ml += (size_t)snprintf(merged + ml, sizeof(merged) - ml, "%s", rows[i]->text);
                 n++;
-                while (n < displayCount) {
+                while (n < endN) {
                     int j = displayOrder[n];
                     const char *t = rows[j]->text;
                     if (!(t[0] == ' ' && t[1] == ' ')) break;   // not a continuation line
@@ -26976,7 +27040,7 @@ static void refreshChatView(bool force) {
                                     (void *)(uintptr_t)replyPacketId);
 
                 // One separator between messages, none after the last.
-                if (n < displayCount) {
+                if (n < endN) {
                     lv_obj_t *sep = lv_obj_create(s_chatList);
                     lv_obj_remove_style_all(sep);
                     lv_obj_set_size(sep, lv_pct(100), 1);
@@ -28003,6 +28067,11 @@ static void seedNodesForRepro(int requestedCount) {
         if ((i & 0x0F) == 0) yield();
     }
 
+    // hasName/lastHeardMs above are written straight through the upsert()
+    // pointer, which only marks itself when it creates a slot — a re-seed round
+    // that lands on existing nodes would otherwise leave the cached sort stale.
+    Nodes.markRankingDirty();
+
     if (s_nodesModal) {
         snapshotNodesForModal();
         refreshNodesListRows();
@@ -28775,6 +28844,20 @@ void loop() {
     serviceNeighborInfoAnnounce(now);
     serviceAutoFavorite(now);
     serviceConfigFlush(now);
+    // Debounced transcript snapshots. Each writes at most one channel and one
+    // conversation per pass, so a burst of traffic costs one bounded write here
+    // rather than a full rewrite on every rendered line down in _pushLine().
+    //
+    // Held off while a key or the wheel is actively being worked: this sits
+    // between pumpKeyboardInput() above and lv_timer_handler() below, so a
+    // multi-KB write here lands squarely in the frame the user is waiting on —
+    // and on most boards the card shares its SPI bus with the display. Their
+    // own max-age deadlines override this, so interaction defers a write by a
+    // few hundred milliseconds rather than starving it.
+    const bool inputIdle =
+        (uint32_t)(now - s_lastActivityMs) >= kPersistInputIdleMs;
+    Channels.servicePersistence(now, inputIdle);
+    DMs.servicePersistence(now, inputIdle);
     serviceEmojiPickerRepeat(now);
     serviceTracerouteTimeout();
 #if FEATURE_DISCOVERY

@@ -11,9 +11,17 @@
 #include "utf8_utils.h"
 #include <esp_heap_caps.h>
 #include <string.h>
-#if HAS_FILE_STORAGE
+#include <stdlib.h>   // strtoul(), used by loadAll()'s staged-file recovery
+// Unconditional, matching channel_mgr.cpp. HAS_FILE_STORAGE is *defined by*
+// storage.h, so guarding this include with it made the test always fail on any
+// board that does not reach storage.h some other way — which is every board
+// except Mesh Deck, whose hw_mesh_deck.h happens to include it. On T-Deck,
+// Cardputer and T-LoRa Pager the macro was therefore 0 for this whole file and
+// saveConv()/loadAll() compiled down to bare returns: DM transcripts were never
+// written or restored there at all. storage.h handles the no-storage case
+// internally, so including it always is both safe and the only way the test
+// below can mean anything.
 #include "storage.h"
-#endif
 
 DmMgr DMs;
 
@@ -100,10 +108,16 @@ bool DmMgr::deleteConversation(uint32_t nodeId) {
     }
     if (idx < 0) return false;
 
-    // Remove persisted transcript if present.
+    // Remove persisted transcript if present. The staged copy goes too — a
+    // leftover .tmp would otherwise be adopted by loadAll()'s recovery and bring
+    // the deleted conversation back on the next boot.
 #if HAS_FILE_STORAGE
     char path[40];
     snprintf(path, sizeof(path), "%s/%08X.bin", "/camillia/dms", nodeId);
+    if (storageFs().exists(path)) {
+        storageFs().remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/%08X.tmp", "/camillia/dms", nodeId);
     if (storageFs().exists(path)) {
         storageFs().remove(path);
     }
@@ -240,7 +254,10 @@ void DmMgr::addMessage(uint32_t nodeId, const char *shortName,
               epoch);
 
     c->scrollOff = 0;  // jump to latest on new message
-    saveConv(c);       // save before _sort() — sort may move the struct in the array
+    // Mark rather than write; servicePersistence() does the save. The old
+    // ordering note no longer applies — the dirty stamp lives inside DmConv, so
+    // _sort() carries it along with the conversation it belongs to.
+    _markPersistDirty(*c);
     _sort();
 }
 
@@ -513,6 +530,12 @@ const DmLine *DmMgr::getLine(const DmConv *conv, int visibleRow, int visibleRows
 //   Body:   numLines × DmLine entries, written oldest → newest
 
 static const char *kDmDir = "/camillia/dms";
+// Persistence debounce. Matches ChannelMgr's windows: every save rewrites the
+// whole conversation, so a back-and-forth exchange should cost one write rather
+// than one per message, while kDmPersistMaxAgeMs keeps a busy thread from
+// deferring its write indefinitely.
+static const uint32_t kDmPersistQuietMs  = 1500;
+static const uint32_t kDmPersistMaxAgeMs = 15000;
 // Magic was bumped when on-disk DmLine.text width changed to support full
 // Meshtastic-sized payloads in one record. Older "CMDM"/"CMDN" files used
 // shorter records (no epoch field) and are skipped on load (transcripts are
@@ -535,11 +558,18 @@ void DmMgr::saveConv(const DmConv *c) {
     storageFs().mkdir(kDmDir);
 
     char path[40];
+    char tmpPath[40];
     snprintf(path, sizeof(path), "%s/%08X.bin", kDmDir, c->nodeId);
+    snprintf(tmpPath, sizeof(tmpPath), "%s/%08X.tmp", kDmDir, c->nodeId);
 
-    File f = storageFs().open(path, FILE_WRITE);
+    // Staged write. Opening the live file with FILE_WRITE truncates it, so a
+    // power cut mid-save used to leave a header-only or half-written
+    // conversation where a complete older one had been. Build the replacement
+    // beside it and swap it in only once it is closed.
+    storageFs().remove(tmpPath);
+    File f = storageFs().open(tmpPath, FILE_WRITE);
     if (!f) {
-        debugLogMessages("[dm] saveConv FAIL: can't open %s\n", path);
+        debugLogMessages("[dm] saveConv FAIL: can't open %s\n", tmpPath);
         return;
     }
 
@@ -571,8 +601,60 @@ void DmMgr::saveConv(const DmConv *c) {
 
     f.flush();
     f.close();
+
+    // Swap in. FAT rename() will not overwrite, so the old file goes first;
+    // loadAll() recovers a conversation whose power cut landed in that gap.
+    storageFs().remove(path);
+    if (!storageFs().rename(tmpPath, path)) {
+        debugLogMessages("[dm] saveConv rename FAIL: %s\n", tmpPath);
+        return;
+    }
     debugLogMessages("[dm] saved %s: %d lines (%u bytes)\n", path, (int)nLines, (unsigned)(25 + written));
 #endif
+}
+
+void DmMgr::_markPersistDirty(DmConv &c) {
+#if !HAS_FILE_STORAGE
+    (void)c;   // Heltec and friends have nowhere to write; never go dirty
+#else
+    uint32_t now = millis();
+    if (now == 0) now = 1;   // keep 0 meaning "clean"
+    if (c.dirtySinceMs == 0) c.dirtySinceMs = now;
+    c.dirtyTouchedMs = now;
+#endif
+}
+
+bool DmMgr::persistenceDirty() const {
+    for (int i = 0; i < _count; i++) {
+        if (_convs[i].dirtySinceMs != 0) return true;
+    }
+    return false;
+}
+
+void DmMgr::servicePersistence(uint32_t nowMs, bool inputIdle) {
+    for (int i = 0; i < _count; i++) {
+        DmConv &c = _convs[i];
+        if (c.dirtySinceMs == 0) continue;
+        bool quiet = (uint32_t)(nowMs - c.dirtyTouchedMs) >= kDmPersistQuietMs;
+        bool stale = (uint32_t)(nowMs - c.dirtySinceMs) >= kDmPersistMaxAgeMs;
+        if (!quiet && !stale) continue;
+        // See ChannelMgr::servicePersistence() — wait for a gap in input unless
+        // the deadline has run out.
+        if (!inputIdle && !stale) continue;
+        saveConv(&c);
+        c.dirtySinceMs = 0;
+        // One conversation per pass — see the matching note in
+        // ChannelMgr::servicePersistence().
+        return;
+    }
+}
+
+void DmMgr::flushPersistence() {
+    for (int i = 0; i < _count; i++) {
+        if (_convs[i].dirtySinceMs == 0) continue;
+        saveConv(&_convs[i]);
+        _convs[i].dirtySinceMs = 0;
+    }
 }
 
 void DmMgr::loadAll() {
@@ -587,6 +669,50 @@ void DmMgr::loadAll() {
         return;
     }
 
+    // Recovery pass for saveConv()'s stage-and-rename, before anything is
+    // loaded. Names are collected first and acted on after the directory is
+    // closed: renaming entries out from under an open dir handle is not
+    // something every backend here is happy about.
+    {
+        uint32_t staged[MAX_DM_CONVS];
+        int stagedCount = 0;
+        File dir = storageFs().open(kDmDir);
+        if (dir && dir.isDirectory()) {
+            File f = dir.openNextFile();
+            while (f && stagedCount < MAX_DM_CONVS) {
+                const char *name = f.name();
+                // Basename only: some backends hand back a full path here.
+                const char *slash = strrchr(name, '/');
+                if (slash) name = slash + 1;
+                size_t len = strlen(name);
+                if (!f.isDirectory() && len == 12 && strcmp(name + 8, ".tmp") == 0) {
+                    char idHex[9];
+                    memcpy(idHex, name, 8);
+                    idHex[8] = '\0';
+                    staged[stagedCount++] = (uint32_t)strtoul(idHex, nullptr, 16);
+                }
+                f.close();
+                f = dir.openNextFile();
+            }
+            dir.close();
+        }
+        for (int i = 0; i < stagedCount; i++) {
+            char binPath[40], tmpPath[40];
+            snprintf(binPath, sizeof(binPath), "%s/%08X.bin", kDmDir, staged[i]);
+            snprintf(tmpPath, sizeof(tmpPath), "%s/%08X.tmp", kDmDir, staged[i]);
+            if (!storageFs().exists(binPath)) {
+                // Power was lost after the old file went and before the rename;
+                // the staged copy is the complete one.
+                if (storageFs().rename(tmpPath, binPath)) {
+                    debugLogMessages("[dm] recovered staged conv %08X\n", staged[i]);
+                }
+            } else {
+                // A live .bin alongside means the staged write never finished.
+                storageFs().remove(tmpPath);
+            }
+        }
+    }
+
     File dir = storageFs().open(kDmDir);
     if (!dir || !dir.isDirectory()) {
         debugLogMessages("[dm] loadAll: no %s directory\n", kDmDir);
@@ -599,6 +725,19 @@ void DmMgr::loadAll() {
             f.close();
             f = dir.openNextFile();
             continue;
+        }
+        // Anything still ending in .tmp survived the recovery pass above only
+        // because the table was already full; never load it as a conversation.
+        {
+            const char *nm = f.name();
+            const char *slash = strrchr(nm, '/');
+            if (slash) nm = slash + 1;
+            size_t len = strlen(nm);
+            if (len >= 4 && strcmp(nm + len - 4, ".tmp") == 0) {
+                f.close();
+                f = dir.openNextFile();
+                continue;
+            }
         }
 
         // Read header

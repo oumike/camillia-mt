@@ -122,6 +122,7 @@ static void nodeKey(char *buf, uint32_t id) {
 void NodeDB::init() {
     memset(_nodes, 0, sizeof(_nodes));
     _count = 0;
+    _sortDirty = true;
 
     // Load persisted nodes directly into the array (bypasses save to avoid
     // triggering NVS writes during boot). Open read-write so first boot can
@@ -299,6 +300,7 @@ void NodeDB::clearPersisted() {
     memset(_neighbors, 0, sizeof(_neighbors));
 #endif
     _count = 0;
+    _sortDirty = true;
 }
 
 void NodeDB::saveAll() {
@@ -552,6 +554,9 @@ NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     e->nodeId = nodeId;
     snprintf(e->shortName, sizeof(e->shortName), "%04X", nodeId & 0xFFFF);
     snprintf(e->longName,  sizeof(e->longName),  "!%08x", nodeId);
+    // A new node landed in the table (appended, or written over an evicted
+    // slot). Either way the ordering the last sort produced no longer holds.
+    _sortDirty = true;
 
     _saveIds();   // add new / remove evicted from the index
     _save(nodeId); // write initial blob so load() never finds an orphaned ID
@@ -585,7 +590,9 @@ static int cmpNodes(const void *a, const void *b) {
 }
 
 void NodeDB::_sort() {
+    if (!_sortDirty) return;
     qsort(_nodes, _count, sizeof(NodeEntry), cmpNodes);
+    _sortDirty = false;
 }
 
 // ── Update methods ────────────────────────────────────────────
@@ -594,6 +601,7 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     NodeEntry *e = upsert(pkt.hdr.from);
     if (!e) return;   // table full of favorites
     e->lastHeardMs = pkt.rxMs;
+    _sortDirty = true;   // recency is a ranking key
     e->snr         = pkt.snr;
     // Routing ACK/NAK can arrive on a fallback channel and should not drive
     // future DM channel selection.
@@ -713,11 +721,13 @@ void NodeDB::updateUser(uint32_t nodeId, const UserInfo &u) {
     if (u.longName[0] && strncmp(e->longName, u.longName, sizeof(e->longName) - 1) != 0) {
         utf8util::copyTruncate(e->longName, sizeof(e->longName), u.longName);
         e->hasName = true;
+        _sortDirty = true;   // named nodes rank above unnamed ones
         changed = true;
     }
     if (u.shortName[0] && strncmp(e->shortName, u.shortName, sizeof(e->shortName) - 1) != 0) {
         utf8util::copyTruncate(e->shortName, sizeof(e->shortName), u.shortName);
         e->hasName = true;
+        _sortDirty = true;
         changed = true;
     }
     if (u.hasPubKey && memcmp(e->pubKey, u.pubKey, 32) != 0) {
@@ -796,6 +806,7 @@ bool NodeDB::setFavorite(uint32_t nodeId, bool favorite) {
     if (e->favorite == favorite) return false;
 
     e->favorite = favorite;
+    _sortDirty = true;   // favorites sort to the top
     _save(nodeId);
     e->lastPersistMs = millis();
     return true;

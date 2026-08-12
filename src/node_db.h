@@ -93,9 +93,21 @@ public:
     NodeEntry *upsert(uint32_t nodeId);
     NodeEntry *find(uint32_t nodeId);
 
-    // Sorted with favorites first, then by recency. Note this re-sorts on every
-    // call, so it is the wrong tool for bulk scans.
+    // Sorted with favorites first, then by recency. The sort is memoized: it
+    // runs on the first call after a ranking field changes and is skipped by
+    // every call until the next change, so walking rank 0..count-1 costs one
+    // sort for the whole pass rather than one per element.
+    //
+    // The table is still reordered under you, just at a predictable point — a
+    // ranked walk that mutates ranking fields as it goes must call
+    // markRankingDirty() and restart, or use at() instead (see below).
     NodeEntry *getByRank(int rank);
+
+    // Force the next getByRank() to re-sort. Only needed when a ranking field
+    // (favorite, hasName, lastHeardMs, nodeId) is written straight through a
+    // pointer from find()/at()/getByRank() rather than via the update methods
+    // below, which already mark themselves.
+    void markRankingDirty() { _sortDirty = true; }
 
     // Direct slot access in storage order — no sort. Use for bulk scans that
     // may mutate entries: getByRank() would reorder the table mid-iteration
@@ -132,6 +144,9 @@ public:
 private:
     NodeEntry _nodes[MAX_NODES];
     int       _count = 0;
+    // Set by anything that changes ranking order; cleared by _sort(). Starts
+    // true so the first getByRank() after boot sorts the loaded table.
+    bool      _sortDirty = true;
 #if FEATURE_DISCOVERY
     NeighborReport _neighbors[MAX_NEIGHBOR_REPORTS] = {};
     // A report is dropped at 2x the reporter's own advertised interval, the

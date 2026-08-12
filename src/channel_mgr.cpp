@@ -18,6 +18,15 @@ constexpr const char *kChanPersistDir = "/camillia/channels";
 constexpr int kPersistMaxLines = 100;
 constexpr int kLiveHistoryMaxLines = 50;
 
+// Debounce window. A snapshot costs a full rewrite of up to kPersistMaxLines
+// however little changed, so the aim is to spend one write per burst of
+// activity rather than one per rendered line. kPersistQuietMs is long enough to
+// cover the wrapped lines of a single message and the ACK that follows a moment
+// later; kPersistMaxAgeMs bounds how long a busy channel can defer its write,
+// so sustained traffic still lands on storage at a predictable cadence.
+constexpr uint32_t kPersistQuietMs  = 1500;
+constexpr uint32_t kPersistMaxAgeMs = 15000;
+
 static int channelHistoryLimit(int chanIdx) {
     if (chanIdx == CHAN_LIVE) return kLiveHistoryMaxLines;
     return MAX_MSG_LINES;
@@ -25,6 +34,12 @@ static int channelHistoryLimit(int chanIdx) {
 
 static void channelPersistPath(int chanIdx, char *out, size_t outLen) {
     snprintf(out, outLen, "%s/ch%d.log", kChanPersistDir, chanIdx);
+}
+
+// Staging path for the write-then-rename in _persistChannel(). Recovered by
+// loadPersisted() when power was lost between the two.
+static void channelPersistTmpPath(int chanIdx, char *out, size_t outLen) {
+    snprintf(out, outLen, "%s/ch%d.tmp", kChanPersistDir, chanIdx);
 }
 
 static inline bool isUtf8Continuation(uint8_t b) {
@@ -98,11 +113,25 @@ void ChannelMgr::clearAllMessages(bool clearPersisted) {
     }
 
 #if HAS_FILE_STORAGE
-    if (!clearPersisted) return;
+    if (!clearPersisted) {
+        // Buffers are empty now, so let the debounce write that emptiness out
+        // rather than leaving the old snapshot to reappear on next boot.
+        for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) _markPersistDirty(chanIdx);
+        return;
+    }
+
+    // Files are about to go; drop the marks first so nothing gets written back
+    // out behind the deletion.
+    memset(_dirtySinceMs, 0, sizeof(_dirtySinceMs));
+    memset(_dirtyTouchedMs, 0, sizeof(_dirtyTouchedMs));
 
     for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
         char path[48];
         channelPersistPath(chanIdx, path, sizeof(path));
+        if (storageFs().exists(path)) storageFs().remove(path);
+        // Staged snapshots too, or loadPersisted()'s recovery would restore one
+        // of them on the next boot after a wipe.
+        channelPersistTmpPath(chanIdx, path, sizeof(path));
         if (storageFs().exists(path)) storageFs().remove(path);
     }
     if (storageFs().exists(kChanPersistDir)) {
@@ -115,6 +144,12 @@ void ChannelMgr::clearAllMessages(bool clearPersisted) {
 }
 
 size_t ChannelMgr::releaseBuffers() {
+    // Before the lines go away, not after: a debounced snapshot still owed to
+    // storage reads out of these buffers, and restoreBuffers() reloads from the
+    // file. Skipping this would silently drop the last few seconds of chat every
+    // time Cardputer opened web config.
+    flushPersistence();
+
     size_t freed = 0;
     for (int i = 0; i < MAX_CHANNELS; i++) {
         if (_chans[i].lines) {
@@ -164,9 +199,10 @@ void ChannelMgr::_pushLine(int chanIdx, Channel &ch, const char *text, uint16_t 
     ch.count++;
     ch.revision++;
 
-    if (_persistReady && !_persistLoading && chanIdx >= 0 && chanIdx < MESH_CHANNELS) {
-        _persistChannel(chanIdx, ch);
-    }
+    // Marks only. A wrapped message calls this once per rendered line, and each
+    // snapshot rewrites the whole bounded history — writing here made one
+    // message cost several full-file rewrites.
+    _markPersistDirty(chanIdx);
 }
 
 int ChannelMgr::addMessage(int chanIdx, const char *prefix, const char *text,
@@ -306,16 +342,27 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
     }
 
     char path[48];
+    char tmpPath[48];
     channelPersistPath(chanIdx, path, sizeof(path));
+    channelPersistTmpPath(chanIdx, tmpPath, sizeof(tmpPath));
 
-    // Rewrite bounded snapshot to keep storage and restore behavior predictable.
-    storageFs().remove(path);
-    File f = storageFs().open(path, FILE_WRITE);
+    // Rewrite a bounded snapshot to keep storage and restore behavior
+    // predictable — but stage it under .tmp and only swap it into place once it
+    // is completely written and closed. Truncating the live file first (what
+    // this used to do) left a window on every single write where a power cut
+    // took the whole transcript with it, rather than the previous snapshot
+    // simply surviving.
+    storageFs().remove(tmpPath);
+    File f = storageFs().open(tmpPath, FILE_WRITE);
     if (!f) return;
 
     int stored = min(ch.count, MAX_MSG_LINES);
     if (stored <= 0) {
+        // Nothing to keep: drop the staged file and the snapshot together, so an
+        // emptied channel does not restore its old contents on next boot.
         f.close();
+        storageFs().remove(tmpPath);
+        storageFs().remove(path);
         return;
     }
     int keep = min(stored, kPersistMaxLines);
@@ -340,10 +387,65 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
                  text);
     }
     f.close();
+
+    // Swap the finished snapshot in. FAT rename() refuses an existing
+    // destination, so the old file goes first; that leaves a much smaller window
+    // than truncate-and-write did, and loadPersisted() recovers from it by
+    // adopting the staged file when the log is missing.
+    storageFs().remove(path);
+    if (!storageFs().rename(tmpPath, path)) {
+        debugLogMessages("[chanmgr] ch%d snapshot rename failed\n", chanIdx);
+    }
 #else
     (void)chanIdx;
     (void)ch;
 #endif
+}
+
+void ChannelMgr::_markPersistDirty(int chanIdx) {
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return;
+    if (!_persistReady || _persistLoading) return;
+    uint32_t now = millis();
+    // millis() == 0 only in the first millisecond after boot, before persistence
+    // is even up; nudging it keeps 0 unambiguously meaning "clean".
+    if (now == 0) now = 1;
+    if (_dirtySinceMs[chanIdx] == 0) _dirtySinceMs[chanIdx] = now;
+    _dirtyTouchedMs[chanIdx] = now;
+}
+
+bool ChannelMgr::persistenceDirty() const {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (_dirtySinceMs[i] != 0) return true;
+    }
+    return false;
+}
+
+void ChannelMgr::servicePersistence(uint32_t nowMs, bool inputIdle) {
+    if (!_persistReady || _persistLoading) return;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (_dirtySinceMs[i] == 0) continue;
+        bool quiet = (uint32_t)(nowMs - _dirtyTouchedMs[i]) >= kPersistQuietMs;
+        bool stale = (uint32_t)(nowMs - _dirtySinceMs[i]) >= kPersistMaxAgeMs;
+        if (!quiet && !stale) continue;
+        // Hold the bus while the user is mid-interaction; the deadline still
+        // wins, so a long scroll delays this write rather than cancelling it.
+        if (!inputIdle && !stale) continue;
+        _persistChannel(i, _chans[i]);
+        _dirtySinceMs[i] = 0;
+        // One channel per pass: each write is a full snapshot over shared SPI,
+        // and doing several back to back is exactly the loop stall this change
+        // exists to avoid. The rest keep their dirty marks for the next pass.
+        return;
+    }
+}
+
+void ChannelMgr::flushPersistence() {
+    if (!_persistReady || _persistLoading) return;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (_dirtySinceMs[i] == 0) continue;
+        _persistChannel(i, _chans[i]);
+        _dirtySinceMs[i] = 0;
+    }
 }
 
 void ChannelMgr::loadPersisted() {
@@ -354,7 +456,24 @@ void ChannelMgr::loadPersisted() {
     for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
         if (!_chans[chanIdx].lines) continue;
         char path[48];
+        char tmpPath[48];
         channelPersistPath(chanIdx, path, sizeof(path));
+        channelPersistTmpPath(chanIdx, tmpPath, sizeof(tmpPath));
+
+        // Crash recovery for _persistChannel()'s stage-and-rename. Power lost
+        // between the remove and the rename leaves the finished snapshot sitting
+        // under .tmp with no log beside it; promote it. A .tmp alongside an
+        // intact log is instead a write that died before it finished — that one
+        // is incomplete, so the log wins and the leftover is dropped.
+        if (storageFs().exists(tmpPath)) {
+            if (!storageFs().exists(path)) {
+                if (storageFs().rename(tmpPath, path)) {
+                    debugLogMessages("[chanmgr] ch%d recovered staged snapshot\n", chanIdx);
+                }
+            } else {
+                storageFs().remove(tmpPath);
+            }
+        }
         if (!storageFs().exists(path)) continue;
 
         int totalLines = 0;
@@ -482,9 +601,11 @@ void ChannelMgr::_applyAckToLines(int chanIdx, uint32_t packetId, DisplayLine::A
         }
     }
     if (updated) ch.revision++;
-    if (_persistReady && !_persistLoading) {
-        _persistChannel(chanIdx, ch);
-    }
+    // An ACK usually lands within the debounce window of the message it
+    // acknowledges, so coalescing here typically folds the send and its ACK into
+    // a single write. The final state still reaches storage — the mark is only
+    // cleared once a snapshot has actually been written.
+    if (updated) _markPersistDirty(chanIdx);
 }
 
 void ChannelMgr::setAckState(uint32_t packetId, DisplayLine::AckState state) {

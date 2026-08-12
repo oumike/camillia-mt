@@ -1,7 +1,16 @@
 ### New
-- **Mesh Beacons**: the device can now recognise Meshtastic 2.7 beacon advertisements — brief broadcasts from *other* meshes carrying an offer of a channel, preset and region. Off by default; the switch is on the Config screen and under Modules in web config, and it travels with config export and import. Receive-only — nothing is transmitted, and an offer is only ever shown, never applied to your radio.
-- **Beacons screen** under Live → Tools (press B, or the Beacons cell on Heltec): one card per sender with its message, what it offered, the SNR, RSSI and hop count it arrived on, and how often it has repeated. Beacons arrive minutes to hours apart, so the list is kept until you clear it with C (Heltec: the Clear button); switching Mesh Beacons off clears it too.
-- Beacons are available on every board, Cardputer included, where they join the two charts in the Tools modal; Cardputer keeps four senders, the other boards eight.
+- Added a middle-finger emoji to the emoji picker, available on every board.
 
 ### Changed
-- The Config screen action list now wraps — going up from the first row lands on the last, and down from the last returns to the first.
+- Chat and DM transcripts are now written in batches a moment after activity settles instead of once per line, so a busy channel no longer stutters the screen while messages arrive.
+- Saves are held off while you are typing or scrolling and land in the gaps, keeping input responsive on boards where the display and SD card share a bus.
+- T-Lora Pager: stepping through messages with the wheel now redraws only the messages around the cursor, so selecting and replying stays fast in long channels.
+- Node list ordering is now recalculated only when something actually changes, speeding up screens that walk the whole node table.
+
+### Fixed
+- T-Deck, Cardputer and T-Lora Pager: direct message conversations were never saved to storage and were lost on every reboot — they now persist and reload like channel history.
+- Losing power partway through a save no longer destroys a channel transcript or DM conversation; the previous saved copy survives, and a save interrupted at the last moment is recovered on the next boot.
+- Cardputer: opening web config no longer discards the last few seconds of chat.
+- Recent messages now reach storage before a reboot, factory reset, onboarding, settings change or OTA update, instead of being lost inside the save delay.
+- Clearing messages no longer leaves the old transcript to reappear after a restart.
+- A deleted DM conversation no longer comes back after a reboot.

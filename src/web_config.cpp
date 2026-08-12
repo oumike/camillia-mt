@@ -3513,6 +3513,10 @@ static void handlePostOnboard() {
     server.sendContent("");   // terminate chunked response
     server.stop();
     delay(500);
+    // Transcript snapshots are debounced; anything inside the current quiet
+    // window would not survive this restart otherwise.
+    Channels.flushPersistence();
+    DMs.flushPersistence();
     ESP.restart();
 }
 
@@ -5122,6 +5126,8 @@ void webCfgLoop() {
         gRebootPending = false;
         server.stop();
         delay(100);
+        Channels.flushPersistence();
+        DMs.flushPersistence();
         ESP.restart();
     }
 }

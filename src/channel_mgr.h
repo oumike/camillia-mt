@@ -138,6 +138,28 @@ public:
     void beginPersistence();
     void loadPersisted();
 
+    // Writes are debounced: a change marks its channel dirty, and the snapshot
+    // is written once the channel has been quiet for kPersistQuietMs or has been
+    // dirty for kPersistMaxAgeMs, whichever comes first. Call every loop pass.
+    // A wrapped message therefore costs one file write instead of one per
+    // rendered line, which is the whole point on LittleFS boards.
+    //
+    // inputIdle: false while the user is actively pressing keys or scrolling.
+    // A snapshot is several KB over a bus the display shares on most boards, so
+    // an ordinary flush waits for a gap in input rather than stalling the frame
+    // the user is waiting on. The kPersistMaxAgeMs deadline overrides this —
+    // sustained interaction delays a write, it cannot postpone it forever.
+    void servicePersistence(uint32_t nowMs, bool inputIdle);
+
+    // Write every dirty channel right now. Call before anything that ends the
+    // process or takes the buffers away — reboot, factory reset, releaseBuffers()
+    // — or the debounce window swallows the most recent messages.
+    void flushPersistence();
+
+    // True when at least one channel is holding unwritten changes. For shutdown
+    // paths that want to know whether flushing is worth the SPI time.
+    bool persistenceDirty() const;
+
 private:
     Channel    _chans[MAX_CHANNELS];
     PendingAck _pending[MAX_PENDING_ACK];
@@ -145,6 +167,11 @@ private:
     bool       _persistReady = false;
     bool       _persistLoading = false;
     bool       _persistDirReady = false;
+    // millis() when each channel first went dirty / was last touched. Zero in
+    // _dirtySinceMs means clean. Sized for the persisted channels only: CHAN_LIVE
+    // and anything above MESH_CHANNELS is never written to storage.
+    uint32_t   _dirtySinceMs[MESH_CHANNELS] = {0};
+    uint32_t   _dirtyTouchedMs[MESH_CHANNELS] = {0};
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId, bool trackAck,
@@ -153,6 +180,9 @@ private:
                    uint32_t packetId, DisplayLine::AckState ack,
                    uint32_t epoch, uint32_t senderNodeId);
     void _persistChannel(int chanIdx, const Channel &ch);
+    // Note a change to a persisted channel. Cheap and safe to call per rendered
+    // line; the actual write is servicePersistence()'s job.
+    void _markPersistDirty(int chanIdx);
     // Stamp an ack state onto a message's lines without retiring its pending
     // record. Only call on a real state change — it forces a redraw and a
     // channel persist.
