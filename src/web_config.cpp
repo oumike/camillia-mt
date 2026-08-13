@@ -580,7 +580,10 @@ static const char kHead[] =
         // left is the default, so the overrides that fought it are dead weight.
         "#tab-utils .tab-pane-center{max-width:760px}"
         "#tab-utils form{max-width:520px;margin:.5em 0}"
-                ".vnc-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
+                ".remote-toggle{display:flex;align-items:center;gap:.55em;margin:.7em 0;color:var(--text)}"
+                ".remote-toggle input{width:auto;margin:0}"
+                ".remote-status{font-size:.82em;color:var(--text-dim);margin:.35em 0 .6em}"
+                ".remote-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
                          "border-radius:6px;background:#000}"
         ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
         ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
@@ -1599,9 +1602,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
 #if defined(DEVICE_TDECK)
-        if (vncHostEnabled()) {
-            html += "<button type='button' class='tab-btn' id='tab-btn-vnc' onclick=\"switchTab('vnc')\">VNC</button>";
-        }
+    html += "<button type='button' class='tab-btn' id='tab-btn-remote' onclick=\"switchTab('remote')\">Remote</button>";
 #endif
         html += "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
@@ -2770,15 +2771,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
         html += "</div>";
 #if defined(DEVICE_TDECK)
-        if (vncHostEnabled()) {
-            const String vncIp = WiFi.localIP().toString();
-            html += "<div class='tab-panel' id='tab-vnc'>"
-                    "<iframe id='vnc-frame' class='vnc-frame' title='VNC' data-src='http://";
-            html += vncIp;
-            html += ":";
-            html += String(vncHostPort());
-            html += "/'></iframe></div>";
-        }
+        const String vncIp = WiFi.localIP().toString();
+        html += "<div class='tab-panel' id='tab-remote'><div class='tab-pane-center'>"
+            "<h3 style='margin-top:1.2em'>Remote</h3>"
+            "<label class='remote-toggle'><input type='checkbox' id='remote-enabled' onchange='remoteToggle()'";
+        if (vncHostEnabled()) html += " checked";
+        html += "><span>Enable VNC host</span></label>"
+            "<p id='remote-status' class='remote-status'>Checking remote host...</p>"
+            "<iframe id='remote-frame' class='remote-frame' title='Remote control' data-src='http://";
+        html += vncIp;
+        html += ":";
+        html += String(vncHostPort());
+        html += "/' style='display:none'></iframe></div></div>";
 #endif
         html += "<script>"
                         "var nodeMap=null;"
@@ -3402,14 +3406,51 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function startChatPolling(){chatBodySync();loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
                         "function stopChatPolling(){chatStopTimers();}"
 #endif
+#if defined(DEVICE_TDECK)
+                        "var remotePollTimer=null;"
+                        "function remoteFrameSync(on){"
+                            "var frame=document.getElementById('remote-frame');"
+                            "var panel=document.getElementById('tab-remote');"
+                            "if(!frame)return;"
+                            "var active=!!(panel&&panel.classList.contains('active'));"
+                            "frame.style.display=(on&&active)?'block':'none';"
+                            "if(on&&active){if(!frame.getAttribute('src'))frame.setAttribute('src',frame.getAttribute('data-src'));}"
+                            "else if(frame.getAttribute('src'))frame.removeAttribute('src');"
+                        "}"
+                        "function remoteRender(d){"
+                            "var box=document.getElementById('remote-enabled');"
+                            "var status=document.getElementById('remote-status');"
+                            "if(!box)return;"
+                            "box.disabled=!!d.pending;box.checked=!!d.enabled;"
+                            "if(status){"
+                                "if(d.pending)status.textContent='Applying...';"
+                                "else if(!d.enabled)status.textContent='Remote host is off.';"
+                                "else if(d.client)status.textContent='Browser connected.';"
+                                "else if(d.running)status.textContent='Ready at http://'+d.ip+':'+d.port+'/';"
+                                "else status.textContent='Starting remote host...';"
+                            "}"
+                            "remoteFrameSync(!!d.enabled);"
+                        "}"
+                        "function pollRemote(){"
+                            "fetch('/vnc-status',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error();return r.json();})"
+                                ".then(remoteRender).catch(function(){var s=document.getElementById('remote-status');if(s)s.textContent='Remote status unavailable.';});"
+                        "}"
+                        "function remoteToggle(){"
+                            "var box=document.getElementById('remote-enabled');if(!box)return;"
+                            "box.disabled=true;var desired=box.checked;"
+                            "var status=document.getElementById('remote-status');if(status)status.textContent=desired?'Starting...':'Stopping...';"
+                            "fetch('/vnc-toggle',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'enabled='+(desired?'1':'0')})"
+                                ".then(function(r){if(!r.ok)throw new Error();setTimeout(pollRemote,150);})"
+                                ".catch(function(){box.disabled=false;pollRemote();});"
+                        "}"
+                        "function startRemotePolling(){pollRemote();if(!remotePollTimer)remotePollTimer=setInterval(pollRemote,1000);}"
+                        "function stopRemotePolling(){if(remotePollTimer){clearInterval(remotePollTimer);remotePollTimer=null;}remoteFrameSync(false);}"
+#endif
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isUtil=(tab==='utils');"
                             "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
-                            "var vncPanel=document.getElementById('tab-vnc');"
-                            "var vncButton=document.getElementById('tab-btn-vnc');"
-                            "var isVnc=(tab==='vnc'&&!!vncPanel);"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-live').classList.toggle('active',isLive);"
@@ -3418,12 +3459,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
-                            "if(vncPanel)vncPanel.classList.toggle('active',isVnc);"
-                            "if(vncButton)vncButton.classList.toggle('active',isVnc);"
-                            "var vf=document.getElementById('vnc-frame');"
-                            "if(vf){if(isVnc){if(!vf.getAttribute('src'))vf.setAttribute('src',vf.getAttribute('data-src'));}"
-                                "else if(vf.getAttribute('src'))vf.removeAttribute('src');}"
                             "if(isLive)startLivePolling();else stopLivePolling();"
+#if defined(DEVICE_TDECK)
+                            "var isRemote=(tab==='remote');"
+                            "document.getElementById('tab-remote').classList.toggle('active',isRemote);"
+                            "document.getElementById('tab-btn-remote').classList.toggle('active',isRemote);"
+                            "if(isRemote)startRemotePolling();else stopRemotePolling();"
+#endif
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
                             "var isChat=(tab==='chat');"
                             "document.getElementById('tab-chat').classList.toggle('active',isChat);"
