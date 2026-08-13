@@ -5,10 +5,15 @@
 // Release notes for the build this firmware was cut from, shown by the
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
-static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(Added
-- T-Deck: added an experimental browser VNC host that mirrors the live screen and accepts taps and keyboard input. It requires an active Wi-Fi network connection, runs alongside Web Config, and appears there as a VNC tab; the direct viewer remains available on port 8765.
+static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
+- T-Deck: experimental VNC Host that mirrors the live screen into a web browser and sends taps and typing back to the device; it requires the T-Deck to be joined to a Wi-Fi network (its own access point is not enough).
+- T-Deck: Web Config has a new Remote tab with an "Enable VNC host" checkbox and the viewer embedded right below it, showing whether the host is off, ready, or has a browser connected.
+- T-Deck: a "VNC Host" action on the Config screen turns the same setting on or off and displays the viewer address; the setting is remembered across reboots and survives a settings reset.
+- T-Deck: the viewer is also reachable directly at `http://<device-ip>:8765/` while the host is enabled - any modern browser works, no VNC client to install.
 
-Fixed
-- Mesh Deck: quick keystrokes no longer go missing - a key press now registers the instant it is seen instead of having to be held across two scans, so fast typing and short taps on Enter land reliably.
-- Mesh Deck: when a single scan catches two keys at once, both are delivered right away rather than one being held back until the next pass.
-- Opening the channel list no longer bogs the interface down; the channel buttons are only redrawn when something about them actually changes, keeping key presses responsive while the list is on screen.)CAMNOTES";
+Changed
+- T-Deck: while a browser is connected to the VNC host, the screen stays awake and Web Config no longer times out, so a remote session is not cut short.
+- T-Deck: turning Wi-Fi off also shuts the VNC host down.
+
+Notes
+- The VNC host is plain HTTP with no password of its own and serves one browser at a time; use it only on a trusted local network. It is not a standard RFB/noVNC server, so desktop VNC clients cannot connect.)CAMNOTES";

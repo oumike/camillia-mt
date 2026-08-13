@@ -490,6 +490,8 @@ static bool sendRegion(int16_t x, int16_t y, int16_t width, int16_t height) {
     return true;
 }
 
+static bool stationConnected();
+
 static void serviceFrames() {
     if (!s_wsReady) return;
     if (!s_metaSent) {
@@ -520,7 +522,7 @@ static void serviceFrames() {
 
 static void vncTask(void *) {
     for (;;) {
-        if (!s_enabled || WiFi.status() != WL_CONNECTED) {
+        if (!s_enabled || !stationConnected()) {
             if (s_running || s_client) stopNetwork();
             vTaskDelay(pdMS_TO_TICKS(25));
             continue;

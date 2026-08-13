@@ -554,17 +554,17 @@ keyboard input back through the same UI paths as the physical controls.
 - The action is available only while the T-Deck is connected to a Wi-Fi network
   as a station. Saved credentials or the device's own access point are not
   enough.
-- Turn it on, then open the exact address shown by the device from another
-  device on the same network. When full Web Config is running, that address is
-  its normal page; select **VNC** there. Refresh a page that was already open so
-  the newly enabled tab appears.
+- Full T-Deck Web Config always includes a **Remote** tab. Use its **Enable VNC
+  host** checkbox to turn the service on or off, then use the viewer directly
+  below it. The on-device **VNC Host** action controls the same saved setting.
 - This uses a compact RGB565 WebSocket protocol based on wadamesh's browser
   mirror design. It is not an RFB/noVNC endpoint and does not accept standard
   desktop VNC clients.
-- VNC and Web Config run together. While VNC is enabled, the full Web Config
-  page adds a **VNC** tab containing the live viewer; the tab connects only
-  while it is selected. The direct `http://<device-ip>:8765/` viewer remains
-  available too.
+- VNC and Web Config run together. The viewer connects only while **Remote** is
+  selected and the checkbox is on. Direct access at
+  `http://<device-ip>:8765/` remains available while enabled.
+- The **Remote** tab and its endpoints are compiled only into the `tdeck`
+  environment; no other board exposes them.
 - The current experiment is plain HTTP with no VNC-specific authentication.
   Use it only on a trusted local network. One browser controls the device at a
   time.
