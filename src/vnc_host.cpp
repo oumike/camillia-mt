@@ -1,6 +1,6 @@
 #include "vnc_host.h"
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -452,6 +452,9 @@ static bool takeDirtyRegion(int16_t &x, int16_t &y, int16_t &width, int16_t &hei
 
 static bool sendRegion(int16_t x, int16_t y, int16_t width, int16_t height) {
     if (!s_framebuffer || !s_bandBuffer || !s_rleBuffer || !s_packetBuffer) return false;
+    // Bands are whole rows, so the panel width sets the floor: one row must fit
+    // in kBandBytes or the clamp below hands memcpy a band wider than the
+    // buffer. That caps the panel at 2048 px wide (T-Deck 320, Pager 480).
     int rowsPerBand = (int)(kBandBytes / ((size_t)width * sizeof(uint16_t)));
     if (rowsPerBand < 1) rowsPerBand = 1;
     uint16_t *band = (uint16_t *)s_bandBuffer;

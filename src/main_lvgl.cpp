@@ -27,7 +27,7 @@
 #include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
 #endif
 #include "web_config.h"
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
 #include "ota_update.h"
@@ -787,7 +787,7 @@ static constexpr time_t kClockSetEpoch = 1700000000;
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static bool s_vncEnabled = false;
 #endif
 static bool s_screenAsleep = false;
@@ -1339,7 +1339,7 @@ static void markConfigDirty();
 static void flushConfigIfDirty();
 static void flushPersistentState();   // config + debounced transcripts, before reboot
 static void persistWebCfgEnabled();
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static void persistVncEnabled();
 #endif
 static void persistWifiForceAp();
@@ -1678,7 +1678,7 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     CFG_ACTION_VNC_HOST,
 #endif
     CFG_ACTION_WIFI_TOGGLE,
@@ -2960,7 +2960,7 @@ static bool wifiHasActiveCreds() {
     return ssid && ssid[0];
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static bool vncNetworkConnected() {
     return s_cfg.wifiEnabled
         && WiFi.status() == WL_CONNECTED
@@ -3033,7 +3033,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Web Config: Enabled");
             }
             break;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         case CFG_ACTION_VNC_HOST: {
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "VNC Host: Off (WiFi off)");
@@ -3223,7 +3223,7 @@ static bool cfgActionDisabled(int actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
         case CFG_ACTION_WEBCFG:
             return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         // Keep an active row usable after a transient link drop so VNC can
         // still be turned off. Only activation requires a live station.
         case CFG_ACTION_VNC_HOST: return !s_vncEnabled && !vncNetworkConnected();
@@ -3312,7 +3312,7 @@ static void persistWebCfgEnabled() {
     p.end();
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static void persistVncEnabled() {
     Preferences p;
     if (!p.begin("camillia", false)) return;
@@ -4703,7 +4703,7 @@ static bool camilliaKeyIsPreserved(const char *key) {
     static const char *const kKeep[] = {
         kCfgBlobKey, "nodeId", "pub25519", "priv25519", "pubKey", "privKey",
         "webCfgEnabled", "wifiForceAp",
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         "vncEnabled",
 #endif
         kPrefSkipWebAutoOnce, kPrefOtaWorkerOnce,
@@ -4779,7 +4779,7 @@ static void persistConfigToPrefs() {
     // Read during early boot, before the blob is unpacked, so they stay keys.
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     p.putBool("vncEnabled", s_vncEnabled);
 #endif
     p.end();
@@ -4997,7 +4997,7 @@ static void loadConfigFromPrefs() {
         // is unpacked; read them here so this path ends up in the same state as
         // the legacy one below.
         s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         s_vncEnabled = prefs.getBool("vncEnabled", false);
 #endif
         const bool forceAp = prefs.getBool("wifiForceAp", false);
@@ -5258,7 +5258,7 @@ static void loadConfigFromPrefs() {
     // the onboarding AP is the only way in before WiFi creds exist. Devices
     // that have been set up keep whatever they last persisted.
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", s_firstBoot);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     s_vncEnabled = prefs.getBool("vncEnabled", false);
 #endif
 
@@ -6158,6 +6158,52 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     refreshEmojiPickerSelection();
 }
 
+// Draws one caret that looks the same in every state.
+//
+// Keys reach these boxes by hand from the board key handler, not through an LVGL
+// input group, so typing alone never puts the textarea in LV_STATE_FOCUSED — and
+// the default theme attaches its cursor style to LV_PART_CURSOR|LV_STATE_FOCUSED
+// only. The part therefore stays at zero border width and the caret draws as an
+// empty rect: nothing on screen tells you where the next character lands.
+// Styling the part in the default state instead makes it unconditional.
+//
+// anim_duration is what makes the caret blink; the textarea samples it in
+// start_cursor_blink(), which the cursor-pos call below runs, so set the styles
+// first and blink from the moment the box opens rather than the first keystroke.
+//
+// The theme's style has to come off the part first, or it wins back the caret
+// the moment the box is tapped. A tap on a CLICK_FOCUSABLE object outside any
+// group makes LVGL add LV_STATE_FOCUSED, and get_prop_core() resolves a property
+// to the candidate with the highest state weight — the theme's FOCUSED entry (2)
+// outranks anything written here for the default state (0). The caret would flip
+// from this white to the theme's own text colour, which on the light-mode default
+// theme this build never re-inits is dark grey on a dark blue box, and change
+// blink rate and width with it. Removing that entry leaves one definition of the
+// part, so the caret looks the same tapped or not, in either UI mode.
+//
+// On touch boards the same caret is what makes tap-to-edit legible. LVGL already
+// walks a press back to a character index and moves the cursor there, so long as
+// the widget stays clickable and click positioning is on — both are class
+// defaults, but they are the whole feature here, so assert them rather than
+// inherit them. Typing then lands at the tapped point on its own: every board
+// key handler edits through lv_textarea_add_text()/lv_textarea_delete_char(),
+// which are cursor-relative, not append-only.
+static void showTextareaCursor(lv_obj_t *ta) {
+    if (!ta) return;
+    lv_obj_remove_style(ta, NULL, LV_PART_CURSOR | LV_STATE_ANY);
+    lv_obj_set_style_border_side(ta, LV_BORDER_SIDE_LEFT, LV_PART_CURSOR);
+    lv_obj_set_style_border_width(ta, 2, LV_PART_CURSOR);
+    lv_obj_set_style_border_color(ta, lv_color_hex(0xE8F1FF), LV_PART_CURSOR);
+    lv_obj_set_style_border_opa(ta, LV_OPA_COVER, LV_PART_CURSOR);
+    lv_obj_set_style_bg_opa(ta, LV_OPA_TRANSP, LV_PART_CURSOR);
+    lv_obj_set_style_anim_duration(ta, 500, LV_PART_CURSOR);
+#if HAS_TOUCH
+    lv_obj_add_flag(ta, LV_OBJ_FLAG_CLICKABLE);
+    lv_textarea_set_cursor_click_pos(ta, true);
+#endif
+    lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST);
+}
+
 static void openComposePrompt(uint32_t replyPacketId,
                               const char *replyText,
                               bool allowSelectedReplyFallback) {
@@ -6283,6 +6329,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_one_line(s_composeInput, true);
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    showTextareaCursor(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
     s_composeCharCount = lv_label_create(s_composeModal);
@@ -6463,6 +6510,7 @@ static void openComposePrompt(uint32_t replyPacketId,
 #endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
+    showTextareaCursor(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
@@ -6628,7 +6676,7 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
@@ -19401,7 +19449,7 @@ static void activateCfgSelection() {
         if (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled) {
             disabledMessage = "Web Config locked while MQTT is on";
         }
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         else if (actionId == CFG_ACTION_VNC_HOST && !vncNetworkConnected()) {
             disabledMessage = "Connect to WiFi before enabling VNC";
         }
@@ -19489,7 +19537,7 @@ static void performCfgAction(int actionId) {
             }
         } break;
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         case CFG_ACTION_VNC_HOST: {
             showActionPopup = false;
             if (s_vncEnabled) {
@@ -19737,7 +19785,7 @@ static void performCfgAction(int actionId) {
             if (!s_cfg.wifiEnabled) {
                 // Master off: stop both consumers and drop the radio.
                 s_cfg.mqttEnabled = false;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
                 if (s_vncEnabled) {
                     (void)applyVncEnabled(false);
                 }
@@ -21045,7 +21093,7 @@ static void pumpKeyboardInput() {
         // to avoid one-off selection shifts during activation.
         char k = KEY_NONE;
         bool fromVnc = false;
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         uint16_t vncKey = 0;
         if (vncHostPopKey(&vncKey) && vncKey <= 0xFF) {
             if (vncKey == '\r') vncKey = KEY_ENTER;
@@ -22138,6 +22186,32 @@ static void pumpKeyboardInput() {
             }
             continue;   // swallow all other keys while the tray is up
         }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        // Wheel steps the caret through the message being typed.
+        //
+        // It sits ahead of the per-screen handlers because compose is reachable
+        // from chat, DMs and the nodes list, and those three carry identical
+        // copies of the compose key switch — one branch here beats three. The
+        // emoji tray above already swallows every key while it is up, so it
+        // keeps the wheel for its own grid without being named here.
+        //
+        // Direction follows invertScrollNav, the rule every other pager list
+        // uses, so the detent that steps a selection forward moves the caret
+        // right. Only the wheel can reach this: j/k stay literal characters in a
+        // typing context, so they never fold onto KEY_SCROLL_UP/DN while a
+        // compose box is open.
+        if (s_composeModal && s_composeInput
+            && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+            const bool forward = (k == KEY_SCROLL_UP) ? invertScrollNav : !invertScrollNav;
+            if (forward) {
+                lv_textarea_cursor_right(s_composeInput);
+            } else {
+                lv_textarea_cursor_left(s_composeInput);
+            }
+            continue;
+        }
+#endif
 
         if (s_dmModal) {
             if (s_composeModal) {
@@ -23754,8 +23828,14 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
     // v9 hands over a raw byte buffer in the display's colour format (RGB565).
     uint16_t *pixels = (uint16_t *)px_map;
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     vncHostCaptureFlush(area->x1, area->y1, w, h, pixels);
+#endif
+    // Web screenshots stay T-Deck-only: unlike the mirror above, the capture
+    // path mallocs a whole frame out of *internal* RAM (see
+    // captureWebScreenshotPng), which is not a cost the other boards have been
+    // sized for. It shared the mirror's guard only because both hook the flush.
+#if defined(DEVICE_TDECK)
     if (s_screenshotCaptureActive && s_screenshotCaptureFrame && s_screenshotCaptureW > 0 && s_screenshotCaptureH > 0) {
         int32_t capX1 = area->x1 < 0 ? 0 : area->x1;
         int32_t capY1 = area->y1 < 0 ? 0 : area->y1;
@@ -23779,7 +23859,7 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
     lv_display_flush_ready(disp);
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static void lvglVncPointerRead(lv_indev_t *indev, lv_indev_data_t *data) {
     LV_UNUSED(indev);
     int16_t x = 0;
@@ -26071,7 +26151,7 @@ static void serviceWebManualTime() {
     }
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static void serviceWebVncToggle() {
     bool enabled = false;
     if (!webCfgTakeVncToggle(enabled)) return;
@@ -28772,7 +28852,7 @@ void setup() {
                       (long)dispW, (long)dispH);
     }
     s_lvDisplay = lv_display_create(dispW, dispH);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     vncHostInit((uint16_t)dispW, (uint16_t)dispH);
 #endif
     lv_display_set_color_format(s_lvDisplay, LV_COLOR_FORMAT_RGB565);
@@ -28789,7 +28869,7 @@ void setup() {
     lv_indev_set_read_cb(touchIndev, lvglTouchRead);
     lv_indev_set_display(touchIndev, s_lvDisplay);
 #endif
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     lv_indev_t *vncPointerIndev = lv_indev_create();
     if (vncPointerIndev) {
         lv_indev_set_type(vncPointerIndev, LV_INDEV_TYPE_POINTER);
@@ -28917,7 +28997,7 @@ void setup() {
     Serial.printf("[cfg] live: wifiSsid=\"%s\" override=%d selected=\"%s\" webCfgRunning=%d\n",
                   s_cfg.wifiSsid, (int)s_wifiUsingKnownOverride,
                   s_wifiSelectedSsid, (int)webCfgRunning());
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     if (s_vncEnabled && !applyVncEnabled(true)) {
         s_vncEnabled = false;
         persistVncEnabled();
@@ -29127,7 +29207,7 @@ void loop() {
     serviceCpuScaling();
     serviceSerialCommands();
     bootstrapStateMapsIfMissing();
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     // A connected browser is an active operator. Wake once on connect and keep
     // the panel/UI timers alive so remote input is never swallowed by the
     // screen-off path.
@@ -29144,7 +29224,7 @@ void loop() {
     // time the screen is off.
     if (webCfgRunning()) {
         webCfgLoop();
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         serviceWebVncToggle();
 #endif
         serviceWebChatSend();
@@ -29314,7 +29394,7 @@ void loop() {
     // Runs after the refresh block so the flush carries this pass's updates,
     // and serviceBacklightWake() below only ever lights a panel that has
     // already been repainted.
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     if (vncHostClientConnected() && vncHostTakeFullRepaintRequest()) {
         lv_obj_invalidate(lv_screen_active());
     }

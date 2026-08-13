@@ -65,7 +65,7 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
 // 24-hour form. Returns false when nothing is queued.
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute);
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 // Remote-tab checkbox request, queued by the HTTP handler and applied by the
 // main loop that owns VNC allocation and persistence.
 bool webCfgTakeVncToggle(bool &enabled);

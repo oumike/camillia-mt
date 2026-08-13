@@ -3,9 +3,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Browser-accessible screen mirror for the T-Deck. This is a compact custom
-// WebSocket transport, not an RFB server: the device serves its own viewer and
-// streams RGB565 dirty regions to it.
+#include "config.h"   // HAS_VNC_HOST, via hal/board.h
+
+// Browser-accessible screen mirror, built for any board with HAS_VNC_HOST. This
+// is a compact custom WebSocket transport, not an RFB server: the device serves
+// its own viewer and streams RGB565 dirty regions to it.
+//
+// Nothing here assumes a panel size — the dimensions passed to vncHostInit()
+// are what the viewer sizes its canvas to, over the wire.
 void vncHostInit(uint16_t width, uint16_t height);
 bool vncHostSetEnabled(bool enabled);
 bool vncHostEnabled();

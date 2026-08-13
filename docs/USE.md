@@ -545,26 +545,40 @@ are not received or stored — they are lost, not queued. The device warns you
 when Web Config starts, the Config row reads *chat PAUSED*, and the web page
 shows a red banner. Turn Web Config off to resume messaging.
 
-### T-Deck browser VNC
+### Browser VNC
 
-The T-Deck has an experimental **VNC Host** action on the Config screen. It
-mirrors the live 320x240 device UI into a browser and sends browser taps and
-keyboard input back through the same UI paths as the physical controls.
+Every board except the Cardputer has an experimental **VNC Host** action on the
+Config screen. It mirrors the live device UI into a browser — 480x222 on the
+Pager, 320x240 elsewhere, or 240x320 if you flashed the vertical Heltec build —
+and sends browser taps and keyboard input back through the same UI paths as the
+physical controls. The viewer sizes itself to whichever panel it connects to.
 
-- The action is available only while the T-Deck is connected to a Wi-Fi network
+- The action is available only while the device is connected to a Wi-Fi network
   as a station. Saved credentials or the device's own access point are not
   enough.
-- Full T-Deck Web Config always includes a **Remote** tab. Use its **Enable VNC
-  host** checkbox to turn the service on or off, then use the viewer directly
-  below it. The on-device **VNC Host** action controls the same saved setting.
+- Full Web Config on those boards always includes a **Remote** tab. Use its
+  **Enable VNC host** checkbox to turn the service on or off, then use the viewer
+  directly below it. The on-device **VNC Host** action controls the same saved
+  setting.
 - This uses a compact RGB565 WebSocket protocol based on wadamesh's browser
   mirror design. It is not an RFB/noVNC endpoint and does not accept standard
   desktop VNC clients.
 - VNC and Web Config run together. The viewer connects only while **Remote** is
   selected and the checkbox is on. Direct access at
   `http://<device-ip>:8765/` remains available while enabled.
-- The **Remote** tab and its endpoints are compiled only into the `tdeck`
-  environment; no other board exposes them.
+- The **Remote** tab and its endpoints are compiled into the `tdeck`,
+  `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical` and `mesh-deck`
+  environments. The Cardputer is the one board without them: the mirror needs a
+  full-panel buffer in PSRAM, which that board does not have. The other
+  requirement is a Wi-Fi station.
+- The Heltec has no physical keyboard of its own. Browser keystrokes are injected
+  into its key handling as though one were attached, so they work wherever the
+  other boards' hardware keys do. Its on-screen keyboard is a separate path into
+  the text box and is unaffected.
+- On the Mesh Deck the mirror is the only way to see the screen remotely. Its
+  panel has no MISO line, so it cannot be read back and the Web Config
+  screenshot is unavailable there — but VNC copies the frames on their way to
+  the panel rather than reading it, so the mirror is unaffected.
 - The current experiment is plain HTTP with no VNC-specific authentication.
   Use it only on a trusted local network. One browser controls the device at a
   time.

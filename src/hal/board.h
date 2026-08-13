@@ -72,6 +72,33 @@ DEVICE_MESH_DECK"
 #  define UI_CHANNEL_LIST_DROPDOWN 0
 #endif
 
+// ── Screen mirror (VNC host) ─────────────────────────────────────────────────
+// Boards that serve their own browser viewer and stream the panel to it. Two
+// hardware prerequisites: PSRAM, because the host keeps a full RGB565 copy of
+// the panel (320x240 or 240x320 = 150 KB everywhere except the Pager's 480x222
+// = 208 KB) that internal RAM cannot spare, and a WiFi station, since the
+// stream needs a routable address.
+//
+// Every board now qualifies except the Cardputer, which has no PSRAM at all —
+// see the LV_MEM_SIZE split in lv_conf.h, where it is likewise the one target
+// keeping LVGL's pool in internal DRAM. This stays an explicit allowlist rather
+// than a test of BOARD_HAS_PSRAM so that a new board opts in deliberately,
+// after someone has actually watched it mirror.
+//
+// The Heltec entry covers both its environments — heltec-v4 and the vertical
+// variant share DEVICE_HELTEC_V4_EXPANSION and differ only in rotation, which
+// the host never sees: it takes the panel size from the display at init, so the
+// portrait build mirrors 240x320 without anything here changing.
+//
+// This was spelled out as defined(DEVICE_TDECK) at twenty-six call sites across
+// three files, which is twenty-six chances to miss one when a board joins.
+#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
+    || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK)
+#  define HAS_VNC_HOST 1
+#else
+#  define HAS_VNC_HOST 0
+#endif
+
 // ── Panel offset defaults ─────────────────────────────────────────────────────
 // Some panels have a pixel offset baked into the driver IC.  Boards that don't
 // need an offset simply don't define these in their hw_*.h; default to zero.

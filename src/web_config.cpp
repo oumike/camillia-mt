@@ -1,5 +1,5 @@
 #include "web_config.h"
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
 #include "mesh_channel_plan.h"
@@ -102,7 +102,7 @@ static char           gChatSendText[MESH_TEXT_MAX_LEN + 1] = "";
 // Manual clock set from the config form, applied on the main loop.
 static volatile bool  gManualTimeReq   = false;
 static int            gManualTime[5]   = {0, 0, 0, 0, 0};  // y, mon, day, hour, min
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static volatile bool  gVncToggleReq    = false;
 static bool           gVncToggleOn     = false;
 #endif
@@ -1601,7 +1601,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
 #endif
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     html += "<button type='button' class='tab-btn' id='tab-btn-remote' onclick=\"switchTab('remote')\">Remote</button>";
 #endif
         html += "</div><div class='tab-metrics'><span class='metric-chip ";
@@ -2156,7 +2156,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "</label>";
     }
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+// Every board that can make a sound, which is the same test the on-device row
+// uses (CFG_ACTION_MSG_ALERT) and the same one the Splash Melody select below
+// already used. It was a three-device list, so the Heltec — which alerts
+// through a passive buzzer on BOARD_BUZZER rather than a codec — chirped with
+// no way to turn it off from this page, even though its Config screen had the
+// setting all along. The Mesh Deck stays out on HAS_AUDIO_ALERTS being 0.
+//
+// Off is the only option that changes anything on a buzzer board: Default,
+// Chirpy and Bass all fall through to the one tone() call triggerMessageAlert()
+// has there. The four are still listed, because this select and the on-device
+// picker have to agree about what is selected.
+#if HAS_AUDIO_ALERTS
     html += "<label>Notification Sound<select name='msg_alert_sound'>"
             "<option value='0'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_DEFAULT) html += " selected"; html += ">Default</option>"
             "<option value='1'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_CHIRPY) html += " selected"; html += ">Chirpy</option>"
@@ -2770,7 +2781,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<script src='https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js'></script>";
 
         html += "</div>";
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
         const String vncIp = WiFi.localIP().toString();
         html += "<div class='tab-panel' id='tab-remote'><div class='tab-pane-center'>"
             "<h3 style='margin-top:1.2em'>Remote</h3>"
@@ -3406,7 +3417,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function startChatPolling(){chatBodySync();loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
                         "function stopChatPolling(){chatStopTimers();}"
 #endif
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
                         "var remotePollTimer=null;"
                         "function remoteFrameSync(on){"
                             "var frame=document.getElementById('remote-frame');"
@@ -3460,7 +3471,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
                             "if(isLive)startLivePolling();else stopLivePolling();"
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
                             "var isRemote=(tab==='remote');"
                             "document.getElementById('tab-remote').classList.toggle('active',isRemote);"
                             "document.getElementById('tab-btn-remote').classList.toggle('active',isRemote);"
@@ -3997,7 +4008,7 @@ static void handlePostSave() {
     if (server.hasArg("snf_client_en")) {
         gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;
     }
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if HAS_AUDIO_ALERTS
     if (server.hasArg("msg_alert_sound")) {   // same guard, same reason
         gCfg->msgAlertSound  = (uint8_t)constrain(server.arg("msg_alert_sound").toInt(), 0, 3);
     }
@@ -4056,7 +4067,7 @@ static void handlePostSetDebugMonitor() {
         : "Debug monitor disabled.");
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 static void handleGetVncStatus() {
     if (!isLoggedIn()) {
         server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
@@ -4935,7 +4946,7 @@ static void registerCommonRoutes() {
     onRoute("/save",              HTTP_POST, handlePostSave);
     onRoute("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     onRoute("/live-data",         HTTP_GET,  handleGetLiveData);
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     onRoute("/vnc-status",        HTTP_GET,  handleGetVncStatus);
     onRoute("/vnc-toggle",        HTTP_POST, handlePostVncToggle);
 #endif
@@ -5200,7 +5211,7 @@ void webCfgEnd() {
     // leftover request would otherwise fire the next time it's started.
     gChatSendReq   = false;
     gChatSendText[0] = '\0';
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     gVncToggleReq = false;
 #endif
     running     = false;
@@ -5227,7 +5238,7 @@ void webCfgLoop() {
     if (gCaptiveActive) gDns.processNextRequest();
     server.handleClient();
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
     // The VNC iframe streams through port 8765, so its traffic never reaches
     // WebServer's request handlers. Keep the full page alive while the host is
     // enabled; once VNC is turned off, the normal idle countdown starts here.
@@ -5315,7 +5326,7 @@ bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute)
     return true;
 }
 
-#if defined(DEVICE_TDECK)
+#if HAS_VNC_HOST
 bool webCfgTakeVncToggle(bool &enabled) {
     if (!gVncToggleReq) return false;
     gVncToggleReq = false;
