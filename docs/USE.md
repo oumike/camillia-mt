@@ -545,6 +545,30 @@ are not received or stored — they are lost, not queued. The device warns you
 when Web Config starts, the Config row reads *chat PAUSED*, and the web page
 shows a red banner. Turn Web Config off to resume messaging.
 
+### T-Deck browser VNC
+
+The T-Deck has an experimental **VNC Host** action on the Config screen. It
+mirrors the live 320x240 device UI into a browser and sends browser taps and
+keyboard input back through the same UI paths as the physical controls.
+
+- The action is available only while the T-Deck is connected to a Wi-Fi network
+  as a station. Saved credentials or the device's own access point are not
+  enough.
+- Turn it on, then open the exact address shown by the device from another
+  device on the same network. When full Web Config is running, that address is
+  its normal page; select **VNC** there. Refresh a page that was already open so
+  the newly enabled tab appears.
+- This uses a compact RGB565 WebSocket protocol based on wadamesh's browser
+  mirror design. It is not an RFB/noVNC endpoint and does not accept standard
+  desktop VNC clients.
+- VNC and Web Config run together. While VNC is enabled, the full Web Config
+  page adds a **VNC** tab containing the live viewer; the tab connects only
+  while it is selected. The direct `http://<device-ip>:8765/` viewer remains
+  available too.
+- The current experiment is plain HTTP with no VNC-specific authentication.
+  Use it only on a trusted local network. One browser controls the device at a
+  time.
+
 ### Custom LoRa modem settings
 
 The **Modem Preset** dropdown in Web Config's LoRa section has a **Custom** entry

@@ -1,4 +1,7 @@
 #include "web_config.h"
+#if defined(DEVICE_TDECK)
+#include "vnc_host.h"
+#endif
 #include "mesh_channel_plan.h"
 #include "base64_util.h"
 #include "node_db.h"
@@ -99,6 +102,10 @@ static char           gChatSendText[MESH_TEXT_MAX_LEN + 1] = "";
 // Manual clock set from the config form, applied on the main loop.
 static volatile bool  gManualTimeReq   = false;
 static int            gManualTime[5]   = {0, 0, 0, 0, 0};  // y, mon, day, hour, min
+#if defined(DEVICE_TDECK)
+static volatile bool  gVncToggleReq    = false;
+static bool           gVncToggleOn     = false;
+#endif
 static char           gWifiSsid[64]    = "";
 static char           gWifiPass[64]    = "";
 static char           gFlashMsg[128]   = "";
@@ -573,6 +580,8 @@ static const char kHead[] =
         // left is the default, so the overrides that fought it are dead weight.
         "#tab-utils .tab-pane-center{max-width:760px}"
         "#tab-utils form{max-width:520px;margin:.5em 0}"
+                ".vnc-frame{display:block;width:100%;height:min(72vh,520px);border:1px solid var(--line);"
+                         "border-radius:6px;background:#000}"
         ".map-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
         ".map-canvas{display:block;width:100%;height:320px;border-radius:6px;overflow:hidden;background:#08141f}"
         ".map-controls{display:flex;gap:.45em;flex-wrap:wrap;margin:.15em 0 .45em}"
@@ -1589,6 +1598,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<button type='button' class='tab-btn' id='tab-btn-chat' onclick=\"switchTab('chat')\">Chat</button>"
 #endif
             "<button type='button' class='tab-btn' id='tab-btn-map' onclick=\"switchTab('map')\">Nodes</button>";
+#if defined(DEVICE_TDECK)
+        if (vncHostEnabled()) {
+            html += "<button type='button' class='tab-btn' id='tab-btn-vnc' onclick=\"switchTab('vnc')\">VNC</button>";
+        }
+#endif
         html += "</div><div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
@@ -2754,8 +2768,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
             "<script src='https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js'></script>";
 
-        html += "</div>"
-                        "<script>"
+        html += "</div>";
+#if defined(DEVICE_TDECK)
+        if (vncHostEnabled()) {
+            const String vncIp = WiFi.localIP().toString();
+            html += "<div class='tab-panel' id='tab-vnc'>"
+                    "<iframe id='vnc-frame' class='vnc-frame' title='VNC' data-src='http://";
+            html += vncIp;
+            html += ":";
+            html += String(vncHostPort());
+            html += "/'></iframe></div>";
+        }
+#endif
+        html += "<script>"
                         "var nodeMap=null;"
                         "var nodeMarkerLayer=null;"
                         "var nodeHeatLayer=null;"
@@ -3382,6 +3407,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var isUtil=(tab==='utils');"
                             "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
+                            "var vncPanel=document.getElementById('tab-vnc');"
+                            "var vncButton=document.getElementById('tab-btn-vnc');"
+                            "var isVnc=(tab==='vnc'&&!!vncPanel);"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-live').classList.toggle('active',isLive);"
@@ -3390,6 +3418,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
+                            "if(vncPanel)vncPanel.classList.toggle('active',isVnc);"
+                            "if(vncButton)vncButton.classList.toggle('active',isVnc);"
+                            "var vf=document.getElementById('vnc-frame');"
+                            "if(vf){if(isVnc){if(!vf.getAttribute('src'))vf.setAttribute('src',vf.getAttribute('data-src'));}"
+                                "else if(vf.getAttribute('src'))vf.removeAttribute('src');}"
                             "if(isLive)startLivePolling();else stopLivePolling();"
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
                             "var isChat=(tab==='chat');"
@@ -3980,6 +4013,38 @@ static void handlePostSetDebugMonitor() {
         ? "Debug monitor enabled."
         : "Debug monitor disabled.");
 }
+
+#if defined(DEVICE_TDECK)
+static void handleGetVncStatus() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    char response[192];
+    const String ip = WiFi.localIP().toString();
+    snprintf(response, sizeof(response),
+             "{\"enabled\":%s,\"running\":%s,\"client\":%s,"
+             "\"pending\":%s,\"ip\":\"%s\",\"port\":%u}",
+             vncHostEnabled() ? "true" : "false",
+             vncHostRunning() ? "true" : "false",
+             vncHostClientConnected() ? "true" : "false",
+             gVncToggleReq ? "true" : "false",
+             ip.c_str(), (unsigned)vncHostPort());
+    server.send(200, "application/json", response);
+}
+
+static void handlePostVncToggle() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    gVncToggleOn = server.arg("enabled") == "1";
+    gVncToggleReq = true;
+    server.send(202, "application/json", "{\"queued\":true}");
+}
+#endif
 
 static void handleGetLiveData() {
     if (!isLoggedIn()) {
@@ -4828,6 +4893,10 @@ static void registerCommonRoutes() {
     onRoute("/save",              HTTP_POST, handlePostSave);
     onRoute("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     onRoute("/live-data",         HTTP_GET,  handleGetLiveData);
+#if defined(DEVICE_TDECK)
+    onRoute("/vnc-status",        HTTP_GET,  handleGetVncStatus);
+    onRoute("/vnc-toggle",        HTTP_POST, handlePostVncToggle);
+#endif
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     onRoute("/chat-targets",      HTTP_GET,  handleGetChatTargets);
     onRoute("/chat-data",         HTTP_GET,  handleGetChatData);
@@ -5089,6 +5158,9 @@ void webCfgEnd() {
     // leftover request would otherwise fire the next time it's started.
     gChatSendReq   = false;
     gChatSendText[0] = '\0';
+#if defined(DEVICE_TDECK)
+    gVncToggleReq = false;
+#endif
     running     = false;
     gOnboarding = false;
     gApMode     = false;
@@ -5112,6 +5184,16 @@ void webCfgLoop() {
 
     if (gCaptiveActive) gDns.processNextRequest();
     server.handleClient();
+
+#if defined(DEVICE_TDECK)
+    // The VNC iframe streams through port 8765, so its traffic never reaches
+    // WebServer's request handlers. Keep the full page alive while the host is
+    // enabled; once VNC is turned off, the normal idle countdown starts here.
+    if (vncHostEnabled()) {
+        gLastRequestMs = millis();
+        gIdleExpired = false;
+    }
+#endif
 
     // Onboarding is exempt: the user may be reading the setup page for a while
     // before submitting anything, and pulling the AP out from under a
@@ -5190,3 +5272,12 @@ bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute)
     minute = gManualTime[4];
     return true;
 }
+
+#if defined(DEVICE_TDECK)
+bool webCfgTakeVncToggle(bool &enabled) {
+    if (!gVncToggleReq) return false;
+    gVncToggleReq = false;
+    enabled = gVncToggleOn;
+    return true;
+}
+#endif

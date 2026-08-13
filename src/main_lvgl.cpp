@@ -27,6 +27,9 @@
 #include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
 #endif
 #include "web_config.h"
+#if defined(DEVICE_TDECK)
+#include "vnc_host.h"
+#endif
 #include "ota_update.h"
 #include "debug_flags.h"
 #include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
@@ -784,6 +787,9 @@ static constexpr time_t kClockSetEpoch = 1700000000;
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
+#if defined(DEVICE_TDECK)
+static bool s_vncEnabled = false;
+#endif
 static bool s_screenAsleep = false;
 static uint32_t s_lastActivityMs = 0;
 // Quiet gap after the last keypress/touch before a debounced transcript
@@ -1333,6 +1339,9 @@ static void markConfigDirty();
 static void flushConfigIfDirty();
 static void flushPersistentState();   // config + debounced transcripts, before reboot
 static void persistWebCfgEnabled();
+#if defined(DEVICE_TDECK)
+static void persistVncEnabled();
+#endif
 static void persistWifiForceAp();
 static void requestSkipWebAutoStartOnce();
 static bool consumeSkipWebAutoStartOnce();
@@ -1381,6 +1390,7 @@ static void scheduleThemeRebuild(bool reopenCfg);
 static void processPendingThemeRebuild();
 static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection);
 static void applyChannelButtonTheme();
+static void startWebConfigAuto();
 
 static void openOnboardingModal();
 static void closeOnboardingModal();
@@ -1668,6 +1678,9 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
+#if defined(DEVICE_TDECK)
+    CFG_ACTION_VNC_HOST,
+#endif
     CFG_ACTION_WIFI_TOGGLE,
     CFG_ACTION_CHOOSE_WIFI,
     CFG_ACTION_GPS_TOGGLE,
@@ -2947,6 +2960,15 @@ static bool wifiHasActiveCreds() {
     return ssid && ssid[0];
 }
 
+#if defined(DEVICE_TDECK)
+static bool vncNetworkConnected() {
+    return s_cfg.wifiEnabled
+        && WiFi.status() == WL_CONNECTED
+        && WiFi.getMode() != WIFI_AP
+        && (uint32_t)WiFi.localIP() != 0;
+}
+#endif
+
 static const char *wifiActiveSsid() {
     const char *ssid = nullptr;
     wifiGetActiveCreds(&ssid, nullptr);
@@ -3011,6 +3033,28 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Web Config: Enabled");
             }
             break;
+#if defined(DEVICE_TDECK)
+        case CFG_ACTION_VNC_HOST: {
+            if (!s_cfg.wifiEnabled) {
+                snprintf(buf, bufLen, "VNC Host: Off (WiFi off)");
+            } else if (!s_vncEnabled && !vncNetworkConnected()) {
+                snprintf(buf, bufLen, "VNC Host: Unavailable (WiFi not connected)");
+            } else if (!s_vncEnabled) {
+                snprintf(buf, bufLen, "VNC Host: Off");
+            } else if (!vncNetworkConnected()) {
+                snprintf(buf, bufLen, "VNC Host: On (network disconnected)");
+            } else if (vncHostClientConnected()) {
+                snprintf(buf, bufLen, "VNC Host: On (browser connected)");
+            } else if (vncHostIP()[0]) {
+                snprintf(buf, bufLen, "VNC Host: http://%s:%u/",
+                         vncHostIP(), (unsigned)vncHostPort());
+            } else {
+                const String ip = WiFi.localIP().toString();
+                snprintf(buf, bufLen, "VNC Host: http://%s:%u/",
+                         ip.c_str(), (unsigned)vncHostPort());
+            }
+        } break;
+#endif
         case CFG_ACTION_GPS_TOGGLE:
             if (s_cfg.gpsEnabled) {
                 snprintf(buf, bufLen, "GPS: Enabled (Hardware)");
@@ -3177,7 +3221,13 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
-        case CFG_ACTION_WEBCFG:      return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
+        case CFG_ACTION_WEBCFG:
+            return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
+#if defined(DEVICE_TDECK)
+        // Keep an active row usable after a transient link drop so VNC can
+        // still be turned off. Only activation requires a live station.
+        case CFG_ACTION_VNC_HOST: return !s_vncEnabled && !vncNetworkConnected();
+#endif
         default:                     return false;
     }
 }
@@ -3261,6 +3311,30 @@ static void persistWebCfgEnabled() {
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
 }
+
+#if defined(DEVICE_TDECK)
+static void persistVncEnabled() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    p.putBool("vncEnabled", s_vncEnabled);
+    p.end();
+}
+
+static bool applyVncEnabled(bool enabled) {
+    if (enabled) {
+        if (!vncNetworkConnected()) return false;
+        if (!vncHostEnabled() && !vncHostSetEnabled(true)) return false;
+    } else if (vncHostEnabled()) {
+        (void)vncHostSetEnabled(false);
+    }
+
+    if (s_vncEnabled != enabled) {
+        s_vncEnabled = enabled;
+        persistVncEnabled();
+    }
+    return true;
+}
+#endif
 
 // The picker's "AP" choice survives reboots; other picker overrides remain
 // runtime-only, since they hold credentials that already live in config.
@@ -4628,7 +4702,11 @@ static char s_cfgLoadReport[112] = "loadConfigFromPrefs() never ran";
 static bool camilliaKeyIsPreserved(const char *key) {
     static const char *const kKeep[] = {
         kCfgBlobKey, "nodeId", "pub25519", "priv25519", "pubKey", "privKey",
-        "webCfgEnabled", "wifiForceAp", kPrefSkipWebAutoOnce, kPrefOtaWorkerOnce,
+        "webCfgEnabled", "wifiForceAp",
+#if defined(DEVICE_TDECK)
+        "vncEnabled",
+#endif
+        kPrefSkipWebAutoOnce, kPrefOtaWorkerOnce,
     };
     for (size_t i = 0; i < sizeof(kKeep) / sizeof(kKeep[0]); i++) {
         if (kKeep[i] && strcmp(key, kKeep[i]) == 0) return true;
@@ -4701,6 +4779,9 @@ static void persistConfigToPrefs() {
     // Read during early boot, before the blob is unpacked, so they stay keys.
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
+#if defined(DEVICE_TDECK)
+    p.putBool("vncEnabled", s_vncEnabled);
+#endif
     p.end();
 
     if (wrote != sizeof(s_cfgBlobBuf)) {
@@ -4916,6 +4997,9 @@ static void loadConfigFromPrefs() {
         // is unpacked; read them here so this path ends up in the same state as
         // the legacy one below.
         s_webCfgEnabled = prefs.getBool("webCfgEnabled", false);
+#if defined(DEVICE_TDECK)
+        s_vncEnabled = prefs.getBool("vncEnabled", false);
+#endif
         const bool forceAp = prefs.getBool("wifiForceAp", false);
         prefs.end();
         if (forceAp) {
@@ -5174,6 +5258,9 @@ static void loadConfigFromPrefs() {
     // the onboarding AP is the only way in before WiFi creds exist. Devices
     // that have been set up keep whatever they last persisted.
     s_webCfgEnabled = prefs.getBool("webCfgEnabled", s_firstBoot);
+#if defined(DEVICE_TDECK)
+    s_vncEnabled = prefs.getBool("vncEnabled", false);
+#endif
 
     // Restore the picker's "AP" choice by re-selecting the sentinel, so every
     // wifiForceApMode() caller sees it exactly as if the user had just picked it.
@@ -6541,6 +6628,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+#if defined(DEVICE_TDECK)
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
     // Directly under GPS, because that row is where people look for this and
@@ -19307,10 +19397,16 @@ static void activateCfgSelection() {
     if (s_cfgActionCount <= 0 || s_cfgSelection < 0 || s_cfgSelection >= s_cfgActionCount) return;
     const int actionId = s_cfgActions[s_cfgSelection];
     if (cfgActionDisabled(actionId)) {
-        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s",
-                 (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled)
-                     ? "Web Config locked while MQTT is on"
-                     : "Enable WiFi first");
+        const char *disabledMessage = "Enable WiFi first";
+        if (actionId == CFG_ACTION_WEBCFG && s_cfg.mqttEnabled) {
+            disabledMessage = "Web Config locked while MQTT is on";
+        }
+#if defined(DEVICE_TDECK)
+        else if (actionId == CFG_ACTION_VNC_HOST && !vncNetworkConnected()) {
+            disabledMessage = "Connect to WiFi before enabling VNC";
+        }
+#endif
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", disabledMessage);
         openCfgActionMessageModal(s_cfgStatus);
         return;
     }
@@ -19392,6 +19488,43 @@ static void performCfgAction(int actionId) {
                 }
             }
         } break;
+
+#if defined(DEVICE_TDECK)
+        case CFG_ACTION_VNC_HOST: {
+            showActionPopup = false;
+            if (s_vncEnabled) {
+                Serial.println("[vnc] CFG action: disable host");
+                (void)applyVncEnabled(false);
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "VNC Host off");
+            } else {
+                if (!vncNetworkConnected()) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                             "Connect to WiFi before enabling VNC");
+                    openCfgActionMessageModal(s_cfgStatus);
+                    break;
+                }
+                char vncIp[16] = {};
+                WiFi.localIP().toString().toCharArray(vncIp, sizeof(vncIp));
+                Serial.println("[vnc] CFG action: enable host");
+                if (!applyVncEnabled(true)) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                             "VNC Host failed to allocate PSRAM");
+                    openCfgActionMessageModal(s_cfgStatus);
+                    break;
+                }
+                if (webCfgRunning() && !webCfgIsLite()) {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                             "VNC Host on\nOpen http://%s/ and select the Remote tab",
+                             vncIp);
+                } else {
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                             "VNC Host on\nhttp://%s:%u/",
+                             vncIp, (unsigned)vncHostPort());
+                }
+                openCfgActionMessageModal(s_cfgStatus);
+            }
+        } break;
+#endif
 
         case CFG_ACTION_GPS_TOGGLE: {
             s_cfg.gpsEnabled = !s_cfg.gpsEnabled;
@@ -19604,6 +19737,11 @@ static void performCfgAction(int actionId) {
             if (!s_cfg.wifiEnabled) {
                 // Master off: stop both consumers and drop the radio.
                 s_cfg.mqttEnabled = false;
+#if defined(DEVICE_TDECK)
+                if (s_vncEnabled) {
+                    (void)applyVncEnabled(false);
+                }
+#endif
                 if (s_webCfgEnabled) {
                     s_webCfgEnabled = false;
                     persistWebCfgEnabled();
@@ -20905,9 +21043,20 @@ static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
         // to avoid one-off selection shifts during activation.
-        char k = s_keyboard.readKey();
+        char k = KEY_NONE;
+        bool fromVnc = false;
+#if defined(DEVICE_TDECK)
+        uint16_t vncKey = 0;
+        if (vncHostPopKey(&vncKey) && vncKey <= 0xFF) {
+            if (vncKey == '\r') vncKey = KEY_ENTER;
+            if (vncKey == 0x7F) vncKey = KEY_BACKSPACE;
+            k = (char)(uint8_t)vncKey;
+            fromVnc = true;
+        }
+#endif
+        if (!fromVnc) k = s_keyboard.readKey();
         bool fromTrackball = false;
-        const char *src = "key";
+        const char *src = fromVnc ? "vnc" : "key";
 #if defined(DEVICE_MESH_DECK)
         // D-pad presses arrive here as ordinary keys, so screen wake, the j/k
         // remap and every per-screen handler treat them identically.
@@ -20954,7 +21103,7 @@ static void pumpKeyboardInput() {
             // controller's buffer cannot back up while the screen is off; they
             // just don't wake it. KEY_ROLLER is the trackball click and arrives
             // via readTrackball(), so it is unaffected by this.
-            if (!fromTrackball) {
+            if (!fromTrackball && !fromVnc) {
                 continue;
             }
 #endif
@@ -23606,6 +23755,7 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
     uint16_t *pixels = (uint16_t *)px_map;
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
 #if defined(DEVICE_TDECK)
+    vncHostCaptureFlush(area->x1, area->y1, w, h, pixels);
     if (s_screenshotCaptureActive && s_screenshotCaptureFrame && s_screenshotCaptureW > 0 && s_screenshotCaptureH > 0) {
         int32_t capX1 = area->x1 < 0 ? 0 : area->x1;
         int32_t capY1 = area->y1 < 0 ? 0 : area->y1;
@@ -23628,6 +23778,22 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
 #endif
     lv_display_flush_ready(disp);
 }
+
+#if defined(DEVICE_TDECK)
+static void lvglVncPointerRead(lv_indev_t *indev, lv_indev_data_t *data) {
+    LV_UNUSED(indev);
+    int16_t x = 0;
+    int16_t y = 0;
+    bool pressed = false;
+    if (vncHostReadPointer(&x, &y, &pressed)) {
+        data->point.x = x;
+        data->point.y = y;
+        data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+#endif
 
 #if defined(DEVICE_MESH_DECK)
 // Reads the FT6636 over Arduino Wire instead of going through LovyanGFX.
@@ -25904,6 +26070,18 @@ static void serviceWebManualTime() {
                       y, mo, d, h, mi);
     }
 }
+
+#if defined(DEVICE_TDECK)
+static void serviceWebVncToggle() {
+    bool enabled = false;
+    if (!webCfgTakeVncToggle(enabled)) return;
+    if (applyVncEnabled(enabled)) {
+        Serial.printf("[vnc] web checkbox: %s\n", enabled ? "enabled" : "disabled");
+    } else {
+        Serial.println("[vnc] web checkbox: enable rejected");
+    }
+}
+#endif
 
 // Drain a pending Chat-tab send (queued by the web server) on the main loop,
 // where we own the node id and the LoRa TX path.
@@ -28594,6 +28772,9 @@ void setup() {
                       (long)dispW, (long)dispH);
     }
     s_lvDisplay = lv_display_create(dispW, dispH);
+#if defined(DEVICE_TDECK)
+    vncHostInit((uint16_t)dispW, (uint16_t)dispH);
+#endif
     lv_display_set_color_format(s_lvDisplay, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(s_lvDisplay, lvglFlush);
     // Single buffer, partial render mode — same stripe-at-a-time flushing the
@@ -28607,6 +28788,16 @@ void setup() {
     lv_indev_set_type(touchIndev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(touchIndev, lvglTouchRead);
     lv_indev_set_display(touchIndev, s_lvDisplay);
+#endif
+#if defined(DEVICE_TDECK)
+    lv_indev_t *vncPointerIndev = lv_indev_create();
+    if (vncPointerIndev) {
+        lv_indev_set_type(vncPointerIndev, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(vncPointerIndev, lvglVncPointerRead);
+        lv_indev_set_display(vncPointerIndev, s_lvDisplay);
+    } else {
+        Serial.println("[vnc] LVGL pointer allocation failed");
+    }
 #endif
 
     loadConfigFromSd();
@@ -28726,6 +28917,13 @@ void setup() {
     Serial.printf("[cfg] live: wifiSsid=\"%s\" override=%d selected=\"%s\" webCfgRunning=%d\n",
                   s_cfg.wifiSsid, (int)s_wifiUsingKnownOverride,
                   s_wifiSelectedSsid, (int)webCfgRunning());
+#if defined(DEVICE_TDECK)
+    if (s_vncEnabled && !applyVncEnabled(true)) {
+        s_vncEnabled = false;
+        persistVncEnabled();
+        Serial.println("[vnc] disabled: startup prerequisites unavailable");
+    }
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer (no PSRAM): auto-start web config only now that the node DB,
     // chat/DM buffers, radio, and UI are all allocated — this mirrors the
@@ -28929,6 +29127,15 @@ void loop() {
     serviceCpuScaling();
     serviceSerialCommands();
     bootstrapStateMapsIfMissing();
+#if defined(DEVICE_TDECK)
+    // A connected browser is an active operator. Wake once on connect and keep
+    // the panel/UI timers alive so remote input is never swallowed by the
+    // screen-off path.
+    if (vncHostClientConnected()) {
+        if (s_screenAsleep) wakeScreen();
+        s_lastActivityMs = now;
+    }
+#endif
     pumpKeyboardInput();
     processPendingThemeRebuild();
     // lv_timer_handler() deliberately runs below the screen-asleep gate now —
@@ -28937,6 +29144,9 @@ void loop() {
     // time the screen is off.
     if (webCfgRunning()) {
         webCfgLoop();
+#if defined(DEVICE_TDECK)
+        serviceWebVncToggle();
+#endif
         serviceWebChatSend();
         serviceWebManualTime();
         // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
@@ -29104,6 +29314,11 @@ void loop() {
     // Runs after the refresh block so the flush carries this pass's updates,
     // and serviceBacklightWake() below only ever lights a panel that has
     // already been repainted.
+#if defined(DEVICE_TDECK)
+    if (vncHostClientConnected() && vncHostTakeFullRepaintRequest()) {
+        lv_obj_invalidate(lv_screen_active());
+    }
+#endif
     lv_timer_handler();
     serviceBacklightWake();
     delay(5);
