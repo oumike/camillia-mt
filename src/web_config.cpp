@@ -2658,6 +2658,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->snfClientEnabled) html += " selected"; html += ">Yes</option>"
             "<option value='0'"; if (!gCfg->snfClientEnabled) html += " selected"; html += ">No</option>"
             "</select></label>";
+    // A router never replays unsolicited — it only answers a CLIENT_HISTORY — so
+    // this switch on its own never receives anything but heartbeats. The button
+    // that does the asking is a standalone form, so it lives with the other
+    // "do something now" actions under Utilities rather than inside the config
+    // form here; this just says where it went.
+    html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "Displays messages replayed by a Store &amp; Forward router, prefixed "
+            "<code>[SF]</code>. A router only replays when asked &mdash; use "
+            "<em>Request Replay Now</em> under Utilities &rarr; Diagnostics.</p>";
+
+    html += "<label>Router Node ID<input name='snf_router_id' type='text' maxlength='16'"
+            " placeholder='auto' value='";
+    if (gCfg->snfRouterNodeId != 0) {
+        char routerBuf[16];
+        snprintf(routerBuf, sizeof(routerBuf), "!%08lx", (unsigned long)gCfg->snfRouterNodeId);
+        html += routerBuf;
+    }
+    html += "'></label>"
+            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "Leave blank to use whichever router this node hears a heartbeat from. "
+            "Set it &mdash; as <code>!aabbccdd</code> &mdash; to always ask one "
+            "specific router, and heartbeats from any other are then ignored when "
+            "choosing who to ask. Worth setting when your router has heartbeats "
+            "switched off, which is the Meshtastic default and leaves it "
+            "undiscoverable otherwise.</p>";
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -2858,6 +2883,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
         "Forces immediate telemetry TX (device + environment when available).</p>";
+
+    html +=
+        "<form method='POST' action='/snf-request'>"
+        "<button type='submit' style='background:#6b4fa0'>"
+        "&#128260; Request Replay Now</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Asks a Store &amp; Forward router for the last ";
+    html += String((unsigned)SNF_HISTORY_WINDOW_MIN);
+    html += " minutes of stored messages. A router never replays on its own, so "
+            "this is what makes <em>Receive Replayed Messages</em> do anything. "
+            "Needs that setting on and a router that has been heard recently &mdash; "
+            "routers announce themselves with a periodic heartbeat.";
+    if (webCfgSnfResult()[0]) {
+        html += "<br>Last attempt: ";
+        html += webCfgSnfResult();
+    }
+    html += "</p>";
     sectionEnd(html, false);
     sendChunk(html);
 
@@ -2964,12 +3007,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
         "Clears saved and in-memory chat/DM history without resetting device configuration.</p>"
         "<form method='POST' action='/clear-nodes'"
-        " onsubmit=\"return confirm('This will clear all discovered nodes and reboot. Continue?')\">"
+        " onsubmit=\"return confirm('This will clear all discovered nodes EXCEPT favorites, "
+        "then reboot. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
-        "Clear Nodes</button>"
+        "Clear Nodes (Keep Favorites)</button>"
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
-        "Clears the persisted node database and reboots.</p>"
+        "Drops every non-favorited node from the persisted database and reboots. "
+        "Favorited nodes are kept, with their names, keys and positions.</p>"
+        "<form method='POST' action='/clear-nodes'"
+        " onsubmit=\"return confirm('This will clear all discovered nodes INCLUDING favorites, "
+        "then reboot. Continue?')\">"
+        "<input type='hidden' name='all' value='1'>"
+        "<button type='submit' style='background:#c0392b'>"
+        "Clear Nodes (All)</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "Clears the entire persisted node database &mdash; favorites included &mdash; "
+        "and reboots.</p>"
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -4323,6 +4378,13 @@ static void handlePostSave() {
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
     }
+    if (server.hasArg("snf_router_id")) {
+        // Blank, "none" or unparseable all come back 0, which is "unset" — the
+        // way to hand router selection back to heartbeat discovery. Shared with
+        // the YAML importer so a hand-edited config.yaml and this box accept
+        // exactly the same spellings.
+        gCfg->snfRouterNodeId = parseNodeIdText(server.arg("snf_router_id").c_str());
+    }
     if (server.hasArg("snf_client_en")) {
         gCfg->snfClientEnabled = server.arg("snf_client_en").toInt() != 0;
     }
@@ -4935,13 +4997,84 @@ static void handlePostResetChatColors() {
     redirectHomeWithFlash("Chat colors reassigned.");
 }
 
+// ── Store & Forward: request a replay ─────────────────────────
+// Queued rather than sent here: the main loop owns the LoRa TX path and the
+// router-tracking state, and it writes the outcome back through
+// webCfgSetSnfResult() for the next render of the Modules section.
+static void handlePostSnfRequest() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    webCfgQueueSnfRequest();
+    redirectHomeWithFlash("Replay requested from the Store & Forward router.");
+}
+
 // ── Clear Nodes ───────────────────────────────────────────────
 
+// Delete the on-SD node-database files. Legacy paths: nothing in this firmware
+// writes them any more, but a card carrying them from an older build would
+// otherwise resurrect nodes that were just cleared. The eviction archive
+// (nodeArchiveFilePath()) is deliberately left alone — it is a historical log
+// the user opted into, not live node state.
+static void clearNodeDbFilesOnSd() {
+#if HAS_FILE_STORAGE
+    if (!sdBegin()) return;
+
+    const char *nodeFiles[] = {
+        "/camillia/nodes.db",
+        "/camillia/nodes.bin",
+        "/camillia/nodes.json",
+        "/camillia/node_db.bin",
+        "/camillia/node_db.json",
+    };
+    for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
+        if (storageFs().exists(nodeFiles[i])) {
+            storageFs().remove(nodeFiles[i]);
+        }
+    }
+
+    File nodesDir = storageFs().open("/camillia/nodes");
+    if (nodesDir && nodesDir.isDirectory()) {
+        File f = nodesDir.openNextFile();
+        while (f) {
+            String fp = String("/camillia/nodes/") + f.name();
+            f.close();
+            storageFs().remove(fp.c_str());
+            f = nodesDir.openNextFile();
+        }
+        nodesDir.close();
+        storageFs().rmdir("/camillia/nodes");
+    }
+#endif
+}
+
+// One route, two behaviors, selected by the "all" field that only the
+// clear-everything form posts. Wiping favorites is the branch that has to ask
+// for itself: anything arriving without that field — an older bookmark, a script
+// written against the single-button version of this route — gets the variant
+// that keeps them, which is the recoverable mistake of the two.
+//
+// The destructive half now also clears the SD copies, matching what the
+// on-device Clear Nodes (All) action has always done; until now a web clear left
+// them behind.
 static void handlePostClearNodes() {
     if (!isLoggedIn()) { redirect("/login"); return; }
-    Nodes.clearPersisted();
+
+    if (server.hasArg("all")) {
+        Nodes.clearPersisted();
+        clearNodeDbFilesOnSd();
+        scheduleReboot(200);
+        redirectHomeWithFlash("Node database cleared. Rebooting now...");
+        return;
+    }
+
+    const int removed = Nodes.clearNonFavorites();
+    const int kept = Nodes.count();
+    // No SD deletion here: those files are whole-table snapshots and would take
+    // the favorites with them. Same call the device action makes.
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "Cleared %d nodes, kept %d favorites. Rebooting now...", removed, kept);
     scheduleReboot(200);
-    redirectHomeWithFlash("Node database cleared. Rebooting now...");
+    redirectHomeWithFlash(msg);
 }
 
 // ── Factory Reset ─────────────────────────────────────────────
@@ -4957,35 +5090,11 @@ static void handlePostFactoryReset() {
     nvs_flash_init();
     Nodes.clearPersisted();
 
+    clearNodeDbFilesOnSd();
+
     // Delete saved DM conversations from SD card (if supported on this board)
 #if HAS_FILE_STORAGE
     {
-        const char *nodeFiles[] = {
-            "/camillia/nodes.db",
-            "/camillia/nodes.bin",
-            "/camillia/nodes.json",
-            "/camillia/node_db.bin",
-            "/camillia/node_db.json",
-        };
-        for (size_t i = 0; i < sizeof(nodeFiles) / sizeof(nodeFiles[0]); i++) {
-            if (storageFs().exists(nodeFiles[i])) {
-                storageFs().remove(nodeFiles[i]);
-            }
-        }
-
-        File nodesDir = storageFs().open("/camillia/nodes");
-        if (nodesDir && nodesDir.isDirectory()) {
-            File f = nodesDir.openNextFile();
-            while (f) {
-                String fp = String("/camillia/nodes/") + f.name();
-                f.close();
-                storageFs().remove(fp.c_str());
-                f = nodesDir.openNextFile();
-            }
-            nodesDir.close();
-            storageFs().rmdir("/camillia/nodes");
-        }
-
         File dir = storageFs().open("/camillia/dms");
         if (dir && dir.isDirectory()) {
             File f = dir.openNextFile();
@@ -5428,6 +5537,7 @@ static void registerCommonRoutes() {
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
+    onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
     registerNotFound();
@@ -5774,6 +5884,24 @@ bool webCfgTakeChatSend(bool &isDm, uint32_t &targetId,
     if (text && textLen) strlcpy(text, gChatSendText, textLen);
     return true;
 }
+
+// ── Store & Forward replay bridge ────────────────────────────────────────────
+static bool gSnfReq = false;
+static char gSnfResult[64] = "";
+
+void webCfgQueueSnfRequest() { gSnfReq = true; }
+
+bool webCfgTakeSnfRequest() {
+    if (!gSnfReq) return false;
+    gSnfReq = false;
+    return true;
+}
+
+void webCfgSetSnfResult(const char *msg) {
+    strlcpy(gSnfResult, msg ? msg : "", sizeof(gSnfResult));
+}
+
+const char *webCfgSnfResult() { return gSnfResult; }
 
 bool webCfgTakeManualTime(int &year, int &mon, int &day, int &hour, int &minute) {
     if (!gManualTimeReq) return false;

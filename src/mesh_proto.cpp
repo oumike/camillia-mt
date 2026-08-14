@@ -1075,6 +1075,41 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
     return n;
 }
 
+size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
+                          uint8_t *buf, size_t bufLen) {
+    // Worst case is 16 bytes (portnum 3, payload tag+len 2, inner 11). Checked
+    // up front rather than after the fact: the tags below are written straight
+    // into buf.
+    if (!buf || bufLen < 24) return 0;
+
+    // Inner StoreAndForward proto.
+    uint8_t inner[24]; size_t innerLen = 0;
+    inner[innerLen++] = (1 << 3) | 0;                       // rr, varint
+    innerLen += pbWriteVarint(inner + innerLen, rr);
+
+    if (windowMinutes) {
+        uint8_t hist[8]; size_t histLen = 0;
+        hist[histLen++] = (2 << 3) | 0;                     // History.window, varint
+        histLen += pbWriteVarint(hist + histLen, windowMinutes);
+
+        inner[innerLen++] = (3 << 3) | 2;                   // history, length-delimited
+        innerLen += pbWriteVarint(inner + innerLen, histLen);
+        memcpy(inner + innerLen, hist, histLen);
+        innerLen += histLen;
+    }
+
+    size_t n = 0;
+    // Data.portnum = STORE_FORWARD_APP
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, STORE_FORWARD_APP);
+    // Data.payload = inner StoreAndForward proto
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, innerLen);
+    if (n + innerLen > bufLen) return 0;
+    memcpy(buf + n, inner, innerLen); n += innerLen;
+    return n;
+}
+
 size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
     // Empty RouteDiscovery payload is valid for a traceroute request.
     const size_t routePayloadLen = 0;

@@ -728,6 +728,12 @@ static bool s_cfgInfoPanelFocused = false;
 static bool s_cfgDebugLog = (MY_DEBUG_MONITOR != 0);
 static char s_otaWorkerBootNotice[160] = "";
 static uint32_t s_selectedMsgReplyPacketId = 0;
+// Sender of the message under the chat cursor, so Enter can act on the person
+// who wrote it. 0 means "nothing actionable": either no message is selected, or
+// the selected line is a local/system one with no sender (see
+// DisplayLine::senderNodeId). Set and cleared only through
+// setSelectedReplyContext(), alongside the reply context it travels with.
+static uint32_t s_selectedMsgSenderNodeId = 0;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static constexpr size_t kReplyPreviewTextMax = 128;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -1335,6 +1341,7 @@ static void refreshNodesDetails();
 static void onNodeSnapshotPressed(lv_event_t *e);
 static void onNodesActionRowPressed(lv_event_t *e);
 static void openNodesActionMenu();
+static void openNodesActionMenuFor(uint32_t nodeId);
 static void closeNodesActionMenu();
 static void refreshNodesActionMenuSelection();
 static void executeNodesActionSelection();
@@ -1397,6 +1404,16 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
                                int &markerX, int &markerY);
 static void sdRmDirRecursive(const char *path);
 static void clearNodeDbOnSd();
+
+// Store-and-Forward client. Defined down with the mesh TX helpers; the CFG
+// screen needs them ~22k lines earlier to label and run its "Request S&F Replay"
+// row. snfRequestHistory() reports failure through `why` so the row can say
+// which precondition was not met.
+static bool     snfRouterKnown();
+static uint32_t snfRouterId();
+static bool     snfRequestHistory(const char **why);
+
+static constexpr uint32_t kSnfHistoryWindowMin = SNF_HISTORY_WINDOW_MIN;
 static bool pagerSelectChatCursorIndex(int displayIndex);
 static void pagerExitChatCursorMode(bool clearSelection = true);
 static void setActiveChannel(int channelIdx);
@@ -1741,6 +1758,7 @@ enum CfgActionId {
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MESH_BEACON,
     CFG_ACTION_SNF_CLIENT,
+    CFG_ACTION_SNF_REQUEST,
     CFG_ACTION_MQTT_TOGGLE,
     #if HAS_VOLUME_CONTROL
     CFG_ACTION_VOLUME,
@@ -1765,6 +1783,7 @@ enum CfgActionId {
     CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_RESET_CHAT_COLORS,
     CFG_ACTION_CLEAR_MSGS,
+    CFG_ACTION_CLEAR_NODES_KEEP_FAVS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
 };
@@ -3246,6 +3265,17 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_SNF_CLIENT:
             snprintf(buf, bufLen, "Store&Fwd Client: %s", s_cfg.snfClientEnabled ? "On" : "Off");
             break;
+        case CFG_ACTION_SNF_REQUEST:
+            // Names the router when one has been heard: a request can only go to
+            // a specific node, so "which one" is the first thing to know.
+            if (snfRouterKnown()) {
+                char who[16];
+                liveNodeLabel(snfRouterId(), who, sizeof(who), false);
+                snprintf(buf, bufLen, "Request S&F Replay (%s)", who);
+            } else {
+                snprintf(buf, bufLen, "Request S&F Replay (no router)");
+            }
+            break;
         case CFG_ACTION_MQTT_TOGGLE:
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "MQTT Bridge: Off (WiFi off)");
@@ -3316,8 +3346,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_CLEAR_MSGS:
             snprintf(buf, bufLen, "Clear Messages");
             break;
+        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS:
+            snprintf(buf, bufLen, "Clear Nodes (Keep Favorites)");
+            break;
         case CFG_ACTION_CLEAR_NODES:
-            snprintf(buf, bufLen, "Clear Nodes");
+            snprintf(buf, bufLen, "Clear Nodes (All)");
             break;
         case CFG_ACTION_FACTORY_RESET:
             snprintf(buf, bufLen, "Factory Reset");
@@ -3335,6 +3368,8 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 static bool cfgActionDisabled(int actionId) {
     switch (actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
+        // Nothing to ask for with the client switched off.
+        case CFG_ACTION_SNF_REQUEST:  return !s_cfg.snfClientEnabled;
         case CFG_ACTION_WEBCFG:
             return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
 #if HAS_VNC_HOST
@@ -3368,6 +3403,7 @@ static bool cfgActionNeedsConfirm(int actionId) {
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
+        || actionId == CFG_ACTION_CLEAR_NODES_KEEP_FAVS
         || actionId == CFG_ACTION_CLEAR_NODES
         || actionId == CFG_ACTION_FACTORY_RESET;
 }
@@ -5717,8 +5753,14 @@ static uint32_t resolveReplyPacketId(const DisplayLine *const *rows, int rowCoun
     return replyId;
 }
 
-static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallbackText) {
+// senderNodeId is who wrote the selected message, for the Enter-opens-actions
+// path; pass 0 for lines with no sender (local/system) and for callers that
+// have no node to offer. It rides along here rather than being assigned at each
+// call site so that the one set and the several clear paths cannot drift apart.
+static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallbackText,
+                                    uint32_t senderNodeId) {
     s_selectedMsgReplyPacketId = replyPacketId;
+    s_selectedMsgSenderNodeId = senderNodeId;
     s_selectedMsgText[0] = '\0';
 
     if (replyPacketId != 0) {
@@ -5771,6 +5813,14 @@ static void setSelectedReplyContext(uint32_t replyPacketId, const char *fallback
                 s_selectedMsgText + 1,
                 strlen(s_selectedMsgText) + 1);
     }
+}
+
+// Drop the whole selection — reply target, preview text and sender together.
+// They are one selection and have to be cleared as one; forgetting the sender
+// here is what would leave Enter opening an action menu for a message that is
+// no longer highlighted.
+static inline void clearSelectedMsgContext() {
+    setSelectedReplyContext(0, nullptr, 0);
 }
 
 static void collectChatRows(const DisplayLine **rows, int &rowCount) {
@@ -5859,8 +5909,7 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
 
     if (cursorCount <= 0) {
         s_pagerChatCursorDisplayIndex = -1;
-        s_selectedMsgReplyPacketId = 0;
-        s_selectedMsgText[0] = '\0';
+        clearSelectedMsgContext();
         s_lastRenderedChannel = -1;
         return false;
     }
@@ -5872,7 +5921,10 @@ static bool pagerSelectChatCursorIndex(int displayIndex) {
     int rowIdx = cursorOrder[displayIndex];
     uint32_t replyPacketId = resolveReplyPacketId(rows, rowCount, rowIdx);
     const char *txt = rows[rowIdx] ? rows[rowIdx]->text : "";
-    setSelectedReplyContext(replyPacketId, txt);
+    // senderNodeId is 0 on local/system lines, which is exactly the "no menu"
+    // signal the Enter handler wants, so it is passed through as-is.
+    uint32_t senderNodeId = rows[rowIdx] ? rows[rowIdx]->senderNodeId : 0;
+    setSelectedReplyContext(replyPacketId, txt, senderNodeId);
 
     s_lastRenderedChannel = -1;
     return true;
@@ -5887,8 +5939,7 @@ static void pagerExitChatCursorMode(bool clearSelection) {
     s_chatWindowGrowPending = false;
     s_chatWindowAnchorActive = false;
     if (clearSelection) {
-        s_selectedMsgReplyPacketId = 0;
-        s_selectedMsgText[0] = '\0';
+        clearSelectedMsgContext();
     }
     s_lastRenderedChannel = -1;
 }
@@ -6871,6 +6922,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
+    // Directly under the toggle it depends on: a router never replays history
+    // unsolicited, so asking is the only way the client ever receives anything.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_REQUEST;
     // Hardware trim, so it sits with the maintenance entries rather than up
     // among the display settings — it is set once per unit, not adjusted.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
@@ -6878,6 +6932,9 @@ static void initCfgActions() {
     // the mildest of the "undo something about the stored chat" group.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
+    // Mildest first: keeping the pinned contacts is the common case, and the
+    // total wipe sits between it and Factory Reset.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
 
@@ -15264,23 +15321,30 @@ static void executeNodesActionSelection() {
         (void)Nodes.setFavorite(nodeId, !isFavorite);
         closeNodesActionMenu();
 
-        snapshotNodesForModal();
-        s_nodesSelected = -1;
-        for (int i = 0; i < s_nodesFilteredCount; i++) {
-            int snapshotIdx = s_nodesFilteredIdx[i];
-            if (snapshotIdx >= 0
-                && snapshotIdx < s_nodesSnapshotCount
-                && s_nodesSnapshotIds[snapshotIdx] == nodeId) {
-                s_nodesSelected = i;
-                break;
+        // Re-snapshot and re-select only when the Nodes screen is actually up.
+        // Opened from the chat cursor there is no list behind this modal, and
+        // these calls would rebuild rows for a modal that is not on screen and
+        // move a selection index nothing is showing. The favorite itself is
+        // already stored above either way.
+        if (s_nodesModal) {
+            snapshotNodesForModal();
+            s_nodesSelected = -1;
+            for (int i = 0; i < s_nodesFilteredCount; i++) {
+                int snapshotIdx = s_nodesFilteredIdx[i];
+                if (snapshotIdx >= 0
+                    && snapshotIdx < s_nodesSnapshotCount
+                    && s_nodesSnapshotIds[snapshotIdx] == nodeId) {
+                    s_nodesSelected = i;
+                    break;
+                }
             }
+            if (s_nodesSelected < 0 && s_nodesFilteredCount > 0) {
+                s_nodesSelected = 0;
+            }
+            refreshNodesListRows();
+            refreshNodesListSelection();
+            refreshNodesDetails();
         }
-        if (s_nodesSelected < 0 && s_nodesFilteredCount > 0) {
-            s_nodesSelected = 0;
-        }
-        refreshNodesListRows();
-        refreshNodesListSelection();
-        refreshNodesDetails();
         return;
     }
 
@@ -15332,16 +15396,41 @@ static void onNodesActionRowPressed(lv_event_t *e) {
     executeNodesActionSelection();
 }
 
-static void openNodesActionMenu() {
-    if (!s_nodesModal) return;
-    const NodeEntry *selected = currentNodesSelection();
-    if (!selected || selected->nodeId == 0) return;
+// Who the actions modal says it is acting on. The node's own long name where
+// there is room for it, so the title names a device rather than a hex id.
+//
+// The Cardputer takes the short name instead: its 240x135 panel leaves the
+// modal 226 px wide, and a 40-char long name at font 12 wraps the title into
+// several lines on a screen that has none to give — the six action rows below
+// are what the modal is for.
+//
+// Falls back to liveNodeLabel() (short name, else hex) whenever no NODEINFO
+// name has arrived, which is the normal case for a node we have only ever
+// heard relayed.
+static void nodesActionTitleLabel(uint32_t nodeId, char *out, size_t outLen) {
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    const NodeEntry *e = Nodes.find(nodeId);
+    if (e && e->hasName && e->longName[0]) {
+        utf8util::copyTruncate(out, outLen, e->longName);
+        return;
+    }
+#endif
+    liveNodeLabel(nodeId, out, outLen, false);
+}
+
+// Open the action menu for an arbitrary node. Deliberately free of any
+// s_nodesModal dependency: the Nodes screen is one caller, the chat cursor is
+// another, and the menu itself acts on a node id rather than on a list row. The
+// parent below already prefers the root screen, so it centres over whatever is
+// on display without a layout change.
+static void openNodesActionMenuFor(uint32_t nodeId) {
+    if (nodeId == 0) return;
 
     if (s_nodesActionModal) {
         closeNodesActionMenu();
     }
 
-    s_nodesActionNodeId = selected->nodeId;
+    s_nodesActionNodeId = nodeId;
     s_nodesActionSelection = 0;
 
     const int modalW = min(230, lv_disp_get_hor_res(NULL) - 14);
@@ -15370,13 +15459,32 @@ static void openNodesActionMenu() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Node Actions");
+    // Name the node. On the Nodes screen the highlighted row already says who
+    // this is about, but opened from chat the list is not on screen at all —
+    // and for a sender no longer in the node DB the hex id is the only
+    // identification there is.
+    //
+    // Emoji-safe: long names are user-set and routinely carry emoji, which the
+    // montserrat_12 face above has no glyphs for and would draw as tofu.
+    {
+        char who[48];
+        char titleBuf[72];
+        nodesActionTitleLabel(nodeId, who, sizeof(who));
+        snprintf(titleBuf, sizeof(titleBuf), "Node Actions: %s", who);
+        setLabelTextEmojiSafe(title, titleBuf);
+    }
 
     // Buttons arranged 2-per-row. Each label embeds its keyboard shortcut in
     // parens using the (T)raceroute inline style so touch and keyboard builds
     // share the exact same labels.
-    const bool selectedIsFavorite = selected->favorite;
-    const bool selectedIsIgnored = Ignored.contains(selected->nodeId);
+    // Looked up by id rather than taken from a list row: opened from the chat
+    // cursor there is no row, and the sender may not be in the node DB at all
+    // (cleared nodes, or someone we have only ever seen relayed). A null node
+    // just means "not favorited" — which is honest, since Nodes.setFavorite()
+    // will decline to favorite a node it does not know either.
+    const NodeEntry *actionNode = Nodes.find(nodeId);
+    const bool selectedIsFavorite = actionNode && actionNode->favorite;
+    const bool selectedIsIgnored = Ignored.contains(nodeId);
     const char *kActionLabels[kNodesActionCount] = {
         "(T)raceroute",
         "Sen(d) DM",
@@ -15427,6 +15535,15 @@ static void openNodesActionMenu() {
     }
 
     refreshNodesActionMenuSelection();
+}
+
+// Nodes-screen entry point: unchanged behavior, sourcing the node from the
+// highlighted list row.
+static void openNodesActionMenu() {
+    if (!s_nodesModal) return;
+    const NodeEntry *selected = currentNodesSelection();
+    if (!selected || selected->nodeId == 0) return;
+    openNodesActionMenuFor(selected->nodeId);
 }
 
 // ── Channel Actions modal ─────────────────────────────────────
@@ -20009,6 +20126,21 @@ static void performCfgAction(int actionId) {
                      s_cfg.snfClientEnabled ? "On" : "Off");
             break;
 
+        case CFG_ACTION_SNF_REQUEST: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SNF_REQUEST");
+            showActionPopup = false;   // the status line carries the outcome
+            const char *why = nullptr;
+            if (snfRequestHistory(&why)) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "Replay requested (last %lu min)",
+                         (unsigned long)kSnfHistoryWindowMin);
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "Replay not sent: %s", why ? why : "unavailable");
+            }
+            break;
+        }
+
         case CFG_ACTION_WIFI_TOGGLE:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec WIFI_TOGGLE");
             s_cfg.wifiEnabled = !s_cfg.wifiEnabled;
@@ -20235,8 +20367,7 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_MSGS");
             Channels.clearAllMessages(true);
             DMs.clearAll(true);
-            s_selectedMsgReplyPacketId = 0;
-            s_selectedMsgText[0] = '\0';
+            clearSelectedMsgContext();
             s_lastRenderedChannel = -1;
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Messages cleared - rebooting...");
             refreshCfgModal();
@@ -20245,6 +20376,24 @@ static void performCfgAction(int actionId) {
             ESP.restart();
             refreshChatView(true);
             break;
+
+        case CFG_ACTION_CLEAR_NODES_KEEP_FAVS: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES_KEEP_FAVS");
+            const int removed = Nodes.clearNonFavorites();
+            const int kept = Nodes.count();
+            // Deliberately *not* clearNodeDbOnSd(): those paths are whole-table
+            // snapshots, so deleting them wholesale would take the favorites
+            // with them. Nothing in this firmware writes them any more (they are
+            // legacy files cleaned up on a total wipe), so there is also nothing
+            // to re-export here — only the all-variant below still deletes them.
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     "Cleared %d nodes, kept %d favorites - rebooting...", removed, kept);
+            refreshCfgModal();
+            delay(1000);
+            flushPersistentState();   // settings and transcripts must land before we go
+            ESP.restart();
+            break;
+        }
 
         case CFG_ACTION_CLEAR_NODES:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES");
@@ -22700,6 +22849,57 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // Outside the s_nodesModal branch below: this modal is opened both from
+        // the Nodes screen and from the chat cursor, and nested under the Nodes
+        // branch it would swallow no keys at all when opened from chat — arrows,
+        // Enter, Esc and the single-key shortcuts would all fall through to the
+        // handler underneath while the menu sat there looking interactive.
+        //
+        // Still yields to an open composer, which is the precedence it had when
+        // it lived inside the Nodes branch (the compose block there runs first).
+        if (s_nodesActionModal && !s_composeModal) {
+            if (isModalCloseKey(k)) {
+                closeNodesActionMenu();
+                continue;
+            }
+
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                int next = s_nodesActionSelection;
+                if (invertScrollNav) {
+                    next += (k == KEY_SCROLL_UP) ? 1 : -1;
+                } else {
+                    next += (k == KEY_SCROLL_UP) ? -1 : 1;
+                }
+                if (next < 0) next = 0;
+                if (next >= kNodesActionCount) next = kNodesActionCount - 1;
+                if (next != s_nodesActionSelection) {
+                    s_nodesActionSelection = next;
+                    refreshNodesActionMenuSelection();
+                }
+                continue;
+            }
+
+            if (k == KEY_ENTER) {
+                executeNodesActionSelection();
+                continue;
+            }
+
+            // Single-key shortcuts (T/D/F/I/P/X) select and execute the
+            // corresponding action, mirroring the (X) hints in the labels.
+            if (k >= 0x20 && k < 0x7F) {
+                char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
+                for (int i = 0; i < kNodesActionCount; i++) {
+                    if (kNodesActionShortcuts[i] == up) {
+                        s_nodesActionSelection = i;
+                        refreshNodesActionMenuSelection();
+                        executeNodesActionSelection();
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
         if (s_nodesModal) {
             if (s_composeModal) {
                 switch (k) {
@@ -22737,49 +22937,6 @@ static void pumpKeyboardInput() {
                             lv_textarea_add_text(s_composeInput, one);
                         }
                         break;
-                }
-                continue;
-            }
-
-            if (s_nodesActionModal) {
-                if (isModalCloseKey(k)) {
-                    closeNodesActionMenu();
-                    continue;
-                }
-
-                if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
-                    int next = s_nodesActionSelection;
-                    if (invertScrollNav) {
-                        next += (k == KEY_SCROLL_UP) ? 1 : -1;
-                    } else {
-                        next += (k == KEY_SCROLL_UP) ? -1 : 1;
-                    }
-                    if (next < 0) next = 0;
-                    if (next >= kNodesActionCount) next = kNodesActionCount - 1;
-                    if (next != s_nodesActionSelection) {
-                        s_nodesActionSelection = next;
-                        refreshNodesActionMenuSelection();
-                    }
-                    continue;
-                }
-
-                if (k == KEY_ENTER) {
-                    executeNodesActionSelection();
-                    continue;
-                }
-
-                // Single-key shortcuts (T/D/F/I/P/X) select and execute the
-                // corresponding action, mirroring the (X) hints in the labels.
-                if (k >= 0x20 && k < 0x7F) {
-                    char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
-                    for (int i = 0; i < kNodesActionCount; i++) {
-                        if (kNodesActionShortcuts[i] == up) {
-                            s_nodesActionSelection = i;
-                            refreshNodesActionMenuSelection();
-                            executeNodesActionSelection();
-                            break;
-                        }
-                    }
                 }
                 continue;
             }
@@ -23214,8 +23371,7 @@ static void pumpKeyboardInput() {
                         pagerExitChatCursorMode(true);
                         refreshChatView(true);
                     } else if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
-                        s_selectedMsgReplyPacketId = 0;
-                        s_selectedMsgText[0] = '\0';
+                        clearSelectedMsgContext();
                         s_lastRenderedChannel = -1;
                         refreshChatView(true);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -23413,6 +23569,17 @@ static void pumpKeyboardInput() {
                     if (!pagerSelectChatCursorIndex(-1)) {
                         s_pagerChatCursorMode = false;
                     }
+                } else if (s_selectedMsgSenderNodeId != 0
+                           && s_selectedMsgSenderNodeId != s_myNodeId) {
+                    // Second Enter opens the node actions for whoever wrote the
+                    // highlighted message — the same two-step rhythm the Nodes
+                    // screen has, where Enter on a row opens the same menu.
+                    //
+                    // Nothing happens on our own messages or on local/system
+                    // lines (sender 0): traceroute, DM and favorite against
+                    // ourselves are meaningless, and a system line has no one to
+                    // act on. Swallowed silently rather than beeping about it.
+                    openNodesActionMenuFor(s_selectedMsgSenderNodeId);
                 }
 #endif
             } else if (k == KEY_BACKSPACE) {
@@ -23420,8 +23587,7 @@ static void pumpKeyboardInput() {
                     pagerExitChatCursorMode(true);
                     refreshChatView(true);
                 } else if (s_selectedMsgReplyPacketId != 0 || s_selectedMsgText[0]) {
-                    s_selectedMsgReplyPacketId = 0;
-                    s_selectedMsgText[0] = '\0';
+                    clearSelectedMsgContext();
                     s_lastRenderedChannel = -1;
                     refreshChatView(true);
                 }
@@ -23498,13 +23664,54 @@ static void refreshChatComposeButtonState() {
 #endif
 }
 
+#if HAS_TOUCH
+// Tap-and-hold on a chat message opens the node actions for whoever wrote it —
+// the touch equivalent of the second Enter on the chat cursor, and the reason
+// openNodesActionMenuFor() takes a node id rather than a list selection. LVGL
+// raises this at the input device's long-press threshold while the finger is
+// still down, so the menu appears under the finger rather than on release.
+//
+// Timestamp rather than the pressed object: LVGL still delivers CLICKED on
+// release after a long press, and that click would otherwise also select the
+// message as a reply target on the way out. Recording *when* the gesture was
+// consumed lets the next click be dropped without holding an object pointer
+// that a chat rebuild could invalidate underneath us. It self-heals — a long
+// press with no click after it (finger dragged off the message) leaves at most
+// this window behind, not a permanently swallowed tap.
+static uint32_t s_chatLongPressConsumedMs = 0;
+static constexpr uint32_t kChatLongPressConsumeMs = 1500;
+
+static void onChatMessageLongPressed(lv_event_t *e) {
+    uint32_t senderNodeId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    // Same rule the Enter path uses: nothing to act on for our own messages or
+    // for local/system lines, which carry no sender.
+    if (senderNodeId == 0 || senderNodeId == s_myNodeId) return;
+
+    s_chatLongPressConsumedMs = millis();
+    openNodesActionMenuFor(senderNodeId);
+}
+#endif  // HAS_TOUCH
+
 static void onChatMessagePressed(lv_event_t *e) {
     lv_obj_t *label = lv_event_get_target_obj(e);
     if (!label) return;
 
+#if HAS_TOUCH
+    // Drop the release-click that follows a long press we already acted on.
+    if (s_chatLongPressConsumedMs != 0
+        && (uint32_t)(millis() - s_chatLongPressConsumedMs) < kChatLongPressConsumeMs) {
+        s_chatLongPressConsumedMs = 0;
+        return;
+    }
+#endif
+
     uint32_t replyPacketId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
     const char *txt = lv_label_get_text(label);
-    setSelectedReplyContext(replyPacketId, txt ? txt : "");
+    // Sender 0: a tap selects a message for *reply*, and this handler has the
+    // label and packet id but no node id. Claiming a sender here would be
+    // guessing, and carrying a stale one forward would point the Enter action
+    // menu at whoever was highlighted before the tap.
+    setSelectedReplyContext(replyPacketId, txt ? txt : "", 0);
 
     refreshChatComposeButtonState();
 
@@ -25007,8 +25214,7 @@ static void setActiveChannel(int channelIdx) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerDropdownSelection = channelIdx;
 #endif
-    s_selectedMsgReplyPacketId = 0;
-    s_selectedMsgText[0] = '\0';
+    clearSelectedMsgContext();
     // Opening a channel always lands on its newest message. This is a latch, not
     // just the force flag below, because the refresh here is a no-op until the
     // chat panel exists (boot picks a channel before buildUi runs) — the intent
@@ -25842,6 +26048,148 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     return ok;
 }
 
+// ── Store and Forward client ──────────────────────────────────────────────────
+// A router never pushes history unsolicited: upstream's historySend() only runs
+// in response to a CLIENT_HISTORY (rr=65) or the legacy "SF\0" text trigger. The
+// only thing it broadcasts on its own is a ROUTER_HEARTBEAT, which is also how
+// we learn a router exists and which node to address a request to.
+static uint32_t s_snfRouterId = 0;        // node id of the last router heard
+static uint32_t s_snfRouterHeardMs = 0;   // millis() of its last heartbeat/pong
+static uint32_t s_snfRouterPeriodS = 0;   // advertised heartbeat period, seconds
+static int      s_snfRouterChanIdx = 0;   // channel it was heard on
+static uint32_t s_snfLastRequestMs = 0;   // throttles outgoing CLIENT_HISTORY
+
+// A history request can pull the router's entire return_max down on us; a stray
+// double-press should not do that twice.
+static constexpr uint32_t kSnfRequestThrottleMs = 30000;
+// A router that has gone quiet is treated as gone rather than left addressable
+// forever. When it advertised a heartbeat period we hold it to three of those —
+// one missed beat is a lost packet, three is a router that is off — and fall
+// back to a flat half hour for one that never said.
+static constexpr uint32_t kSnfRouterStaleMs = 30UL * 60UL * 1000UL;
+
+// A router pinned in web config wins outright, and no heartbeat can displace it
+// — the point of setting it is that the router you want is the one you named,
+// whether or not it announces itself. Upstream defaults heartbeats *off*
+// (StoreForwardModule.h: `bool heartbeat = false`), so a perfectly good router
+// can be sitting there undiscoverable; this is the way to reach it.
+//
+// Clear the setting to go back to picking up whichever router is heard.
+// The broadcast id is rejected here rather than at each entry point: it parses
+// cleanly from "!ffffffff" but is never a router, and sendStoreForwardTo()
+// refuses it — so without this the row would claim a router while every request
+// failed. Covers the web form, YAML import and the settings blob at once.
+static bool snfRouterPinned() {
+    return s_cfg.snfRouterNodeId != 0 && s_cfg.snfRouterNodeId != 0xFFFFFFFFu;
+}
+
+static bool snfRouterKnown() {
+    // No staleness test for a pinned router: we have no heartbeat to measure it
+    // by, and timing out the user's explicit choice would leave the row reading
+    // "no router" with a router plainly configured.
+    if (snfRouterPinned()) return true;
+
+    if (s_snfRouterId == 0) return false;
+    uint32_t staleMs = kSnfRouterStaleMs;
+    if (s_snfRouterPeriodS > 0 && s_snfRouterPeriodS < (kSnfRouterStaleMs / 3000UL)) {
+        staleMs = s_snfRouterPeriodS * 3000UL;
+    }
+    return (uint32_t)(millis() - s_snfRouterHeardMs) < staleMs;
+}
+
+static uint32_t snfRouterId() {
+    return snfRouterPinned() ? s_cfg.snfRouterNodeId : s_snfRouterId;
+}
+
+// Which channel to address the router on. A heard router answers on the channel
+// its heartbeat arrived on; a pinned one has told us nothing, so fall back to
+// wherever the node DB last heard from it. Channel 0 is the last resort and
+// usually the wrong answer — upstream refuses S&F on the default channel — but
+// it is better than refusing to send at all.
+static int snfRouterChanIdx() {
+    if (snfRouterPinned()) {
+        const NodeEntry *n = Nodes.find(s_cfg.snfRouterNodeId);
+        if (n && n->chanIdx >= 0 && n->chanIdx < MESH_CHANNELS) return n->chanIdx;
+        return 0;
+    }
+    return s_snfRouterChanIdx;
+}
+
+// Send a bare StoreAndForward frame (rr, plus an optional History window) to one
+// node. Unicast on the channel the router was heard on: upstream refuses S&F on
+// the default channel outright, so the primary is usually the wrong one.
+static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMinutes,
+                               int chanIdx) {
+    if (!Radio.isReady()) return false;
+    if (toNodeId == 0 || toNodeId == 0xFFFFFFFF) return false;
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0 || toNodeId == s_myNodeId) return false;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) chanIdx = 0;
+
+    uint8_t proto[48];
+    size_t protoLen = encodeStoreForward(rr, windowMinutes, proto, sizeof(proto));
+    if (protoLen == 0) return false;
+
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    uint8_t cipher[sizeof(proto)];
+    uint32_t packetId = nextMeshPacketId();
+    if (!encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
+        return false;
+    }
+
+    uint8_t frame[sizeof(MeshHdr) + sizeof(cipher)];
+    MeshHdr hdr = {};
+    hdr.to = toNodeId;
+    hdr.from = s_myNodeId;
+    hdr.id = packetId;
+    hdr.channel = ck.hash;
+    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
+                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+
+    char timePrefix[12];
+    char dst[16];
+    char line[72];
+    liveBuildPrefix(timePrefix, sizeof(timePrefix));
+    liveNodeLabel(toNodeId, dst, sizeof(dst), true);
+    snprintf(line, sizeof(line), "T SNF U %s rr=%lu %s",
+             dst, (unsigned long)rr, ok ? "TX" : "ER");
+    liveFeedAddPrefixed(timePrefix, line, ok ? TFT_DARKGREY : TFT_RED, 0, false);
+
+    return ok;
+}
+
+// Ask the known router to replay its history. Returns false with a reason in
+// `why` so the CFG row and web config can say *which* precondition failed —
+// "no router heard yet" and "asked a moment ago" are different problems.
+static bool snfRequestHistory(const char **why) {
+    if (!s_cfg.snfClientEnabled) {
+        if (why) *why = "Store&Fwd client is off";
+        return false;
+    }
+    if (!snfRouterKnown()) {
+        if (why) *why = "No S&F router heard yet";
+        return false;
+    }
+    if (s_snfLastRequestMs != 0 &&
+        (uint32_t)(millis() - s_snfLastRequestMs) < kSnfRequestThrottleMs) {
+        if (why) *why = "Replay already requested";
+        return false;
+    }
+    if (!sendStoreForwardTo(snfRouterId(), SNF_CLIENT_HISTORY,
+                            kSnfHistoryWindowMin, snfRouterChanIdx())) {
+        if (why) *why = "Send failed";
+        return false;
+    }
+    s_snfLastRequestMs = millis();
+    if (why) *why = nullptr;
+    return true;
+}
+
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
 // Stock Meshtastic: every role rebroadcasts except CLIENT_MUTE / CLIENT_HIDDEN.
 static bool roleRebroadcasts(uint8_t role) {
@@ -25952,7 +26300,17 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
     // (display, rebroadcast, or node-state updates).
     if (s_cfg.ignoreMqtt && (pkt.hdr.flags & 0x10)) return false;
 
-    Nodes.updateFromPacket(pkt);
+    // Store-and-Forward is the one port where hdr.from is not who we just heard.
+    // On a replay it is the *original author* of a message the router stored
+    // hours ago, while the SNR, hop count and arrival time all describe the
+    // router's transmission right now — so feeding it here marks a node that has
+    // been silent all afternoon as freshly heard, at someone else's signal
+    // strength, and reshuffles the node list every time a burst lands. The S&F
+    // case below calls this itself for the frames a router really did originate
+    // (heartbeats, pings, stats), where hdr.from means what it usually means.
+    if (!(pkt.decrypted && pkt.portnum == STORE_FORWARD_APP)) {
+        Nodes.updateFromPacket(pkt);
+    }
 
     // Live SNR/RSSI sparkline samples (one per received packet).
     chartPushSample(s_snrHist, pkt.snr);
@@ -25975,6 +26333,11 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;
+                } else if (payPtr) {
+                    Serial.printf("[rx] PKI payload too long: port=%lu len=%u cap=%u (dropped)\n",
+                                  (unsigned long)pkt.portnum,
+                                  (unsigned)payLen,
+                                  (unsigned)sizeof(pkt.payload));
                 }
             }
         }
@@ -26110,15 +26473,21 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
         case STORE_FORWARD_APP: {
             // If the user has disabled the Store-and-Forward client, drop these
-            // packets silently (no live entry, no display).
+            // packets silently (no live entry, no display). NodeDB was already
+            // skipped for this port above and stays skipped: with the feature
+            // off we are not participating, and a replay's hdr.from is the
+            // original author rather than whoever actually transmitted. The
+            // router still appears in the node list via its ordinary NodeInfo.
             if (!s_cfg.snfClientEnabled) {
                 return false;
             }
 
             // Decode the Meshtastic StoreAndForward proto looking for:
             //   field 1 (varint): rr  (RequestResponse enum)
+            //   field 4 (msg):    heartbeat { period = 1 }
             //   field 5 (bytes):  text payload (only present for replayed text)
             uint32_t rr = 0;
+            uint32_t hbPeriodS = 0;
             const uint8_t *sfText = nullptr;
             size_t sfTextLen = 0;
             size_t i = 0;
@@ -26142,6 +26511,35 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     if (field == 5) {
                         sfText = pkt.payload + j;
                         sfTextLen = (size_t)sz;
+                    } else if (field == 4) {
+                        // Heartbeat submessage: field 1 is the period in seconds.
+                        size_t h = j;
+                        while (h < j + (size_t)sz) {
+                            uint64_t htag = 0;
+                            h = pbReadVarint(pkt.payload, j + (size_t)sz, h, htag);
+                            if (!h) break;
+                            uint32_t hfield = (uint32_t)(htag >> 3);
+                            uint32_t hwt = (uint32_t)(htag & 7);
+                            if (hwt == 0) {
+                                uint64_t hv = 0;
+                                h = pbReadVarint(pkt.payload, j + (size_t)sz, h, hv);
+                                if (!h) break;
+                                if (hfield == 1) hbPeriodS = (uint32_t)hv;
+                            } else if (hwt == 2) {
+                                uint64_t hsz = 0;
+                                size_t hj = pbReadVarint(pkt.payload, j + (size_t)sz, h, hsz);
+                                if (!hj || hj + hsz > j + (size_t)sz) break;
+                                h = hj + (size_t)hsz;
+                            } else if (hwt == 5) {
+                                if (h + 4 > j + (size_t)sz) break;
+                                h += 4;
+                            } else if (hwt == 1) {
+                                if (h + 8 > j + (size_t)sz) break;
+                                h += 8;
+                            } else {
+                                break;
+                            }
+                        }
                     }
                     i = j + sz;
                 } else if (wt == 5) {
@@ -26155,10 +26553,87 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 }
             }
 
-            // Only act on text-replay variants (ROUTER_TEXT_BROADCAST=8,
-            // ROUTER_TEXT_DIRECT=9). Heartbeats/stats/etc. are just logged.
-            bool isTextReplay = (rr == 8 || rr == 9) && sfText && sfTextLen > 0;
-            if (isTextReplay) {
+            // Replays are unicast to the client that asked for them, but they go
+            // out encrypted with the *shared channel key* — so every node on the
+            // channel within earshot of the router decrypts them just fine.
+            // Without this check we would absorb another client's entire history
+            // burst as our own, including DMs between two other people.
+            const bool addressedToMe = (pkt.hdr.to == s_myNodeId)
+                                    || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
+
+            switch (rr) {
+                case SNF_ROUTER_HEARTBEAT:
+                case SNF_ROUTER_PONG:
+                case SNF_ROUTER_STATS:
+                case SNF_ROUTER_PING: {
+                    // These really were originated by the node that sent them,
+                    // so hdr.from means what it usually does and NodeDB can have
+                    // it — the call skipped in processMeshPacket() for this port.
+                    Nodes.updateFromPacket(pkt);
+
+                    // Remember who to address a history request to. A heartbeat
+                    // is broadcast, which is exactly how upstream expects a
+                    // client to discover a router in the first place.
+                    //
+                    // Skipped entirely while a router is pinned in config: the
+                    // user named the one to talk to, and a louder router down
+                    // the road should not quietly take the request. Discovery
+                    // resumes the moment the setting is cleared. The NodeDB
+                    // update above still runs either way — that is about having
+                    // heard the node at all, not about who we ask.
+                    //
+                    // A different router taking over drops the remembered period
+                    // rather than inheriting it: how often the last one beat says
+                    // nothing about this one, and holding a silent router to a
+                    // stranger's interval is how it ends up looking alive.
+                    if (!snfRouterPinned()) {
+                        if (pkt.hdr.from != s_snfRouterId) s_snfRouterPeriodS = 0;
+                        s_snfRouterId = pkt.hdr.from;
+                        s_snfRouterHeardMs = millis();
+                        s_snfRouterChanIdx = chanIdx;
+                        if (hbPeriodS) s_snfRouterPeriodS = hbPeriodS;
+                    }
+
+                    // Answer a ping so the router knows we are still here. Only
+                    // when it was aimed at us: a broadcast probe answered by
+                    // every client on the channel is a self-inflicted storm, and
+                    // the router learns nothing from the pile-up it wouldn't
+                    // learn from one reply.
+                    if (rr == SNF_ROUTER_PING && addressedToMe) {
+                        (void)sendStoreForwardTo(pkt.hdr.from, SNF_CLIENT_PONG, 0, chanIdx);
+                    }
+
+                    appendLiveRxSummary(pkt, chanIdx, "F");
+                    return false;
+                }
+
+                case SNF_ROUTER_TEXT_DIRECT:
+                case SNF_ROUTER_TEXT_BROADCAST:
+                    break;   // handled below
+
+                default:
+                    // Errors, busy, history announcements, anything a future
+                    // router adds. Logged, not acted on, and deliberately not
+                    // fed to NodeDB — we cannot tell whose id hdr.from carries.
+                    appendLiveRxSummary(pkt, chanIdx, "F");
+                    return false;
+            }
+
+            if (!addressedToMe || !sfText || sfTextLen == 0) {
+                appendLiveRxSummary(pkt, chanIdx, "F");
+                return false;
+            }
+
+            // The replay preserves the original author in hdr.from, so a blocked
+            // sender walks straight back in through a replay unless we apply the
+            // same filter the live text path does. No ACK is owed on this branch
+            // — upstream sends replays with want_ack clear.
+            if (Ignored.contains(pkt.hdr.from)) {
+                appendLiveRxSummary(pkt, chanIdx, "F");
+                return false;
+            }
+
+            {
                 char textBuf[MESH_TEXT_MAX_LEN + 1];
                 size_t copy = utf8util::copyTruncateBytes(
                     textBuf,
@@ -26172,14 +26647,23 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 if (textBuf[0]) {
                     // Prefix the replayed text with "[SF]" so the user can tell
                     // it came from a Store-and-Forward server rather than the
-                    // original sender in real time.
-                    char prefixedBuf[MESH_TEXT_MAX_LEN + 1];
-                    snprintf(prefixedBuf, sizeof(prefixedBuf), "[SF] %s", textBuf);
+                    // original sender in real time. Sized to hold the prefix on
+                    // top of a full-length message, and truncated through
+                    // utf8util so a message that does overflow loses whole
+                    // characters rather than half of a multi-byte sequence.
+                    static const char kSfPrefix[] = "[SF] ";
+                    char prefixedBuf[MESH_TEXT_MAX_LEN + sizeof(kSfPrefix)];
+                    memcpy(prefixedBuf, kSfPrefix, sizeof(kSfPrefix) - 1);
+                    utf8util::copyTruncate(prefixedBuf + sizeof(kSfPrefix) - 1,
+                                           sizeof(prefixedBuf) - (sizeof(kSfPrefix) - 1),
+                                           textBuf);
 
                     const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
-                    // rr=9 (ROUTER_TEXT_DIRECT) means this replay is for a DM
-                    // that was originally addressed to us.
-                    bool isDirectToMe = (rr == 9);
+                    // rr=8 (ROUTER_TEXT_DIRECT) is a replay of a message that was
+                    // originally a DM; rr=9 (ROUTER_TEXT_BROADCAST) was a
+                    // broadcast. Upstream picks between them on the stored
+                    // packet's `to` (NODENUM_BROADCAST -> 9, else 8).
+                    bool isDirectToMe = (rr == SNF_ROUTER_TEXT_DIRECT);
 
                     if (isDirectToMe) {
                         NodeEntry *sender = Nodes.find(pkt.hdr.from);
@@ -26211,7 +26695,10 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                        TFT_WHITE,
                                        !viewingDm,
                                        chanIdx,
-                                       0);
+                                       // Upstream restores the original packet id
+                                       // on a replay, so the web UI's reply and
+                                       // tapback flow can target it like any DM.
+                                       pkt.hdr.id);
                         if (viewingDm) {
                             DMs.markRead(pkt.hdr.from);
                         }
@@ -26229,7 +26716,6 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 }
             }
 
-            // Non-text S&F traffic (heartbeats, stats, pings). Just log.
             appendLiveRxSummary(pkt, chanIdx, "F");
             return false;
         }
@@ -26471,6 +26957,23 @@ static void serviceWebVncToggle() {
     }
 }
 #endif
+
+// Drain a pending "Request Replay" from the web UI. Same reason as the chat
+// send below: the LoRa TX path and the router-tracking state live here. The
+// outcome goes back to the page rather than being swallowed, so "nothing
+// happened" can be told apart from "no router has been heard yet".
+static void serviceWebSnfRequest() {
+    if (!webCfgTakeSnfRequest()) return;
+    const char *why = nullptr;
+    if (snfRequestHistory(&why)) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Requested (last %lu min)",
+                 (unsigned long)kSnfHistoryWindowMin);
+        webCfgSetSnfResult(msg);
+    } else {
+        webCfgSetSnfResult(why ? why : "unavailable");
+    }
+}
 
 // Drain a pending Chat-tab send (queued by the web server) on the main loop,
 // where we own the node id and the LoRa TX path.
@@ -27299,6 +27802,16 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(b, onPressed, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)replyPacketId);
+#if HAS_TOUCH
+        // Hold opens the sender's node actions. Gated on onPressed along with
+        // the tap above, so DM bubbles stay non-interactive as they are today —
+        // in a DM thread the menu would only offer to DM the person already
+        // being DM'd.
+        if (sender != 0 && !isMe) {
+            lv_obj_add_event_cb(b, onChatMessageLongPressed, LV_EVENT_LONG_PRESSED,
+                                (void *)(uintptr_t)sender);
+        }
+#endif
     }
 
     if (outLast) *outLast = rowW;
@@ -27746,6 +28259,17 @@ static void refreshChatView(bool force) {
                 lv_obj_add_event_cb(msg, onChatMessagePressed,
                                     LV_EVENT_CLICKED,
                                     (void *)(uintptr_t)replyPacketId);
+#if HAS_TOUCH
+                // Hold opens the sender's node actions, same as the bubble style.
+                {
+                    const uint32_t longPressSender = rows[i]->senderNodeId;
+                    if (longPressSender != 0 && longPressSender != s_myNodeId) {
+                        lv_obj_add_event_cb(msg, onChatMessageLongPressed,
+                                            LV_EVENT_LONG_PRESSED,
+                                            (void *)(uintptr_t)longPressSender);
+                    }
+                }
+#endif
 
                 // One separator between messages, none after the last.
                 if (n < endN) {
@@ -29537,6 +30061,7 @@ void loop() {
         serviceWebVncToggle();
 #endif
         serviceWebChatSend();
+        serviceWebSnfRequest();
         serviceWebManualTime();
         // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
         // the flag is cleared and persisted too, so the device doesn't come

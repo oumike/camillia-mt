@@ -303,6 +303,58 @@ void NodeDB::clearPersisted() {
     _sortDirty = true;
 }
 
+int NodeDB::clearNonFavorites() {
+    // Drop the removed nodes' blobs one key at a time rather than p.clear()-ing
+    // the namespace and re-saving the survivors. Clearing first would open a
+    // window in which the favorites exist only in RAM, and _save() is a no-op
+    // whenever node persistence is paused (NVS starved, see
+    // nodePersistCanWrite()) — so the rewrite could silently fail to put them
+    // back. This is also exactly how upsert() retires an evicted node.
+    //
+    // One begin()/end() around the whole sweep: up to MAX_NODES keys go in a
+    // single handle rather than reopening the namespace per node.
+    Preferences p;
+    const bool nvsOpen = p.begin("nodes", false);
+
+    // Compact in place: survivors keep their relative order, which _sort() would
+    // redo anyway, and the tail is zeroed so the slots read as empty.
+    int kept = 0, removed = 0;
+    for (int i = 0; i < _count; i++) {
+        if (!_nodes[i].nodeId) continue;
+        if (_nodes[i].favorite) {
+            if (kept != i) _nodes[kept] = _nodes[i];
+            kept++;
+        } else {
+            if (nvsOpen) {
+                char key[12]; nodeKey(key, _nodes[i].nodeId);
+                p.remove(key);
+            }
+            removed++;
+        }
+    }
+    if (nvsOpen) p.end();
+    if (!removed) return 0;
+
+    memset(&_nodes[kept], 0, sizeof(_nodes[0]) * (size_t)(_count - kept));
+    _count = kept;
+#if FEATURE_DISCOVERY
+    // Same rationale as clearPersisted(): the graph describes nodes that no
+    // longer exist. A favorites-only subgraph is not worth rebuilding — the
+    // mesh refills it from the next NeighborInfo broadcast.
+    memset(_neighbors, 0, sizeof(_neighbors));
+#endif
+    _sortDirty = true;
+
+    // Survivors' blobs were never touched, so only the index needs rewriting.
+    // If this is the write that persistence is currently refusing, the index
+    // just keeps listing ids whose blobs are gone — which load() already heals
+    // on the next boot (see the staleIds pass in init()).
+    _saveIds();
+    Serial.printf("[nodedb] cleared %d non-favorite node(s), kept %d favorite(s)\n",
+                  removed, kept);
+    return removed;
+}
+
 void NodeDB::saveAll() {
     _saveIds();
     for (int i = 0; i < _count; i++)

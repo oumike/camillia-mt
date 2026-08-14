@@ -6,17 +6,18 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Build your own theme in Web Config: give it a name, pick its background, panel, panel alt and accent colors, choose Light or Dark, and save it. It shows up in the theme grid and in the on-device Theme picker alongside the built-ins.
-- Up to 4 custom themes can be stored. Each saved theme's card has a pencil button to edit it and a red button to delete it; editing the theme you are currently wearing repaints the device as soon as you save.
-- Custom themes can be moved between devices as a short share code - copy it out of a config backup or export, paste it into the builder's Import code field, and click Load to fill the form before saving.
-- Custom themes are written into the SD config backup (`/camillia/config.yaml`), so they ride along with a config export and come back on a restore, into the same slots.
-- The on-device Theme picker can be filtered: press Space, then type to narrow the list to themes whose names contain what you typed. The line under the title shows the filter and how many themes match; Backspace edits it, and an empty filter closes it.
-- Web Config's theme grid has a matching Filter themes box with a count of visible cards; pressing Enter with a single match selects that theme.
+- Store and Forward client: the device can now display messages replayed by a Store & Forward router, shown with an `[SF]` prefix in the channel or DM thread they originally belonged to. Off by default - turn on **Store&Fwd Client** on the Config screen (Modules -> *Receive Replayed Messages* in web config).
+- **Request S&F Replay** on the Config screen, and **Request Replay Now** in web config under Utilities -> Diagnostics, ask the router for the last four hours of stored messages. Routers never replay on their own, so this is what actually fetches history; the row names the router it will ask, or reads `no router` until one has been heard.
+- **Router Node ID** (web config -> Modules -> Store & Forward) pins which router to ask, as `!aabbccdd`. Worth setting when your router has heartbeats switched off - the Meshtastic default - which otherwise leaves it undiscoverable. Travels with config export/import.
+- Node Actions can now be opened straight from a chat message: press Enter to move the cursor into the messages, then Enter again on a message to open the sender's action menu (Traceroute, Send DM, Favorite, Request Info, Request Position, Ignore) with the same T/D/F/I/P/G shortcuts. Works on T-Deck, T-Lora Pager, Cardputer and Mesh Deck.
+- Tap and hold a chat message to open Node Actions for its sender on the touch builds - T-Deck, Mesh Deck and Heltec V4. On Heltec this is the only route from chat, since Enter keeps its new-message binding there.
+- **Clear Nodes (Keep Favorites)** on the Config screen and in web config's Danger Zone drops every non-favorited node while keeping favorites with their names, keys and positions, and reports what it did (e.g. `Cleared 214 nodes, kept 6 favorites`).
 
 Changed
-- Changing the font size in Web Config no longer reboots the device - chat and DMs re-render at the new size immediately. Any other setting still reboots as before.
-- The on-device Theme picker wraps around: moving up from the first theme lands on the last, and down from the last returns to the first.
-- T-Lora Pager TFT: scrolling chat with the wheel or j/k now moves one line of text per step instead of jumping from message to message, so a long message can be read all the way through. Enter still enters cursor mode for picking a reply target.
+- The old Clear Nodes action is now **Clear Nodes (All)** on both the device and web config, and its confirmation spells out that favorites go too.
+- The Node Actions menu title now names the node it is acting on rather than just reading "Node Actions" - long name where there is room, short name on the Cardputer.
+- Clearing all nodes from web config now also removes leftover node-database files on the SD card, matching what the on-device action has always done.
 
 Fixed
-- Cardputer and T-Lora Pager TFT: the four chat font sizes are now actually distinct. Small and Medium previously rendered identically, and Extra Large was still small on these panels.)CAMNOTES";
+- Full-length incoming messages are no longer dropped in silence: the receive buffer now matches Meshtastic's maximum payload size, and a payload that still does not fit is reported on the serial log instead of vanishing.
+- Replayed messages respect your ignore list, and a replay no longer disturbs the node list - a sender's Last Heard and signal readings still describe when that node was really heard, not when a router repeated it.)CAMNOTES";

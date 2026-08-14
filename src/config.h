@@ -233,6 +233,9 @@
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"
 #define MY_SNF_CLIENT_EN    1   // Store and Forward: act as client (receive replayed messages)
+// Store and Forward: pin the router to ask for replays, as a raw node id.
+// 0 = unset — discover the router from its broadcast heartbeat instead.
+#define MY_SNF_ROUTER_ID    0
 // Ask the release server for a newer build once per boot and offer to install
 // it. Opt-out: the check is a single plain-HTTP GET and costs nothing when
 // there is no update, so it is on by default.
@@ -495,6 +498,10 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #endif
 #define MESH_TEXT_MAX_LEN 200
 #define MAX_NODES        250
+// How far back a Store-and-Forward replay request asks for, in minutes. The
+// router clamps this to its own history_return_window, so asking for more than
+// it kept is harmless. Shared so the device row and the web button agree.
+#define SNF_HISTORY_WINDOW_MIN 240
 #define MAX_PENDING_ACK   8
 
 // ── Battery ADC ───────────────────────────────────────────────

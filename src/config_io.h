@@ -125,6 +125,12 @@ bool uiCustomThemeEncode(const UiCustomTheme &theme, char *out, size_t outLen);
 bool uiCustomThemeDecode(const char *code, UiCustomTheme &out);
 
 // Runtime config (loaded from SD or defaulted from compile-time #defines)
+// Parse a node id written as "!aabbccdd", "0xaabbccdd" or bare hex. Returns 0
+// for anything that names no node (empty, "none", "0"), which is how every
+// optional node-id setting spells "unset". Shared so the YAML importer and the
+// web form cannot disagree about what a user typed.
+uint32_t parseNodeIdText(const char *val);
+
 struct RhinoConfig {
     char     nodeLong[40];
     char     nodeShort[5];
@@ -363,6 +369,17 @@ struct RhinoConfig {
     // Decode and display MeshBeacon (port 37) advertisements from other meshes.
     // Receive-only; see MY_MESH_BEACON_LISTEN.
     bool     meshBeaconListen;
+    // Store-and-Forward router to address replay requests to, when the user has
+    // pinned one. 0 = unset, which is the default and means "use whichever
+    // router we heard a heartbeat from". Set it when the router has heartbeats
+    // switched off, which is upstream's default and leaves it undiscoverable.
+    //
+    // No _reservedPad here on purpose, unlike every field above: those are
+    // bools and uint8_ts that would have landed inside the old blob's trailing
+    // padding. This is a uint32_t, and its natural 4-alignment already places
+    // it at offset 940 — exactly the previous sizeof(RhinoConfig), with
+    // meshBeaconListen at 938. Verified by compiling both layouts on the host.
+    uint32_t snfRouterNodeId;
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

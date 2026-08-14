@@ -805,6 +805,25 @@ static void copyTrimmed(char *dst, size_t dstSize, const char *src) {
     dst[n] = '\0';
 }
 
+uint32_t parseNodeIdText(const char *val) {
+    if (!val) return 0;
+    while (*val == ' ' || *val == '\t') val++;
+    // Accept every form a node id gets written in: Meshtastic's own "!aabbccdd",
+    // a C-style "0xaabbccdd", or bare hex. Anything that names no node at all —
+    // empty, "none", "0", or leading junk — comes back 0, which is the "unset"
+    // value wherever a node id is optional.
+    if (*val == '!') {
+        val++;
+    } else if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) {
+        val += 2;
+    }
+    if (!*val) return 0;
+    char *end = nullptr;
+    unsigned long v = strtoul(val, &end, 16);
+    if (end == val) return 0;
+    return (uint32_t)v;
+}
+
 static bool parseBoolValue(const char *val) {
     if (!val || !val[0]) return false;
     if (!strcmp(val, "true") || !strcmp(val, "TRUE") || !strcmp(val, "1")) return true;
@@ -902,6 +921,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.cannedMessages, MY_CANNED_MSGS, sizeof(cfg.cannedMessages) - 1);
     cfg.cannedMessages[sizeof(cfg.cannedMessages) - 1] = '\0';
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
+    cfg.snfRouterNodeId    = MY_SNF_ROUTER_ID;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.volumePct           = MY_VOLUME_PCT;
@@ -1249,6 +1269,15 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "module_config:\n";
     out += "  storeForward:\n";
     snprintf(tmp, sizeof(tmp), "    client_enabled: %s\n", cfg.snfClientEnabled ? "true" : "false"); out += tmp;
+    // "none" rather than !00000000 for unset: the file is meant to be read, and
+    // a zeroed node id is not a node. parseNodeIdText() maps it back to 0.
+    if (cfg.snfRouterNodeId != 0) {
+        snprintf(tmp, sizeof(tmp), "    router_id: !%08lx\n",
+                 (unsigned long)cfg.snfRouterNodeId);
+    } else {
+        snprintf(tmp, sizeof(tmp), "    router_id: none\n");
+    }
+    out += tmp;
     // MQTT subsection: include full bridge settings so export/import round-trips
     // all MQTT behavior and connectivity fields.
     out += "  mqtt:\n";
@@ -1748,7 +1777,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "cannedMessage")) {
                 if (!strcmp(key, "enabled")) cfg.cannedEnabled = (!strcmp(val,"true"));
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "storeForward")) {
-                if (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
+                if      (!strcmp(key, "client_enabled")) cfg.snfClientEnabled = (!strcmp(val,"true"));
+                else if (!strcmp(key, "router_id"))      cfg.snfRouterNodeId = parseNodeIdText(val);
             } else if (!strcmp(section, "nodes")) {
                 // Also handled at indent 2, which is where cfgToYaml writes it.
                 parseNodesSectionKey(cfg, key, val);

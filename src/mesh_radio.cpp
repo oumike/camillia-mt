@@ -328,6 +328,14 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;
+                } else if (payPtr) {
+                    // Leaving payloadLen at 0 makes an over-long payload vanish
+                    // with nothing to show for it — the packet still decrypted,
+                    // so it isn't logged as encrypted either. Say so instead.
+                    Serial.printf("[radio] payload too long: port=%lu len=%u cap=%u (dropped)\n",
+                                  (unsigned long)pkt.portnum,
+                                  (unsigned)payLen,
+                                  (unsigned)sizeof(pkt.payload));
                 }
             }
         }

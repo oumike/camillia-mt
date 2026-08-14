@@ -78,6 +78,11 @@ class NodeDB {
 public:
     void init();          // zeros RAM, then loads persisted nodes from NVS
     void clearPersisted(); // wipe "nodes" NVS namespace and clear runtime node cache
+    // Drop every non-favorited node from RAM and NVS, keeping favorites intact
+    // with their names, keys, positions and favorite flag. Returns how many were
+    // removed. The counterpart to clearPersisted() for the common case: flush
+    // months of stale mesh nodes without losing the handful that were pinned.
+    int  clearNonFavorites();
     // Boot-time recovery for a saturated NVS: drops the persisted node cache
     // (RAM copy untouched) when free space has fallen below the reserve settings
     // need. Returns true if it freed space. Ordinary operation never needs this

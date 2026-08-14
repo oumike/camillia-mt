@@ -44,6 +44,17 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - **Enter moves the cursor into the messages** — on chat it drops into the
   selected channel's messages; in the DM list it focuses the conversation's
   messages. Enter never opens compose.
+- **Enter again opens Node Actions for the sender** of the highlighted message —
+  the same six-action menu Enter opens on a highlighted row of the Nodes screen
+  (Traceroute, Send DM, Favorite, Request Info, Request Position, Ignore), and
+  the same T/D/F/I/P/G shortcuts work inside it. Nothing happens on your own
+  messages or on system lines. Esc closes the menu and leaves the cursor exactly
+  where it was.
+- **On touch builds, tap and hold a message** to open that same Node Actions
+  menu for its sender — no need to enter cursor mode first. Available on T-Deck,
+  Mesh Deck and Heltec; the Pager and Cardputer have no touch panel and use the
+  Enter route above. Holding your own message or a system line does nothing, and
+  the tap that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
 - Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI,
   ChUtil, Beacons, and Discovery except on Cardputer). Inside Discovery: W
@@ -93,6 +104,9 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 - Primary usage is touch (no dedicated hardware keyboard shortcuts)
 - Bottom touch nav: Config, DM, Nodes, Live, Help
 - DM delete trigger: long-press a conversation row
+- Tap and hold a chat message to open Node Actions for its sender. On this
+  build that is the only route to the menu from chat, since Enter keeps its
+  new-message binding below
 - The Space/Enter remap above does **not** apply here: this build is touch-first,
   so Enter keeps its original "new message" behavior
 
@@ -155,7 +169,7 @@ neighbor report.
   Clearing is not destructive and does not touch the Nodes screen: stored
   neighbor reports really are dropped, but the rest is hidden by a timestamp,
   not deleted. Node records, names and last-heard times are all untouched —
-  discarding those is Config → Clear Nodes.
+  discarding those is Config → Clear Nodes (Keep Favorites) or Clear Nodes (All).
 - Press S to save a snapshot, on boards with an SD card (T-Deck and T-Lora
   Pager). Writes `/camillia/discovery-YYYYMMDD-HHMMSS.json` — timestamped, so
   saves never overwrite each other, and suffixed `-2`, `-3`… if two land in the
@@ -212,7 +226,8 @@ Config includes Web Config controls, export and import, the theme picker, announ
   the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action
 - Keyboard builds: I opens/focuses the info panel within Config
-- Import, Clear Nodes, and Factory Reset require a second Enter confirmation
+- Import, both Clear Nodes rows, and Factory Reset require a second Enter
+  confirmation
 - **Space filters the rows**, the same way it does on the Nodes screen. Press
   Space to arm the filter, then type to narrow the list; the header shows
   `[what you typed]` and how many rows match. Backspace edits the filter and
@@ -390,7 +405,10 @@ screen sleeps after it has expired the light stays dark.
 
 The device keeps a fixed number of the most recently heard nodes (250 on current
 builds). When that fills up, the **least recently heard non-favorite** is dropped
-to make room — **favorited nodes are never dropped, however old they are**.
+to make room — **favorited nodes are never dropped, however old they are**. The
+only things that drop a favorite are the two deliberate wipes: Clear Nodes (All)
+and Factory Reset. Clear Nodes (Keep Favorites) exists precisely so you can flush
+a table full of stale mesh nodes without losing the ones you pinned.
 
 Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
 **Node Management** has an *Archive dropped nodes to SD card* checkbox:
@@ -403,6 +421,21 @@ Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
 The same section has an **Export Node List (CSV)** button, which downloads every
 node the device currently knows about plus any previously archived nodes. A
 `source` column marks each row as `live` or `archived`.
+
+### Clearing the node database
+
+Both the Config screen and Web Config's Danger Zone offer two variants:
+
+- **Clear Nodes (Keep Favorites)** — drops every non-favorited node. Favorites
+  survive with their names, keys, positions and favorite flag, and are still
+  there after a power cycle. The device reports what happened, e.g.
+  `Cleared 214 nodes, kept 6 favorites`.
+- **Clear Nodes (All)** — empties the table completely, favorites included.
+
+Both reboot afterwards. Neither touches DM transcripts (that is Clear Messages)
+or the archived-node CSV above, which is a historical log rather than live node
+state. Under Discovery, stored neighbor reports are dropped by either variant;
+the mesh rebuilds that graph from the next round of broadcasts.
 
 ### Mesh beacons
 
@@ -424,6 +457,57 @@ decides whether this device pays attention to them.
 
 A beacon can only be heard if the sender retuned onto *your* channel, preset and
 region — so an empty list usually just means nobody nearby is beaconing at you.
+
+### Store and Forward
+
+Some Meshtastic nodes run as a **Store and Forward router**: they keep a buffer
+of the messages they hear and replay them on request, so a node that was off or
+out of range can catch up. This device can act as a *client* of one — it never
+stores or replays anything for anyone else.
+
+- **Store&Fwd Client** on the Config screen (Modules → *Receive Replayed
+  Messages* in web config) turns the client on. Off by default.
+- **Request S&F Replay** — the row directly beneath it, and the *Request Replay
+  Now* button in web config under Utilities → Diagnostics, next to Send NODEINFO
+  Broadcast. A router **never replays history on its own**; it
+  only answers a request, so this button is what actually makes the feature do
+  something. It asks for the last four hours; the router trims that to whatever
+  window and message count it is configured to return.
+- The row names the router it will ask (`Request S&F Replay (a1b2)`), or reads
+  `no router` when none has been heard yet. Routers announce themselves with a
+  periodic heartbeat, so give it a few minutes after coming into range. The row
+  is greyed out while the client is off.
+- **Router Node ID** (web config → Modules → Store & Forward) pins the router to
+  ask. Leave it blank and the device uses whichever router it hears a heartbeat
+  from. Set it — as `!aabbccdd` — and that router is used always, with
+  heartbeats from any other ignored when choosing who to ask. Clear it to go
+  back to automatic.
+
+  This matters more than it sounds: Meshtastic defaults `store_forward.heartbeat`
+  to **off**, and a router that never beats can't be discovered. If the row reads
+  `no router` while you know a router is right there, this is the fix. The
+  setting is web config only, and travels with config export/import under
+  `module_config: storeForward: router_id`.
+- Replayed messages appear prefixed **`[SF]`** — in the channel view if they
+  were originally broadcast, in a DM thread with the original sender if they
+  were originally a DM.
+- Requests are throttled to one every 30 seconds, because a single request can
+  pull the router's whole return buffer down at once.
+
+Things worth knowing about how routers behave, which are properties of the
+router and not of this device:
+
+- **Not on the default channel.** Routers refuse history requests on the public
+  channel outright. Use a channel with your own key.
+- **Only what it heard while running.** Anything sent before the router was
+  configured, or while it was powered off, was never stored.
+- A replay carries the *original author* in the packet, so replayed messages
+  from a sender you have ignored stay hidden, and a replay does not disturb the
+  node list — the original sender's **Last Heard** and signal readings describe
+  when that node was really heard, not when the router repeated it.
+- Replays are addressed to the client that asked for them, and this device only
+  displays the ones addressed to it. Another node's catch-up burst on a shared
+  channel is not absorbed as your own history.
 
 ### Backing up settings
 
@@ -762,9 +846,11 @@ Help explains shortcuts and transport symbols.
 Primary usage is touch plus keyboard shortcuts.
 
 - Use touch for channel chips and UI buttons
+- Tap and hold a chat message to open Node Actions for its sender
 - D, C, N, L open main modals; A opens Channel Actions
 - H toggles channel selector
-- Space opens compose or reply compose; Enter moves the cursor into the channel's messages
+- Space opens compose or reply compose; Enter moves the cursor into the channel's messages,
+  and Enter again opens Node Actions for the highlighted message's sender
 - Optional Vim-style helpers in navigation views: J maps to Up and K maps to Down
 - Modal close key: Backspace (Esc also works)
 
@@ -776,7 +862,8 @@ Primary usage is wheel plus keyboard.
 - Wheel Click enters/exits row cursor mode
 - In row cursor mode, Wheel Up and Down moves selected chat row
 - Backspace exits row cursor mode
-- Space opens compose or reply compose; Enter moves the cursor into the channel's messages
+- Space opens compose or reply compose; Enter moves the cursor into the channel's messages,
+  and Enter again opens Node Actions for the highlighted message's sender
 - H toggles channel selector
 - Config modal: Wheel Click swaps focus between action list and info panel
 - DM modal: Wheel Click swaps focus between conversation list and message list
@@ -791,7 +878,8 @@ Primary usage is keyboard.
 - Arrow keys map to the same directional actions
 - H toggles channel selector
 - Escape closes modals and exits chat focus mode
-- Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages
+- Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages,
+  and Enter again opens Node Actions for the highlighted message's sender
 - Fn+Backspace is the DM delete trigger
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)

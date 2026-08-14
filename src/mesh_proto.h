@@ -60,7 +60,12 @@ struct MeshPacket {
     float    rssi;
     float    snr;
     uint32_t rxMs;            // millis() at receipt
-    uint8_t  payload[220];    // decrypted inner payload (after Data wrapper)
+    // Meshtastic's Data.payload maximum. Was 220, which is enough for any text
+    // message sent directly but not for one arriving through Store and Forward:
+    // a replay wraps the original text in a StoreAndForward message, and the
+    // ~4-5 bytes of extra framing pushed full-length messages over the old cap
+    // — where they were dropped in silence.
+    uint8_t  payload[237];    // decrypted inner payload (after Data wrapper)
     size_t   payloadLen;
     uint32_t requestId;       // non-zero for ROUTING_APP ACK/NAK
     uint32_t dataDest;        // Data.dest (field 4), when present
@@ -298,6 +303,42 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
 // Encode a POSITION_APP Data request with an empty payload and want_response=true.
 // Used to ask a specific peer to reply with their current Position.
 size_t encodePositionRequest(uint8_t *buf, size_t bufLen);
+
+// ── Store and Forward (port 65) ───────────────────────────────
+// StoreAndForward.RequestResponse. Router-originated values are < 64, client
+// ones >= 64. Only the ones this firmware acts on are named; the rest arrive,
+// get logged and are ignored.
+enum StoreForwardRR : uint32_t {
+    SNF_ROUTER_ERROR          = 1,
+    SNF_ROUTER_HEARTBEAT      = 2,
+    SNF_ROUTER_PING           = 3,
+    SNF_ROUTER_PONG           = 4,
+    SNF_ROUTER_BUSY           = 5,
+    SNF_ROUTER_HISTORY        = 6,
+    SNF_ROUTER_STATS          = 7,
+    // 8 was a *direct* message, 9 was a *broadcast* — this way round, matching
+    // upstream's storeforward.pb.h. Getting them backwards files every replayed
+    // DM into the channel view and every replayed broadcast into a DM thread.
+    SNF_ROUTER_TEXT_DIRECT    = 8,
+    SNF_ROUTER_TEXT_BROADCAST = 9,
+    SNF_CLIENT_ERROR          = 64,
+    SNF_CLIENT_HISTORY        = 65,
+    SNF_CLIENT_STATS          = 66,
+    SNF_CLIENT_PING           = 67,
+    SNF_CLIENT_PONG           = 68,
+    SNF_CLIENT_ABORT          = 106,
+};
+
+// Encode a STORE_FORWARD_APP Data message carrying just a request/response code,
+// optionally with a History submessage naming how far back to replay.
+//
+// StoreAndForward { rr = 1, stats = 2, history = 3, heartbeat = 4, text = 5 }
+// History         { history_messages = 1, window = 2, last_request = 3 }
+//
+// windowMinutes = 0 omits the History submessage entirely, which is what a plain
+// CLIENT_PONG or a "use your own default window" CLIENT_HISTORY wants.
+size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
+                          uint8_t *buf, size_t bufLen);
 
 // ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
 // Meshtastic MQTT does not carry the packed 16-byte on-air header. It publishes
