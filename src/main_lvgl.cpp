@@ -894,26 +894,62 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // up. Anchoring to the passed base keeps "Medium" equal to each screen's current
 // size on every board. Fonts below 10 px aren't compiled in, so Small clamps at
 // montserrat_10; 18 px is the largest compiled face, so Extra Large clamps there.
+//
+// The Cardputer and the Pager opt out of this entirely and name their four sizes
+// outright — see explicitChatFont() below for why a relative ladder could not
+// give them what they needed.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+// These two boards name their four sizes outright instead of deriving them.
+//
+// The shared ladder is relative: Medium is whatever base the caller passes and
+// Small is one step below it, which ties the whole range to a single anchor. On
+// the Cardputer that anchor is montserrat_10 — the smallest face compiled in —
+// so its ladder collapsed to 10/10/12/14, with Small and Medium identical and
+// Extra Large still small on a 240x135 panel. No choice of base fixes that: the
+// bottom of the ladder is pinned to the bottom of the font set.
+//
+// Spelled out, the four sizes are distinct and cover the whole compiled range.
+// The base argument is ignored: both chat call sites on either board pass the
+// same font (kMainScreenFont and kChannelChatFont are equal on both), so there
+// is no second anchor for it to be relative to.
+static const lv_font_t *explicitChatFont() {
+    switch (s_cfg.fontSize) {
+        case FONT_SIZE_SMALL:  return &lv_font_montserrat_12;
+        case FONT_SIZE_LARGE:  return &lv_font_montserrat_16;
+        case FONT_SIZE_XLARGE: return &lv_font_montserrat_18;
+        case FONT_SIZE_MEDIUM:
+        default:               return &lv_font_montserrat_14;
+    }
+}
+#endif
+
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+    (void)base;
+    return explicitChatFont();
+#else
+    const lv_font_t *out = base;
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:
-            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_10;
-            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_12;
-            return base;
+            if (base == &lv_font_montserrat_12)      out = &lv_font_montserrat_10;
+            else if (base == &lv_font_montserrat_14) out = &lv_font_montserrat_12;
+            break;
         case FONT_SIZE_LARGE:
-            if (base == &lv_font_montserrat_10) return &lv_font_montserrat_12;
-            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_14;
-            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_16;
-            return base;
+            if (base == &lv_font_montserrat_10)      out = &lv_font_montserrat_12;
+            else if (base == &lv_font_montserrat_12) out = &lv_font_montserrat_14;
+            else if (base == &lv_font_montserrat_14) out = &lv_font_montserrat_16;
+            break;
         case FONT_SIZE_XLARGE:
-            if (base == &lv_font_montserrat_10) return &lv_font_montserrat_14;
-            if (base == &lv_font_montserrat_12) return &lv_font_montserrat_16;
-            if (base == &lv_font_montserrat_14) return &lv_font_montserrat_18;
-            if (base == &lv_font_montserrat_16) return &lv_font_montserrat_18;
-            return base;
+            if (base == &lv_font_montserrat_10)      out = &lv_font_montserrat_14;
+            else if (base == &lv_font_montserrat_12) out = &lv_font_montserrat_16;
+            else if (base == &lv_font_montserrat_14) out = &lv_font_montserrat_18;
+            else if (base == &lv_font_montserrat_16) out = &lv_font_montserrat_18;
+            break;
         default:
-            return base;
+            break;
     }
+    return out;
+#endif
 }
 
 // Chat/DM text face, emoji-enabled. Every chat, DM, name, and preview label
@@ -1891,6 +1927,10 @@ struct UiPalette {
 static UiPalette s_ui = {};
 static uint8_t s_appliedUiTheme = 0xFF;
 static uint8_t s_appliedUiMode = 0xFF;
+// What the message views were last rendered at. The theme pair above is set by
+// applyUiThemePalette(); this one has no equivalent hook, so it is updated
+// wherever the font size is applied.
+static uint8_t s_appliedFontSize = 0xFF;
 
 static const char *msgAlertSoundName(uint8_t mode) {
     switch (mode) {
@@ -2648,7 +2688,56 @@ static void playSplashStartupRiff() {
 #endif
 }
 
+// ── Selectable themes ────────────────────────────────────────────────────────
+// The built-in presets followed by whichever custom slots currently hold a
+// theme, compacted so an empty slot leaves no gap in the picker. Indices are
+// only stable while nothing is added or removed, which is all any caller needs:
+// the on-device picker is rebuilt every time it opens, and the web page carries
+// its own numbering.
+struct UiThemeChoice {
+    uint8_t     theme;
+    uint8_t     mode;
+    const char *name;
+    uint16_t    bgMain;
+    uint16_t    panelAlt;
+    uint16_t    accent;
+};
+
+static int uiThemeChoiceCount() {
+    return kUiThemePresetCount + uiCustomThemeCount();
+}
+
+static bool uiThemeChoiceAt(int idx, UiThemeChoice &out) {
+    if (idx < 0) return false;
+    if (idx < kUiThemePresetCount) {
+        const UiThemePresetLite &p = kUiThemePresets[idx];
+        out = {p.theme, p.mode, p.name, p.bgMain, p.panelAlt, p.accent};
+        return true;
+    }
+    int want = idx - kUiThemePresetCount;
+    for (int slot = 0; slot < UI_CUSTOM_THEME_SLOTS; slot++) {
+        const UiCustomTheme *ct = uiCustomThemeGet(slot);
+        if (!ct) continue;
+        if (want-- == 0) {
+            out = {uiThemeFromCustomSlot(slot), ct->mode, ct->name,
+                   ct->bgMain, ct->panelAlt, ct->accent};
+            return true;
+        }
+    }
+    return false;
+}
+
 static int uiThemePresetIndexFromCfg() {
+    if (uiThemeIsCustom(s_cfg.uiTheme)) {
+        const int target = uiThemeCustomSlot(s_cfg.uiTheme);
+        int idx = kUiThemePresetCount;
+        for (int slot = 0; slot < UI_CUSTOM_THEME_SLOTS; slot++) {
+            if (!uiCustomThemeGet(slot)) continue;
+            if (slot == target) return idx;
+            idx++;
+        }
+        return 0;   // selected slot has since been emptied
+    }
     uint8_t mode = s_cfg.uiMode;
     if (uiThemeForcesDark(s_cfg.uiTheme)) mode = UI_MODE_DARK;
     for (int i = 0; i < kUiThemePresetCount; i++) {
@@ -2661,9 +2750,9 @@ static int uiThemePresetIndexFromCfg() {
 }
 
 static const char *uiThemePresetNameFromCfg() {
-    int idx = uiThemePresetIndexFromCfg();
-    if (idx < 0 || idx >= kUiThemePresetCount) return "Camillia Dark";
-    return kUiThemePresets[idx].name;
+    UiThemeChoice choice;
+    if (!uiThemeChoiceAt(uiThemePresetIndexFromCfg(), choice)) return "Camillia Dark";
+    return choice.name;
 }
 
 // These used to write one key each. Settings now live in a single blob, so a
@@ -2674,26 +2763,51 @@ static void persistMessageAlertSetting() { markConfigDirty(); }
 static void persistSplashMelodySetting() { markConfigDirty(); }
 
 static void applyUiThemePalette() {
-    s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
-    if (uiThemeForcesDark(s_cfg.uiTheme)) {
-        s_cfg.uiMode = UI_MODE_DARK;
-    } else {
-        s_cfg.uiMode = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
+    // A custom theme selected from a slot that has since been emptied — deleted
+    // in web config while it was live, or a config restored without it — has no
+    // colors to read. Fall back before anything dereferences it.
+    if (uiThemeIsCustom(s_cfg.uiTheme) && !uiCustomThemeGet(uiThemeCustomSlot(s_cfg.uiTheme))) {
+        Serial.printf("[theme] custom slot %d is empty, falling back to Camellia\n",
+                      uiThemeCustomSlot(s_cfg.uiTheme));
+        s_cfg.uiTheme = UI_THEME_CAMELLIA;
     }
 
-    const UiThemePresetLite *preset = &kUiThemePresets[0];
-    for (int i = 0; i < kUiThemePresetCount; i++) {
-        if (kUiThemePresets[i].theme == s_cfg.uiTheme && kUiThemePresets[i].mode == s_cfg.uiMode) {
-            preset = &kUiThemePresets[i];
-            break;
+    const UiCustomTheme *custom = uiThemeIsCustom(s_cfg.uiTheme)
+                                      ? uiCustomThemeGet(uiThemeCustomSlot(s_cfg.uiTheme))
+                                      : nullptr;
+    if (custom) {
+        // The mode is part of the theme the user built, not a separate axis
+        // they can flip underneath it: it picks the text and on-accent colors
+        // the four authored ones were chosen against.
+        s_cfg.uiMode = custom->mode;
+    } else {
+        s_cfg.uiTheme = (uint8_t)constrain((int)s_cfg.uiTheme, 0, UI_THEME_COUNT - 1);
+        if (uiThemeForcesDark(s_cfg.uiTheme)) {
+            s_cfg.uiMode = UI_MODE_DARK;
+        } else {
+            s_cfg.uiMode = (uint8_t)(s_cfg.uiMode == UI_MODE_LIGHT ? UI_MODE_LIGHT : UI_MODE_DARK);
         }
     }
 
+    const UiThemePresetLite *preset = &kUiThemePresets[0];
+    if (!custom) {
+        for (int i = 0; i < kUiThemePresetCount; i++) {
+            if (kUiThemePresets[i].theme == s_cfg.uiTheme && kUiThemePresets[i].mode == s_cfg.uiMode) {
+                preset = &kUiThemePresets[i];
+                break;
+            }
+        }
+    }
+
+    // The only difference a custom theme makes: where the four authored colors
+    // come from. Every derivation below — the blends, the mode constants, the
+    // aliases — is the same code the presets go through, which is what keeps a
+    // user-built theme looking like a real one rather than four flat colors.
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const uint16_t bgMain = preset->bgMain;
-    const uint16_t panelBg = preset->panelBg;
-    const uint16_t panelAlt = preset->panelAlt;
-    const uint16_t accent = preset->accent;
+    const uint16_t bgMain = custom ? custom->bgMain : preset->bgMain;
+    const uint16_t panelBg = custom ? custom->panelBg : preset->panelBg;
+    const uint16_t panelAlt = custom ? custom->panelAlt : preset->panelAlt;
+    const uint16_t accent = custom ? custom->accent : preset->accent;
 
     const uint16_t statusTop = blend565(bgMain, panelBg, isLight ? 128 : 96);
     const uint16_t statusBg = isLight ? panelAlt : panelBg;
@@ -8709,8 +8823,26 @@ static void openChatStyleModal() {
 // palette+rebuild path the old cycling used.
 static lv_obj_t *s_themeBackdrop = nullptr;
 static lv_obj_t *s_themeModal = nullptr;
-static lv_obj_t *s_themeRows[kUiThemePresetCount] = {};
+// Sized for the built-ins plus every custom slot, so the array does not have
+// to be resized when a user adds one. uiThemeChoiceCount() is the live bound.
+static lv_obj_t *s_themeRows[kUiThemePresetCount + UI_CUSTOM_THEME_SLOTS] = {};
 static int s_themeSelection = 0;
+
+// ── Theme filter ─────────────────────────────────────────────────────────────
+// Twenty-nine themes is a long way to scroll to reach "Winter Chill". Typing
+// narrows the list to matching names; the selection then indexes the *visible*
+// rows, and s_themeVisible maps those back to choice indices.
+//
+// Armed with Space, exactly as the CFG and Nodes screens do it, and for the same
+// reason: until the user asks to filter, letters have to stay available for
+// navigation — j and k in particular, which are how this list is driven on a
+// board with no trackball.
+static lv_obj_t *s_themeList = nullptr;      // the scrollable row container
+static lv_obj_t *s_themeFilterLabel = nullptr;
+static bool s_themeFilterOpen = false;
+static char s_themeFilter[16] = "";
+static int s_themeVisible[kUiThemePresetCount + UI_CUSTOM_THEME_SLOTS] = {};
+static int s_themeVisibleCount = 0;
 
 static void closeThemeModal() {
     if (lvObjValid(s_themeBackdrop)) {
@@ -8720,7 +8852,29 @@ static void closeThemeModal() {
     }
     s_themeBackdrop = nullptr;
     s_themeModal = nullptr;
+    s_themeList = nullptr;
+    s_themeFilterLabel = nullptr;
+    s_themeFilterOpen = false;
+    s_themeFilter[0] = '\0';
+    s_themeVisibleCount = 0;
     memset(s_themeRows, 0, sizeof(s_themeRows));
+}
+
+// Case-insensitive substring, so "dark" finds every dark variant and "sun"
+// finds "Sunset Ridge" without the user typing from the start of the name.
+static bool themeNameMatchesFilter(const char *name) {
+    if (!s_themeFilter[0]) return true;
+    if (!name) return false;
+    for (const char *start = name; *start; start++) {
+        const char *a = start;
+        const char *b = s_themeFilter;
+        while (*a && *b && tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+            a++;
+            b++;
+        }
+        if (!*b) return true;
+    }
+    return false;
 }
 
 static void refreshThemeSelection() {
@@ -8730,7 +8884,7 @@ static void refreshThemeSelection() {
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
     const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
     const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < kUiThemePresetCount; i++) {
+    for (int i = 0; i < s_themeVisibleCount; i++) {
         lv_obj_t *row = s_themeRows[i];
         if (!row) continue;
         const bool sel = (i == s_themeSelection);
@@ -8742,9 +8896,117 @@ static void refreshThemeSelection() {
     }
 }
 
+static void onThemeRowPressed(lv_event_t *e);
+
+// Rebuilds the row list against the current filter, keeping the previously
+// selected theme selected when it survives the filter. Called on open and after
+// every keystroke that changes the filter.
+static void rebuildThemeRows() {
+    if (!s_themeList) return;
+
+    // Remember the theme that was selected, not its row number: the row numbers
+    // are about to change under it.
+    int keepChoice = -1;
+    if (s_themeSelection >= 0 && s_themeSelection < s_themeVisibleCount) {
+        keepChoice = s_themeVisible[s_themeSelection];
+    }
+
+    lv_obj_clean(s_themeList);
+    memset(s_themeRows, 0, sizeof(s_themeRows));
+    s_themeVisibleCount = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+    const lv_color_t swatchBorder = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x8FA6CC) : lv_color_hex(0x0A1730);
+    const int swatch = (w <= 160) ? 12 : 16;
+
+    const int total = uiThemeChoiceCount();
+    for (int i = 0; i < total; i++) {
+        UiThemeChoice p;
+        if (!uiThemeChoiceAt(i, p)) break;
+        if (!themeNameMatchesFilter(p.name)) continue;
+
+        const int vis = s_themeVisibleCount;
+        s_themeVisible[vis] = i;
+        s_themeVisibleCount++;
+
+        lv_obj_t *row = lv_btn_create(s_themeList);
+        s_themeRows[vis] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_column(row, 6, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_add_event_cb(row, onThemeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)vis);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_flex_grow(name, 1);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowTextColor, 0);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_label_set_text(name, p.name);
+
+        // Three-swatch preview: background, panel, accent.
+        const uint16_t swatches[3] = { p.bgMain, p.panelAlt, p.accent };
+        for (int s = 0; s < 3; s++) {
+            lv_obj_t *box = lv_obj_create(row);
+            lv_obj_remove_style_all(box);
+            lv_obj_set_size(box, swatch, swatch);
+            lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_style_radius(box, 3, 0);
+            lv_obj_set_style_bg_color(box, tftColorToLv(swatches[s]), 0);
+            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(box, 1, 0);
+            lv_obj_set_style_border_color(box, swatchBorder, 0);
+        }
+    }
+
+    // Follow the kept theme to its new row; otherwise start at the top, which
+    // is what someone narrowing a list expects to be looking at.
+    s_themeSelection = 0;
+    if (keepChoice >= 0) {
+        for (int v = 0; v < s_themeVisibleCount; v++) {
+            if (s_themeVisible[v] == keepChoice) { s_themeSelection = v; break; }
+        }
+    }
+
+    if (s_themeFilterLabel) {
+        if (s_themeFilterOpen) {
+            // Brackets are the armed cue, present before anything is typed —
+            // the same signal the CFG and Nodes headers give.
+            if (s_themeVisibleCount == 0) {
+                lv_label_set_text_fmt(s_themeFilterLabel, "[%s] no match", s_themeFilter);
+            } else {
+                lv_label_set_text_fmt(s_themeFilterLabel, "[%s] %d",
+                                      s_themeFilter, s_themeVisibleCount);
+            }
+        } else {
+            lv_label_set_text(s_themeFilterLabel,
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                              "Tap a theme to apply"
+#else
+                              "Space=Filter  Enter=Select"
+#endif
+            );
+        }
+    }
+
+    // Resolve geometry first: lv_obj_scroll_to_view() is a no-op before the tree
+    // is laid out, which is why the initial selection previously landed off-screen.
+    lv_obj_update_layout(s_themeModal);
+    refreshThemeSelection();
+}
+
 static void applyThemeSelection(int idx) {
-    if (idx < 0 || idx >= kUiThemePresetCount) return;
-    const UiThemePresetLite &p = kUiThemePresets[idx];
+    // idx addresses the visible (filtered) rows, not the full theme list.
+    if (idx < 0 || idx >= s_themeVisibleCount) return;
+    UiThemeChoice p;
+    if (!uiThemeChoiceAt(s_themeVisible[idx], p)) return;
     if (p.theme == s_cfg.uiTheme && p.mode == s_cfg.uiMode) {
         // No change — just return to the CFG screen.
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s (unchanged)", p.name);
@@ -8777,8 +9039,12 @@ static void onThemeBackdropPressed(lv_event_t *e) {
 
 static void openThemeModal() {
     if (!s_rootScreen || s_themeModal || s_themeBackdrop) return;
-    s_themeSelection = uiThemePresetIndexFromCfg();
-    if (s_themeSelection < 0 || s_themeSelection >= kUiThemePresetCount) s_themeSelection = 0;
+    // Every open starts unfiltered; the selection is resolved after the rows
+    // exist, since it indexes them.
+    s_themeFilterOpen = false;
+    s_themeFilter[0] = '\0';
+    s_themeVisibleCount = 0;
+    s_themeSelection = 0;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -8828,18 +9094,15 @@ static void openThemeModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Theme");
 
+    // Doubles as the filter readout: it shows what has been typed and how many
+    // themes still match, and the key legend when nothing has been.
     lv_obj_t *hint = lv_label_create(s_themeModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Tap a theme to apply"
-#else
-                      "Arrows=Move  Enter=Select  Backspace=Cancel"
-#endif
-    );
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
+    s_themeFilterLabel = hint;
 
     // Scrollable list holding the theme rows; the header above stays fixed.
     lv_obj_t *list = lv_obj_create(s_themeModal);
@@ -8856,51 +9119,18 @@ static void openThemeModal() {
     lv_obj_set_style_pad_row(list, 5, 0);
     lv_obj_set_style_pad_right(list, 2, 0);
 
-    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
-                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
-    const lv_color_t swatchBorder = (s_cfg.uiMode == UI_MODE_LIGHT)
-                                        ? lv_color_hex(0x8FA6CC) : lv_color_hex(0x0A1730);
-    const int swatch = (w <= 160) ? 12 : 16;
+    s_themeList = list;
+    rebuildThemeRows();
 
-    for (int i = 0; i < kUiThemePresetCount; i++) {
-        const UiThemePresetLite &p = kUiThemePresets[i];
-        lv_obj_t *row = lv_btn_create(list);
-        s_themeRows[i] = row;
-        lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_radius(row, 4, 0);
-        lv_obj_set_style_pad_all(row, 5, 0);
-        lv_obj_set_style_pad_column(row, 6, 0);
-        lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_add_event_cb(row, onThemeRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-
-        lv_obj_t *name = lv_label_create(row);
-        lv_obj_set_flex_grow(name, 1);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(name, rowTextColor, 0);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_label_set_text(name, p.name);
-
-        // Three-swatch preview: background, panel, accent.
-        const uint16_t swatches[3] = { p.bgMain, p.panelAlt, p.accent };
-        for (int s = 0; s < 3; s++) {
-            lv_obj_t *box = lv_obj_create(row);
-            lv_obj_remove_style_all(box);
-            lv_obj_set_size(box, swatch, swatch);
-            lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_style_radius(box, 3, 0);
-            lv_obj_set_style_bg_color(box, tftColorToLv(swatches[s]), 0);
-            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(box, 1, 0);
-            lv_obj_set_style_border_color(box, swatchBorder, 0);
+    // Open on the theme in use. Done after the rows exist because the selection
+    // indexes them, not the theme list.
+    const int current = uiThemePresetIndexFromCfg();
+    for (int v = 0; v < s_themeVisibleCount; v++) {
+        if (s_themeVisible[v] == current) {
+            s_themeSelection = v;
+            break;
         }
     }
-
-    // Resolve geometry first: lv_obj_scroll_to_view() is a no-op before the tree
-    // is laid out, which is why the initial selection previously landed off-screen.
-    lv_obj_update_layout(s_themeModal);
     refreshThemeSelection();
 }
 
@@ -9105,6 +9335,7 @@ static void applyFontSizeSelection(int size) {
     if (size < 0 || size > FONT_SIZE_MAX) return;
     const bool changed = ((uint8_t)size != s_cfg.fontSize);
     s_cfg.fontSize = (uint8_t)size;
+    s_appliedFontSize = s_cfg.fontSize;
     if (changed) {
         persistConfigToPrefs();
         // Re-render both message views so the new size takes effect immediately.
@@ -21173,6 +21404,12 @@ static void pumpKeyboardInput() {
                              || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || s_cfgWifiPassModal
                              || s_chanTextModal
+                             // Only once the theme filter is armed. Before that
+                             // j/k must stay navigation, which is the whole
+                             // reason the filter is armed with Space; after it,
+                             // they have to be letters, because every dark
+                             // theme's name ends in "Dark".
+                             || (s_themeModal && s_themeFilterOpen)
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
@@ -21469,6 +21706,20 @@ static void pumpKeyboardInput() {
         }
 
         if (s_themeModal) {
+            // Backspace edits the filter before it closes the modal — it is the
+            // close key on some builds, so this has to come first, exactly as it
+            // does on the CFG and Nodes screens. An empty filter disarms, and
+            // the next press closes.
+            if (isBackspaceKey(k) && s_themeFilterOpen) {
+                const size_t len = strlen(s_themeFilter);
+                if (len > 0) {
+                    s_themeFilter[len - 1] = '\0';
+                } else {
+                    s_themeFilterOpen = false;
+                }
+                rebuildThemeRows();
+                continue;
+            }
             if (isModalCloseKey(k)) {
                 closeThemeModal();
                 refreshCfgModal();
@@ -21478,13 +21729,41 @@ static void pumpKeyboardInput() {
                 applyThemeSelection(s_themeSelection);
                 continue;
             }
+            // Space arms the filter and is never part of it. Until it is armed
+            // letters are left alone, so j/k keep navigating — which is the
+            // point of arming at all on a board with no trackball.
+            if (k == ' ') {
+                if (!s_themeFilterOpen) {
+                    s_themeFilterOpen = true;
+                    rebuildThemeRows();
+                }
+                continue;
+            }
+            // Once armed the modal is a typing context (see typingContext
+            // above), so j and k arrive as letters rather than scroll keys —
+            // necessary, since every dark theme's name ends in "Dark". The
+            // wheel, trackball, D-pad and arrows come in as KEY_SCROLL_* and
+            // navigate either way.
+            if (k > 0x20 && k < 0x7F && s_themeFilterOpen) {
+                const size_t len = strlen(s_themeFilter);
+                if (len + 1 < sizeof(s_themeFilter)) {
+                    s_themeFilter[len] = k;
+                    s_themeFilter[len + 1] = '\0';
+                    rebuildThemeRows();
+                }
+                continue;
+            }
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
-            if (delta != 0) {
+            if (delta != 0 && s_themeVisibleCount > 0) {
+                // Round robin: past the last theme comes the first. With
+                // twenty-nine of them the end of the list is a long way from
+                // the start, and clamping made the last few feel unreachable
+                // from the top.
                 int next = s_themeSelection + delta;
-                if (next < 0) next = 0;
-                if (next >= kUiThemePresetCount) next = kUiThemePresetCount - 1;
+                if (next < 0) next = s_themeVisibleCount - 1;
+                else if (next >= s_themeVisibleCount) next = 0;
                 if (next != s_themeSelection) {
                     s_themeSelection = next;
                     refreshThemeSelection();
@@ -22978,19 +23257,27 @@ static void pumpKeyboardInput() {
                     }
 
                     if (s_cardputerMainChatPanelFocused) {
-                        if (!s_pagerChatCursorMode) {
-                            s_pagerChatCursorMode = true;
-                            if (!pagerSelectChatCursorIndex(-1)) {
-                                s_pagerChatCursorMode = false;
-                            }
-                        } else {
-                            // Keep keyboard j/k direction consistent with chat-list
-                            // expectations while preserving non-keyboard scroll behavior.
-                            int delta;
-                            if (navFromJk) delta = (k == KEY_SCROLL_UP) ? 1 : -1;
-                            else           delta = (k == KEY_SCROLL_UP) ? -1 : 1;
-                            pagerSelectChatCursorIndex(s_pagerChatCursorDisplayIndex + delta);
-                        }
+                        // One text line per press, rather than one whole message.
+                        //
+                        // Stepping a message cursor was unusable once this board
+                        // moved to 12-18 px chat text: a single message is often
+                        // taller than the 135 px panel, so jumping cursor-to-
+                        // cursor skipped straight over the middle of it with no
+                        // way to read what was passed. Pixel scrolling is safe
+                        // here because the window grows from the scroll position
+                        // itself — reaching the top margin loads older history
+                        // through the existing scroll callback, exactly as a
+                        // touch drag does (see kChatWindowGrowScrollMargin).
+                        //
+                        // Cursor mode still exists for reply targeting, reached
+                        // with Enter as before; it is just no longer what
+                        // scrolling drives.
+                        const lv_coord_t line = (lv_coord_t)lv_font_get_line_height(
+                            scaledChatFont(kChannelChatFont));
+                        // Positive dy reveals content above — scrollListClamped's
+                        // documented convention. j/k arrive pre-mapped, so the
+                        // sign is the same for both input paths here.
+                        scrollListClamped(s_chatList, (k == KEY_SCROLL_UP) ? line : -line);
                         refreshChannelGlow(true);
                         continue;
                     }
@@ -23228,6 +23515,7 @@ static void onChatMessagePressed(lv_event_t *e) {
 static void onWebCfgSaved() {
     uint8_t prevTheme = s_appliedUiTheme;
     uint8_t prevMode = s_appliedUiMode;
+    const uint8_t prevFontSize = s_appliedFontSize;
 
 #if !HAS_ENV_SENSOR_TELEMETRY
     s_cfg.telEnvEnabled = false;
@@ -23279,6 +23567,20 @@ static void onWebCfgSaved() {
     if ((prevTheme != s_appliedUiTheme || prevMode != s_appliedUiMode) && s_rootScreen) {
         scheduleThemeRebuild(s_cfgModal != nullptr);
     }
+
+    // Font size is not part of the theme, so a theme rebuild does not cover it,
+    // and web config no longer reboots for it — which leaves this as the only
+    // thing that makes the change visible. Same three steps the on-device picker
+    // takes: clear the render cache so the refresh is not skipped as a no-op,
+    // then rebuild both message views.
+    s_cfg.fontSize = (uint8_t)constrain((int)s_cfg.fontSize, 0, FONT_SIZE_MAX);
+    if (prevFontSize != s_cfg.fontSize && s_rootScreen) {
+        s_lastRenderedChannel = -1;
+        s_lastRenderedCount = -1;
+        refreshChatView(true);
+        refreshDmModal(true);
+    }
+    s_appliedFontSize = s_cfg.fontSize;
 }
 
 static uint32_t pngCrc32Update(uint32_t crc, const uint8_t *data, size_t len) {
@@ -25136,7 +25438,14 @@ static void loadConfigFromSd() {
         s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
     loadChannelsFromPrefs();
+    // Before the palette, which needs the slots populated to resolve a custom
+    // selection — and would otherwise log a spurious "slot is empty" fallback
+    // on every boot of a device using one.
+    uiCustomThemesLoad();
     applyUiThemePalette();
+    // Boot renders at whatever was loaded, so record it here — otherwise the
+    // first web save would see a change against 0xFF and rebuild for nothing.
+    s_appliedFontSize = (uint8_t)constrain((int)s_cfg.fontSize, 0, FONT_SIZE_MAX);
     myDeviceRole = s_cfg.deviceRole;
 }
 

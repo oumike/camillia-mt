@@ -493,6 +493,266 @@ static const char *kThemeModeNames[] = {
 };
 static const int kNumThemeModes = 2;
 
+// ── Custom theme store ───────────────────────────────────────────────────────
+// One NVS blob holding the whole slot array. Written whole on every change:
+// four slots is 104 bytes, so there is nothing to gain from per-slot keys and a
+// great deal to lose — the 16 KB partition some units ship with runs out of
+// entries long before it runs out of bytes (see kCfgBlobKey in main_lvgl.cpp).
+static const char *kCustomThemeBlobKey = "themes";
+static constexpr uint16_t kCustomThemeBlobVersion = 1;
+
+struct CustomThemeBlobHeader {
+    uint16_t version;
+    uint16_t slotBytes;   // sizeof(UiCustomTheme) the writer used
+    uint16_t slots;       // how many followed
+    uint16_t _pad;
+};
+
+static UiCustomTheme sCustomThemes[UI_CUSTOM_THEME_SLOTS] = {};
+static bool sCustomThemesLoaded = false;
+
+static void customThemeSanitizeName(UiCustomTheme &t) {
+    t.name[UI_CUSTOM_THEME_NAME_MAX - 1] = '\0';
+    // The name is rendered into an HTML attribute and a JS string literal on the
+    // web page, and into an LVGL label on the device. Keep it to printable
+    // ASCII minus the quoting characters rather than escaping at every use.
+    for (char *p = t.name; *p; p++) {
+        const unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c > 0x7E || c == '"' || c == '\'' || c == '\\' || c == '<' || c == '>') {
+            *p = ' ';
+        }
+    }
+    // An all-blank name would render as a nameless card with a delete button.
+    bool any = false;
+    for (const char *p = t.name; *p; p++) {
+        if (*p != ' ') { any = true; break; }
+    }
+    if (!any) strncpy(t.name, "Custom", UI_CUSTOM_THEME_NAME_MAX - 1);
+}
+
+static bool customThemeWriteBlob() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return false;
+
+    uint8_t buf[sizeof(CustomThemeBlobHeader)
+                + (sizeof(UiCustomTheme) * UI_CUSTOM_THEME_SLOTS)];
+    CustomThemeBlobHeader hdr = {kCustomThemeBlobVersion,
+                                 (uint16_t)sizeof(UiCustomTheme),
+                                 (uint16_t)UI_CUSTOM_THEME_SLOTS, 0};
+    memcpy(buf, &hdr, sizeof(hdr));
+    memcpy(buf + sizeof(hdr), sCustomThemes, sizeof(sCustomThemes));
+
+    const size_t wrote = p.putBytes(kCustomThemeBlobKey, buf, sizeof(buf));
+    p.end();
+    if (wrote != sizeof(buf)) {
+        Serial.printf("[theme] custom store write failed (%u of %u bytes)\n",
+                      (unsigned)wrote, (unsigned)sizeof(buf));
+        return false;
+    }
+    return true;
+}
+
+void uiCustomThemesLoad() {
+    sCustomThemesLoaded = true;
+    memset(sCustomThemes, 0, sizeof(sCustomThemes));
+
+    Preferences p;
+    if (!p.begin("camillia", true)) return;
+
+    uint8_t buf[sizeof(CustomThemeBlobHeader)
+                + (sizeof(UiCustomTheme) * UI_CUSTOM_THEME_SLOTS)];
+    memset(buf, 0, sizeof(buf));
+    const size_t got = p.getBytes(kCustomThemeBlobKey, buf, sizeof(buf));
+    p.end();
+    if (got < sizeof(CustomThemeBlobHeader)) return;
+
+    CustomThemeBlobHeader hdr = {};
+    memcpy(&hdr, buf, sizeof(hdr));
+    if (hdr.version != kCustomThemeBlobVersion) return;
+    // A blob written by a build with a different slot size cannot be indexed
+    // into safely. Slot *count* differences are fine and expected — that is the
+    // whole reason this lives outside RhinoConfig.
+    if (hdr.slotBytes != sizeof(UiCustomTheme)) return;
+
+    int slots = (int)hdr.slots;
+    if (slots > UI_CUSTOM_THEME_SLOTS) slots = UI_CUSTOM_THEME_SLOTS;
+    const size_t avail = (got > sizeof(hdr)) ? (got - sizeof(hdr)) : 0;
+    if ((size_t)slots * sizeof(UiCustomTheme) > avail) {
+        slots = (int)(avail / sizeof(UiCustomTheme));
+    }
+    if (slots > 0) {
+        memcpy(sCustomThemes, buf + sizeof(hdr),
+               (size_t)slots * sizeof(UiCustomTheme));
+    }
+
+    int live = 0;
+    for (int i = 0; i < UI_CUSTOM_THEME_SLOTS; i++) {
+        if (!sCustomThemes[i].used) {
+            memset(&sCustomThemes[i], 0, sizeof(sCustomThemes[i]));
+            continue;
+        }
+        sCustomThemes[i].mode =
+            (sCustomThemes[i].mode == UI_MODE_LIGHT) ? UI_MODE_LIGHT : UI_MODE_DARK;
+        customThemeSanitizeName(sCustomThemes[i]);
+        live++;
+    }
+    Serial.printf("[theme] custom themes loaded: %d of %d slots\n",
+                  live, UI_CUSTOM_THEME_SLOTS);
+}
+
+const UiCustomTheme *uiCustomThemeGet(int slot) {
+    if (!sCustomThemesLoaded) uiCustomThemesLoad();
+    if (slot < 0 || slot >= UI_CUSTOM_THEME_SLOTS) return nullptr;
+    if (!sCustomThemes[slot].used) return nullptr;
+    return &sCustomThemes[slot];
+}
+
+int uiCustomThemeCount() {
+    if (!sCustomThemesLoaded) uiCustomThemesLoad();
+    int n = 0;
+    for (int i = 0; i < UI_CUSTOM_THEME_SLOTS; i++) {
+        if (sCustomThemes[i].used) n++;
+    }
+    return n;
+}
+
+int uiCustomThemeFirstFree() {
+    if (!sCustomThemesLoaded) uiCustomThemesLoad();
+    for (int i = 0; i < UI_CUSTOM_THEME_SLOTS; i++) {
+        if (!sCustomThemes[i].used) return i;
+    }
+    return -1;
+}
+
+int uiCustomThemeSave(int slot, const UiCustomTheme &theme) {
+    if (!sCustomThemesLoaded) uiCustomThemesLoad();
+    if (slot < 0) slot = uiCustomThemeFirstFree();
+    if (slot < 0 || slot >= UI_CUSTOM_THEME_SLOTS) return -1;
+
+    UiCustomTheme t = theme;
+    t.used = 1;
+    t.mode = (t.mode == UI_MODE_LIGHT) ? UI_MODE_LIGHT : UI_MODE_DARK;
+    customThemeSanitizeName(t);
+
+    sCustomThemes[slot] = t;
+    if (!customThemeWriteBlob()) return -1;
+    Serial.printf("[theme] saved custom slot %d \"%s\" mode=%s\n",
+                  slot, t.name, (t.mode == UI_MODE_LIGHT) ? "light" : "dark");
+    return slot;
+}
+
+bool uiCustomThemeDelete(int slot) {
+    if (!sCustomThemesLoaded) uiCustomThemesLoad();
+    if (slot < 0 || slot >= UI_CUSTOM_THEME_SLOTS) return false;
+    if (!sCustomThemes[slot].used) return true;
+    memset(&sCustomThemes[slot], 0, sizeof(sCustomThemes[slot]));
+    Serial.printf("[theme] deleted custom slot %d\n", slot);
+    return customThemeWriteBlob();
+}
+
+bool uiThemeIdValid(uint8_t theme) {
+    if (theme < UI_THEME_COUNT) return true;
+    const int slot = uiThemeCustomSlot(theme);
+    return slot >= 0 && uiCustomThemeGet(slot) != nullptr;
+}
+
+// ── Share codes ──────────────────────────────────────────────────────────────
+static inline void customThemeTo888(uint16_t c, uint8_t *out) {
+    out[0] = (uint8_t)((((c >> 11) & 0x1F) * 255) / 31);
+    out[1] = (uint8_t)((((c >> 5) & 0x3F) * 255) / 63);
+    out[2] = (uint8_t)(((c & 0x1F) * 255) / 31);
+}
+
+static inline uint16_t customThemeFrom888(const uint8_t *in) {
+    return (uint16_t)(((in[0] & 0xF8) << 8) | ((in[1] & 0xFC) << 3) | (in[2] >> 3));
+}
+
+static int customThemeHexVal(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+bool uiCustomThemeEncode(const UiCustomTheme &theme, char *out, size_t outLen) {
+    if (!out || outLen == 0) return false;
+
+    uint8_t raw[17 + UI_CUSTOM_THEME_NAME_MAX];
+    size_t n = 0;
+    raw[n++] = 0x01;
+    raw[n++] = (theme.mode == UI_MODE_LIGHT) ? 1 : 0;
+    customThemeTo888(theme.bgMain,  raw + n); n += 3;
+    customThemeTo888(theme.panelBg, raw + n); n += 3;
+    customThemeTo888(theme.panelAlt, raw + n); n += 3;
+    customThemeTo888(theme.accent,  raw + n); n += 3;
+
+    char name[UI_CUSTOM_THEME_NAME_MAX];
+    strncpy(name, theme.name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    const size_t nameLen = strlen(name);
+    raw[n++] = (uint8_t)nameLen;
+    memcpy(raw + n, name, nameLen);
+    n += nameLen;
+
+    uint8_t sum = 0;
+    for (size_t i = 0; i < n; i++) sum = (uint8_t)(sum ^ raw[i]);
+    raw[n++] = sum;
+
+    if (outLen < (n * 2) + 1) return false;
+    static const char kHex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        out[i * 2]       = kHex[(raw[i] >> 4) & 0x0F];
+        out[(i * 2) + 1] = kHex[raw[i] & 0x0F];
+    }
+    out[n * 2] = '\0';
+    return true;
+}
+
+bool uiCustomThemeDecode(const char *code, UiCustomTheme &out) {
+    if (!code) return false;
+
+    // Tolerate what a paste actually looks like: spaces, dashes, and a leading
+    // '#' someone added because the fields next to it wanted one.
+    uint8_t raw[17 + UI_CUSTOM_THEME_NAME_MAX];
+    size_t n = 0;
+    int hi = -1;
+    for (const char *p = code; *p; p++) {
+        if (*p == ' ' || *p == '-' || *p == ':' || *p == '#') continue;
+        const int v = customThemeHexVal(*p);
+        if (v < 0) return false;
+        if (hi < 0) {
+            hi = v;
+        } else {
+            if (n >= sizeof(raw)) return false;
+            raw[n++] = (uint8_t)((hi << 4) | v);
+            hi = -1;
+        }
+    }
+    if (hi >= 0) return false;            // odd number of hex digits
+    if (n < 16) return false;             // header + colors + namelen + checksum
+    if (raw[0] != 0x01) return false;
+
+    uint8_t sum = 0;
+    for (size_t i = 0; i + 1 < n; i++) sum = (uint8_t)(sum ^ raw[i]);
+    if (sum != raw[n - 1]) return false;
+
+    const size_t nameLen = raw[14];
+    if (nameLen >= UI_CUSTOM_THEME_NAME_MAX) return false;
+    if (n != 15 + nameLen + 1) return false;
+
+    memset(&out, 0, sizeof(out));
+    out.mode = (raw[1] == 1) ? UI_MODE_LIGHT : UI_MODE_DARK;
+    out.bgMain   = customThemeFrom888(raw + 2);
+    out.panelBg  = customThemeFrom888(raw + 5);
+    out.panelAlt = customThemeFrom888(raw + 8);
+    out.accent   = customThemeFrom888(raw + 11);
+    if (nameLen) memcpy(out.name, raw + 15, nameLen);
+    out.name[nameLen] = '\0';
+    out.used = 1;
+    customThemeSanitizeName(out);
+    return true;
+}
+
 static const char *kMsgAlertSoundNames[] = {
     "DEFAULT", "CHIRPY", "BASS", "OFF"
 };
@@ -877,8 +1137,28 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
     out += "    theme: ";
-    out += (cfg.uiTheme < kNumThemes) ? kThemeNames[cfg.uiTheme] : kThemeNames[0];
+    if (uiThemeIsCustom(cfg.uiTheme)) {
+        // The selection is a slot index, which only means anything alongside the
+        // themeCustom list written below. Spelled CUSTOM<n> rather than a bare
+        // number so a config restored onto a device with no custom themes falls
+        // back to Camellia instead of silently landing on a built-in.
+        snprintf(tmp, sizeof(tmp), "CUSTOM%d", uiThemeCustomSlot(cfg.uiTheme));
+        out += tmp;
+    } else {
+        out += (cfg.uiTheme < kNumThemes) ? kThemeNames[cfg.uiTheme] : kThemeNames[0];
+    }
     out += "\n";
+    // User-built themes travel with the backup as share codes — the same string
+    // the web builder exports, so one can be lifted out of a config file and
+    // pasted into another device by hand.
+    for (int i = 0; i < UI_CUSTOM_THEME_SLOTS; i++) {
+        const UiCustomTheme *ct = uiCustomThemeGet(i);
+        if (!ct) continue;
+        char code[UI_CUSTOM_THEME_CODE_MAX];
+        if (!uiCustomThemeEncode(*ct, code, sizeof(code))) continue;
+        snprintf(tmp, sizeof(tmp), "    themeCustom%d: %s\n", i, code);
+        out += tmp;
+    }
     uint8_t themeMode = cfg.uiMode;
     if (uiThemeForcesDark(cfg.uiTheme)) themeMode = UI_MODE_DARK;
     out += "    themeMode: ";
@@ -1351,10 +1631,33 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         : MSG_ALERT_SOUND_OFF;
                 }
                 else if (!strcmp(key, "theme")) {
-                    if (isdigit((unsigned char)val[0]))
+                    if (!strncmp(val, "CUSTOM", 6) && isdigit((unsigned char)val[6])) {
+                        // Held as-is; the themeCustom<n> lines that fill the
+                        // slots may not have been parsed yet, and the selection
+                        // is validated against them after the whole file lands
+                        // (see the uiThemeIdValid check below).
+                        const int slot = atoi(val + 6);
+                        cfg.uiTheme = (slot >= 0 && slot < UI_CUSTOM_THEME_SLOTS)
+                                          ? uiThemeFromCustomSlot(slot)
+                                          : UI_THEME_CAMELLIA;
+                    }
+                    else if (isdigit((unsigned char)val[0]))
                         cfg.uiTheme = (uint8_t)constrain(atoi(val), 0, UI_THEME_COUNT - 1);
                     else
                         cfg.uiTheme = findName(val, kThemeNames, kNumThemes);
+                }
+                else if (!strncmp(key, "themeCustom", 11) && isdigit((unsigned char)key[11])) {
+                    const int slot = atoi(key + 11);
+                    UiCustomTheme ct = {};
+                    if (slot >= 0 && slot < UI_CUSTOM_THEME_SLOTS
+                        && uiCustomThemeDecode(val, ct)) {
+                        // Straight into the slot the file names, so a restore
+                        // reproduces the selection above rather than shuffling
+                        // themes into whichever slots happened to be free.
+                        (void)uiCustomThemeSave(slot, ct);
+                    } else {
+                        Serial.printf("[theme] config import: bad themeCustom%d code\n", slot);
+                    }
                 }
                 else if (!strcmp(key, "themeMode")) {
                     if (isdigit((unsigned char)val[0]))
@@ -1460,6 +1763,24 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     cfg.fontSize = (uint8_t)constrain((int)cfg.fontSize, 0, FONT_SIZE_MAX);
     cfg.volumePct = cfgCoerceVolume((int)cfg.volumePct);
     cfg.battCalTrim = cfgCoerceBattCalTrim((int)cfg.battCalTrim);
+    // Now that any themeCustom lines have filled their slots, a CUSTOM<n>
+    // selection can be checked. A config restored onto a device whose slot is
+    // empty would otherwise select a theme that does not exist, and every
+    // palette lookup would fall through to the first preset anyway — better to
+    // land there honestly than to hold a dangling id that a later save writes.
+    if (!uiThemeIdValid(cfg.uiTheme)) {
+        if (uiThemeIsCustom(cfg.uiTheme)) {
+            Serial.printf("[theme] config import: custom slot %d is empty, using Camellia\n",
+                          uiThemeCustomSlot(cfg.uiTheme));
+        }
+        cfg.uiTheme = UI_THEME_CAMELLIA;
+    }
+    if (uiThemeIsCustom(cfg.uiTheme)) {
+        // A custom theme carries its own mode; the file's themeMode line is
+        // about the built-ins and must not override it.
+        const UiCustomTheme *ct = uiCustomThemeGet(uiThemeCustomSlot(cfg.uiTheme));
+        if (ct) cfg.uiMode = ct->mode;
+    }
     if (uiThemeForcesDark(cfg.uiTheme)) cfg.uiMode = UI_MODE_DARK;
     if (cfg.telDeviceIntervalS < 3600UL) cfg.telDeviceIntervalS = 3600UL;
     if (cfg.telEnvIntervalS < 3600UL) cfg.telEnvIntervalS = 3600UL;

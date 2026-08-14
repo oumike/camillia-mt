@@ -31,6 +31,99 @@ static inline bool uiThemeForcesDark(uint8_t theme) {
     return theme == UI_THEME_CAMELLIA_BLACK;
 }
 
+// ── User-built themes ────────────────────────────────────────────────────────
+// A theme is four authored colors plus a light/dark mode; everything else in
+// the running palette is derived from them (see applyUiThemePalette). That is
+// what makes a builder practical at all: the user picks four, the firmware
+// computes the other thirty-one.
+//
+// Mode is not cosmetic here. It selects the text, dim-text and on-accent
+// constants — the caret, body copy and label colors — so the same four colors
+// read completely differently under it. It is the one field a user must get
+// right for their theme to be legible.
+#define UI_CUSTOM_THEME_SLOTS    4
+#define UI_CUSTOM_THEME_NAME_MAX 16   // 15 chars + NUL
+
+// Custom themes live in their own id range rather than extending
+// UiThemeFamily, so built-ins can still be added up to 31 without renumbering
+// what users have already saved. cfg.uiTheme holds one of these directly.
+#define UI_THEME_CUSTOM_BASE     32
+
+struct UiCustomTheme {
+    char     name[UI_CUSTOM_THEME_NAME_MAX];
+    uint16_t bgMain;     // rgb565, same four the presets carry
+    uint16_t panelBg;
+    uint16_t panelAlt;
+    uint16_t accent;
+    uint8_t  mode;       // UI_MODE_DARK / UI_MODE_LIGHT
+    uint8_t  used;       // 0 = empty slot
+};
+
+static inline bool uiThemeIsCustom(uint8_t theme) {
+    return theme >= UI_THEME_CUSTOM_BASE
+        && theme < (UI_THEME_CUSTOM_BASE + UI_CUSTOM_THEME_SLOTS);
+}
+
+static inline int uiThemeCustomSlot(uint8_t theme) {
+    return uiThemeIsCustom(theme) ? (int)(theme - UI_THEME_CUSTOM_BASE) : -1;
+}
+
+static inline uint8_t uiThemeFromCustomSlot(int slot) {
+    return (uint8_t)(UI_THEME_CUSTOM_BASE + slot);
+}
+
+// True for any theme id this build can actually resolve to a palette — a
+// built-in, or a custom slot that currently holds a theme. Everything that
+// used to clamp uiTheme into 0..UI_THEME_COUNT-1 asks this instead, because
+// that clamp silently rewrites a custom selection to Camillia Dark.
+bool uiThemeIdValid(uint8_t theme);
+
+// ── Custom theme store ───────────────────────────────────────────────────────
+// Kept in its own NVS blob rather than appended to RhinoConfig. The settings
+// struct is append-only with a documented history of fields landing in old
+// trailing padding, and a fixed theme array in it could never be resized; here
+// the slot count is just a constant, and a stored blob shorter than the current
+// array leaves the extra slots empty.
+void uiCustomThemesLoad();
+
+// nullptr when the slot is out of range or empty.
+const UiCustomTheme *uiCustomThemeGet(int slot);
+
+// Number of slots currently holding a theme (not an index bound — slots can be
+// freed out of order, so iterate all UI_CUSTOM_THEME_SLOTS and test each).
+int uiCustomThemeCount();
+
+// -1 when every slot is taken.
+int uiCustomThemeFirstFree();
+
+// slot < 0 stores into the first free slot. Returns the slot written, or -1 if
+// there was no room. Persists immediately: a theme the user just named is not
+// something to lose to a battery pull.
+int uiCustomThemeSave(int slot, const UiCustomTheme &theme);
+
+// Clearing the slot a theme is *selected* from is the caller's problem to
+// notice — uiThemeIdValid() goes false for it, and the palette falls back.
+bool uiCustomThemeDelete(int slot);
+
+// ── Share codes ──────────────────────────────────────────────────────────────
+// A theme as one hex string, for pasting between devices. Layout, all bytes
+// hex-encoded uppercase with no separators:
+//
+//   0      version (0x01)
+//   1      mode
+//   2..13  bgMain, panelBg, panelAlt, accent as RGB888 triples
+//   14     name length (0..15)
+//   15..   name, ASCII
+//   last   XOR of every preceding byte
+//
+// RGB888 rather than the stored RGB565 so a code round-trips through a browser
+// color picker without drifting; the low bits are dropped on the way into the
+// slot either way.
+#define UI_CUSTOM_THEME_CODE_MAX 80   // 2 * (17 + 15) + NUL, rounded up
+
+bool uiCustomThemeEncode(const UiCustomTheme &theme, char *out, size_t outLen);
+bool uiCustomThemeDecode(const char *code, UiCustomTheme &out);
+
 // Runtime config (loaded from SD or defaulted from compile-time #defines)
 struct RhinoConfig {
     char     nodeLong[40];

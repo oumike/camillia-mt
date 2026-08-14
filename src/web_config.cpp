@@ -800,7 +800,55 @@ static const char *kNotifyLedColorNames[] = {
 static const uint8_t kNotifyLedColorCount =
     (uint8_t)(sizeof(kNotifyLedColorNames) / sizeof(kNotifyLedColorNames[0]));
 
+// Widened back to 8 bits per channel for the browser. The stored value is
+// RGB565, so this is lossy in the direction that already happened — round-trip
+// it and you get the same 565 back, which is what makes the color inputs
+// stable when a theme is reopened.
+static uint32_t rgb565To888(uint16_t c) {
+    const uint32_t r = (((c >> 11) & 0x1F) * 255U) / 31U;
+    const uint32_t g = (((c >> 5) & 0x3F) * 255U) / 63U;
+    const uint32_t b = ((c & 0x1F) * 255U) / 31U;
+    return (r << 16) | (g << 8) | b;
+}
+
+static uint16_t rgb888To565(uint32_t rgb) {
+    return (uint16_t)((((rgb >> 16) & 0xF8) << 8)
+                    | (((rgb >> 8) & 0xFC) << 3)
+                    | ((rgb & 0xFF) >> 3));
+}
+
+// Accepts "#RRGGBB" or "RRGGBB" — the color input posts the first, a person
+// typing a hex code by hand may post either.
+static bool parseHexColor(const String &s, uint16_t &out) {
+    const char *p = s.c_str();
+    if (*p == '#') p++;
+    if (strlen(p) != 6) return false;
+    uint32_t v = 0;
+    for (int i = 0; i < 6; i++) {
+        const char c = p[i];
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = 10 + (c - 'a');
+        else if (c >= 'A' && c <= 'F') d = 10 + (c - 'A');
+        else return false;
+        v = (v << 4) | (uint32_t)d;
+    }
+    out = rgb888To565(v);
+    return true;
+}
+
+// Custom themes continue the preset numbering: kThemePresetCount + slot, so a
+// slot keeps its number whether or not the slots before it are filled. The
+// picker only draws cards for slots that exist, so the gaps never show.
+static constexpr uint8_t kThemePresetCustomBase = kThemePresetCount;
+static constexpr uint8_t kThemePresetTotal =
+    (uint8_t)(kThemePresetCount + UI_CUSTOM_THEME_SLOTS);
+
 static uint8_t themePresetFromConfig(const RhinoConfig &cfg) {
+    if (uiThemeIsCustom(cfg.uiTheme)) {
+        return (uint8_t)(kThemePresetCustomBase + uiThemeCustomSlot(cfg.uiTheme));
+    }
+
     uint8_t themeBase = (uint8_t)constrain((int)cfg.uiTheme, 0, UI_THEME_COUNT - 1);
     if (themeBase == UI_THEME_CAMELLIA_BLACK) {
         return (uint8_t)(kThemePresetCount - 1);
@@ -811,7 +859,19 @@ static uint8_t themePresetFromConfig(const RhinoConfig &cfg) {
 }
 
 static void themePresetToConfig(uint8_t preset, uint8_t &themeOut, uint8_t &modeOut) {
-    preset = (uint8_t)constrain((int)preset, 0, (int)kThemePresetCount - 1);
+    preset = (uint8_t)constrain((int)preset, 0, (int)kThemePresetTotal - 1);
+    if (preset >= kThemePresetCustomBase) {
+        const int slot = preset - kThemePresetCustomBase;
+        const UiCustomTheme *ct = uiCustomThemeGet(slot);
+        if (ct) {
+            themeOut = uiThemeFromCustomSlot(slot);
+            modeOut = ct->mode;   // the theme carries its own mode
+            return;
+        }
+        // Deleted between the page render and the save. Leave the config alone
+        // rather than selecting a theme that is not there.
+        return;
+    }
     if (preset == (uint8_t)(kThemePresetCount - 1)) {
         themeOut = UI_THEME_CAMELLIA_BLACK;
         modeOut = UI_MODE_DARK;
@@ -932,8 +992,71 @@ static const char kThemePicker[] =
         ".theme-sws{display:flex;gap:3px;flex:0 0 auto}"
         ".theme-sw{width:16px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,.25)}"
         ".theme-name{font-size:.86em;line-height:1.15}"
+        ".theme-filter{display:flex;align-items:center;gap:8px;margin:.2em 0 .1em}"
+        ".theme-filter input{flex:1 1 auto;margin:0}"
+        ".theme-filter span{font-size:.8em;color:var(--text-dim);white-space:nowrap}"
+        // Custom cards carry two corner buttons, so they need room underneath
+        // the row and a positioning context for them.
+        ".theme-card.cust{position:relative;padding-bottom:15px}"
+        ".theme-card.cust.sel{padding-bottom:14px}"
+        ".theme-btn-cnr{position:absolute;bottom:2px;width:15px;height:15px;line-height:13px;"
+        "text-align:center;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer;"
+        "border:1px solid rgba(0,0,0,.3);padding:0}"
+        ".theme-del{right:3px;background:#c62839;color:#fff}"
+        ".theme-edit{right:21px;background:var(--panel-2);color:var(--text)}"
+        ".theme-card.new{justify-content:center;border-style:dashed;font-weight:600}"
+        // The builder. A fixed overlay rather than a <dialog>, which older
+        // mobile browsers on the far end of a device AP still do not have.
+        ".tb-back{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;z-index:50}"
+        ".tb-back.on{display:block}"
+        ".tb-box{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);"
+        "width:min(340px,92vw);max-height:92vh;overflow:auto;background:var(--panel);color:var(--text);"
+        "border:1px solid var(--line);border-radius:10px;padding:14px}"
+        ".tb-box h3{margin:0 0 .5em}"
+        ".tb-row{display:flex;align-items:center;gap:8px;margin:.45em 0}"
+        ".tb-row label{flex:1 1 auto;font-size:.88em;margin:0}"
+        ".tb-row input[type=color]{width:38px;height:26px;padding:0;flex:0 0 auto}"
+        ".tb-row input[type=text]{width:96px;flex:0 0 auto;font-family:monospace}"
+        ".tb-modes{display:flex;gap:14px;align-items:center;margin:.5em 0}"
+        ".tb-modes label{display:flex;align-items:center;gap:5px;font-size:.88em;margin:0}"
+        ".tb-modes input{width:auto;margin:0}"
+        ".tb-prev{border:1px solid var(--line);border-radius:8px;padding:9px;margin:.6em 0}"
+        ".tb-prev-t{font-weight:700;font-size:.9em}"
+        ".tb-prev-d{font-size:.78em;opacity:.85}"
+        ".tb-prev-a{display:inline-block;margin-top:6px;padding:3px 9px;border-radius:5px;font-size:.78em}"
+        ".tb-msg{font-size:.8em;min-height:1.1em;margin:.3em 0}"
+        ".tb-acts{display:flex;gap:8px;justify-content:flex-end;margin-top:.7em}"
         "</style>"
+        "<div class='theme-filter'>"
+        "<input type='text' id='themeFilter' placeholder='Filter themes' autocomplete='off'>"
+        "<span id='themeCount'></span></div>"
         "<div id='themeGrid' class='theme-grid'></div>"
+        "<div class='tb-back' id='tbBack'><div class='tb-box'>"
+        "<h3 id='tbTitle'>New Theme</h3>"
+        "<div class='tb-row'><label for='tbName'>Name</label>"
+        "<input type='text' id='tbName' maxlength='15' style='width:150px' placeholder='My Theme'></div>"
+        "<div class='tb-row'><label for='tbBgP'>Background</label>"
+        "<input type='color' id='tbBgP'><input type='text' id='tbBg' maxlength='7'></div>"
+        "<div class='tb-row'><label for='tbPnP'>Panel</label>"
+        "<input type='color' id='tbPnP'><input type='text' id='tbPn' maxlength='7'></div>"
+        "<div class='tb-row'><label for='tbP2P'>Panel Alt</label>"
+        "<input type='color' id='tbP2P'><input type='text' id='tbP2' maxlength='7'></div>"
+        "<div class='tb-row'><label for='tbAcP'>Accent</label>"
+        "<input type='color' id='tbAcP'><input type='text' id='tbAc' maxlength='7'></div>"
+        "<div class='tb-modes'><span style='font-size:.88em'>Mode</span>"
+        "<label><input type='radio' name='tbMode' value='0' checked>Dark</label>"
+        "<label><input type='radio' name='tbMode' value='1'>Light</label></div>"
+        "<div class='tb-prev' id='tbPrev'>"
+        "<div class='tb-prev-t' id='tbPrevT'>Preview</div>"
+        "<div class='tb-prev-d' id='tbPrevD'>Dim text reads like this</div>"
+        "<span class='tb-prev-a' id='tbPrevA'>Accent</span></div>"
+        "<div class='tb-row'><label for='tbCode'>Import code</label>"
+        "<input type='text' id='tbCode' style='width:150px;font-family:monospace' placeholder='paste hex'>"
+        "<button type='button' id='tbImport'>Load</button></div>"
+        "<div class='tb-msg' id='tbMsg'></div>"
+        "<div class='tb-acts'><button type='button' id='tbCancel'>Cancel</button>"
+        "<button type='button' id='tbSave'>Save Theme</button></div>"
+        "</div></div>"
         "<script>"
         "(function(){"
         "var P={"
@@ -971,30 +1094,175 @@ static const char kThemePicker[] =
                     "'Morning Dew Dark','Morning Dew Light','Winter Chill Dark','Winter Chill Light',"
                     "'Camillia Black'];"
         "var input=document.getElementById('themeInput');"
+        // Custom themes are authored as four colors; the rest of their web
+        // palette is derived here the same way applyUiThemePalette() derives it
+        // on the device — same blend ratios, same mode constants — so the page
+        // preview matches what the panel will actually show.
+        "function hx(c){c=c.replace('#','');return [parseInt(c.substr(0,2),16),"
+          "parseInt(c.substr(2,2),16),parseInt(c.substr(4,2),16)];}"
+        "function mix(a,b,t){var x=hx(a),y=hx(b),o='#';"
+          "for(var i=0;i<3;i++){var v=Math.round(x[i]+(y[i]-x[i])*t/255);"
+            "o+=('0'+Math.max(0,Math.min(255,v)).toString(16)).slice(-2);}return o;}"
+        "function derive(t){var L=(t.m==1);return {bg:t.bg,panel:t.p,panel2:t.p2,"
+          "line:mix(t.p2,t.bg,L?135:150),text:L?'#1e242c':'#f3f6fa',"
+          "dim:L?'#5e6876':'#b7c0cc',accent:t.a,ink:L?'#ffffff':'#080d14'};}"
+        "function pal(k){"
+          "if(P[k])return P[k];"
+          "var t=byKey(k);return t?derive(t):P['0'];}"
+        "function byKey(k){var s=parseInt(k,10)-CUSTOM_BASE;"
+          "for(var i=0;i<CUSTOM.length;i++)if(CUSTOM[i].s===s)return CUSTOM[i];return null;}"
+        "function isLightKey(k){var t=byKey(k);"
+          "if(t)return t.m==1;return (parseInt(k,10)%2)==1;}"
         "function apply(){"
-          "var k=input.value;var p=P[k]||P['0'];"
+          "var k=input.value;var p=pal(k);"
           "var r=document.documentElement.style;"
           "r.setProperty('--bg',p.bg);r.setProperty('--panel',p.panel);r.setProperty('--panel-2',p.panel2);"
           "r.setProperty('--line',p.line);r.setProperty('--text',p.text);r.setProperty('--text-dim',p.dim);"
           "r.setProperty('--accent',p.accent);r.setProperty('--accent-ink',p.ink);"
-          "r.colorScheme=(parseInt(k,10)%2)?'light':'dark';"  // odd preset = light
+          "r.colorScheme=isLightKey(k)?'light':'dark';"
         "}"
         "function select(k){input.value=k;"
           "var cards=document.querySelectorAll('#themeGrid .theme-card');"
           "for(var i=0;i<cards.length;i++)cards[i].classList.toggle('sel',cards[i].dataset.k==k);"
           "apply();}"
         "var grid=document.getElementById('themeGrid');"
-        "Object.keys(P).forEach(function(k){"
-          "var p=P[k];"
-          "var c=document.createElement('div');c.className='theme-card';c.dataset.k=k;"
+        "function card(k,name,cols,cust){"
+          "var c=document.createElement('div');"
+          "c.className='theme-card'+(cust?' cust':'');c.dataset.k=k;"
           "var sw=document.createElement('div');sw.className='theme-sws';"
-          "[p.bg,p.panel2,p.accent].forEach(function(col){"
+          "cols.forEach(function(col){"
             "var b=document.createElement('div');b.className='theme-sw';b.style.background=col;sw.appendChild(b);});"
-          "var nm=document.createElement('div');nm.className='theme-name';nm.textContent=NAMES[k]||('Theme '+k);"
+          "var nm=document.createElement('div');nm.className='theme-name';nm.textContent=name;"
           "c.appendChild(sw);c.appendChild(nm);"
           "c.addEventListener('click',function(){select(k);});"
-          "grid.appendChild(c);"
-        "});"
+          "return c;}"
+        // Case-insensitive substring on the name, matching the on-device filter.
+        "var fbox=document.getElementById('themeFilter'),fcount=document.getElementById('themeCount');"
+        "function pass(name){var f=(fbox.value||'').trim().toLowerCase();"
+          "return !f||String(name).toLowerCase().indexOf(f)>=0;}"
+        "function build(){"
+          "grid.innerHTML='';"
+          "var shown=0,total=0;"
+          "Object.keys(P).forEach(function(k){"
+            "var p=P[k],nm=NAMES[k]||('Theme '+k);total++;"
+            "if(!pass(nm))return;shown++;"
+            "grid.appendChild(card(k,nm,[p.bg,p.panel2,p.accent],false));});"
+          "CUSTOM.forEach(function(t){"
+            "var k=String(CUSTOM_BASE+t.s);total++;"
+            "if(!pass(t.n))return;shown++;"
+            "var c=card(k,t.n,[t.bg,t.p2,t.a],true);"
+            "var ed=document.createElement('button');ed.type='button';"
+            "ed.className='theme-btn-cnr theme-edit';ed.textContent='\\u270E';"
+            "ed.title='Edit theme';"
+            "ed.addEventListener('click',function(e){e.stopPropagation();openBuilder(t);});"
+            "var dl=document.createElement('button');dl.type='button';"
+            "dl.className='theme-btn-cnr theme-del';dl.textContent='-';"
+            "dl.title='Delete theme';"
+            "dl.addEventListener('click',function(e){e.stopPropagation();del(t);});"
+            "c.appendChild(ed);c.appendChild(dl);"
+            "grid.appendChild(c);});"
+          // +New is an action, not a theme, so it goes away while filtering
+          // rather than sitting at the end of every result set.
+          "if(CUSTOM.length<CUSTOM_SLOTS&&!(fbox.value||'').trim()){"
+            "var n=document.createElement('div');n.className='theme-card new';"
+            "n.textContent='+New';n.title='Build a custom theme';"
+            "n.addEventListener('click',function(){openBuilder();});"
+            "grid.appendChild(n);}"
+          "fcount.textContent=(shown<total)?(shown+' of '+total):'';"
+          "var cards=document.querySelectorAll('#themeGrid .theme-card');"
+          "for(var i=0;i<cards.length;i++)cards[i].classList.toggle('sel',cards[i].dataset.k==input.value);"
+        "}"
+        "fbox.addEventListener('input',build);"
+        // Enter in the filter would submit the config form; with one match left
+        // it should pick that theme instead, which is what the on-device filter
+        // does too.
+        "fbox.addEventListener('keydown',function(e){if(e.key!=='Enter')return;"
+          "e.preventDefault();"
+          "var only=document.querySelectorAll('#themeGrid .theme-card');"
+          "if(only.length===1&&only[0].dataset.k!==undefined)select(only[0].dataset.k);});"
+        // ── Builder ──
+        "var back=document.getElementById('tbBack'),msg=document.getElementById('tbMsg');"
+        "var F={name:'tbName',bg:'tbBg',pn:'tbPn',p2:'tbP2',ac:'tbAc',code:'tbCode'};"
+        "function g(id){return document.getElementById(id);}"
+        "function pairs(){return [['tbBg','tbBgP'],['tbPn','tbPnP'],['tbP2','tbP2P'],['tbAc','tbAcP']];}"
+        "function norm(v){v=(v||'').trim();if(v.charAt(0)!='#')v='#'+v;"
+          "return /^#[0-9a-fA-F]{6}$/.test(v)?v.toLowerCase():null;}"
+        "function mode(){var r=document.querySelector('input[name=tbMode]:checked');"
+          "return r?parseInt(r.value,10):0;}"
+        "function setMode(m){var r=document.querySelector('input[name=tbMode][value=\"'+m+'\"]');"
+          "if(r)r.checked=true;}"
+        "function preview(){"
+          "var b=norm(g('tbBg').value),p=norm(g('tbPn').value),"
+            "q=norm(g('tbP2').value),a=norm(g('tbAc').value);"
+          "if(!b||!p||!q||!a)return;"
+          "var d=derive({m:mode(),bg:b,p:p,p2:q,a:a});"
+          "var box=g('tbPrev');box.style.background=d.panel;box.style.borderColor=d.line;"
+          "g('tbPrevT').style.color=d.text;g('tbPrevD').style.color=d.dim;"
+          "var ac=g('tbPrevA');ac.style.background=d.accent;ac.style.color=d.ink;}"
+        "pairs().forEach(function(pr){"
+          "var t=g(pr[0]),c=g(pr[1]);"
+          "t.addEventListener('input',function(){var v=norm(t.value);if(v){c.value=v;preview();}});"
+          "c.addEventListener('input',function(){t.value=c.value;preview();});});"
+        "Array.prototype.forEach.call(document.querySelectorAll('input[name=tbMode]'),"
+          "function(r){r.addEventListener('change',preview);});"
+        "function fill(t){g('tbName').value=t.n;setMode(t.m);"
+          "g('tbBg').value=t.bg;g('tbPn').value=t.p;g('tbP2').value=t.p2;g('tbAc').value=t.a;"
+          "pairs().forEach(function(pr){var v=norm(g(pr[0]).value);if(v)g(pr[1]).value=v;});"
+          "preview();}"
+        // -1 = building a new theme, otherwise the slot being edited. Save posts
+        // it back so an edit overwrites in place instead of consuming a slot.
+        "var editSlot=-1;"
+        "function openBuilder(t){msg.textContent='';g('tbCode').value='';"
+          "editSlot=t?t.s:-1;"
+          "g('tbTitle').textContent=t?('Edit '+t.n):'New Theme';"
+          "fill(t||{n:'',m:0,bg:'#10141d',p:'#1a2230',p2:'#232d3e',a:'#d7869d'});"
+          "back.classList.add('on');g('tbName').focus();}"
+        "function closeBuilder(){back.classList.remove('on');}"
+        "g('tbCancel').addEventListener('click',closeBuilder);"
+        "back.addEventListener('click',function(e){if(e.target===back)closeBuilder();});"
+        "function post(url,body,ok){"
+          "var x=new XMLHttpRequest();x.open('POST',url,true);"
+          "x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
+          "x.onreadystatechange=function(){if(x.readyState!=4)return;"
+            "var j=null;try{j=JSON.parse(x.responseText);}catch(_){}"
+            "if(x.status>=200&&x.status<300&&j&&j.ok)ok(j);"
+            "else msg.textContent=(j&&j.error)?j.error:'Request failed.';};"
+          "x.send(body);}"
+        "function stored(j){"
+          // Replace in place when the slot already had a theme, so an import
+          // over an existing slot does not produce two cards for it.
+          "var found=false;"
+          "for(var i=0;i<CUSTOM.length;i++)if(CUSTOM[i].s===j.slot){CUSTOM[i]=j.theme;found=true;}"
+          "if(!found)CUSTOM.push(j.theme);"
+          "CUSTOM.sort(function(a,b){return a.s-b.s;});"
+          "build();select(String(CUSTOM_BASE+j.slot));closeBuilder();}"
+        "g('tbSave').addEventListener('click',function(){"
+          "var nm=(g('tbName').value||'').trim();"
+          "if(!nm){msg.textContent='Give the theme a name.';return;}"
+          "var b=norm(g('tbBg').value),p=norm(g('tbPn').value),"
+            "q=norm(g('tbP2').value),a=norm(g('tbAc').value);"
+          "if(!b||!p||!q||!a){msg.textContent='Colors must be hex like #1a2230.';return;}"
+          "msg.textContent='Saving...';"
+          "post('/theme-save','name='+encodeURIComponent(nm)+'&mode='+mode()+"
+            "'&bg='+encodeURIComponent(b)+'&panel='+encodeURIComponent(p)+"
+            "'&panel2='+encodeURIComponent(q)+'&accent='+encodeURIComponent(a)+"
+            "(editSlot>=0?('&slot='+editSlot):''),stored);});"
+        "g('tbImport').addEventListener('click',function(){"
+          "var c=(g('tbCode').value||'').trim();"
+          "if(!c){msg.textContent='Paste a share code first.';return;}"
+          "msg.textContent='Reading code...';"
+          // Decoded on the device so the browser never reimplements the format.
+          // preview=1 fills the form instead of storing, which lets someone
+          // rename or adjust an imported theme before committing a slot.
+          "post('/theme-save','preview=1&code='+encodeURIComponent(c),function(j){"
+            "msg.textContent='Code loaded — Save Theme to keep it.';fill(j.theme);});});"
+        "function del(t){"
+          "if(!window.confirm('Delete the theme \"'+t.n+'\"? This cannot be undone.'))return;"
+          "post('/theme-delete','slot='+t.s,function(j){"
+            "CUSTOM=CUSTOM.filter(function(x){return x.s!==t.s;});"
+            "if(parseInt(input.value,10)===CUSTOM_BASE+t.s)input.value='0';"
+            "build();select(input.value);});}"
+        "build();"
         "select(input.value);"
         "})();"
         "</script>";
@@ -2116,6 +2384,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += tmp;
             sendChunkIfBig(html);
         }
+        // Custom themes get plain options here — no builder, which needs the
+        // grid page, but they must at least be listed. Without them a device
+        // wearing a custom theme opens this page with nothing selected, so the
+        // browser posts back the first option and a save from AP mode silently
+        // replaces the user's theme with Camillia Dark.
+        for (int slot = 0; slot < UI_CUSTOM_THEME_SLOTS; slot++) {
+            const UiCustomTheme *ct = uiCustomThemeGet(slot);
+            if (!ct) continue;
+            const uint8_t v = (uint8_t)(kThemePresetCustomBase + slot);
+            snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                     (unsigned)v, (v == themePreset) ? " selected" : "", ct->name);
+            html += tmp;
+            sendChunkIfBig(html);
+        }
         html += "</select></label>";
     } else {
         html += "<label>Theme</label>";
@@ -2125,6 +2407,35 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                      "<input type='hidden' name='ui_theme_preset' id='themeInput' value='%u'>",
                      (unsigned)themePreset);
             html += themeHidden;
+        }
+        // The saved custom themes, emitted ahead of the picker so its script can
+        // build cards for them. Server-side rather than fetched, because this
+        // page already streams in one pass and the AP-mode variant cannot afford
+        // a second round trip.
+        html += "<script>var CUSTOM=[";
+        {
+            bool first = true;
+            for (int slot = 0; slot < UI_CUSTOM_THEME_SLOTS; slot++) {
+                const UiCustomTheme *ct = uiCustomThemeGet(slot);
+                if (!ct) continue;
+                char row[160];
+                snprintf(row, sizeof(row),
+                         "%s{s:%d,n:'%s',m:%u,bg:'#%06lX',p:'#%06lX',p2:'#%06lX',a:'#%06lX'}",
+                         first ? "" : ",", slot, ct->name, (unsigned)ct->mode,
+                         (unsigned long)rgb565To888(ct->bgMain),
+                         (unsigned long)rgb565To888(ct->panelBg),
+                         (unsigned long)rgb565To888(ct->panelAlt),
+                         (unsigned long)rgb565To888(ct->accent));
+                html += row;
+                first = false;
+                sendChunkIfBig(html);
+            }
+        }
+        {
+            char tail[64];
+            snprintf(tail, sizeof(tail), "];var CUSTOM_BASE=%u,CUSTOM_SLOTS=%u;</script>",
+                     (unsigned)kThemePresetCustomBase, (unsigned)UI_CUSTOM_THEME_SLOTS);
+            html += tail;
         }
         sendChunk(html);
         sendFlash(kThemePicker);
@@ -3643,6 +3954,10 @@ static void handlePostSave() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     if (!gCfg) { redirect("/"); return; }
 
+    // Snapshot for the reboot decision below. Taken before any field is written
+    // so it can be compared against the applied result.
+    const RhinoConfig cfgBefore = *gCfg;
+
     // Node identity
     String lng  = server.arg("long");
     String shrt = server.arg("short");
@@ -3940,9 +4255,12 @@ static void handlePostSave() {
         gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     }
     if (server.hasArg("ui_theme_preset")) {
+        // kThemePresetTotal, not kThemePresetCount: the custom slots live past
+        // the built-ins, and clamping to the old bound would quietly rewrite
+        // every custom selection to the last preset.
         uint8_t preset = (uint8_t)constrain(server.arg("ui_theme_preset").toInt(),
                                             0,
-                                            (int)kThemePresetCount - 1);
+                                            (int)kThemePresetTotal - 1);
         themePresetToConfig(preset, gCfg->uiTheme, gCfg->uiMode);
     } else {
         // Backward-compatible fallback for older forms.
@@ -4041,6 +4359,28 @@ static void handlePostSave() {
     }
 
     if (gOnSave) gOnSave();
+
+    // Font size alone does not need a reboot — the save callback re-renders chat
+    // and DMs at the new size, exactly as the on-device picker does. Rebooting
+    // for it meant a ~10 second outage to change how big the text is.
+    //
+    // Decided by comparing the applied config against the snapshot with the font
+    // size masked out: if that is the only field that moved, nothing else needs
+    // a restart. Any other difference — and any field this comparison does not
+    // understand — still reboots, so the failure direction is the old behaviour
+    // rather than a setting that silently never takes effect. Both structs come
+    // from the same live object, so their padding bytes match and memcmp is
+    // meaningful.
+    RhinoConfig cfgMasked = *gCfg;
+    cfgMasked.fontSize = cfgBefore.fontSize;
+    const bool fontSizeOnly = (memcmp(&cfgMasked, &cfgBefore, sizeof(RhinoConfig)) == 0)
+                              && (gCfg->fontSize != cfgBefore.fontSize);
+
+    if (fontSizeOnly) {
+        redirectHomeWithFlash("Saved. Font size applied.");
+        return;
+    }
+
     scheduleReboot(900);
     redirectHomeWithFlash("Saved. Rebooting now...");
 }
@@ -4098,6 +4438,124 @@ static void handlePostVncToggle() {
     server.send(202, "application/json", "{\"queued\":true}");
 }
 #endif
+
+// ── Custom theme builder ─────────────────────────────────────────────────────
+// Written straight through rather than queued like the VNC toggle: handlers run
+// inside webCfgLoop() on the main loop thread (see server.handleClient() there),
+// which is the same thread that owns NVS everywhere else — the WiFi credentials
+// above are already saved this way. Writing here also means the response can
+// carry the slot that was assigned, which is what the page needs to draw the
+// new card without a reload.
+static void sendThemeJson(int slot, const UiCustomTheme &t) {
+    char body[220];
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"slot\":%d,\"theme\":{\"s\":%d,\"n\":\"%s\",\"m\":%u,"
+             "\"bg\":\"#%06lX\",\"p\":\"#%06lX\",\"p2\":\"#%06lX\",\"a\":\"#%06lX\"}}",
+             slot, slot, t.name, (unsigned)t.mode,
+             (unsigned long)rgb565To888(t.bgMain),
+             (unsigned long)rgb565To888(t.panelBg),
+             (unsigned long)rgb565To888(t.panelAlt),
+             (unsigned long)rgb565To888(t.accent));
+    server.send(200, "application/json", body);
+}
+
+static void handlePostThemeSave() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    UiCustomTheme t = {};
+    if (server.hasArg("code")) {
+        // Import path. The device owns the format, so a code that round-trips
+        // here is a code every device will accept.
+        if (!uiCustomThemeDecode(server.arg("code").c_str(), t)) {
+            server.send(400, "application/json",
+                        "{\"error\":\"That share code is not valid.\"}");
+            return;
+        }
+        if (server.arg("preview") == "1") {
+            // Fill the form only. The slot is reported as -1 because nothing
+            // was stored; the page uses the theme fields and ignores it.
+            sendThemeJson(-1, t);
+            return;
+        }
+    } else {
+        String name = server.arg("name");
+        name.trim();
+        if (name.length() == 0) {
+            server.send(400, "application/json", "{\"error\":\"Give the theme a name.\"}");
+            return;
+        }
+        strncpy(t.name, name.c_str(), sizeof(t.name) - 1);
+        t.mode = (server.arg("mode").toInt() == UI_MODE_LIGHT) ? UI_MODE_LIGHT : UI_MODE_DARK;
+        if (!parseHexColor(server.arg("bg"), t.bgMain)
+            || !parseHexColor(server.arg("panel"), t.panelBg)
+            || !parseHexColor(server.arg("panel2"), t.panelAlt)
+            || !parseHexColor(server.arg("accent"), t.accent)) {
+            server.send(400, "application/json",
+                        "{\"error\":\"Colors must be hex like #1a2230.\"}");
+            return;
+        }
+    }
+
+    int slot = server.hasArg("slot") ? server.arg("slot").toInt() : -1;
+    if (slot >= UI_CUSTOM_THEME_SLOTS) slot = -1;
+    if (slot < 0 && uiCustomThemeFirstFree() < 0) {
+        char full[96];
+        snprintf(full, sizeof(full),
+                 "{\"error\":\"All %d theme slots are full. Delete one first.\"}",
+                 UI_CUSTOM_THEME_SLOTS);
+        server.send(409, "application/json", full);
+        return;
+    }
+
+    slot = uiCustomThemeSave(slot, t);
+    if (slot < 0) {
+        server.send(500, "application/json", "{\"error\":\"Could not save the theme.\"}");
+        return;
+    }
+
+    // Editing the theme the device is currently wearing has to repaint it, or
+    // the panel keeps showing the colors that were just replaced until
+    // something else happens to re-apply the palette.
+    if (gCfg && uiThemeIsCustom(gCfg->uiTheme)
+        && uiThemeCustomSlot(gCfg->uiTheme) == slot) {
+        if (gOnSave) gOnSave();
+    }
+
+    const UiCustomTheme *stored = uiCustomThemeGet(slot);
+    sendThemeJson(slot, stored ? *stored : t);
+}
+
+static void handlePostThemeDelete() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    const int slot = server.arg("slot").toInt();
+    if (slot < 0 || slot >= UI_CUSTOM_THEME_SLOTS) {
+        server.send(400, "application/json", "{\"error\":\"No such theme slot.\"}");
+        return;
+    }
+    if (!uiCustomThemeDelete(slot)) {
+        server.send(500, "application/json", "{\"error\":\"Could not delete the theme.\"}");
+        return;
+    }
+
+    // Deleting the theme the device is currently wearing leaves the selection
+    // pointing at an empty slot. Move it off deliberately and repaint, rather
+    // than letting applyUiThemePalette() discover it later and fall back with
+    // the panel already drawn in the deleted colors.
+    if (gCfg && uiThemeIsCustom(gCfg->uiTheme)
+        && uiThemeCustomSlot(gCfg->uiTheme) == slot) {
+        gCfg->uiTheme = UI_THEME_CAMELLIA;
+        gCfg->uiMode = UI_MODE_DARK;
+        if (gOnSave) gOnSave();
+    }
+    server.send(200, "application/json", "{\"ok\":true}");
+}
 
 static void handleGetLiveData() {
     if (!isLoggedIn()) {
@@ -4946,6 +5404,8 @@ static void registerCommonRoutes() {
     onRoute("/save",              HTTP_POST, handlePostSave);
     onRoute("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     onRoute("/live-data",         HTTP_GET,  handleGetLiveData);
+    onRoute("/theme-save",        HTTP_POST, handlePostThemeSave);
+    onRoute("/theme-delete",      HTTP_POST, handlePostThemeDelete);
 #if HAS_VNC_HOST
     onRoute("/vnc-status",        HTTP_GET,  handleGetVncStatus);
     onRoute("/vnc-toggle",        HTTP_POST, handlePostVncToggle);

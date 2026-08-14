@@ -262,6 +262,73 @@ reboot. Backspace/Esc (or tapping outside) cancels. Web Config shows the same
 themes as a grid of swatch cards, and previews the selected one live before you
 save.
 
+**Scrolling wraps.** Moving up from the first theme lands on the last, and down
+from the last returns to the first — with nearly thirty themes in the list, the
+bottom of it is otherwise a long way from the top.
+
+**Space filters the rows**, the same way it does on the CFG and Nodes screens.
+Press Space to arm the filter, then type to narrow the list to themes whose names
+contain what you typed, case-insensitively — `dark` for every dark variant, `sun`
+for `Sunset Ridge`. The line under the title shows `[what you typed]` and how many
+themes match, with the brackets appearing as soon as the filter is armed even
+before you type anything.
+
+Arming matters because **j/k keep navigating until you press Space**. Once armed
+they are letters instead — which the filter needs, since every dark theme's name
+ends in `Dark`. The wheel, trackball, D-pad and arrow keys navigate either way.
+
+Backspace edits the filter, an empty filter disarms, and the next Backspace
+closes the picker as usual. The selected theme stays selected as long as it still
+matches, so narrowing the list doesn't move your choice out from under you.
+
+Web Config's theme grid has a matching **Filter themes** box above it, with a
+count of how many cards are showing. Pressing Enter there with a single match
+selects it.
+
+#### Building your own theme
+
+Web Config's theme grid ends with a **+New** card. It opens a builder where you
+give the theme a name, pick its four colors, and choose Light or Dark.
+
+Four colors is the whole theme: **Background**, **Panel**, **Panel Alt** and
+**Accent**. Everything else the interface uses — dividers, selection highlights,
+the unread tab tint — is derived from those four, the same way the built-in
+themes are, so a custom theme behaves like a real one rather than four flat
+colors.
+
+**Light/Dark is not decoration.** It selects the text, dim-text and on-accent
+colors — body copy, labels, the typing caret — which are fixed per mode. Pick the
+one your background actually is, or your theme will be unreadable.
+
+- Each color has a swatch picker and a text box; you can type a hex code like
+  `#1a2230` into the box instead of using the picker.
+- The preview panel in the builder shows title text, dim text and an accent chip
+  in the colors you have chosen so far.
+- **Save Theme** stores it and adds it to the grid immediately. It also appears
+  in the on-device Theme picker, where it can be selected like any built-in.
+- There are **4 slots**. The +New card disappears when they are full.
+- Saved themes get two small buttons in the corner of their card: **✎** reopens
+  the builder to modify the theme, and a red **-** deletes it (with a
+  confirmation). Editing writes back to the same slot, and if you are wearing
+  that theme the device repaints as soon as you save.
+
+#### Moving themes between devices
+
+Custom themes are written into the SD config backup (`/camillia/config.yaml`) as
+`themeCustom<n>` lines, so they ride along with a config export and come back on
+a restore, into the same slots they came from.
+
+Each line's value is a share code — a short hex string like
+`0101FFF2F6FFFAFFFFEAEED51C390C53756E736574` carrying the name, the four colors
+and the mode. To move one theme rather than a whole config, copy that value out
+of the file, paste it into the builder's **Import code** field, and click
+**Load**. It fills the form rather than saving straight away, so you can rename
+or adjust the theme before committing a slot; **Save Theme** keeps it.
+
+Codes carry a checksum, so one mangled in transit is rejected rather than loaded
+as the wrong colors. Spaces, dashes and lowercase are tolerated, since a code
+copied out of a text file usually picks some up.
+
 ### Information panel
 
 The device info panel is scrollable with the keyboard on every keyboard build:
