@@ -380,6 +380,17 @@ struct RhinoConfig {
     // it at offset 940 — exactly the previous sizeof(RhinoConfig), with
     // meshBeaconListen at 938. Verified by compiling both layouts on the host.
     uint32_t snfRouterNodeId;
+    // Battery indicator format: BATT_DISPLAY_PERCENT / BATT_DISPLAY_VOLTAGE.
+    // Lands at the previous sizeof(RhinoConfig) because snfRouterNodeId above
+    // is a uint32_t that ends flush with it — verified on the host, same check
+    // the pads above document. Default 0 (PERCENT) also happens to be what an
+    // upgraded device reads out of the old blob's absent bytes, so existing
+    // units keep today's behavior either way.
+    uint8_t  battDisplayMode;
+    // For whoever appends next: battDisplayMode is one byte at the end of a
+    // 4-aligned struct, so the stored blob carries three bytes past it that the
+    // load memcpy's straight over anything placed there.
+    uint8_t  _reservedPad9[3];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -450,6 +461,20 @@ const char *notifyLightTimeoutName(uint16_t secs);
 // to. Never (0) is only chosen by an exact 0, so no small number rounds a
 // timeout away into "never stop".
 uint16_t cfgCoerceNotifyLightTimeout(long secs);
+
+// How the local battery reads where it is shown as a single number: the chat
+// header indicator and the web status chip. Percentage comes off a Li-ion SOC
+// curve, and on the flat part of that curve a tenth of a volt swings it by tens
+// of points — voltage mode shows the number the curve was derived from instead.
+//
+// An enum rather than a bool so a later "percent + voltage" mode does not need
+// a second field. Does not affect transmitted telemetry, the Device Info panel
+// or the calibration modal, all of which show both numbers by design.
+enum BattDisplayMode : uint8_t {
+    BATT_DISPLAY_PERCENT = 0,
+    BATT_DISPLAY_VOLTAGE = 1,
+};
+#define BATT_DISPLAY_MAX 1
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
 // GPS otherwise; MANUAL means the user set it and nothing may overwrite it.
@@ -562,6 +587,30 @@ void cfgInitDefaults(RhinoConfig &cfg);
 // Serialise cfg (and CHANNEL_KEYS[], plus the identity keypair) to YAML,
 // appending into out. The output carries the node's private key — an exported
 // config is a secret, not just a settings file.
+// ── Remembered WiFi networks (export/import bridge) ──────────────────────────
+// How many networks are remembered *besides* the configured one. Shared so the
+// picker's array and the YAML importer's scratch agree on the ceiling.
+#define CFG_SAVED_WIFI_MAX 5
+
+// The list of networks besides the configured one lives with the WiFi picker in
+// the UI layer, which owns its NVS blob. These let the YAML round-trip reach it
+// without config_io needing to know how it is stored. Defined in main_lvgl.cpp.
+//
+// The *active* network is not in this list — it is cfg.wifiSsid/wifiPass, and
+// the export marks it so on the way out.
+int  cfgSavedWifiCount();
+bool cfgSavedWifiAt(int idx, char *ssidOut, size_t ssidCap, char *passOut, size_t passCap);
+void cfgSavedWifiClear();
+void cfgSavedWifiAdd(const char *ssid, const char *pass);
+void cfgSavedWifiCommit();   // persist after a batch of Clear/Add
+
+// Management, for the web config's saved-networks list. Each persists on its
+// own and returns true only when something actually changed, so a handler can
+// tell the user whether the click did anything.
+bool cfgSavedWifiRemember(const char *ssid, const char *pass);  // add or update
+bool cfgSavedWifiRemove(const char *ssid);                      // forget one
+bool cfgSavedWifiActivate(const char *ssid);                    // make it configured
+
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 
 // Parse YAML from an in-memory buffer. Updates CHANNEL_KEYS[] and fills cfg.

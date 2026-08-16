@@ -89,6 +89,23 @@ bool webCfgIsOnboarding();
 // serving the Config tab only. False for the full config served over STA.
 bool webCfgIsLite();
 
+// Called roughly every 100 ms while webCfgBegin() blocks waiting for the
+// station to associate — up to ten seconds, and the longest single step of a
+// boot. Lets a caller that owns the display keep a progress indicator moving
+// through it. Optional; pass null to disable.
+void webCfgSetWaitCb(void (*cb)());
+
+// The station credentials webCfgBegin() should associate with. The device may
+// be joined to a network picked in the on-device WiFi list rather than the one
+// stored in RhinoConfig, and that choice lives in the UI layer — so it has to be
+// pushed here before starting, alongside webCfgSetForceAp(). Passing null or an
+// empty ssid clears the override and falls back to the stored credentials.
+//
+// Without this, turning web config on while joined to a picked network dials the
+// *stored* SSID instead, times out, and drops to AP fallback — taking the device
+// off the network it was just reachable on.
+void webCfgSetStaCreds(const char *ssid, const char *pass);
+
 // Force the next webCfgBegin() to bring up the SoftAP even when WiFi
 // credentials are saved. Backs the "AP" entry in the on-device WiFi picker,
 // which lets a user reach web config without joining their network.

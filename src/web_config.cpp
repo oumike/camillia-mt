@@ -71,6 +71,15 @@ static bool           gApMode          = false;
 // Set from the on-device WiFi picker's "AP" entry: start the SoftAP even when
 // credentials are saved, instead of joining the network.
 static bool           gForceAp         = false;
+// Set from the on-device WiFi picker's network entries, via webCfgSetStaCreds().
+// Empty ssid means "no override" — use the credentials stored in RhinoConfig.
+// The picker's choice is not written back into the config (that would overwrite
+// the user's configured default), so it has to reach us this way or we would
+// dial the wrong network every time web config starts.
+static char           gStaSsidOverride[64] = {};
+static char           gStaPassOverride[64] = {};
+// Pumped while the station-connect wait below blocks; see webCfgSetWaitCb().
+static void         (*gWaitCb)()           = nullptr;
 
 // Boards that always serve web config lite, regardless of radio mode. The
 // Cardputer has no PSRAM and ~23 KB of internal heap once Wi-Fi is up, which the
@@ -88,6 +97,15 @@ static inline bool webCfgUseLite() { return gApMode || kLiteOnlyBoard; }
 static char           ipBuf[16]        = "";
 static char           sessionToken[17] = "";   // hex token; empty = no session
 static RhinoConfig   *gCfg             = nullptr;
+
+// The credentials webCfgBegin() should actually associate with: the picker's
+// override when one was pushed, otherwise what is stored in the config.
+static const char *staConnectSsid() {
+    return gStaSsidOverride[0] ? gStaSsidOverride : gCfg->wifiSsid;
+}
+static const char *staConnectPass() {
+    return gStaSsidOverride[0] ? gStaPassOverride : gCfg->wifiPass;
+}
 static WebCfgSaveCb   gOnSave          = nullptr;
 static WebCfgScreenshotPngCb gOnScreenshotPng = nullptr;
 static volatile bool  gAnnounceReq     = false;
@@ -1590,7 +1608,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     uint8_t gpsSat = gpsSats();
     const char *gpsCls = !gpsEn ? "metric-bad" : (gpsFix ? "metric-good" : (gpsNmea ? "metric-warn" : "metric-bad"));
     char battChip[24];
-    snprintf(battChip, sizeof(battChip), "BAT %u%%", (unsigned)battPct);
+    // battCls above stays percentage-derived in both modes: the chip's color is
+    // a state-of-charge signal, same as the on-device header dot.
+    if (gCfg && gCfg->battDisplayMode == BATT_DISPLAY_VOLTAGE) {
+        snprintf(battChip, sizeof(battChip), "BAT %.2fV", (double)batteryReadVoltage());
+    } else {
+        snprintf(battChip, sizeof(battChip), "BAT %u%%", (unsigned)battPct);
+    }
     char gpsChip[48];
     if (!gpsEn) snprintf(gpsChip, sizeof(gpsChip), "GPS OFF");
     else if (gpsFix) snprintf(gpsChip, sizeof(gpsChip), "GPS FIX %u", (unsigned)gpsSat);
@@ -1863,6 +1887,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     } else {
         html += "<div class='tab-row'><div class='tab-btns'>"
             "<button type='button' class='tab-btn active' id='tab-btn-config' onclick=\"switchTab('config')\">Config</button>"
+            "<button type='button' class='tab-btn' id='tab-btn-wifi' onclick=\"switchTab('wifi')\">WiFi</button>"
             "<button type='button' class='tab-btn' id='tab-btn-utils' onclick=\"switchTab('utils')\">Utilities</button>"
             "<button type='button' class='tab-btn' id='tab-btn-live' onclick=\"switchTab('live')\">Live</button>"
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -2322,6 +2347,14 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<label>Units (Display &amp; Telemetry)<select name='disp_units'>"
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
+            "</select></label>";
+    html += "<label>Battery Display<select name='batt_display'>"
+            "<option value='0'";
+    if (gCfg->battDisplayMode != BATT_DISPLAY_VOLTAGE) html += " selected";
+    html += ">Percentage (87%)</option>"
+            "<option value='1'";
+    if (gCfg->battDisplayMode == BATT_DISPLAY_VOLTAGE) html += " selected";
+    html += ">Voltage (3.94V)</option>"
             "</select></label></div>";
 #if HAS_SCROLL_INVERT
     // Trackball direction. Sits in Display rather than getting a section of its
@@ -2690,12 +2723,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // only hides its contents visually — the inputs stay in the form and submit
     // either way, which is what the other collapsed sections already rely on.
     section(html, lite, "WiFi", false);
+    // appendAttr, not a raw append: an SSID or password containing an
+    // apostrophe would close the value= attribute and mangle the rest of the
+    // form, so the field would come back truncated on the next save. Same
+    // reason the channel-name fields use it.
     html += "<label>SSID<input name='wifi_ssid' type='text' maxlength='63' value='";
-    html += gWifiSsid;
+    appendAttr(html, gWifiSsid);
     html += "'></label>"
             "<label>Password<input name='wifi_pass' type='password' maxlength='63' value='";
-    html += gWifiPass;
+    appendAttr(html, gWifiPass);
     html += "'></label>";
+    if (!lite) {
+        html += "<p class='gps-hint'>This is the network the device joins. Other "
+                "remembered networks, and switching between them, live on the "
+                "<b>WiFi</b> tab.</p>";
+    }
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -2861,6 +2903,87 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         logWifiHeapDiag("lite page sent");
         return;
     }
+
+    // ── WiFi tab ──────────────────────────────────────────────
+    // Its own tab rather than a block under the Config pane's Save All
+    // button, which read as an afterthought bolted below the primary action.
+    // Rendered after the lite return above, so the AP page never sees it —
+    // that mode has no tab bar and serves the Config pane alone.
+    html += "</div></div><div class='tab-panel' id='tab-wifi'><div class='tab-pane-center'>";
+    // ── Saved WiFi networks ───────────────────────────────────
+    // After the config form closes, so each row is a standalone form: nesting
+    // one inside the form above would submit to /save instead. Below the lite
+    // return, so it never reaches the AP page — that mode is deliberately the
+    // Config pane only, and the heap there has nothing spare for a per-row list.
+    //
+    // The SSID/Password fields in the WiFi section above still set the active
+    // network; this is for keeping the others around and swapping between them.
+    section(html, false, "Saved Networks", false);
+    {
+        char nSsid[64], nPass[64];
+        const int savedCount = cfgSavedWifiCount();
+
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+                "Networks this device remembers. <b>Use</b> switches to one and keeps "
+                "the current network in the list, so you can swap back. Switching "
+                "reconnects the radio &mdash; if you are reading this page over WiFi, "
+                "it will drop and you will need to reach the device on the new "
+                "network.</p>";
+
+        html += "<table style='width:100%;border-collapse:collapse;font-size:.9em'>";
+        // SSIDs are free text chosen by whoever owns the access point, so every
+        // one of them goes through appendAttr() — an apostrophe would otherwise
+        // close the value= attribute and mangle the rest of the form, and a '<'
+        // would inject markup from a network name we merely scanned.
+        if (gCfg->wifiSsid[0]) {
+            html += "<tr><td style='padding:.3em 0'><b>";
+            appendAttr(html, gCfg->wifiSsid);
+            html += "</b> <span style='color:#5a9;font-size:.85em'>&#9679; active</span></td>"
+                    "<td style='text-align:right;color:#888;font-size:.85em'>in use</td></tr>";
+        }
+        for (int i = 0; i < savedCount; i++) {
+            if (!cfgSavedWifiAt(i, nSsid, sizeof(nSsid), nPass, sizeof(nPass))) continue;
+            if (!nSsid[0]) continue;
+            html += "<tr><td style='padding:.3em 0'>";
+            appendAttr(html, nSsid);
+            html += "</td><td style='text-align:right;white-space:nowrap'>"
+                    "<form method='POST' action='/wifi-use' style='display:inline'>"
+                    "<input type='hidden' name='ssid' value='";
+            appendAttr(html, nSsid);
+            html += "'><button type='submit' style='padding:.15em .7em'>Use</button></form> "
+                    "<form method='POST' action='/wifi-forget' style='display:inline'"
+                    " onsubmit=\"return confirm('Forget this network?')\">"
+                    "<input type='hidden' name='ssid' value='";
+            appendAttr(html, nSsid);
+            html += "'><button type='submit' style='padding:.15em .7em;background:#c0392b'>"
+                    "Forget</button></form></td></tr>";
+        }
+        html += "</table>";
+
+        if (savedCount == 0) {
+            html += "<p style='font-size:.82em;color:#888;margin:.3em 0'>"
+                    "No other networks remembered yet.</p>";
+        }
+
+        char slots[64];
+        snprintf(slots, sizeof(slots), "%d of %d slots used", savedCount, CFG_SAVED_WIFI_MAX);
+        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        html += slots;
+        html += ". When full, the least recently added one drops off.</p>";
+
+        html += "<form method='POST' action='/wifi-add'>"
+                "<label>Add network &mdash; SSID"
+                "<input name='ssid' type='text' maxlength='63' required></label>"
+                "<label>Password (blank for an open network)"
+                "<input name='pass' type='password' maxlength='63'></label>"
+                "<button type='submit' style='margin-top:.4em'>Remember Network</button>"
+                "</form>"
+                "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+                "Adds to the list without switching to it. The credentials are not "
+                "tested until the device connects.</p>";
+    }
+    sectionEnd(html, false);
+    sendChunk(html);
 
     html += "</div></div><div class='tab-panel' id='tab-utils'><div class='tab-pane-center'>";
 
@@ -3688,6 +3811,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "}"
                         // ── Chat tab (omitted on Cardputer — no PSRAM) ────────
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
+                        // Mirrored by kTapbackTray in main_lvgl.cpp, which is what
+                        // the device's Message Actions menu offers. Same set, same
+                        // order — keep the two in step so a reaction means the same
+                        // thing whichever side sent it.
                         "var CHAT_TAPS=['\\uD83D\\uDC4D','\\uD83D\\uDC4E','\\u203C\\uFE0F','\\u2753','\\uD83D\\uDE02','\\uD83D\\uDE22'];"
                         "var chatIsDm=false;var chatId='';var chatCursor=-1;var chatLines=[];"
                         "var chatReplyPid=0;var chatPreview={};var chatTimer=null;var chatTargetsTimer=null;"
@@ -3825,14 +3952,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #endif
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
+                            "var isWifi=(tab==='wifi');"
                             "var isUtil=(tab==='utils');"
                             "var isLive=(tab==='live');"
                             "var isMap=(tab==='map');"
                             "document.getElementById('tab-config').classList.toggle('active',isCfg);"
+                            "document.getElementById('tab-wifi').classList.toggle('active',isWifi);"
                             "document.getElementById('tab-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-map').classList.toggle('active',isMap);"
                             "document.getElementById('tab-btn-config').classList.toggle('active',isCfg);"
+                            "document.getElementById('tab-btn-wifi').classList.toggle('active',isWifi);"
                             "document.getElementById('tab-btn-utils').classList.toggle('active',isUtil);"
                             "document.getElementById('tab-btn-live').classList.toggle('active',isLive);"
                             "document.getElementById('tab-btn-map').classList.toggle('active',isMap);"
@@ -4215,6 +4345,10 @@ static void handlePostSave() {
     // POST is switching to.
     const uint8_t prevUnits = gCfg->displayUnits;
     gCfg->displayUnits    = server.arg("disp_units").toInt() != 0 ? 1 : 0;
+    if (server.hasArg("batt_display")) {
+        gCfg->battDisplayMode =
+            (uint8_t)constrain(server.arg("batt_display").toInt(), 0, BATT_DISPLAY_MAX);
+    }
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     if (server.hasArg("chat_style")) {
         long cs = server.arg("chat_style").toInt();
@@ -4997,6 +5131,55 @@ static void handlePostResetChatColors() {
     redirectHomeWithFlash("Chat colors reassigned.");
 }
 
+// ── Saved WiFi networks ───────────────────────────────────────
+// Applied straight through rather than queued: these handlers run inside
+// webCfgLoop() on the main loop thread, which is the thread that owns NVS and
+// the WiFi state everywhere else.
+
+static void handlePostWifiAdd() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+    ssid.trim();
+    if (ssid.isEmpty()) {
+        redirectHomeWithFlash("Network name cannot be empty.");
+        return;
+    }
+    if (cfgSavedWifiRemember(ssid.c_str(), pass.c_str())) {
+        redirectHomeWithFlash("Network remembered.");
+    } else {
+        // Refused for a reason worth naming rather than a silent no-op: the
+        // active network is already listed, and "AP" is the picker's sentinel.
+        redirectHomeWithFlash("Not added - that is the active network, or a reserved name.");
+    }
+}
+
+static void handlePostWifiForget() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    String ssid = server.arg("ssid");
+    ssid.trim();
+    if (cfgSavedWifiRemove(ssid.c_str())) {
+        redirectHomeWithFlash("Network forgotten.");
+    } else {
+        redirectHomeWithFlash("That network is not in the remembered list.");
+    }
+}
+
+static void handlePostWifiUse() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    String ssid = server.arg("ssid");
+    ssid.trim();
+    if (!cfgSavedWifiActivate(ssid.c_str())) {
+        redirectHomeWithFlash("That network is not in the remembered list.");
+        return;
+    }
+    // Answer before the radio moves. The switch re-associates the station, so a
+    // browser reading this over WiFi is about to lose the device; sending the
+    // page first at least lets the message land.
+    redirectHomeWithFlash("Switched network. Reconnecting - this page may become "
+                          "unreachable until you join the new network.");
+}
+
 // ── Store & Forward: request a replay ─────────────────────────
 // Queued rather than sent here: the main loop owns the LoRa TX path and the
 // router-tracking state, and it writes the outcome back through
@@ -5537,6 +5720,9 @@ static void registerCommonRoutes() {
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
+    onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
+    onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
+    onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
@@ -5678,8 +5864,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // No credentials means onboarding; the picker's "AP" entry forces the same
     // SoftAP even when credentials exist, so the user can reach web config
     // without their network (or when it's out of range).
-    if (!gCfg->wifiSsid[0] || gForceAp) {
-        const bool onboarding = !gCfg->wifiSsid[0];
+    if (!staConnectSsid()[0] || gForceAp) {
+        const bool onboarding = !staConnectSsid()[0];
         bool ok = startApMode(onboarding ? "onboarding AP" : "forced AP", onboarding);
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
@@ -5693,7 +5879,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
-    wl_status_t beginStatus = WiFi.begin(gCfg->wifiSsid, gCfg->wifiPass);
+    wl_status_t beginStatus = WiFi.begin(staConnectSsid(), staConnectPass());
     if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
         Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
         logWifiHeapDiag("STA begin failed");
@@ -5701,7 +5887,8 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
-    Serial.printf("[web] connecting to \"%s\" ...\n", gCfg->wifiSsid);
+    Serial.printf("[web] connecting to \"%s\"%s ...\n", staConnectSsid(),
+                  gStaSsidOverride[0] ? " (picker)" : "");
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
@@ -5719,6 +5906,7 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
             if (!ok) restoreUiBuffersIfNeeded();
             return ok;
         }
+        if (gWaitCb) gWaitCb();
         delay(100);
     }
 
@@ -5758,8 +5946,29 @@ void webCfgEnd() {
         gCaptiveActive = false;
     }
     server.stop();
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
+
+    // Keep the station association when the device wants WiFi anyway. Web
+    // config used to power the radio down unconditionally here, on the basis
+    // that it had brought the radio up — but when it merely *joined* the
+    // network the device was going to be on regardless, dropping the
+    // association only forces serviceWifiStation() to rebuild it, which costs a
+    // full reassociation (and an MQTT/NTP outage) for nothing.
+    //
+    // Not kept when we were hosting the SoftAP (that has to come down, and the
+    // station was never up), when WiFi is switched off in settings, or when
+    // there is no association to preserve in the first place.
+    const bool keepStation = gCfg && gCfg->wifiEnabled && !gApMode
+                             && WiFi.status() == WL_CONNECTED;
+    if (keepStation) {
+        // The one radio setting the session actually changed. webCfgBegin()
+        // turns modem power-save off because the synchronous WebServer stalls
+        // on DTIM-buffered packets; that was only ever meant to last as long as
+        // the server, and the old teardown "restored" it by killing the radio.
+        WiFi.setSleep(true);
+    } else {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+    }
 
     if (gWebBuffersReclaimed) {
         // Reallocate chat/DM buffers released in webCfgBegin() and reload
@@ -5787,13 +5996,26 @@ void webCfgEnd() {
     running     = false;
     gOnboarding = false;
     gApMode     = false;
-    Serial.println("[web] stopped");
+    Serial.printf("[web] stopped%s\n",
+                  keepStation ? " (station connection kept)" : " (radio off)");
 }
 
 bool webCfgIsOnboarding() { return gOnboarding; }
 bool webCfgIsLite() { return running && webCfgUseLite(); }
 bool webCfgChatPaused() { return running && gWebBuffersReclaimed; }
 void webCfgSetForceAp(bool force) { gForceAp = force; }
+
+void webCfgSetWaitCb(void (*cb)()) { gWaitCb = cb; }
+
+void webCfgSetStaCreds(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0]) {
+        gStaSsidOverride[0] = '\0';
+        gStaPassOverride[0] = '\0';
+        return;
+    }
+    strlcpy(gStaSsidOverride, ssid, sizeof(gStaSsidOverride));
+    strlcpy(gStaPassOverride, pass ? pass : "", sizeof(gStaPassOverride));
+}
 const char *webCfgWifiSsid() { return gWifiSsid; }
 const char *webCfgWifiPass() { return gWifiPass; }
 

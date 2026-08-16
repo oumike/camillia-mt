@@ -1,6 +1,11 @@
 #pragma once
 // SX1262 radio wrapper for init, RX polling, and blocking TX operations.
 #include <Arduino.h>
+// RadioLib raises an unconditional #warning when ARDUINO_USB_CDC_ON_BOOT=1
+// (RadioLib.h:67), advising a hardware UART for debug output. On these boards
+// USB CDC *is* the console, so the advice does not apply — it is suppressed via
+// build_src_flags in platformio.ini rather than here, because #warning is
+// emitted during preprocessing where `#pragma GCC diagnostic` does not reach it.
 #include <RadioLib.h>
 #include "mesh_proto.h"
 

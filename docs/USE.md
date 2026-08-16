@@ -44,17 +44,15 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - **Enter moves the cursor into the messages** — on chat it drops into the
   selected channel's messages; in the DM list it focuses the conversation's
   messages. Enter never opens compose.
-- **Enter again opens Node Actions for the sender** of the highlighted message —
-  the same six-action menu Enter opens on a highlighted row of the Nodes screen
-  (Traceroute, Send DM, Favorite, Request Info, Request Position, Ignore), and
-  the same T/D/F/I/P/G shortcuts work inside it. Nothing happens on your own
-  messages or on system lines. Esc closes the menu and leaves the cursor exactly
-  where it was.
-- **On touch builds, tap and hold a message** to open that same Node Actions
-  menu for its sender — no need to enter cursor mode first. Available on T-Deck,
-  Mesh Deck and Heltec; the Pager and Cardputer have no touch panel and use the
-  Enter route above. Holding your own message or a system line does nothing, and
-  the tap that ends the hold does not also select the message for reply.
+- **Enter again opens Message Actions** for the highlighted message — see
+  [Message Actions](#message-actions). Nothing happens on your own messages or
+  on system lines. Esc closes the menu and leaves the cursor exactly where it
+  was.
+- **On touch builds, tap and hold a message** to open Message Actions directly,
+  with no need to enter cursor mode first. Available on T-Deck, Mesh Deck and
+  Heltec; the Pager and Cardputer have no touch panel and use the Enter route
+  above. Holding your own message or a system line does nothing, and the tap
+  that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
 - Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI,
   ChUtil, Beacons, and Discovery except on Cardputer). Inside Discovery: W
@@ -104,7 +102,8 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 - Primary usage is touch (no dedicated hardware keyboard shortcuts)
 - Bottom touch nav: Config, DM, Nodes, Live, Help
 - DM delete trigger: long-press a conversation row
-- Tap and hold a chat message to open Node Actions for its sender. On this
+- Tap and hold a chat message to open Message Actions (reactions, Reply, and
+  the sender's node actions). On this
   build that is the only route to the menu from chat, since Enter keeps its
   new-message binding below
 - The Space/Enter remap above does **not** apply here: this build is touch-first,
@@ -266,6 +265,33 @@ a firmware update never starts obfuscating a position on its own.
 One difference from stock Meshtastic: theirs is a per-channel setting, so a node
 can be exact on a private channel and coarse on a public one. Ours is one
 device-wide value applied to every channel this node shares position on.
+
+### Battery display
+
+**Battery Display** on the Config screen (and under Display in web config)
+switches the battery indicator between the two ways of reading the same cell:
+
+- **Percent** (default) — `87%`, a state of charge derived from voltage through
+  a Li-ion discharge curve.
+- **Voltage** — `3.94V`, the number that curve is derived from.
+
+Voltage is worth switching to if you have calibrated the unit under Battery
+Calibration, or if you run a cell the standard curve does not describe. On the
+flat middle of a Li-ion curve a tenth of a volt swings the percentage by tens of
+points, so the raw reading is the steadier number to judge by there.
+
+The setting applies to the chat header and the web `BAT` chip. It changes
+nothing else:
+
+- The colored dot beside the reading still tracks **charge**, not volts, in both
+  modes — a voltage next to a green/amber/red dot is the point of the mode.
+- Device Info and the Battery Calibration modal keep showing **both** numbers;
+  that is what those screens are for.
+- What this node **transmits** is unchanged. Telemetry carries battery level and
+  voltage as it always did, so other nodes see no difference.
+
+It applies immediately with no reboot, and travels with config export/import as
+`display: battDisplay:` (`PERCENT` or `VOLTAGE`).
 
 ### Theme
 
@@ -641,6 +667,45 @@ or a tap outside dismisses the tray without sending.
 
 The web-config composer can also send any emoji your browser can type.
 
+### Message Actions
+
+Everything you can do to a single channel message lives in one menu. Open it two
+ways:
+
+- **Keyboard** — Enter to drop the cursor into the messages, scroll to one, then
+  Enter again.
+- **Touch** (T-Deck, Mesh Deck, Heltec) — tap and hold the message.
+
+**Not on the Cardputer.** That board has no PSRAM and a small LVGL pool — the
+same headroom that caps its emoji tray and leaves Discovery out — so Enter on a
+highlighted message there opens the plain Node Actions menu instead. Reactions
+are still reachable on Cardputer through the quick-emoji tray (**E**).
+
+The menu is titled `Message Actions: <sender>` and holds:
+
+- **A row of six reactions** — 👍 👎 ‼️ ❓ 😂 😢 — plus `...` for the full emoji
+  tray. Picking one sends it immediately and closes the menu. Keys **1**–**6**
+  fire the reactions, **M** opens the full tray.
+- **Reply** (**R**) — opens compose quoting that message, the same thing Space
+  does on a highlighted message.
+- The six node actions for the **sender**: Traceroute (**T**), Send DM (**D**),
+  Favorite (**F**), Request Info (**I**), Request Position (**P**) and Ignore
+  (**G**).
+
+Up/down walks the whole list including the reaction row; Esc closes and leaves
+the chat cursor where it was.
+
+A **reaction is not a new message** — it is attached to the message you picked
+it on, and other clients (the web config chat tab, the Meshtastic app) show it
+as a reaction on that message rather than as a new line. Reactions are only
+offered on other people's messages, matching the web UI.
+
+Note that reactions *received* from other nodes currently arrive as ordinary
+one-glyph messages rather than being folded into the message they target.
+
+The Nodes screen's Enter menu is unchanged and still titled **Node Actions** —
+there is no message in that context to react to or reply to.
+
 ### Chat names
 
 Config also has a **Chat Names** action, which opens a picker (same navigation as
@@ -768,8 +833,58 @@ directly.
 
 ### Choosing a Wi-Fi network
 
-The **Choose WiFi** action lists your configured network, an **AP** entry, and
-any networks found by a scan — names only.
+The **Choose WiFi** action lists your configured network, an **AP** entry, then
+up to **five remembered networks**, plus anything found by a scan — names only.
+
+**Networks are remembered across reboots.** Joining a new one does not forget
+the last: whichever network you were on moves into the remembered list, so you
+can switch back from the picker without re-entering its password. The list holds
+five besides the current network; when it is full the least recently added one
+drops off. Press **D** on a row to forget it deliberately.
+
+**The Cardputer keeps one network at a time.** It has no room for the remembered
+list, so its picker holds the configured network and the AP entry only, and
+joining a new network replaces the old one. A config imported from another board
+keeps that file's active network and drops the rest.
+
+The network you are actually connected to becomes the configured one — so a
+reboot comes back to where you left off, not to whatever was configured first.
+A network that fails to connect never displaces one that worked.
+
+Web Config manages the same list on its own **WiFi** tab, between Config and
+Utilities.
+Each remembered network gets **Use** (switch to it, keeping the current one in
+the list) and **Forget**, and there is a form to add one by name and password
+without switching to it. Switching re-associates the radio, so a browser reading
+the page over WiFi will lose the device until it joins the new network.
+
+Saved Networks is not on the AP-mode Lite page — that mode serves the Config
+pane only. Use the on-device picker when you are connected to the device's own
+access point.
+
+Every network travels with config export/import, under `wifi_networks:`. The one
+currently in use is flagged `active: true`:
+
+```yaml
+wifi_networks:
+  - ssid: HomeNet
+    pass: homesecret
+    active: true
+  - ssid: Office
+    pass: officepass
+    active: false
+```
+
+The top-level `wifi_ssid` / `wifi_pass` keys still name the active network too,
+so an older build reading the file comes up on the right one and simply ignores
+the list. On import, the entry marked `active` becomes the configured network
+and the rest are remembered. A file with no `wifi_networks:` section at all — an
+older export, or a `meshtastic --export-config` dump — leaves the remembered
+list alone rather than clearing it.
+
+Note this means an exported config now carries **every** network password you
+have saved, not just one. It was already a secret because of the channel keys
+and identity key; this is one more reason to treat it like a password.
 
 Selecting **AP** does not join a network: it brings up the device's own
 `camillia-mt` access point, so Web Config stays reachable even when a network is
@@ -846,11 +961,11 @@ Help explains shortcuts and transport symbols.
 Primary usage is touch plus keyboard shortcuts.
 
 - Use touch for channel chips and UI buttons
-- Tap and hold a chat message to open Node Actions for its sender
+- Tap and hold a chat message to open Message Actions
 - D, C, N, L open main modals; A opens Channel Actions
 - H toggles channel selector
 - Space opens compose or reply compose; Enter moves the cursor into the channel's messages,
-  and Enter again opens Node Actions for the highlighted message's sender
+  and Enter again opens Message Actions for the highlighted message
 - Optional Vim-style helpers in navigation views: J maps to Up and K maps to Down
 - Modal close key: Backspace (Esc also works)
 
@@ -863,7 +978,7 @@ Primary usage is wheel plus keyboard.
 - In row cursor mode, Wheel Up and Down moves selected chat row
 - Backspace exits row cursor mode
 - Space opens compose or reply compose; Enter moves the cursor into the channel's messages,
-  and Enter again opens Node Actions for the highlighted message's sender
+  and Enter again opens Message Actions for the highlighted message
 - H toggles channel selector
 - Config modal: Wheel Click swaps focus between action list and info panel
 - DM modal: Wheel Click swaps focus between conversation list and message list
@@ -879,7 +994,7 @@ Primary usage is keyboard.
 - H toggles channel selector
 - Escape closes modals and exits chat focus mode
 - Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages,
-  and Enter again opens Node Actions for the highlighted message's sender
+  and Enter again opens Message Actions for the highlighted message
 - Fn+Backspace is the DM delete trigger
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)

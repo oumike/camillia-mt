@@ -380,8 +380,26 @@ struct ScannedWifiEntry {
     bool secure;
 };
 
-static constexpr int kKnownWifiExtraCount = 5;
-static constexpr int kKnownWifiMaxCount = 1 + kKnownWifiExtraCount;
+// Shared with the YAML importer's scratch array — see CFG_SAVED_WIFI_MAX.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+// One network at a time on the Cardputer. It has no PSRAM and ~23 KB of
+// internal heap once Wi-Fi is up — the reason its web config is lite-only and
+// Discovery is compiled out — so it does not carry a remembered-network list,
+// its NVS blob, or the picker rows for it. The configured network and the AP
+// entry are the whole list.
+static constexpr int kKnownWifiExtraCount = 0;
+#else
+static constexpr int kKnownWifiExtraCount = CFG_SAVED_WIFI_MAX;
+#endif
+// Configured network + the "AP" entry + the remembered ones. This was 1 + extras
+// and so one slot short: with the list full, populateKnownWifiEntries() ran out
+// of room and the last remembered network never appeared in the picker.
+static constexpr int kKnownWifiMaxCount = 2 + kKnownWifiExtraCount;
+// Never zero: a zero-length array is a GNU extension, and every loop below is
+// bounded by kKnownWifiExtraCount rather than by this, so the spare slot on
+// Cardputer is allocated but never written.
+static constexpr int kKnownWifiSlotAlloc =
+    (kKnownWifiExtraCount > 0) ? kKnownWifiExtraCount : 1;
 static constexpr int kScannedWifiMaxCount = 20;
 
 static KnownWifiEntry s_cfgKnownWifi[kKnownWifiMaxCount] = {};
@@ -392,8 +410,20 @@ static int s_cfgWifiScanSelection = 0;
 // network — it forces the device's own SoftAP (see wifiForceApMode()).
 static const char kForceApSsid[] = "AP";
 static bool s_wifiUsingKnownOverride = false;
-static KnownWifiEntry s_cfgKnownWifiAdded[kKnownWifiExtraCount] = {};
+// Networks remembered besides the configured one, so switching between them
+// does not forget where you were. Persisted (see saveKnownWifiNetworks): this
+// list used to be RAM only, which is why joining a second network lost the
+// first one on the next boot. Oldest is evicted when it fills up.
+static KnownWifiEntry s_cfgKnownWifiAdded[kKnownWifiSlotAlloc] = {};
 static int s_cfgKnownWifiAddedCount = 0;
+static void saveKnownWifiNetworks();
+static void loadKnownWifiNetworks();
+// Make `ssid` the configured network, remembering whichever one it replaces.
+static void wifiSetConfiguredNetwork(const char *ssid, const char *pass);
+// Next station reconnect attempt. Declared here with the other WiFi state
+// rather than beside serviceWifiStation(): the saved-network bridge below
+// clears it to re-associate promptly after a switch.
+static uint32_t s_wifiStaKickMs       = 0;
 static ScannedWifiEntry s_cfgScannedWifi[kScannedWifiMaxCount] = {};
 static int s_cfgScannedWifiCount = 0;
 static char s_cfgWifiPassTargetSsid[33] = {};
@@ -631,7 +661,6 @@ static bool s_nodesFilterOpen = false;
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
 static constexpr int kNodesActionCount = 6;
 static lv_obj_t *s_nodesActionModal = nullptr;
-static lv_obj_t *s_nodesActionRows[kNodesActionCount] = {};
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
 // Action ordering (also referenced by executeNodesActionSelection):
@@ -640,6 +669,74 @@ static uint32_t s_nodesActionNodeId = 0;
 static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     'T', 'D', 'F', 'I', 'P', 'G'
 };
+
+// The six reactions Message Actions offers on a chat message. Deliberately the
+// same set, in the same order, as CHAT_TAPS in web_config.cpp — a reaction
+// should be the same thing whether it was sent from the device or the browser.
+// Keep the two lists in step.
+static const char *const kTapbackTray[] = {
+    "\U0001F44D", "\U0001F44E", "\U0000203C", "\U00002753", "\U0001F602", "\U0001F622",
+};
+static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTapbackTray[0]));
+
+// ── Message Actions ──────────────────────────────────────────────────────────
+// Off on the Cardputer. The modal would add seven emoji cells to a board with
+// no PSRAM and a 96 KB LVGL pool — the same headroom that caps its emoji tray at
+// 40 glyphs and compiles Discovery out entirely. Chat there keeps the plain node
+// menu; the quick-emoji tray on E is still the way to send a reaction.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_MESSAGE_ACTIONS 0
+#else
+#define HAS_MESSAGE_ACTIONS 1
+#endif
+
+// The same modal opened from a chat message rather than a node row. It keeps
+// the six node actions and prepends the things that only make sense about a
+// message: the tapback reactions, an escape to the full emoji tray, and Reply.
+//
+// One flat index space so up/down and the selection highlight need no special
+// cases — the tapbacks are rows like any other, they just render as a strip of
+// glyph cells above the two-column grid instead of inside it.
+//
+//   0 .. 5  tapback reactions (kTapbackTray)
+//   6       "..."  -> full emoji picker in tapback mode
+//   7       Reply
+//   8 ..12  node actions, via kMsgActionNodeMap
+//
+// Favorite is deliberately absent from message mode. It is a property of the
+// node rather than anything to do with the message, it is the one action here
+// with no bearing on the conversation, and dropping it also makes the button
+// grid come out even — Reply plus five actions is three full rows, where seven
+// buttons left a half-empty row of padding under the menu. The Nodes screen
+// still offers it.
+static constexpr uint8_t kMsgActionNodeMap[] = { 0, 1, 3, 4, 5 };   // skips 2 = Favorite
+static constexpr int kMsgActionNodeCount =
+    (int)(sizeof(kMsgActionNodeMap) / sizeof(kMsgActionNodeMap[0]));
+static constexpr int kMsgActionMoreIdx  = kTapbackTrayCount;        // 6
+static constexpr int kMsgActionReplyIdx = kMsgActionMoreIdx + 1;    // 7
+static constexpr int kMsgActionNodeBase = kMsgActionReplyIdx + 1;   // 8
+static constexpr int kMsgActionCount    = kMsgActionNodeBase + kMsgActionNodeCount;  // 13
+static constexpr char kMsgActionShortcuts[kMsgActionCount] = {
+    '1', '2', '3', '4', '5', '6',   // tapbacks
+    'M',                            // more emoji
+    'R',                            // reply
+    'T', 'D', 'I', 'P', 'G'         // node actions, minus (F)avorite
+};
+
+// Sized for the larger of the two modes.
+static lv_obj_t *s_nodesActionRows[kMsgActionCount] = {};
+// True while the modal is acting on a message rather than a bare node.
+static bool s_nodesActionMsgMode = false;
+// The message being acted on. Message mode requires it to be non-zero — without
+// a packet id there is nothing to react to or reply to.
+static uint32_t s_nodesActionPacketId = 0;
+
+static inline int activeActionCount() {
+    return s_nodesActionMsgMode ? kMsgActionCount : kNodesActionCount;
+}
+static inline const char *activeActionShortcuts() {
+    return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
+}
 
 // Channel Actions modal: overlay opened with (A) from the main screen. Acts on
 // the active channel. Holds the (M)ute/Un(m)ute and (L)ocation toggles,
@@ -774,6 +871,10 @@ static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
 static char s_lastHeaderTime[8] = "";
 static uint8_t s_lastBattPct = 255;
+// Battery voltage in hundredths, cached alongside the percentage so the header
+// early-out notices a change in either. 0xFFFF is the "not yet drawn" sentinel,
+// matching s_lastBattPct's 255.
+static uint16_t s_lastBattCentiV = 0xFFFF;
 static uint8_t s_lastGpsSats = 255;
 static bool s_lastGpsEnabled = false;
 static bool s_lastGpsFix = false;
@@ -1341,7 +1442,11 @@ static void refreshNodesDetails();
 static void onNodeSnapshotPressed(lv_event_t *e);
 static void onNodesActionRowPressed(lv_event_t *e);
 static void openNodesActionMenu();
-static void openNodesActionMenuFor(uint32_t nodeId);
+static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode = false,
+                                   uint32_t packetId = 0);
+// Message Actions: the same modal with the tapback/Reply rows, acting on a chat
+// message. Falls back to the node menu when there is no packet id.
+static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
 static void closeNodesActionMenu();
 static void refreshNodesActionMenuSelection();
 static void executeNodesActionSelection();
@@ -1424,6 +1529,12 @@ static void setChannelDropdownVisible(bool visible);
 static void refreshChannelSelectorLabel();
 static void onChannelSelectorPressed(lv_event_t *e);
 static void drawBootSplash();
+// Boot-progress line on the splash. Defined with drawBootSplash(); declared here
+// because the station-connect wait in bootTimeNtpSyncDirectSta() sits above it
+// and pumps the tick so the dots keep moving through the wait.
+static void bootSplashStatus(const char *msg);
+static void bootSplashTick();
+static void bootSplashStatusEnd();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
 #if defined(DEVICE_MESH_DECK)
@@ -1749,6 +1860,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_BRIGHTNESS,
+    CFG_ACTION_BATT_DISPLAY,
     #if HAS_SCROLL_INVERT
     CFG_ACTION_INVERT_SCROLL,
     #endif
@@ -3028,6 +3140,9 @@ static void populateKnownWifiEntries() {
 
 static void addTempKnownWifi(const char *ssid, const char *pass) {
     if (!ssid || !ssid[0]) return;
+    // No remembered list on this board (see kKnownWifiExtraCount). Returning
+    // here also keeps the rolling-window eviction below from indexing [-1].
+    if (kKnownWifiExtraCount <= 0) return;
 
     // "AP" is the picker's force-SoftAP sentinel, not a joinable network; a
     // scanned network by that name would shadow it.
@@ -3055,6 +3170,7 @@ static void addTempKnownWifi(const char *ssid, const char *pass) {
 
     if (s_cfgKnownWifiAddedCount < kKnownWifiExtraCount) {
         s_cfgKnownWifiAdded[s_cfgKnownWifiAddedCount++] = newEntry;
+        saveKnownWifiNetworks();
         return;
     }
 
@@ -3063,7 +3179,155 @@ static void addTempKnownWifi(const char *ssid, const char *pass) {
         s_cfgKnownWifiAdded[i - 1] = s_cfgKnownWifiAdded[i];
     }
     s_cfgKnownWifiAdded[kKnownWifiExtraCount - 1] = newEntry;
+    saveKnownWifiNetworks();
 }
+
+// Drop a network from the remembered list. Used when it becomes the configured
+// one: slot 0 already shows it, and a second copy in the list is both confusing
+// and the thing that would re-introduce a RAM-only override if picked.
+static void forgetSavedWifi(const char *ssid) {
+    if (!ssid || !ssid[0]) return;
+    int w = 0;
+    bool removed = false;
+    for (int i = 0; i < s_cfgKnownWifiAddedCount; i++) {
+        if (strncmp(s_cfgKnownWifiAdded[i].ssid, ssid,
+                    sizeof(s_cfgKnownWifiAdded[i].ssid)) == 0) {
+            removed = true;
+            continue;
+        }
+        if (w != i) s_cfgKnownWifiAdded[w] = s_cfgKnownWifiAdded[i];
+        w++;
+    }
+    if (!removed) return;
+    for (int i = w; i < s_cfgKnownWifiAddedCount; i++) {
+        memset(&s_cfgKnownWifiAdded[i], 0, sizeof(s_cfgKnownWifiAdded[i]));
+    }
+    s_cfgKnownWifiAddedCount = w;
+    saveKnownWifiNetworks();
+}
+
+// Switch the configured network, keeping the one it replaces in the remembered
+// list. This is the whole point of the list: joining network B should not lose
+// network A, so you can switch back without re-entering its password.
+//
+// Order matters. s_cfg is updated *first* so that addTempKnownWifi()'s "don't
+// duplicate the configured network" guard compares the outgoing network against
+// the *new* configured one rather than against itself, which would make it skip
+// the very entry we are trying to keep.
+static void wifiSetConfiguredNetwork(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0]) return;
+
+    KnownWifiEntry previous = {};
+    strncpy(previous.ssid, s_cfg.wifiSsid, sizeof(previous.ssid) - 1);
+    strncpy(previous.pass, s_cfg.wifiPass, sizeof(previous.pass) - 1);
+    const bool sameNetwork =
+        strncmp(previous.ssid, ssid, sizeof(previous.ssid)) == 0;
+
+    utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), ssid);
+    utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), pass ? pass : "");
+
+    if (!sameNetwork && previous.ssid[0]) {
+        addTempKnownWifi(previous.ssid, previous.pass);
+    }
+    // Whatever we just made configured must not also sit in the remembered list.
+    forgetSavedWifi(s_cfg.wifiSsid);
+}
+
+// ── Remembered-network bridge for config export/import ───────────────────────
+// Declared in config_io.h. cfgToYaml()/cfgFromYaml() live in config_io.cpp,
+// which has no view of the picker's array or its NVS blob; these are the whole
+// of what it needs.
+
+int cfgSavedWifiCount() { return s_cfgKnownWifiAddedCount; }
+
+bool cfgSavedWifiAt(int idx, char *ssidOut, size_t ssidCap, char *passOut, size_t passCap) {
+    if (idx < 0 || idx >= s_cfgKnownWifiAddedCount) return false;
+    if (ssidOut && ssidCap) utf8util::copyTruncate(ssidOut, ssidCap, s_cfgKnownWifiAdded[idx].ssid);
+    if (passOut && passCap) utf8util::copyTruncate(passOut, passCap, s_cfgKnownWifiAdded[idx].pass);
+    return true;
+}
+
+void cfgSavedWifiClear() {
+    s_cfgKnownWifiAddedCount = 0;
+    memset(s_cfgKnownWifiAdded, 0, sizeof(s_cfgKnownWifiAdded));
+}
+
+void cfgSavedWifiAdd(const char *ssid, const char *pass) {
+    // Deliberately not addTempKnownWifi(): that one refuses anything matching
+    // the configured SSID, and during an import the caller has already decided
+    // which entry is the active one. Duplicates are filtered there instead.
+    if (!ssid || !ssid[0]) return;
+    // Also covers boards with no remembered list: a config imported from a
+    // multi-network device keeps its active network and drops the rest.
+    if (s_cfgKnownWifiAddedCount >= kKnownWifiExtraCount) return;
+    KnownWifiEntry &e = s_cfgKnownWifiAdded[s_cfgKnownWifiAddedCount++];
+    memset(&e, 0, sizeof(e));
+    strncpy(e.ssid, ssid, sizeof(e.ssid) - 1);
+    strncpy(e.pass, pass ? pass : "", sizeof(e.pass) - 1);
+}
+
+void cfgSavedWifiCommit() {
+    saveKnownWifiNetworks();
+    populateKnownWifiEntries();
+}
+
+bool cfgSavedWifiRemember(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0]) return false;
+    // Refuses the AP sentinel and the configured network, and persists itself.
+    if (!strncmp(ssid, kForceApSsid, sizeof(kForceApSsid))) return false;
+    if (!strncmp(ssid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid))) return false;
+    addTempKnownWifi(ssid, pass);
+    populateKnownWifiEntries();
+    return true;
+}
+
+bool cfgSavedWifiRemove(const char *ssid) {
+    if (!ssid || !ssid[0]) return false;
+    const int before = s_cfgKnownWifiAddedCount;
+    forgetSavedWifi(ssid);   // persists when it removes something
+    if (s_cfgKnownWifiAddedCount == before) return false;
+    populateKnownWifiEntries();
+    return true;
+}
+
+// Promote a remembered network to being the configured one. The network it
+// replaces goes into the remembered list, so this is a swap rather than a
+// replacement and switching back stays one click away.
+bool cfgSavedWifiActivate(const char *ssid) {
+    if (!ssid || !ssid[0]) return false;
+
+    // Copy the credentials out before mutating: wifiSetConfiguredNetwork()
+    // rewrites the very array we would otherwise still be pointing into.
+    char pickSsid[sizeof(s_cfgKnownWifiAdded[0].ssid)] = {};
+    char pickPass[sizeof(s_cfgKnownWifiAdded[0].pass)] = {};
+    bool found = false;
+    for (int i = 0; i < s_cfgKnownWifiAddedCount; i++) {
+        if (strncmp(s_cfgKnownWifiAdded[i].ssid, ssid,
+                    sizeof(s_cfgKnownWifiAdded[i].ssid)) != 0) {
+            continue;
+        }
+        utf8util::copyTruncate(pickSsid, sizeof(pickSsid), s_cfgKnownWifiAdded[i].ssid);
+        utf8util::copyTruncate(pickPass, sizeof(pickPass), s_cfgKnownWifiAdded[i].pass);
+        found = true;
+        break;
+    }
+    if (!found) return false;
+
+    wifiSetConfiguredNetwork(pickSsid, pickPass);
+    // Any picker override would keep feeding the old network to
+    // wifiGetActiveCreds() and undo the switch on the next reconnect.
+    s_wifiUsingKnownOverride = false;
+    memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+    memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+    persistWifiForceAp();
+    syncWifiCredsToPrefs();
+    flushConfigIfDirty();    // not debounced: the reconnect below may cost us the session
+    populateKnownWifiEntries();
+    s_wifiStaKickMs = 0;     // re-associate promptly
+    Serial.printf("[wifi] web config switched to \"%s\"\n", s_cfg.wifiSsid);
+    return true;
+}
+
 
 static void wifiGetActiveCreds(const char **ssidOut, const char **passOut) {
     const char *ssid = s_cfg.wifiSsid;
@@ -3091,6 +3355,25 @@ static bool wifiHasActiveCreds() {
     const char *ssid = nullptr;
     wifiGetActiveCreds(&ssid, nullptr);
     return ssid && ssid[0];
+}
+
+// Hand web config the network the device is actually using, right before it
+// brings the radio up. The on-device WiFi picker can override the configured
+// network without writing back to the config — deliberately, so choosing a
+// network once does not overwrite the user's saved default — which means web
+// config cannot find that choice on its own. Without this it dials the *stored*
+// SSID, times out, and drops to AP fallback, taking the device off the network
+// it was reachable on a moment earlier.
+//
+// Pairs with webCfgSetForceAp() at the same call sites; forced-AP mode reports
+// no station credentials, so this pushes an empty override and the AP branch
+// takes over.
+static void webCfgPushActiveCreds() {
+    const char *ssid = nullptr;
+    const char *pass = nullptr;
+    wifiGetActiveCreds(&ssid, &pass);
+    if (wifiForceApMode()) { ssid = nullptr; pass = nullptr; }
+    webCfgSetStaCreds(ssid, pass);
 }
 
 #if HAS_VNC_HOST
@@ -3219,6 +3502,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_UNITS:
             snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
+            break;
+        case CFG_ACTION_BATT_DISPLAY:
+            snprintf(buf, bufLen, "Battery Display: %s",
+                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
             break;
         case CFG_ACTION_CHAT_STYLE:
             snprintf(buf, bufLen, "Chat Style: %s", chatStyleName(s_cfg.chatStyle));
@@ -3745,8 +4032,53 @@ static bool otaWorkerReconnectWifiForLowMemRetry() {
 // within one interval rather than being permanently slow.
 static constexpr uint32_t kWifiKickMinMs = 10000UL;
 static constexpr uint32_t kWifiKickMaxMs = 300000UL;
-static uint32_t s_wifiStaKickMs       = 0;
 static uint32_t s_wifiStaKickIntervalMs = kWifiKickMinMs;
+
+// Remember the network we actually associated with, by making it the configured
+// one. The WiFi picker's choice is a RAM-only override (see wifiGetActiveCreds),
+// so without this a device that joined a network from the picker reverts to the
+// old configured SSID on the next boot — "it forgot my network".
+//
+// Runs on a *successful* association only, which is the point: a network that
+// would not connect never displaces one that did. Fires once per override,
+// since promoting clears the override that triggered it.
+static void wifiPromoteConnectedNetwork() {
+    if (!s_wifiUsingKnownOverride || !s_wifiSelectedSsid[0]) return;
+    // "AP" is the force-SoftAP sentinel, not a joinable network. It cannot reach
+    // here anyway (wifiHasActiveCreds() reports none for it, so the station
+    // service returns before connecting), but promoting it would write a network
+    // literally named "AP" into the config.
+    if (wifiForceApMode()) return;
+
+    const bool sameAsConfigured =
+        strncmp(s_wifiSelectedSsid, s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid)) == 0 &&
+        strncmp(s_wifiSelectedPass, s_cfg.wifiPass, sizeof(s_cfg.wifiPass)) == 0;
+
+    if (!sameAsConfigured) {
+        // Keeps the network being replaced in the remembered list, so switching
+        // back to it later does not mean re-entering its password.
+        wifiSetConfiguredNetwork(s_wifiSelectedSsid, s_wifiSelectedPass);
+        syncWifiCredsToPrefs();
+        Serial.printf("[wifi] connected to \"%s\" - saved as the configured network\n",
+                      s_cfg.wifiSsid);
+    }
+
+    // Drop the override either way: it has served its purpose, and leaving it
+    // set would keep the picker anchored to a runtime value that no longer
+    // differs from the configured one.
+    s_wifiUsingKnownOverride = false;
+    memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
+    memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
+    // Clearing the override also drops any persisted "AP" choice, which would
+    // otherwise force the SoftAP on the next boot and mask the network just
+    // saved — same reasoning as the connect-dialog path.
+    persistWifiForceAp();
+
+    // Slot 0 now holds the network we are on, so rebuilding re-anchors the
+    // picker selection to it.
+    populateKnownWifiEntries();
+    refreshCfgWifiPickerModal();   // no-op unless the picker is open
+}
 
 static void serviceWifiStation(uint32_t now) {
     // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
@@ -3760,6 +4092,9 @@ static void serviceWifiStation(uint32_t now) {
     if (WiFi.status() == WL_CONNECTED) {
         // Associated: next disconnection gets a prompt retry again.
         s_wifiStaKickIntervalMs = kWifiKickMinMs;
+        // This is the only place that knows an association actually succeeded,
+        // so it is where a picked network earns its place in the config.
+        wifiPromoteConnectedNetwork();
         return;
     }
     if (s_wifiStaKickMs != 0 && (now - s_wifiStaKickMs) < s_wifiStaKickIntervalMs) return;
@@ -4662,6 +4997,7 @@ static void wakeScreen() {
     s_lastRenderedLiveScrollOff = -1;
     s_lastHeaderTime[0] = '\0';
     s_lastBattPct = 255;
+    s_lastBattCentiV = 0xFFFF;
     s_lastGpsSats = 255;
     Serial.println("[screen] woke");
 }
@@ -4841,6 +5177,98 @@ struct CfgBlobHeader {
 // RAM to spare. Only the UI thread touches it, and never re-entrantly.
 static uint8_t s_cfgBlobBuf[sizeof(CfgBlobHeader) + sizeof(RhinoConfig)];
 
+// ── Remembered WiFi networks ─────────────────────────────────────────────────
+// Its own blob rather than fields on RhinoConfig: 5 x 128 bytes would grow the
+// settings blob by two-thirds, and that one is rewritten on every settings
+// change while this list only moves when a network is added, replaced or
+// deleted. Same versioned-header shape as the config blob, so a build whose
+// layout we cannot interpret falls back to "no remembered networks" rather than
+// reading someone else's bytes as SSIDs.
+static constexpr const char *kWifiNetsBlobKey     = "wifiNets";
+static constexpr uint16_t    kWifiNetsBlobVersion = 1;
+
+struct WifiNetsBlobHeader {
+    uint16_t version;
+    uint16_t count;      // KnownWifiEntry records following the header
+};
+
+static void saveKnownWifiNetworks() {
+    if (kKnownWifiExtraCount <= 0) return;   // nothing to remember on this board
+    uint8_t buf[sizeof(WifiNetsBlobHeader) + sizeof(s_cfgKnownWifiAdded)] = {};
+    int n = s_cfgKnownWifiAddedCount;
+    if (n < 0) n = 0;
+    if (n > kKnownWifiExtraCount) n = kKnownWifiExtraCount;
+
+    const WifiNetsBlobHeader hdr = { kWifiNetsBlobVersion, (uint16_t)n };
+    memcpy(buf, &hdr, sizeof(hdr));
+    memcpy(buf + sizeof(hdr), s_cfgKnownWifiAdded, sizeof(s_cfgKnownWifiAdded));
+
+    Preferences p;
+    if (!p.begin("camillia", false)) {
+        Serial.println("[wifi] saved-networks write FAILED: cannot open NVS");
+        return;
+    }
+    const size_t wrote = p.putBytes(kWifiNetsBlobKey, buf, sizeof(buf));
+    p.end();
+    if (wrote != sizeof(buf)) {
+        Serial.printf("[wifi] saved-networks write FAILED: %u of %u bytes\n",
+                      (unsigned)wrote, (unsigned)sizeof(buf));
+    } else {
+        Serial.printf("[wifi] remembered %d network(s)\n", n);
+    }
+}
+
+static void loadKnownWifiNetworks() {
+    s_cfgKnownWifiAddedCount = 0;
+    memset(s_cfgKnownWifiAdded, 0, sizeof(s_cfgKnownWifiAdded));
+    // Boards without a remembered list stay at zero. A blob left by an older
+    // build, or by a config imported from another board, is simply not read.
+    if (kKnownWifiExtraCount <= 0) return;
+
+    Preferences p;
+    if (!p.begin("camillia", true)) return;
+    if (!p.isKey(kWifiNetsBlobKey)) { p.end(); return; }
+
+    uint8_t buf[sizeof(WifiNetsBlobHeader) + sizeof(s_cfgKnownWifiAdded)] = {};
+    const size_t got = p.getBytes(kWifiNetsBlobKey, buf, sizeof(buf));
+    p.end();
+    if (got < sizeof(WifiNetsBlobHeader)) return;
+
+    WifiNetsBlobHeader hdr = {};
+    memcpy(&hdr, buf, sizeof(hdr));
+    if (hdr.version != kWifiNetsBlobVersion) {
+        Serial.printf("[wifi] saved-networks blob v%u unusable (want v%u)\n",
+                      (unsigned)hdr.version, (unsigned)kWifiNetsBlobVersion);
+        return;
+    }
+
+    int n = (int)hdr.count;
+    if (n < 0) n = 0;
+    if (n > kKnownWifiExtraCount) n = kKnownWifiExtraCount;
+    // Only copy what actually arrived: a blob written by a build with a smaller
+    // entry array must not be read past its end.
+    const size_t avail = got - sizeof(WifiNetsBlobHeader);
+    const int fits = (int)(avail / sizeof(KnownWifiEntry));
+    if (n > fits) n = fits;
+    memcpy(s_cfgKnownWifiAdded, buf + sizeof(hdr), (size_t)n * sizeof(KnownWifiEntry));
+
+    // Drop anything that did not survive the round trip intact, so a corrupt
+    // record cannot show up in the picker as a nameless row.
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+        s_cfgKnownWifiAdded[i].ssid[sizeof(s_cfgKnownWifiAdded[i].ssid) - 1] = '\0';
+        s_cfgKnownWifiAdded[i].pass[sizeof(s_cfgKnownWifiAdded[i].pass) - 1] = '\0';
+        if (!s_cfgKnownWifiAdded[i].ssid[0]) continue;
+        if (w != i) s_cfgKnownWifiAdded[w] = s_cfgKnownWifiAdded[i];
+        w++;
+    }
+    for (int i = w; i < kKnownWifiExtraCount; i++) {
+        memset(&s_cfgKnownWifiAdded[i], 0, sizeof(s_cfgKnownWifiAdded[i]));
+    }
+    s_cfgKnownWifiAddedCount = w;
+    Serial.printf("[wifi] loaded %d remembered network(s)\n", w);
+}
+
 // What the boot-time settings load actually did. loadConfigFromPrefs() runs
 // before USB CDC enumerates, so its Serial output is never seen on these
 // boards (same reason logNvsHealth() is repeated at the end of setup()).
@@ -4900,18 +5328,21 @@ static int removeLegacyConfigKeys() {
 }
 
 static void persistConfigToPrefs() {
-    // Web config edits land in its own copies of the credentials first; fold
-    // them back into s_cfg so the blob is written from a single source.
-    const char *wifiSsid = webCfgWifiSsid();
-    const char *wifiPass = webCfgWifiPass();
-    if (wifiSsid && wifiSsid[0]) {
-        strncpy(s_cfg.wifiSsid, wifiSsid, sizeof(s_cfg.wifiSsid) - 1);
-        s_cfg.wifiSsid[sizeof(s_cfg.wifiSsid) - 1] = '\0';
-    }
-    if (wifiPass && wifiPass[0]) {
-        strncpy(s_cfg.wifiPass, wifiPass, sizeof(s_cfg.wifiPass) - 1);
-        s_cfg.wifiPass[sizeof(s_cfg.wifiPass) - 1] = '\0';
-    }
+    // s_cfg is the single source of truth for credentials; nothing is folded in
+    // from web config here.
+    //
+    // This used to copy webCfgWifiSsid()/webCfgWifiPass() over s_cfg whenever
+    // they were non-empty, on the theory that web edits landed there first. They
+    // do not: both web paths that accept credentials (handlePostSave and
+    // handlePostOnboard) already write gCfg->wifiSsid themselves before invoking
+    // this save. What those globals actually hold the rest of the time is a
+    // *mirror* seeded from the config when the server starts — so the fold-back
+    // could not tell a pending edit from a stale copy, and the stale copy won.
+    //
+    // The effect was that any network joined on the device — the WiFi picker's
+    // connect dialog, or a promoted association — was written to the blob and
+    // then immediately overwritten by whatever SSID web config had last mirrored,
+    // so the new network never survived a reboot.
 
     // Sized off the array, never off a pointer to it: a decayed `uint8_t *buf`
     // here made sizeof() four bytes, so saves stored the header alone and every
@@ -5964,6 +6395,9 @@ static void closeComposePrompt() {
 // via the emoji fallback font. The set is intentionally a small curated tray of
 // the everyday ones, not the whole 1,489-glyph font — a full grid would be
 // unusable to scroll on these panels.
+// The tapback reactions live up with the Message Actions constants, which
+// derive their index layout from the size of that list.
+
 static const char *const kEmojiTray[] = {
     // Faces
     "\U0001F600", "\U0001F602", "\U0001F603", "\U0001F604", "\U0001F609",
@@ -6917,6 +7351,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
+    // Unconditional: every supported board reads a battery voltage, so there is
+    // no board this row would have nothing to show.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_DISPLAY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
@@ -7463,6 +7900,7 @@ static void applyCfgWifiSelection(int idx) {
     // to be restarted to move between the SoftAP and the station network.
     if (s_webCfgEnabled && webCfgRunning()) {
         webCfgEnd();
+        webCfgPushActiveCreds();
 #if HAS_FILE_STORAGE
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
@@ -7520,9 +7958,9 @@ static int nextUsableKnownWifiIndex() {
 // removing it has to clear the blob *and* the pre-blob standalone NVS keys —
 // loadConfigFromPrefs() still reads those as a migration fallback and would
 // otherwise hand the deleted SSID straight back on the next boot — *and* the
-// copies web config keeps, which persistConfigToPrefs() folds back in whenever
-// they are non-empty. Everything below slot 1 is a session-scoped entry learned
-// from a scan/connect, so for those the array is the only storage there is.
+// copies web config keeps, so a later save cannot restore what was just removed.
+// Everything below slot 1 is a remembered network, held in its own NVS blob, so
+// those deletions have to be written back through saveKnownWifiNetworks().
 static void deleteSelectedKnownWifi() {
     const int idx = s_cfgWifiSelection;
     const char *whyNot = nullptr;
@@ -7569,6 +8007,9 @@ static void deleteSelectedKnownWifi() {
             s_cfgKnownWifiAddedCount--;
             memset(&s_cfgKnownWifiAdded[s_cfgKnownWifiAddedCount], 0,
                    sizeof(s_cfgKnownWifiAdded[0]));
+            // These are persisted now, so a deletion has to reach flash too —
+            // otherwise the entry comes straight back on the next boot.
+            saveKnownWifiNetworks();
             break;
         }
     }
@@ -7717,14 +8158,16 @@ static void openCfgWifiDeleteConfirm() {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     // Says what else the delete will do while it can still be called off — the
     // reconnect is the part nobody expects from a list keystroke.
+    //
+    // Deliberately does not name the replacement. nextUsableKnownWifiIndex()
+    // answers correctly *after* the delete, when slot 0 holds whatever is left;
+    // asked here, before anything is removed, slot 0 is still the network being
+    // deleted — so it used to promise "rhinohome ... will switch to rhinohome".
     if (isActive) {
-        const int fallback = nextUsableKnownWifiIndex();
-        if (fallback == kForceApWifiIndex) {
-            lv_label_set_text_fmt(body, "%s\nIn use - will disconnect and start AP mode", ssid);
-        } else {
-            lv_label_set_text_fmt(body, "%s\nIn use - will switch to %s", ssid,
-                                  s_cfgKnownWifi[fallback].ssid);
-        }
+        lv_label_set_text_fmt(body,
+                              "%s\nIn use - will switch to the next configured "
+                              "WiFi network, or AP mode if none is available",
+                              ssid);
     } else {
         lv_label_set_text(body, ssid);
     }
@@ -11598,14 +12041,40 @@ static void refreshCfgWifiScanModal(bool runScan) {
         }
         lv_timer_handler();
 
+        // A scan needs a station interface. Coming from OFF the driver has only
+        // just been started, and coming from AP-only there is no station at all;
+        // in both cases scanNetworks() can return before the interface is ready,
+        // so give it a moment rather than asking immediately.
         wifi_mode_t mode = WiFi.getMode();
         if (mode == WIFI_OFF) {
             WiFi.mode(WIFI_STA);
+            delay(150);
         } else if (mode == WIFI_AP) {
             WiFi.mode(WIFI_AP_STA);
+            delay(150);
         }
 
+        // An association attempt in flight makes a scan fail outright, and
+        // serviceWifiStation() kicks one every few seconds whenever credentials
+        // exist and the station is not up. Only when we are not already
+        // associated — scanning from a live connection is fine, and dropping it
+        // to look at a list would be a poor trade.
+        if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false);
+
         int found = WiFi.scanNetworks();
+        if (found < 0) {
+            // WIFI_SCAN_FAILED / WIFI_SCAN_RUNNING. Usually the driver still
+            // settling after a mode change, or left busy by a web-config AP that
+            // was just torn down. One retry costs a moment and clears most of
+            // them; the alternative is telling the user there are no networks
+            // when we never actually looked.
+            Serial.printf("[wifi] scan returned %d, retrying\n", found);
+            WiFi.scanDelete();
+            delay(400);
+            found = WiFi.scanNetworks();
+        }
+        Serial.printf("[wifi] scan found %d network(s)\n", found);
+
         if (found > 0) {
             for (int i = 0; i < found && s_cfgScannedWifiCount < kScannedWifiMaxCount; i++) {
                 String ssid = WiFi.SSID(i);
@@ -11632,7 +12101,13 @@ static void refreshCfgWifiScanModal(bool runScan) {
                 lv_label_set_text(s_cfgWifiScanStatus, status);
             }
         } else if (s_cfgWifiScanStatus) {
-            lv_label_set_text(s_cfgWifiScanStatus, "No networks found");
+            // "None in range" and "the scan did not run" are different answers,
+            // and only one of them is worth retrying. Reporting both as "No
+            // networks found" is what made a transient radio state look like
+            // there was nothing out there.
+            lv_label_set_text(s_cfgWifiScanStatus,
+                              (found < 0) ? "Scan failed - Rescan to try again"
+                                          : "No networks found");
         }
         WiFi.scanDelete();
     }
@@ -11751,14 +12226,15 @@ static void cfgWifiConnectFromPassModal() {
     }
 
     if (connected) {
-        addTempKnownWifi(s_cfgWifiPassTargetSsid, pass);
         s_wifiStaKickMs = 0;
 
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "WiFi connected: %s", s_cfgWifiPassTargetSsid);
         if (s_cfgWifiPickerOnboardingMode) {
             // Onboarding keeps this a runtime override on purpose: the scratch
             // copied below is what onboardingFinalize() folds into s_cfg once
-            // the whole flow is confirmed.
+            // the whole flow is confirmed. The network is not the configured one
+            // yet, so it needs a temp entry to stay in the picker list.
+            addTempKnownWifi(s_cfgWifiPassTargetSsid, pass);
             s_wifiUsingKnownOverride = true;
             strncpy(s_wifiSelectedSsid, s_cfgWifiPassTargetSsid, sizeof(s_wifiSelectedSsid) - 1);
             strncpy(s_wifiSelectedPass, pass, sizeof(s_wifiSelectedPass) - 1);
@@ -11783,8 +12259,12 @@ static void cfgWifiConnectFromPassModal() {
         // exactly that condition — so nothing ever reached the settings blob and
         // the next boot came up in the onboarding AP. A freshly erased device
         // hid this by going through onboarding, whose scratch does reach s_cfg.
-        utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_cfgWifiPassTargetSsid);
-        utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), pass ? pass : "");
+        //
+        // wifiSetConfiguredNetwork() also moves the network being replaced into
+        // the remembered list, so adding a second network does not lose the
+        // first — and it makes sure the new one is not listed twice, as both the
+        // configured entry and a remembered copy.
+        wifiSetConfiguredNetwork(s_cfgWifiPassTargetSsid, pass);
         s_wifiUsingKnownOverride = false;
         memset(s_wifiSelectedSsid, 0, sizeof(s_wifiSelectedSsid));
         memset(s_wifiSelectedPass, 0, sizeof(s_wifiSelectedPass));
@@ -13355,6 +13835,8 @@ static void closeNodesModal() {
     memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
     s_nodesActionSelection = 0;
     s_nodesActionNodeId = 0;
+    s_nodesActionPacketId = 0;
+    s_nodesActionMsgMode = false;
     memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 }
@@ -15258,7 +15740,8 @@ static void refreshNodesActionMenuSelection() {
     const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
     const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
 
-    for (int i = 0; i < kNodesActionCount; i++) {
+    const int count = activeActionCount();
+    for (int i = 0; i < count; i++) {
         lv_obj_t *row = s_nodesActionRows[i];
         if (!row) continue;
         bool selected = (i == s_nodesActionSelection);
@@ -15273,6 +15756,8 @@ static void closeNodesActionMenu() {
     lvObjDeleteSafe(s_nodesActionModal);
     s_nodesActionSelection = 0;
     s_nodesActionNodeId = 0;
+    s_nodesActionPacketId = 0;
+    s_nodesActionMsgMode = false;
     memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
 }
 
@@ -15280,6 +15765,49 @@ static void executeNodesActionSelection() {
     if (s_nodesActionNodeId == 0) {
         closeNodesActionMenu();
         return;
+    }
+
+    // ── Message-mode rows ───────────────────────────────────────────────────
+    // Each tears the modal down *before* acting. That ordering is not cosmetic:
+    // sending refreshes the chat view, which rebuilds the rows this modal was
+    // opened from — the same reason emojiPickerActivate() closes first.
+    if (s_nodesActionMsgMode) {
+        const int sel = s_nodesActionSelection;
+        const uint32_t pid = s_nodesActionPacketId;
+
+        if (sel >= 0 && sel < kTapbackTrayCount) {
+            const char *glyph = kTapbackTray[sel];
+            closeNodesActionMenu();
+            sendQuickEmoji(glyph, pid);
+            return;
+        }
+        if (sel == kMsgActionMoreIdx) {
+            // The curated six are a shortcut, not a ceiling. openEmojiPicker()
+            // reads the tapback target from s_selectedMsgReplyPacketId, which
+            // the caller set when the message was selected.
+            closeNodesActionMenu();
+            openEmojiPicker(/*sendMode=*/true);
+            return;
+        }
+        if (sel == kMsgActionReplyIdx) {
+            const uint32_t replyId = s_selectedMsgReplyPacketId;
+            char preview[kReplyPreviewTextMax + 1];
+            utf8util::copyTruncate(preview, sizeof(preview), s_selectedMsgText);
+            closeNodesActionMenu();
+            openComposePrompt(replyId, preview);
+            return;
+        }
+        // Anything past Reply is one of the node actions; fall through with the
+        // index mapped back so the arms below keep their original 0..5 numbering.
+        // Through the map, not a subtraction: message mode omits Favorite, so
+        // the offsets diverge past it — a plain shift would fire Request Info
+        // where the user pressed Request Position.
+        const int nodeSel = sel - kMsgActionNodeBase;
+        if (nodeSel < 0 || nodeSel >= kMsgActionNodeCount) {
+            closeNodesActionMenu();
+            return;
+        }
+        s_nodesActionSelection = (int)kMsgActionNodeMap[nodeSel];
     }
 
     if (s_nodesActionSelection == 0) {
@@ -15390,7 +15918,7 @@ static void executeNodesActionSelection() {
 
 static void onNodesActionRowPressed(lv_event_t *e) {
     int action = (int)(intptr_t)lv_event_get_user_data(e);
-    if (action < 0 || action >= kNodesActionCount) return;
+    if (action < 0 || action >= activeActionCount()) return;
     s_nodesActionSelection = action;
     refreshNodesActionMenuSelection();
     executeNodesActionSelection();
@@ -15423,13 +15951,16 @@ static void nodesActionTitleLabel(uint32_t nodeId, char *out, size_t outLen) {
 // another, and the menu itself acts on a node id rather than on a list row. The
 // parent below already prefers the root screen, so it centres over whatever is
 // on display without a layout change.
-static void openNodesActionMenuFor(uint32_t nodeId) {
+static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packetId) {
     if (nodeId == 0) return;
 
     if (s_nodesActionModal) {
         closeNodesActionMenu();
     }
 
+    // After the close above, which clears both — the builder below reads them.
+    s_nodesActionMsgMode = msgMode;
+    s_nodesActionPacketId = packetId;
     s_nodesActionNodeId = nodeId;
     s_nodesActionSelection = 0;
 
@@ -15468,9 +15999,13 @@ static void openNodesActionMenuFor(uint32_t nodeId) {
     // montserrat_12 face above has no glyphs for and would draw as tofu.
     {
         char who[48];
-        char titleBuf[72];
+        char titleBuf[80];
         nodesActionTitleLabel(nodeId, who, sizeof(who));
-        snprintf(titleBuf, sizeof(titleBuf), "Node Actions: %s", who);
+        // Named for what it acts on. Opened from a message the menu is mostly
+        // about that message; opened from the Nodes screen there is no message
+        // to react to and the title stays as it was.
+        snprintf(titleBuf, sizeof(titleBuf), "%s: %s",
+                 s_nodesActionMsgMode ? "Message Actions" : "Node Actions", who);
         setLabelTextEmojiSafe(title, titleBuf);
     }
 
@@ -15497,6 +16032,52 @@ static void openNodesActionMenuFor(uint32_t nodeId) {
                                     ? lv_color_hex(0x13233D)
                                     : lv_color_hex(0xD9E8FF);
 
+    // ── Tapback strip (message mode only) ───────────────────────────────────
+    // A single row of glyph cells above the action grid: six curated reactions
+    // and a "..." that hands off to the full emoji tray. They are rows 0..6 of
+    // the same selection space as the buttons below, so arrow keys walk
+    // straight from the reactions into the actions with nothing special here.
+    //
+    // #if'd rather than left to the runtime flag: on a board without message
+    // mode these cells can never be built, and this keeps the emoji labels and
+    // their glyph lookups out of the image entirely.
+#if HAS_MESSAGE_ACTIONS
+    if (s_nodesActionMsgMode) {
+        lv_obj_t *tapRow = lv_obj_create(s_nodesActionModal);
+        lv_obj_set_width(tapRow, lv_pct(100));
+        lv_obj_set_height(tapRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(tapRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(tapRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(tapRow, 0, 0);
+        lv_obj_set_style_pad_all(tapRow, 0, 0);
+        lv_obj_set_style_pad_column(tapRow, 3, 0);
+        lv_obj_set_flex_flow(tapRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(tapRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        for (int i = 0; i <= kMsgActionMoreIdx; i++) {
+            lv_obj_t *cell = lv_btn_create(tapRow);
+            s_nodesActionRows[i] = cell;
+            lv_obj_set_flex_grow(cell, 1);
+            lv_obj_set_height(cell, 28);
+            lv_obj_set_style_radius(cell, 4, 0);
+            lv_obj_set_style_pad_all(cell, 0, 0);
+            lv_obj_set_style_shadow_width(cell, 0, 0);
+            lv_obj_add_event_cb(cell, onNodesActionRowPressed, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)i);
+
+            lv_obj_t *lbl = lv_label_create(cell);
+            // Emoji face: montserrat has no glyphs for these and would draw tofu.
+            lv_obj_set_style_text_font(lbl, emojiFont(&lv_font_montserrat_16), 0);
+            lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            setLabelTextEmojiSafe(lbl, (i == kMsgActionMoreIdx) ? "..."
+                                                                : kTapbackTray[i]);
+            lv_obj_center(lbl);
+        }
+    }
+#endif  // HAS_MESSAGE_ACTIONS
+
     lv_obj_t *grid = lv_obj_create(s_nodesActionModal);
     lv_obj_set_width(grid, lv_pct(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
@@ -15510,7 +16091,24 @@ static void openNodesActionMenuFor(uint32_t nodeId) {
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_START);
 
-    for (int i = 0; i < kNodesActionCount; i++) {
+    // In message mode the grid starts with Reply and then carries the same six
+    // node actions; in node mode it is those six alone. The loop walks the
+    // flat selection index so the row array stays aligned with it either way.
+    const int gridFirst = s_nodesActionMsgMode ? kMsgActionReplyIdx : 0;
+    const int gridLast  = activeActionCount() - 1;
+    for (int i = gridFirst; i <= gridLast; i++) {
+        const char *labelText;
+        if (s_nodesActionMsgMode && i == kMsgActionReplyIdx) {
+            labelText = "(R)eply";
+        } else {
+            // Message mode's node rows are not a straight offset — the map skips
+            // Favorite, so the index has to go through it rather than be shifted.
+            const int nodeIdx = s_nodesActionMsgMode
+                                ? (int)kMsgActionNodeMap[i - kMsgActionNodeBase]
+                                : i;
+            labelText = kActionLabels[nodeIdx];
+        }
+
         lv_obj_t *row = lv_btn_create(grid);
         s_nodesActionRows[i] = row;
         // pct(49) leaves a small gutter for pad_column between the two columns.
@@ -15530,7 +16128,7 @@ static void openNodesActionMenuFor(uint32_t nodeId) {
         lv_obj_set_style_text_color(lbl, rowTextColor, 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_label_set_text(lbl, kActionLabels[i]);
+        lv_label_set_text(lbl, labelText);
         lv_obj_center(lbl);
     }
 
@@ -15544,6 +16142,23 @@ static void openNodesActionMenu() {
     const NodeEntry *selected = currentNodesSelection();
     if (!selected || selected->nodeId == 0) return;
     openNodesActionMenuFor(selected->nodeId);
+}
+
+// Chat entry point: the same modal, in message mode. packetId is what the
+// reactions and Reply act on, so message mode is refused without one — a system
+// line has nothing to react to, and a reaction with no reply_id would go out as
+// an ordinary one-glyph message.
+static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId) {
+    if (senderNodeId == 0) return;
+    // No message to act on: fall back to the plain node menu rather than showing
+    // reaction rows that would silently do nothing. The mode is passed into the
+    // builder rather than set around it — the builder's own closeNodesActionMenu()
+    // clears these fields, so anything set beforehand would not survive.
+    //
+    // Message mode never engages where HAS_MESSAGE_ACTIONS is 0, so those boards
+    // get the plain node menu from every entry point.
+    const bool msgMode = HAS_MESSAGE_ACTIONS && packetId != 0;
+    openNodesActionMenuFor(senderNodeId, msgMode, msgMode ? packetId : 0);
 }
 
 // ── Channel Actions modal ─────────────────────────────────────
@@ -19852,6 +20467,7 @@ static void performCfgAction(int actionId) {
                 persistWebCfgEnabled();
                 webCfgSetForceAp(wifiForceApMode());
 
+                webCfgPushActiveCreds();
 #if HAS_FILE_STORAGE
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
@@ -19997,6 +20613,20 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OWNER_COLOR");
             showActionPopup = false;
             openCfgColorPickerModal();
+            break;
+
+        case CFG_ACTION_BATT_DISPLAY:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec BATT_DISPLAY");
+            showActionPopup = false;   // row already reads Percent/Voltage
+            s_cfg.battDisplayMode = (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE)
+                                    ? BATT_DISPLAY_PERCENT : BATT_DISPLAY_VOLTAGE;
+            persistConfigToPrefs();
+            // Forced: the reading itself has not changed, only how it is
+            // written, so the early-out in refreshHeaderStatus() would keep the
+            // old string on screen until the battery moved.
+            refreshHeaderStatus(true);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Battery Display: %s",
+                     s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
             break;
 
         case CFG_ACTION_UNITS:
@@ -22870,8 +23500,9 @@ static void pumpKeyboardInput() {
                 } else {
                     next += (k == KEY_SCROLL_UP) ? -1 : 1;
                 }
+                const int count = activeActionCount();
                 if (next < 0) next = 0;
-                if (next >= kNodesActionCount) next = kNodesActionCount - 1;
+                if (next >= count) next = count - 1;
                 if (next != s_nodesActionSelection) {
                     s_nodesActionSelection = next;
                     refreshNodesActionMenuSelection();
@@ -22884,12 +23515,16 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            // Single-key shortcuts (T/D/F/I/P/X) select and execute the
-            // corresponding action, mirroring the (X) hints in the labels.
+            // Single-key shortcuts select and execute the corresponding action,
+            // mirroring the (X) hints in the labels. Message mode adds 1-6 for
+            // the tapbacks, M for the full tray and R for Reply; T/D/F/I/P/G
+            // keep their meanings in both modes.
             if (k >= 0x20 && k < 0x7F) {
                 char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
-                for (int i = 0; i < kNodesActionCount; i++) {
-                    if (kNodesActionShortcuts[i] == up) {
+                const char *shortcuts = activeActionShortcuts();
+                const int count = activeActionCount();
+                for (int i = 0; i < count; i++) {
+                    if (shortcuts[i] == up) {
                         s_nodesActionSelection = i;
                         refreshNodesActionMenuSelection();
                         executeNodesActionSelection();
@@ -23571,15 +24206,19 @@ static void pumpKeyboardInput() {
                     }
                 } else if (s_selectedMsgSenderNodeId != 0
                            && s_selectedMsgSenderNodeId != s_myNodeId) {
-                    // Second Enter opens the node actions for whoever wrote the
-                    // highlighted message — the same two-step rhythm the Nodes
-                    // screen has, where Enter on a row opens the same menu.
+                    // Second Enter opens Message Actions for the highlighted
+                    // message — the same two-step rhythm the Nodes screen has,
+                    // where Enter on a row opens the same menu.
                     //
                     // Nothing happens on our own messages or on local/system
                     // lines (sender 0): traceroute, DM and favorite against
                     // ourselves are meaningless, and a system line has no one to
                     // act on. Swallowed silently rather than beeping about it.
-                    openNodesActionMenuFor(s_selectedMsgSenderNodeId);
+                    //
+                    // The cursor already set the reply context when it landed on
+                    // this row, so the reaction and Reply rows have their target.
+                    openMessageActionMenu(s_selectedMsgReplyPacketId,
+                                          s_selectedMsgSenderNodeId);
                 }
 #endif
             } else if (k == KEY_BACKSPACE) {
@@ -23681,14 +24320,44 @@ static void refreshChatComposeButtonState() {
 static uint32_t s_chatLongPressConsumedMs = 0;
 static constexpr uint32_t kChatLongPressConsumeMs = 1500;
 
+// Resolve a message's sender and text from its packet id, by scanning the
+// channel's display lines. LVGL gives one user_data per registration and the
+// long press needs both halves — the packet id is the one that cannot be
+// recovered any other way, so that is what gets carried and this looks up the
+// rest. Returns false when the line is gone (the backlog scrolled past it).
+static bool chatLineForPacketId(uint32_t packetId, uint32_t *senderOut,
+                                const char **textOut) {
+    if (packetId == 0) return false;
+    for (int row = 0; row < MAX_MSG_LINES; row++) {
+        const DisplayLine *dl = Channels.getLine(s_activeChannel, row);
+        if (!dl) break;
+        if (dl->packetId != packetId) continue;
+        if (senderOut) *senderOut = dl->senderNodeId;
+        if (textOut) *textOut = dl->text;
+        return true;
+    }
+    return false;
+}
+
 static void onChatMessageLongPressed(lv_event_t *e) {
-    uint32_t senderNodeId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    const uint32_t packetId = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+
+    uint32_t senderNodeId = 0;
+    const char *text = nullptr;
+    if (!chatLineForPacketId(packetId, &senderNodeId, &text)) return;
+
     // Same rule the Enter path uses: nothing to act on for our own messages or
     // for local/system lines, which carry no sender.
     if (senderNodeId == 0 || senderNodeId == s_myNodeId) return;
 
+    // Select the held message before opening. Without this the Reply row, the
+    // tapbacks and the full-tray escape would all act on whatever was selected
+    // earlier — or on nothing, since a long press never went through the tap
+    // handler that normally sets the selection.
+    setSelectedReplyContext(packetId, text, senderNodeId);
+
     s_chatLongPressConsumedMs = millis();
-    openNodesActionMenuFor(senderNodeId);
+    openMessageActionMenu(packetId, senderNodeId);
 }
 #endif  // HAS_TOUCH
 
@@ -24037,6 +24706,7 @@ static void startWebConfigAuto() {
     }
     if (webCfgRunning()) return;
     webCfgSetForceAp(wifiForceApMode());
+    webCfgPushActiveCreds();
 #if HAS_FILE_STORAGE
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
@@ -24268,6 +24938,7 @@ static bool bootTimeNtpSyncDirectSta(const char *ssidOverride, const char *passO
         WiFi.begin(ssid, pass);
         uint32_t connectStartMs = millis();
         while (WiFi.status() != WL_CONNECTED && (millis() - connectStartMs) < 10000UL) {
+            bootSplashTick();   // longest single step at boot; keep the dots moving
             delay(100);
         }
     }
@@ -24532,6 +25203,78 @@ static void serviceTouchWakeWhileAsleep() {
 #endif
 }
 
+// ── Splash boot-progress line ────────────────────────────────────────────────
+// The splash now stays up through the whole init sequence, which is several
+// seconds of WiFi, storage and radio work. This is the line that says which
+// part is running, drawn straight to the panel like the rest of the splash —
+// LVGL is initialised by then but nothing pumps it until loop().
+//
+// drawBootSplash() registers the band; bootSplashStatus() repaints it. Only the
+// layouts that have somewhere to put it register one, so on the Pager and
+// Cardputer every call below is a no-op rather than something to #if around at
+// each of the ~a dozen call sites in setup().
+static bool     s_splashStatusOn = false;
+static int      s_splashStatusX  = 0;
+static int      s_splashStatusY  = 0;
+static int      s_splashStatusW  = 0;
+static uint16_t s_splashStatusFg = 0;
+static uint16_t s_splashStatusBg = 0;
+static char     s_splashStatusMsg[40] = "";
+static uint8_t  s_splashStatusDots = 1;      // 1..3
+static uint32_t s_splashStatusDotMs = 0;
+
+static constexpr uint32_t kSplashDotIntervalMs = 350;
+
+// Repaint the band with the current message and dot count.
+static void bootSplashStatusPaint() {
+    if (!s_splashStatusOn || !s_splashStatusMsg[0]) return;
+    char line[sizeof(s_splashStatusMsg) + 4];
+    const uint8_t n = (s_splashStatusDots < 1) ? 1
+                      : (s_splashStatusDots > 3) ? 3 : s_splashStatusDots;
+    snprintf(line, sizeof(line), "%s%.*s", s_splashStatusMsg, (int)n, "...");
+
+    displayDev().setFont(&fonts::DejaVu12);
+    displayDev().setTextSize(1.0f);
+    const int h = displayDev().fontHeight();
+    // Clear the whole band first: messages vary in width, and the tail of a
+    // longer previous one would otherwise stay on screen next to a shorter one.
+    // This also covers the dots shrinking from three back to one.
+    displayDev().fillRect(s_splashStatusX, s_splashStatusY, s_splashStatusW, h,
+                          s_splashStatusBg);
+    displayDev().setTextColor(s_splashStatusFg, s_splashStatusBg);
+    // Centred on the message alone, not on message+dots, so the text does not
+    // jitter left and right as the dots cycle.
+    const int msgW = displayDev().textWidth(s_splashStatusMsg);
+    displayDev().drawString(line, s_splashStatusX + max(0, (s_splashStatusW - msgW) / 2),
+                            s_splashStatusY);
+}
+
+static void bootSplashStatus(const char *msg) {
+    if (!s_splashStatusOn || !msg || !*msg) return;
+    strlcpy(s_splashStatusMsg, msg, sizeof(s_splashStatusMsg));
+    s_splashStatusDots = 1;
+    s_splashStatusDotMs = millis();
+    bootSplashStatusPaint();
+}
+
+// Advance the dots. Called from the blocking waits that make boot slow enough
+// to be worth animating — the station-connect loops in bootTimeNtpSync() and
+// web config, and the splash hold itself. Steps that finish in milliseconds
+// simply never call it, which is fine: nothing is on screen long enough to
+// animate. Rate-limited, so callers can invoke it as often as they like.
+static void bootSplashTick() {
+    if (!s_splashStatusOn) return;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - s_splashStatusDotMs) < kSplashDotIntervalMs) return;
+    s_splashStatusDotMs = now;
+    s_splashStatusDots = (uint8_t)((s_splashStatusDots % 3) + 1);
+    bootSplashStatusPaint();
+}
+
+// Stop accepting progress updates. Called once the UI owns the panel, so a late
+// call cannot paint a boot message over the running interface.
+static void bootSplashStatusEnd() { s_splashStatusOn = false; }
+
 static void drawBootSplash() {
     const int screenW = displayDev().width();
     const int screenH = displayDev().height();
@@ -24612,6 +25355,22 @@ static void drawBootSplash() {
     const int subY = brandY + brandCap;
     drawCentered("for Meshtastic", subY);
     splashContentBottom = subY + displayDev().fontHeight();
+
+    // Version tucked under the subtitle in a small face. It moved here from the
+    // footer so the footer line can carry the boot progress instead — the
+    // version is a thing you glance at once, the progress is what is changing.
+    // APP_VERSION already carries its own "v" (the VERSION file reads "v4.1.1"),
+    // so this only adds the parentheses.
+    {
+        char verSmall[32];
+        snprintf(verSmall, sizeof(verSmall), "(%s)", version);
+        displayDev().setFont(&fonts::DejaVu9);
+        displayDev().setTextSize(1.0f);
+        displayDev().setTextColor(dimCol, cardBg);
+        drawCentered(verSmall, splashContentBottom + 2);
+        splashContentBottom += displayDev().fontHeight() + 2;
+        displayDev().setTextColor(titleCol, cardBg);
+    }
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
@@ -24834,15 +25593,36 @@ static void drawBootSplash() {
     int nodeW = displayDev().textWidth(nodeLine);
     displayDev().drawString(nodeLine, cardX + max(0, (cardW - nodeW) / 2), cardY + cardH - 36);
 
-    char verLine[72];
-    snprintf(verLine, sizeof(verLine), "Version: %s", version);
-    displayDev().setTextColor(dimCol, cardBg);
-    int verW = displayDev().textWidth(verLine);
-    displayDev().drawString(verLine, cardX + max(0, (cardW - verW) / 2), cardY + cardH - 20);
+    // Where the version line used to sit. The version moved up under the
+    // subtitle; this band now reports what boot is doing, updated by
+    // bootSplashStatus() as setup() works through it.
+    s_splashStatusX  = cardX + 6;
+    s_splashStatusW  = max(0, cardW - 12);
+    s_splashStatusY  = cardY + cardH - 20;
+    s_splashStatusFg = dimCol;
+    s_splashStatusBg = cardBg;
+    s_splashStatusOn = true;
 #endif
 
-    delay(1200);
-    displayDev().fillScreen(TFT_BLACK);
+    // Held, then left on screen. Everything between here and buildUi() — WiFi
+    // association, NTP, web config start, the node and channel stores, radio
+    // and GPS bring-up — is seconds of work with nothing to show, and this used
+    // to black the panel out before any of it ran. Leaving the splash up means
+    // the device looks like it is starting rather than like it is off.
+    //
+    // Nothing repaints the panel in between: LVGL is initialised by now but
+    // lv_timer_handler() is not called until loop(), so the last thing drawn
+    // stays drawn. buildUi() loads a screen with an opaque background, and the
+    // first handler pass paints over the splash a band at a time.
+    //
+    // Ticked rather than a flat delay so the dots are already moving during the
+    // hold, instead of the line sitting still until the first slow step.
+    bootSplashStatus("Starting up");
+    const uint32_t holdUntil = millis() + 1200;
+    while ((int32_t)(millis() - holdUntil) < 0) {
+        bootSplashTick();
+        delay(20);
+    }
 }
 
 // ── Channel-button paint cache ───────────────────────────────────────────────
@@ -25644,6 +26424,9 @@ static void loadConfigFromSd() {
         s_cfg.neighborInfoIntervalS = NEIGHBORINFO_MIN_INTERVAL_S;
     }
     loadChannelsFromPrefs();
+    // After the config, because the remembered list is defined relative to the
+    // configured network (the picker shows configured first, then these).
+    loadKnownWifiNetworks();
     // Before the palette, which needs the slots populated to resolve a custom
     // selection — and would otherwise log a spurious "slot is empty" fallback
     // on every boot of a device using one.
@@ -25775,6 +26558,10 @@ static void refreshHeaderStatus(bool force) {
     lastPollMs = now;
 
     const uint8_t battPct = batteryReadPercent();
+    // Quantised to the two decimals actually drawn, so the early-out below
+    // compares what the user can see rather than raw ADC jitter.
+    const float battV = batteryReadVoltage();
+    const uint16_t battCentiV = (uint16_t)(battV * 100.0f + 0.5f);
     const bool gpsEnabled = gpsIsEnabled();
     const bool gpsFix = gpsHasFix();
     const uint8_t gpsSatCount = gpsEnabled ? gpsSats() : 0;
@@ -25785,18 +26572,42 @@ static void refreshHeaderStatus(bool force) {
 #endif
     bool wifiConnected = (!wifiApMode && WiFi.status() == WL_CONNECTED);
 
-    if (!force && battPct == s_lastBattPct && gpsEnabled == s_lastGpsEnabled
+    // Voltage is in the early-out alongside percent, not instead of it: on the
+    // flat part of the discharge curve the percentage can sit still for tens of
+    // millivolts, and a percent-only comparison would freeze a voltage reading
+    // on screen until the curve finally moved.
+    if (!force && battPct == s_lastBattPct && battCentiV == s_lastBattCentiV
+        && gpsEnabled == s_lastGpsEnabled
         && gpsFix == s_lastGpsFix && gpsSatCount == s_lastGpsSats
         && wifiConnected == s_lastWifiConnected && wifiApMode == s_lastWifiApMode) {
         return;
     }
 
+    // The dot stays a state-of-charge signal in both modes. A voltage reading
+    // next to a green/amber/red dot is the pairing that makes voltage mode
+    // useful — the thresholds are percentages and stay percentages.
     lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerBatteryDotColor(battPct), 0);
+    if (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE) {
+        // snprintf, not lv_label_set_text_fmt: LVGL's own printf has no float
+        // support unless LV_SPRINTF_USE_FLOAT is set, which it is not here, so
+        // "%.2fV" reaches the screen as a literal "fV". Every other float in
+        // this file is formatted this way for the same reason.
+        char battBuf[12];
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text_fmt(s_chatHeaderBattText, "%u", (unsigned)battPct);
+        // Same width treatment the percent branch gets on this panel: "4.02" is
+        // four glyphs, exactly like "100".
+        snprintf(battBuf, sizeof(battBuf), "%.2f", (double)battV);
 #else
-    lv_label_set_text_fmt(s_chatHeaderBattText, "%u%%", (unsigned)battPct);
+        snprintf(battBuf, sizeof(battBuf), "%.2fV", (double)battV);
 #endif
+        lv_label_set_text(s_chatHeaderBattText, battBuf);
+    } else {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        lv_label_set_text_fmt(s_chatHeaderBattText, "%u", (unsigned)battPct);
+#else
+        lv_label_set_text_fmt(s_chatHeaderBattText, "%u%%", (unsigned)battPct);
+#endif
+    }
 
     if (gpsEnabled) {
         lv_label_set_text_fmt(s_chatHeaderGps, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
@@ -25847,6 +26658,7 @@ static void refreshHeaderStatus(bool force) {
 #endif
 
     s_lastBattPct = battPct;
+    s_lastBattCentiV = battCentiV;
     s_lastGpsEnabled = gpsEnabled;
     s_lastGpsFix = gpsFix;
     s_lastGpsSats = gpsSatCount;
@@ -27803,13 +28615,17 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         lv_obj_add_event_cb(b, onPressed, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)replyPacketId);
 #if HAS_TOUCH
-        // Hold opens the sender's node actions. Gated on onPressed along with
-        // the tap above, so DM bubbles stay non-interactive as they are today —
-        // in a DM thread the menu would only offer to DM the person already
-        // being DM'd.
-        if (sender != 0 && !isMe) {
+        // Hold opens Message Actions. Gated on onPressed along with the tap
+        // above, so DM bubbles stay non-interactive as they are today — in a DM
+        // thread the menu would only offer to DM the person already being DM'd.
+        //
+        // Carries the *packet id*, not the sender: the handler needs both, LVGL
+        // allows one user_data, and the sender is recoverable from the display
+        // line while the packet id is not. A message with no packet id has
+        // nothing to react or reply to, so it gets no long press at all.
+        if (sender != 0 && !isMe && replyPacketId != 0) {
             lv_obj_add_event_cb(b, onChatMessageLongPressed, LV_EVENT_LONG_PRESSED,
-                                (void *)(uintptr_t)sender);
+                                (void *)(uintptr_t)replyPacketId);
         }
 #endif
     }
@@ -28260,13 +29076,16 @@ static void refreshChatView(bool force) {
                                     LV_EVENT_CLICKED,
                                     (void *)(uintptr_t)replyPacketId);
 #if HAS_TOUCH
-                // Hold opens the sender's node actions, same as the bubble style.
+                // Hold opens Message Actions, same as the bubble style — and for
+                // the same reason it carries the packet id rather than the
+                // sender (see chatLineForPacketId).
                 {
                     const uint32_t longPressSender = rows[i]->senderNodeId;
-                    if (longPressSender != 0 && longPressSender != s_myNodeId) {
+                    if (longPressSender != 0 && longPressSender != s_myNodeId
+                        && replyPacketId != 0) {
                         lv_obj_add_event_cb(msg, onChatMessageLongPressed,
                                             LV_EVENT_LONG_PRESSED,
-                                            (void *)(uintptr_t)longPressSender);
+                                            (void *)(uintptr_t)replyPacketId);
                     }
                 }
 #endif
@@ -29717,14 +30536,21 @@ void setup() {
     // The panel came up at the hardware default above, before any config
     // existed; now that it's loaded, honour the user's level.
     applyBrightness();
-    drawBootSplash();
+    drawBootSplash();   // sets the first status itself and holds, dots ticking
+    // Lets the splash keep animating through web config's station-connect wait,
+    // which is in another translation unit and blocks for up to ten seconds.
+    // Self-disarms after boot: bootSplashTick() returns immediately once
+    // bootSplashStatusEnd() has run.
+    webCfgSetWaitCb(bootSplashTick);
     playSplashStartupRiff();
     recomputeChannelHashes();
     deriveNodeId();
+    bootSplashStatus("Mesh identity");
     mqttBridgeBegin(&s_cfg, s_myNodeId);
     mqttBridgeSetInject(mqttDownlinkInject);
     syncWifiCredsToPrefs();
     applyTimezoneFromConfig();
+    bootSplashStatus("Syncing time");
     bootTimeNtpSync();
     const bool otaWorkerHandled = runOtaWorkerModeIfRequested();
     const bool skipWebAutoStartOnce = consumeSkipWebAutoStartOnce();
@@ -29737,18 +30563,23 @@ void setup() {
     // wait until those DRAM buffers exist so webCfgBegin()'s reclaim can free
     // them for Wi-Fi — it starts at the end of setup() instead. Starting here
     // would reclaim 0 bytes and then get starved when the buffers allocate.
+    bootSplashStatus("Web config");
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
+    bootSplashStatus("Map storage");
     bootstrapStateMapsIfMissing();
     // Before batteryInitAdc(), which takes the first sample: the trim has to be
     // in place for it, or boot's opening reading is the uncalibrated one.
     batterySetCalibrationTrim((int)s_cfg.battCalTrim);
+    bootSplashStatus("Battery");
     batteryInitAdc();
+    bootSplashStatus("Node database");
     Nodes.init();
     // Runs after init() so the RAM copy is already loaded: on a partition that a
     // previous build filled with node blobs, this hands the space back before
     // anything tries to save settings into it.
     Nodes.releaseNvsForSettings();
+    bootSplashStatus("Messages");
     DMs.init();
     Ignored.init();
     Channels.init();
@@ -29761,11 +30592,13 @@ void setup() {
     // loadConfigFromSd() ran before the channel plan existed — it would have
     // hashed whatever the compiled-in default channel was called.
     applyPresetParams(s_cfg);
+    bootSplashStatus("Starting radio");
     s_radioReady = Radio.init(s_cfg.loraPower, s_cfg.loraRxBoostedGain);
     // Deliberately after Radio.init(). On the pager, pagerPrimeLoRaRail() arms
     // every peripheral rail on the expander including GPS_EN, so starting GPS
     // before the radio meant a boot with GPS disabled had its power-down
     // immediately undone — the module ran all session with nobody listening.
+    bootSplashStatus("GPS");
     gpsSetEnabled(s_cfg.gpsEnabled);
 #if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
     Serial.println("[radio] *** LORA_TEST_MQTT_ONLY: LoRa TX/RX DISABLED (MQTT-only test build) ***");
@@ -29792,7 +30625,11 @@ void setup() {
         }
     }
 
+    bootSplashStatus("Starting interface");
     buildUi();
+    // The UI owns the panel from here; a later progress call must not paint a
+    // boot message over it.
+    bootSplashStatusEnd();
     if (s_otaWorkerBootNotice[0]) {
         openCfgActionMessageModal(s_otaWorkerBootNotice);
         s_otaWorkerBootNotice[0] = '\0';

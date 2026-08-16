@@ -493,6 +493,11 @@ static const char *kThemeModeNames[] = {
 };
 static const int kNumThemeModes = 2;
 
+static const char *kBattDisplayNames[] = {
+    "PERCENT", "VOLTAGE"
+};
+static const int kNumBattDisplayModes = 2;
+
 // ── Custom theme store ───────────────────────────────────────────────────────
 // One NVS blob holding the whole slot array. Written whole on every change:
 // four slots is 104 bytes, so there is nothing to gain from per-slot keys and a
@@ -878,6 +883,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.brightness         = cfgCoerceBrightness(MY_BRIGHTNESS_PCT);
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
+    cfg.battDisplayMode    = MY_BATT_DISPLAY;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
@@ -1078,6 +1084,29 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // WiFi credentials (for web config export/import portability)
     out += "wifi_ssid: "; out += cfg.wifiSsid; out += "\n";
     out += "wifi_pass: "; out += cfg.wifiPass; out += "\n";
+    // Every known network, with the active one flagged. wifi_ssid/wifi_pass
+    // above stay for backward compatibility and always name the same network as
+    // the `active: true` entry here; an older build reading this file ignores
+    // the list and still comes up on the right network.
+    {
+        char nSsid[64], nPass[64];
+        const int savedCount = cfgSavedWifiCount();
+        if (cfg.wifiSsid[0] || savedCount > 0) {
+            out += "wifi_networks:\n";
+            if (cfg.wifiSsid[0]) {
+                out += "  - ssid: "; out += cfg.wifiSsid; out += "\n";
+                out += "    pass: "; out += cfg.wifiPass; out += "\n";
+                out += "    active: true\n";
+            }
+            for (int i = 0; i < savedCount; i++) {
+                if (!cfgSavedWifiAt(i, nSsid, sizeof(nSsid), nPass, sizeof(nPass))) continue;
+                if (!nSsid[0]) continue;
+                out += "  - ssid: "; out += nSsid; out += "\n";
+                out += "    pass: "; out += nPass; out += "\n";
+                out += "    active: false\n";
+            }
+        }
+    }
     out += "webcfg_user: "; out += kWebCfgUser; out += "\n";
     snprintf(tmp, sizeof(tmp), "webcfg_auth_enabled: %s\n", cfg.webCfgAuthEnabled ? "true" : "false"); out += tmp;
     out += "webcfg_pass: "; out += cfg.webCfgPass; out += "\n";
@@ -1199,6 +1228,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
             : "MEDIUM");
     out += "\n";
     snprintf(tmp, sizeof(tmp), "    chatColors: %s\n", cfg.chatColorsEnabled ? "true" : "false"); out += tmp;
+    out += "    battDisplay: ";
+    out += (cfg.battDisplayMode < kNumBattDisplayModes)
+           ? kBattDisplayNames[cfg.battDisplayMode] : kBattDisplayNames[0];
+    out += "\n";
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
     else { out += "default"; }
@@ -1367,6 +1400,14 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     char        section[20]    = "";   // indent-0 section key
     char        subsection[20] = "";   // indent-2 subsection key (e.g. "lora" under "config")
     int         chanIdx        = -1;
+    // wifi_networks items, collected here and applied after the parse so the
+    // active flag can be honored whatever order the entries arrive in. Static
+    // rather than stack: this runs on the main loop's 8 KB task stack, and the
+    // import is never re-entered.
+    struct ImportedWifiNet { char ssid[64]; char pass[64]; bool active; };
+    static ImportedWifiNet wifiNets[1 + CFG_SAVED_WIFI_MAX];
+    int         wifiNetCount   = 0;
+    int         wifiNetIdx     = -1;
     bool        gotPubKey      = false;
     bool        gotPrivKey     = false;
     const char *p              = buf;
@@ -1405,6 +1446,23 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             }
         }
 
+        // wifi_networks list item. Same "- key:" shape the channel list uses.
+        if (!strcmp(section, "wifi_networks")) {
+            const char *ssidItem = strstr(t, "- ssid:");
+            if (ssidItem) {
+                if (wifiNetCount >= (int)(sizeof(wifiNets) / sizeof(wifiNets[0]))) {
+                    wifiNetIdx = -1;   // full: parse on, but stop recording
+                    continue;
+                }
+                wifiNetIdx = wifiNetCount++;
+                memset(&wifiNets[wifiNetIdx], 0, sizeof(wifiNets[0]));
+                const char *v2 = ssidItem + 7;
+                while (*v2 == ' ') v2++;
+                copyTrimmed(wifiNets[wifiNetIdx].ssid, sizeof(wifiNets[0].ssid), v2);
+                continue;
+            }
+        }
+
         char *colon = strchr((char *)t, ':');
         if (!colon) continue;
         *colon = '\0';
@@ -1419,6 +1477,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 section[sizeof(section) - 1] = '\0';
                 subsection[0] = '\0';
                 chanIdx = -1;
+                wifiNetIdx = -1;
             } else {
                 // Top-level key-value (Meshtastic CLI format)
                 if      (!strcmp(key, "owner"))
@@ -1495,6 +1554,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 strncpy(subsection, key, sizeof(subsection) - 1);
                 subsection[sizeof(subsection) - 1] = '\0';
                 chanIdx = -1;
+                wifiNetIdx = -1;
             } else {
                 if (!strcmp(section, "location")) {
                     // Meshtastic CLI: float degrees
@@ -1536,6 +1596,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
         } else if (indent == 4) {
             if (!hasVal) {
                 // Deeper subsection header — ignore
+            } else if (!strcmp(section, "wifi_networks") && wifiNetIdx >= 0) {
+                // Continuation fields of the "- ssid:" item opened above.
+                if      (!strcmp(key, "pass"))
+                    copyTrimmed(wifiNets[wifiNetIdx].pass, sizeof(wifiNets[0].pass), val);
+                else if (!strcmp(key, "active"))
+                    wifiNets[wifiNetIdx].active = parseBoolValue(val);
             } else if (chanIdx >= 0 && chanIdx < MAX_CHANNELS) {
                 // Legacy channel properties
                 if (!strcmp(key, "name")) {
@@ -1724,6 +1790,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         cfg.fontSize = FONT_SIZE_MEDIUM;
                 }
+                else if (!strcmp(key, "battDisplay")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.battDisplayMode = (uint8_t)constrain(atoi(val), 0, BATT_DISPLAY_MAX);
+                    else
+                        cfg.battDisplayMode = findName(val, kBattDisplayNames, kNumBattDisplayModes);
+                }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);
                 }
@@ -1820,6 +1892,35 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
 #if !HAS_ENV_SENSOR_TELEMETRY
     cfg.telEnvEnabled = false;
 #endif
+    // Apply wifi_networks after the parse, so `active` decides the configured
+    // network regardless of the order entries appeared in. Absent from the file
+    // (an older export, or a Meshtastic CLI dump) leaves the list untouched —
+    // an import that says nothing about remembered networks should not wipe the
+    // ones already on the device.
+    if (wifiNetCount > 0) {
+        int activeIdx = -1;
+        for (int i = 0; i < wifiNetCount; i++) {
+            if (wifiNets[i].active && wifiNets[i].ssid[0]) { activeIdx = i; break; }
+        }
+        // No entry claimed to be active: keep whatever wifi_ssid set above, and
+        // treat every listed network as a remembered one.
+        if (activeIdx >= 0) {
+            utf8util::copyTruncate(cfg.wifiSsid, sizeof(cfg.wifiSsid), wifiNets[activeIdx].ssid);
+            utf8util::copyTruncate(cfg.wifiPass, sizeof(cfg.wifiPass), wifiNets[activeIdx].pass);
+        }
+
+        cfgSavedWifiClear();
+        for (int i = 0; i < wifiNetCount; i++) {
+            if (i == activeIdx) continue;             // that one is the configured network
+            if (!wifiNets[i].ssid[0]) continue;
+            // Never let the active network also appear as a remembered copy —
+            // the picker would list it twice, once per source.
+            if (!strncmp(wifiNets[i].ssid, cfg.wifiSsid, sizeof(cfg.wifiSsid))) continue;
+            cfgSavedWifiAdd(wifiNets[i].ssid, wifiNets[i].pass);
+        }
+        cfgSavedWifiCommit();
+    }
+
     // Only client roles are supported; coerce anything else from imported YAML.
     cfg.deviceRole = cfgCoerceClientRole(cfg.deviceRole);
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
