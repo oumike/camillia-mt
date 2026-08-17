@@ -1,20 +1,14 @@
 ### New
-- **Message Actions** — a single menu on a chat message with six quick reactions (👍 👎 ‼️ ❓ 😂 😢), `...` for the full emoji tray, Reply, and the sender's node actions. Press Enter twice on a message, or tap and hold it on T-Deck, Mesh Deck and Heltec V4. The Cardputer keeps the plain Node Actions menu; reactions there are still on the **E** tray.
-- **Battery Display** setting (Config screen, and under Display in web config) switches the chat header and the web `BAT` chip between percentage (`87%`) and voltage (`3.94V`). The colored dot still tracks charge in both modes, and transmitted telemetry is unchanged.
-- **Remembered WiFi networks** — the device now keeps up to five networks besides the one it is on, so switching back does not mean re-entering a password. They survive reboots, appear in the on-device Choose WiFi picker (**D** to forget one), and travel with config export/import under `wifi_networks:`. The Cardputer has no room for the list and still holds one network at a time.
-- **WiFi tab in web config**, between Config and Utilities: see the remembered networks, **Use** one (the network you are on moves into the list), **Forget** one, or add a network by name and password without switching to it. Not on the AP-mode Lite page.
-- **Boot progress on the splash screen** — the splash now stays up through WiFi, storage, radio and GPS bring-up and names the step it is on, instead of blacking out for several seconds. The version moved up under the subtitle. T-Deck, Mesh Deck and Heltec V4.
+- Elecrow ThinkNode M9 is now a supported board: LoRa mesh over its LR1110 radio, GPS, 320x240 display, 37-key QWERTY plus d-pad, microSD config import/export, and the full UI (channels, DMs, Nodes, Live, Map/Discovery, web config).
+- ThinkNode M9: the six hardware buttons under the screen jump straight to Messages, Home, Live, Nodes and Map from anywhere, closing whatever is open first; holding Home for a second sleeps the screen.
+- ThinkNode M9: d-pad Up/Down scrolls lists and chat, Left/Right switches channels and moves between columns in the Tools, channel, color, font-size and alert-sound grids.
+- MQTT Monitor — a new tool under Live → Tools (press M) that shows a live count of how many messages are arriving on each channel under your configured MQTT root, so you can tell at a glance whether a root is actually carrying traffic and on which channels. Counts merge all gateways relaying the same channel into one row, reset when the screen closes, and C (Reset on Heltec) restarts the count in place. Available on all WiFi boards except Cardputer.
 
 ### Changed
-- Whichever network the device actually connects to becomes the configured one, so a reboot comes back to where you left off. A network that fails to connect never displaces one that worked.
-- Turning web config off no longer drops the WiFi connection when the device wanted WiFi anyway — no reassociation, and no MQTT/NTP gap after closing the page.
-- An exported config now carries every remembered network password, not just the active one. Treat the file as a secret, as with channel keys.
+- The Live → Tools grid now lists five tools; the MQTT row is shown but greyed out and reads "MQTT - WiFi off" when WiFi is switched off, instead of disappearing.
+- ThinkNode M9 firmware should be flashed with the combined erase-and-upload step (`./build-upload-monitor.sh --m9 --erase`); the board does not reliably release its port for a separate erase pass.
 
 ### Fixed
-- A network joined from the on-device WiFi picker is no longer forgotten on the next boot — web config's stale copy of the credentials was overwriting it in storage.
-- Turning on web config while joined to a network picked on the device no longer dials the old stored network, time out and fall back to AP mode, taking the device off the network it was reachable on.
-- The last remembered network is no longer missing from the Choose WiFi picker when the list is full.
-- WiFi scanning is more reliable from a cold radio or just after AP mode: the scan retries once, and a scan that failed now says "Scan failed - Rescan to try again" instead of "No networks found".
-- Deleting the network in use no longer claims it will switch to the network being deleted.
-- WiFi names and passwords containing an apostrophe no longer break the web config form and come back truncated on save.
-- The chat header battery reading now refreshes as soon as either the voltage or the percentage changes, instead of the voltage sitting still on the flat part of the discharge curve.
+- ThinkNode M9 units shipped with older LR1110 radio firmware no longer fail to start the radio with `[radio] init failed: -706`.
+- ThinkNode M9: the radio's antenna switch is now configured on startup, restoring the receive sensitivity it would otherwise lose.
+- Saving a channel no longer prints a false "does not exist" storage error to the serial console.

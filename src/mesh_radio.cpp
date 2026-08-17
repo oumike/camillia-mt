@@ -127,7 +127,7 @@ void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
 void MeshRadio::setRxBoostedGain(bool enabled) {
     _rxBoostedGain = enabled;
-#if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
+#if !MESH_RADIO_IS_LR11XX
     if (_ready) {
         _radio.setRxBoostedGainMode(enabled);
         _radio.startReceive();   // re-arm so the new gain setting takes effect
@@ -203,19 +203,45 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
         return false;
     }
 
-#if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
+#if !MESH_RADIO_IS_LR11XX
     _radio.setDio2AsRfSwitch(true);
+#endif
+
+#if MESH_RADIO_IS_LR11XX && defined(MESH_LR11XX_RFSWITCH_DIO56)
+    // The LR11x0 equivalent of the line above, and it has to come after begin():
+    // setRfSwitchTable() does not stage anything, it sends SetDioAsRfSwitch
+    // straight to the chip. Skipping it leaves the antenna switch wherever it
+    // powered up, which costs receive sensitivity rather than announcing itself.
+    // See the truth table (and the warning attached to it) in the board header.
+    {
+        static const uint32_t kRfSwitchPins[Module::RFSWITCH_MAX_PINS] = {
+            RADIOLIB_LR11X0_DIO5, RADIOLIB_LR11X0_DIO6,
+            RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC
+        };
+        static const Module::RfSwitchMode_t kRfSwitchTable[] = {
+            { LR11x0::MODE_STBY,  { LOW,  LOW  } },
+            { LR11x0::MODE_RX,    { HIGH, LOW  } },
+            { LR11x0::MODE_TX,    { HIGH, HIGH } },
+            { LR11x0::MODE_TX_HP, { LOW,  HIGH } },
+            { LR11x0::MODE_TX_HF, { LOW,  LOW  } },
+            { LR11x0::MODE_GNSS,  { LOW,  LOW  } },
+            { LR11x0::MODE_WIFI,  { LOW,  LOW  } },
+            END_OF_MODE_TABLE,
+        };
+        _radio.setRfSwitchTable(kRfSwitchPins, kRfSwitchTable);
+        Serial.println("[radio] LR11x0 RF switch: DIO5/DIO6 configured");
+    }
 #endif
     // Explicitly apply the PA; the begin() parameter alone may not stick. This
     // used to be a hardcoded 22, which silently overrode the configured power
     // whenever setup()'s "did anything differ from the compile-time default?"
     // check decided not to call reconfigure().
     _radio.setOutputPower(txPower);
-#if !(defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121))
+#if !MESH_RADIO_IS_LR11XX
     _radio.setCurrentLimit(140.0);   // SX1262 HP PA max; default OCP may be too low
     _radio.setRxBoostedGainMode(_rxBoostedGain);
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
+#if MESH_RADIO_IS_LR11XX
     _radio.setIrqAction(_onDio1);
 #else
     _radio.setDio1Action(_onDio1);

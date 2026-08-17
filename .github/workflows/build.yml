@@ -15,7 +15,7 @@ on:
 #
 # It is NOT a release gate, despite the tag trigger. release.sh pushes the tag
 # and then publishes seconds later, while this job spends minutes installing
-# PlatformIO and building five environments — so the release is always public
+# PlatformIO and building every environment — so the release is always public
 # before CI has an opinion. The branch trigger above is the one that earns its
 # keep: it runs on the commit release.sh pushes just before tagging, and on
 # every ordinary push in between. To make it a real gate, release.sh would have
@@ -57,6 +57,8 @@ jobs:
           pio run -e cardputer-cap
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
+          pio run -e mesh-deck
+          pio run -e m9
 
       # Debug symbols are deliberately not archived here. CI's build is not
       # byte-identical to the release.sh-built, signed binaries that actually

@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -94,6 +94,12 @@
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
 #elif defined(DEVICE_MESH_DECK)
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#elif defined(DEVICE_M9)
+// Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
+// the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
+// #else below would hand out, would put a hardware name on the mesh that does
+// not match what is transmitting.
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #else
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK
@@ -232,6 +238,18 @@
 #define FEATURE_DISCOVERY 0
 #else
 #define FEATURE_DISCOVERY 1
+#endif
+// MQTT Monitor (Live -> Tools -> MQTT) is a census of the channels arriving
+// under the configured root. It rides the bridge's existing subscription, so it
+// costs nothing until it is opened and a bounded ~1 KB of heap while it is — but
+// it is meaningless on a build that cannot reach a broker at all, so it follows
+// the master WiFi switch. Off on Cardputer for the same reason Discovery is:
+// that board has no heap to spare at first boot, and a two-column list on a
+// 240x135 panel is not where you would want to read this anyway.
+#if MY_WIFI_ENABLED && !defined(DEVICE_CARDPUTER_LORA_HAT)
+#define FEATURE_MQTT_MONITOR 1
+#else
+#define FEATURE_MQTT_MONITOR 0
 #endif
 #define MY_CANNED_EN        1
 #define MY_CANNED_MSGS      "Hi|Bye|Yes|No|Ok"

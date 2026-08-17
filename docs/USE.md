@@ -55,8 +55,9 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
 - Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI,
-  ChUtil, Beacons, and Discovery except on Cardputer). Inside Discovery: W
-  sweeps, C clears, S saves a snapshot to SD. Inside Beacons: C clears
+  ChUtil and Beacons everywhere, plus Discovery and MQTT except on Cardputer).
+  Inside Discovery: W sweeps, C clears, S saves a snapshot to SD. Inside
+  Beacons: C clears. Inside MQTT Monitor: C restarts the count
 
 ### LilyGo T-Deck (tdeck)
 
@@ -95,6 +96,19 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - Picker modals (Chat Style, Chat Names) show option names without the
   explanatory line underneath, and scroll when they outgrow the 240x135 panel
 
+### Elecrow ThinkNode M9 (m9)
+
+- Six dedicated hardware buttons below the screen jump straight to a surface
+  from anywhere, closing whatever is open first: **Messages** (DMs), **Home**,
+  the function key below Home (Live), the key below Back (Nodes), and **Map**
+  (Discovery)
+- **Hold Home** for a second to sleep the screen
+- D-pad Up/Down navigates lists and chat rows; Left/Right switches channels, and
+  moves between columns in multi-column pickers (Tools, channel grid)
+- Modal close key is Back; hold Back or Enter for the long-press close
+- No touch panel and no trackball — the keyboard and d-pad are the only input
+- The keypad has its own backlight, driven by the host
+
 ### Heltec WiFi LoRa 32 V4 + TFT expansion
 
 Builds: `heltec-v4`, `heltec-v4-vertical`
@@ -123,8 +137,12 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - Press C to clear the log
 - Press T for Tools (on Heltec, the Tools button in the Live header) — a
   two-column picker holding the SNR/RSSI chart, the channel-utilization chart,
-  Discovery, and Beacons. Enter opens the selected tool, and S, U, D or B jumps
-  straight to one. Backing out of a tool returns to Live, not to Tools.
+  Discovery, Beacons, and the MQTT Monitor. Enter opens the selected tool, and
+  S, U, D, B or M jumps straight to one. Backing out of a tool returns to Live,
+  not to Tools.
+- The MQTT cell is only built on boards with WiFi compiled in (so: not
+  Cardputer), and is only live while WiFi is switched on in config. With WiFi
+  off the row reads `MQTT - WiFi off` and does not open.
 
 ### Discovery
 
@@ -212,6 +230,52 @@ it.
   beacon again, which can be a long wait — nothing else is affected
 - The list also empties when Mesh Beacons is switched off, so an old offer can
   never sit on screen after the feature has been turned off
+- Close with the device close key (see device sections below)
+
+### MQTT Monitor
+
+Not available on Cardputer, for the same reasons Discovery is not: first-boot
+onboarding there has no heap to spare, and a two-column list on a 240x135 panel
+is not where you would want to read this.
+
+A census of what is arriving on the broker: a scrolling grid of channels under
+`<root>/2/e/#` and the number of messages seen on each, laid out two cells to a
+line so the panel is not mostly empty space. It answers
+"is this root actually carrying traffic, and on which channels" without spending
+the RAM a message viewer would — payloads are counted and dropped, never stored
+or displayed.
+
+- Open from Live → Tools → MQTT (M), or the MQTT cell on Heltec
+- Requires a build with WiFi, WiFi switched on, the MQTT bridge on, and a broker
+  session. When any of those is missing the screen says which one instead of
+  showing an empty list
+- The title is the filter being watched, `<root>/2/e/#`
+- **Rows are channels, not whole topics.** An envelope topic is
+  `<root>/2/e/<channel>/<gateway>`, and the gateway is merged away, so three
+  gateways relaying KAM-NET are one row reading 3 rather than three rows
+  reading 1:
+
+  ```
+  msh/US/MI/2/e/KAM-NET/!699c90c8  ┐
+  msh/US/MI/2/e/KAM-NET/!699c9234  ┴──▶   KAM-NET    2
+  msh/US/MI/2/e/CFW/!b2a77a48      ───▶   CFW        1
+  ```
+
+- Counts uptick live as messages arrive, and only while the screen is up
+- The status line reads *channels · messages · how long this session has been
+  counting*, so a message count has a denominator
+- Cells fill left to right, top to bottom, in first-seen order, and stay put;
+  only the numbers move. Nothing is sorted or reshuffled under you while you read
+- Nothing persists. Counting starts when the screen opens, the table is freed
+  when it closes, and reopening starts from zero. Press C (Heltec: the Reset
+  button) to start over without leaving the screen
+- Bounded on purpose, so leaving it up all day costs what one minute costs: 32
+  channels are tracked and messages on channels past that are tallied together
+  as `(+n off-list)` on the status line rather than evicting a row. Every counter
+  stops at 999999 and prints with a `+` instead of wrapping
+- It rides the subscription the bridge already holds rather than opening a
+  second connection, so it neither adds broker load nor changes what the bridge
+  does with downlink traffic
 - Close with the device close key (see device sections below)
 
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)
@@ -1004,10 +1068,26 @@ Primary usage is touch.
 - Bottom touch nav provides Config, DM, Nodes, Live, and Help
 - Use on-screen touch lists and buttons inside each modal
 
+### Elecrow ThinkNode M9 (m9)
+
+Primary usage is keyboard plus the d-pad and the dedicated function row.
+
+- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere;
+  holding Home sleeps the screen
+- D-pad Up/Down navigates, Left/Right switches channels or hops columns
+- H toggles the channel selector
+- Space opens compose or reply compose; Enter moves the cursor into the
+  channel's messages, and Enter again opens Message Actions for the highlighted
+  message
+- Modal close key: Back
+- The controller resolves Shift/Sym/Alt itself, so printable keys arrive already
+  cased — there is no separate symbol tray on this board
+
 ## Close key summary
 
 - Cardputer label: Esc
 - T-Deck and T-Lora Pager label: Bksp
+- M9 label: Bksp (the Back key)
 - Heltec touch: use on-screen navigation and close controls
 
 Esc is accepted as a close key in most keyboard flows.

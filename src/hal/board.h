@@ -13,6 +13,13 @@
 //   2. Add a new  #elif defined(DEVICE_<DEVICE>)  branch below.
 //   3. Add a new  [env:<target>]  section in platformio.ini  and set
 //      -DDEVICE_<DEVICE>=1  in its build_flags.
+//   3b. Add DEVICE_<DEVICE> to the "no device specified" guard at the top of
+//      config.h, and give it a MY_HW_MODEL arm there. Miss the guard and the
+//      new target still gets DEVICE_TDECK forced on underneath it — this file
+//      then matches DEVICE_TDECK first and the build compiles against the
+//      T-Deck pin map, with the new header never included. It builds, boots,
+//      and drives the wrong pins; the giveaway is the boot log reporting
+//      another board's pin numbers.
 //   4. If your device needs TFT rotation different from the default (landscape),
 //      set  TFT_ROTATION_DEFAULT  in the device header or in the elif chain at
 //      the bottom of this file.
@@ -23,6 +30,7 @@
 //   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer + LoRa-1262 Cap
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
 //   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
+//   DEVICE_M9                   Elecrow ThinkNode M9 (LR1110, no touch)
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -35,10 +43,16 @@
 #  include "hw_heltec_v4.h"
 #elif defined(DEVICE_MESH_DECK)
 #  include "hw_mesh_deck.h"
+#elif defined(DEVICE_M9)
+#  include "hw_m9.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
-DEVICE_MESH_DECK"
+DEVICE_MESH_DECK, DEVICE_M9"
+#endif
+
+#ifndef KB_INT_ACTIVE_LEVEL
+#  define KB_INT_ACTIVE_LEVEL LOW
 #endif
 
 // ── TFT default rotation ──────────────────────────────────────────────────────
@@ -50,6 +64,13 @@ DEVICE_MESH_DECK"
 #elif defined(DEVICE_MESH_DECK)
 // The ST7789 is mounted rotated 180° from the usual landscape orientation, so
 // the default (1) comes out upside down on this frame.
+#  define TFT_ROTATION_DEFAULT 3
+#elif defined(DEVICE_M9)
+// Hardware-verified on this build: 1 comes out upside down, 3 puts the keyboard
+// below the screen. The reference MeshCore port records the opposite, but it
+// drives the panel through Adafruit_ST7789 while this uses LovyanGFX, and the
+// two libraries do not number rotations the same way — so its value does not
+// carry over, and the panel is the only authority.
 #  define TFT_ROTATION_DEFAULT 3
 #elif DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 0
@@ -66,7 +87,8 @@ DEVICE_MESH_DECK"
 // This used to be spelled out longhand as the same three-device condition at a
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0

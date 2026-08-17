@@ -23,6 +23,14 @@
 // period and nothing else, so this opens the on-screen symbol tray rather than
 // typing a character of its own.
 #define KEY_SYMBOL      0x89
+// Dedicated M9 Messages button. Kept synthetic so its raw controller code does
+// not collide with KEY_NEXT_CHAN.
+#define KEY_OPEN_DMS    0x8A
+#define KEY_OPEN_HOME   0x8B
+#define KEY_OPEN_LIVE   0x8C
+#define KEY_OPEN_DISCOVERY 0x8D
+#define KEY_OPEN_NODES  0x8E
+#define KEY_SLEEP_SCREEN 0x8F
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

@@ -1,6 +1,89 @@
 #include <Arduino.h>
 #include "keyboard.h"
 
+#if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
+#include "soc/usb_serial_jtag_reg.h"
+// GPIO19/20 are the S3's native USB D-/D+ pads, and the ROM's USB-Serial-JTAG
+// peripheral owns them from reset — including a pull-up driven onto D+. The M9
+// puts its console on an external UART bridge and reuses GPIO20/21 as the
+// keyboard I2C bus, so until that claim is dropped the USB PHY clamps SDA:
+// every transaction fails, which Wire reports as endTransmission()==5 on writes
+// and i2cRead -1 on reads.
+//
+// Must run before the first Wire.begin() on these pins.
+static void m9ReleaseUsbPads() {
+    REG_CLR_BIT(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+}
+#endif
+
+static TwoWire &keyboardBus() {
+#if defined(DEVICE_M9)
+    return Wire1;
+#else
+    return Wire;
+#endif
+}
+
+#if defined(DEVICE_M9)
+static uint8_t sM9KeyReg = KB_REG_KEY;
+static uint32_t sM9NextEarlyProbeMs = 0;
+static constexpr uint32_t kM9HomeSleepHoldMs = 1000;
+static bool sM9PressTimingActive = false;
+static bool sM9PressDurationReady = false;
+static uint32_t sM9PressStartedMs = 0;
+static uint32_t sM9PressDurationMs = 0;
+static uint32_t sM9EventPressDurationMs = 0;
+
+static void m9TrackPressTiming(bool pressed, uint32_t nowMs) {
+    if (sM9KeyReg == KB_REG_KEY_EARLY) {
+        sM9PressTimingActive = false;
+        sM9PressDurationReady = false;
+        return;
+    }
+
+    if (pressed) {
+        if (!sM9PressTimingActive) {
+            sM9PressTimingActive = true;
+            sM9PressStartedMs = nowMs;
+            sM9PressDurationReady = false;
+        }
+        return;
+    }
+
+    if (sM9PressTimingActive) {
+        sM9PressDurationMs = nowMs - sM9PressStartedMs;
+        sM9PressDurationReady = true;
+        sM9PressTimingActive = false;
+    }
+}
+
+static uint32_t m9ConsumePressDuration(uint32_t nowMs) {
+    uint32_t durationMs = 0;
+    if (sM9PressTimingActive) {
+        durationMs = nowMs - sM9PressStartedMs;
+    } else if (sM9PressDurationReady) {
+        durationMs = sM9PressDurationMs;
+    }
+    sM9PressDurationReady = false;
+    return durationMs;
+}
+
+static bool m9ReadRegister(TwoWire &bus, uint8_t reg, uint8_t &value) {
+    bus.beginTransmission((uint8_t)KB_ADDR);
+    bus.write(reg);
+    if (bus.endTransmission() != 0) return false;
+    if (bus.requestFrom((uint8_t)KB_ADDR, (uint8_t)1) != 1) return false;
+    value = bus.read();
+    return true;
+}
+
+static bool m9IsEarlyController(TwoWire &bus, uint8_t &hw, uint8_t &fw) {
+    const bool hwOk = m9ReadRegister(bus, KB_REG_HW_VERSION, hw);
+    const bool fwOk = m9ReadRegister(bus, KB_REG_FW_VERSION, fw);
+    return hwOk && fwOk && hw == 0x03 && fw == 0x10;
+}
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #ifdef KEY_BACKSPACE
 #undef KEY_BACKSPACE
@@ -669,7 +752,7 @@ void TDeckKeyboard::begin() {
     Wire.setClock(400000UL);
     delay(30);
 #if (KB_INT >= 0)
-    pinMode(KB_INT, INPUT_PULLUP);
+    pinMode(KB_INT, (KB_INT_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
 #if defined(KB_BL) && (KB_BL >= 0)
     pinMode(KB_BL, OUTPUT);
@@ -677,14 +760,37 @@ void TDeckKeyboard::begin() {
 #endif
     tloraResetKeyboardController();
 #elif HAS_KEYBOARD
-    Wire.begin(KB_SDA, KB_SCL, 100000UL);
-    Wire.setClock(400000UL);
+#if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
+    // Before Wire.begin(): the USB PHY is holding SDA until this runs.
+    m9ReleaseUsbPads();
+    delay(5);
+#endif
+    TwoWire &bus = keyboardBus();
+    bus.begin(KB_SDA, KB_SCL, 100000UL);
+#if !defined(DEVICE_M9)
+    bus.setClock(400000UL);
+#endif
     delay(50);
-    Wire.beginTransmission(KB_ADDR);
-    Wire.endTransmission();
+    bus.beginTransmission(KB_ADDR);
+    bus.endTransmission();
     delay(50);
+#if defined(DEVICE_M9)
+    {
+        uint8_t hw = 0xFF;
+        uint8_t fw = 0xFF;
+        const bool earlyController = m9IsEarlyController(bus, hw, fw);
+        sM9KeyReg = earlyController ? KB_REG_KEY_EARLY : KB_REG_KEY;
+        sM9NextEarlyProbeMs = millis() + 1000;
+
+        uint8_t sample = 0xFF;
+        const bool keyOk = m9ReadRegister(bus, sM9KeyReg, sample);
+        Serial.printf("[kb] m9 probe bus=Wire1 proto=%s hw=0x%02X fw=0x%02X keyreg=0x%02X sample=0x%02X int=%d ok=%d\n",
+                      earlyController ? "early" : "stc8h",
+                      hw, fw, sM9KeyReg, sample, digitalRead(KB_INT), keyOk ? 1 : 0);
+    }
+#endif
 #if (KB_INT >= 0)
-    pinMode(KB_INT, INPUT_PULLUP);
+    pinMode(KB_INT, (KB_INT_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
 #if defined(DEVICE_TDECK)
     // One probe write, logged. A keyboard whose firmware predates the backlight
@@ -885,7 +991,7 @@ char TDeckKeyboard::readKey() {
     static uint32_t lastIdleProbeMs = 0;
     uint32_t now = millis();
 #if (KB_INT >= 0)
-    bool irqActive = (digitalRead(KB_INT) == LOW);
+    bool irqActive = (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL);
     if (!irqActive) {
         if (now - lastIdleProbeMs < 120) return KEY_NONE;
         lastIdleProbeMs = now;
@@ -901,7 +1007,10 @@ char TDeckKeyboard::readKey() {
 #if (KB_INT >= 0)
     static uint32_t lastIdleProbeMs = 0;
     static uint32_t lastKeyHitMs = 0;
-    bool irqActive = (digitalRead(KB_INT) == LOW);
+    bool irqActive = (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL);
+#if defined(DEVICE_M9)
+    m9TrackPressTiming(irqActive, now);
+#endif
     // T-Deck can miss very short taps if we only probe every 250ms when the
     // IRQ line is not asserted; keep a faster fallback cadence there.
 #if defined(DEVICE_TDECK)
@@ -933,8 +1042,61 @@ char TDeckKeyboard::readKey() {
 #endif
     }
 #endif
-    uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
-    if (!Wire.available()) {
+#if defined(DEVICE_M9)
+    // The M9's controller is register-addressed: point it at the key register
+    // first, then read one byte. A bare read returns whatever register was last
+    // selected — register 0 is the hardware version, a constant — so without
+    // this the driver reads the same non-zero byte forever and never sees a key.
+    //
+    // Also the back-off: when the controller is not answering, every poll would
+    // otherwise emit a Wire error line, which floods the console many times a
+    // second and buries everything else. Failures are counted and polling drops
+    // to once a second until one succeeds.
+    static uint32_t sM9NextProbeMs = 0;
+    static uint16_t sM9FailStreak = 0;
+    TwoWire &bus = keyboardBus();
+    if (sM9KeyReg != KB_REG_KEY_EARLY
+        && (int32_t)(now - sM9NextEarlyProbeMs) >= 0) {
+        sM9NextEarlyProbeMs = now + 1000;
+        uint8_t hw = 0xFF;
+        uint8_t fw = 0xFF;
+        if (m9IsEarlyController(bus, hw, fw)) {
+            sM9KeyReg = KB_REG_KEY_EARLY;
+            Serial.printf("[kb] m9 switched to early protocol hw=0x%02X fw=0x%02X keyreg=0x%02X\n",
+                          hw, fw, sM9KeyReg);
+        }
+    }
+    if (sM9FailStreak >= 8 && (int32_t)(now - sM9NextProbeMs) < 0) {
+        expireHeldKeyBestEffort(now);
+        return KEY_NONE;
+    }
+    bus.beginTransmission((uint8_t)KB_ADDR);
+    bus.write(sM9KeyReg);
+    if (bus.endTransmission() != 0) {
+        if (sM9FailStreak < 0xFFFF) sM9FailStreak++;
+        if (sM9FailStreak == 8) {
+            Serial.println("[kb] m9 controller not responding; backing off to 1 Hz");
+        }
+        sM9NextProbeMs = now + 1000;
+        expireHeldKeyBestEffort(now);
+        return KEY_NONE;
+    }
+#endif
+    uint8_t count = keyboardBus().requestFrom((uint8_t)KB_ADDR, (uint8_t)1);
+#if defined(DEVICE_M9)
+    if (count == 1) {
+        if (sM9FailStreak >= 8) Serial.println("[kb] m9 controller responding again");
+        sM9FailStreak = 0;
+    } else {
+        if (sM9FailStreak < 0xFFFF) sM9FailStreak++;
+        if (sM9FailStreak == 8) {
+            Serial.printf("[kb] m9 read failed keyreg=0x%02X count=%u; backing off to 1 Hz\n",
+                          sM9KeyReg, (unsigned)count);
+        }
+        sM9NextProbeMs = now + 1000;
+    }
+#endif
+    if (!keyboardBus().available()) {
     #if defined(DEVICE_TDECK) && (KB_INT >= 0)
         if (irqActive) {
             // While the keyboard IRQ stays asserted, preserve the current held
@@ -947,7 +1109,7 @@ char TDeckKeyboard::readKey() {
 #endif
         return KEY_NONE;
     }
-    uint8_t raw = Wire.read();
+    uint8_t raw = keyboardBus().read();
     if (raw == 0x00 || raw == 0xFF) {
     #if defined(DEVICE_TDECK) && (KB_INT >= 0)
         if (irqActive) {
@@ -961,10 +1123,21 @@ char TDeckKeyboard::readKey() {
 #endif
         return KEY_NONE;
     }
+#if defined(DEVICE_M9)
+    sM9EventPressDurationMs = m9ConsumePressDuration(now);
+#endif
 #if defined(DEVICE_TDECK)
     lastKeyHitMs = now;
 #endif
     char mapped = mapKey(raw);
+#if defined(DEVICE_M9)
+    static bool sM9FirstKeyLogged = false;
+    if (!sM9FirstKeyLogged && mapped != KEY_NONE) {
+        sM9FirstKeyLogged = true;
+        Serial.printf("[kb] m9 first key raw=0x%02X mapped=0x%02X keyreg=0x%02X\n",
+                      raw, (uint8_t)mapped, sM9KeyReg);
+    }
+#endif
 #if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
     noteHeldKeyBestEffort(mapped, now);
 #endif
@@ -1130,6 +1303,46 @@ void TDeckKeyboard::pumpCardputerKeys() {
 #endif
 
 char TDeckKeyboard::mapKey(uint8_t raw) {
+#if defined(DEVICE_M9)
+    // The M9's controller resolves shift/symbol/alt itself and sends final
+    // ASCII for printable keys, so only the d-pad and the dedicated function
+    // keys arrive as sentinels. Values confirmed on hardware by the reference
+    // port; anything not listed falls through to the shared table below.
+    switch (raw) {
+        case 0xB5: return KEY_SCROLL_UP;    // d-pad up
+        case 0xB6: return KEY_SCROLL_DN;    // d-pad down
+        // The UI collapses these to up/down in one-dimensional contexts, but
+        // preserves them as horizontal movement in multi-column pickers.
+        case 0xB4: return KEY_PREV_CHAN;    // d-pad left
+        case 0xB7: return KEY_NEXT_CHAN;    // d-pad right
+        // Early controllers report Back as 0x86. Production STC firmware uses
+        // 0x86 for Map hold and reports the same Back matrix position as 0x87.
+        case 0x86:
+            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_BACKSPACE : KEY_NONE;
+        case 0x87:
+            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_NONE : KEY_BACKSPACE;
+        case 0x89: return KEY_BACKSPACE_HOLD;  // Back/Delete long-press
+        case 0xA3: return KEY_BACKSPACE_HOLD;  // Enter long-press
+        case 0x81: return KEY_OPEN_DMS;      // dedicated Messages button
+        case 0x82:
+            // STC firmware identifies Home on release; GPIO12 supplies the
+            // press duration that the key byte itself does not include.
+            if (sM9KeyReg != KB_REG_KEY_EARLY
+                && sM9EventPressDurationMs >= kM9HomeSleepHoldMs) {
+                return KEY_SLEEP_SCREEN;
+            }
+            return KEY_OPEN_HOME;            // dedicated Home button
+        case 0x83: return KEY_OPEN_LIVE;     // function button below Home
+        case 0x84: return KEY_OPEN_NODES;    // GPS-area button below Back
+        case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button
+        // Dedicated M9 functions have no Camillia binding yet. Their raw values
+        // overlap this driver's synthetic navigation codes, so drop them.
+        case 0x88:
+        case 0x90:
+            return KEY_NONE;
+        default: break;
+    }
+#endif
     switch (raw) {
     case 0x0D: return KEY_ENTER;
     case 0x0A: return KEY_ENTER;

@@ -352,7 +352,11 @@ void ChannelMgr::_persistChannel(int chanIdx, const Channel &ch) {
     // this used to do) left a window on every single write where a power cut
     // took the whole transcript with it, rather than the previous snapshot
     // simply surviving.
-    storageFs().remove(tmpPath);
+    // exists() first: a leftover staged file is the rare case, and Arduino's VFS
+    // layer logs removing a file that is not there at error level. Unguarded,
+    // the normal path prints an alarming "does not exist" line on every channel
+    // save — noise that reads like a storage fault while nothing is wrong.
+    if (storageFs().exists(tmpPath)) storageFs().remove(tmpPath);
     File f = storageFs().open(tmpPath, FILE_WRITE);
     if (!f) return;
 

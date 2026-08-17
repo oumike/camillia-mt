@@ -13,6 +13,20 @@
 #define PAGER_LORA_USE_LR1121 0
 #endif
 
+// True on boards whose radio is an LR11x0 rather than an SX126x. The families
+// diverge enough in RadioLib's API — no DIO2-as-RF-switch, no current limit, no
+// RX-boost setter, setIrqAction() instead of setDio1Action() — that most call
+// sites have to branch. This used to be spelled out longhand as
+// "DEVICE_TLORA_PAGER_TFT && PAGER_LORA_USE_LR1121" at every one of them, which
+// was a chance to miss one the moment a second LR11x0 board arrived; the M9 is
+// that board.
+#if (defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)) \
+    || defined(MESH_LORA_LR1110)
+#  define MESH_RADIO_IS_LR11XX 1
+#else
+#  define MESH_RADIO_IS_LR11XX 0
+#endif
+
 class MeshRadio {
 public:
     // txPower/rxBoostedGain come from live config. They are passed in rather
@@ -51,7 +65,9 @@ public:
 private:
     bool    _ready = false;
     bool    _rxBoostedGain = (bool)MY_LORA_RX_BOOST;
-#if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
+#if defined(MESH_LORA_LR1110)
+    LR1110  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
+#elif defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
     LR1121  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #else
     SX1262  _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};

@@ -12,6 +12,7 @@ HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 TLORA_ENV_NAME="tlora-pager-tft"
 ATTAKY_ENV_NAME="mesh-deck"
+M9_ENV_NAME="m9"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 FULLCLEAN=false
@@ -40,6 +41,7 @@ env_label() {
 		"$HELTEC_ENV_NAME")        echo "Heltec V4 Expansion Kit" ;;
 		"$HELTEC_VERTICAL_ENV_NAME") echo "Heltec V4 Expansion Kit (Vertical UI)" ;;
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
+		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		*)                         echo "$1" ;;
 	esac
 }
@@ -90,6 +92,10 @@ prompt_for_device() {
 		options+=("$ATTAKY_ENV_NAME")
 		labels+=("Attaky Mesh Deck")
 	fi
+	if has_env "$M9_ENV_NAME"; then
+		options+=("$M9_ENV_NAME")
+		labels+=("Elecrow ThinkNode M9")
+	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
 		echo "No supported device environments found in platformio.ini"
@@ -127,8 +133,10 @@ show_usage() {
 	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
 	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
+	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
+	echo "                M9 uses the combined upload_erase target."
 	echo "  --fullclean, -F  Run PlatformIO fullclean before upload"
 	echo "  --just-build, -B  Compile only - no upload, no monitor, no device needed."
 	echo "                Builds every environment in platformio.ini, or just the"
@@ -193,6 +201,9 @@ for arg in "$@"; do
 			;;
 		--mesh-deck|--attaky|-M)
 			select_env_or_exit "$ATTAKY_ENV_NAME" "Environment '$ATTAKY_ENV_NAME' not found in platformio.ini"
+			;;
+		--m9|-9)
+			select_env_or_exit "$M9_ENV_NAME" "Environment '$M9_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage
@@ -292,15 +303,22 @@ if [ "$ENV_EXPLICIT" = false ]; then
 	prompt_for_device
 fi
 
+UPLOAD_TARGET="upload"
+UPLOAD_LABEL="Upload"
 if [ "$ERASE_FIRST" = true ]; then
-	run_pio_target "erase" "Erasing device flash"
+	if [ "$ENV_NAME" = "$M9_ENV_NAME" ]; then
+		UPLOAD_TARGET="upload_erase"
+		UPLOAD_LABEL="Erase flash and upload"
+	else
+		run_pio_target "erase" "Erasing device flash"
+	fi
 fi
 
 BUILD_START_TS="$(date +%s)"
 if [ "$FULLCLEAN" = true ]; then
 	run_pio_target "fullclean" "Full clean"
 fi
-run_pio_target "upload" "Upload"
+run_pio_target "$UPLOAD_TARGET" "$UPLOAD_LABEL"
 BUILD_END_TS="$(date +%s)"
 BUILD_ELAPSED_SECS=$((BUILD_END_TS - BUILD_START_TS))
 echo "[PIO] Build completed in $(format_duration "$BUILD_ELAPSED_SECS")."

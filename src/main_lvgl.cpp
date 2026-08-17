@@ -980,6 +980,12 @@ static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
+#elif defined(DEVICE_M9)
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = true;
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
+static constexpr int kMainScreenChannelBtnHeight = 22;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -989,7 +995,7 @@ static constexpr int kMainScreenChannelBtnHeight = 22;
 #endif
 // The Mesh Deck's panel is 320x240, the same as the T-Deck's, so it takes the
 // T-Deck's roomier chat font rather than the small-screen default.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
 static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
 #else
 static const lv_font_t *kChannelChatFont = kMainScreenFont;
@@ -1348,6 +1354,11 @@ static void refreshDiscoveryModal(bool force = false);
 static void openBeaconsModal();
 static void closeBeaconsModal();
 static void refreshBeaconsModal(bool force = false);
+#if FEATURE_MQTT_MONITOR
+static void openMqttMonitorModal();
+static void closeMqttMonitorModal();
+static void refreshMqttMonitorModal(bool force = false);
+#endif
 static void chartPushSample(ChartHist &h, float value);
 static void openDmModal();
 static void closeDmModal();
@@ -6823,7 +6834,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
     const lv_coord_t composeInputPadTop = 1;
@@ -6990,7 +7001,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     int modalH = isReply ? 100 : 76;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     modalH = isReply ? 138 : 116;
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     modalH = isReply ? 126 : 104;
 #elif defined(DEVICE_MESH_DECK)
     // Nearly the full panel height, centred, so it expands both up and down.
@@ -7059,7 +7070,8 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
     // Both grow to take whatever the title and reply row leave. On Cardputer
@@ -7084,7 +7096,8 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
     lv_obj_set_style_max_height(s_composeInput, composeInputH, 0);
 #endif
@@ -7099,7 +7112,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) \
-    || defined(DEVICE_MESH_DECK)
+    || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
     // rather than growing the box into the legend.
@@ -7126,7 +7139,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_top(hint, 0, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
     lv_obj_set_style_pad_bottom(hint, 0, 0);
 #else
     lv_obj_set_style_pad_bottom(hint, 1, 0);
@@ -10052,9 +10065,11 @@ static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
 // (T)ools modal now, built on the channel grid metrics just above: same two
 // columns, same column-major fill, so a step of one walks down a column here
 // too. Laid out, that is:
-//     SNR/RSSI | Discovery
-//     ChUtil   | Beacons
-// (Cardputer has no Discovery, so Beacons takes its cell.)
+//     SNR/RSSI  | Beacons
+//     ChUtil    | MQTT
+//     Discovery |
+// (Cardputer has neither Discovery nor MQTT, leaving it SNR/RSSI and ChUtil in
+// the left column with Beacons alone in the right.)
 enum LiveTool : uint8_t {
     LIVE_TOOL_SNR = 0,
     LIVE_TOOL_CHUTIL,
@@ -10062,6 +10077,9 @@ enum LiveTool : uint8_t {
     LIVE_TOOL_DISCOVERY,
 #endif
     LIVE_TOOL_BEACONS,
+#if FEATURE_MQTT_MONITOR
+    LIVE_TOOL_MQTT,
+#endif
     LIVE_TOOL_COUNT
 };
 static constexpr int kLiveToolRowsPerCol =
@@ -10074,6 +10092,9 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
     'D',
 #endif
     'B',
+#if FEATURE_MQTT_MONITOR
+    'M',
+#endif
 };
 
 static lv_obj_t *s_liveToolsBackdrop = nullptr;
@@ -10251,13 +10272,13 @@ static constexpr uint8_t kDiscoverySweepHopLimit = 3;
 // numbers alone.
 //
 //   Pager (480 wide): DIRECT | distance | HEARD ABOUT
-//   T-Deck, Mesh Deck (320): DIRECT + distance | HEARD ABOUT
+//   T-Deck, Mesh Deck, M9 (320): DIRECT + distance | HEARD ABOUT
 //   Cardputer, Heltec: one column, everything stacked
 static constexpr int kDiscoveryColDirect = 0;
 #if defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int kDiscoveryColDistance = 1;
 static constexpr int kDiscoveryColHeard    = 2;
-#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
 static constexpr int kDiscoveryColDistance = 0;
 static constexpr int kDiscoveryColHeard    = 1;
 #else
@@ -16663,10 +16684,23 @@ static void refreshLiveToolsSelection() {
     }
 }
 
+// MQTT needs a broker and a broker needs WiFi, so with the master switch off
+// that row is dead. It stays on the grid rather than vanishing — a tool that
+// comes and goes with a setting is harder to find than one you can see is
+// unavailable — and says why in its own label.
+static bool liveToolEnabled(int tool) {
+#if FEATURE_MQTT_MONITOR
+    if (tool == LIVE_TOOL_MQTT) return s_cfg.wifiEnabled;
+#endif
+    LV_UNUSED(tool);
+    return true;
+}
+
 // Opening a tool drops Tools rather than stacking it underneath: backing out of
 // one then lands on Live, which is where the charts have always returned to.
 static void liveToolsActivate(int tool) {
     if (tool < 0 || tool >= LIVE_TOOL_COUNT) return;
+    if (!liveToolEnabled(tool)) return;
     closeLiveToolsModal();
     switch (tool) {
         case LIVE_TOOL_SNR:       openSnrRssiChartModal(); break;
@@ -16675,6 +16709,9 @@ static void liveToolsActivate(int tool) {
         case LIVE_TOOL_DISCOVERY: openDiscoveryModal();    break;
 #endif
         case LIVE_TOOL_BEACONS:   openBeaconsModal();      break;
+#if FEATURE_MQTT_MONITOR
+        case LIVE_TOOL_MQTT:      openMqttMonitorModal();  break;
+#endif
         default: break;
     }
 }
@@ -16741,6 +16778,9 @@ static void openLiveToolsModal() {
         "Discovery",
 #endif
         "Beacons",
+#if FEATURE_MQTT_MONITOR
+        "MQTT",
+#endif
     };
 #else
     lv_obj_t *hint = lv_label_create(s_liveToolsModal);
@@ -16756,6 +16796,9 @@ static void openLiveToolsModal() {
         "(D)iscovery",
 #endif
         "(B)eacons",
+#if FEATURE_MQTT_MONITOR
+        "(M)QTT",
+#endif
     };
 #endif
 
@@ -16790,15 +16833,32 @@ static void openLiveToolsModal() {
         lv_obj_set_style_pad_top(row, 1, 0);
         lv_obj_set_style_pad_bottom(row, 1, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
-        lv_obj_add_event_cb(row, onLiveToolRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        // Nothing to enable or disable while this modal is up: the settings
+        // behind liveToolEnabled() are only reachable from screens that cannot
+        // be open at the same time, so this is read once, here.
+        const bool enabled = liveToolEnabled(i);
+        if (enabled) {
+            lv_obj_add_event_cb(row, onLiveToolRowPressed, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)i);
+        } else {
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        }
 
         lv_obj_t *lbl = lv_label_create(row);
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, kChanModalRowFont, 0);
-        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_color(lbl, enabled ? rowTextColor : lv_color_hex(0x7590BE), 0);
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        lv_label_set_text(lbl, kToolLabels[i]);
+#if FEATURE_MQTT_MONITOR
+        if (!enabled && i == LIVE_TOOL_MQTT) {
+            lv_label_set_text_fmt(lbl, "%s - WiFi off", kToolLabels[i]);
+        } else
+#endif
+        {
+            lv_label_set_text(lbl, kToolLabels[i]);
+        }
         lv_obj_center(lbl);
     }
 
@@ -17640,6 +17700,367 @@ static void openBeaconsModal() {
 
     refreshBeaconsModal(true);
 }
+
+// ── MQTT Monitor modal ───────────────────────────────────────────────────────
+// What is actually arriving under the configured root: a scrolling grid of
+// channel + message count, two cells to a line. Not a message viewer — the
+// payloads are counted and thrown away, which is what keeps this cheap enough to
+// leave up. The gateway half of each topic is merged away upstream in the
+// bridge, so three gateways carrying KAM-NET are one cell reading 3, not three
+// cells reading 1.
+//
+// Everything about it is transient by design. Counting starts when the screen
+// opens and the table is freed when it closes, so reopening always begins from
+// zero, and the bridge's own state — connection, subscription, downlink — is
+// untouched either way. It rides the subscription the bridge already holds
+// rather than opening a second client, so a board with no broker session shows
+// why instead of dialing one of its own.
+#if FEATURE_MQTT_MONITOR
+
+// Cell geometry for the two-column grid. The narrowest panel this screen is
+// built for is 320 px wide, which leaves ~150 px per cell — enough for a channel
+// name and its count without either being clipped.
+static constexpr int kMqttMonCellPct   = 49;
+static constexpr int kMqttMonCountW    = 44;
+
+static lv_obj_t *s_mqttMonModal = nullptr;
+static lv_obj_t *s_mqttMonList = nullptr;
+static lv_obj_t *s_mqttMonStatusLabel = nullptr;
+// One per row, so a ticking count is a label rewrite rather than a rebuild of a
+// list the user is reading (and scrolled).
+static lv_obj_t *s_mqttMonCountLabels[MQTT_MONITOR_TOPIC_SLOTS] = {};
+static int       s_mqttMonRenderedRows = -1;
+static uint32_t  s_mqttMonRenderedTopicSeq = 0;
+static uint32_t  s_mqttMonStartMs = 0;
+
+static void closeMqttMonitorModal() {
+    if (!s_mqttMonModal) return;
+    lvObjDeleteSafe(s_mqttMonModal);
+    s_mqttMonList = nullptr;
+    s_mqttMonStatusLabel = nullptr;
+    memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+    s_mqttMonRenderedRows = -1;
+    s_mqttMonRenderedTopicSeq = 0;
+    // The whole point of the screen being transient: the table goes back to the
+    // heap the moment it stops being looked at.
+    mqttMonitorStop();
+}
+
+// Why nothing is arriving, in the order the user would have to fix it. Returns
+// nullptr once the broker session is up, which is the only case with no problem
+// to report.
+static const char *mqttMonitorBlockedReason() {
+    if (!mqttMonitorActive())                return "Not counting - out of memory";
+    if (!s_cfg.wifiEnabled)                  return "WiFi is off";
+    if (!s_cfg.mqttEnabled)                  return "MQTT bridge is off";
+    if (!wifiHasActiveCreds())               return "No WiFi network configured";
+    if (WiFi.status() != WL_CONNECTED)       return "WiFi not connected";
+    if (!mqttBridgeConnected())              return "Connecting to broker...";
+    return nullptr;
+}
+
+// Saturated counters print with a trailing '+' so a pegged number reads as "at
+// least this many" rather than as a number that stopped being true.
+static void mqttMonitorFormatCount(uint32_t n, char *out, size_t outLen) {
+    if (n >= kMqttMonitorCountMax) snprintf(out, outLen, "%lu+", (unsigned long)n);
+    else                           snprintf(out, outLen, "%lu", (unsigned long)n);
+}
+
+static void mqttMonitorBuildList() {
+    if (!s_mqttMonList) return;
+    lv_obj_clean(s_mqttMonList);
+    memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+
+    const int rows = mqttMonitorTopicCount();
+    s_mqttMonRenderedRows = rows;
+
+    if (rows == 0) {
+        char empty[220];
+        if (!mqttMonitorActive()) {
+            // The table is ~2 KB. If that could not be found there is no
+            // counting happening at all, which is worth saying plainly.
+            snprintf(empty, sizeof(empty),
+                     "Not enough free heap to hold the topic table.\n\n"
+                     "Close a few screens (or reboot) and try again.");
+        } else if (const char *why = mqttMonitorBlockedReason()) {
+            snprintf(empty, sizeof(empty),
+                     "%s.\n\nNothing can arrive until the bridge has a broker "
+                     "session. Fix it in Config (or web config) and this list "
+                     "fills in on its own.", why);
+        } else {
+            snprintf(empty, sizeof(empty),
+                     "Watching %s/2/e/#\n\nNo messages yet. Channels appear here "
+                     "as they are published, newest at the bottom, with the "
+                     "number of messages seen on each.",
+                     s_cfg.mqttRoot);
+        }
+        beaconsMakeLabel(s_mqttMonList, kBeaconsBodyFont, kBeaconsBodyColor, empty);
+        return;
+    }
+
+    char countText[16];
+    for (int i = 0; i < rows && i < MQTT_MONITOR_TOPIC_SLOTS; i++) {
+        const MqttTopicStat *st = mqttMonitorTopicAt(i);
+        if (!st) break;
+
+        // Two cells per line: a channel name and a count are a handful of
+        // characters, and one per full-width line left most of the panel empty.
+        // 49% leaves the gutter that pad_column draws between the columns, the
+        // same split the channel and Tools grids use.
+        lv_obj_t *row = lv_obj_create(s_mqttMonList);
+        lv_obj_set_width(row, lv_pct(kMqttMonCellPct));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(row, 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 3, 0);
+        lv_obj_set_style_pad_column(row, 4, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        // Channel takes the width that is left; the count is the column that has
+        // to stay readable, so it is the one with a reserved size.
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_flex_grow(name, 1);
+        lv_obj_set_style_text_font(name, kBeaconsBodyFont, 0);
+        lv_obj_set_style_text_color(name, lv_color_hex(kBeaconsBodyColor), 0);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_label_set_text(name, st->channel);
+
+        mqttMonitorFormatCount(st->count, countText, sizeof(countText));
+        lv_obj_t *count = lv_label_create(row);
+        lv_obj_set_width(count, kMqttMonCountW);
+        lv_obj_set_style_text_font(count, kBeaconsBodyFont, 0);
+        lv_obj_set_style_text_color(count, lv_color_hex(kBeaconsTitleColor), 0);
+        lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_label_set_long_mode(count, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(count, countText);
+        s_mqttMonCountLabels[i] = count;
+    }
+}
+
+static void refreshMqttMonitorModal(bool force) {
+    if (!s_mqttMonModal || !s_mqttMonList) return;
+    if (!lvObjValid(s_mqttMonModal)) {
+        s_mqttMonModal = nullptr;
+        s_mqttMonList = nullptr;
+        s_mqttMonStatusLabel = nullptr;
+        memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+        mqttMonitorStop();
+        return;
+    }
+
+    // The list only changes shape when a topic is seen for the first time, and
+    // that is exactly what the topic sequence counts. Everything else that moves
+    // on this screen is a number inside a row that already exists.
+    const uint32_t seq = mqttMonitorTopicSeq();
+    const bool rebuild = force || seq != s_mqttMonRenderedTopicSeq
+                      || mqttMonitorTopicCount() != s_mqttMonRenderedRows;
+    if (rebuild) {
+        s_mqttMonRenderedTopicSeq = seq;
+        mqttMonitorBuildList();
+    }
+
+    // Twice a second: on a busy root every one of these numbers changes many
+    // times a second, and lv_label_set_text invalidates unconditionally — at UI
+    // tick rate this screen would spend the whole loop redrawing itself.
+    static uint32_t s_lastTallyMs = 0;
+    const uint32_t now = millis();
+    if (!rebuild && (uint32_t)(now - s_lastTallyMs) < 500UL) return;
+    s_lastTallyMs = now;
+
+    if (s_mqttMonStatusLabel) {
+        char status[96];
+        const char *why = mqttMonitorBlockedReason();
+        if (why) {
+            snprintf(status, sizeof(status), "%s", why);
+        } else {
+            char total[16];
+            mqttMonitorFormatCount(mqttMonitorTotalMsgs(), total, sizeof(total));
+            // How long this session has been counting, so the message count has
+            // a denominator — 400 messages means nothing without it.
+            char span[16];
+            beaconsFormatSpan((uint32_t)(now - s_mqttMonStartMs), span, sizeof(span));
+            const uint32_t other = mqttMonitorOtherMsgs();
+            if (other) {
+                char otherText[16];
+                mqttMonitorFormatCount(other, otherText, sizeof(otherText));
+                // The table is full, so say so rather than letting the list read
+                // as the whole picture.
+                snprintf(status, sizeof(status), "%d chans  %s msgs  %s  (+%s off-list)",
+                         mqttMonitorTopicCount(), total, span, otherText);
+            } else {
+                snprintf(status, sizeof(status), "%d chans  %s msgs  %s",
+                         mqttMonitorTopicCount(), total, span);
+            }
+        }
+        const char *shown = lv_label_get_text(s_mqttMonStatusLabel);
+        if (!shown || strcmp(shown, status) != 0) {
+            lv_label_set_text(s_mqttMonStatusLabel, status);
+        }
+    }
+
+    char countText[16];
+    const int rows = mqttMonitorTopicCount();
+    for (int i = 0; i < rows && i < MQTT_MONITOR_TOPIC_SLOTS; i++) {
+        if (!s_mqttMonCountLabels[i]) continue;
+        const MqttTopicStat *st = mqttMonitorTopicAt(i);
+        if (!st) break;
+        mqttMonitorFormatCount(st->count, countText, sizeof(countText));
+        const char *shown = lv_label_get_text(s_mqttMonCountLabels[i]);
+        if (shown && strcmp(shown, countText) == 0) continue;
+        lv_label_set_text(s_mqttMonCountLabels[i], countText);
+    }
+}
+
+// Start over without leaving the screen: same thing closing and reopening does,
+// minus the teardown.
+static void mqttMonitorReset() {
+    mqttMonitorStop();
+    mqttMonitorStart();
+    s_mqttMonStartMs = millis();
+    s_mqttMonRenderedTopicSeq = mqttMonitorTopicSeq();
+    s_mqttMonRenderedRows = -1;
+    refreshMqttMonitorModal(true);
+}
+
+static void openMqttMonitorModal() {
+    // Same guard the other tool surfaces carry: a theme rebuild deletes the root
+    // screen out from under the stale pointer.
+    if (s_mqttMonModal && !lvObjAlive(s_mqttMonModal)) {
+        s_mqttMonModal = nullptr;
+        s_mqttMonList = nullptr;
+        s_mqttMonStatusLabel = nullptr;
+        memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+        mqttMonitorStop();
+    }
+    if (!s_rootScreen || s_mqttMonModal) return;
+
+    // A failure here is not fatal to the screen: the list and status both say so
+    // on their own, which beats refusing to open with no explanation.
+    (void)mqttMonitorStart();
+    s_mqttMonStartMs = millis();
+    s_mqttMonRenderedTopicSeq = mqttMonitorTopicSeq();
+    s_mqttMonRenderedRows = -1;
+
+    const int modalW = lv_disp_get_hor_res(NULL);
+    const int modalH = lv_disp_get_ver_res(NULL);
+
+    s_mqttMonModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_mqttMonModal, modalW, modalH);
+    lv_obj_align(s_mqttMonModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mqttMonModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_mqttMonModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_mqttMonModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mqttMonModal, 1, 0);
+    lv_obj_set_style_border_color(s_mqttMonModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_mqttMonModal, 4, 0);
+    lv_obj_set_style_pad_row(s_mqttMonModal, 4, 0);
+    lv_obj_set_flex_flow(s_mqttMonModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_mqttMonModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *header = lv_obj_create(s_mqttMonModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, 26);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(header, 1, 0);
+    lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(header, 4, 0);
+    lv_obj_set_style_pad_right(header, 4, 0);
+    lv_obj_set_style_pad_top(header, 1, 0);
+    lv_obj_set_style_pad_bottom(header, 1, 0);
+
+    // The root is the whole subject of the screen, so it is the title.
+    char titleText[64];
+    snprintf(titleText, sizeof(titleText), "%s/2/e/#", s_cfg.mqttRoot);
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_label_set_text(title, titleText);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_set_width(title, modalW - 108);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+
+    auto makeMqttMonBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+                             lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 44, 20);
+        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makeMqttMonBtn(header, "Close", 0,
+                   [](lv_event_t *e) { LV_UNUSED(e); closeMqttMonitorModal(); });
+    makeMqttMonBtn(header, "Reset", -48,
+                   [](lv_event_t *e) { LV_UNUSED(e); mqttMonitorReset(); });
+#else
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(title);
+#endif
+
+    s_mqttMonStatusLabel = lv_label_create(s_mqttMonModal);
+    lv_obj_set_width(s_mqttMonStatusLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_mqttMonStatusLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_mqttMonStatusLabel, lv_color_hex(0xB8D4FF), 0);
+    lv_obj_set_style_text_align(s_mqttMonStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_mqttMonStatusLabel, "-");
+
+    s_mqttMonList = lv_obj_create(s_mqttMonModal);
+    lv_obj_set_width(s_mqttMonList, lv_pct(100));
+    lv_obj_set_flex_grow(s_mqttMonList, 1);
+    lv_obj_add_flag(s_mqttMonList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_mqttMonList);
+    lv_obj_set_scrollbar_mode(s_mqttMonList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_mqttMonList, lv_color_hex(0x123266), 0);
+    lv_obj_set_style_bg_opa(s_mqttMonList, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_mqttMonList, 1, 0);
+    lv_obj_set_style_border_color(s_mqttMonList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_mqttMonList, 3, 0);
+    lv_obj_set_style_pad_row(s_mqttMonList, 3, 0);
+    lv_obj_set_style_pad_column(s_mqttMonList, 3, 0);
+    lv_obj_set_style_width(s_mqttMonList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_mqttMonList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_mqttMonList, LV_OPA_70, LV_PART_SCROLLBAR);
+    // Row-wrap rather than a column: cells fill left to right, top to bottom, so
+    // a channel that appears while you are watching lands where reading order
+    // says it should — and an odd count leaves one gap, at the end, not a hole
+    // in the middle of a column-major fill.
+    lv_obj_set_flex_flow(s_mqttMonList, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(s_mqttMonList, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_mqttMonModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_label_set_text_fmt(hint, "C = Reset   %s = Back", modalCloseKeyLabel());
+#endif
+
+    refreshMqttMonitorModal(true);
+}
+
+#endif  // FEATURE_MQTT_MONITOR
 
 // ── Discovery modal ──────────────────────────────────────────────────────────
 #if FEATURE_DISCOVERY
@@ -22097,6 +22518,112 @@ static void onboardingFinalize() {
     ESP.restart();
 }
 
+#if defined(DEVICE_M9)
+static bool prepareM9GlobalNavigation() {
+    // Onboarding owns the whole input surface until identity and region exist.
+    if (s_onboardingModal) return false;
+
+    if (s_otaPromptModal) otaPromptDecline();
+    closeEmojiPicker();
+    closeTracerouteProgressModal();
+    closeChUtilChartModal();
+    closeSnrRssiChartModal();
+#if FEATURE_DISCOVERY
+    closeDiscoveryModal();
+#endif
+    closeBeaconsModal();
+#if FEATURE_MQTT_MONITOR
+    closeMqttMonitorModal();
+#endif
+
+    // Revert staged previews first, then remove root-owned picker backdrops
+    // that are not children of the Settings modal itself.
+    closeCfgModal();
+    closeCfgColorPickerModal();
+    closeAlertSoundModal();
+    closeChatStyleModal();
+    closeThemeModal();
+    closeChatNameModal();
+    closeFontSizeModal();
+    closeChanCfgModal();
+    closeLiveModal();
+    closeNodesModal();
+    closeLegendModal();
+    closeChannelActionsModal();
+    setChannelDropdownVisible(false);
+
+    if (s_composeModal) closeComposePrompt();
+    return true;
+}
+
+static void openM9DirectMessagesShortcut() {
+    if (!prepareM9GlobalNavigation()) return;
+    if (s_dmModal && lvObjAlive(s_dmModal)) {
+        closeDmNodePicker();
+        lv_obj_move_foreground(s_dmModal);
+        refreshDmModal(true);
+        return;
+    }
+    openDmModal();
+}
+
+static void openM9HomeShortcut() {
+    if (!prepareM9GlobalNavigation()) return;
+    closeDmModal();
+    setActiveChannel(0);
+}
+
+static void openM9LiveShortcut() {
+    if (!prepareM9GlobalNavigation()) return;
+    closeDmModal();
+    openLiveModal();
+}
+
+static void openM9NodesShortcut() {
+    if (!prepareM9GlobalNavigation()) return;
+    closeDmModal();
+    openNodesModal();
+}
+
+#if FEATURE_DISCOVERY
+static void openM9DiscoveryShortcut() {
+    if (!prepareM9GlobalNavigation()) return;
+    closeDmModal();
+    openDiscoveryModal();
+}
+#endif
+
+static bool handleM9GlobalNavigationKey(char key) {
+    if (key == KEY_SLEEP_SCREEN) {
+        sleepScreen("M9 Home hold");
+        return true;
+    }
+    if (key == KEY_OPEN_DMS) {
+        openM9DirectMessagesShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_HOME) {
+        openM9HomeShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_LIVE) {
+        openM9LiveShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_NODES) {
+        openM9NodesShortcut();
+        return true;
+    }
+#if FEATURE_DISCOVERY
+    if (key == KEY_OPEN_DISCOVERY) {
+        openM9DiscoveryShortcut();
+        return true;
+    }
+#endif
+    return false;
+}
+#endif
+
 static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
@@ -22168,11 +22695,16 @@ static void pumpKeyboardInput() {
             if (!tryWakeScreenFromInput(millis())) {
                 continue;
             }
+#if defined(DEVICE_M9)
+            (void)handleM9GlobalNavigationKey(k);
+#endif
             return;
         }
         s_lastActivityMs = millis();
 
-        char rawKey = k;
+#if defined(DEVICE_M9)
+    if (handleM9GlobalNavigationKey(k)) continue;
+#endif
 
         // Every modal that feeds keys into a textarea belongs here. Anything
         // left out has its j and k folded into KEY_SCROLL_UP/DN below and then
@@ -22199,6 +22731,26 @@ static void pumpKeyboardInput() {
         // physical arrows, and those must keep their own direction.
         bool jkDirectionInvert = false;
 
+    #if defined(DEVICE_M9)
+        // Keep left/right distinct only where the visible surface is genuinely
+        // multi-column. Everywhere else the pad remains paired vertical nav:
+        // Up/Left move up, Down/Right move down.
+        const bool m9FourWaySelection = s_emojiPickerModal
+                         || s_cfgColorModal
+                         || s_fontSizeModal
+                         || s_alertSoundModal
+                         || (s_chanCfgModal && !s_chanEditModal)
+                         || (s_chanEditModal && !s_chanTextModal)
+                         || s_timeCfgModal
+                         || s_liveToolsModal;
+        if (!m9FourWaySelection) {
+            if (k == KEY_PREV_CHAN)      k = KEY_SCROLL_UP;
+            else if (k == KEY_NEXT_CHAN) k = KEY_SCROLL_DN;
+        }
+    #endif
+
+        char rawKey = k;
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         // Match v1 Cardputer shortcuts: ';' / '.' navigate lists, and
         // the key physically labeled '`' acts as Escape to close modals.
@@ -22212,16 +22764,13 @@ static void pumpKeyboardInput() {
         k = remapJkUiKey(k, !typingContext);
 #endif
 
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     // Cardputer parity rule: physical Up/Down arrows must behave exactly
     // like j/k anywhere j/k are used for navigation, so all downstream
     // navFromJk direction branches apply the same way.
     //
-    // The Mesh Deck needs it for the same reason. Its D-pad arrives as
-    // KEY_SCROLL_UP/DN from the expander poller, and without this the
-    // direction branches that ask "did this come from j/k?" step the opposite
-    // way for the D-pad than for j and k — most visibly inside the channel
-    // dropdown, where the two inputs would scroll against each other.
+    // Mesh Deck and M9 need it for the same reason: their physical D-pads arrive
+    // as scroll keys in one-dimensional contexts and must keep j/k direction.
     if (!typingContext && (rawKey == KEY_SCROLL_UP || rawKey == KEY_SCROLL_DN)) {
         navFromJk = true;
     }
@@ -22466,20 +23015,34 @@ static void pumpKeyboardInput() {
                 applyCfgColorSelection(s_cfgColorSelection);
                 continue;
             }
+            int next = s_cfgColorSelection;
+#if defined(DEVICE_M9)
+            if (k == KEY_SCROLL_UP) {
+                if (next > 0) next = (next <= kMsgColorCols) ? 0 : next - kMsgColorCols;
+            } else if (k == KEY_SCROLL_DN) {
+                if (next == 0) next = 1;
+                else if (next + kMsgColorCols < kUserMsgColorNavCount) next += kMsgColorCols;
+            } else if (k == KEY_PREV_CHAN) {
+                if (next > 1 && ((next - 1) % kMsgColorCols) != 0) next--;
+            } else if (k == KEY_NEXT_CHAN) {
+                if (next == 0) next = 1;
+                else if (((next - 1) % kMsgColorCols) != kMsgColorCols - 1
+                         && next + 1 < kUserMsgColorNavCount) next++;
+            }
+#else
             int delta = 0;
             if (k == KEY_SCROLL_UP)          delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN)     delta = invertScrollNav ? -1 : 1;
             // A row, whatever a row is on this board (kMsgColorCols).
             else if (k == KEY_PAGE_UP || k == KEY_PREV_CHAN) delta = -kMsgColorCols;
             else if (k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) delta = kMsgColorCols;
-            if (delta != 0) {
-                int next = s_cfgColorSelection + delta;
-                if (next < 0) next = 0;
-                if (next >= kUserMsgColorNavCount) next = kUserMsgColorNavCount - 1;
-                if (next != s_cfgColorSelection) {
-                    s_cfgColorSelection = next;
-                    refreshCfgColorPickerModal();
-                }
+            next += delta;
+            if (next < 0) next = 0;
+            if (next >= kUserMsgColorNavCount) next = kUserMsgColorNavCount - 1;
+#endif
+            if (next != s_cfgColorSelection) {
+                s_cfgColorSelection = next;
+                refreshCfgColorPickerModal();
             }
             continue;
         }
@@ -22767,15 +23330,21 @@ static void pumpKeyboardInput() {
                 applyAlertSoundSelection(s_alertSoundSelection);
                 continue;
             }
+            int next = s_alertSoundSelection;
+#if defined(DEVICE_M9)
+            if (k == KEY_SCROLL_UP && next >= 2) next -= 2;
+            else if (k == KEY_SCROLL_DN && next + 2 <= MSG_ALERT_SOUND_MAX) next += 2;
+            else if (k == KEY_PREV_CHAN && (next % 2) != 0) next--;
+            else if (k == KEY_NEXT_CHAN && (next % 2) == 0 && next < MSG_ALERT_SOUND_MAX) next++;
+#else
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
-            if (delta != 0) {
-                int next = s_alertSoundSelection + delta;
-                if (next < 0) next = 0;
-                if (next > MSG_ALERT_SOUND_MAX) next = MSG_ALERT_SOUND_MAX;
-                if (next != s_alertSoundSelection) previewAlertSoundSelection(next);
-            }
+            next += delta;
+            if (next < 0) next = 0;
+            if (next > MSG_ALERT_SOUND_MAX) next = MSG_ALERT_SOUND_MAX;
+#endif
+            if (next != s_alertSoundSelection) previewAlertSoundSelection(next);
             continue;
         }
 
@@ -22814,17 +23383,23 @@ static void pumpKeyboardInput() {
                 applyFontSizeSelection(s_fontSizeSelection);
                 continue;
             }
+            int next = s_fontSizeSelection;
+#if defined(DEVICE_M9)
+            if (k == KEY_SCROLL_UP && next >= 2) next -= 2;
+            else if (k == KEY_SCROLL_DN && next + 2 <= FONT_SIZE_MAX) next += 2;
+            else if (k == KEY_PREV_CHAN && (next % 2) != 0) next--;
+            else if (k == KEY_NEXT_CHAN && (next % 2) == 0 && next < FONT_SIZE_MAX) next++;
+#else
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
-            if (delta != 0) {
-                int next = s_fontSizeSelection + delta;
-                if (next < 0) next = 0;
-                if (next > FONT_SIZE_MAX) next = FONT_SIZE_MAX;
-                if (next != s_fontSizeSelection) {
-                    s_fontSizeSelection = next;
-                    refreshFontSizeSelection();
-                }
+            next += delta;
+            if (next < 0) next = 0;
+            if (next > FONT_SIZE_MAX) next = FONT_SIZE_MAX;
+#endif
+            if (next != s_fontSizeSelection) {
+                s_fontSizeSelection = next;
+                refreshFontSizeSelection();
             }
             continue;
         }
@@ -23705,6 +24280,28 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+#if FEATURE_MQTT_MONITOR
+        if (s_mqttMonModal) {
+            if (isModalCloseKey(k)) {
+                closeMqttMonitorModal();
+                continue;
+            }
+            if (k == 'c' || k == 'C') {
+                mqttMonitorReset();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP && s_mqttMonList) {
+                scrollListClamped(s_mqttMonList, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN && s_mqttMonList) {
+                scrollListClamped(s_mqttMonList, -18);
+                continue;
+            }
+            continue;
+        }
+#endif
+
         if (s_beaconsModal) {
             if (isModalCloseKey(k)) {
                 closeBeaconsModal();
@@ -23742,6 +24339,9 @@ static void pumpKeyboardInput() {
                 for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
                     const char shortcut = kLiveToolShortcuts[i];
                     if (k != shortcut && k != (char)(shortcut - 'A' + 'a')) continue;
+                    // A disabled row's letter is inert rather than a silent
+                    // selection move: its label already says why.
+                    if (!liveToolEnabled(i)) { handled = true; break; }
                     s_liveToolsSelection = i;
                     liveToolsActivate(i);
                     handled = true;
@@ -25991,7 +26591,7 @@ static void setActiveChannel(int channelIdx) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerMainChatPanelFocused = false;
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
     s_cardputerDropdownSelection = channelIdx;
 #endif
     clearSelectedMsgContext();
@@ -26036,7 +26636,8 @@ static void refreshChannelSelectorLabel() {
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
         && s_cardputerDropdownSelection < MESH_CHANNELS) {
@@ -26054,7 +26655,7 @@ static void refreshChannelSelectorLabel() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = useCompactVerticalHeltecSelector();
@@ -26109,7 +26710,7 @@ static void refreshChannelSelectorLabel() {
 
             // Measure button width from text + equal edge padding (+ optional caret room).
             lv_coord_t desiredW = textW + (showSelectorCaret ? 26 : (selectorEdgePad * 2 + selectorAntiClip));
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
             if (desiredW < 56) desiredW = 56;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
             if (desiredW < 60) desiredW = 60;
@@ -26170,7 +26771,8 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         lv_obj_clear_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_channelList);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
         }
@@ -26181,7 +26783,8 @@ static void setChannelDropdownVisible(bool visible) {
 #endif
     } else {
         lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
         s_cardputerDropdownSelection = -1;
 #endif
     }
@@ -29008,7 +29611,7 @@ static void refreshChatView(bool force) {
                 lv_obj_set_width(msg, lv_pct(100));
                 lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
                 lv_obj_set_style_pad_left(msg, 1, 0);
                 lv_obj_set_style_pad_right(msg, 0, 0);
 #else
@@ -29173,8 +29776,9 @@ static void buildUi() {
 // Full-width chat, no side panel: these boards put channels in the overlay
 // dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
 // a column for one leaves an empty strip down the side.
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK)
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const int panelMargin = 6;
     const int chatGap = 6;
     const int chatLegendH = 14;
@@ -29297,7 +29901,7 @@ static void buildUi() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     const bool showSelectorCaret = compactHeltecSelector;
@@ -29314,7 +29918,7 @@ static void buildUi() {
 #endif
 
     const lv_font_t *selectorTextFont = headerTextFont;
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
@@ -29476,7 +30080,7 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(s_chatList, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_chatList, 0, 0);
     lv_obj_set_style_pad_all(s_chatList, 0, 0);
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_M9)
     lv_obj_set_style_pad_right(s_chatList, 0, 0);
 #else
     lv_obj_set_style_pad_right(s_chatList, 6, 0);
@@ -29497,7 +30101,7 @@ static void buildUi() {
     // Same size as the selector button's own label, so the open list reads as
     // that button unfolded rather than as a smaller menu below it.
     channelNavFont = &lv_font_montserrat_14;
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
@@ -30725,7 +31329,7 @@ static const NapWakeLine kNapWakeLines[] = {
     { LORA_DIO1,   true  },   // SX1262 holds DIO1 high on RX-done
 #endif
 #if SCREEN_WAKE_FROM_KEYBOARD && defined(KB_INT) && (KB_INT >= 0)
-    { KB_INT,      false },   // keyboard has a byte ready (active low)
+    { KB_INT,      (KB_INT_ACTIVE_LEVEL) == HIGH },
 #endif
 #if SCREEN_WAKE_FROM_TOUCH && defined(TOUCH_INT) && (TOUCH_INT >= 0)
     { TOUCH_INT,   false },   // touch panel (active low)
@@ -31059,6 +31663,10 @@ void loop() {
 #endif
         // Same reasoning, plus the ages on the cards, which move on their own.
         refreshBeaconsModal();
+#if FEATURE_MQTT_MONITOR
+        // Cheap no-op unless the monitor is open; it throttles its own retally.
+        refreshMqttMonitorModal();
+#endif
         refreshDmModal(meshDirty);
     }
 
