@@ -1409,6 +1409,11 @@ static void refreshBeaconsModal(bool force = false);
 static void openMqttMonitorModal();
 static void closeMqttMonitorModal();
 static void refreshMqttMonitorModal(bool force = false);
+static void openMqttSendModal();
+static void closeMqttSendModal();
+static void openMqttConfirmModal(int chan);
+static void closeMqttConfirmModal();
+static void mqttSendConfirmed();
 #endif
 static void chartPushSample(ChartHist &h, float value);
 static void openDmModal();
@@ -18230,8 +18235,89 @@ static int       s_mqttMonRenderedRows = -1;
 static uint32_t  s_mqttMonRenderedTopicSeq = 0;
 static uint32_t  s_mqttMonStartMs = 0;
 
+// ── Send-to-channel ──────────────────────────────────────────────────────────
+// Puts the top few topics on the mesh, for the times when the interesting thing
+// about a broker is worth telling the people not standing next to you. It is a
+// transmission on a shared channel, so it is deliberately awkward: pick the
+// channel, confirm it, and then wait a minute before you can do it again.
+static constexpr uint32_t kMqttSendCooldownMs = 60000;
+static constexpr int      kMqttSendTopN       = 5;
+
+static lv_obj_t *s_mqttSendBackdrop = nullptr;   // channel picker
+static lv_obj_t *s_mqttSendModal    = nullptr;
+static lv_obj_t *s_mqttSendRows[MESH_CHANNELS] = {};
+static int       s_mqttSendSelection = 0;
+
+static lv_obj_t *s_mqttConfirmBackdrop = nullptr;  // "really send?" prompt
+static lv_obj_t *s_mqttConfirmModal    = nullptr;
+static int       s_mqttConfirmChan     = -1;
+
+// millis() of the last send. 0 means "never", which is why the elapsed test
+// below is written to treat it as ready rather than as a very old send.
+static uint32_t  s_mqttSendLastMs = 0;
+
+// A short-lived line that outranks the running status until it expires — the
+// status is rewritten twice a second, so anything said there without this would
+// be gone before it was read.
+static char      s_mqttMonNotice[72] = {};
+static uint32_t  s_mqttMonNoticeUntilMs = 0;
+
+static void mqttMonNotice(const char *msg, uint32_t holdMs = 3000) {
+    snprintf(s_mqttMonNotice, sizeof(s_mqttMonNotice), "%s", msg ? msg : "");
+    uint32_t until = millis() + holdMs;
+    if (until == 0) until = 1;          // 0 is the "no notice" sentinel
+    s_mqttMonNoticeUntilMs = until;
+}
+
+static bool mqttMonNoticeActive() {
+    if (s_mqttMonNoticeUntilMs == 0) return false;
+    if ((int32_t)(millis() - s_mqttMonNoticeUntilMs) >= 0) {
+        s_mqttMonNoticeUntilMs = 0;
+        return false;
+    }
+    return true;
+}
+
+// Seconds still to wait, or 0 when a send is allowed.
+static uint32_t mqttSendCooldownLeftS() {
+    if (s_mqttSendLastMs == 0) return 0;
+    const uint32_t elapsed = (uint32_t)(millis() - s_mqttSendLastMs);
+    if (elapsed >= kMqttSendCooldownMs) return 0;
+    return (kMqttSendCooldownMs - elapsed + 999UL) / 1000UL;
+}
+
+// The top N channels by message count, most first. Ties keep first-seen order,
+// which is the order the screen shows — so the message agrees with the list the
+// sender was looking at when they pressed Send.
+static int mqttMonTopIndices(int *out, int maxOut) {
+    const int total = mqttMonitorTopicCount();
+    int n = 0;
+    for (int slot = 0; slot < maxOut && slot < total; slot++) {
+        int best = -1;
+        uint32_t bestCount = 0;
+        for (int i = 0; i < total; i++) {
+            bool taken = false;
+            for (int j = 0; j < n; j++) {
+                if (out[j] == i) { taken = true; break; }
+            }
+            if (taken) continue;
+            const MqttTopicStat *st = mqttMonitorTopicAt(i);
+            if (!st) continue;
+            if (best < 0 || st->count > bestCount) { best = i; bestCount = st->count; }
+        }
+        if (best < 0) break;
+        out[n++] = best;
+    }
+    return n;
+}
+
+
 static void closeMqttMonitorModal() {
     if (!s_mqttMonModal) return;
+    // Both are parented to the root screen, so neither goes down with the modal
+    // that opened them.
+    closeMqttConfirmModal();
+    closeMqttSendModal();
     lvObjDeleteSafe(s_mqttMonModal);
     s_mqttMonList = nullptr;
     s_mqttMonStatusLabel = nullptr;
@@ -18373,7 +18459,11 @@ static void refreshMqttMonitorModal(bool force) {
     if (s_mqttMonStatusLabel) {
         char status[96];
         const char *why = mqttMonitorBlockedReason();
-        if (why) {
+        if (mqttMonNoticeActive()) {
+            // Sent / refused / cooling down: outranks the running tally until it
+            // expires, because the tally would overwrite it within half a second.
+            snprintf(status, sizeof(status), "%s", s_mqttMonNotice);
+        } else if (why) {
             snprintf(status, sizeof(status), "%s", why);
         } else {
             char total[16];
@@ -18483,7 +18573,8 @@ static void openMqttMonitorModal() {
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_label_set_text(title, titleText);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_obj_set_width(title, modalW - 108);
+    // Three buttons now sit on the right of this header, not two.
+    lv_obj_set_width(title, modalW - 156);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     auto makeMqttMonBtn = [](lv_obj_t *parent, const char *text, int xOffset,
@@ -18509,6 +18600,8 @@ static void openMqttMonitorModal() {
                    [](lv_event_t *e) { LV_UNUSED(e); closeMqttMonitorModal(); });
     makeMqttMonBtn(header, "Reset", -48,
                    [](lv_event_t *e) { LV_UNUSED(e); mqttMonitorReset(); });
+    makeMqttMonBtn(header, "Send", -96,
+                   [](lv_event_t *e) { LV_UNUSED(e); openMqttSendModal(); });
 #else
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
@@ -18551,10 +18644,373 @@ static void openMqttMonitorModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "C = Reset   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "S = Send   C = Reset   %s = Back", modalCloseKeyLabel());
 #endif
 
     refreshMqttMonitorModal(true);
+}
+
+
+// "MQTT msh/US/MI 12m: KAM-NET 42, CFW 18, LongFast 7"
+//
+// Built up entry by entry and stopped at the first one that will not fit, so the
+// text is always a whole list of whole entries rather than something cut mid
+// number. Meshtastic caps a text at MESH_TEXT_MAX_LEN bytes.
+static void mqttMonBuildSendText(char *out, size_t outLen) {
+    char span[16];
+    beaconsFormatSpan((uint32_t)(millis() - s_mqttMonStartMs), span, sizeof(span));
+
+    int n = snprintf(out, outLen, "MQTT %s %s:", s_cfg.mqttRoot, span);
+    if (n < 0 || (size_t)n >= outLen) return;
+
+    int top[kMqttSendTopN];
+    const int count = mqttMonTopIndices(top, kMqttSendTopN);
+    for (int i = 0; i < count; i++) {
+        const MqttTopicStat *st = mqttMonitorTopicAt(top[i]);
+        if (!st) continue;
+        char entry[MQTT_MONITOR_TOPIC_MAX + 24];
+        char countText[16];
+        mqttMonitorFormatCount(st->count, countText, sizeof(countText));
+        snprintf(entry, sizeof(entry), "%s %s %s",
+                 (i == 0) ? "" : ",", st->channel, countText);
+        if ((size_t)n + strlen(entry) >= outLen) break;   // whole entries only
+        n += snprintf(out + n, outLen - n, "%s", entry);
+    }
+}
+
+// ── Send: channel picker ─────────────────────────────────────────────────────
+static void closeMqttSendModal() {
+    if (lvObjValid(s_mqttSendBackdrop)) {
+        lv_obj_del(s_mqttSendBackdrop);
+    } else if (lvObjValid(s_mqttSendModal)) {
+        lv_obj_del(s_mqttSendModal);
+    }
+    s_mqttSendBackdrop = nullptr;
+    s_mqttSendModal = nullptr;
+    memset(s_mqttSendRows, 0, sizeof(s_mqttSendRows));
+}
+
+static void closeMqttConfirmModal() {
+    if (lvObjValid(s_mqttConfirmBackdrop)) {
+        lv_obj_del(s_mqttConfirmBackdrop);
+    } else if (lvObjValid(s_mqttConfirmModal)) {
+        lv_obj_del(s_mqttConfirmModal);
+    }
+    s_mqttConfirmBackdrop = nullptr;
+    s_mqttConfirmModal = nullptr;
+    s_mqttConfirmChan = -1;
+}
+
+// The send itself. Everything above this point is asking; this is the only place
+// that transmits.
+static void mqttSendConfirmed() {
+    const int chan = s_mqttConfirmChan;
+    closeMqttConfirmModal();
+    if (chan < 0 || chan >= MESH_CHANNELS) return;
+
+    // Re-checked here rather than trusting the gate that opened the picker: the
+    // confirm prompt can sit on screen indefinitely, and a stale check is how
+    // two sends land seconds apart.
+    const uint32_t waitS = mqttSendCooldownLeftS();
+    if (waitS > 0) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Wait %lus before sending again", (unsigned long)waitS);
+        mqttMonNotice(msg);
+        return;
+    }
+
+    if (s_myNodeId == 0) deriveNodeId();
+    if (s_myNodeId == 0) {
+        mqttMonNotice("Cannot send: no node id");
+        return;
+    }
+
+    char text[MESH_TEXT_MAX_LEN + 1];
+    mqttMonBuildSendText(text, sizeof(text));
+
+    const bool ok = Channels.sendText(s_myNodeId, text, s_cfg.okToMqtt, chan, 0);
+    char msg[64];
+    if (ok) {
+        // Only a real transmission starts the clock. A failed send leaves the
+        // user free to try again rather than locked out for a minute over
+        // something that never reached the air.
+        s_mqttSendLastMs = millis();
+        if (s_mqttSendLastMs == 0) s_mqttSendLastMs = 1;
+        const char *nm = channelName(chan);
+        snprintf(msg, sizeof(msg), "Sent to %s", (nm && nm[0]) ? nm : "channel");
+    } else {
+        snprintf(msg, sizeof(msg), "Send failed");
+    }
+    mqttMonNotice(msg);
+    refreshMqttMonitorModal(true);
+}
+
+static void openMqttConfirmModal(int chan) {
+    if (!s_rootScreen || chan < 0 || chan >= MESH_CHANNELS) return;
+    if (s_mqttConfirmModal) closeMqttConfirmModal();
+    s_mqttConfirmChan = chan;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 16;
+    if (modalW > kChanModalMaxW) modalW = kChanModalMaxW;
+    if (modalW < 120) modalW = w - 4;
+
+    s_mqttConfirmBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_mqttConfirmBackdrop, w, h);
+    lv_obj_align(s_mqttConfirmBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mqttConfirmBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mqttConfirmBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mqttConfirmBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_mqttConfirmBackdrop, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(s_mqttConfirmBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_mqttConfirmBackdrop, 0, 0);
+    // No dismiss-on-backdrop here, unlike the picker: this is the last gate
+    // before a transmission, so leaving it wants a deliberate No.
+
+    s_mqttConfirmModal = lv_obj_create(s_mqttConfirmBackdrop);
+    lv_obj_set_size(s_mqttConfirmModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_mqttConfirmModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mqttConfirmModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mqttConfirmModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mqttConfirmModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_mqttConfirmModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mqttConfirmModal, 1, 0);
+    lv_obj_set_style_border_color(s_mqttConfirmModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_mqttConfirmModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_mqttConfirmModal, kChanModalGap, 0);
+    lv_obj_set_flex_flow(s_mqttConfirmModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_mqttConfirmModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_mqttConfirmBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_mqttConfirmModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Send to channel?");
+
+    // The message itself, verbatim. Showing what will be transmitted — rather
+    // than a description of it — is the whole point of a confirmation step.
+    char preview[MESH_TEXT_MAX_LEN + 1];
+    mqttMonBuildSendText(preview, sizeof(preview));
+
+    const char *nm = channelName(chan);
+    char line[64];
+    snprintf(line, sizeof(line), "Channel %d  %s", chan, (nm && nm[0]) ? nm : "(unnamed)");
+    lv_obj_t *chanLbl = lv_label_create(s_mqttConfirmModal);
+    lv_obj_set_width(chanLbl, lv_pct(100));
+    lv_obj_set_style_text_font(chanLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(chanLbl, lv_color_hex(0xFFC98A), 0);
+    lv_obj_set_style_text_align(chanLbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(chanLbl, line);
+
+    lv_obj_t *body = lv_label_create(s_mqttConfirmModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body, preview);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *btnRow = lv_obj_create(s_mqttConfirmModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 8, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeConfirmBtn = [](lv_obj_t *parent, const char *text, uint32_t border,
+                             lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, 84, 26);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(border), 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makeConfirmBtn(btnRow, "Cancel", 0x8FB5E6,
+                   [](lv_event_t *e) { LV_UNUSED(e); closeMqttConfirmModal(); });
+    makeConfirmBtn(btnRow, "Send", 0xFFC98A,
+                   [](lv_event_t *e) { LV_UNUSED(e); mqttSendConfirmed(); });
+#else
+    lv_obj_t *hint = lv_label_create(s_mqttConfirmModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Enter=Send   %s=Cancel", modalCloseKeyLabel());
+#endif
+}
+
+static void onMqttSendRowPressed(lv_event_t *e) {
+    const int chan = (int)(intptr_t)lv_event_get_user_data(e);
+    closeMqttSendModal();
+    openMqttConfirmModal(chan);
+}
+
+static void onMqttSendBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_mqttSendBackdrop) return;
+    closeMqttSendModal();
+}
+
+static void refreshMqttSendSelection() {
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *row = s_mqttSendRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_mqttSendSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+    }
+}
+
+static void openMqttSendModal() {
+    if (!s_rootScreen || !s_mqttMonModal) return;
+    if (s_mqttSendModal) closeMqttSendModal();
+
+    // Both gates are checked before the picker opens, so a refusal costs one
+    // keypress rather than a channel choice and a confirmation.
+    const uint32_t waitS = mqttSendCooldownLeftS();
+    if (waitS > 0) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Wait %lus before sending again", (unsigned long)waitS);
+        mqttMonNotice(msg);
+        refreshMqttMonitorModal(true);
+        return;
+    }
+    if (mqttMonitorTopicCount() <= 0) {
+        mqttMonNotice("Nothing recorded yet - nothing to send");
+        refreshMqttMonitorModal(true);
+        return;
+    }
+
+    if (s_mqttSendSelection < 0 || s_mqttSendSelection >= MESH_CHANNELS) s_mqttSendSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 16;
+    if (modalW > kChanModalMaxW) modalW = kChanModalMaxW;
+    if (modalW < 120) modalW = w - 4;
+
+    s_mqttSendBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_mqttSendBackdrop, w, h);
+    lv_obj_align(s_mqttSendBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_mqttSendBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_mqttSendBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mqttSendBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_mqttSendBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_mqttSendBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_mqttSendBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_mqttSendBackdrop, onMqttSendBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_mqttSendModal = lv_obj_create(s_mqttSendBackdrop);
+    lv_obj_set_size(s_mqttSendModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_mqttSendModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_mqttSendModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_mqttSendModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_mqttSendModal, LV_DIR_VER);
+    lv_obj_add_flag(s_mqttSendModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_mqttSendModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_mqttSendModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_mqttSendModal, 1, 0);
+    lv_obj_set_style_border_color(s_mqttSendModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_mqttSendModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_mqttSendModal, kChanModalGap, 0);
+    lv_obj_set_flex_flow(s_mqttSendModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_mqttSendModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_mqttSendBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_mqttSendModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Send top 5 to");
+
+    lv_obj_t *hint = lv_label_create(s_mqttSendModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(hint, "Tap a channel");
+#else
+    lv_label_set_text_fmt(hint, "Move  Enter=Pick  %s=Back", modalCloseKeyLabel());
+#endif
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    lv_obj_t *grid = lv_obj_create(s_mqttSendModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
+    for (int pos = 0; pos < MESH_CHANNELS; pos++) {
+        // Column-major, so the slots read 0-3 down the left and 4-7 down the
+        // right — the same order every other channel grid uses.
+        const int i = (pos % kChanModalCols) * kChanModalRowsPerCol + (pos / kChanModalCols);
+        if (i >= MESH_CHANNELS) continue;
+
+        lv_obj_t *row = lv_btn_create(grid);
+        s_mqttSendRows[i] = row;
+        lv_obj_set_width(row, lv_pct(kChanModalCellPct));
+        lv_obj_set_height(row, kChanModalRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onMqttSendRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        char slotText[28];
+        chanCfgRowLabel(i, slotText, sizeof(slotText));
+        lv_label_set_text(lbl, slotText);
+        lv_obj_center(lbl);
+    }
+
+    lv_obj_update_layout(s_mqttSendModal);
+    refreshMqttSendSelection();
 }
 
 #endif  // FEATURE_MQTT_MONITOR
@@ -23245,7 +23701,7 @@ static void openM9DiscoveryShortcut() {
 
 static bool handleM9GlobalNavigationKey(char key) {
     if (key == KEY_SLEEP_SCREEN) {
-        sleepScreen("M9 Home hold");
+        sleepScreen("M9 d-pad centre hold");
         return true;
     }
     if (key == KEY_OPEN_DMS) {
@@ -23342,12 +23798,34 @@ static void pumpKeyboardInput() {
                 continue;
             }
 #endif
+#if defined(DEVICE_M9)
+            // Pocket guard. This board rides in a pocket with a bare keyboard
+            // and six dedicated buttons facing outward, and with any key able to
+            // wake it that turned into messages sent by accident: the first
+            // press woke the screen and everything after it landed as real
+            // input. Only the d-pad centre wakes it now.
+            //
+            // The centre click and the keyboard's Enter are the same byte on the
+            // wire (0x0D — the controller cannot tell them apart), so Enter
+            // wakes too. One key out of forty is the win here, not zero. Keys
+            // are still drained rather than left to back up in the controller.
+            //
+            // VNC is exempt: a key arriving from a remote viewer was typed
+            // deliberately by someone looking at the screen.
+            // KEY_SLEEP_SCREEN is the same physical key: the driver reports a
+            // held centre as that rather than as Enter, and someone pressing it
+            // to wake the device should not have to guess how long to hold it.
+            if (!fromVnc && k != KEY_ENTER && k != KEY_SLEEP_SCREEN) {
+                continue;
+            }
+#endif
             if (!tryWakeScreenFromInput(millis())) {
                 continue;
             }
-#if defined(DEVICE_M9)
-            (void)handleM9GlobalNavigationKey(k);
-#endif
+            // The press that wakes the screen does nothing else — it is consumed
+            // here. On the M9 this used to also run the global-navigation keys,
+            // so a pocket press of Messages both woke the device and opened DMs,
+            // which is the front half of the accident described above.
             return;
         }
         s_lastActivityMs = millis();
@@ -24964,9 +25442,60 @@ static void pumpKeyboardInput() {
 #endif
 
 #if FEATURE_MQTT_MONITOR
+        // Confirm sits above the picker, which sits above the monitor: each one
+        // owns the keys while it is the topmost of the three.
+        if (s_mqttConfirmModal) {
+            if (isModalCloseKey(k)) {
+                closeMqttConfirmModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                mqttSendConfirmed();
+                continue;
+            }
+            continue;   // nothing else reaches past a confirmation prompt
+        }
+
+        if (s_mqttSendModal) {
+            if (isModalCloseKey(k)) {
+                closeMqttSendModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                const int chan = s_mqttSendSelection;
+                closeMqttSendModal();
+                openMqttConfirmModal(chan);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kChanModalRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kChanModalRowsPerCol;
+                }
+            }
+            if (delta != 0) {
+                int next = s_mqttSendSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= MESH_CHANNELS) next = MESH_CHANNELS - 1;
+                if (next != s_mqttSendSelection) {
+                    s_mqttSendSelection = next;
+                    refreshMqttSendSelection();
+                }
+            }
+            continue;
+        }
+
         if (s_mqttMonModal) {
             if (isModalCloseKey(k)) {
                 closeMqttMonitorModal();
+                continue;
+            }
+            if (k == 's' || k == 'S') {
+                openMqttSendModal();
                 continue;
             }
             if (k == 'c' || k == 'C') {

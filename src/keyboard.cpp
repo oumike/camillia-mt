@@ -27,46 +27,22 @@ static TwoWire &keyboardBus() {
 #if defined(DEVICE_M9)
 static uint8_t sM9KeyReg = KB_REG_KEY;
 static uint32_t sM9NextEarlyProbeMs = 0;
-static constexpr uint32_t kM9HomeSleepHoldMs = 1000;
-static bool sM9PressTimingActive = false;
-static bool sM9PressDurationReady = false;
-static uint32_t sM9PressStartedMs = 0;
-static uint32_t sM9PressDurationMs = 0;
-static uint32_t sM9EventPressDurationMs = 0;
-
-static void m9TrackPressTiming(bool pressed, uint32_t nowMs) {
-    if (sM9KeyReg == KB_REG_KEY_EARLY) {
-        sM9PressTimingActive = false;
-        sM9PressDurationReady = false;
-        return;
-    }
-
-    if (pressed) {
-        if (!sM9PressTimingActive) {
-            sM9PressTimingActive = true;
-            sM9PressStartedMs = nowMs;
-            sM9PressDurationReady = false;
-        }
-        return;
-    }
-
-    if (sM9PressTimingActive) {
-        sM9PressDurationMs = nowMs - sM9PressStartedMs;
-        sM9PressDurationReady = true;
-        sM9PressTimingActive = false;
-    }
-}
-
-static uint32_t m9ConsumePressDuration(uint32_t nowMs) {
-    uint32_t durationMs = 0;
-    if (sM9PressTimingActive) {
-        durationMs = nowMs - sM9PressStartedMs;
-    } else if (sM9PressDurationReady) {
-        durationMs = sM9PressDurationMs;
-    }
-    sM9PressDurationReady = false;
-    return durationMs;
-}
+// ── d-pad centre hold ────────────────────────────────────────────────────────
+// The controller does the timing, not the firmware. Holding the centre makes it
+// send 0xA3 (its Enter long-press event) all by itself, which is the whole
+// gesture — no press-duration tracking on this side, and nothing that depends on
+// KB_INT behaving as a level.
+//
+// That last part is why the obvious approach does not work here: KB_INT-based
+// timing is guarded off entirely on early controllers (keyreg 0x01), which is
+// what the units in the field actually report, so anything measuring the press
+// on the host never runs on them.
+//
+// The threshold is therefore the controller's own, not a number chosen here. The
+// keyboard exposes it at KB_REG_LONG_PRESS_MS (register 0x03, big-endian ms) if
+// it ever needs to be stretched to an exact two seconds — untested on the early
+// controller, so it is deliberately not written at init.
+static uint32_t sM9LastEnterMs = 0;   // for the one-shot timing log below
 
 static bool m9ReadRegister(TwoWire &bus, uint8_t reg, uint8_t &value) {
     bus.beginTransmission((uint8_t)KB_ADDR);
@@ -1008,9 +984,6 @@ char TDeckKeyboard::readKey() {
     static uint32_t lastIdleProbeMs = 0;
     static uint32_t lastKeyHitMs = 0;
     bool irqActive = (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL);
-#if defined(DEVICE_M9)
-    m9TrackPressTiming(irqActive, now);
-#endif
     // T-Deck can miss very short taps if we only probe every 250ms when the
     // IRQ line is not asserted; keep a faster fallback cadence there.
 #if defined(DEVICE_TDECK)
@@ -1123,19 +1096,30 @@ char TDeckKeyboard::readKey() {
 #endif
         return KEY_NONE;
     }
-#if defined(DEVICE_M9)
-    sM9EventPressDurationMs = m9ConsumePressDuration(now);
-#endif
 #if defined(DEVICE_TDECK)
     lastKeyHitMs = now;
 #endif
     char mapped = mapKey(raw);
 #if defined(DEVICE_M9)
+    // Remembered so the log below can report how long the controller waits
+    // before calling a press a long-press — the one number this side does not
+    // otherwise know.
+    if (mapped == KEY_ENTER) sM9LastEnterMs = now;
     static bool sM9FirstKeyLogged = false;
     if (!sM9FirstKeyLogged && mapped != KEY_NONE) {
         sM9FirstKeyLogged = true;
         Serial.printf("[kb] m9 first key raw=0x%02X mapped=0x%02X keyreg=0x%02X\n",
                       raw, (uint8_t)mapped, sM9KeyReg);
+    }
+    // Once per boot: how long the controller waited before calling the centre a
+    // long-press, and whether it sent an ordinary Enter first. That is the only
+    // way to see this device's threshold from here — it is the controller's
+    // number, not one this firmware sets.
+    static bool sM9HoldDiagLogged = false;
+    if (!sM9HoldDiagLogged && raw == 0xA3) {
+        sM9HoldDiagLogged = true;
+        Serial.printf("[kb] m9 centre long-press: %lums after last Enter\n",
+                      sM9LastEnterMs ? (unsigned long)(now - sM9LastEnterMs) : 0UL);
     }
 #endif
 #if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -1322,16 +1306,15 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0x87:
             return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_NONE : KEY_BACKSPACE;
         case 0x89: return KEY_BACKSPACE_HOLD;  // Back/Delete long-press
-        case 0xA3: return KEY_BACKSPACE_HOLD;  // Enter long-press
+        // Centre held. The controller raises this on its own, and it is the
+        // only "still held" signal the early protocol gives us — see the note
+        // above. It used to be a second close gesture; Back's own long-press
+        // (0x89, just above) is the close-hold now, and this is "screen off".
+        case 0xA3: return KEY_SLEEP_SCREEN;
         case 0x81: return KEY_OPEN_DMS;      // dedicated Messages button
-        case 0x82:
-            // STC firmware identifies Home on release; GPIO12 supplies the
-            // press duration that the key byte itself does not include.
-            if (sM9KeyReg != KB_REG_KEY_EARLY
-                && sM9EventPressDurationMs >= kM9HomeSleepHoldMs) {
-                return KEY_SLEEP_SCREEN;
-            }
-            return KEY_OPEN_HOME;            // dedicated Home button
+        // Home opens Home, and only that. Holding it used to sleep the screen,
+        // which is now the d-pad centre's job.
+        case 0x82: return KEY_OPEN_HOME;     // dedicated Home button
         case 0x83: return KEY_OPEN_LIVE;     // function button below Home
         case 0x84: return KEY_OPEN_NODES;    // GPS-area button below Back
         case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button

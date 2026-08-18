@@ -179,8 +179,16 @@
 #endif
 
 // ── Screen wake policy ───────────────────────────────────────────────────────
-// Keyboard wake is fine here: unlike the T-Deck there is no lid-exposed
-// capacitive panel to trigger on contact, and the keys are the only input.
+// Keyboard wake is on, but narrowed: this stays 1 because the keyboard is the
+// only input this board has, and the wake path in main_lvgl.cpp then accepts
+// only the d-pad centre (KEY_ENTER) while the screen is off. Every other key is
+// drained without waking.
+//
+// Not a style preference — a pocket. The keys and the six dedicated buttons face
+// outward with no lid over them, and with any key able to wake the device the
+// first press woke the screen while the rest went in as real input, which sent
+// messages nobody meant to send. Search DEVICE_M9 near tryWakeScreenFromInput()
+// for the gate.
 #define SCREEN_WAKE_FROM_KEYBOARD 1
 #define SCREEN_WAKE_FROM_TOUCH    0
 

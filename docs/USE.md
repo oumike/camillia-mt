@@ -58,7 +58,7 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   T opens the Tools modal (SNR/RSSI, ChUtil and Beacons everywhere, plus
   Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
   S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
-  restarts the count
+  restarts the count and S sends the top 5 to a channel
 
 ### LilyGo T-Deck (tdeck)
 
@@ -103,10 +103,21 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   from anywhere, closing whatever is open first: **Messages** (DMs), **Home**,
   the function key below Home (Live), the key below Back (Nodes), and **Map**
   (Discovery)
-- **Hold Home** for a second to sleep the screen
+- **Hold the d-pad centre to put the screen to sleep** — the same gesture as
+  holding the T-Deck's trackball click. A tap of the centre is still Enter. How
+  long counts as a hold is decided by the keyboard controller itself, not by the
+  firmware, so it may not be exactly two seconds
+- **Only the d-pad centre wakes the screen.** Every other key is ignored while
+  the screen is off, and the press that wakes it does nothing else — it does not
+  also open the surface it belongs to. This board rides in a pocket with its keys
+  and shortcut buttons facing outward, and with any key able to wake it the first
+  press woke the screen and the rest went in as real input, which sent messages
+  nobody meant to send. The centre click and the keyboard's Enter are the same
+  code on the wire, so Enter wakes it too
 - D-pad Up/Down navigates lists and chat rows; Left/Right switches channels, and
   moves between columns in multi-column pickers (Tools, channel grid)
-- Modal close key is Back; hold Back or Enter for the long-press close
+- Modal close key is Back; hold Back for the long-press close. (A held Enter no
+  longer closes — past two seconds it is the sleep gesture above)
 - No touch panel and no trackball — the keyboard and d-pad are the only input
 - The keypad has its own backlight, driven by the host
 
@@ -297,6 +308,8 @@ or displayed.
 - Nothing persists. Counting starts when the screen opens, the table is freed
   when it closes, and reopening starts from zero. Press C (Heltec: the Reset
   button) to start over without leaving the screen
+- **Press S (Heltec: the Send button) to put the top 5 channels on the mesh.**
+  See [Sending a summary](#sending-a-summary) below
 - Bounded on purpose, so leaving it up all day costs what one minute costs: 32
   channels are tracked and messages on channels past that are tallied together
   as `(+n off-list)` on the status line rather than evicting a row. Every counter
@@ -305,6 +318,31 @@ or displayed.
   second connection, so it neither adds broker load nor changes what the bridge
   does with downlink traffic
 - Close with the device close key (see device sections below)
+
+#### Sending a summary
+
+Puts the five busiest channels and their counts on the mesh as an ordinary text
+message, for when what the broker is carrying is worth telling people who are not
+standing next to you.
+
+- Press **S** (on Heltec, the **Send** button in the header) to start
+- Pick a channel from the grid — every configured channel is listed, the same
+  slots the channel selector shows. Move with Up/Down, hop columns with
+  Left/Right, Enter picks; on Heltec, tap one
+- **A confirmation follows, showing the exact text that will be transmitted** and
+  the channel it is going to. Enter sends, the close key cancels (on Heltec, the
+  Send and Cancel buttons). The backdrop is not a dismiss target here — this is
+  the last gate before a transmission, so leaving it takes a deliberate no
+- The message reads like
+  `MQTT msh/US/MI 12m: KAM-NET 42, CFW 18, LongFast 7`, and is trimmed to whole
+  entries if it would run past Meshtastic's 200-byte text limit
+- **One send per minute.** After a successful send the action is refused for 60
+  seconds and says how long is left — this is a broadcast on a shared channel and
+  it should not be possible to lean on the key. A send that fails to transmit
+  does not start the clock
+- Refusals and results appear on the status line for a few seconds: `Sent to
+  LongFast`, `Wait 43s before sending again`, or
+  `Nothing recorded yet - nothing to send`
 
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)
 
@@ -1170,8 +1208,8 @@ Primary usage is touch.
 
 Primary usage is keyboard plus the d-pad and the dedicated function row.
 
-- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere;
-  holding Home sleeps the screen
+- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere
+- Holding the d-pad centre sleeps the screen
 - D-pad Up/Down navigates, Left/Right switches channels or hops columns
 - H toggles the channel selector
 - Space opens compose or reply compose; Enter moves the cursor into the
