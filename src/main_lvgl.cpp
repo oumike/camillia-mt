@@ -20596,13 +20596,13 @@ static void openNodesModal() {
     int contentW = modalW - (modalPad * 2);
     if (contentW < 120) contentW = modalW;
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_14);
-#elif defined(DEVICE_TDECK)
-    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_14);
-#else
+    // One size on every board. The Pager and T-Deck used to take montserrat_14
+    // here, which suited the old single-block description and is much too big
+    // for a two-column table: at that size the field names ate the row and the
+    // values ellipsized down to nothing. This is what the M9 renders on the same
+    // 320x240 panel the T-Deck has, and it is the size the tables were laid out
+    // against. The Cardputer, on its own layout, was already using it.
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
-#endif
 
 #if NODES_LAYOUT_WIDE
     // The list is on the left now and carries long names, so it gets a real
@@ -20773,13 +20773,17 @@ static void openNodesModal() {
 #else
     const int32_t nodesSectionW = lv_pct(100);
 #endif
-    // Wide enough for "Last heard" and "Pressure" in the detail font; the value
-    // column takes whatever is left.
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    const int nodesKeyColW = 78;
-#else
-    const int nodesKeyColW = 56;
-#endif
+    // Measured from the font rather than hardcoded per board: the widest field
+    // name decides the column, so changing the font above can never again leave
+    // the names clipped or the values starting halfway across the panel. The
+    // value column takes whatever is left.
+    int nodesKeyColW;
+    {
+        lv_point_t keySz;
+        lv_text_get_size(&keySz, "Last heard", nodesDetailFont, 0, 0,
+                         LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        nodesKeyColW = keySz.x + 6;   // + the gutter to the values
+    }
     static const char *kNodesSectionTitles[NODES_SEC_COUNT] = {
         "Identity", "Link", "Position", "Telemetry"
     };
