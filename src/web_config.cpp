@@ -626,7 +626,12 @@ static const char kHead[] =
         ".chat-compose{margin-top:.5em;display:flex;gap:.5em}"
         ".chat-compose input{flex:1}"
         ".chat-compose button{margin:0}"
+        ".node-head{display:flex;align-items:flex-start;justify-content:space-between;gap:.6em}"
         ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
+        ".fav-tag{margin-left:.4em;font-weight:600;font-size:.78em;color:var(--text-dim)}"
+        ".fav-btn{flex:0 0 auto;white-space:nowrap}"
+        ".fav-btn[data-fav='1']{border-color:var(--accent);color:var(--accent)}"
+        ".fav-btn:disabled{opacity:.6;cursor:default}"
         ".node-meta{font-size:.82em;color:var(--text-dim);margin:.15em 0;word-break:break-word}"
         ".node-meta b{color:var(--text)}"
         ".live-wrap{margin-top:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:.5em}"
@@ -1672,13 +1677,37 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // board now uses it and the accumulate path is gone.
     auto streamNodeOptions = [&]() {
         String buf;
+        // Rank order already puts favorites first (see cmpNodes in node_db.cpp),
+        // so the boundary is simply the first non-favorite after at least one
+        // favorite — no second pass, and nothing to keep in sync if the sort
+        // keys change. A disabled <option> is the one separator every browser
+        // renders the same way; <option> borders are not stylable.
+        bool sawFavorite = false;
+        bool sawDivider  = false;
         for (int i = 0; i < totalNodes; i++) {
             NodeEntry *n = Nodes.getByRank(i);
             if (!n) continue;
+            if (n->favorite) {
+                sawFavorite = true;
+            } else if (sawFavorite && !sawDivider) {
+                buf += "<option disabled data-fav-divider='1'>"
+                       "&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;&mdash;"
+                       "&mdash;&mdash;&mdash;&mdash;</option>";
+                sawDivider = true;
+            }
             const char *shortName = n->shortName[0] ? n->shortName : "----";
             const char *longName  = n->longName[0]  ? n->longName  : "(unnamed)";
+            char optId[16];
+            snprintf(optId, sizeof(optId), "!%08X", n->nodeId);
+            // The value stays the rank index (it is what selectNode() turns into
+            // an nd-<rank> lookup); the id and flag are what lets the favorite
+            // toggle re-sort this list in place without touching the values.
             buf += "<option value='";
             buf += String(i);
+            buf += "' data-nid='";
+            buf += optId;
+            buf += "' data-fav='";
+            buf += n->favorite ? "1" : "0";
             buf += "'>";
             buf += shortName;
             buf += " -- ";
@@ -1821,11 +1850,33 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += lonAttr;
             buf += "'>";
             buf += "<div class='node-card'>";
+            buf += "<div class='node-head'>";
             buf += "<div class='node-title'>";
             buf += shortName;
             buf += " -- ";
             buf += longName;
-            buf += "</div>";
+            // Says why this node sorted to the top of the list, and — more to
+            // the point — that it is exempt from eviction and from the
+            // keep-favorites clear.
+            //
+            // Always emitted, shown or hidden by style: the toggle below flips
+            // this without a page rebuild, and toggling a display is a great
+            // deal less fragile than inserting an element into a title whose
+            // text came from another node's name.
+            buf += "<span class='fav-tag' data-fav-tag='";
+            buf += idBuf;
+            buf += "'";
+            if (!n->favorite) buf += " style='display:none'";
+            buf += ">(favorite)</span>";
+            buf += "</div>";   // .node-title
+            buf += "<button type='button' class='chat-mini fav-btn' data-fav-btn='";
+            buf += idBuf;
+            buf += "' data-fav='";
+            buf += n->favorite ? "1" : "0";
+            buf += "' onclick='toggleNodeFavorite(this)'>";
+            buf += n->favorite ? "Unfavorite" : "Favorite";
+            buf += "</button>";
+            buf += "</div>";   // .node-head
             buf += "<div class='node-meta'><b>ID:</b> ";
             buf += idBuf;
             buf += "  <b>Channel:</b> ";
@@ -3809,6 +3860,80 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "info.innerHTML=d.innerHTML;"
                             "showNodeMini(d.getAttribute('data-loc')==='1',parseFloat(d.getAttribute('data-lat')),parseFloat(d.getAttribute('data-lon')));"
                         "}"
+                        // ── Favorite toggle ───────────────────────────────────
+                        // The detail panels are cloned out of the hidden store
+                        // into #node-info, so every node has two copies of its
+                        // card in the DOM. Updates go by node id across the whole
+                        // document rather than to the clicked button, or the copy
+                        // that was not clicked goes stale and reappears wrong the
+                        // next time the node is selected.
+                        "function applyNodeFavorite(id,fav){"
+                            "var i,els;"
+                            "els=document.querySelectorAll(\"[data-fav-btn='\"+id+\"']\");"
+                            "for(i=0;i<els.length;i++){"
+                                "els[i].setAttribute('data-fav',fav?'1':'0');"
+                                "els[i].textContent=fav?'Unfavorite':'Favorite';"
+                            "}"
+                            "els=document.querySelectorAll(\"[data-fav-tag='\"+id+\"']\");"
+                            "for(i=0;i<els.length;i++)els[i].style.display=fav?'':'none';"
+                            "var opts=document.querySelectorAll(\"#node-select option[data-nid='\"+id+\"']\");"
+                            "for(i=0;i<opts.length;i++)opts[i].setAttribute('data-fav',fav?'1':'0');"
+                            "resortNodeOptions();"
+                        "}"
+                        // Re-partitions the dropdown the way the device ranks it:
+                        // favorites first, everything else after, relative order
+                        // untouched inside each group (the server's secondary keys
+                        // — named-ness, then recency — still hold within a group,
+                        // and nothing here reorders across one). appendChild moves
+                        // existing nodes, so no option is rebuilt and the values
+                        // that map to nd-<rank> are never touched.
+                        "function resortNodeOptions(){"
+                            "var sel=document.getElementById('node-select');"
+                            "if(!sel)return;"
+                            "var keep=sel.value,favs=[],rest=[],div=null,i,o;"
+                            "for(i=0;i<sel.options.length;i++){"
+                                "o=sel.options[i];"
+                                "if(o.getAttribute('data-fav-divider')==='1'){div=o;continue;}"
+                                "if(!o.hasAttribute('data-nid'))continue;"   // the placeholder
+                                "if(o.getAttribute('data-fav')==='1')favs.push(o);else rest.push(o);"
+                            "}"
+                            "if(div&&div.parentNode)div.parentNode.removeChild(div);"
+                            "for(i=0;i<favs.length;i++)sel.appendChild(favs[i]);"
+                            "if(favs.length&&rest.length){"
+                                "if(!div){"
+                                    "div=document.createElement('option');"
+                                    "div.disabled=true;"
+                                    "div.setAttribute('data-fav-divider','1');"
+                                    "div.textContent='\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014\\u2014';"
+                                "}"
+                                "sel.appendChild(div);"
+                            "}"
+                            "for(i=0;i<rest.length;i++)sel.appendChild(rest[i]);"
+                            "sel.value=keep;"
+                        "}"
+                        "function toggleNodeFavorite(btn){"
+                            "var id=btn.getAttribute('data-fav-btn');"
+                            "var next=btn.getAttribute('data-fav')==='1'?'0':'1';"
+                            "if(!id)return;"
+                            // Every copy of this node's button, not just the one
+                            // clicked: they are the same action in flight.
+                            "var btns=document.querySelectorAll(\"[data-fav-btn='\"+id+\"']\"),i;"
+                            "for(i=0;i<btns.length;i++)btns[i].disabled=true;"
+                            "var done=function(){for(var j=0;j<btns.length;j++)btns[j].disabled=false;};"
+                            "fetch('/node-favorite',{method:'POST',"
+                                "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                                "body:'id='+encodeURIComponent(id)+'&fav='+next})"
+                            ".then(function(r){return r.json();})"
+                            ".then(function(j){"
+                                "if(!j||!j.ok)throw new Error(j&&j.error?j.error:'failed');"
+                                "applyNodeFavorite(id,j.fav===1);"
+                                "done();"
+                            "})"
+                            ".catch(function(e){"
+                                "done();"
+                                "alert('Could not change favorite: '+(e&&e.message?e.message:e));"
+                            "});"
+                        "}"
                         // ── Chat tab (omitted on Cardputer — no PSRAM) ────────
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
                         // Mirrored by kTapbackTray in main_lvgl.cpp, which is what
@@ -5260,6 +5385,43 @@ static void handlePostClearNodes() {
     redirectHomeWithFlash(msg);
 }
 
+// ── Node favorite toggle ──────────────────────────────────────
+// Answers JSON rather than redirecting like the forms above it: the Nodes tab
+// has a streamed option list and a map behind it, and rebuilding that page to
+// flip one bit would cost seconds on a full table and drop the user back on the
+// Config tab. The page updates itself from the response instead.
+static void handlePostNodeFavorite() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    // Hex node id, with or without the leading '!' the page displays.
+    String idArg = server.arg("id");
+    if (idArg.startsWith("!")) idArg.remove(0, 1);
+    const uint32_t nodeId = (uint32_t)strtoul(idArg.c_str(), nullptr, 16);
+    if (nodeId == 0) {
+        server.send(400, "application/json", "{\"error\":\"bad node id\"}");
+        return;
+    }
+
+    const bool want = (server.arg("fav") == "1");
+    NodeEntry *n = Nodes.find(nodeId);
+    if (!n || !n->nodeId) {
+        server.send(404, "application/json", "{\"error\":\"no such node\"}");
+        return;
+    }
+
+    // setFavorite() returns false when the flag already matches. That is not a
+    // failure for a toggle whose request may have been retried — report the
+    // state the node is actually in, which is the state that was asked for.
+    (void)Nodes.setFavorite(nodeId, want);
+
+    char body[40];
+    snprintf(body, sizeof(body), "{\"ok\":true,\"fav\":%d}", n->favorite ? 1 : 0);
+    server.send(200, "application/json", body);
+}
+
 // ── Factory Reset ─────────────────────────────────────────────
 
 static void handlePostFactoryReset() {
@@ -5725,6 +5887,7 @@ static void registerCommonRoutes() {
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
+    onRoute("/node-favorite",     HTTP_POST, handlePostNodeFavorite);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
     registerNotFound();
 }

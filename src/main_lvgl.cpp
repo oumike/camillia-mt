@@ -617,8 +617,56 @@ static int s_dmTouchPressRowIdx = -1;
 static bool s_dmTouchLongPressTriggered = false;
 static lv_obj_t *s_nodesModal = nullptr;
 static lv_obj_t *s_nodesInfoPanel = nullptr;
+// Shown only when there is no node to describe; the sections below take over the
+// moment there is one.
 static lv_obj_t *s_nodesDetail = nullptr;
-static lv_obj_t *s_nodesDetailExtra = nullptr;
+
+// The Nodes screen has two layouts. Everywhere but the Cardputer: the list on
+// the left carrying long names, aligned field tables on the right. The Cardputer
+// keeps the original — a narrow column of short names beside one wrapped detail
+// label — because 240x135 has neither the width to give the list 45% and still
+// leave the values a readable column, nor the height for four sections of
+// fields. Both layouts share the list, the filter, the selection model and the
+// focus model below; only the geometry and the detail rendering differ.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define NODES_LAYOUT_WIDE 0
+#else
+#define NODES_LAYOUT_WIDE 1
+#endif
+
+// Which panel the keys are steering. Selecting a node and pressing Enter hands
+// the navigation keys to the detail panel so its fields can be scrolled; the
+// close key hands them back to the list. Touch builds ignore this — a finger
+// scrolls whichever panel it is on.
+static bool s_nodesInfoFocused = false;
+static lv_obj_t *s_nodesListPanel = nullptr;   // framed container around s_nodesList
+
+// ── Node detail sections ─────────────────────────────────────────────────────
+// The detail panel used to be one wrapped label holding the whole description.
+// Long values reflowed and dragged the field labels out of line with each other,
+// which is what made it hard to read at a glance.
+//
+// Now each section is a two-label table: one label holds the field names, one
+// holds the values, side by side. The columns line up because both labels use
+// the same font and have one line per field, and a value too long for its column
+// ellipsizes on its own line instead of wrapping — a wrap is what would push the
+// rows out of step.
+//
+// Two labels per section rather than two objects per field is a memory decision,
+// not a style one. This modal already refuses to open below 8 KB of largest free
+// LVGL block and stops rendering rows below 4 KB; a label per field would be
+// ~30 more objects out of that same fixed pool. These are built once when the
+// modal opens and only their text is rewritten as the selection moves.
+enum NodesDetailSection : uint8_t {
+    NODES_SEC_IDENTITY = 0,
+    NODES_SEC_LINK,
+    NODES_SEC_POSITION,
+    NODES_SEC_TELEMETRY,
+    NODES_SEC_COUNT
+};
+static lv_obj_t *s_nodesSectionBox[NODES_SEC_COUNT]  = {};
+static lv_obj_t *s_nodesSectionKeys[NODES_SEC_COUNT] = {};
+static lv_obj_t *s_nodesSectionVals[NODES_SEC_COUNT] = {};
 static lv_obj_t *s_nodesMapPanel = nullptr;
 static lv_obj_t *s_nodesMapTitle = nullptr;
 static lv_obj_t *s_nodesMapCoords = nullptr;
@@ -1346,6 +1394,9 @@ static void closeSnrRssiChartModal();
 static void refreshSnrRssiChart(bool force = false);
 static void openLiveToolsModal();
 static void closeLiveToolsModal();
+static void openLiveFilterModal();
+static void closeLiveFilterModal();
+static void refreshLiveFilterHeader();
 #if FEATURE_DISCOVERY
 static void openDiscoveryModal();
 static void closeDiscoveryModal();
@@ -10097,6 +10148,48 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
 #endif
 };
 
+// ── Live traffic filter ──────────────────────────────────────────────────────
+// On a busy mesh the lines worth reading — text, DMs, errors — scroll away under
+// position and telemetry chatter. The filter narrows the Live feed to one kind
+// of traffic, backed by classifyLiveTraffic() — the same classifier that already
+// colors the rows — so there is nothing new to parse and no way for the colors
+// and the filter to disagree about what a line is.
+//
+// Grouped rather than one entry per LiveTrafficClass: the RX and TX halves of a
+// kind belong together on screen, and sixteen rows would not fit the smallest
+// panel this has to open on. liveFilterName()/liveFilterMatches() are defined
+// down beside that classifier.
+enum LiveFilter : uint8_t {
+    LIVE_FILTER_ALL = 0,
+    LIVE_FILTER_TEXT,
+    LIVE_FILTER_DM,
+    LIVE_FILTER_POS,
+    LIVE_FILTER_TLM,
+    LIVE_FILTER_NODE,
+    LIVE_FILTER_ACK,
+    LIVE_FILTER_ENC,
+    LIVE_FILTER_ERROR,
+    LIVE_FILTER_OTHER,
+    LIVE_FILTER_COUNT
+};
+
+// Session-local on purpose: a filter is a way of looking at the feed right now,
+// not a setting. Reopening Live starts on All, so a filter left on days ago can
+// never masquerade as a quiet mesh. (Also why there is no new config field.)
+static uint8_t s_liveFilter = LIVE_FILTER_ALL;
+
+// The picker itself, built on the same grid metrics as Tools. It is a sibling of
+// Tools rather than an entry in it: Tools opens other screens and closes itself,
+// where this changes how the screen behind it renders and hands you straight
+// back to it.
+static lv_obj_t *s_liveFilterBackdrop = nullptr;
+static lv_obj_t *s_liveFilterModal    = nullptr;
+static lv_obj_t *s_liveFilterRows[LIVE_FILTER_COUNT] = {};
+static lv_obj_t *s_liveFilterHeaderLabel = nullptr;   // the chip in the Live header
+static int       s_liveFilterSelection = LIVE_FILTER_ALL;
+static constexpr int kLiveFilterRowsPerCol =
+    (LIVE_FILTER_COUNT + kChanModalCols - 1) / kChanModalCols;
+
 static lv_obj_t *s_liveToolsBackdrop = nullptr;
 static lv_obj_t *s_liveToolsModal    = nullptr;
 static lv_obj_t *s_liveToolsRows[LIVE_TOOL_COUNT] = {};
@@ -13625,6 +13718,46 @@ static LiveTrafficClass classifyLiveTraffic(const DisplayLine &dl) {
     return LIVE_TRAFFIC_DEFAULT;
 }
 
+// ── Live traffic filter ──────────────────────────────────────────────────────
+// The enum and its state live further up, beside the picker's own statics, which
+// need LIVE_FILTER_COUNT to size their arrays. These two are here instead
+// because they are the half that has to know about LiveTrafficClass, defined
+// just above.
+static const char *liveFilterName(uint8_t f) {
+    switch (f) {
+        case LIVE_FILTER_TEXT:  return "Text";
+        // "DMs" rather than "Direct messages": this name has to fit a grid cell
+        // on a 240px panel and the header chip beside it.
+        case LIVE_FILTER_DM:    return "DMs";
+        case LIVE_FILTER_POS:   return "Position";
+        case LIVE_FILTER_TLM:   return "Telemetry";
+        case LIVE_FILTER_NODE:  return "Node info";
+        case LIVE_FILTER_ACK:   return "ACKs";
+        case LIVE_FILTER_ENC:   return "Encrypted";
+        case LIVE_FILTER_ERROR: return "Errors";
+        case LIVE_FILTER_OTHER: return "Other";
+        default:                return "All";
+    }
+}
+
+static bool liveFilterMatches(uint8_t f, LiveTrafficClass cls) {
+    if (f == LIVE_FILTER_ALL) return true;
+    switch (f) {
+        case LIVE_FILTER_TEXT:  return cls == LIVE_TRAFFIC_RX_TEXT || cls == LIVE_TRAFFIC_TX_TEXT;
+        case LIVE_FILTER_DM:    return cls == LIVE_TRAFFIC_TX_DM;
+        case LIVE_FILTER_POS:   return cls == LIVE_TRAFFIC_RX_POS  || cls == LIVE_TRAFFIC_TX_POS;
+        case LIVE_FILTER_TLM:   return cls == LIVE_TRAFFIC_RX_TLM  || cls == LIVE_TRAFFIC_TX_TLM;
+        case LIVE_FILTER_NODE:  return cls == LIVE_TRAFFIC_RX_NODE || cls == LIVE_TRAFFIC_TX_NODE;
+        case LIVE_FILTER_ACK:   return cls == LIVE_TRAFFIC_RX_ACK  || cls == LIVE_TRAFFIC_TX_ACK;
+        case LIVE_FILTER_ENC:   return cls == LIVE_TRAFFIC_RX_ENC;
+        case LIVE_FILTER_ERROR: return cls == LIVE_TRAFFIC_ERROR;
+        // Everything the named rows do not claim, so no line is unreachable.
+        case LIVE_FILTER_OTHER: return cls == LIVE_TRAFFIC_RX_OTHER || cls == LIVE_TRAFFIC_TX_OTHER
+                                    || cls == LIVE_TRAFFIC_DEFAULT;
+        default:                return true;
+    }
+}
+
 static inline uint16_t userMessageAccentColor565() {
     // User-chosen override from the config color picker takes precedence.
     if (s_cfg.userMsgColor < kUserMsgColorCount) {
@@ -13716,17 +13849,34 @@ static void closeLiveToolsModal() {
     s_liveToolsSelection = LIVE_TOOL_SNR;      // first enabled tool
 }
 
+static void closeLiveFilterModal() {
+    if (lvObjValid(s_liveFilterBackdrop)) {
+        lv_obj_del(s_liveFilterBackdrop);      // takes the modal and rows with it
+    } else if (lvObjValid(s_liveFilterModal)) {
+        lv_obj_del(s_liveFilterModal);
+    }
+    s_liveFilterBackdrop = nullptr;
+    s_liveFilterModal = nullptr;
+    memset(s_liveFilterRows, 0, sizeof(s_liveFilterRows));
+}
+
 static void closeLiveModal() {
-    // Tools is parented to the root screen, not to the Live modal, so nothing
-    // else would take it down with the screen it belongs to.
+    // Tools and the filter picker are parented to the root screen, not to the
+    // Live modal, so nothing else would take them down with the screen they
+    // belong to.
     closeLiveToolsModal();
+    closeLiveFilterModal();
     if (s_liveModal && lv_obj_is_valid(s_liveModal)) {
         lv_obj_del(s_liveModal);
     }
     s_liveModal = nullptr;
     s_liveList = nullptr;
+    s_liveFilterHeaderLabel = nullptr;
     s_lastRenderedLiveCount = -1;
     s_lastRenderedLiveScrollOff = -1;
+    // The filter is a way of looking at the feed, not a setting: leaving Live
+    // puts it back to All so it can never be silently in force next time.
+    s_liveFilter = LIVE_FILTER_ALL;
 }
 
 static void chartPushSample(ChartHist &h, float value) {
@@ -13829,7 +13979,11 @@ static void closeNodesModal() {
     s_nodesMapLastPrimePollMs = 0;
     s_nodesInfoPanel = nullptr;
     s_nodesDetail = nullptr;
-    s_nodesDetailExtra = nullptr;
+    s_nodesListPanel = nullptr;
+    s_nodesInfoFocused = false;
+    memset(s_nodesSectionBox, 0, sizeof(s_nodesSectionBox));
+    memset(s_nodesSectionKeys, 0, sizeof(s_nodesSectionKeys));
+    memset(s_nodesSectionVals, 0, sizeof(s_nodesSectionVals));
     s_nodesMapPanel = nullptr;
     s_nodesMapTitle = nullptr;
     s_nodesMapCoords = nullptr;
@@ -14928,6 +15082,32 @@ static void clearNodeDbOnSd() {
 #endif
 }
 
+// The legend under the list. Its own function because the focus model changes it
+// without changing a single row — rebuilding every row object to rewrite one
+// line of text would be real LVGL churn on a full node table.
+static void refreshNodesHint() {
+    if (!s_nodesHintLabel) return;
+#if defined(DEVICE_TDECK)
+    const char *navKeys = "J/K";
+#else
+    const char *navKeys = "Up/Down";
+#endif
+    if (s_nodesInfoFocused) {
+        // The keys mean something else in here, so say so rather than leaving
+        // the list's legend up over a panel it no longer drives.
+        lv_label_set_text_fmt(s_nodesHintLabel, "%s=Scroll  A=Actions  %s=List",
+                              navKeys, modalCloseKeyLabel());
+    } else if (s_nodesFilterOpen) {
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              "Type=Filter  %s=Select  Enter=Info  Bksp=Edit/Exit  %s=Back",
+                              navKeys, modalCloseKeyLabel());
+    } else {
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              "%s=Select  Enter=Info  A=Actions  Space=Filter  %s=Back",
+                              navKeys, modalCloseKeyLabel());
+    }
+}
+
 static void refreshNodesListRows() {
     if (!lvObjAlive(s_nodesList)) {
         s_nodesList = nullptr;
@@ -14962,29 +15142,7 @@ static void refreshNodesListRows() {
         }
     }
 
-    if (s_nodesHintLabel) {
-        if (s_nodesFilterOpen) {
-#if defined(DEVICE_TDECK)
-            lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Type=Filter  J/K=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
-                                  modalCloseKeyLabel());
-#else
-            lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Type=Filter  Up/Down=Select  Enter=Actions  Bksp=Edit/Exit  %s=Back",
-                                  modalCloseKeyLabel());
-#endif
-        } else {
-#if defined(DEVICE_TDECK)
-            lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "J/K=Select  Enter=Actions  Space=Filter  %s=Back",
-                                  modalCloseKeyLabel());
-#else
-            lv_label_set_text_fmt(s_nodesHintLabel,
-                                  "Up/Down=Select  Enter=Actions  Space=Filter  %s=Back",
-                                  modalCloseKeyLabel());
-#endif
-        }
-    }
+    refreshNodesHint();
 
     lv_obj_clean(s_nodesList);
     s_nodesListRowCount = 0;
@@ -15054,17 +15212,38 @@ static void refreshNodesListRows() {
         }
         lv_obj_set_width(lbl, lv_pct(100));
         lv_obj_set_style_text_font(lbl, nodesListFont, 0);
+#if NODES_LAYOUT_WIDE
+        // Left-aligned and ellipsized, not centered and clipped: a column of
+        // centered long names is much harder to scan down, and a name cut
+        // mid-glyph does not read as "there is more of this".
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_LEFT, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+
+        // Long name first, since that is what identifies a node to a person.
+        // The fallback chain ends at the id so an evicted node — one that
+        // vanished while this modal was open — still occupies its row and keeps
+        // the list 1:1 with s_nodesFilteredIdx.
+        const char *rowName = nodeIdText;
+        if (n) {
+            if (n->hasName && n->longName[0])  rowName = n->longName;
+            else if (n->shortName[0])          rowName = n->shortName;
+            else                               rowName = "----";
+        }
+#else
+        // Cardputer: short names, centered, in a column too narrow for more.
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-
+        const char *rowName = !n ? nodeIdText : (n->shortName[0] ? n->shortName : "----");
+#endif
         char rowText[56];
-        snprintf(rowText,
-             sizeof(rowText),
-             "%s%s",
-             (n && n->favorite) ? "* " : "",
-             !n ? nodeIdText : (n->shortName[0] ? n->shortName : "----"));
+        snprintf(rowText, sizeof(rowText), "%s%s",
+                 (n && n->favorite) ? "* " : "", rowName);
         setLabelTextEmojiSafe(lbl, rowText);
+#if NODES_LAYOUT_WIDE
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+#else
         lv_obj_center(lbl);
+#endif
 
         if (s_nodesListRowCount < MAX_NODES) {
             s_nodesListRows[s_nodesListRowCount] = row;
@@ -15099,19 +15278,67 @@ static void refreshNodesListSelection() {
     }
 }
 
+// Which panel has the keys, drawn the way DM draws the same idea: the focused
+// panel takes the bright 2px border, the other drops to the dim hairline. Touch
+// builds never enter info focus, so both keep their resting look there.
+static void refreshNodesPanelFocusStyles() {
+    if (!lvObjValid(s_nodesInfoPanel) || !lvObjValid(s_nodesListPanel)) return;
+    const bool infoFocused = s_nodesInfoFocused;
+
+    lv_obj_set_style_border_width(s_nodesListPanel, infoFocused ? 1 : 2, 0);
+    lv_obj_set_style_border_color(
+        s_nodesListPanel,
+        infoFocused ? lv_color_hex(0x335D9D) : lv_color_hex(0x90B4FF), 0);
+
+    lv_obj_set_style_border_width(s_nodesInfoPanel, infoFocused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(
+        s_nodesInfoPanel,
+        infoFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D), 0);
+}
+
+// Writes one section's two labels. `keys` and `vals` are newline-separated and
+// must carry the same number of lines — that correspondence is the whole of the
+// alignment, so a caller that adds a field has to add it to both.
+static void nodesSetSection(int section, const char *keys, const char *vals) {
+    if (section < 0 || section >= NODES_SEC_COUNT) return;
+    if (lvObjValid(s_nodesSectionKeys[section])) {
+        lv_label_set_text(s_nodesSectionKeys[section], keys);
+    }
+    if (lvObjValid(s_nodesSectionVals[section])) {
+        setLabelTextEmojiSafe(s_nodesSectionVals[section], vals);
+    }
+}
+
+static void nodesShowSections(bool show) {
+    for (int i = 0; i < NODES_SEC_COUNT; i++) {
+        if (!lvObjValid(s_nodesSectionBox[i])) continue;
+        if (show) lv_obj_clear_flag(s_nodesSectionBox[i], LV_OBJ_FLAG_HIDDEN);
+        else      lv_obj_add_flag(s_nodesSectionBox[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 static void refreshNodesDetails() {
     if (!lvObjAlive(s_nodesDetail)) {
         s_nodesDetail = nullptr;
-        s_nodesDetailExtra = nullptr;
+        s_nodesListPanel = nullptr;
+        s_nodesInfoFocused = false;
+        memset(s_nodesSectionBox, 0, sizeof(s_nodesSectionBox));
+        memset(s_nodesSectionKeys, 0, sizeof(s_nodesSectionKeys));
+        memset(s_nodesSectionVals, 0, sizeof(s_nodesSectionVals));
         return;
     }
 
     const NodeEntry *selectedNode = currentNodesSelection();
     if (!selectedNode) {
+        lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_nodesDetail, "No nodes seen yet.");
-        if (s_nodesDetailExtra) lv_label_set_text(s_nodesDetailExtra, "");
+        nodesShowSections(false);
         return;
     }
+#if NODES_LAYOUT_WIDE
+    lv_obj_add_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
+    nodesShowSections(true);
+#endif
 
     const NodeEntry &n = *selectedNode;
 
@@ -15136,89 +15363,57 @@ static void refreshNodesDetails() {
         uint32_t ageMs = millis() - n.lastHeardMs;
         snprintf(heard, sizeof(heard), "%lus ago", (unsigned long)(ageMs / 1000UL));
     } else {
-        snprintf(heard, sizeof(heard), "unknown");
+        snprintf(heard, sizeof(heard), "n/a");
     }
 
-    char pos[96];
-    if (n.hasPosition && (n.latI != 0 || n.lonI != 0)) {
-        float lat = (float)n.latI / 10000000.0f;
-        float lon = (float)n.lonI / 10000000.0f;
-        snprintf(pos, sizeof(pos), "Lat: %.5f\nLon: %.5f\nAlt: %ld m",
-                 (double)lat,
-                 (double)lon,
-                 (long)n.alt);
-    } else {
-        snprintf(pos, sizeof(pos), "No position data");
-    }
+    char vals[256];
 
-    const bool useImperial = (s_cfg.displayUnits != 0);
-    char telem[220];
-    if (n.hasTelemetry) {
-        telem[0] = '\0';
-        if (n.hasDeviceTelemetry) {
-            snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                     "Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%",
-                     (double)n.battPct,
-                     (double)n.voltage,
-                     (double)n.chUtil,
-                     (double)n.airUtil);
+#if !NODES_LAYOUT_WIDE
+    // Cardputer: the original single wrapped label. Four sections of aligned
+    // fields need width for two columns and height for ~17 rows, and this panel
+    // has neither — so it keeps the compact blob it has always had.
+    {
+        char pos[96];
+        if (n.hasPosition && (n.latI != 0 || n.lonI != 0)) {
+            snprintf(pos, sizeof(pos), "Lat: %.5f\nLon: %.5f\nAlt: %ld m",
+                     (double)((float)n.latI / 10000000.0f),
+                     (double)((float)n.lonI / 10000000.0f),
+                     (long)n.alt);
+        } else {
+            snprintf(pos, sizeof(pos), "No position data");
         }
-        if (n.hasEnvironmentTelemetry) {
-            if (telem[0]) {
-                snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem), "\n");
-            }
-            if (useImperial) {
-                float tempF = n.temperatureC * (9.0f / 5.0f) + 32.0f;
-                float pressureInHg = n.pressureHpa * 0.0295299831f;
+
+        char telem[220];
+        if (n.hasTelemetry) {
+            telem[0] = '\0';
+            if (n.hasDeviceTelemetry) {
                 snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                         "Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg",
-                         (double)tempF,
-                         (double)n.humidityPct,
-                         (double)pressureInHg);
-            } else {
-                snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
-                         "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
-                         (double)n.temperatureC,
-                         (double)n.humidityPct,
-                         (double)n.pressureHpa);
+                         "Battery: %.0f%%\nVoltage: %.2f V\nChUtil: %.1f%%\nAirTx: %.1f%%",
+                         (double)n.battPct, (double)n.voltage,
+                         (double)n.chUtil, (double)n.airUtil);
             }
-        }
-        if (!telem[0]) {
+            if (n.hasEnvironmentTelemetry) {
+                if (telem[0]) {
+                    snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem), "\n");
+                }
+                if (s_cfg.displayUnits != 0) {
+                    snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                             "Temp: %.1f F\nHumidity: %.1f%%\nPressure: %.2f inHg",
+                             (double)(n.temperatureC * (9.0f / 5.0f) + 32.0f),
+                             (double)n.humidityPct,
+                             (double)(n.pressureHpa * 0.0295299831f));
+                } else {
+                    snprintf(telem + strlen(telem), sizeof(telem) - strlen(telem),
+                             "Temp: %.1f C\nHumidity: %.1f%%\nPressure: %.1f hPa",
+                             (double)n.temperatureC, (double)n.humidityPct,
+                             (double)n.pressureHpa);
+                }
+            }
+            if (!telem[0]) snprintf(telem, sizeof(telem), "No telemetry data");
+        } else {
             snprintf(telem, sizeof(telem), "No telemetry data");
         }
-    } else {
-        snprintf(telem, sizeof(telem), "No telemetry data");
-    }
 
-    if (s_nodesDetailExtra) {
-        char leftBuf[320];
-        char rightBuf[320];
-        snprintf(leftBuf, sizeof(leftBuf),
-                 "Name: %s\n"
-                 "Short: %s\n"
-                 "ID: !%08X\n"
-                 "Last heard: %s\n"
-                 "SNR: %.1f dB\n"
-                 "Hops: %u\n"
-                 "Channel: %d",
-                 name,
-                 shortName,
-                 n.nodeId,
-                 heard,
-                 (double)n.snr,
-                 (unsigned)n.hops,
-                 n.chanIdx);
-
-        snprintf(rightBuf, sizeof(rightBuf),
-                 "Position:\n%s\n"
-                 "\n"
-                 "Telemetry:\n%s",
-                 pos,
-                 telem);
-
-        setLabelTextEmojiSafe(s_nodesDetail, leftBuf);
-        setLabelTextEmojiSafe(s_nodesDetailExtra, rightBuf);
-    } else {
         char buf[512];
         snprintf(buf, sizeof(buf),
                  "Name: %s\n"
@@ -15232,18 +15427,79 @@ static void refreshNodesDetails() {
                  "Position:\n%s\n"
                  "\n"
                  "Telemetry:\n%s",
-                 name,
-                 shortName,
-                 n.nodeId,
-                 heard,
-                 (double)n.snr,
-                 (unsigned)n.hops,
-                 n.chanIdx,
-                 pos,
-                 telem);
-
+                 name, shortName, n.nodeId, heard,
+                 (double)n.snr, (unsigned)n.hops, n.chanIdx, pos, telem);
         setLabelTextEmojiSafe(s_nodesDetail, buf);
     }
+    LV_UNUSED(vals);
+#else
+    // ── Identity ──
+    snprintf(vals, sizeof(vals), "%s\n%s\n!%08X", name, shortName, n.nodeId);
+    nodesSetSection(NODES_SEC_IDENTITY, "Name\nShort\nID", vals);
+
+    // ── Link ──
+    // Hops is only meaningful when a packet carried hop_start; without it "0
+    // hops" would read as "direct neighbor", which is a different claim.
+    char hops[16];
+    if (n.hasHops) snprintf(hops, sizeof(hops), "%u", (unsigned)n.hops);
+    else           snprintf(hops, sizeof(hops), "n/a");
+    char snr[16];
+    if (n.lastHeardMs > 0) snprintf(snr, sizeof(snr), "%.1f dB", (double)n.snr);
+    else                   snprintf(snr, sizeof(snr), "n/a");
+    char chan[16];
+    if (n.chanIdx >= 0) snprintf(chan, sizeof(chan), "%d", n.chanIdx);
+    else                snprintf(chan, sizeof(chan), "n/a");
+    snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s", heard, snr, hops, chan);
+    nodesSetSection(NODES_SEC_LINK, "Last heard\nSNR\nHops\nChannel", vals);
+
+    // ── Position ──
+    // Every field is emitted even when unknown, here and below: a section that
+    // grows and shrinks with the selection makes the whole panel jump under the
+    // cursor, and "n/a" is also a fact worth reading.
+    if (n.hasPosition && (n.latI != 0 || n.lonI != 0)) {
+        snprintf(vals, sizeof(vals), "%.5f\n%.5f\n%ld m",
+                 (double)((float)n.latI / 10000000.0f),
+                 (double)((float)n.lonI / 10000000.0f),
+                 (long)n.alt);
+    } else {
+        snprintf(vals, sizeof(vals), "n/a\nn/a\nn/a");
+    }
+    nodesSetSection(NODES_SEC_POSITION, "Lat\nLon\nAlt", vals);
+
+    // ── Telemetry ──
+    const bool useImperial = (s_cfg.displayUnits != 0);
+    char batt[16], volt[16], chu[16], airtx[16], temp[16], hum[16], press[16];
+    if (n.hasDeviceTelemetry) {
+        snprintf(batt,  sizeof(batt),  "%.0f%%",   (double)n.battPct);
+        snprintf(volt,  sizeof(volt),  "%.2f V",   (double)n.voltage);
+        snprintf(chu,   sizeof(chu),   "%.1f%%",   (double)n.chUtil);
+        snprintf(airtx, sizeof(airtx), "%.1f%%",   (double)n.airUtil);
+    } else {
+        snprintf(batt, sizeof(batt), "n/a");
+        snprintf(volt, sizeof(volt), "n/a");
+        snprintf(chu, sizeof(chu), "n/a");
+        snprintf(airtx, sizeof(airtx), "n/a");
+    }
+    if (n.hasEnvironmentTelemetry) {
+        if (useImperial) {
+            snprintf(temp,  sizeof(temp),  "%.1f F",     (double)(n.temperatureC * (9.0f / 5.0f) + 32.0f));
+            snprintf(press, sizeof(press), "%.2f inHg",  (double)(n.pressureHpa * 0.0295299831f));
+        } else {
+            snprintf(temp,  sizeof(temp),  "%.1f C",     (double)n.temperatureC);
+            snprintf(press, sizeof(press), "%.1f hPa",   (double)n.pressureHpa);
+        }
+        snprintf(hum, sizeof(hum), "%.1f%%", (double)n.humidityPct);
+    } else {
+        snprintf(temp, sizeof(temp), "n/a");
+        snprintf(hum, sizeof(hum), "n/a");
+        snprintf(press, sizeof(press), "n/a");
+    }
+    snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s\n%s\n%s\n%s",
+             batt, volt, chu, airtx, temp, hum, press);
+    nodesSetSection(NODES_SEC_TELEMETRY,
+                    "Battery\nVoltage\nChUtil\nAirTx\nTemp\nHumidity\nPressure", vals);
+#endif  // NODES_LAYOUT_WIDE
+
     if (s_nodesInfoPanel) {
         lv_obj_scroll_to_y(s_nodesInfoPanel, 0, LV_ANIM_OFF);
     }
@@ -16419,6 +16675,14 @@ static void refreshLiveView(bool force) {
         const DisplayLine *dl = Channels.getLine(CHAN_LIVE, row);
         if (!dl) break;
 
+        // Filtered out before anything is created, so a hidden line costs no
+        // LVGL pool memory and does not count against the low-memory cutoff
+        // below — the point of filtering a busy feed is to render less of it.
+        if (s_liveFilter != LIVE_FILTER_ALL
+            && !liveFilterMatches(s_liveFilter, classifyLiveTraffic(*dl))) {
+            continue;
+        }
+
         // Each wrapped label costs a few hundred bytes from LVGL's fixed
         // LV_MEM_SIZE pool. If the pool can't satisfy lv_label_create(), LVGL
         // fires LV_ASSERT_MALLOC and the default handler resets the device —
@@ -16475,7 +16739,20 @@ static void refreshLiveView(bool force) {
         lv_obj_t *empty = lv_label_create(s_liveList);
         lv_obj_set_style_text_font(empty, liveBodyFont, 0);
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
-        lv_label_set_text(empty, "No live traffic yet");
+        // Naming the filter matters here: an empty screen under a filter looks
+        // exactly like a dead radio, and the difference is one word.
+        if (s_liveFilter == LIVE_FILTER_ALL) {
+            lv_label_set_text(empty, "No live traffic yet");
+        } else {
+            lv_label_set_text_fmt(empty, "No %s traffic yet\n(filter is on - %s)",
+                                  liveFilterName(s_liveFilter),
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+                                  "tap Filter to change"
+#else
+                                  "press F to change"
+#endif
+                                  );
+        }
     }
 
     // Flush the flex layout so scroll extents are accurate before positioning;
@@ -16623,7 +16900,23 @@ static void openLiveModal() {
     };
     makeLiveHeaderBtn(header, "Tools", -4,
                       [](lv_event_t *e) { LV_UNUSED(e); openLiveToolsModal(); });
+    // Touch build: the header chip is the control, since there is no F key. It
+    // sits left of Tools and carries the active filter as its label.
+    lv_obj_t *filterBtn =
+        makeLiveHeaderBtn(header, "Filter", -60,
+                          [](lv_event_t *e) { LV_UNUSED(e); openLiveFilterModal(); });
+    lv_obj_set_width(filterBtn, 92);   // holds "Filter: Telemetry", the longest
+    s_liveFilterHeaderLabel = lv_obj_get_child(filterBtn, 0);
+#else
+    // Keyboard builds: a plain chip on the right of the centered LIVE title. Not
+    // a button — F opens the picker, and a tap target with no touch panel behind
+    // it would just be decoration.
+    s_liveFilterHeaderLabel = lv_label_create(header);
+    lv_obj_set_style_text_font(s_liveFilterHeaderLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_liveFilterHeaderLabel, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_align(s_liveFilterHeaderLabel, LV_ALIGN_RIGHT_MID, 0, 0);
 #endif
+    refreshLiveFilterHeader();
 
     s_liveList = lv_obj_create(s_liveModal);
     lv_obj_set_width(s_liveList, lv_pct(100));
@@ -16656,9 +16949,10 @@ static void openLiveModal() {
     // No Back tooltip here. Esc leaves every modal on this build, and carrying
     // it made the legend 239 px wide against 230 px of content — it wrapped to
     // a second line and took 11 px off the feed. The rest fits on one line.
-    lv_label_set_text(hint, "C = Clear   T = Tools");
+    lv_label_set_text(hint, "C = Clear   T = Tools   F = Filter");
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   T = Tools", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   T = Tools   F = Filter",
+                          modalCloseKeyLabel());
 #endif
 #endif
 
@@ -16887,6 +17181,209 @@ static void openLiveToolsModal() {
 #endif
 
     refreshLiveToolsSelection();
+}
+
+// ── Live filter picker ───────────────────────────────────────────────────────
+static void refreshLiveFilterSelection() {
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+
+    for (int i = 0; i < LIVE_FILTER_COUNT; i++) {
+        lv_obj_t *row = s_liveFilterRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_liveFilterSelection);
+        lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
+        // Ten rows do not fit the shortest panel, so the grid scrolls; keeping
+        // the selection in view is what makes arrowing past the fold work.
+        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+// The chip in the Live header. Rewritten in place rather than rebuilt, so
+// changing the filter does not disturb the header layout.
+static void refreshLiveFilterHeader() {
+    if (!lvObjValid(s_liveFilterHeaderLabel)) {
+        s_liveFilterHeaderLabel = nullptr;
+        return;
+    }
+    lv_label_set_text_fmt(s_liveFilterHeaderLabel, "Filter: %s", liveFilterName(s_liveFilter));
+}
+
+static void liveFilterApply(int filter) {
+    if (filter < 0 || filter >= LIVE_FILTER_COUNT) return;
+    closeLiveFilterModal();
+    if ((uint8_t)filter == s_liveFilter) return;
+
+    s_liveFilter = (uint8_t)filter;
+    refreshLiveFilterHeader();
+    // refreshLiveView() early-returns when the line count and scroll offset are
+    // unchanged, and neither moves when only the filter does. Clearing both is
+    // what forces the rebuild.
+    s_lastRenderedLiveCount = -1;
+    s_lastRenderedLiveScrollOff = -1;
+    refreshLiveView(true);
+}
+
+static void onLiveFilterRowPressed(lv_event_t *e) {
+    liveFilterApply((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void onLiveFilterBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_liveFilterBackdrop) return;
+    closeLiveFilterModal();
+}
+
+static void openLiveFilterModal() {
+    if (!s_rootScreen || !s_liveModal) return;
+    if (s_liveFilterModal) closeLiveFilterModal();
+
+    // Opens on the filter that is in force, so Enter is a no-op confirmation
+    // rather than a surprise.
+    s_liveFilterSelection = s_liveFilter;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    const int modalW = min(kChanModalMaxW, w - 14);
+
+    s_liveFilterBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_liveFilterBackdrop, w, h);
+    lv_obj_align(s_liveFilterBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_liveFilterBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_liveFilterBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_liveFilterBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_liveFilterBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_liveFilterBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_liveFilterBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_liveFilterBackdrop, onLiveFilterBackdropPressed,
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_liveFilterModal = lv_obj_create(s_liveFilterBackdrop);
+    lv_obj_set_size(s_liveFilterModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_liveFilterModal,
+                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_liveFilterModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_liveFilterModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_liveFilterModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_liveFilterModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_liveFilterModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_liveFilterModal, 1, 0);
+    lv_obj_set_style_border_color(s_liveFilterModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_liveFilterModal, kChanModalPad, 0);
+    lv_obj_set_style_pad_row(s_liveFilterModal, kChanModalGap, 0);
+    lv_obj_set_flex_flow(s_liveFilterModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_liveFilterModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_liveFilterBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_liveFilterModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Live Filter");
+
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_obj_t *hint = lv_label_create(s_liveFilterModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Back", modalCloseKeyLabel());
+#endif
+
+    const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                        ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
+    lv_obj_t *grid = lv_obj_create(s_liveFilterModal);
+    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_height(grid, LV_SIZE_CONTENT);
+    // Ten rows overflow the 240x135 panel even in two columns. Rather than
+    // clipping the tail (which would make the last filters unreachable there),
+    // the grid scrolls once it runs out of room and sits at content height
+    // everywhere else — on every panel above the Cardputer's, all five rows fit
+    // and no scrollbar appears.
+    {
+        // Title, hint (or the touch build's Close button) and the paddings
+        // between them; the rest of the panel is the grid's to use.
+        constexpr int kFilterChromeH = 52;
+        int gridMaxH = h - 2 * kChanModalPad - kFilterChromeH;
+        const int minGridH = 2 * (kChanModalRowH + kChanModalGap);
+        if (gridMaxH < minGridH) gridMaxH = minGridH;
+        lv_obj_set_style_max_height(grid, gridMaxH, 0);
+    }
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(grid);
+    lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, kChanModalGap, 0);
+    lv_obj_set_style_pad_column(grid, kChanModalGap, 0);
+    lv_obj_set_style_width(grid, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(grid, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+
+    for (int pos = 0; pos < LIVE_FILTER_COUNT; pos++) {
+        // Column-major, matching Tools and the channel grids, so a step of one
+        // walks down a column rather than across.
+        const int i = (pos % kChanModalCols) * kLiveFilterRowsPerCol + (pos / kChanModalCols);
+        if (i >= LIVE_FILTER_COUNT) continue;
+
+        lv_obj_t *row = lv_btn_create(grid);
+        s_liveFilterRows[i] = row;
+        lv_obj_set_width(row, lv_pct(kChanModalCellPct));
+        lv_obj_set_height(row, kChanModalRowH);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_left(row, 5, 0);
+        lv_obj_set_style_pad_right(row, 5, 0);
+        lv_obj_set_style_pad_top(row, 1, 0);
+        lv_obj_set_style_pad_bottom(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_add_event_cb(row, onLiveFilterRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *lbl = lv_label_create(row);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, kChanModalRowFont, 0);
+        lv_obj_set_style_text_color(lbl, rowTextColor, 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(lbl, liveFilterName(i));
+        lv_obj_center(lbl);
+    }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // No close key on this build, so the way out has to be on screen — same
+    // treatment the Tools modal gets.
+    lv_obj_t *closeBtn = lv_btn_create(s_liveFilterModal);
+    lv_obj_set_size(closeBtn, 72, 22);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 0, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(closeBtn, 1, 0);
+    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(closeBtn,
+                        [](lv_event_t *e) { LV_UNUSED(e); closeLiveFilterModal(); },
+                        LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#endif
+
+    refreshLiveFilterSelection();
 }
 
 static int16_t chartClampInt(float v, int16_t lo, int16_t hi) {
@@ -20058,7 +20555,10 @@ static void openNodesModal() {
         s_nodesModal = nullptr;
         s_nodesInfoPanel = nullptr;
         s_nodesDetail = nullptr;
-        s_nodesDetailExtra = nullptr;
+        s_nodesListPanel = nullptr;
+        memset(s_nodesSectionBox, 0, sizeof(s_nodesSectionBox));
+        memset(s_nodesSectionKeys, 0, sizeof(s_nodesSectionKeys));
+        memset(s_nodesSectionVals, 0, sizeof(s_nodesSectionVals));
         s_nodesMapPanel = nullptr;
         s_nodesMapTitle = nullptr;
         s_nodesMapCoords = nullptr;
@@ -20104,17 +20604,32 @@ static void openNodesModal() {
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    int rightW = max(62, min(84, (contentW * 22) / 100));
-#else
-    int rightW = max(68, min(96, (contentW * 24) / 100));
-#endif
-    int leftW = contentW - rightW - contentGap;
-    if (leftW < 120) {
-        int deficit = 120 - leftW;
-        rightW = max(52, rightW - deficit);
-        leftW = contentW - rightW - contentGap;
+#if NODES_LAYOUT_WIDE
+    // The list is on the left now and carries long names, so it gets a real
+    // share of the width instead of the ~22-24% strip it had when it only ever
+    // showed a four-character short name. The detail panel keeps the remainder
+    // and has a floor of its own: below that its two columns stop being a table.
+    const int kNodesDetailMinW = 110;
+    int listW = (contentW * 45) / 100;
+    if (contentW - listW - contentGap < kNodesDetailMinW) {
+        listW = contentW - contentGap - kNodesDetailMinW;
     }
+    // Pathologically narrow panel: give the list something rather than a
+    // negative width, and let the detail panel scroll for the rest.
+    if (listW < 60) listW = 60;
+    int detailW = contentW - listW - contentGap;
+    if (detailW < 60) detailW = 60;
+#else
+    // Cardputer: unchanged from before the wide layout — a narrow list of short
+    // names on the right, details taking the rest on the left.
+    int listW = max(68, min(96, (contentW * 24) / 100));
+    int detailW = contentW - listW - contentGap;
+    if (detailW < 120) {
+        int deficit = 120 - detailW;
+        listW = max(52, listW - deficit);
+        detailW = contentW - listW - contentGap;
+    }
+#endif
 
     s_nodesModal = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_nodesModal, modalW, modalH);
@@ -20179,67 +20694,26 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t *left = lv_obj_create(content);
-    s_nodesInfoPanel = left;
-    lv_obj_set_width(left, leftW);
-    lv_obj_set_height(left, lv_pct(100));
-    lv_obj_add_flag(left, LV_OBJ_FLAG_SCROLLABLE);
-    setupVScroll(left);
-    lv_obj_set_scrollbar_mode(left, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_bg_color(left, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(left, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(left, 1, 0);
-    lv_obj_set_style_border_color(left, lv_color_hex(0x335D9D), 0);
-    lv_obj_set_style_pad_all(left, 4, 0);
-    lv_obj_set_style_width(left, 2, LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_color(left, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(left, LV_OPA_70, LV_PART_SCROLLBAR);
-    lv_obj_set_style_radius(left, 2, LV_PART_SCROLLBAR);
+#if NODES_LAYOUT_WIDE
+    // Node list, on the left. It reads first and it is what you steer, so it is
+    // the panel your eye lands on; the details describe whatever it is pointing
+    // at. (This pair used to be the other way round, from when the list was a
+    // narrow strip of four-character short names.)
+    lv_obj_t *listPanel = lv_obj_create(content);
+    s_nodesListPanel = listPanel;
+    lv_obj_set_width(listPanel, listW);
+    lv_obj_set_height(listPanel, lv_pct(100));
+    lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(listPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(listPanel, 1, 0);
+    lv_obj_set_style_border_color(listPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(listPanel, 2, 0);
+    lv_obj_set_style_pad_right(listPanel, 1, 0);
+    lv_obj_set_style_pad_top(listPanel, 2, 0);
+    lv_obj_set_style_pad_bottom(listPanel, 2, 0);
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    lv_obj_t *detailsCols = lv_obj_create(left);
-    lv_obj_set_width(detailsCols, lv_pct(100));
-    lv_obj_clear_flag(detailsCols, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(detailsCols, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(detailsCols, 0, 0);
-    lv_obj_set_style_pad_all(detailsCols, 0, 0);
-    lv_obj_set_style_pad_column(detailsCols, 10, 0);
-    lv_obj_set_flex_flow(detailsCols, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(detailsCols, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-
-    s_nodesDetail = lv_label_create(detailsCols);
-    lv_obj_set_width(s_nodesDetail, lv_pct(50));
-    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
-    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
-
-    s_nodesDetailExtra = lv_label_create(detailsCols);
-    lv_obj_set_width(s_nodesDetailExtra, lv_pct(50));
-    lv_obj_set_style_text_font(s_nodesDetailExtra, nodesDetailFont, 0);
-    lv_obj_set_style_text_color(s_nodesDetailExtra, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(s_nodesDetailExtra, LV_LABEL_LONG_WRAP);
-#else
-    s_nodesDetail = lv_label_create(left);
-    lv_obj_set_width(s_nodesDetail, lv_pct(100));
-    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
-    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
-#endif
-
-    lv_obj_t *right = lv_obj_create(content);
-    lv_obj_set_width(right, rightW);
-    lv_obj_set_height(right, lv_pct(100));
-    lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(right, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(right, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(right, 1, 0);
-    lv_obj_set_style_border_color(right, lv_color_hex(0x335D9D), 0);
-    lv_obj_set_style_pad_left(right, 2, 0);
-    lv_obj_set_style_pad_right(right, 1, 0);
-    lv_obj_set_style_pad_top(right, 2, 0);
-    lv_obj_set_style_pad_bottom(right, 2, 0);
-
-    s_nodesList = lv_obj_create(right);
+    s_nodesList = lv_obj_create(listPanel);
     lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
     lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_nodesList);
@@ -20259,16 +20733,186 @@ static void openNodesModal() {
     lv_obj_set_flex_flow(s_nodesList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
+    // Detail panel, on the right.
+    lv_obj_t *infoPanel = lv_obj_create(content);
+    s_nodesInfoPanel = infoPanel;
+    lv_obj_set_width(infoPanel, detailW);
+    lv_obj_set_height(infoPanel, lv_pct(100));
+    lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(infoPanel);
+    lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(infoPanel, 1, 0);
+    lv_obj_set_style_border_color(infoPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(infoPanel, 4, 0);
+    lv_obj_set_style_pad_row(infoPanel, 3, 0);
+    lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(infoPanel, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(infoPanel, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(infoPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_column(infoPanel, 8, 0);
+
+    // Shown only when there is nothing selected; the sections replace it as soon
+    // as there is.
+    s_nodesDetail = lv_label_create(infoPanel);
+    lv_obj_set_width(s_nodesDetail, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
+    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_nodesDetail, "");
+
+    // Section width: the Pager has room for two sections abreast, which is what
+    // its old two-column detail split was for. Everywhere else they stack, and
+    // the panel scrolls.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    const int32_t nodesSectionW = lv_pct(48);
+#else
+    const int32_t nodesSectionW = lv_pct(100);
+#endif
+    // Wide enough for "Last heard" and "Pressure" in the detail font; the value
+    // column takes whatever is left.
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+    const int nodesKeyColW = 78;
+#else
+    const int nodesKeyColW = 56;
+#endif
+    static const char *kNodesSectionTitles[NODES_SEC_COUNT] = {
+        "Identity", "Link", "Position", "Telemetry"
+    };
+    for (int i = 0; i < NODES_SEC_COUNT; i++) {
+        lv_obj_t *box = lv_obj_create(infoPanel);
+        s_nodesSectionBox[i] = box;
+        lv_obj_set_width(box, nodesSectionW);
+        lv_obj_set_height(box, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(box, 0, 0);
+        lv_obj_set_style_pad_all(box, 0, 0);
+        lv_obj_set_style_pad_top(box, (i == 0) ? 0 : 2, 0);
+        lv_obj_set_style_pad_row(box, 1, 0);
+        lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        lv_obj_t *hdr = lv_label_create(box);
+        lv_obj_set_width(hdr, lv_pct(100));
+        lv_obj_set_style_text_font(hdr, nodesDetailFont, 0);
+        // Amber against the pale-blue body, the same split Discovery and Beacons
+        // use for a heading.
+        lv_obj_set_style_text_color(hdr, lv_color_hex(0xFFC98A), 0);
+        lv_obj_set_style_border_color(hdr, lv_color_hex(0x335D9D), 0);
+        lv_obj_set_style_border_side(hdr, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(hdr, 1, 0);
+        lv_label_set_long_mode(hdr, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(hdr, kNodesSectionTitles[i]);
+
+        lv_obj_t *table = lv_obj_create(box);
+        lv_obj_set_width(table, lv_pct(100));
+        lv_obj_set_height(table, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(table, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(table, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(table, 0, 0);
+        lv_obj_set_style_pad_all(table, 0, 0);
+        lv_obj_set_style_pad_column(table, 4, 0);
+        lv_obj_set_flex_flow(table, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(table, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        s_nodesSectionKeys[i] = lv_label_create(table);
+        lv_obj_set_width(s_nodesSectionKeys[i], nodesKeyColW);
+        lv_obj_set_style_text_font(s_nodesSectionKeys[i], nodesDetailFont, 0);
+        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_hex(0x9FBEEA), 0);
+        lv_label_set_long_mode(s_nodesSectionKeys[i], LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_nodesSectionKeys[i], "");
+
+        // LONG_DOT, never WRAP: a wrapped value would take two lines where its
+        // field name takes one, and every row below it would stop lining up.
+        s_nodesSectionVals[i] = lv_label_create(table);
+        lv_obj_set_flex_grow(s_nodesSectionVals[i], 1);
+        lv_obj_set_style_text_font(s_nodesSectionVals[i], nodesDetailFont, 0);
+        lv_obj_set_style_text_color(s_nodesSectionVals[i], lv_color_hex(0xD9E8FF), 0);
+        lv_label_set_long_mode(s_nodesSectionVals[i], LV_LABEL_LONG_DOT);
+        lv_label_set_text(s_nodesSectionVals[i], "");
+    }
+#else
+    // Cardputer: the original arrangement — detail panel on the left taking most
+    // of the width, narrow node list on the right.
+    lv_obj_t *infoPanel = lv_obj_create(content);
+    s_nodesInfoPanel = infoPanel;
+    lv_obj_set_width(infoPanel, detailW);
+    lv_obj_set_height(infoPanel, lv_pct(100));
+    lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(infoPanel);
+    lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(infoPanel, 1, 0);
+    lv_obj_set_style_border_color(infoPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(infoPanel, 4, 0);
+    lv_obj_set_style_width(infoPanel, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(infoPanel, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(infoPanel, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(infoPanel, 2, LV_PART_SCROLLBAR);
+
+    s_nodesDetail = lv_label_create(infoPanel);
+    lv_obj_set_width(s_nodesDetail, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodesDetail, nodesDetailFont, 0);
+    lv_obj_set_style_text_color(s_nodesDetail, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_long_mode(s_nodesDetail, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_nodesDetail, "");
+
+    lv_obj_t *listPanel = lv_obj_create(content);
+    s_nodesListPanel = listPanel;
+    lv_obj_set_width(listPanel, listW);
+    lv_obj_set_height(listPanel, lv_pct(100));
+    lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(listPanel, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(listPanel, 1, 0);
+    lv_obj_set_style_border_color(listPanel, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_left(listPanel, 2, 0);
+    lv_obj_set_style_pad_right(listPanel, 1, 0);
+    lv_obj_set_style_pad_top(listPanel, 2, 0);
+    lv_obj_set_style_pad_bottom(listPanel, 2, 0);
+
+    s_nodesList = lv_obj_create(listPanel);
+    lv_obj_set_size(s_nodesList, lv_pct(100), lv_pct(100));
+    lv_obj_add_flag(s_nodesList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_nodesList);
+    lv_obj_set_scrollbar_mode(s_nodesList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_nodesList, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_nodesList, 0, 0);
+    lv_obj_set_style_pad_left(s_nodesList, 1, 0);
+    lv_obj_set_style_pad_right(s_nodesList, 8, 0);
+    lv_obj_set_style_pad_top(s_nodesList, 0, 0);
+    lv_obj_set_style_pad_bottom(s_nodesList, 0, 0);
+    lv_obj_set_style_pad_row(s_nodesList, 2, 0);
+    lv_obj_set_style_width(s_nodesList, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(s_nodesList, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(s_nodesList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_nodesList, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(s_nodesList, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(s_nodesList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodesList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+#endif  // NODES_LAYOUT_WIDE
+
+
     s_nodesListRowCount = 0;
     s_nodesRenderStart = 0;
     memset(s_nodesRenderedFilteredIdx, 0, sizeof(s_nodesRenderedFilteredIdx));
     memset(s_nodesListRows, 0, sizeof(s_nodesListRows));
 
+    s_nodesInfoFocused = false;
     nodesApplyFilter();
     refreshNodesListRows();
 
     refreshNodesListSelection();
     refreshNodesDetails();
+    refreshNodesPanelFocusStyles();
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     appendHeltecBottomNav(s_nodesModal, HELTEC_NAV_NODES);
@@ -20279,9 +20923,11 @@ static void openNodesModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #if defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "J/K=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "J/K=Select   Enter=Info   A=Actions   %s=Back",
+                          modalCloseKeyLabel());
 #else
-    lv_label_set_text_fmt(hint, "Up/Down=Select   Enter=Actions   %s=Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "Up/Down=Select   Enter=Info   A=Actions   %s=Back",
+                          modalCloseKeyLabel());
 #endif
 #endif
 }
@@ -24190,14 +24836,47 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if (isModalCloseKey(k)) {
-                closeNodesModal();
-                continue;
-            }
-            if (k == KEY_ENTER) {
+            // Actions moved off Enter and onto A when Enter became "focus the
+            // details". Guarded on the filter: with it open, letters are text.
+            if (!s_nodesFilterOpen && (k == 'a' || k == 'A')) {
                 openNodesActionMenu();
                 continue;
             }
+
+            if (isModalCloseKey(k)) {
+                // Back steps out of the detail panel first, and only closes the
+                // screen from the list — the same shape as leaving a DM thread.
+                if (s_nodesInfoFocused) {
+                    s_nodesInfoFocused = false;
+                    refreshNodesPanelFocusStyles();
+                    refreshNodesHint();         // legend follows the focus
+                } else {
+                    closeNodesModal();
+                }
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                // Enter hands the keys to the details; the Pager's wheel click
+                // toggles, matching how it swaps panels on Config and DM.
+                const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
+                if (wantFocus != s_nodesInfoFocused
+                    && (!wantFocus || currentNodesSelection() != nullptr)) {
+                    s_nodesInfoFocused = wantFocus;
+                    refreshNodesPanelFocusStyles();
+                    refreshNodesHint();
+                }
+                continue;
+            }
+
+            // With the details focused, the navigation keys scroll them instead
+            // of moving the selection.
+            if (s_nodesInfoFocused && lvObjValid(s_nodesInfoPanel)) {
+                if (k == KEY_SCROLL_UP)  { scrollListClamped(s_nodesInfoPanel, 18);  continue; }
+                if (k == KEY_SCROLL_DN)  { scrollListClamped(s_nodesInfoPanel, -18); continue; }
+                if (k == KEY_PAGE_UP)    { scrollListClamped(s_nodesInfoPanel, 60);  continue; }
+                if (k == KEY_PAGE_DN)    { scrollListClamped(s_nodesInfoPanel, -60); continue; }
+            }
+
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 int nextSelected = s_nodesSelected;
                 if (invertScrollNav) {
@@ -24322,6 +25001,46 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+        // Above Tools and Live both: the filter picker is the topmost thing on
+        // the Live stack whenever it is open.
+        if (s_liveFilterModal) {
+            if (isModalCloseKey(k)) {
+                closeLiveFilterModal();       // dismiss without changing anything
+                continue;
+            }
+            // F toggles, so the key that opened it also closes it.
+            if (k == 'f' || k == 'F') {
+                closeLiveFilterModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                liveFilterApply(s_liveFilterSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            // Column-major fill, as in Tools: one step walks down a column and
+            // left/right hops between them.
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kLiveFilterRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kLiveFilterRowsPerCol;
+                }
+            }
+            if (delta != 0) {
+                int next = s_liveFilterSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= LIVE_FILTER_COUNT) next = LIVE_FILTER_COUNT - 1;
+                if (next != s_liveFilterSelection) {
+                    s_liveFilterSelection = next;
+                    refreshLiveFilterSelection();
+                }
+            }
+            continue;
+        }
+
         // Below the tool surfaces, above Live: a tool opened from here keeps the
         // keys while it is up, and Tools keeps them while it is the topmost one.
         if (s_liveToolsModal) {
@@ -24387,6 +25106,10 @@ static void pumpKeyboardInput() {
             }
             if (k == 't' || k == 'T') {
                 openLiveToolsModal();
+                continue;
+            }
+            if (k == 'f' || k == 'F') {
+                openLiveFilterModal();
                 continue;
             }
             // Up reveals content above, down reveals below — scrollListClamped's

@@ -333,6 +333,8 @@ const char *otaCurrentDeviceAssetSlug() {
     return "cardputer-cap";
 #elif defined(DEVICE_MESH_DECK)
     return "mesh-deck";
+#elif defined(DEVICE_M9)
+    return "m9";
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
   #if defined(DEVICE_UI_VERTICAL) && (DEVICE_UI_VERTICAL)
     return "heltec-vertical";

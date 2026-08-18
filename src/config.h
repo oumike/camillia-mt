@@ -358,6 +358,14 @@
 // PWM-owned by the keyboard's own ESP32-C3 and set over I2C, the Pager's is a
 // plain KB_BL GPIO. They also differ in resting state, which is why the Pager
 // only blinks with the screen asleep — see kbBlinkAllowedNow().
+//
+// Deliberately NOT the M9, which looks like it belongs here and does not. Its
+// keypad LEDs belong to the companion controller, and KB_REG_BACKLIGHT only sets
+// the brightness that controller uses for its OWN keypress auto-light — the host
+// has no way to turn the LEDs on. Verified on hardware (early ESP32-S2
+// controller, hw=0x03 fw=0x10): writing 255 lights nothing, and the pattern's
+// closing write of 0 disables the auto-light until the next power cycle. Wiring
+// the M9 up here breaks the keypad light rather than blinking it.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
 #define HAS_KB_BLINK 1
 #else

@@ -54,10 +54,11 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   above. Holding your own message or a system line does nothing, and the tap
   that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
-- Live modal shortcuts: C clears the log, T opens the Tools modal (SNR/RSSI,
-  ChUtil and Beacons everywhere, plus Discovery and MQTT except on Cardputer).
-  Inside Discovery: W sweeps, C clears, S saves a snapshot to SD. Inside
-  Beacons: C clears. Inside MQTT Monitor: C restarts the count
+- Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
+  T opens the Tools modal (SNR/RSSI, ChUtil and Beacons everywhere, plus
+  Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
+  S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
+  restarts the count
 
 ### LilyGo T-Deck (tdeck)
 
@@ -135,6 +136,8 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - Open from the main screen (L on keyboard builds, Live bottom-nav button on Heltec)
 - Scroll with Up and Down input
 - Press C to clear the log
+- Press F for the traffic filter (on Heltec, the filter button in the Live
+  header) — see [Traffic filter](#traffic-filter) below
 - Press T for Tools (on Heltec, the Tools button in the Live header) — a
   two-column picker holding the SNR/RSSI chart, the channel-utilization chart,
   Discovery, Beacons, and the MQTT Monitor. Enter opens the selected tool, and
@@ -143,6 +146,31 @@ Live shows decoded RX and TX traffic with per-traffic coloring.
 - The MQTT cell is only built on boards with WiFi compiled in (so: not
   Cardputer), and is only live while WiFi is switched on in config. With WiFi
   off the row reads `MQTT - WiFi off` and does not open.
+
+### Traffic filter
+
+On a busy mesh the lines worth reading — text, DMs, errors — scroll away under
+position and telemetry chatter. The filter narrows the feed to one kind of
+traffic.
+
+- Press **F** to open the picker (on Heltec, tap the filter button in the Live
+  header). F again closes it, as does the device close key; neither changes the
+  filter
+- Move with Up/Down, hop columns with Left/Right, and press Enter to apply. The
+  picker opens on the filter already in force
+- Options: **All** (the default), Text, DMs, Position, Telemetry, Node info,
+  ACKs, Encrypted, Errors, and Other — the last one catching anything the named
+  rows do not, so no line is unreachable. Each covers both directions: *Text* is
+  sent and received text, not one or the other
+- The active filter is shown in the Live header, e.g. `Filter: Telemetry`
+- **The filter only changes what is drawn.** Nothing is dropped from the log:
+  switching back to All shows everything that arrived while a filter was up, and
+  C still clears the whole buffer regardless of what is on screen
+- New matching traffic keeps appending live while a filter is active
+- When a filter matches nothing the screen says so by name, so an empty list
+  can't be mistaken for a silent radio
+- The filter resets to All each time you open Live. It is a way of looking at
+  the feed, not a setting, so one left on can never masquerade as a quiet mesh
 
 ### Discovery
 
@@ -819,6 +847,24 @@ There are two versions of the page:
 The Cardputer always serves Lite, on its own network or yours, because it has no
 PSRAM to spare.
 
+On the **Nodes** tab, the *Nodes Seen* dropdown lists favorited nodes first,
+separated from the rest by a dashed divider, and a favorite's detail panel reads
+*(favorite)* after its long name. Both come straight from the same ranking the
+device's own Nodes screen uses. Lite has no Nodes tab, so this is everywhere the
+full page is served — every board except the Cardputer.
+
+The top-right corner of a node's detail panel has a **Favorite** /
+**Unfavorite** button. It takes effect immediately — the same flag the device's
+own Nodes → Actions → Favorite sets, saved to NVS on the spot — and the page
+updates in place: the label flips, the *(favorite)* tag appears or disappears,
+and the node moves to its new side of the divider without a reload. Favorited
+nodes are never evicted when the table fills and survive *Clear Nodes (Keep
+Favorites)*.
+
+One caveat if **Auto-favorite nearby nodes** is on: it re-favorites any node
+reporting a position inside the radius, so unfavoriting one that is still in
+range only lasts until its next position packet.
+
 **On the Cardputer, chat is paused while Web Config runs.** That board needs its
 message memory to run Wi-Fi, so messages sent to it during a Web Config session
 are not received or stored — they are lost, not queued. The device warns you
@@ -965,9 +1011,61 @@ sync, MQTT) stay offline.
 Nodes shows discovered nodes and detail fields, including map position details.
 
 - Open from the main screen (N on keyboard builds, Nodes bottom-nav button on Heltec)
+- **The node list is on the left, the selected node's details on the right.** The
+  list gets a real share of the width — about 45% — because its rows carry the
+  node's **long name**, ellipsized when it does not fit. A node with no long name
+  falls back to its short name, and one that was evicted while the screen is open
+  falls back to its id, so rows never shift out from under the selection
+- Favorites keep their `*` marker and still sort to the top
 - Navigate rows with Up and Down input (T-Deck uses J/K, since it has no Up/Down buttons)
-- Enter opens the actions menu for the selected node
+- **Enter moves the keys into the details panel** so you can scroll through the
+  fields with the same Up/Down (and Page Up/Down) you were using on the list. The
+  focused panel is the one with the bright border. The close key steps back out
+  to the list; from the list it closes the screen
+- **A opens the actions menu** for the selected node, from either panel. (It used
+  to be Enter, which now focuses the details.) With the filter open, letters are
+  filter text — close the filter first
+- On the T-Lora Pager the wheel click toggles between the two panels, the same
+  way it swaps panels on Config and DM
 - Close with the device close key
+
+**Cardputer keeps the original layout**: a narrow column of short names on the
+right with the details taking the left. Four sections of aligned fields need
+width for two columns and height for roughly seventeen rows, and 240x135 has
+neither. Everything else on this screen — the filter, the selection, Enter for
+details focus, A for actions — works there the same way.
+
+**On Heltec**, drag either panel to scroll it; there is no focus to move because
+there are no navigation keys. The USER button opens the actions menu for the
+selected node, as before.
+
+### Node details
+
+The detail panel is a set of aligned field tables under four headings —
+**Identity**, **Link**, **Position**, **Telemetry** — rather than one wrapped
+paragraph. Field names form a left column and values a right column, and the two
+stay lined up no matter how long a value is: a value too wide for its column
+ellipsizes on its own line instead of reflowing and dragging the rows out of
+step.
+
+- **Identity** — Name, Short, ID
+- **Link** — Last heard, SNR, Hops, Channel
+- **Position** — Lat, Lon, Alt
+- **Telemetry** — Battery, Voltage, ChUtil, AirTx, Temp, Humidity, Pressure
+
+Every field is always listed, and anything unknown reads `n/a`. That is
+deliberate: a panel whose fields come and go with the selection jumps under the
+cursor as you arrow down the list, and "this node has never reported a position"
+is worth reading in its own right. Temperature and pressure follow the display
+units setting (F/inHg or C/hPa).
+
+The panel scrolls when the fields outrun it, and returns to the top each time
+the selection changes. Press Enter on the list to move the navigation keys into
+it. On the T-Lora Pager, whose screen is wide enough, the sections sit two
+abreast.
+
+This section describes every build except the Cardputer, which keeps the older
+single-block detail text described above.
 
 ### Filtering nodes
 

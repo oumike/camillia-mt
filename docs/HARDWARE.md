@@ -50,6 +50,22 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 >   truth table (see [`hw_m9.h`](../src/hal/hw_m9.h), which carries the warning
 >   attached to it). Elecrow lists the flash as "16GB"; the part is an
 >   ESP32-S3**R8** with **16 MB**.
+> - **M9 receive ceiling:** the LR11x0's `SetPacketParams` `PayloadLength` field
+>   is both "bytes to transmit" and "largest payload the receiver will accept".
+>   RadioLib writes the TX length there on every transmit and never restores it
+>   for explicit-header RX, so after one transmission the radio silently refuses
+>   anything longer than its own last packet — no interrupt, no error. All RX
+>   arming goes through `MeshRadio::_armRx()`, which puts the ceiling back to 255
+>   first; do not call `startReceive()` directly. The SX126x ignores this field
+>   on RX, which is why only this board was affected. See issue #43.
+> - **M9 packet reads:** the LR11x0 hands out its 256-byte RX buffer as a ring —
+>   `GetRxBufferStatus` returns a start offset that advances a few bytes per
+>   packet — so a packet that starts late enough has its tail wrapped to the base
+>   of the buffer. RadioLib reads it as one linear run and loses the wrapped
+>   part, which drops long packets while short ones sail through and moves the
+>   cutoff around as the offset creeps. `MeshRadio::_readPacketLr11xx()` reads
+>   across the wrap in two parts instead; see it and issue #43 for the full
+>   diagnosis. This is why `mesh_radio.h` subclasses the RadioLib driver.
 > - **M9 console:** this board brings the serial console out through an external
 >   UART bridge rather than native USB-CDC, so its env builds with
 >   `ARDUINO_USB_CDC_ON_BOOT=0`. With CDC on boot the logs go to a `ttyACM` port

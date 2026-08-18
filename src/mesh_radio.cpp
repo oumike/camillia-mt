@@ -125,14 +125,110 @@ float airPct(bool txOnly) {
 
 void IRAM_ATTR MeshRadio::_onDio1() { _rxFlag = true; }
 
-void MeshRadio::setRxBoostedGain(bool enabled) {
-    _rxBoostedGain = enabled;
-#if !MESH_RADIO_IS_LR11XX
-    if (_ready) {
-        _radio.setRxBoostedGainMode(enabled);
-        _radio.startReceive();   // re-arm so the new gain setting takes effect
+// Arms receive. On LR11x0 the chip's "largest payload the receiver will accept"
+// has to be put back to the maximum first — RadioLib leaves it set to the length
+// of whatever this node last transmitted, which makes the radio deaf to anything
+// longer than its own last packet. See MESH_LR11XX_RESTORE_RX_MAX_PAYLOAD in
+// mesh_radio.h for the full story, and issue #43 for what it looked like from
+// the outside.
+int MeshRadio::_armRx() {
+#if MESH_RADIO_IS_LR11XX
+    // Standby first: SetPacketParams is a configuration command, and the chip is
+    // still sitting in continuous RX at most of the call sites below (a received
+    // packet does not leave RX). Re-entering RX is what startReceive() does next
+    // anyway, so this costs a mode transition and nothing else.
+    _radio.standby();
+    const int16_t state = _radio.restoreRxMaxPayload();
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.printf("[radio] restoreRxMaxPayload failed: %d\n", (int)state);
     }
 #endif
+    return _radio.startReceive();
+}
+
+// ── RX health counters ───────────────────────────────────────────────────────
+// "The M9 misses messages" is three different bugs depending on where the packet
+// is lost, and until now the firmware threw away the evidence that tells them
+// apart: pollRx() swallowed a bad length and a CRC failure into the same silent
+// `return false`. These count what the radio actually reported, so a session can
+// answer whether packets are arriving damaged (RF: switch, gain, clock), not
+// arriving at all (RF: sensitivity, sync), or arriving fine and being lost above
+// the radio (crypto, dedup, ignore list). See issue #43.
+namespace {
+struct RxHealth {
+    uint32_t irqs;        // DIO1 assertions serviced
+    uint32_t good;        // packets handed up
+    uint32_t crcErr;      // arrived, failed CRC — heard but damaged
+    uint32_t badLen;      // IRQ with a length no packet can have
+    uint32_t readErr;     // the buffer read itself failed
+    uint32_t wrapped;     // LR11x0 only: packets whose tail wrapped the RX ring
+};
+RxHealth sRx = {};
+} // namespace
+
+void MeshRadio::logRxHealth(const char *why) {
+    Serial.printf("[radio] rx health (%s): irq=%lu ok=%lu crcErr=%lu badLen=%lu readErr=%lu"
+#if MESH_RADIO_IS_LR11XX
+                  " wrapped=%lu"
+#endif
+                  "\n",
+                  why ? why : "-",
+                  (unsigned long)sRx.irqs, (unsigned long)sRx.good,
+                  (unsigned long)sRx.crcErr, (unsigned long)sRx.badLen,
+                  (unsigned long)sRx.readErr
+#if MESH_RADIO_IS_LR11XX
+                  , (unsigned long)sRx.wrapped
+#endif
+                  );
+}
+
+#if MESH_RADIO_IS_LR11XX
+// The chip's own account of itself: firmware revision (preproduction units run
+// pre-0x0308, which is what tools/patch_radiolib_lr11x0.py exists for) and the
+// error register, which is the one place a failed calibration is recorded. A
+// bad image or PLL calibration costs real sensitivity and is otherwise
+// invisible — the radio comes up, answers SPI, and quietly hears less.
+void MeshRadio::logLr11xxHealth(const char *why) {
+    LR11x0VersionInfo_t info = {};
+    if (_radio.getVersionInfo(&info) != RADIOLIB_ERR_NONE) {
+        Serial.printf("[radio] LR11x0 (%s): getVersionInfo failed - chip not answering\n",
+                      why ? why : "-");
+        return;
+    }
+    uint16_t errors = 0;
+    (void)_radio.getErrors(&errors);
+    Serial.printf("[radio] LR11x0 (%s): hw=0x%02X device=0x%02X fw=%u.%u errors=0x%04X%s\n",
+                  why ? why : "-", info.hardware, info.device,
+                  (unsigned)info.fwMajor, (unsigned)info.fwMinor, errors,
+                  errors ? "  <-- see decode below" : "");
+    if (!errors) return;
+
+    // Decoded rather than left as a hex word: every one of these bits means a
+    // different thing is wrong, and only some of them cost sensitivity.
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_LF_RC_CALIB_ERR)  Serial.println("[radio]   LF_RC_CALIB_ERR");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_HF_RC_CALIB_ERR)  Serial.println("[radio]   HF_RC_CALIB_ERR");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_ADC_CALIB_ERR)    Serial.println("[radio]   ADC_CALIB_ERR");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_PLL_CALIB_ERR)    Serial.println("[radio]   PLL_CALIB_ERR");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_IMG_CALIB_ERR)    Serial.println("[radio]   IMG_CALIB_ERR (costs RX sensitivity)");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_HF_XOSC_START_ERR) Serial.println("[radio]   HF_XOSC_START_ERR (clock/TCXO config)");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_LF_XOSC_START_ERR) Serial.println("[radio]   LF_XOSC_START_ERR");
+    if (errors & RADIOLIB_LR11X0_ERROR_STAT_PLL_LOCK_ERR)     Serial.println("[radio]   PLL_LOCK_ERR (frequency not reached)");
+}
+#endif
+
+// Boosted-gain RX is NOT an SX126x-only feature, however the guard here used to
+// read: the LR11x0 has its own SetRxBoosted command (0x0227) and RadioLib
+// exposes it under the same setRxBoostedGainMode() name. Wrapping this in
+// !MESH_RADIO_IS_LR11XX left the M9 with a config toggle that moved a field and
+// nothing else — the radio kept the chip default while "[radio] ready ...
+// rxBoost=1" printed — which is the last thing you want on the one board in the
+// fleet that is short on sensitivity. See issue #43.
+void MeshRadio::setRxBoostedGain(bool enabled) {
+    _rxBoostedGain = enabled;
+    if (_ready) {
+        _radio.setRxBoostedGainMode(enabled);
+        _armRx();   // re-arm so the new gain setting takes effect
+    }
 }
 
 bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
@@ -239,19 +335,30 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
     _radio.setOutputPower(txPower);
 #if !MESH_RADIO_IS_LR11XX
     _radio.setCurrentLimit(140.0);   // SX1262 HP PA max; default OCP may be too low
-    _radio.setRxBoostedGainMode(_rxBoostedGain);
 #endif
+    // Both families have this; only the SX126x branch above is chip-specific.
+    const int boostState = _radio.setRxBoostedGainMode(_rxBoostedGain);
 #if MESH_RADIO_IS_LR11XX
     _radio.setIrqAction(_onDio1);
 #else
     _radio.setDio1Action(_onDio1);
 #endif
-    _radio.startReceive();
+    _armRx();
 
     _ready = true;
-    Serial.printf("[radio] ready  %.3f MHz  SF%d  BW%.0f  CR4/%d  %ddBm  rxBoost=%d\n",
-                  MESH_FREQ, MESH_SF, MESH_BW, MESH_CR,
-                  (int)txPower, _rxBoostedGain ? 1 : 0);
+    // rxBoost prints what the chip accepted, not what was asked for. The old
+    // line printed the request, which is how a setting that was never being
+    // applied on this board sat unnoticed (issue #43).
+    Serial.printf("[radio] ready  %.3f MHz  SF%d  BW%.0f  CR4/%d  %ddBm  rxBoost=%s\n",
+                  MESH_FREQ, MESH_SF, MESH_BW, MESH_CR, (int)txPower,
+                  (boostState != RADIOLIB_ERR_NONE) ? "FAILED"
+                                                    : (_rxBoostedGain ? "1" : "0"));
+    if (boostState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[radio] setRxBoostedGainMode failed: %d\n", boostState);
+    }
+#if MESH_RADIO_IS_LR11XX
+    logLr11xxHealth("init");
+#endif
     return true;
 }
 
@@ -270,7 +377,7 @@ bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_
     if (state != RADIOLIB_ERR_NONE) ok = false;
     state = _radio.setOutputPower(power);
     if (state != RADIOLIB_ERR_NONE) ok = false;
-    state = _radio.startReceive();
+    state = _armRx();
     if (state != RADIOLIB_ERR_NONE) ok = false;
 
     if (!ok) {
@@ -284,6 +391,81 @@ bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_
     return true;
 }
 
+#if MESH_RADIO_IS_LR11XX
+// Reads one packet out of the LR11x0's RX buffer, wrapping correctly.
+//
+// THE BUG THIS EXISTS FOR. The LR11x0 hands out its 256-byte RX buffer as a
+// ring: GetRxBufferStatus returns both the length and a *start offset*, and that
+// offset advances a few bytes on every packet received (RadioLib's own comment
+// in readData(): "the LR11x0 seems to move the buffer base by 4 bytes on every
+// packet"). When a packet starts late enough that offset + length runs past 256,
+// the chip wraps the tail around to the start of the buffer — but RadioLib reads
+// it as one linear run of `length` bytes from `offset`, so everything past the
+// end comes back as whatever is there instead of the packet's tail.
+//
+// The symptom is the one reported in issue #43, including the parts that made no
+// sense for an RF fault:
+//   • short packets survive, long ones do not — a packet fits iff
+//     length <= 256 - offset, so the cutoff is a *length* threshold;
+//   • the threshold drifts, because the offset creeps up ~4 bytes per packet and
+//     wraps at 256. Right after a reboot the offset is 0 and everything works;
+//   • it is not correlated with distance or SNR, and a node being heard fine one
+//     minute loses its longer messages the next;
+//   • the packet is not "weak" — it is received intact and then read wrong, so
+//     nothing in the radio's own error reporting flags it.
+//
+// Reading in two parts across the wrap is what the ring layout has always
+// required. When offset + length <= 256 (the only case that worked before) this
+// is byte-for-byte the old behavior.
+int MeshRadio::_readPacketLr11xx(uint8_t *buf, size_t bufCap, size_t &outLen) {
+    outLen = 0;
+
+    uint8_t offset = 0;
+    const size_t len = _radio.getPacketLength(true, &offset);
+    // One error for both ends of the range — the caller only needs "not a usable
+    // packet", and outLen staying 0 is what tells it this was the length check
+    // rather than the read below.
+    if (len < sizeof(MeshHdr) || len > bufCap) return RADIOLIB_ERR_PACKET_TOO_LONG;
+
+    // Same CRC verdict RadioLib's readData() reaches, taken before the read
+    // because the read clears the flags. A header error only counts when no
+    // valid header was seen, otherwise it is a leftover from the packet before.
+    const uint32_t irq = _radio.getIrqFlags();
+    const bool crcBad = (irq & RADIOLIB_LR11X0_IRQ_CRC_ERR)
+                     || ((irq & RADIOLIB_LR11X0_IRQ_HEADER_ERR)
+                         && !(irq & RADIOLIB_LR11X0_IRQ_SYNC_WORD_HEADER_VALID));
+
+    constexpr size_t kRxBufBytes = 256;   // the chip's RX buffer, and the ring modulus
+    const size_t firstRun = (offset + len > kRxBufBytes) ? (kRxBufBytes - offset) : len;
+
+    int state = _radio.readBuffer8(buf, firstRun, offset);
+    if (state == RADIOLIB_ERR_NONE && firstRun < len) {
+        // The tail wrapped to the base of the buffer.
+        state = _radio.readBuffer8(buf + firstRun, len - firstRun, 0);
+        // The first one always announces itself, verbose or not: this is the
+        // packet that a build without this fix would have read as garbage and
+        // dropped without a word, so seeing the line at all is the confirmation
+        // that the ring wrap was what ate the long messages.
+        if (sRx.wrapped == 0 || kVerboseRadioIo) {
+            Serial.printf("[radio] LR11x0 RX wrap: offset=%u len=%u split=%u+%u"
+                          " (before this fix, this packet was lost)\n",
+                          (unsigned)offset, (unsigned)len,
+                          (unsigned)firstRun, (unsigned)(len - firstRun));
+            logRxHealth("first wrap");
+        }
+        sRx.wrapped++;
+    }
+
+    // Housekeeping readData() would otherwise have done for us.
+    _radio.clearRxBuffer();
+    _radio.clearIrqFlags(RADIOLIB_LR11X0_IRQ_ALL);
+
+    if (state != RADIOLIB_ERR_NONE) return state;
+    outLen = len;
+    return crcBad ? RADIOLIB_ERR_CRC_MISMATCH : RADIOLIB_ERR_NONE;
+}
+#endif
+
 bool MeshRadio::pollRx(MeshPacket &pkt) {
 #if defined(LORA_TEST_MQTT_ONLY) && LORA_TEST_MQTT_ONLY
     (void)pkt;
@@ -291,18 +473,39 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
 #endif
     if (!_rxFlag) return false;
     _rxFlag = false;
-
-    size_t len = _radio.getPacketLength();
-    if (len < sizeof(MeshHdr) || len > 256) {
-        _radio.startReceive();
-        return false;
-    }
+    sRx.irqs++;
 
     uint8_t buf[256];
-    if (_radio.readData(buf, len) != RADIOLIB_ERR_NONE) {
-        _radio.startReceive();
+#if MESH_RADIO_IS_LR11XX
+    size_t len = 0;
+    const int readState = _readPacketLr11xx(buf, sizeof(buf), len);
+    if (readState != RADIOLIB_ERR_NONE) {
+        if (readState == RADIOLIB_ERR_CRC_MISMATCH) sRx.crcErr++;
+        else if (len == 0)                          sRx.badLen++;
+        else                                        sRx.readErr++;
+        // standby() before re-arming, not startReceive() alone: on this family a
+        // corrupted packet can leave the receiver shifted, and every packet after
+        // it arrives damaged until the radio has been through standby. Ported
+        // from MeshCore's LR1110 driver, which hit the same thing.
+        _radio.standby();
+        _armRx();
         return false;
     }
+#else
+    size_t len = _radio.getPacketLength();
+    if (len < sizeof(MeshHdr) || len > 256) {
+        sRx.badLen++;
+        _armRx();
+        return false;
+    }
+
+    if (_radio.readData(buf, len) != RADIOLIB_ERR_NONE) {
+        sRx.readErr++;
+        _armRx();
+        return false;
+    }
+#endif
+    sRx.good++;
 
     if (kVerboseRadioIo) {
         // Dump raw header bytes for wire-format verification
@@ -368,7 +571,7 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     }
 
     sLastRxDoneMs = millis();
-    _radio.startReceive();
+    _armRx();
     return true;
 }
 
@@ -395,7 +598,7 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
             (void)_radio.readData(dump, pendingLen);
         }
         _rxFlag = false;
-        _radio.startReceive();
+        _armRx();
         delay(2);
     }
 
@@ -421,7 +624,7 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
 
         if (attempt + 1 < kTxAttempts) {
             Serial.printf("[radio] TX retry %u state=%d\n", (unsigned)(attempt + 1), state);
-            _radio.startReceive();
+            _armRx();
             uint16_t backoffMs =
 #if defined(DEVICE_TLORA_PAGER_TFT)
                 (uint16_t)(24 + (attempt * 28));
@@ -440,7 +643,7 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
         airNote((uint32_t)(_radio.getTimeOnAir(len) / 1000UL), true);
     }
     _rxFlag = false;    // discard TX_DONE ISR trigger
-    _radio.startReceive();
+    _armRx();
     return state == RADIOLIB_ERR_NONE;
 }
 
@@ -453,6 +656,6 @@ void MeshRadio::setRxPaused(bool paused) {
     if (paused) {
         (void)_radio.standby();
     } else {
-        (void)_radio.startReceive();
+        (void)_armRx();
     }
 }

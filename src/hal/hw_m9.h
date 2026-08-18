@@ -49,7 +49,17 @@
 #define TFT_BL                   17
 #define TFT_BL_INVERT           true
 #define TFT_BL_FREQ           12000
-#define TFT_BL_PWM_CH             0
+// NOT channel 0, which is what this was while the pin map was being modelled on
+// the T-Deck's. LovyanGFX claims its LEDC channel straight through the IDF, so
+// Arduino's own allocator never learns the channel is taken — and Arduino hands
+// them out from 0 upward. This board is the only one that then calls tone()
+// (BOARD_BUZZER >= 0; the T-Deck shares channel 0 but drives an I2S speaker, and
+// every other buzzer board already sits on 7), so the message-alert tone would
+// take channel 0 off GPIO17 and repoint it at the buzzer. With the backlight
+// active LOW, losing the drive turns it ON: a message arriving with the screen
+// asleep lit a blank panel — SLPIN still set, so no wake, just a glow — and left
+// it lit until the next real wake reprogrammed the pin.
+#define TFT_BL_PWM_CH             7
 #define TFT_BRIGHTNESS_DEFAULT  128
 #define TFT_PANEL_WIDTH         240
 #define TFT_PANEL_HEIGHT        320
@@ -82,12 +92,19 @@
 // which is what makes this look like "receives some packets" rather than a dead
 // radio.
 //
-// VERIFY THIS TRUTH TABLE AGAINST U8 BEFORE TRUSTING IT. What is here is the
-// Semtech/RadioLib reference mapping that nearly every LR1110 layout follows,
-// but it is inferred, not read off this schematic — and a wrong TX row points
-// the PA at the receive port, which at 22 dBm is how an LNA dies. If TX range
-// falls off after this change while RX improves, the TX rows are the ones to
-// swap.
+// Pin assignment is schematic-confirmed and corroborated by the MeshCore port
+// this pin map was cross-checked against, which traces DIO5 (U7 pin 20) -> R20
+// -> net RFSW0_V1 -> U8 V1, and DIO6 (pin 19) -> R19 -> net RFSW1_V2 -> U8 V2.
+// DIO7/DIO8 are unconnected here: a plain 2-pin switch into one antenna, not the
+// 4-pin DIO5-8 scheme other LR1110 boards use.
+//
+// The per-mode truth table below is still the conventional one rather than
+// something read off U8 (its part number is not printed on the schematic), but
+// it is the same table that port runs on this hardware, so it is no longer a
+// leading suspect for a receive fault — issue #43 turned out to be a buffer-read
+// bug, not this. Still: a wrong TX row points the PA at the receive port, which
+// at 22 dBm is how an LNA dies, so if TX range ever falls off while RX is fine,
+// the TX rows are the ones to look at — do not blind-swap them.
 //              DIO5  DIO6
 //   STBY        0     0
 //   RX          1     0
@@ -124,12 +141,27 @@
 #define KB_ADDR               0x6c
 #define KB_INT                   12
 #define KB_INT_ACTIVE_LEVEL    HIGH
-#define KB_LED                   46   // Host-driven keypad backlight
+// GPIO46 is the schematic's KEY_LED net, but it is NOT wired to the keypad LEDs
+// on this board — the bring-up port records it as unconnected, and it is an S3
+// strapping pin besides. Kept only so the pin map stays a complete record of the
+// schematic; nothing drives it. The keypad light is KB_REG_BACKLIGHT below.
+#define KB_LED                   -1   // KEY_LED (GPIO46) — not wired, do not drive
 #define KB_REG_KEY             0x05   // Pending key byte; 0x00 means no key
 #define KB_REG_KEY_EARLY       0x01
 #define KB_REG_HW_VERSION      0x00
 #define KB_REG_FW_VERSION      0xFE
 #define KB_REG_LONG_PRESS_MS   0x03   // Write big-endian duration in milliseconds
+// Keypad backlight brightness, 0..255 — NOT an on/off control, and not usable as
+// a notification light. The LEDs belong to the companion controller, which lights
+// them only for its own keypress auto-light (~10 s timeout); this register just
+// sets how bright that is. The host cannot turn them on.
+//
+// Verified on hardware against the early ESP32-S2 controller (hw=0x03 fw=0x10):
+// writing 255 lights nothing on its own, and writing 0 disables the auto-light
+// until the next power cycle. That is why the M9 is deliberately excluded from
+// HAS_KB_BLINK — see the note there before wiring this up to anything.
+// Documented but unused, like KB_REG_LONG_PRESS_MS above.
+#define KB_REG_BACKLIGHT       0x02
 #define M9_KB_NEEDS_USB_PAD_RELEASE 1
 
 // ── Touch — none ────────────────────────────────────────────────────────────
