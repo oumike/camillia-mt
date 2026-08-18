@@ -74,19 +74,25 @@ delete_existing_release_and_tags() {
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 ASSUME_YES=false
+NO_CLEAN=false
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes]"
+            echo "Usage: $0 [-y|--yes] [--no-clean]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
             echo ""
             echo "  -y, --yes   Bump the patch level of the latest tag without"
             echo "              prompting (v3.6.5 -> v3.6.6) and accept the AI"
             echo "              release notes."
+            echo "  --no-clean  Skip the full clean and build on top of whatever"
+            echo "              is already in .pio. Much faster, and fine when"
+            echo "              you just built these same sources — but the"
+            echo "              images are only as trustworthy as that tree."
             exit 0
             ;;
         -y|--yes) ASSUME_YES=true ;;
+        --no-clean) NO_CLEAN=true ;;
         *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
     esac
 done
@@ -432,8 +438,18 @@ fi
 } > "$PUBKEY_HEADER"
 echo "Regenerated $PUBKEY_HEADER from $SIGNING_KEY"
 
-echo "Running full clean for release environments..."
-~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+# The clean is here so a release image can never contain a stale object file —
+# PlatformIO's dependency tracking misses enough (a changed build flag, a header
+# reached through a symlink) that "it rebuilt what mattered" is not something to
+# stake a signed, published binary on. --no-clean trades that guarantee for the
+# several minutes it costs, which is a fair trade when re-cutting a release from
+# sources you just built and no trade at all otherwise.
+if [[ "$NO_CLEAN" == true ]]; then
+    echo "Skipping full clean (--no-clean); building on existing .pio output."
+else
+    echo "Running full clean for release environments..."
+    ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+fi
 
 ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
 echo "Build successful."
