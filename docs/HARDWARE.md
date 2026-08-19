@@ -50,6 +50,11 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 >   truth table (see [`hw_m9.h`](../src/hal/hw_m9.h), which carries the warning
 >   attached to it). Elecrow lists the flash as "16GB"; the part is an
 >   ESP32-S3**R8** with **16 MB**.
+> - **Channel count:** ten configurable channels everywhere except the Cardputer,
+>   which keeps eight — each channel owns a `MAX_MSG_LINES` history ring, and on
+>   the only board without PSRAM those rings come out of internal DRAM. Nothing
+>   on the air depends on the number: a Meshtastic header carries a channel hash,
+>   not a slot index. See issue #44.
 > - **M9 receive ceiling:** the LR11x0's `SetPacketParams` `PayloadLength` field
 >   is both "bytes to transmit" and "largest payload the receiver will accept".
 >   RadioLib writes the TX length there on every transmit and never restores it

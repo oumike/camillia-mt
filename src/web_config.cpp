@@ -4,6 +4,7 @@
 #endif
 #include "mesh_channel_plan.h"
 #include "base64_util.h"
+#include "web_icon.h"
 #include "node_db.h"
 #include "channel_mgr.h"
 #include "dm_mgr.h"
@@ -536,11 +537,17 @@ static bool fetchLatestReleaseInfo(String &tagOut, String &urlOut, String &errOu
 
 // ── HTML helpers ──────────────────────────────────────────────
 
+// ── Favicon ──────────────────────────────────────────────────────────────────
+// The markup lives in web_icon.h, shared with the VNC viewer page, which is a
+// second HTML page on a second server and cannot reach this one's route.
+static const char kFavicon[] = CAMELLIA_FAVICON_SVG;
+
 static const char kHead[] =
     "<!DOCTYPE html><html><head>"
     "<meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>Camillia for Meshtastic</title>"
+    "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
     "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
     "<style>"
         ":root{color-scheme:dark;--bg:#10141d;--panel:#1a2230;--panel-2:#232d3e;--line:#4a5b73;"
@@ -708,6 +715,7 @@ static const char kLiteHead[] =
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Camillia &mdash; Web Config Lite</title>"
+        "<link rel='icon' type='image/svg+xml' href='/favicon.ico'>"
         "<style>"
         "body{font-family:sans-serif;margin:0 auto;padding:1em;max-width:40em}"
         "h2{font-size:1.2em}"
@@ -2188,7 +2196,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         if (!lite) {
             // Slot 0 is the primary and never moves, so its buttons are present
             // but disabled — dropping them would leave its header a different
-            // shape from the other seven. Slot 1 cannot move up into 0, and the
+            // shape from the others. Slot 1 cannot move up into 0, and the
             // last slot cannot move down: those limits are fixed by position, so
             // they are baked in here rather than recomputed after every swap.
             const bool canUp   = (i > 1);
@@ -5628,7 +5636,7 @@ static void handleGetMessagesCsv() {
     server.sendHeader("Content-Disposition", cd);
     server.sendHeader("Cache-Control", "no-store");
 
-    // Chunked for the same reason as the node CSV: eight channels of history
+    // Chunked for the same reason as the node CSV: every channel of history
     // plus every DM is far too much to assemble in one String here.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/csv", "");
@@ -5812,6 +5820,14 @@ static void handleImportDone() {
     sendImportResult("Import complete. Rebooting now...");
 }
 
+static void handleGetFavicon() {
+    // Cached hard: it is a fixed asset on a device whose whole job is to answer
+    // a handful of requests without stalling, and re-serving it on every page
+    // load costs a round trip this server can feel.
+    server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+    server.send(200, "image/svg+xml", kFavicon);
+}
+
 static void handleGetLogout() {
     sessionToken[0] = '\0';
     server.sendHeader("Set-Cookie", "sess=; Path=/; Max-Age=0");
@@ -5885,6 +5901,7 @@ static void registerLiteRoutes() {
     onRoute("/login",      HTTP_GET,  handleGetLogin);
     onRoute("/login",      HTTP_POST, handlePostLogin);
     onRoute("/logout",     HTTP_GET,  handleGetLogout);
+    onRoute("/favicon.ico", HTTP_GET, handleGetFavicon);
     // The one heavy-sounding endpoint lite does carry. Restoring a config is
     // exactly what someone stuck on the AP with a misconfigured device needs,
     // and the cost is a route registration plus WebServer's ~2 KB multipart
@@ -5917,6 +5934,7 @@ static void registerCommonRoutes() {
 #endif
     onRoute("/chart-data",        HTTP_GET,  handleGetChartData);
     onRoute("/logout",            HTTP_GET,  handleGetLogout);
+    onRoute("/favicon.ico",       HTTP_GET,  handleGetFavicon);
     onRoute("/announce",          HTTP_POST, handlePostAnnounce);
     onRoute("/telemetry",         HTTP_POST, handlePostTelemetry);
     if (gOnScreenshotPng) {

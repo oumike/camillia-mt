@@ -99,6 +99,10 @@ ChannelKey CHANNEL_KEYS[MAX_CHANNELS] = {
     { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
     { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
     { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+#if MESH_CHANNELS > 8
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+    { "",         { 0x01 },    1, 0x08, {}, 1, true,  false, false, false },  // SECONDARY (unconfigured)
+#endif
     { "DM",       { 0 },       0, 0xFF, {}, 2, false, false, false, false },  // DISABLED  (virtual, direct messages)
     { "ANN",      { 0 },       0, 0xFF, {}, 2, false, false, false, false },  // DISABLED  (virtual, announcements)
 };

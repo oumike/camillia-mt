@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include "web_icon.h"   // the site icon, embedded in the viewer page below
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -97,6 +98,7 @@ static const char kViewerPage[] = R"HTML(<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Camillia VNC</title>
+<link rel="icon" href=")HTML" CAMELLIA_FAVICON_DATA_URI R"HTML(">
 <style>
 :root{color-scheme:light;--paper:#f3f1ea;--ink:#171816;--muted:#686b65;--line:#c9c8bf;--live:#087f72;--bad:#b33b31}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--paper);color:var(--ink);font-family:"Avenir Next","Trebuchet MS",sans-serif;letter-spacing:0}

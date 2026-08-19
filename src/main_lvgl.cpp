@@ -5998,16 +5998,31 @@ static void loadChannelsFromPrefs() {
         const uint8_t *raw = reinterpret_cast<const uint8_t *>(&blob);
         const size_t recOff   = offsetof(ChanBlob, chans);
         const size_t storedN  = blob.count;
+        // Only the channels this build can hold have to be present. getBytes()
+        // truncates at our struct size, so a blob written by a build with *more*
+        // channels arrives cut short — demanding all of its records would reject
+        // it outright and reset every channel, which is the same data loss this
+        // parse exists to prevent, just in the downgrade direction.
+        const size_t readN    = (storedN < (size_t)MESH_CHANNELS) ? storedN : (size_t)MESH_CHANNELS;
         const size_t recBytes = storedN * sizeof(ChanBlobRecord);
-        if (blob.version != kChanBlobVersion || storedN == 0 || got < recOff + recBytes) {
+        if (blob.version != kChanBlobVersion || storedN == 0
+            || got < recOff + readN * sizeof(ChanBlobRecord)) {
             Serial.printf("[cfg] channel blob unusable (v%u, count %u, %u bytes) - using defaults\n",
                           (unsigned)blob.version, (unsigned)storedN, (unsigned)got);
             return;
+        }
+        if (storedN > (size_t)MESH_CHANNELS) {
+            Serial.printf("[cfg] channel blob holds %u channels, this build has %d - extra ignored\n",
+                          (unsigned)storedN, MESH_CHANNELS);
         }
 
         // Present only in blobs written after per-channel hop limits landed.
         // Absent means every channel follows the device default, which is what
         // the firmware did before the field existed.
+        // Located from the *stored* record count, since that is where the writer
+        // put it. On a truncated read those bytes never arrived, so this is
+        // false and every channel falls back to the device default — a downgrade
+        // keeps its names and keys and loses only the hop overrides.
         const size_t hopOff  = recOff + recBytes;
         const bool   haveHop = (got >= hopOff + storedN);
         if (got > recOff + recBytes && !haveHop) {
@@ -6015,7 +6030,7 @@ static void loadChannelsFromPrefs() {
                           (unsigned)(got - recOff - recBytes));
         }
 
-        const int n = (storedN < (size_t)MESH_CHANNELS) ? (int)storedN : MESH_CHANNELS;
+        const int n = (int)readN;
         for (int i = 0; i < n; i++) {
             ChanBlobRecord r;
             memcpy(&r, raw + recOff + (size_t)i * sizeof(ChanBlobRecord), sizeof(r));
@@ -31174,11 +31189,13 @@ static void buildUi() {
     lv_obj_set_style_pad_bottom(panel, 3, 0);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     static lv_coord_t panelCols[] = { LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST };
-    static lv_coord_t panelRows[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1),
-        LV_GRID_TEMPLATE_LAST
-    };
+    // Built from MESH_CHANNELS rather than written out, because a hand-written
+    // template silently swallows the channels past its end: a row with no track
+    // to sit in is simply not placed, so the extra channels would vanish from
+    // this panel with nothing to indicate why.
+    static lv_coord_t panelRows[MESH_CHANNELS + 1];
+    for (int r = 0; r < MESH_CHANNELS; r++) panelRows[r] = LV_GRID_FR(1);
+    panelRows[MESH_CHANNELS] = LV_GRID_TEMPLATE_LAST;
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_style_pad_column(panel, 4, 0);
     lv_obj_set_layout(panel, LV_LAYOUT_GRID);

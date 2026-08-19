@@ -515,11 +515,28 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define NODE_CHARS      (NODE_W / CHAR_W)   // derived chars in node pane
 
 // ── Message storage ───────────────────────────────────────────
-#define MESH_CHANNELS     8   // number of actual LoRa channels (0-7)
-#define CHAN_DM           8   // Direct Messages tab (virtual, local-only)
-#define CHAN_LIVE         9   // Live feed tab       (virtual, local-only; telemetry/routing/etc.)
+// Configurable LoRa channels. Ten everywhere except the Cardputer, which stays
+// at eight: each channel owns a history ring of MAX_MSG_LINES x sizeof(
+// DisplayLine), and that board has no PSRAM to put them in — ~3.5 KB of internal
+// DRAM per channel, on a device whose first-boot AP already runs with a largest
+// free block near 6.6 KB. Everywhere else the rings live in PSRAM and two more
+// cost ~54 KB of eight megabytes.
+//
+// Nothing on the air constrains this. A Meshtastic header carries a channel
+// *hash*, never a slot number, so a node with ten channels and a stock node with
+// eight interoperate exactly as before; the count is local bookkeeping. See
+// issue #44.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define MESH_CHANNELS     8
+#else
+#define MESH_CHANNELS    10
+#endif
+// The two virtual tabs sit immediately above the real channels, so they move
+// with the count rather than being pinned at 8 and 9.
+#define CHAN_DM          (MESH_CHANNELS)      // Direct Messages tab (virtual, local-only)
+#define CHAN_LIVE        (MESH_CHANNELS + 1)  // Live feed tab (virtual, local-only)
 #define CHAN_ANN   CHAN_LIVE  // Deprecated alias (kept for compatibility during refactors)
-#define MAX_CHANNELS     10   // MESH_CHANNELS + DM + LIVE
+#define MAX_CHANNELS     (MESH_CHANNELS + 2)  // MESH_CHANNELS + DM + LIVE
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 #define MAX_MSG_LINES    64   // DRAM-sized history for Cardputer (leave headroom for Wi-Fi/tasks)
 #else

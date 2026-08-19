@@ -947,6 +947,27 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
   Use it only on a trusted local network. One browser controls the device at a
   time.
 
+### How many channels
+
+Ten configurable channels on every board except the **Cardputer**, which has
+eight. Each channel keeps its own message history, and on the Cardputer those
+buffers sit in internal RAM rather than PSRAM — two more would cost memory that
+board needs to boot its Wi-Fi access point.
+
+This is a local setting, not a protocol one. A Meshtastic packet header carries a
+channel *hash*, never a slot number, so a ten-channel device and a stock
+eight-channel node talk to each other exactly as before as long as they share the
+key for the channel in use. Slots 8 and 9 are ordinary channels to everyone else
+on the mesh; they are only extra room on this device.
+
+Two consequences worth knowing:
+
+- The Meshtastic phone app and `meshtastic --export-config` only understand eight
+  slots, so a config exported through stock tooling will not carry channels 8-9.
+  Camillia's own export does.
+- Downgrading to a build with eight channels keeps the first eight and drops the
+  rest, rather than resetting everything.
+
 ### Per-channel hop limit
 
 Every channel can carry its own hop budget, so a busy local channel can be held

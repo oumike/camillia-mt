@@ -1,7 +1,11 @@
 ### New
-- Per-channel hop limit: each channel can carry its own hop budget instead of always using the device-wide Hop Limit. Set it on the device under Config → Channels → *(slot)* → **Hops**, in Web Config with the new **Hops** dropdown on each channel row, or as `hop_limit:` under a channel in `config.yaml`. Leaving it at `Default (n)` keeps the previous behaviour, and `0` means direct neighbours only — nothing will relay that channel's traffic. This is a Camillia-only setting: the phone app can't see it, and it needs no support from other nodes.
+- Ten configurable LoRa channels on T-Deck, T-Lora Pager TFT, Heltec V4, Attaky Mesh Deck and ThinkNode M9; the Cardputer keeps eight, since its channel history has to live in internal RAM rather than PSRAM.
+- Channels 8 and 9 are ordinary channels to the rest of the mesh — a Meshtastic header carries a channel hash, not a slot number, so ten-channel devices and stock eight-channel nodes talk to each other exactly as before.
+- The web config pages and the VNC viewer page now carry a site icon, so the browser tab shows the Camillia mark instead of a blank page symbol.
+
+### Changed
+- The channel list in the web config and on-device settings grows to match the board's channel count instead of stopping at eight.
+- The Meshtastic phone app and `meshtastic --export-config` only understand eight slots, so a config exported through stock tooling will not include channels 8 and 9; Camillia's own export does.
 
 ### Fixed
-- The Hop Limit setting is now actually applied to outgoing packets. Previously every message, position, telemetry, ack, traceroute and nodeinfo this device sent used the compiled-in default of 7 regardless of what Hop Limit was set to — the configured value only changed what the info panel displayed. Changing it in Web Config now takes effect immediately, without a reboot.
-- Upgrading no longer risks wiping configured channels. The stored channel settings were rejected outright if they came from a build with a different channel count or layout, silently resetting every channel to defaults; older saved channels are now read correctly.
-- Web Config no longer floods the serial console with socket errors when a browser closes the page or drops the connection part-way through loading it.
+- Moving a device from a ten-channel build back to an eight-channel one (or to a Cardputer's saved config) no longer wipes every channel — the first eight keep their names and keys, and only the per-channel hop overrides fall back to the device default.
