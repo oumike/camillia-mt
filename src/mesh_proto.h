@@ -23,7 +23,22 @@ struct ChannelKey {
     // this says. Defaults on for the primary channel and off for the rest, which
     // is exactly what the firmware did before the flag existed.
     bool    shareLocation;
+    // Per-channel hop budget, overriding cfg.loraHopLimit for traffic this node
+    // originates on this channel. Encoded 0 = unset (use the device default),
+    // 1..8 = a budget of (value - 1) hops.
+    //
+    // The offset exists so that zero means "never configured" — the static table
+    // below and every blob written before this field are zero here, and 0 is
+    // also a legitimate budget (direct neighbours only). Without the offset the
+    // two would be indistinguishable, which is the same trap ChanBlobRecord's
+    // extFlags documents.
+    uint8_t hopLimitPlus1;
 };
+
+// Encode/decode helpers for the field above, so the +1 lives in one place.
+static inline bool    chanHopLimitSet(uint8_t plus1)   { return plus1 != 0; }
+static inline uint8_t chanHopLimitGet(uint8_t plus1)   { return (uint8_t)((plus1 - 1) & 0x07); }
+static inline uint8_t chanHopLimitMake(uint8_t hops)   { return (uint8_t)((hops & 0x07) + 1); }
 
 // Inline definitions so the table lives in mesh_proto.cpp (extern declared below)
 extern ChannelKey CHANNEL_KEYS[MAX_CHANNELS];
@@ -368,6 +383,38 @@ bool decodeServiceEnvelope(const uint8_t *buf, size_t len,
                            MeshHdr &hdr, uint8_t *cipher, size_t cipherCap,
                            size_t &cipherLen,
                            char *channelName, size_t channelNameCap);
+
+// ── Hop limit ─────────────────────────────────────────────────
+// The hop budget this node stamps on packets it originates. Set from
+// cfg.loraHopLimit; MESH_HOP_LIMIT is only the compiled default that seeds that
+// setting, and is deliberately not read at transmit time — every originating
+// path used to use the constant directly, so a configured limit changed the
+// info panel and nothing else.
+//
+// Relayed traffic is not covered by any of this: a relay decrements the budget
+// it received and forwards, and rewriting someone else's would corrupt the
+// hop_start - hop_limit arithmetic that tells every node how far away a sender
+// is.
+void meshSetHopLimit(uint8_t hops);      // clamped to the 3 header bits (0-7)
+uint8_t meshHopLimit();
+
+// Header flags for a packet this node originates: hop_limit and hop_start both
+// set to the current budget — they are equal at origination by definition, and
+// that is what lets a receiver derive the hops taken — OR'd with whatever else
+// the caller needs (want_ack, via_mqtt).
+uint8_t meshOriginHopFlags(uint8_t extraFlags = 0);
+
+// Same, for a path that has its own, shorter budget in mind (the discovery
+// sweep). Never exceeds the configured limit: a node told to stay within one hop
+// should not have some other subsystem reaching further on its behalf.
+uint8_t meshOriginHopFlagsCapped(uint8_t hops, uint8_t extraFlags = 0);
+
+// Origin flags for traffic going out on a specific channel: that channel's own
+// hop limit when it has one, otherwise the device default. A channel value is an
+// explicit override and is used as given — it may be higher than the device
+// default, because "this channel needs more reach" is exactly the case the
+// setting exists for.
+uint8_t meshOriginHopFlagsForChannel(int chanIdx, uint8_t extraFlags = 0);
 
 // ── Port name helper ──────────────────────────────────────────
 const char *portnumName(uint32_t p);

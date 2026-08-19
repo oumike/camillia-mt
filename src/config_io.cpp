@@ -1360,6 +1360,14 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         out += tmp;
         snprintf(tmp, sizeof(tmp), "    shareLocation: %s\n", ch.shareLocation ? "true" : "false");
         out += tmp;
+        // Written only when the channel has an override. Absent means "follow the
+        // device default", which is also how a file from a build without this
+        // field reads — so the two are the same thing rather than a special case.
+        if (chanHopLimitSet(ch.hopLimitPlus1)) {
+            snprintf(tmp, sizeof(tmp), "    hop_limit: %u\n",
+                     (unsigned)chanHopLimitGet(ch.hopLimitPlus1));
+            out += tmp;
+        }
         snprintf(tmp, sizeof(tmp), "    hash: %02x\n", ch.hash);
         out += tmp;
     }
@@ -1623,6 +1631,14 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     CHANNEL_KEYS[chanIdx].muted = parseBoolValue(val);
                 } else if (!strcmp(key, "shareLocation")) {
                     CHANNEL_KEYS[chanIdx].shareLocation = parseBoolValue(val);
+                } else if (!strcmp(key, "hop_limit")) {
+                    // Camillia-only: Meshtastic has no per-channel hop field, so
+                    // a config from stock tooling never carries this and the
+                    // channel keeps following the device default.
+                    const int h = atoi(val);
+                    if (h >= 0 && h <= 7) {
+                        CHANNEL_KEYS[chanIdx].hopLimitPlus1 = chanHopLimitMake((uint8_t)h);
+                    }
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "lora")) {
                 // Meshtastic CLI format. bandwidth/spreadFactor/codingRate also

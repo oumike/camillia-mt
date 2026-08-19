@@ -1443,7 +1443,13 @@ static bool sendSliced(const char *data, size_t len, const char *what) {
     // response — every page here is a stream of modest chunks, which is exactly
     // the traffic pattern Nagle penalises. Idempotent, so setting it per slice
     // rather than plumbing a response-start hook costs a setsockopt per section.
-    server.client().setNoDelay(true);
+    //
+    // Guarded on connected(): setsockopt on a socket the peer has already closed
+    // fails with EINVAL, and the core logs every failure at error level. On a
+    // client that goes away mid-response that is one console line per slice,
+    // which buries whatever else is being diagnosed. A dropped client also has
+    // nothing to gain from TCP_NODELAY.
+    if (server.client().connected()) server.client().setNoDelay(true);
     for (size_t off = 0; off < len; ) {
         if (sendStalled()) return false;
         const size_t n = (len - off > kFlashChunkBytes) ? kFlashChunkBytes
@@ -1593,7 +1599,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // long a chunk write can block: WiFiClient::write() runs its own select()
     // retry loop with a hardcoded 1 s timeout and ignores this value. It only
     // helps the read side.
-    server.client().setTimeout(3);
+    // Same guard as sendSliced(): a setsockopt on a closed socket is an error
+    // line, not a timeout.
+    if (server.client().connected()) server.client().setTimeout(3);
 
     char tmp[96];
     // Stream the head straight from flash rather than seeding the String with
@@ -2218,7 +2226,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                      r, (ch.role == r) ? " selected" : "", kChanRoles[r]);
             html += tmp;
         }
-        html += "</select></label></div>";
+        html += "</select></label>";
+
+        // Hop limit: a select rather than a number box so "Default" is a value
+        // you pick, not an empty field you have to know to leave alone. The
+        // reorder script swaps `input,select` values between rows, so this moves
+        // with its channel like everything else here.
+        snprintf(tmp, sizeof(tmp), "ch%d_hop", i);
+        html += "<label>Hops<select name='"; html += tmp; html += "'>";
+        {
+            char optbuf[96];
+            snprintf(optbuf, sizeof(optbuf), "<option value=''%s>Default (%d)</option>",
+                     chanHopLimitSet(ch.hopLimitPlus1) ? "" : " selected",
+                     (int)gCfg->loraHopLimit);
+            html += optbuf;
+            for (int h = 0; h <= 7; h++) {
+                const bool sel = chanHopLimitSet(ch.hopLimitPlus1)
+                                 && chanHopLimitGet(ch.hopLimitPlus1) == (uint8_t)h;
+                snprintf(optbuf, sizeof(optbuf), "<option value='%d'%s>%d%s</option>",
+                         h, sel ? " selected" : "", h,
+                         (h == 0) ? " (direct only)" : "");
+                html += optbuf;
+            }
+        }
+        html += "</select></label>";
+        html += "</div>";
 
         // Toggles
         const ChanToggle toggles[] = {
@@ -4378,6 +4410,20 @@ static void handlePostSave() {
         }
         snprintf(field, sizeof(field), "ch%d_role", i);
         CHANNEL_KEYS[i].role = (uint8_t)constrain(server.arg(field).toInt(), 0, 2);
+        // Hop limit. Guarded by hasArg, not by an empty-string test: a select
+        // always submits something when it was rendered, and an absent field
+        // means this form did not carry the channels section at all — which must
+        // leave the stored value alone rather than reset it to Default.
+        snprintf(field, sizeof(field), "ch%d_hop", i);
+        if (server.hasArg(field)) {
+            const String hv = server.arg(field);
+            if (hv.length() == 0) {
+                CHANNEL_KEYS[i].hopLimitPlus1 = 0;      // Default
+            } else {
+                CHANNEL_KEYS[i].hopLimitPlus1 =
+                    chanHopLimitMake((uint8_t)constrain(hv.toInt(), 0, 7));
+            }
+        }
         // MQTT uplink/downlink and position sharing — apply only when the channels
         // section was rendered (unchecked boxes submit nothing, so we can't
         // distinguish off from absent).

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_system.h>   // esp_reset_reason() for the boot marker below
 #include <stdarg.h>       // discoverySectionRow() takes a format
+#include <stddef.h>       // offsetof() for the channel blob layout
 #include <Wire.h>
 #include "config.h"
 #include "base64_util.h"
@@ -5509,7 +5510,25 @@ struct ChanBlob {
     uint16_t       version;
     uint16_t       count;
     ChanBlobRecord chans[MESH_CHANNELS];
+    // Appended after the records rather than added to ChanBlobRecord, and this
+    // is load-bearing: every record is 1-byte aligned, so growing the record
+    // changes its stride and every stored blob would be read at the wrong
+    // offsets from the second channel onward. A trailing section leaves older
+    // blobs a valid prefix of this layout — they simply stop before it, and the
+    // loader treats a missing section as "no channel has an override".
+    //
+    // Same reason the loader below parses by the *stored* count instead of
+    // casting this struct over the bytes: when MESH_CHANNELS changes (#44) the
+    // record array moves the trailing section, and only the stored count says
+    // where it actually is.
+    uint8_t        hopLimitPlus1[MESH_CHANNELS];   // 0 = unset, else hops + 1
 };
+
+// The stride the loader walks the record array with. If a field is ever added to
+// ChanBlobRecord this fires, which is the point: every stored blob would then be
+// read at the wrong offsets from the second channel onward, and the fix is a
+// trailing section (as hopLimitPlus1 is) rather than a wider record.
+static_assert(sizeof(ChanBlobRecord) == 52, "ChanBlobRecord stride changed - see ChanBlob");
 
 // Shared by save and load for the same reasons as s_cfgBlobBuf.
 static ChanBlob s_chanBlob;
@@ -5535,6 +5554,7 @@ static void persistChannelsToPrefs() {
                                        | (ck.muted           ? 4 : 0));
         blob.chans[i].extFlags = (uint8_t)(CHAN_EXT_VALID
                                          | (ck.shareLocation ? CHAN_EXT_SHARE_LOCATION : 0));
+        blob.hopLimitPlus1[i] = ck.hopLimitPlus1;
     }
 
     Preferences cp;
@@ -5963,14 +5983,42 @@ static void loadChannelsFromPrefs() {
         memset(&blob, 0, sizeof(blob));
         const size_t got = cp.getBytes(kChanBlobKey, &blob, sizeof(blob));
         cp.end();
-        if (got < sizeof(blob) || blob.version != kChanBlobVersion) {
-            Serial.printf("[cfg] channel blob unusable (v%u, %u bytes) - using defaults\n",
-                          (unsigned)blob.version, (unsigned)got);
+
+        // Parsed by offset from the stored count, not by reading the struct's
+        // fields directly. getBytes() copies the stored bytes verbatim, so the
+        // layout in this buffer is whichever version wrote it — and both the
+        // record count (#44) and the trailing sections can differ from what this
+        // build's struct describes. Only version, count and the record stride are
+        // guaranteed fixed, and those are enough to find everything else.
+        //
+        // The old test was `got < sizeof(blob)`, which rejected any blob written
+        // by a build with fewer channels or fewer sections. That is a silent
+        // reset of every configured channel on upgrade, so it is deliberately
+        // gone rather than merely relaxed.
+        const uint8_t *raw = reinterpret_cast<const uint8_t *>(&blob);
+        const size_t recOff   = offsetof(ChanBlob, chans);
+        const size_t storedN  = blob.count;
+        const size_t recBytes = storedN * sizeof(ChanBlobRecord);
+        if (blob.version != kChanBlobVersion || storedN == 0 || got < recOff + recBytes) {
+            Serial.printf("[cfg] channel blob unusable (v%u, count %u, %u bytes) - using defaults\n",
+                          (unsigned)blob.version, (unsigned)storedN, (unsigned)got);
             return;
         }
-        const int n = (blob.count < MESH_CHANNELS) ? blob.count : MESH_CHANNELS;
+
+        // Present only in blobs written after per-channel hop limits landed.
+        // Absent means every channel follows the device default, which is what
+        // the firmware did before the field existed.
+        const size_t hopOff  = recOff + recBytes;
+        const bool   haveHop = (got >= hopOff + storedN);
+        if (got > recOff + recBytes && !haveHop) {
+            Serial.printf("[cfg] channel blob: trailing %u bytes ignored\n",
+                          (unsigned)(got - recOff - recBytes));
+        }
+
+        const int n = (storedN < (size_t)MESH_CHANNELS) ? (int)storedN : MESH_CHANNELS;
         for (int i = 0; i < n; i++) {
-            const ChanBlobRecord &r = blob.chans[i];
+            ChanBlobRecord r;
+            memcpy(&r, raw + recOff + (size_t)i * sizeof(ChanBlobRecord), sizeof(r));
             if (r.name[0]) {
                 strncpy(CHANNEL_KEYS[i].name_buf, r.name, sizeof(CHANNEL_KEYS[i].name_buf) - 1);
                 CHANNEL_KEYS[i].name_buf[sizeof(CHANNEL_KEYS[i].name_buf) - 1] = '\0';
@@ -5988,6 +6036,10 @@ static void loadChannelsFromPrefs() {
             // compiled default (primary on, secondary off) — see ChanBlobRecord.
             if (r.extFlags & CHAN_EXT_VALID) {
                 CHANNEL_KEYS[i].shareLocation = (r.extFlags & CHAN_EXT_SHARE_LOCATION) != 0;
+            }
+            if (haveHop) {
+                const uint8_t p1 = raw[hopOff + (size_t)i];
+                if (p1 <= 8) CHANNEL_KEYS[i].hopLimitPlus1 = p1;
             }
         }
         return;
@@ -10084,7 +10136,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_12;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_10;
 // A half-width cell here is ~112px. "Encryption" plus its value does not fit,
 // and an ellipsised field name is worse than a short one.
-#define CHAN_EDIT_LABELS { "Name", "Enc", "Save", "Loc", "Key" }
+#define CHAN_EDIT_LABELS { "Name", "Enc", "Save", "Loc", "Key", "Hops" }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int  kChanModalCols  = 2;
 static constexpr int  kChanModalMaxW  = 448;
@@ -10093,7 +10145,7 @@ static constexpr int  kChanModalGap   = 5;
 static constexpr int  kChanModalRowH  = 28;
 static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
-#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key" }
+#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key", "Hops" }
 #else
 // 320x240 boards (T-Deck, Heltec V4, Mesh Deck). At 300px wide a 49% cell is
 // ~138px, which holds "0  LongFast" at montserrat_12 with room to spare.
@@ -10106,7 +10158,7 @@ static const lv_font_t *kChanModalTitleFont = &lv_font_montserrat_16;
 static const lv_font_t *kChanModalRowFont   = &lv_font_montserrat_12;
 // ~138px cells at montserrat_12: "Location" plus "Off" fits, "Encryption" plus
 // "AES-256" is the tightest pairing and ellipsises its value, not its name.
-#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key" }
+#define CHAN_EDIT_LABELS { "Name", "Encryption", "Save", "Location", "Key", "Hops" }
 #endif
 static constexpr int kChanModalRowsPerCol =
     (MESH_CHANNELS + kChanModalCols - 1) / kChanModalCols;
@@ -10432,13 +10484,17 @@ static int       s_chanCfgSelection = 0;
 // step with them. Laid out, that is:
 //     Name  | Location
 //     Enc   | Key
-//     Save  |
+//     Save  | Hops
 enum ChanEditRow : uint8_t {
     CHAN_EDIT_NAME = 0,
     CHAN_EDIT_ENC,
     CHAN_EDIT_SAVE,
     CHAN_EDIT_LOCATION,
     CHAN_EDIT_KEY,
+    // Appended deliberately: five rows and six both come to three per column, so
+    // this takes the cell the short column used to leave empty and every other
+    // row keeps the position it had.
+    CHAN_EDIT_HOPS,
     CHAN_EDIT_ROW_COUNT
 };
 
@@ -10461,6 +10517,9 @@ static char    s_chanEditName[16] = {};
 static uint8_t s_chanEditKey[32]  = {};
 static uint8_t s_chanEditKeyLen   = 0;
 static bool    s_chanEditShareLoc = false;
+// Staged per-channel hop budget in the ChannelKey encoding: 0 = follow the
+// device default, else hops + 1.
+static uint8_t s_chanEditHopPlus1 = 0;
 
 // Text-entry sub-modal, shared by the name and key fields.
 static lv_obj_t *s_chanTextBackdrop = nullptr;
@@ -10578,6 +10637,7 @@ static void chanEditSave() {
     memcpy(ck.key, s_chanEditKey, s_chanEditKeyLen);
     ck.keyLen = s_chanEditKeyLen;
     ck.shareLocation = s_chanEditShareLoc;
+    ck.hopLimitPlus1 = s_chanEditHopPlus1;
 
     // Role is deliberately untouched — the web config owns it, and an empty
     // secondary slot already ships as SECONDARY, so naming one is enough to put
@@ -10821,6 +10881,16 @@ static void refreshChanEditRows() {
             case CHAN_EDIT_LOCATION:
                 lv_label_set_text(val, s_chanEditShareLoc ? "On" : "Off");
                 break;
+            case CHAN_EDIT_HOPS:
+                // "Default" names where the number comes from when unset, and
+                // shows it, because "this channel follows the device" is only
+                // useful if you can see what the device is set to.
+                if (!chanHopLimitSet(s_chanEditHopPlus1)) {
+                    lv_label_set_text_fmt(val, "Default (%u)", (unsigned)s_cfg.loraHopLimit);
+                } else {
+                    lv_label_set_text_fmt(val, "%u", (unsigned)chanHopLimitGet(s_chanEditHopPlus1));
+                }
+                break;
             default:
                 break;
         }
@@ -10829,6 +10899,20 @@ static void refreshChanEditRows() {
 
 static void chanEditToggleShareLoc() {
     s_chanEditShareLoc = !s_chanEditShareLoc;
+    refreshChanEditRows();
+}
+
+// Default -> 0 -> 1 -> ... -> 7 -> Default. Nine stops rather than the handful
+// of values anyone is likely to want, because a hop budget is not a preference
+// list — someone setting 5 has a reason, and hiding it behind a config file
+// would be worse than one extra press.
+static void chanEditCycleHops(int dir) {
+    const int steps = 9;                       // Default plus 0..7
+    int cur = chanHopLimitSet(s_chanEditHopPlus1)
+                  ? (int)chanHopLimitGet(s_chanEditHopPlus1) + 1
+                  : 0;
+    cur = (cur + dir + steps) % steps;
+    s_chanEditHopPlus1 = (cur == 0) ? 0 : chanHopLimitMake((uint8_t)(cur - 1));
     refreshChanEditRows();
 }
 
@@ -10843,6 +10927,9 @@ static void chanEditActivateRow(int row) {
             break;
         case CHAN_EDIT_LOCATION:
             chanEditToggleShareLoc();
+            break;
+        case CHAN_EDIT_HOPS:
+            chanEditCycleHops(1);
             break;
         case CHAN_EDIT_SAVE:
             chanEditSave();
@@ -10878,6 +10965,7 @@ static void openChanEditModal(int slot) {
     memset(s_chanEditKey, 0, sizeof(s_chanEditKey));
     memcpy(s_chanEditKey, ck.key, s_chanEditKeyLen);
     s_chanEditShareLoc = ck.shareLocation;
+    s_chanEditHopPlus1 = ck.hopLimitPlus1;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -15991,9 +16079,7 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
                 hdr.from = s_myNodeId;
                 hdr.id = packetId;
                 hdr.channel = ck.hash;
-                hdr.flags = (uint8_t)((1 << 3) |  // want_ack
-                                      (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                                      ((MESH_HOP_LIMIT & 0x07) << 5));
+                hdr.flags = meshOriginHopFlagsForChannel(0, 1 << 3);   // want_ack
                 hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
                 memcpy(frame, &hdr, sizeof(hdr));
@@ -24349,8 +24435,8 @@ static void pumpKeyboardInput() {
                 chanEditActivateRow(s_chanEditSelection);
                 continue;
             }
-            // Left/right change the value in place on the two rows that have one
-            // to cycle, so neither needs a sub-modal. Both consume the key, so
+            // Left/right change the value in place on the rows that have one
+            // to cycle, so none of them needs a sub-modal. Both consume the key, so
             // the column hop below is unreachable from these rows — the same
             // trade the encryption row has always made.
             if (s_chanEditSelection == CHAN_EDIT_ENC) {
@@ -24360,6 +24446,10 @@ static void pumpKeyboardInput() {
             if (s_chanEditSelection == CHAN_EDIT_LOCATION) {
                 if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP
                     || k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) { chanEditToggleShareLoc(); continue; }
+            }
+            if (s_chanEditSelection == CHAN_EDIT_HOPS) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP)  { chanEditCycleHops(-1); continue; }
+                if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN)  { chanEditCycleHops(1);  continue; }
             }
             int delta = 0;
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
@@ -26288,6 +26378,10 @@ static void onWebCfgSaved() {
     s_ntpServerActive[0] = '\0';
     s_ntpLastConfigureMs = 0;
 
+    // Not part of Radio.reconfigure(): the hop budget is a header field this
+    // firmware stamps, not a modem setting, so it applies whether or not the
+    // radio came up.
+    meshSetHopLimit(s_cfg.loraHopLimit);
     if (s_radioReady) {
         Radio.reconfigure(s_cfg.loraFreq, s_cfg.loraBw,
                           s_cfg.loraSf, s_cfg.loraCr, s_cfg.loraPower);
@@ -28652,8 +28746,7 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     hdr.from = s_myNodeId;
     hdr.id = packetId;
     hdr.channel = ck.hash;
-    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
@@ -28697,8 +28790,7 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     hdr.from = s_myNodeId;
     hdr.id = packetId;
     hdr.channel = ck.hash;
-    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(chanIdx);
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
@@ -28814,8 +28906,7 @@ static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMi
     hdr.from = s_myNodeId;
     hdr.id = packetId;
     hdr.channel = ck.hash;
-    hdr.flags = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(chanIdx);
     hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
 
     memcpy(frame, &hdr, sizeof(hdr));
@@ -32453,6 +32544,9 @@ void setup() {
     // hashed whatever the compiled-in default channel was called.
     applyPresetParams(s_cfg);
     bootSplashStatus("Starting radio");
+    // Before the first transmission of the session, since the TX paths read this
+    // rather than the compiled default.
+    meshSetHopLimit(s_cfg.loraHopLimit);
     s_radioReady = Radio.init(s_cfg.loraPower, s_cfg.loraRxBoostedGain);
     // Deliberately after Radio.init(). On the pager, pagerPrimeLoRaRail() arms
     // every peripheral rail on the expander including GPS_EN, so starting GPS

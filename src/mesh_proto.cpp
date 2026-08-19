@@ -38,6 +38,40 @@ static void resolveMeshKey(const uint8_t *key, uint8_t keyLen,
     }
 }
 
+// ── Hop limit ─────────────────────────────────────────────────
+namespace {
+// Seeded from the compiled default so a packet sent before config load still
+// carries something sane.
+uint8_t sMeshHopLimit = (uint8_t)(MESH_HOP_LIMIT & 0x07);
+}
+
+void meshSetHopLimit(uint8_t hops) {
+    sMeshHopLimit = (uint8_t)(hops & 0x07);
+}
+
+uint8_t meshHopLimit() { return sMeshHopLimit; }
+
+uint8_t meshOriginHopFlags(uint8_t extraFlags) {
+    return (uint8_t)(extraFlags | (sMeshHopLimit & 0x07) | ((sMeshHopLimit & 0x07) << 5));
+}
+
+uint8_t meshOriginHopFlagsCapped(uint8_t hops, uint8_t extraFlags) {
+    uint8_t h = (uint8_t)(hops & 0x07);
+    if (h > sMeshHopLimit) h = sMeshHopLimit;
+    return (uint8_t)(extraFlags | h | (uint8_t)(h << 5));
+}
+
+uint8_t meshOriginHopFlagsForChannel(int chanIdx, uint8_t extraFlags) {
+    if (chanIdx >= 0 && chanIdx < MAX_CHANNELS) {
+        const uint8_t p1 = CHANNEL_KEYS[chanIdx].hopLimitPlus1;
+        if (chanHopLimitSet(p1)) {
+            const uint8_t h = chanHopLimitGet(p1);
+            return (uint8_t)(extraFlags | h | (uint8_t)(h << 5));
+        }
+    }
+    return meshOriginHopFlags(extraFlags);
+}
+
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen) {
     uint8_t exp[16];
     const uint8_t *k = key;

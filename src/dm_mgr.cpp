@@ -314,9 +314,11 @@ bool DmMgr::sendDm(uint32_t myNodeId, uint32_t toNodeId, const char *text,
     hdr.to    = resolvedToNodeId;
     hdr.from  = myNodeId;
     hdr.id    = packetId;
-    hdr.flags = (1 << 3) |  // want_ack
-                (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                ((MESH_HOP_LIMIT & 0x07) << 5);
+    // A DM is PKI-encrypted and carries no channel key, so "which channel" here
+    // means the one this node was last heard on — the path a reply is expected
+    // to take back, which is what NodeEntry.chanIdx records. Unknown falls back
+    // to the device default.
+    hdr.flags = meshOriginHopFlagsForChannel(node ? node->chanIdx : -1, 1 << 3);   // want_ack
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
 
     size_t payloadLen = 0;

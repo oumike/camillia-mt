@@ -721,9 +721,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = CHANNEL_KEYS[txChan].hash;
-    hdr.flags   = (1 << 3) |      // want_ack
-                  (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(txChan, 1 << 3);   // want_ack
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -828,8 +826,7 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(chanIdx);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -867,8 +864,7 @@ bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId) {
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -916,8 +912,7 @@ bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -955,8 +950,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -1000,8 +994,7 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(MESH_HOP_LIMIT & 0x07) |
-                  ((MESH_HOP_LIMIT & 0x07) << 5);
+    hdr.flags   = meshOriginHopFlagsForChannel(0);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -1078,8 +1071,9 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     hdr.from    = myNodeId;
     hdr.id      = packetId;
     hdr.channel = ck.hash;
-    hdr.flags   = (uint8_t)(hopLimit & 0x07) |
-                  ((hopLimit & 0x07) << 5);
+    // Capped, not used as-is: a caller asking for 3 must not reach further than
+    // a node configured to stay within 1.
+    hdr.flags   = meshOriginHopFlagsCapped(hopLimit);
     hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
     memcpy(frame, &hdr, sizeof(hdr));
     memcpy(frame + sizeof(hdr), cipher, protoLen);
@@ -1124,7 +1118,7 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
     // sanctioned broadcast exception goes through sendDiscoverySweep().
     const bool isUnicast = (toNodeId != 0xFFFFFFFF);
     return sendNodeInfoFrame(myNodeId, longName, shortName, toNodeId,
-                             isUnicast && wantResponse, MESH_HOP_LIMIT);
+                             isUnicast && wantResponse, meshHopLimit());
 }
 
 uint32_t ChannelMgr::nodeInfoBroadcastCooldownMs() const {

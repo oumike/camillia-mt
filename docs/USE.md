@@ -947,6 +947,48 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
   Use it only on a trusted local network. One browser controls the device at a
   time.
 
+### Per-channel hop limit
+
+Every channel can carry its own hop budget, so a busy local channel can be held
+to a hop or two while a wide-area one keeps the full reach. Unset — the default
+for every channel — means "follow the device's Hop Limit", exactly as before.
+
+- **On the device**: Config &rarr; Channels &rarr; pick a slot &rarr; **Hops**.
+  Enter cycles Default &rarr; 0 &rarr; 1 &rarr; ... &rarr; 7 &rarr; Default, and
+  Left/Right steps it either way. `Default (7)` shows the device value it is
+  following, so you can see what unset actually means.
+- **In Web Config**: a **Hops** dropdown on each channel row, next to Name, Key
+  and Role. The first entry is `Default (7)`.
+- **In `config.yaml`**: `hop_limit` under the channel, written only when the
+  channel has an override.
+
+What it affects: **traffic this node originates on that channel** — text,
+position, telemetry, and the acks sent for traffic heard there. Direct messages
+follow the channel their conversation resolves to, falling back to the device
+default when that is unknown.
+
+What it does not affect: **anything relayed**. A packet passing through keeps
+the sender's budget, decremented by one, because the difference between where a
+packet started and where it is now is how every node works out how far away the
+sender is — rewriting it would corrupt that for everyone downstream.
+
+A channel value is an override, not a cap: setting a channel to 5 on a device
+whose default is 3 sends 5 on that channel. "This channel needs more reach" is
+the case the setting exists for.
+
+Two things worth knowing:
+
+- **0 means direct neighbours only.** Nothing relays it. That is a legitimate
+  setting for a channel shared with someone in the same room, and a silent dead
+  end for anyone further away — a packet that runs out of hops is dropped by a
+  relay, not rejected back to you.
+- **This is a Camillia setting.** Meshtastic has no per-channel hop field
+  (`ChannelSettings` carries name, key, role, uplink, downlink and module
+  settings, and nothing else), so the phone app cannot see it and a config
+  exported through stock tooling will not carry it. It needs no support from
+  other nodes: the hop budget travels in every packet's header and relays honour
+  whatever number they receive.
+
 ### Custom LoRa modem settings
 
 The **Modem Preset** dropdown in Web Config's LoRa section has a **Custom** entry
