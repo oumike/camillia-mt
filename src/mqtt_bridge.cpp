@@ -309,3 +309,33 @@ void mqttBridgePublishRaw(const MeshHdr &hdr, const uint8_t *cipher, size_t ciph
     // Self-originated frame: no RX metadata (snr/rssi = 0).
     publishEnvelope(hdr, cipher, cipherLen, 0.0f, 0, chanName);
 }
+
+bool mqttBridgePublishMapReport(const MapReportInfo &info, const char *chanName) {
+    // Gated here as well as at the caller: this is the one publish that is not a
+    // mirror of something the mesh already saw, so "map reporting is off" has to
+    // mean nothing leaves, no matter who calls.
+    if (!s_cfg || !s_cfg->mqttMapReport) return false;
+    if (!s_mqtt.connected()) return false;
+
+    char gw[16];
+    gatewayId(gw, sizeof(gw));
+
+    uint8_t env[400];
+    const size_t n = encodeMapReportEnvelope(s_myNodeId, info,
+                                             (chanName && chanName[0]) ? chanName : "",
+                                             gw, env, sizeof(env));
+    if (n == 0) {
+        Serial.println("[mqtt] map report DROP: envelope too big");
+        return false;
+    }
+
+    // Trailing slash and no per-channel or per-gateway segment: unlike /2/e/,
+    // the map topic is a single well-known sink that consumers subscribe to
+    // whole. The gateway id travels inside the envelope instead.
+    char topic[96];
+    snprintf(topic, sizeof(topic), "%s/2/map/", s_cfg->mqttRoot);
+    const bool ok = s_mqtt.publish(topic, env, n);
+    Serial.printf("[mqtt] map report %s topic=%s len=%u\n",
+                  ok ? "OK" : "FAIL", topic, (unsigned)n);
+    return ok;
+}

@@ -688,6 +688,35 @@ bool ChannelMgr::expireAcks() {
     return changed;
 }
 
+// Mirror a self-originated frame to the MQTT broker, on the terms every send
+// path shares: only after the radio actually took the frame, only when the user
+// allows MQTT for our own traffic, only on a named channel with uplink enabled,
+// and always the ciphertext that went on the air rather than the plaintext.
+//
+// This exists because a half-duplex LoRa radio never receives its own
+// transmission, so the RX-side uplink in main_lvgl only ever mirrors packets
+// heard from *other* nodes. Until this was called from the announce paths, chat
+// was the one thing about this node that reached a broker: telemetry, position,
+// nodeinfo and neighborinfo all set the OK_TO_MQTT bit and then had nothing
+// publish them (issue #47).
+//
+// One helper rather than the same four lines at six call sites — the gate is
+// easy to get subtly wrong, and getting it wrong leaks traffic to a broker the
+// operator disabled uplink on.
+static void uplinkSelfFrame(bool txOk, bool okToMqtt, int chanIdx,
+                            const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen) {
+    if (!txOk || !okToMqtt) return;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return;
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    if (!ck.uplinkEnabled) return;
+    // Imported channels keep their name in name_buf; ck.name is redirected there
+    // on import, but resolve both so an un-imported slot still publishes under
+    // its literal.
+    const char *chanName = ck.name_buf[0] ? ck.name_buf : ck.name;
+    if (!chanName || !chanName[0]) return;
+    mqttBridgePublishRaw(hdr, cipher, cipherLen, chanName);
+}
+
 bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
                           int chanIdx, uint32_t replyId, uint32_t emoji) {
     if (!Radio.isReady()) {
@@ -746,9 +775,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 
     // Mirror our own outgoing message to MQTT when this channel is uplink-enabled
     // (published once here, not on the reliability retry below).
-    if (okToMqtt && CHANNEL_KEYS[txChan].uplinkEnabled) {
-        mqttBridgePublishRaw(hdr, cipher, protoLen, txName);
-    }
+    uplinkSelfFrame(/*txOk=*/true, okToMqtt, txChan, hdr, cipher, protoLen);
 
     // Reliability nudge for broadcast text: send one additional copy with the
     // same from:id shortly after the first TX. Receivers dedupe by from:id, so
@@ -799,8 +826,7 @@ bool ChannelMgr::sendText(uint32_t myNodeId, const char *text, bool okToMqtt,
 }
 
 bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                              bool unusedCompat, int chanIdx, uint8_t precisionBits) {
-    (void)unusedCompat;
+                              bool okToMqtt, int chanIdx, uint8_t precisionBits) {
     if (!Radio.isReady()) return false;
     if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return false;
 
@@ -812,7 +838,9 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     applyPositionPrecision(latI, lonI, precisionBits);
 
     uint8_t proto[64], cipher[64];
-    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), 0, precisionBits);
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+    size_t protoLen = encodePosition(latI, lonI, alt, proto, sizeof(proto), bitfield,
+                                     precisionBits);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
@@ -833,6 +861,9 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
     debugLogMessages("[position] transmit ch%d %s\n", chanIdx, ok ? "OK" : "FAILED");
+    // Uplinked per channel: an announce can walk several location-sharing
+    // channels, and each one carries its own uplinkEnabled flag.
+    uplinkSelfFrame(ok, okToMqtt, chanIdx, hdr, cipher, protoLen);
     {
         // Position can now go out on several channels in one announce, so the
         // channel index is part of the line — otherwise the burst reads as a
@@ -918,6 +949,7 @@ bool ChannelMgr::sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt) {
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
     {
         char live[56];
         snprintf(live, sizeof(live), "T TEL D %08X %s",
@@ -956,6 +988,7 @@ bool ChannelMgr::sendTelemetryEnvironment(uint32_t myNodeId,
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
     {
         char live[56];
         snprintf(live, sizeof(live), "T TEL E %08X %s",
@@ -1000,6 +1033,7 @@ bool ChannelMgr::sendNeighborInfo(uint32_t myNodeId,
     memcpy(frame + sizeof(hdr), cipher, protoLen);
 
     bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
     {
         char live[64];
         snprintf(live, sizeof(live), "T NBR B %08X %s",
@@ -1026,7 +1060,8 @@ static uint32_t sLastNodeInfoBroadcastMs = 0;
 // rule and its one sanctioned exception live.
 static bool sendNodeInfoFrame(uint32_t myNodeId,
                               const char *longName, const char *shortName,
-                              uint32_t toNodeId, bool reqReply, uint8_t hopLimit) {
+                              uint32_t toNodeId, bool reqReply, uint8_t hopLimit,
+                              bool okToMqtt) {
     if (!Radio.isReady()) return false;
 
     bool isUnicast = (toNodeId != 0xFFFFFFFF);
@@ -1055,8 +1090,9 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     };
 
     uint8_t proto[256], cipher[256];
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
     size_t protoLen = encodeNodeInfo(myNodeId, longName, shortName,
-                                     mac, proto, sizeof(proto), reqReply);
+                                     mac, proto, sizeof(proto), reqReply, bitfield);
     if (protoLen == 0) return false;
 
     // Always send NODEINFO on LongFast (index 0) for maximum visibility
@@ -1087,6 +1123,11 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
     // Start the 15s broadcast window only once a broadcast actually goes out,
     // so a failed transmit doesn't lock out the next attempt.
     if (ok && !isUnicast) sLastNodeInfoBroadcastMs = millis();
+    // Broadcast only. A unicast reply is addressed to the node that asked, and
+    // publishing it would put a one-to-one answer on a topic the whole broker
+    // reads. The periodic broadcast is what a map needs anyway — it is the
+    // packet that gives this node a name and a role.
+    if (!isUnicast) uplinkSelfFrame(ok, okToMqtt, 0, hdr, cipher, protoLen);
     {
         char dst[16];
         liveNodeLabel(toNodeId, dst, sizeof(dst), true);
@@ -1111,14 +1152,13 @@ static bool sendNodeInfoFrame(uint32_t myNodeId,
 bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                               const char *longName, const char *shortName,
                               uint32_t toNodeId, bool wantResponse,
-                              bool unusedCompat) {
-    (void)unusedCompat;
+                              bool okToMqtt) {
     // Never set want_response on broadcast NODEINFO — that would trigger a
     // reply storm. For unicast, allow requesting peer NODEINFO. The one
     // sanctioned broadcast exception goes through sendDiscoverySweep().
     const bool isUnicast = (toNodeId != 0xFFFFFFFF);
     return sendNodeInfoFrame(myNodeId, longName, shortName, toNodeId,
-                             isUnicast && wantResponse, meshHopLimit());
+                             isUnicast && wantResponse, meshHopLimit(), okToMqtt);
 }
 
 uint32_t ChannelMgr::nodeInfoBroadcastCooldownMs() const {
@@ -1137,6 +1177,10 @@ bool ChannelMgr::sendDiscoverySweep(uint32_t myNodeId,
     // the rate limit and the channel-utilization check — this only refuses to
     // send an unbounded one.
     if (hopLimit == 0 || hopLimit > 3) hopLimit = 3;
+    // okToMqtt=false, unlike every other broadcast: this is the one frame that
+    // asks the mesh to answer, so neither the OK_TO_MQTT bit nor our own uplink
+    // should hand it to a broker — that would ask every MQTT-connected node to
+    // reply at once, well past the hop limit that is supposed to bound it.
     return sendNodeInfoFrame(myNodeId, longName, shortName, 0xFFFFFFFF,
-                             /*reqReply=*/true, hopLimit);
+                             /*reqReply=*/true, hopLimit, /*okToMqtt=*/false);
 }

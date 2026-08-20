@@ -115,7 +115,8 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // This was spelled out as defined(DEVICE_TDECK) at twenty-six call sites across
 // three files, which is twenty-six chances to miss one when a board joins.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
-    || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK)
+    || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_M9)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0

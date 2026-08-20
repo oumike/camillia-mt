@@ -55,6 +55,19 @@ int presetFromMeshtastic(uint8_t meshtasticPreset);
 // names as the Meshtastic enum, so this is the whole translation.
 const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion);
 
+// The other direction, for anything that has to report our settings in
+// Meshtastic's own enums rather than act on theirs — the MQTT map report is the
+// only caller today. Both read the same tables as the functions above, so the
+// pairs cannot drift apart.
+//
+// Returns Meshtastic's ModemPreset value for one of our PRESET_* indices, or -1
+// if we ever add a preset upstream does not have.
+int presetToMeshtastic(uint8_t preset);
+
+// Returns Meshtastic's RegionCode for a region code string, or 0 (UNSET) when
+// the string is empty or names a region their enum does not carry.
+uint8_t regionCodeToMeshtastic(const char *code);
+
 // ── Custom (non-preset) modem settings ──────────────────────────────────────
 // Bandwidth is stored the way Meshtastic stores it: an integer count of kHz,
 // where two values are shorthand for a fractional bandwidth the radio actually

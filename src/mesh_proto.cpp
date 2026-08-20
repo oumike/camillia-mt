@@ -1225,7 +1225,7 @@ size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
 // ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
 // Inner MeshPacket field numbers (Meshtastic mesh.proto).
 enum : uint32_t {
-    MP_FROM = 1, MP_TO = 2, MP_CHANNEL = 3, MP_ENCRYPTED = 5, MP_ID = 6,
+    MP_FROM = 1, MP_TO = 2, MP_CHANNEL = 3, MP_DECODED = 4, MP_ENCRYPTED = 5, MP_ID = 6,
     MP_RX_TIME = 7, MP_RX_SNR = 8, MP_HOP_LIMIT = 9, MP_WANT_ACK = 10,
     MP_RX_RSSI = 12, MP_VIA_MQTT = 14, MP_HOP_START = 15,
     MP_NEXT_HOP = 18, MP_RELAY_NODE = 19,
@@ -1280,10 +1280,127 @@ size_t encodeServiceEnvelope(const MeshHdr &hdr,
     // ServiceEnvelope: packet(1, message), channel_id(2, string), gateway_id(3, string)
     size_t chanLen = channelName ? strlen(channelName) : 0;
     size_t gwLen   = gatewayId ? strlen(gatewayId) : 0;
+    // Ahead of the first write, for the reason spelled out in
+    // encodeMapReportEnvelope(): the two varints below used to go out before
+    // this check, so a caller whose buffer could not hold even those overran it
+    // before being told no. Every caller today passes 400 bytes, so this has
+    // always been latent rather than live.
+    if (m + chanLen + gwLen + 12 > outLen) return 0;
     size_t n = 0;
     n += pbWriteVarint(out + n, (1 << 3) | 2);
     n += pbWriteVarint(out + n, m);
-    if (n + m + chanLen + gwLen + 8 > outLen) return 0;
+    memcpy(out + n, mp, m); n += m;
+
+    n += pbWriteVarint(out + n, (2 << 3) | 2);
+    n += pbWriteVarint(out + n, chanLen);
+    memcpy(out + n, channelName, chanLen); n += chanLen;
+
+    n += pbWriteVarint(out + n, (3 << 3) | 2);
+    n += pbWriteVarint(out + n, gwLen);
+    memcpy(out + n, gatewayId, gwLen); n += gwLen;
+
+    return n;
+}
+
+// ── MapReport (mqtt.proto) ────────────────────────────────────
+// Field numbers of the MapReport message itself. Written longhand for the same
+// reason the MeshPacket fields above are: this is a wire format owned by
+// somebody else, and a number that drifts is a field that silently lands
+// somewhere no reader looks.
+enum : uint32_t {
+    MR_LONG_NAME = 1, MR_SHORT_NAME = 2, MR_ROLE = 3, MR_HW_MODEL = 4,
+    MR_FIRMWARE = 5, MR_REGION = 6, MR_MODEM_PRESET = 7,
+    MR_HAS_DEFAULT_CHANNEL = 8, MR_LATITUDE_I = 9, MR_LONGITUDE_I = 10,
+    MR_ALTITUDE = 11, MR_POSITION_PRECISION = 12, MR_ONLINE_LOCAL_NODES = 13,
+};
+
+static size_t pbWriteString(uint8_t *buf, uint32_t field, const char *str) {
+    const size_t len = str ? strlen(str) : 0;
+    size_t n = pbWriteVarint(buf, (field << 3) | 2);
+    n += pbWriteVarint(buf + n, len);
+    if (len) memcpy(buf + n, str, len);
+    return n + len;
+}
+
+// The MapReport message body. Every string here comes from user config, so the
+// one thing worth bounds-checking up front is their combined length — the
+// numeric fields that follow are at most 6 bytes each and the caller's buffer
+// is sized for them.
+static size_t encodeMapReport(const MapReportInfo &info, uint8_t *buf, size_t bufLen) {
+    const size_t longLen  = info.longName ? strlen(info.longName) : 0;
+    const size_t shortLen = info.shortName ? strlen(info.shortName) : 0;
+    const size_t fwLen    = info.firmwareVersion ? strlen(info.firmwareVersion) : 0;
+    // 3 strings x 2 tag/length bytes, plus 10 numeric fields at <= 6 bytes.
+    if (longLen + shortLen + fwLen + 6 + 60 > bufLen) return 0;
+
+    size_t n = 0;
+    n += pbWriteString(buf + n, MR_LONG_NAME, info.longName);
+    n += pbWriteString(buf + n, MR_SHORT_NAME, info.shortName);
+    // proto3 omits zero-valued scalars; role CLIENT (0) and region UNSET (0) are
+    // both meaningful defaults on the reader's side, so let them fall out.
+    if (info.role)        n += pbWriteTaggedVarint(buf + n, MR_ROLE, info.role);
+    n += pbWriteTaggedVarint(buf + n, MR_HW_MODEL, MY_HW_MODEL);
+    n += pbWriteString(buf + n, MR_FIRMWARE, info.firmwareVersion);
+    if (info.region)      n += pbWriteTaggedVarint(buf + n, MR_REGION, info.region);
+    if (info.modemPreset) n += pbWriteTaggedVarint(buf + n, MR_MODEM_PRESET, info.modemPreset);
+    if (info.hasDefaultChannel) n += pbWriteTaggedVarint(buf + n, MR_HAS_DEFAULT_CHANNEL, 1);
+
+    if (info.hasPosition) {
+        // latitude_i/longitude_i are sfixed32, like Position's — not varints.
+        n += pbWriteFixed32(buf + n, MR_LATITUDE_I, (uint32_t)info.latI);
+        n += pbWriteFixed32(buf + n, MR_LONGITUDE_I, (uint32_t)info.lonI);
+        if (info.alt) n += pbWriteTaggedVarint(buf + n, MR_ALTITUDE, (uint64_t)(int64_t)info.alt);
+        n += pbWriteTaggedVarint(buf + n, MR_POSITION_PRECISION, info.positionPrecision);
+    }
+
+    if (info.onlineLocalNodes) {
+        n += pbWriteTaggedVarint(buf + n, MR_ONLINE_LOCAL_NODES, info.onlineLocalNodes);
+    }
+    return n;
+}
+
+size_t encodeMapReportEnvelope(uint32_t fromNode, const MapReportInfo &info,
+                               const char *channelName, const char *gatewayId,
+                               uint8_t *out, size_t outLen) {
+    uint8_t report[192];
+    const size_t r = encodeMapReport(info, report, sizeof(report));
+    if (r == 0) return 0;
+
+    // Data { portnum = MAP_REPORT_APP, payload = <MapReport> }
+    uint8_t data[208];
+    size_t d = 0;
+    d += pbWriteTaggedVarint(data + d, 1, MAP_REPORT_APP);
+    d += pbWriteVarint(data + d, (2 << 3) | 2);
+    d += pbWriteVarint(data + d, r);
+    if (d + r > sizeof(data)) return 0;
+    memcpy(data + d, report, r); d += r;
+
+    // MeshPacket { from, to = broadcast, decoded = Data, id }. No channel hash
+    // and no hop limit: nothing relays this, so the fields that bound a flood
+    // have nothing to say. The id is real rather than zero so a broker that
+    // dedupes by from:id does not fold successive reports into one.
+    uint8_t mp[240];
+    size_t m = 0;
+    m += pbWriteFixed32(mp + m, MP_FROM, fromNode);
+    m += pbWriteFixed32(mp + m, MP_TO, 0xFFFFFFFFUL);
+    m += pbWriteVarint(mp + m, (MP_DECODED << 3) | 2);
+    m += pbWriteVarint(mp + m, d);
+    if (m + d + 8 > sizeof(mp)) return 0;
+    memcpy(mp + m, data, d); m += d;
+    m += pbWriteFixed32(mp + m, MP_ID, nextMeshPacketId());
+
+    // ServiceEnvelope: packet(1), channel_id(2), gateway_id(3) — same shape as
+    // encodeServiceEnvelope() builds, only the inner packet differs.
+    const size_t chanLen = channelName ? strlen(channelName) : 0;
+    const size_t gwLen   = gatewayId ? strlen(gatewayId) : 0;
+    // Checked before the first byte goes out, not partway through: everything
+    // below writes unconditionally, so a buffer too small to hold the envelope
+    // has to be refused here. 12 covers the three tag+length pairs, whose
+    // lengths are all single varint bytes at these sizes.
+    if (m + chanLen + gwLen + 12 > outLen) return 0;
+    size_t n = 0;
+    n += pbWriteVarint(out + n, (1 << 3) | 2);
+    n += pbWriteVarint(out + n, m);
     memcpy(out + n, mp, m); n += m;
 
     n += pbWriteVarint(out + n, (2 << 3) | 2);

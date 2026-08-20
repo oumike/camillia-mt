@@ -65,6 +65,12 @@ public:
     // Returns nullptr if out of range.
     const DisplayLine *getLine(int chanIdx, int row) const;
 
+    // okToMqtt, on every send below, does two things: it sets the OK_TO_MQTT bit
+    // in the outgoing Data so other gateways may forward the packet, and it lets
+    // *this* node mirror its own frame to the broker when the channel it went out
+    // on has uplink enabled. A half-duplex radio never hears its own TX, so the
+    // RX-side uplink in main cannot cover self-originated traffic.
+
     // Build and transmit a text message on a mesh channel.
     // chanIdx: 0..MESH_CHANNELS-1, or -1 to use current active channel.
     bool sendText(uint32_t myNodeId, const char *text, bool okToMqtt = false,
@@ -73,9 +79,12 @@ public:
     // Send a NODEINFO_APP packet. Broadcasts on LongFast by default.
     // Pass toNodeId for a unicast reply (e.g. responding to want_response).
     // For unicast, wantResponse=true can be used to request peer NODEINFO.
+    // okToMqtt sets the OK_TO_MQTT bit and, on a *broadcast*, mirrors the frame
+    // to the broker when LongFast has uplink enabled. Unicast replies stay off
+    // the uplink: they are addressed to one node, not to the mesh.
     bool sendNodeInfo(uint32_t myNodeId, const char *longName, const char *shortName,
                       uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false,
-                      bool unusedCompat = false);
+                      bool okToMqtt = false);
 
     // Discovery sweep: one NODEINFO_APP broadcast with want_response, so every
     // node that hears it answers with its own. This is the deliberate exception
@@ -101,8 +110,10 @@ public:
     // the packet with how many bits are real. Defaulted to exact so a caller
     // that does not care cannot accidentally send a coarser position than the
     // operator asked for — but every real caller should pass the setting.
+    // okToMqtt sets the OK_TO_MQTT bit and mirrors the frame to the broker when
+    // the chosen channel has uplink enabled.
     bool sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int32_t alt,
-                      bool unusedCompat = false, int chanIdx = 0,
+                      bool okToMqtt = false, int chanIdx = 0,
                       uint8_t precisionBits = 32);
 
     // Send a unicast POSITION_APP request to a peer (empty payload + want_response).

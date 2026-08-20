@@ -65,6 +65,7 @@ enum PortNum : uint32_t {
     TELEMETRY_APP    = 67,
     NEIGHBORINFO_APP = 71,
     TRACEROUTE_APP   = 70,   // traceroute (not ACK)
+    MAP_REPORT_APP   = 73,   // MQTT-only self-description; never sent over LoRa
     MESH_BEACON_APP  = 37,   // Meshtastic 2.7 MeshBeacon: cross-mesh advertisement
 };
 
@@ -374,6 +375,42 @@ size_t encodeServiceEnvelope(const MeshHdr &hdr,
                              float rxSnr, int32_t rxRssi, uint32_t rxTime,
                              const char *channelName, const char *gatewayId,
                              uint8_t *out, size_t outLen);
+
+// ── Map report (mqtt.proto MapReport) ─────────────────────────
+// A node's periodic self-description, published straight to <root>/2/map/ so an
+// MQTT-fed map can place it without inferring anything from mesh traffic. It is
+// the one thing this firmware publishes that never goes on the air: there is no
+// LoRa frame behind it, no channel key involved, and no receiver on RF.
+//
+// So, unlike every other envelope we publish, the inner MeshPacket carries a
+// *decoded* Data (portnum MAP_REPORT_APP) rather than ciphertext.
+//
+// hw_model is not a field here — it is MY_HW_MODEL, the same compile-time
+// constant encodeNodeInfo() sends, and nothing at runtime can change it.
+struct MapReportInfo {
+    const char *longName;
+    const char *shortName;
+    const char *firmwareVersion;
+    uint8_t  role;                // Config.DeviceConfig.Role
+    uint8_t  region;              // Config.LoRaConfig.RegionCode (Meshtastic enum)
+    uint8_t  modemPreset;         // Config.LoRaConfig.ModemPreset (Meshtastic enum)
+    bool     hasDefaultChannel;   // primary channel still carries the default PSK
+    // false omits latitude/longitude/altitude/precision entirely, rather than
+    // sending a zeroed position that reads as a real fix off West Africa.
+    bool     hasPosition;
+    int32_t  latI;                // degrees * 1e7, already coarsened by the caller
+    int32_t  lonI;
+    int32_t  alt;                 // metres
+    uint8_t  positionPrecision;   // how many bits of lat/lon are real
+    uint32_t onlineLocalNodes;
+};
+
+// Encode a ServiceEnvelope carrying one MapReport. channelName/gatewayId are the
+// envelope's channel_id/gateway_id, as in encodeServiceEnvelope(). Returns
+// encoded length, or 0 on overflow.
+size_t encodeMapReportEnvelope(uint32_t fromNode, const MapReportInfo &info,
+                               const char *channelName, const char *gatewayId,
+                               uint8_t *out, size_t outLen);
 
 // Decode a ServiceEnvelope received from MQTT. Reconstructs the on-air header
 // (with the via_mqtt flag forced on) and copies MeshPacket.encrypted into

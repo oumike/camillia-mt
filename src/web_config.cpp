@@ -2408,7 +2408,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label style='display:flex;align-items:center;gap:.5em'>"
             "<input type='checkbox' name='mqtt_map_report' value='1'";
     if (gCfg->mqttMapReport) html += " checked";
-    html += "> Map reporting</label>";
+    html += "> Map reporting (this node to /2/map/ every 15 min)</label>";
     html += "<p style='font-size:.8em;color:var(--muted);margin:.4em 0 0'>"
             "Requires WiFi credentials above. Default broker: mqtt.meshtastic.org:8883.</p>";
     sectionEnd(html, lite);
@@ -2598,10 +2598,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 // no way to turn it off from this page, even though its Config screen had the
 // setting all along. The Mesh Deck stays out on HAS_AUDIO_ALERTS being 0.
 //
-// Off is the only option that changes anything on a buzzer board: Default,
-// Chirpy and Bass all fall through to the one tone() call triggerMessageAlert()
-// has there. The four are still listed, because this select and the on-device
-// picker have to agree about what is selected.
+// All four options mean something on every board here. The buzzer boards used to
+// be the exception — Default, Chirpy and Bass all fell through to a single
+// tone() call, so only Off changed anything — and they now have three patterns
+// of their own, pitched for a piezo rather than a speaker.
 #if HAS_AUDIO_ALERTS
     html += "<label>Notification Sound<select name='msg_alert_sound'>"
             "<option value='0'"; if (gCfg->msgAlertSound == MSG_ALERT_SOUND_DEFAULT) html += " selected"; html += ">Default</option>"

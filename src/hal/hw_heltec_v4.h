@@ -68,8 +68,22 @@
 #define LORA_FEM_TX_MODE_PIN      46   // HIGH = TX mode, LOW = RX mode
 
 // ── No SD card slot on this board ────────────────────────────────────────────
+// SD_CS still has to exist because sdBegin() keys off (SD_CS < 0) rather than
+// HAS_SD_CARD; -1 keeps the card path disabled.
 #define SD_CS                     -1
 #define HAS_SD_CARD                0
+
+// ...but the board is not storage-less. Like the Mesh Deck, it keeps the files
+// a card would hold in a LittleFS partition instead — see partitions_16mb_fs.csv,
+// which maps the flash left over after the two OTA app slots. sdBegin() routes
+// straight to storageBegin() on a board with this defined, so chat and DM
+// transcripts, config export/import and map tiles all come up without any of
+// those call sites knowing which backend answered.
+//
+// Test HAS_FILE_STORAGE (storage.h), not HAS_SD_CARD, when the question is
+// "can a file be saved"; reach the filesystem through storageFs().
+#define HAS_INTERNAL_FS            1
+#define INTERNAL_FS_PARTITION  "littlefs"
 
 // ── No keyboard; touch + buttons handle all input ────────────────────────────
 #define HAS_KEYBOARD               0

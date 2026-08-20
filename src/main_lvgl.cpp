@@ -201,6 +201,7 @@ static lv_obj_t *s_chatPanel = nullptr;
 static lv_obj_t *s_chatList = nullptr;
 static lv_obj_t *s_chatNewMsgBtn = nullptr;
 static lv_obj_t *s_chatNewMsgLabel = nullptr;
+static lv_obj_t *s_chatActBtn = nullptr;
 static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
 static lv_obj_t *s_rootScreen = nullptr;
@@ -616,6 +617,15 @@ static uint32_t s_dmDeleteFlashUntilMs = 0;
 static uint32_t s_dmTouchPressStartMs = 0;
 static int s_dmTouchPressRowIdx = -1;
 static bool s_dmTouchLongPressTriggered = false;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// A finger is down on a conversation-list row. While it is, the list must not be
+// rebuilt: refreshDmModal() rebuilds it with lv_obj_clean(), and deleting the
+// row the gesture belongs to makes LVGL abandon the rest of that gesture. The
+// tap that should have followed never arrives.
+static bool s_dmRowPressActive = false;
+// A refresh asked for while a row was held. Run once the finger lifts.
+static bool s_dmRefreshPending = false;
+#endif
 static lv_obj_t *s_nodesModal = nullptr;
 static lv_obj_t *s_nodesInfoPanel = nullptr;
 // Shown only when there is no node to describe; the sections below take over the
@@ -896,6 +906,7 @@ static uint32_t s_nextPositionTxMs = 0;
 static uint32_t s_nextDeviceTelemetryTxMs = 0;
 static uint32_t s_nextEnvTelemetryTxMs = 0;
 static uint32_t s_nextNeighborInfoTxMs = 0;
+static uint32_t s_nextMapReportMs = 0;
 static char s_serialCmdBuf[96] = {};
 static size_t s_serialCmdLen = 0;
 
@@ -1177,6 +1188,44 @@ static void setupVScroll(lv_obj_t *obj) {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
 }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// One Close button, for every modal on the touch-only build that a keyboard
+// build closes with Backspace. There is no key to name in a hint here, so those
+// modals need a control instead — and they should all be the same control, in
+// the same place, looking the same.
+//
+// Returns the button so a caller can override its placement: the traceroute
+// popup is a fixed 96px tall and pins its footer with IGNORE_LAYOUT rather than
+// spending a flex row on it.
+static lv_obj_t *appendHeltecCloseButton(lv_obj_t *parent, lv_event_cb_t onClose,
+                                         int width, int height = 24,
+                                         const char *text = "Close") {
+    if (!parent) return nullptr;
+    lv_obj_t *btn = lv_btn_create(parent);
+    if (!btn) return nullptr;
+    if (width > 0) lv_obj_set_width(btn, width);
+    else           lv_obj_set_width(btn, lv_pct(100));
+    lv_obj_set_height(btn, height);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(btn, onClose, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    if (lbl) {
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    }
+    return btn;
+}
+#endif
+
 static inline bool lvObjValid(lv_obj_t *obj) {
     return obj && lv_obj_is_valid(obj);
 }
@@ -1425,6 +1474,8 @@ static DmConv *selectedDmConversation();
 // allowCompose=false stops at focusing the message panel (Enter); the compose
 // dialog is only opened when true (Space).
 static void activateDmSelection(bool allowCompose = true);
+static void chatComposeFromButton();
+static void emojiPickerActivate(int idx);
 
 // Bubble chat helpers (defined further down, but also used by the DM renderer
 // so DMs can share the Bubbles style).
@@ -1508,6 +1559,9 @@ static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
 static void onNodeSnapshotPressed(lv_event_t *e);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onNodeSnapshotClicked(lv_event_t *e);
+#endif
 static void onNodesActionRowPressed(lv_event_t *e);
 static void openNodesActionMenu();
 static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode = false,
@@ -1543,6 +1597,7 @@ static void normalizeSerialCommand(char *line);
 static void serviceNodeInfoAnnounce(uint32_t nowMs);
 static void serviceTelemetryAnnounce(uint32_t nowMs);
 static void serviceNeighborInfoAnnounce(uint32_t nowMs);
+static void serviceMapReport(uint32_t nowMs);
 static void serviceAutoFavorite(uint32_t nowMs);
 static void applyTimezoneFromConfig();
 static void setOtaWorkerBootNotice(const char *msg);
@@ -2700,6 +2755,71 @@ static void cardputerPlayBassPattern() {
 } // namespace
 #endif
 
+#if (BOARD_BUZZER >= 0)
+namespace {
+// ── Passive-buzzer alert patterns (Heltec, M9) ───────────────────────────────
+// Every alert style used to leave this board as one 1760 Hz beep: Default,
+// Chirpy and Bass were the same sound, which is the one thing the setting
+// exists to choose between.
+//
+// These are not copies of the speaker patterns above, for two reasons.
+//
+//  - A passive piezo has a single resonant peak, somewhere around 2-4 kHz, and
+//    falls away steeply below it. The Cardputer's Bass pattern bottoms out at
+//    440 Hz, which this part reproduces at a fraction of the volume — so "Bass"
+//    here is the lowest register it still projects and earns its name by being
+//    slower and longer, not by being inaudibly low.
+//  - tone() does not block the caller. It posts to the Arduino tone task, which
+//    holds the pin for each note's duration before taking the next one off the
+//    queue, so a whole pattern is enqueued in microseconds and plays out behind
+//    the main loop. An alert here never delays packet handling, which the
+//    blocking speaker paths above do for the length of their pattern.
+//
+// A rest is a note of frequency 0: ledcWriteTone() takes the duty to zero for
+// the duration, so gaps queue exactly like notes and keep their place in the
+// sequence. Without them the notes run together and the shape is lost.
+struct BuzzerNote {
+    uint16_t hz;      // 0 = rest
+    uint16_t durMs;
+};
+
+template <size_t N>
+static void buzzerPlayNotes(const BuzzerNote (&notes)[N]) {
+    for (size_t i = 0; i < N; i++) {
+        tone(BOARD_BUZZER, notes[i].hz, notes[i].durMs);
+    }
+}
+
+// Two-tone descending chime — the "you have mail" shape, and the one that
+// carries best across a room.
+static void buzzerPlayAlertPattern() {
+    static const BuzzerNote kNotes[] = {
+        {2637, 70}, {0, 30}, {1976, 110},
+    };
+    buzzerPlayNotes(kNotes);
+}
+
+// Three rising chirps at the top of the part's range: short, bright, and the
+// most obviously different from Default when heard back to back in the picker.
+static void buzzerPlayChirpyPattern() {
+    static const BuzzerNote kNotes[] = {
+        {2637, 28}, {0, 22}, {3136, 28}, {0, 22}, {3951, 46},
+    };
+    buzzerPlayNotes(kNotes);
+}
+
+// Low and unhurried. Two notes rather than three, each roughly twice the length
+// of the Chirpy ones, so it reads as a different sound and not just a quieter
+// one — which is all a true low note would have been on this hardware.
+static void buzzerPlayBassPattern() {
+    static const BuzzerNote kNotes[] = {
+        {1109, 90}, {0, 60}, {880, 150},
+    };
+    buzzerPlayNotes(kNotes);
+}
+} // namespace
+#endif
+
 enum : uint8_t {
     MSG_ALERT_VISUAL_CHANNEL = 0,
     MSG_ALERT_VISUAL_DM = 1,
@@ -2828,7 +2948,21 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     }
 #elif (BOARD_BUZZER >= 0)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
-    tone(BOARD_BUZZER, 1760, 60);
+
+    switch (s_cfg.msgAlertSound) {
+        case MSG_ALERT_SOUND_CHIRPY:
+            buzzerPlayChirpyPattern();
+            break;
+        case MSG_ALERT_SOUND_BASS:
+            buzzerPlayBassPattern();
+            break;
+        case MSG_ALERT_SOUND_OFF:
+            return;
+        case MSG_ALERT_SOUND_DEFAULT:
+        default:
+            buzzerPlayAlertPattern();
+            break;
+    }
 #endif
 }
 
@@ -5126,6 +5260,29 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
     return false;
 }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// True when the chat screen is what the user is looking at — nothing floating
+// over it. Only the USER button needs this: a tap lands on whatever is actually
+// on top, while a button press has to work out for itself who it is for.
+//
+// An explicit list rather than a flag, because the modals do not share one. It
+// has to name everything that can be up while the three full-screen views
+// (Config, DM, Nodes) are all closed — those are excluded by the caller, which
+// checks them first. The Config screen's own sub-modals ride on s_cfgModal and
+// need no entry here.
+//
+// A modal added later that forgets to appear in this list costs one thing: the
+// USER button opens the composer over it. Nothing crashes, and it is visible
+// the first time anyone presses the button on that screen.
+static bool heltecChatScreenIsForeground() {
+    return !s_cfgModal && !s_dmModal && !s_nodesModal && !s_liveModal
+        && !s_composeModal && !s_emojiPickerModal && !s_legendModal
+        && !s_channelActionsModal && !s_nodesActionModal && !s_tracerouteModal
+        && !s_releaseNotesModal && !s_onboardingModal && !s_sysStatsModal
+        && !s_nodeInfoModal && !s_cfgActionMsgModal;
+}
+#endif
+
 static bool pollUserButton(uint32_t nowMs) {
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
     static bool userBtnRawPrev = false;
@@ -5146,6 +5303,26 @@ static bool pollUserButton(uint32_t nowMs) {
                 return true;
             }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+            // Innermost surface first. Each entry is the same thing its screen
+            // activates on a tap — this button is the Enter key's stand-in on a
+            // build that has no Enter key, so the two must not disagree about
+            // what "activate" means anywhere.
+            if (s_emojiPickerModal) {
+                emojiPickerActivate(s_emojiPickerSelection);
+                return true;
+            }
+            if (s_nodesActionModal) {
+                executeNodesActionSelection();
+                return true;
+            }
+            if (s_channelActionsModal) {
+                // Mute, which is what Enter does here on the keyboard builds and
+                // what the modal's first button does on a tap. Location is the
+                // other button and stays tap-only: there is one button press to
+                // spend and muting is the one people come here for.
+                toggleActiveChannelMute();
+                return true;
+            }
             if (s_dmModal && s_dmNodePickerModal && !s_composeModal) {
                 activateDmNodePickerSelection();
                 return true;
@@ -5156,6 +5333,12 @@ static bool pollUserButton(uint32_t nowMs) {
             }
             if (s_nodesModal && !s_composeModal && !s_nodesActionModal && !s_tracerouteModal) {
                 openNodesActionMenu();
+                return true;
+            }
+            // Nothing over the chat screen: compose, which is what its New
+            // Message button does and what Enter does on the keyboard builds.
+            if (heltecChatScreenIsForeground()) {
+                chatComposeFromButton();
                 return true;
             }
 #else
@@ -6815,10 +6998,14 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(hint, symbolTray ? "Tap a symbol • tap outside to close"
-                            : tapback  ? "Tap to react • tap outside to close"
-                            : sendMode ? "Tap to send • tap outside to close"
-                                       : "Tap to add • tap outside to close");
+    // No "tap outside to close" any more: the Close button at the foot of the
+    // modal says it, and it says it where the finger can reach. The tray covers
+    // all but a 6px margin of the screen, so the backdrop it was pointing at was
+    // barely a target at all.
+    lv_label_set_text(hint, symbolTray ? "Tap a symbol"
+                            : tapback  ? "Tap to react"
+                            : sendMode ? "Tap to send"
+                                       : "Tap to add");
 #else
     lv_label_set_text_fmt(hint, symbolTray ? "Move • Enter=Insert • %s=Close"
                                 : tapback  ? "Move • Enter=React • %s=Close"
@@ -6831,7 +7018,15 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_remove_style_all(grid);
     lv_obj_set_width(grid, lv_pct(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // 28px lower than the other builds: the Close button below the grid and its
+    // row gap have to fit inside the modal's own (h - 14) cap, and the grid is
+    // what gives up the space. Hint + gap + grid + gap + button + padding then
+    // comes to exactly that cap.
+    lv_obj_set_style_max_height(grid, (h > 88) ? (h - 72) : LV_SIZE_CONTENT, 0);
+#else
     lv_obj_set_style_max_height(grid, (h > 60) ? (h - 44) : LV_SIZE_CONTENT, 0);
+#endif
     lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
@@ -6882,6 +7077,41 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
         setLabelTextEmojiSafe(g, s_pickerTray[i]);
         lv_obj_center(g);
     }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Built after the grid, not before it: refreshEmojiPickerSelection() reaches
+    // the grid as child [1] of the modal, so the button has to land at [2].
+    //
+    // Allocated like the cells above — this is the largest burst in the UI and
+    // the tray is what usually exhausts the pool, so a failure here closes the
+    // picker rather than leaving one with no way out.
+    lv_obj_t *emojiCloseBtn = lv_btn_create(s_emojiPickerModal);
+    if (!emojiCloseBtn) {
+        logLvglMemDiag("emoji picker aborted (low LVGL mem)");
+        closeEmojiPicker();
+        return;
+    }
+    lv_obj_set_width(emojiCloseBtn, lv_pct(100));
+    lv_obj_set_height(emojiCloseBtn, 24);
+    lv_obj_set_style_radius(emojiCloseBtn, 4, 0);
+    lv_obj_set_style_pad_all(emojiCloseBtn, 0, 0);
+    lv_obj_set_style_shadow_width(emojiCloseBtn, 0, 0);
+    lv_obj_set_style_bg_color(emojiCloseBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(emojiCloseBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(emojiCloseBtn, 1, 0);
+    lv_obj_set_style_border_color(emojiCloseBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(emojiCloseBtn,
+                        [](lv_event_t *ev) { LV_UNUSED(ev); closeEmojiPicker(); },
+                        LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *emojiCloseLbl = lv_label_create(emojiCloseBtn);
+    if (emojiCloseLbl) {
+        lv_obj_set_style_text_font(emojiCloseLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(emojiCloseLbl, lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(emojiCloseLbl, "Close");
+        lv_obj_center(emojiCloseLbl);
+    }
+#endif
 
     // Baseline right after the tray is built but before a single glyph has been
     // rasterized: whatever the scroll samples show, they are relative to this.
@@ -7880,7 +8110,23 @@ static void onCfgActionRowPressed(lv_event_t *e) {
     s_cfgSelection = idx;
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only build: a tap is the whole gesture, so it selects the row and
+    // runs it. Every other build has an Enter key for the second half, and
+    // leaves the tap as a way to move the highlight without committing.
+    //
+    // A drag does not reach here. LVGL only sends LV_EVENT_CLICKED when the
+    // press did not turn into a scroll, so flicking the list past a row still
+    // just scrolls it.
+    //
+    // refreshCfgSelection() rather than refreshCfgModal(): it repaints the two
+    // rows whose highlight changed instead of rebuilding every row, so the row
+    // this event belongs to is still alive when the action below runs.
+    refreshCfgSelection();
+    activateCfgSelection();
+#else
     refreshCfgModal();
+#endif
 }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -12944,7 +13190,9 @@ static void openCfgActionMessageModal(const char *msg) {
     const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyPanelBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
     const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
     const lv_color_t hintTextColor = lightUi ? lv_color_hex(0x35567E) : lv_color_hex(0xA7C7FF);
+#endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
     const lv_font_t *bodyFont = &lv_font_montserrat_14;
@@ -13019,12 +13267,41 @@ static void openCfgActionMessageModal(const char *msg) {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body, displayMsg);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only build: a Close button where the key hint used to be. Tapping
+    // the backdrop already dismissed this, but that is a gesture you have to
+    // know about, and this popup is the one that tells you what an action just
+    // did — it should not be the one you have to guess your way out of.
+    lv_obj_t *closeBtn = lv_btn_create(s_cfgActionMsgModal);
+    lv_obj_set_width(closeBtn, contentW);
+    lv_obj_set_height(closeBtn, 24);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 0, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    // Takes its colours from the modal's own light/dark pair rather than the
+    // fixed blues used by the buttons on the chat screen: this popup is the one
+    // that flips its whole palette in light mode.
+    lv_obj_set_style_bg_color(closeBtn, lightUi ? bodyPanelBg : lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(closeBtn, 1, 0);
+    lv_obj_set_style_border_color(closeBtn, modalBorder, 0);
+    lv_obj_add_event_cb(closeBtn,
+                        [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgActionMessageModal(); },
+                        LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(closeLbl, lightUi ? bodyTextColor : lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#else
     lv_obj_t *hint = lv_label_create(s_cfgActionMsgModal);
     lv_obj_set_width(hint, contentW);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, hintTextColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+#endif
 
     lv_obj_move_foreground(s_cfgActionMsgBackdrop);
     s_cfgActionMsgOpenedMs = millis();
@@ -13067,11 +13344,55 @@ static void openNodeInfoModal() {
     lv_obj_set_flex_flow(s_nodeInfoModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeInfoModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Touch-only build: there is no key to press, so the title shares its row
+    // with a real Close button. It goes at the top rather than under the rows
+    // because the list can be taller than the panel — a button below it would
+    // have to be scrolled to before it could be tapped.
+    lv_obj_t *header = lv_obj_create(s_nodeInfoModal);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_set_style_pad_column(header, 6, 0);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *title = lv_label_create(header);
+    lv_obj_set_flex_grow(title, 1);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_label_set_text(title, "Device Info");
+
+    // Same shape as the touch buttons on the slider modal, so the one control
+    // this popup has looks like the ones next door.
+    lv_obj_t *closeBtn = lv_btn_create(header);
+    lv_obj_set_size(closeBtn, 62, 24);
+    lv_obj_set_style_radius(closeBtn, 4, 0);
+    lv_obj_set_style_pad_all(closeBtn, 0, 0);
+    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
+    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(closeBtn, 1, 0);
+    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(closeBtn,
+                        [](lv_event_t *ev) { LV_UNUSED(ev); closeNodeInfoModal(); },
+                        LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+#else
     lv_obj_t *title = lv_label_create(s_nodeInfoModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Device Info");
+#endif
 
     for (int i = 0; i < infoCount; i++) {
         lv_obj_t *row = lv_label_create(s_nodeInfoModal);
@@ -13082,14 +13403,16 @@ static void openNodeInfoModal() {
         lv_label_set_text(row, info[i]);
     }
 
+    // Heltec has the Close button above instead: naming a key on a build with no
+    // keyboard was only ever telling the user to look for something that is not
+    // there.
+#if !defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_obj_t *hint = lv_label_create(s_nodeInfoModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, bodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_pad_top(hint, 3, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
-#elif defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK)
     // T-Deck has no dedicated Up/Down keys; J/K and the trackball drive scroll.
     lv_label_set_text_fmt(hint, "J/K = Scroll   %s = Close", modalCloseKeyLabel());
 #else
@@ -13097,6 +13420,7 @@ static void openNodeInfoModal() {
                           "Up/Down/J/K = Scroll   %s = Close",
                           modalCloseKeyLabel());
 #endif
+#endif   // !DEVICE_HELTEC_V4_EXPANSION
 }
 #endif
 
@@ -13315,12 +13639,21 @@ static void openSysStatsModal() {
         s_sysStatsCols[2] = nullptr;
     }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Reachable here only through a keyboard driven over VNC (five presses of
+    // I), so without this the one way out was the keyboard that opened it —
+    // and whoever walked over to the device itself was stuck.
+    appendHeltecCloseButton(s_sysStatsModal,
+                            [](lv_event_t *ev) { LV_UNUSED(ev); closeSysStatsModal(); },
+                            /*width=*/0);
+#else
     lv_obj_t *hint = lv_label_create(s_sysStatsModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x7FD8CC), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
+#endif
 
     s_sysStatsOpenedMs = millis();
     lv_obj_move_foreground(s_sysStatsModal);
@@ -13404,20 +13737,25 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         const char *label;
         int target;
     };
+    // No Actions entry. It acts on the channel you are reading, so it belongs
+    // with the chat screen's own buttons and nowhere else — offering it from
+    // Nodes or Live meant a button that silently acted on a channel that was
+    // not even on screen. The chat screen builds its own, next to New Message.
+    //
+    // HELTEC_NAV_ACTIONS itself stays: that button routes through
+    // onHeltecBottomNavPressed() below, so the open/close behaviour is shared.
     static const NavItem kItems[] = {
 #if defined(DEVICE_UI_VERTICAL)
         {"Cfg", HELTEC_NAV_CFG},
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
-        {"Act", HELTEC_NAV_ACTIONS},
         {"Help", HELTEC_NAV_LEGEND},
 #else
         {"Config", HELTEC_NAV_CFG},
         {"DM", HELTEC_NAV_DM},
         {"Nodes", HELTEC_NAV_NODES},
         {"Live", HELTEC_NAV_LIVE},
-        {"Actions", HELTEC_NAV_ACTIONS},
         {"Help", HELTEC_NAV_LEGEND},
 #endif
     };
@@ -14073,6 +14411,12 @@ static void closeDmModal() {
     s_dmTouchPressStartMs = 0;
     s_dmTouchPressRowIdx = -1;
     s_dmTouchLongPressTriggered = false;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // The rows that would have reported the release are gone with the modal.
+    // Left set, these would suppress every future refresh of a reopened screen.
+    s_dmRowPressActive = false;
+    s_dmRefreshPending = false;
+#endif
     memset(s_dmConvRows, 0, sizeof(s_dmConvRows));
     memset(s_dmConvNodeIds, 0, sizeof(s_dmConvNodeIds));
 }
@@ -15195,6 +15539,14 @@ static void clearNodeDbOnSd() {
 // line of text would be real LVGL churn on a full node table.
 static void refreshNodesHint() {
     if (!s_nodesHintLabel) return;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // One line for every state, because none of the three states below can be
+    // reached without a keyboard: there is no Space to open the filter and no
+    // Enter to focus the info panel. Naming the way out matters more here than
+    // on the keyboard builds — it is the nav button, not a key, and this screen
+    // is closed by tapping the Nodes button that is already lit underneath it.
+    lv_label_set_text(s_nodesHintLabel, "Tap a node for actions   Nodes below = Back");
+#else
 #if defined(DEVICE_TDECK)
     const char *navKeys = "J/K";
 #else
@@ -15214,6 +15566,7 @@ static void refreshNodesHint() {
                               "%s=Select  Enter=Info  A=Actions  Space=Filter  %s=Back",
                               navKeys, modalCloseKeyLabel());
     }
+#endif   // !DEVICE_HELTEC_V4_EXPANSION
 }
 
 static void refreshNodesListRows() {
@@ -15311,6 +15664,9 @@ static void refreshNodesListRows() {
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        lv_obj_add_event_cb(row, onNodeSnapshotClicked, LV_EVENT_CLICKED, (void *)(intptr_t)rowIdx);
+#endif
 
         lv_obj_t *lbl = lv_label_create(row);
         if (!lbl) {
@@ -15627,6 +15983,26 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
         lv_obj_scroll_to_view(selectedRow, LV_ANIM_OFF);
     }
 }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// Tap a row to act on it. Selecting is what the LV_EVENT_PRESSED handler above
+// does; this is the second half of the gesture, which on the keyboard builds is
+// Enter on the highlighted row.
+//
+// On CLICKED rather than PRESSED, and the distinction is the whole reason this
+// is a separate callback: PRESSED fires the moment a finger lands, so opening
+// the menu there would pop it on every scroll of the list. LVGL withholds
+// CLICKED once a press has turned into a scroll, so a drag still selects rows
+// as it passes them and opens nothing.
+//
+// Routed through the press handler rather than repeating its four lines: that
+// one also closes an already-open menu, which is exactly what a tap on a
+// different row should do before opening its own.
+static void onNodeSnapshotClicked(lv_event_t *e) {
+    onNodeSnapshotPressed(e);
+    openNodesActionMenu();
+}
+#endif
 
 static void closeTracerouteProgressModal() {
     lvObjDeleteSafe(s_tracerouteBackdrop);
@@ -15945,9 +16321,17 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -2);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    char hintText[56];
-    snprintf(hintText, sizeof(hintText), "%s=Close  Tap outside=Close", modalCloseKeyLabel());
-    lv_label_set_text(hint, hintText);
+    // The hint object above is left unused on this build: a button goes in its
+    // place, pinned the same way so the fixed 96px modal spends no extra height
+    // on it.
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
+    if (lv_obj_t *closeBtn = appendHeltecCloseButton(
+            s_tracerouteModal,
+            [](lv_event_t *ev) { LV_UNUSED(ev); closeTracerouteProgressModal(); },
+            /*width=*/64, /*height=*/18)) {
+        lv_obj_add_flag(closeBtn, LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_align(closeBtn, LV_ALIGN_BOTTOM_MID, 0, -1);
+    }
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Bksp=Close");
 #else
@@ -20010,6 +20394,31 @@ static void dmRequestDeleteSelectedConversation() {
     refreshDmModal(true);
 }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// The right panel's own compose button. Writes to whichever conversation is
+// selected; with none selected there is nobody to write to, so it falls through
+// to the picker that chooses one — the same thing the New DM row does.
+static void onDmNewMessagePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (s_dmNodePickerModal || s_composeModal) return;
+    DmConv *selected = selectedDmConversation();
+    if (selected && selected->nodeId != 0) {
+        openComposePromptForDm(selected->nodeId);
+        return;
+    }
+    openDmNodePicker();
+}
+
+// Consumes a refresh that was held back while a row was under a finger.
+// Returns false while the finger is still down, so the caller waits for the
+// gesture to finish rather than pulling the rug out from under it.
+static bool dmTakeDeferredRefresh() {
+    if (s_dmRowPressActive || !s_dmRefreshPending) return false;
+    s_dmRefreshPending = false;
+    return true;
+}
+#endif
+
 static void refreshDmPanelFocusStyles() {
     if (!s_dmConvPanel || !s_dmMsgPanel) return;
 
@@ -20040,12 +20449,41 @@ static void onDmConversationPressed(lv_event_t *e) {
         s_dmDeletePendingNodeId = 0;
         s_dmDeleteConfirmUntilMs = 0;
     }
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Asked for, not performed. This handler runs on LV_EVENT_PRESSED — finger
+    // still down — and refreshDmModal() rebuilds the list with lv_obj_clean(),
+    // which would delete this very row and take the LV_EVENT_CLICKED that
+    // activates it along with it. That is exactly why tapping New DM did
+    // nothing: the row was gone before the tap could complete. loop()'s UI tick
+    // runs it once the gesture is over.
+    s_dmRefreshPending = true;
+#else
     refreshDmModal(true);
+#endif
 }
 
 static void onDmConversationPressState(lv_event_t *e) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
+
+    // Press tracking covers every row, New DM (index 0) included, so the list
+    // is held still for the whole of any gesture. The hold-to-delete timing
+    // below is still conversations-only.
+    {
+        const lv_event_code_t stateCode = lv_event_get_code(e);
+        if (stateCode == LV_EVENT_PRESSED) {
+            s_dmRowPressActive = true;
+        } else if (stateCode == LV_EVENT_RELEASED || stateCode == LV_EVENT_PRESS_LOST) {
+            // Only lift the hold. The deferred refresh is *not* run from here:
+            // LVGL sends RELEASED before CLICKED (lv_indev.c indev_proc_release),
+            // so rebuilding the list at this point would delete the row before
+            // the click that activates it — the same bug one event later. The
+            // UI tick in loop() picks the refresh up a few milliseconds later,
+            // by which time the gesture is over.
+            s_dmRowPressActive = false;
+        }
+    }
+
     if (idx <= 0 || idx > s_dmConvCount) return;
 
     lv_event_code_t code = lv_event_get_code(e);
@@ -20296,7 +20734,11 @@ static void refreshDmNodePicker(bool force) {
 
     if (s_dmNodePickerHint) {
         lv_obj_set_style_text_color(s_dmNodePickerHint, dmPickerHintColor, 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // Nothing here changes with the filter — there is no keyboard to open
+        // one — so the line says the one thing that is always true.
+        lv_label_set_text(s_dmNodePickerHint, "Tap a node to start a DM");
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_label_set_text(s_dmNodePickerHint,
                           s_dmNodeFilterOpen
                               ? "Type = Filter   Bksp = Edit Filter   Enter = Open DM   Esc = Back"
@@ -20373,6 +20815,14 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // Second half of the gesture, matching the USER button on this screen —
+        // without it the picker's own "Tap a node to start a DM" was a promise
+        // the row could not keep.
+        lv_obj_add_event_cb(row,
+                            [](lv_event_t *ev) { LV_UNUSED(ev); activateDmNodePickerSelection(); },
+                            LV_EVENT_CLICKED, (void *)(intptr_t)i);
+#endif
 
         lv_obj_t *lbl = lv_label_create(row);
         if (!lbl) {
@@ -20474,6 +20924,11 @@ static void openDmNodePicker() {
         0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    lv_label_set_text(hint, "Tap a node to start a DM");
+    appendHeltecCloseButton(s_dmNodePickerModal,
+                            [](lv_event_t *ev) { LV_UNUSED(ev); closeDmNodePicker(); },
+                            /*width=*/0);
 #else
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Bksp = Back");
 #endif
@@ -20526,6 +20981,15 @@ static DisplayLine::AckState dmAckToDisplayAck(DmLine::AckState a) {
 }
 
 static void refreshDmModal(bool force) {
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // A DM arriving mid-gesture used to rebuild the list under the finger,
+    // which cancelled whatever the finger was doing — a tap, or a hold that was
+    // three seconds into a delete. Hold the redraw until the gesture ends.
+    if (s_dmRowPressActive && lvObjAlive(s_dmModal)) {
+        s_dmRefreshPending = true;
+        return;
+    }
+#endif
     if (!lvObjAlive(s_dmModal)
         || !lvObjAlive(s_dmConvList)
         || !lvObjAlive(s_dmMsgList)) {
@@ -20652,6 +21116,18 @@ static void refreshDmModal(bool force) {
         lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // Tap runs it, the same as the USER button does on this row. On CLICKED,
+        // so dragging the conversation list past it only scrolls.
+        //
+        // The conversation rows below deliberately do not get this: tapping one
+        // focuses its messages, which is what the *first* USER press does there.
+        // Activating on tap as well would mean a single tap opened the composer
+        // instead of the thread you wanted to read.
+        lv_obj_add_event_cb(row,
+                            [](lv_event_t *ev) { LV_UNUSED(ev); activateDmSelection(); },
+                            LV_EVENT_CLICKED, (void *)(intptr_t)0);
+#endif
         lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)0);
         lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSING, (void *)(intptr_t)0);
         lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_RELEASED, (void *)(intptr_t)0);
@@ -20892,8 +21368,8 @@ static void refreshDmModal(bool force) {
                                   "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
-                                  modalCloseKeyLabel());
+                                  "Tap = Open   Long-press 3s = Delete"
+                                  "   DM below = Back");
 #else
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
@@ -21062,6 +21538,32 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmMsgList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmMsgList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Sits under the messages, in the panel it writes to. Reading a thread and
+    // answering it are the same errand, and on a touch-only build there was no
+    // way to start the second half from here at all.
+    //
+    // Outside the message list, so the rebuild that redraws the thread on every
+    // new message leaves it alone.
+    lv_obj_t *dmNewMsgBtn = lv_btn_create(rightPanel);
+    lv_obj_set_width(dmNewMsgBtn, lv_pct(100));
+    lv_obj_set_height(dmNewMsgBtn, 24);
+    lv_obj_set_style_radius(dmNewMsgBtn, 4, 0);
+    lv_obj_set_style_pad_all(dmNewMsgBtn, 0, 0);
+    lv_obj_set_style_shadow_width(dmNewMsgBtn, 0, 0);
+    lv_obj_set_style_bg_color(dmNewMsgBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(dmNewMsgBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(dmNewMsgBtn, 1, 0);
+    lv_obj_set_style_border_color(dmNewMsgBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(dmNewMsgBtn, onDmNewMessagePressed, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *dmNewMsgLbl = lv_label_create(dmNewMsgBtn);
+    lv_obj_set_style_text_font(dmNewMsgLbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(dmNewMsgLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(dmNewMsgLbl, "New Message");
+    lv_obj_center(dmNewMsgLbl);
+#endif
+
     lv_obj_t *hint = lv_label_create(s_dmModal);
     s_dmHintLabel = hint;
     lv_obj_set_width(hint, lv_pct(100));
@@ -21086,8 +21588,8 @@ static void openDmModal() {
                           "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text_fmt(hint,
-                          "Long-press convo 3s = Delete   Enter = Compose/Focus   %s = Back",
-                          modalCloseKeyLabel());
+                          "Tap = Open   Long-press 3s = Delete"
+                          "   DM below = Back");
 #else
     lv_label_set_text_fmt(hint,
                           "Up/Down = Select   Space = Compose   Enter = Focus   %s = Delete   %s = Back",
@@ -26235,8 +26737,10 @@ static void pumpKeyboardInput() {
     }
 }
 
-static void onChatNewMessagePressed(lv_event_t *e) {
-    LV_UNUSED(e);
+// What the chat screen's New Message button does. Split out of the event handler
+// so the USER button can do the same thing: on this build that button is the
+// Enter key's stand-in, and Enter on the chat screen composes.
+static void chatComposeFromButton() {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     if (s_legendModal) return;
 #endif
@@ -26245,6 +26749,11 @@ static void onChatNewMessagePressed(lv_event_t *e) {
     } else {
         openComposePrompt(0, nullptr);
     }
+}
+
+static void onChatNewMessagePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    chatComposeFromButton();
 }
 
 static void refreshChatComposeButtonState() {
@@ -30158,6 +30667,101 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, nowMs);
 }
 
+// ── MQTT map report ──────────────────────────────────────────────────────────
+// The odd one out among the announce services above: nothing here touches the
+// radio. A map report is a node describing itself directly to the broker — name,
+// hardware, firmware, region, preset and a coarsened position — so that an
+// MQTT-fed map can show it without waiting to overhear its traffic.
+//
+// Fixed cadence rather than a config field. Upstream defaults to 15 minutes and
+// treats it as a floor for public brokers; a node that re-announced itself every
+// few seconds would be rate-limited or blocked, and there is nothing here a user
+// gains by tuning it.
+static constexpr uint32_t kMapReportIntervalS = 900UL;
+
+// How recently a node must have been heard to count as online, matching
+// Meshtastic's own two-hour window. Nodes that arrived over the MQTT downlink
+// are counted too — the table does not record how a node was heard, so "local"
+// here means "in our node table", which on a device without a downlink-enabled
+// channel is the same thing.
+static constexpr uint32_t kMapReportOnlineWindowMs = 2UL * 60UL * 60UL * 1000UL;
+
+static uint32_t mapReportOnlineLocalNodes(uint32_t nowMs) {
+    uint32_t online = 1;   // ourselves: the reporting node is part of its own count
+    const int count = Nodes.count();
+    for (int i = 0; i < count; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        // 0 is "not heard since boot", not "heard at time zero".
+        if (e->lastHeardMs == 0) continue;
+        if ((uint32_t)(nowMs - e->lastHeardMs) > kMapReportOnlineWindowMs) continue;
+        online++;
+    }
+    return online;
+}
+
+static void serviceMapReport(uint32_t nowMs) {
+    if (!s_cfg.mqttEnabled || !s_cfg.mqttMapReport) return;
+    if (!announceDue(nowMs, s_nextMapReportMs, kMapReportIntervalS)) return;
+
+    // Not connected yet: come back on the next tick rather than burning the
+    // interval, so enabling the bridge does not mean a 15-minute wait.
+    if (!mqttBridgeConnected()) {
+        scheduleAnnounceRetry(s_nextMapReportMs, nowMs);
+        return;
+    }
+
+    MapReportInfo info = {};
+    info.longName        = s_cfg.nodeLong;
+    info.shortName       = s_cfg.nodeShort;
+    info.firmwareVersion = APP_VERSION;
+    info.role            = s_cfg.deviceRole;
+    info.region          = regionCodeToMeshtastic(s_cfg.region);
+    // Reported even when custom modem settings are in force: modemPreset is
+    // still what the config holds, and upstream reports the same field the same
+    // way. Long Turbo is ours alone and has no value in their enum, so it goes
+    // out as 0 — which a reader shows as Long Fast, the proto3 default. There is
+    // no "unknown" to send instead, and the alternative is naming some other
+    // preset we are definitely not running.
+    {
+        const int preset = presetToMeshtastic(s_cfg.modemPreset);
+        info.modemPreset = (preset >= 0) ? (uint8_t)preset : 0;
+    }
+    // "Default channel" in the sense the map cares about: the primary still
+    // carries the stock one-byte PSK, so anyone can read its traffic.
+    info.hasDefaultChannel = (CHANNEL_KEYS[0].keyLen == 1 && CHANNEL_KEYS[0].key[0] == 0x01);
+    info.onlineLocalNodes  = mapReportOnlineLocalNodes(nowMs);
+
+    int32_t latI = 0, lonI = 0, altM = 0;
+    if (resolveAnnouncePosition(latI, lonI, altM)) {
+        // Coarsened by the same transform and to the same precision as the
+        // position we broadcast on RF. A map report that was more precise than
+        // what the operator agreed to put on the air would be a leak, and the
+        // one place that decision is expressed is positionPrecision.
+        const uint8_t bits = positionPrecisionCoerce(s_cfg.positionPrecision);
+        applyPositionPrecision(latI, lonI, bits);
+        info.hasPosition       = true;
+        info.latI              = latI;
+        info.lonI              = lonI;
+        info.alt               = altM;
+        info.positionPrecision = bits;
+    }
+
+    // Rescheduled before the early return, not after it: without a position
+    // there is nothing to map, and a return that left the timer alone would log
+    // this line on every pass through the loop.
+    scheduleAnnounceNext(s_nextMapReportMs, nowMs, kMapReportIntervalS);
+    if (!info.hasPosition) {
+        Serial.println("[mqtt] map report skipped: no position "
+                       "(location sharing off, or no fix and no fixed position)");
+        return;
+    }
+
+    const ChannelKey &primary = CHANNEL_KEYS[0];
+    const char *chanName = primary.name_buf[0] ? primary.name_buf : primary.name;
+    (void)mqttBridgePublishMapReport(info, chanName);
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Chat / DM date markers
 //
@@ -31529,9 +32133,56 @@ static void buildUi() {
 #endif
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    s_chatNewMsgBtn = lv_btn_create(s_chatPanel);
-    lv_obj_set_width(s_chatNewMsgBtn, lv_pct(100));
-    lv_obj_set_height(s_chatNewMsgBtn, 28);
+    // Actions and New Message share the strip under the chat: both act on the
+    // conversation being read, so they belong next to it rather than in the
+    // bottom nav, which is about going somewhere else. Actions is the narrow one
+    // — it opens a menu, while New Message is the button this screen exists for.
+    //
+    // Split by flex_grow 1 : 2 rather than percentages, so the row's column gap
+    // comes out of the total instead of pushing the pair past 100% and wrapping.
+    lv_obj_t *chatBtnRow = lv_obj_create(s_chatPanel);
+    lv_obj_set_width(chatBtnRow, lv_pct(100));
+    lv_obj_set_height(chatBtnRow, 28);
+    lv_obj_clear_flag(chatBtnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(chatBtnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chatBtnRow, 0, 0);
+    lv_obj_set_style_pad_all(chatBtnRow, 0, 0);
+    lv_obj_set_style_pad_column(chatBtnRow, 4, 0);
+    lv_obj_set_flex_flow(chatBtnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(chatBtnRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    s_chatActBtn = lv_btn_create(chatBtnRow);
+    lv_obj_set_flex_grow(s_chatActBtn, 1);
+    lv_obj_set_height(s_chatActBtn, lv_pct(100));
+    lv_obj_set_style_radius(s_chatActBtn, 5, 0);
+    lv_obj_set_style_pad_all(s_chatActBtn, 2, 0);
+    lv_obj_set_style_shadow_width(s_chatActBtn, 0, 0);
+    lv_obj_set_style_bg_color(s_chatActBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_chatActBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_chatActBtn, 1, 0);
+    lv_obj_set_style_border_color(s_chatActBtn, lv_color_hex(0x335D9D), 0);
+    // The nav button's own handler, so this opens and closes the same modal the
+    // same way. On CLICKED rather than the nav bar's PRESSED, to match the
+    // button it now sits beside.
+    lv_obj_add_event_cb(s_chatActBtn,
+                        onHeltecBottomNavPressed,
+                        LV_EVENT_CLICKED,
+                        (void *)(intptr_t)HELTEC_NAV_ACTIONS);
+
+    lv_obj_t *chatActLabel = lv_label_create(s_chatActBtn);
+    lv_obj_set_style_text_font(chatActLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(chatActLabel, lv_color_hex(0xE8F1FF), 0);
+#if defined(DEVICE_UI_VERTICAL)
+    lv_label_set_text(chatActLabel, "Act");
+#else
+    lv_label_set_text(chatActLabel, "Actions");
+#endif
+    lv_obj_center(chatActLabel);
+
+    s_chatNewMsgBtn = lv_btn_create(chatBtnRow);
+    lv_obj_set_flex_grow(s_chatNewMsgBtn, 2);
+    lv_obj_set_height(s_chatNewMsgBtn, lv_pct(100));
     lv_obj_set_style_radius(s_chatNewMsgBtn, 5, 0);
     lv_obj_set_style_pad_all(s_chatNewMsgBtn, 2, 0);
     lv_obj_set_style_shadow_width(s_chatNewMsgBtn, 0, 0);
@@ -31549,6 +32200,7 @@ static void buildUi() {
 #else
     s_chatNewMsgBtn = nullptr;
     s_chatNewMsgLabel = nullptr;
+    s_chatActBtn = nullptr;
 #endif
 
     s_chatShortcutBar = lv_obj_create(screen);
@@ -31768,6 +32420,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_chatList = nullptr;
     s_chatNewMsgBtn = nullptr;
     s_chatNewMsgLabel = nullptr;
+    s_chatActBtn = nullptr;
     s_chatShortcutBar = nullptr;
     s_chatShortcutText = nullptr;
 
@@ -31876,6 +32529,10 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     if (s_chatNewMsgBtn) {
         lv_obj_set_style_bg_color(s_chatNewMsgBtn, lv_color_hex(0x16386F), 0);
         lv_obj_set_style_border_color(s_chatNewMsgBtn, lv_color_hex(0x335D9D), 0);
+    }
+    if (s_chatActBtn) {
+        lv_obj_set_style_bg_color(s_chatActBtn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_border_color(s_chatActBtn, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatShortcutBar) {
         lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
@@ -32488,6 +33145,26 @@ void setup() {
     lv_indev_set_type(touchIndev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(touchIndev, lvglTouchRead);
     lv_indev_set_display(touchIndev, s_lvDisplay);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Long-press has to survive a finger that does not hold perfectly still.
+    //
+    // LVGL only raises LV_EVENT_LONG_PRESSED while the press has not turned
+    // into a scroll — indev_proc_press() guards it with
+    // `if(indev->pointer.scroll_obj == NULL && indev->long_pr_sent == 0)` — and
+    // a press inside a scrollable list becomes a scroll as soon as the finger
+    // moves past scroll_limit, which is 10 px by default. That is inside the
+    // drift of a fingertip resting on this panel for the 400 ms the long press
+    // needs, so holding a chat message to open Message Actions would register as
+    // a one-pixel scroll of the chat list and the menu would never appear.
+    //
+    // It also explains why it looked intermittent rather than broken: with too
+    // few messages to scroll, scroll_obj is never set and the hold worked.
+    //
+    // 22 px is still far inside a deliberate scroll drag, so the list starts
+    // moving when it is meant to. Set on the touch indev only, so the VNC
+    // pointer — which never drifts — keeps LVGL's default.
+    lv_indev_set_scroll_limit(touchIndev, 22);
+#endif
 #endif
 #if HAS_VNC_HOST
     lv_indev_t *vncPointerIndev = lv_indev_create();
@@ -32921,6 +33598,7 @@ void loop() {
     serviceNodeInfoAnnounce(now);
     serviceTelemetryAnnounce(now);
     serviceNeighborInfoAnnounce(now);
+    serviceMapReport(now);
     serviceAutoFavorite(now);
     serviceConfigFlush(now);
     // Debounced transcript snapshots. Each writes at most one channel and one
@@ -33034,7 +33712,14 @@ void loop() {
         // Cheap no-op unless the monitor is open; it throttles its own retally.
         refreshMqttMonitorModal();
 #endif
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // Evaluated first, not folded into the argument: || would short-circuit
+        // past it whenever meshDirty is already true and leave the flag set.
+        const bool dmDeferred = dmTakeDeferredRefresh();
+        refreshDmModal(meshDirty || dmDeferred);
+#else
         refreshDmModal(meshDirty);
+#endif
     }
 
     // Runs after the refresh block so the flush carries this pass's updates,

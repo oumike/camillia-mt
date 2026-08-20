@@ -126,7 +126,16 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 Builds: `heltec-v4`, `heltec-v4-vertical`
 
 - Primary usage is touch (no dedicated hardware keyboard shortcuts)
-- Bottom touch nav: Config, DM, Nodes, Live, Help
+- **Chat and DM transcripts survive a reboot.** This board has no card slot, so
+  they go to a LittleFS partition in its own flash. Devices flashed before this
+  existed need one USB flash to get the partition — the partition table is not
+  part of an OTA update, so an OTA alone leaves history in RAM as before
+- Bottom touch nav: Config, DM, Nodes, Live, Help — the same five everywhere.
+  Actions is not one of them: it acts on the channel you are reading, so it
+  lives on the chat screen only
+- **Under the chat: Actions on the left, New Message on the right**, splitting
+  that strip one third to two thirds. Both act on the conversation you are
+  reading, which is why they are together under it rather than in the nav bar
 - DM delete trigger: long-press a conversation row
 - Tap and hold a chat message to open Message Actions (reactions, Reply, and
   the sender's node actions). On this
@@ -354,6 +363,10 @@ Config includes Web Config controls, export and import, the theme picker, announ
 - Navigate action rows with Up and Down input. The list wraps: going up from
   the first row lands on the last, and down from the last returns to the first
 - Enter runs the selected action
+- **On the touch-only Heltec, tapping a row runs it** — there is no Enter key to
+  press, so the tap is the whole gesture. Dragging the list to scroll it does
+  not count as a tap and never runs anything. On the other touch builds a tap
+  moves the highlight and Enter still runs it
 - Keyboard builds: I opens/focuses the info panel within Config
 - Import, both Clear Nodes rows, and Factory Reset require a second Enter
   confirmation
@@ -395,6 +408,30 @@ a firmware update never starts obfuscating a position on its own.
 One difference from stock Meshtastic: theirs is a per-channel setting, so a node
 can be exact on a private channel and coarse on a public one. Ours is one
 device-wide value applied to every channel this node shares position on.
+
+### MQTT map reporting
+
+**Map reporting**, under MQTT in Web Config, publishes a short self-description
+to the broker every 15 minutes: long and short name, hardware model, firmware
+version, region, modem preset, whether the primary channel still uses the
+default key, how many nodes this one has heard in the last two hours, and a
+position. That is what puts a node on an MQTT-fed map — it is a message to the
+broker rather than mesh traffic, so it never goes out over LoRa and no other
+node sees it.
+
+- It needs the MQTT bridge switched on and connected. The report goes to
+  `<root>/2/map/`, alongside the `<root>/2/e/` topics the bridge already uses.
+- **Nothing is published without a position.** If Share Location is off, or
+  there is no fix and no fixed position set, the report is skipped and the
+  serial log says so — a map report with no coordinates has nothing to map.
+- The position carries the same Location Precision as the one broadcast on the
+  mesh, coarsened the same way, so map reporting can never be more revealing
+  than what you already agreed to transmit.
+- The 15-minute interval is fixed and not configurable. It matches the stock
+  Meshtastic default, which public brokers expect as a floor.
+- Everything else about the node — its telemetry, position and nodeinfo packets
+  — reaches the broker through the ordinary uplink instead, which needs the
+  channel's uplink flag on.
 
 ### Battery display
 
@@ -511,7 +548,8 @@ The device info panel is scrollable with the keyboard on every keyboard build:
   Backspace closes it
 - **Cardputer** — I opens the info popup, Up/Down (or semicolon/period) scroll it,
   and I or Esc closes it
-- **Heltec** — touch-first; the popup is dismissed by any key or by tapping
+- **Heltec** — touch-only; the popup has a **Close** button beside its title.
+  (Any key still dismisses it, which is what a keyboard driven over VNC sends)
 
 ### Notification sound
 
@@ -524,6 +562,14 @@ touch builds, tapping a row previews it and tapping it again applies it.
 
 Notification Sound and Splash Melody now sit directly under My Message Color,
 with the other presentation settings.
+
+**The three tones differ by board, because the hardware does.** The T-Deck,
+Pager and Cardputer play them through a speaker or codec. The Heltec and M9
+have a passive piezo buzzer instead, which has one resonant peak around
+2-4 kHz and drops off sharply below it — so their patterns sit higher, and
+their Bass is the lowest register the part still projects, set apart by being
+slower and longer rather than genuinely low. Until now those two boards played
+a single beep for all three settings.
 
 ### Light timeout
 
@@ -668,7 +714,9 @@ router and not of this device:
 ### Backing up settings
 
 **Export Config** on the Config screen writes `/camillia/config.yaml` to the SD
-card, and web config has the same export plus an upload to restore one. What the
+card — or, on the boards with no card slot, to the internal flash partition that
+stands in for one — and web config has the same export plus an upload to restore
+one. What the
 file carries:
 
 - Every setting in this guide, and the channel list including channel keys
@@ -793,7 +841,9 @@ or a tap outside dismisses the tray without sending.
 
 - **T-Deck / Pager / Cardputer** — press **E** on the chat/DM screen
 - **Heltec (touch)** — while composing, tap the 😀 button next to Cancel / Send
-  to insert emoji into the message
+  to insert emoji into the message. The tray has a **Close** button along its
+  bottom edge: it fills all but a few pixels of the screen, so the tap-outside
+  gesture the other builds rely on has almost nothing left to aim at
 
 The web-config composer can also send any emoji your browser can type.
 
@@ -931,7 +981,7 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
   selected and the checkbox is on. Direct access at
   `http://<device-ip>:8765/` remains available while enabled.
 - The **Remote** tab and its endpoints are compiled into the `tdeck`,
-  `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical` and `mesh-deck`
+  `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`, `mesh-deck` and `m9`
   environments. The Cardputer is the one board without them: the mirror needs a
   full-panel buffer in PSRAM, which that board does not have. The other
   requirement is a Wi-Fi station.
@@ -1137,8 +1187,8 @@ neither. Everything else on this screen — the filter, the selection, Enter for
 details focus, A for actions — works there the same way.
 
 **On Heltec**, drag either panel to scroll it; there is no focus to move because
-there are no navigation keys. The USER button opens the actions menu for the
-selected node, as before.
+there are no navigation keys. Tapping a node opens its actions menu, and the
+USER button does the same thing for whichever node is selected.
 
 ### Node details
 
@@ -1265,7 +1315,24 @@ Primary usage is keyboard.
 Primary usage is touch.
 
 - Bottom touch nav provides Config, DM, Nodes, Live, and Help
+- Actions is not in the nav. On the chat screen it shares the strip under the
+  conversation with New Message, one third and two thirds respectively; no other
+  screen offers it, since there is no conversation there for it to act on
+- **The USER button is the Enter key's stand-in, and it always does what a tap
+  on that screen does**: compose on the chat screen, run the highlighted row on
+  Config, open a node's actions on Nodes, run the highlighted entry in an
+  actions menu, send the highlighted emoji in the tray, start the DM in the New
+  DM picker, mute in Channel Actions
 - Use on-screen touch lists and buttons inside each modal
+- Tapping a Config row runs that action; tapping a node on the Nodes screen
+  opens its node actions
+- **Every popup that a keyboard build closes with Backspace has a Close button
+  here instead** — Device Info, Action Result, the emoji tray, the traceroute
+  progress popup, the New DM node picker and the hidden system-stats screen.
+  Where a popup also dismissed on a tap outside it, that still works
+- The full-screen views — Config, DM, Nodes, Live — are closed by tapping their
+  own button in the bottom nav, which is lit while you are on them. Their
+  legends say so rather than naming a key
 
 ### Elecrow ThinkNode M9 (m9)
 

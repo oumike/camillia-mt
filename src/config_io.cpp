@@ -201,11 +201,39 @@ static const char *const kRegionFromMeshtastic[] = {
     "UA_433",   // 14
     "UA_868",   // 15
     "MY_433",   // 16
+    "MY_919",   // 17
+    "SG_923",   // 18
+    "PH_433",   // 19
+    "PH_868",   // 20
+    "PH_915",   // 21
+    "ANZ_433",  // 22
+    "KZ_433",   // 23
+    "KZ_863",   // 24
+    "NP_865",   // 25
+    "BR_902",   // 26
 };
 
 const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion) {
     if (meshtasticRegion >= (sizeof(kRegionFromMeshtastic) / sizeof(kRegionFromMeshtastic[0]))) return nullptr;
     return kRegionFromMeshtastic[meshtasticRegion];
+}
+
+int presetToMeshtastic(uint8_t preset) {
+    // Reverse scan of the same table, rather than a second table listing the
+    // pairs the other way round: two tables would be two things to update when
+    // a preset is added, and the one that got missed would be silent.
+    for (uint8_t i = 0; i < (sizeof(kPresetFromMeshtastic) / sizeof(kPresetFromMeshtastic[0])); i++) {
+        if (kPresetFromMeshtastic[i] >= 0 && (uint8_t)kPresetFromMeshtastic[i] == preset) return (int)i;
+    }
+    return -1;
+}
+
+uint8_t regionCodeToMeshtastic(const char *code) {
+    if (!code || !code[0]) return 0;   // UNSET
+    for (uint8_t i = 1; i < (sizeof(kRegionFromMeshtastic) / sizeof(kRegionFromMeshtastic[0])); i++) {
+        if (kRegionFromMeshtastic[i] && strcmp(kRegionFromMeshtastic[i], code) == 0) return i;
+    }
+    return 0;
 }
 
 void applyPresetParams(RhinoConfig &cfg) {

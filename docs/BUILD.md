@@ -93,7 +93,7 @@ You can also run the script with no flags and pick a device from the prompt.
 |---|---|
 | Platform | espressif32 7.0.1 |
 | Framework | Arduino |
-| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer) |
+| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). The two card-less boards — Mesh Deck and Heltec — use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots |
 | PSRAM | enabled (OPI; none on Cardputer) |
 | Upload speed | 115200 |
 
@@ -102,6 +102,27 @@ You can also run the script with no flags and pick a device from the prompt.
 - The board must be in download mode to flash. On the T-Deck, hold the trackball button while pressing reset, or let PlatformIO trigger it automatically via USB CDC.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.
+
+### Heltec (heltec-v4, heltec-v4-vertical)
+
+- These envs moved from `partitions.csv` to `partitions_16mb_fs.csv` to give the
+  board a filesystem, since it has no SD slot. The app slots and NVS are at the
+  same offsets in both tables, so an OTA between them is safe — but **OTA does
+  not rewrite the partition table**, which lives outside both app slots. A device
+  updated over the air keeps its old table, finds no `littlefs` partition, logs
+  `[fs] internal flash mount FAILED (partition 'littlefs' missing?)` and carries
+  on with chat history in RAM only.
+- To actually get the partition, flash over USB once:
+  `pio run -e heltec-v4 -t upload`. Nothing needs erasing first — the new table
+  keeps NVS where it was, so settings, channels and the node identity survive.
+- The env sets `board_upload.flash_size` and `board_upload.maximum_size`
+  alongside `board_build.flash_size`, and all three are load-bearing. The
+  `esp32-s3-devkitc-1` board definition declares an 8 MB part; that is the size
+  the bootloader is built against, and it rejects a partition table reaching
+  past it *before any app code runs*. The symptom is a boot loop showing nothing
+  but the ROM banner and `entry 0x403c98d0`, over and over — no bootloader log,
+  no panic, no app output. The same note is on the mesh-deck env, which hit it
+  first.
 
 ### ThinkNode M9
 

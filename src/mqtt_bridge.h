@@ -33,6 +33,14 @@ void mqttBridgePublish(const MeshPacket &pkt, const char *chanName);
 void mqttBridgePublishRaw(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
                           const char *chanName);
 
+// Publish one MapReport to "<root>/2/map/" — the node describing itself to an
+// MQTT-fed map. Nothing about this goes on the air: it is not a mesh packet
+// mirrored upward but a message that only ever exists on the broker, which is
+// why it takes a MapReportInfo rather than a frame. No-op (returns false)
+// unless the bridge is connected and map reporting is enabled in config.
+// chanName is the envelope's channel_id; pass the primary channel's name.
+bool mqttBridgePublishMapReport(const MapReportInfo &info, const char *chanName);
+
 // Re-read config and drop any existing session so the next loop reconnects with
 // the new server/port/credentials. Call after the user edits MQTT settings.
 void mqttBridgeConfigChanged();
