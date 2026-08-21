@@ -179,11 +179,15 @@ static void logWifiHeapDiag(const char *tag) {
     size_t freeInt = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t largestInt = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     size_t free8 = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    Serial.printf("[web] %s [heap int free=%u largest=%u 8bit=%u]\n",
+    size_t freeDma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    size_t largestDma = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    Serial.printf("[web] %s [heap int free=%u largest=%u 8bit=%u dma free=%u largest=%u]\n",
                   tag ? tag : "wifi",
                   (unsigned)freeInt,
                   (unsigned)largestInt,
-                  (unsigned)free8);
+                  (unsigned)free8,
+                  (unsigned)freeDma,
+                  (unsigned)largestDma);
 }
 
 static bool ensureWifiMode(wifi_mode_t mode, const char *stageTag) {
@@ -1537,16 +1541,22 @@ static void appendAttr(String &html, const char *s) {
 // <details> accordion; web config lite renders a plain heading with everything
 // expanded — no folding, no styling, so nothing depends on CSS being there.
 static void section(String &html, bool lite, const char *title, bool open) {
+    const char *safeTitle = title ? title : "?";
     if (lite) {
         // Progress marker: if a render stalls, the last line names the section.
-        Serial.printf("[web] lite: %s\n", title);
+        Serial.printf("[web] lite: %s\n", safeTitle);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+        char heapTag[80];
+        snprintf(heapTag, sizeof(heapTag), "lite: %s", safeTitle);
+        logWifiHeapDiag(heapTag);
+#endif
         html += "<h3>";
-        html += title;
+        html += safeTitle;
         html += "</h3>";
         return;
     }
     html += open ? "<details open><summary>" : "<details><summary>";
-    html += title;
+    html += safeTitle;
     html += "</summary>";
 }
 

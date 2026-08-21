@@ -162,6 +162,10 @@ static constexpr uint16_t kMaxHorRes =
 // buffer occupies zero bytes and OTA actually gets MORE contiguous internal
 // heap than the old static 12-line buffer left it.
 static constexpr uint16_t kDrawBufLines = 32;
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+// Cardputer has no PSRAM and AP web config can leave very little internal DRAM.
+// A smaller draw buffer trades redraw speed for RAM headroom where it matters.
+static constexpr uint16_t kDrawBufLines = 24;
 #else
 static constexpr uint16_t kDrawBufLines = 40;
 #endif

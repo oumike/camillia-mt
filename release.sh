@@ -75,10 +75,11 @@ delete_existing_release_and_tags() {
 # ── Parse flags ───────────────────────────────────────────────────────────────
 ASSUME_YES=false
 NO_CLEAN=false
+APPEND_LAST_NOTES=false
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes] [--no-clean]"
+            echo "Usage: $0 [-y|--yes] [--no-clean] [--append-last-notes]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
             echo ""
@@ -89,10 +90,15 @@ for arg in "$@"; do
             echo "              is already in .pio. Much faster, and fine when"
             echo "              you just built these same sources — but the"
             echo "              images are only as trustworthy as that tree."
+            echo "  --append-last-notes"
+            echo "              Keep RELEASE_NOTES.md content from the previous"
+            echo "              release and append this release's generated delta"
+            echo "              notes under a new 'Update (vX.Y.Z)' heading."
             exit 0
             ;;
         -y|--yes) ASSUME_YES=true ;;
         --no-clean) NO_CLEAN=true ;;
+        --append-last-notes) APPEND_LAST_NOTES=true ;;
         *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
     esac
 done
@@ -241,12 +247,32 @@ echo "Updated VERSION to $TAG"
 # locally authenticated `claude` CLI. Every failure path is non-fatal — the
 # release still publishes with GitHub's auto-generated notes.
 # RELEASE_NOTES.md is committed, so whatever is on disk at build time gets baked
-# into the firmware. When this release has no summary of its own, overwrite it —
-# leaving the previous release's notes there would ship them as if they were
-# these, which is worse than showing nothing.
+# into the firmware. By default each release overwrites it with only this
+# release's summary. With --append-last-notes, the existing file is kept and the
+# new summary is appended under an "Update (vX.Y.Z)" heading.
+NOTES_FILE="RELEASE_NOTES.md"
+PREV_NOTES=""
+if [[ -f "$NOTES_FILE" ]]; then
+    PREV_NOTES=$(cat "$NOTES_FILE")
+fi
+
+write_release_notes() {
+    local body="$1"
+    if [[ "$APPEND_LAST_NOTES" == true && -n "${PREV_NOTES//[[:space:]]/}" ]]; then
+        {
+            printf '%s\n' "$PREV_NOTES"
+            printf '\n\n### Update (%s)\n' "$TAG"
+            printf '%s\n' "$body"
+        } > "$NOTES_FILE"
+    else
+        printf '%s\n' "$body" > "$NOTES_FILE"
+    fi
+}
+
 write_placeholder_notes() {
-    printf 'Release %s\n\nNo release notes were generated for this build.\n' "$TAG" \
-        > "$NOTES_FILE"
+    write_release_notes "Release ${TAG}
+
+No release notes were generated for this build."
 }
 
 generate_ai_summary() {
@@ -332,13 +358,12 @@ ${diff}"
 }
 
 NOTES_ARGS=(--generate-notes)
-NOTES_FILE="RELEASE_NOTES.md"
 echo ""
 echo "Generating AI release summary..."
 AI_SUMMARY=$(generate_ai_summary || true)
 if [[ -n "${AI_SUMMARY// /}" ]]; then
     AI_NOTES_FILE="$NOTES_FILE"
-    printf '%s\n' "$AI_SUMMARY" > "$AI_NOTES_FILE"
+    write_release_notes "$AI_SUMMARY"
     echo ""
     echo "──────── proposed release notes ────────"
     cat "$AI_NOTES_FILE"

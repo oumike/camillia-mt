@@ -103,6 +103,27 @@ You can also run the script with no flags and pick a device from the prompt.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.
 
+### Patched libraries
+
+Two `pre:` scripts rewrite third-party sources in `.pio/libdeps` before a build.
+PlatformIO gives every environment its own copy, so a patch only reaches the env
+that lists the script.
+
+- `tools/patch_lgfx_dmadesc.py` — every display env. LovyanGFX and M5GFX (which
+  vendors the same file) free the SPI DMA descriptor array before allocating its
+  replacement, record the new size whether or not the allocation succeeded, and
+  then dereference the result without a null check. Under memory pressure that
+  turns a 12-24 byte allocation failure into `StoreProhibited` at `EXCVADDR
+  0x00000004` inside `Bus_SPI::_setup_dma_desc_links`, permanently — the stale
+  size stops it ever retrying. The patch allocates before freeing and bails out
+  when there is nothing usable, so a failure drops a frame instead. See #49 for
+  the memory budget that causes the failure in the first place.
+- `tools/patch_radiolib_lr11x0.py` — `m9` only; see the ThinkNode M9 notes below.
+
+Both are idempotent and both print a warning instead of failing silently if the
+upstream text moves under them. If you see `NOT patched - run the build once
+more` on a fresh checkout, the library had not been fetched yet; build again.
+
 ### Heltec (heltec-v4, heltec-v4-vertical)
 
 - These envs moved from `partitions.csv` to `partitions_16mb_fs.csv` to give the

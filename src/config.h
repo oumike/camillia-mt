@@ -543,7 +543,12 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define MAX_MSG_LINES   400   // display lines per channel
 #endif
 #define MESH_TEXT_MAX_LEN 200
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+// Also shrinks several MAX_NODES-sized UI index/snapshot arrays in main_lvgl.cpp.
+#define MAX_NODES         50
+#else
 #define MAX_NODES        250
+#endif
 // How far back a Store-and-Forward replay request asks for, in minutes. The
 // router clamps this to its own history_return_window, so asking for more than
 // it kept is harmless. Shared so the device row and the web button agree.

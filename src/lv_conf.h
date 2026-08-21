@@ -34,8 +34,8 @@
 #define LV_MEM_POOL_ALLOC(size) heap_caps_malloc((size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #define LV_MEM_SIZE (384U * 1024U)
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-// No PSRAM: the pool stays a static internal-DRAM array, so it stays small.
-#define LV_MEM_SIZE (96U * 1024U)
+// No PSRAM: keep the internal pool tighter to preserve AP/web-config headroom.
+#define LV_MEM_SIZE (80U * 1024U)
 #else
 #define LV_MEM_SIZE (128U * 1024U)
 #endif

@@ -27,4 +27,6 @@ Fixed
 - Heltec V4: holding a chat message to open Message Actions now works consistently. Normal fingertip drift during the hold was being read as a list scroll, which cancelled the long press - it appeared to work only when there were too few messages to scroll.
 - Heltec V4: tapping **New DM** did nothing; the row was being rebuilt out from under the tap.
 - Heltec V4: a message arriving while your finger was on the conversation list no longer cancels the gesture, including a delete hold several seconds in.
-- Heltec V4: the hidden system-stats screen could only be closed from the keyboard that opened it, stranding anyone standing at the device.)CAMNOTES";
+- Heltec V4: the hidden system-stats screen could only be closed from the keyboard that opened it, stranding anyone standing at the device.
+
+[truncated])CAMNOTES";

@@ -21,3 +21,12 @@
 - Heltec V4: tapping **New DM** did nothing; the row was being rebuilt out from under the tap.
 - Heltec V4: a message arriving while your finger was on the conversation list no longer cancels the gesture, including a delete hold several seconds in.
 - Heltec V4: the hidden system-stats screen could only be closed from the keyboard that opened it, stranding anyone standing at the device.
+
+
+### Update (v4.4.1)
+### Changed
+- Cardputer: the node list now holds up to 50 nodes instead of 250, and the display redraws in smaller chunks, freeing internal memory for Wi-Fi and the web config page.
+
+### Fixed
+- All boards: fixed a crash (`StoreProhibited` guru meditation) that could hit the display driver when memory ran low, and which then repeated on every redraw until the device was rebooted — a failed buffer allocation now just drops a frame.
+- Cardputer: the on-device web config is less likely to run out of memory while serving pages, after reclaiming 16 KB from the UI memory pool.
