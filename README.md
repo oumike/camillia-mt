@@ -9,7 +9,6 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 - [Hardware](#hardware)
 - [Supported Devices](#supported-devices)
 - [Features](#features)
-- [Build and Flash](#build-and-flash)
 - [First-Time Setup](#first-time-setup)
 - [Configuration](#configuration)
 - [Releases](#releases)
@@ -23,8 +22,8 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 
 ## Hardware
 
-- [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
-- [LilyGo T-Lora Pager TFT](https://lilygo.cc/) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
+- [LilyGo T-Deck](https://lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
+- [LilyGo T-Lora Pager TFT](https://lilygo.cc/products/t-lora-pager) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
 - [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS module
 - [Heltec](https://heltec.org/) WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 - [Attaky Mesh Deck](https://shop.attaky.com/) — ESP32-S3, SX1262 LoRa, 320x240 touch display, 48-key QWERTY, D-pad, GPS
