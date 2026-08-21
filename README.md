@@ -91,11 +91,6 @@ key.
 Publishes a release. On-device OTA and the website flasher both track GitHub's
 *latest* release.
 
-## Roadmap
-
-- Theme builder through web config
-
-
 
 ## Use of AI
 
