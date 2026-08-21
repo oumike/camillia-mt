@@ -12,7 +12,6 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 - [First-Time Setup](#first-time-setup)
 - [Configuration](#configuration)
 - [Releases](#releases)
-- [Roadmap](#roadmap)
 - [Use of AI](#use-of-ai)
 - [License](#license)
 - [Usage and Controls Guide (docs/USE.md)](docs/USE.md)
