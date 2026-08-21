@@ -1,32 +1,13 @@
 ### New
-- **MQTT map reporting** — when the MQTT bridge is on and connected, the node now publishes a short self-description (long/short name, hardware model, firmware version, region, modem preset, whether the primary channel still uses the default key, how many nodes it has heard in the last two hours, and a position) to `<root>/2/map/` every 15 minutes. This is what puts a node on an MQTT-fed map; it goes to the broker only and never over LoRa. Enable it under MQTT in Web Config.
-- Map reports are skipped entirely when there is no position to send, and the position they carry is coarsened by the same Location Precision as the one you broadcast on the mesh — a map report can never be more revealing than what you already transmit.
-- **Heltec V4: chat and DM transcripts now survive a reboot.** The board has no card slot, so they go to a 9.5 MB filesystem partition in its own flash, which also backs config export and import. Devices already in the field need one USB flash to gain that partition — an OTA update does not rewrite the partition table, and an OTA-only device keeps history in RAM as before. Settings, channels and the node identity survive the USB flash.
-- **Heltec V4 and ThinkNode M9: the Default, Chirpy and Bass alert sounds are now three different sounds.** These boards have a piezo buzzer rather than a speaker and previously played one identical beep for all three; the new patterns are pitched for what a piezo actually projects.
-- Heltec V4: an **Actions** button under the chat, sharing that strip with New Message.
-- Heltec V4: a **New Message** button under the DM thread, so a conversation can be answered from the screen you read it on.
-- Heltec V4: **Close** buttons on every popup that keyboard builds dismiss with Backspace — Device Info, action results, the emoji tray, traceroute progress, the New DM node picker and the system-stats screen. Where tapping outside also worked, it still does.
-- ThinkNode M9: the remote VNC viewer now works on this board.
+- Deleting a direct message conversation now raises a **Delete conversation?** dialog that names the peer and warns the message history goes with it — Y/Enter confirms, N/close cancels, and it ignores every other key while it is up.
+- Sent messages in the Classic message style now show an `[ACK]` marker right after the timestamp in channel chat and Direct Messages, on every board: green for a confirmed routing ACK, accent-colored when a relay carried a broadcast onward. Failed sends still turn red.
+- On the Nodes screen, Enter now commits a filter: the list stays narrowed while the keyboard returns to the rows, so Up/Down move the cursor and A opens Actions instead of typing a letter. Backspace or Space goes back to editing the filter text without discarding it.
 
 ### Changed
-- Heltec V4: **a tap now both selects and runs.** Tapping a Config row runs that action, tapping a node opens its node actions, tapping a node in the New DM picker starts the DM. Dragging to scroll never runs anything.
-- Heltec V4: the USER button is now the Enter key's stand-in everywhere and always matches what a tap does on that screen — compose on chat, run the highlighted Config row, open a node's actions, send the highlighted emoji, mute in Channel Actions.
-- Heltec V4: **Actions left the bottom nav.** It acts on the channel you are reading, so it now lives only on the chat screen; from Nodes or Live it had been silently acting on a channel that was not on screen. The nav is Config, DM, Nodes, Live, Help on every board.
-- Heltec V4: on-screen hints name the button to press instead of a key that does not exist on this hardware.
-- Importing a Meshtastic config now recognises the newer regions: MY_919, SG_923, PH_433, PH_868, PH_915, ANZ_433, KZ_433, KZ_863, NP_865 and BR_902.
+- **D** is now the delete key for the selected DM conversation on every keyboard build, replacing Backspace on T-Deck and T-Lora Pager, Fn+Backspace on Cardputer, and Sym+Backspace elsewhere. On the Heltec touch build, long-press a conversation row for 3 seconds to raise the same dialog.
+- In the DM list, Backspace now only steps focus out of the message panel and keeps your place in the list; it no longer arms a delete.
+- The live feed now draws at the size chosen in Font Size, matching chat and DMs, instead of a fixed size of its own.
 
 ### Fixed
-- **This node's own telemetry, position, node info and neighbor info now reach the MQTT broker.** They were marked as MQTT-permitted but nothing ever published them, because a LoRa radio never hears its own transmission — chat was the only thing about this node a broker saw. All of it still respects the channel's uplink flag. Discovery sweeps are deliberately excluded, so they cannot ask every MQTT-connected node to answer at once.
-- Heltec V4: holding a chat message to open Message Actions now works consistently. Normal fingertip drift during the hold was being read as a list scroll, which cancelled the long press — it appeared to work only when there were too few messages to scroll.
-- Heltec V4: tapping **New DM** did nothing; the row was being rebuilt out from under the tap.
-- Heltec V4: a message arriving while your finger was on the conversation list no longer cancels the gesture, including a delete hold several seconds in.
-- Heltec V4: the hidden system-stats screen could only be closed from the keyboard that opened it, stranding anyone standing at the device.
-
-
-### Update (v4.4.1)
-### Changed
-- Cardputer: the node list now holds up to 50 nodes instead of 250, and the display redraws in smaller chunks, freeing internal memory for Wi-Fi and the web config page.
-
-### Fixed
-- All boards: fixed a crash (`StoreProhibited` guru meditation) that could hit the display driver when memory ran low, and which then repeated on every redraw until the device was rebooted — a failed buffer allocation now just drops a frame.
-- Cardputer: the on-device web config is less likely to run out of memory while serving pages, after reclaiming 16 KB from the UI memory pool.
+- Emoji in live feed lines drew as empty boxes.
+- Changing Font Size — from the device menu or from web config — did not update the live feed until something else redrew it.

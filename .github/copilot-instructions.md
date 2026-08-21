@@ -60,7 +60,7 @@ Current PlatformIO environments include:
 - `heltec-v4`
 - `heltec-v4-vertical`
 - `mesh-deck`
-- `mesh-deck-probe`
+- `m9`
 
 When a request says "mesh-deck", scope changes to `DEVICE_MESH_DECK` paths
 unless asked to propagate.

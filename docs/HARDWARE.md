@@ -55,6 +55,16 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 >   the only board without PSRAM those rings come out of internal DRAM. Nothing
 >   on the air depends on the number: a Meshtastic header carries a channel hash,
 >   not a slot index. See issue #44.
+> - **Node table:** 250 entries everywhere except the Cardputer, which holds 50.
+>   `NodeEntry` is 168 bytes, so a full table is ~41 KB, and the `MAX_NODES`-sized
+>   index, snapshot and id arrays around it (the Nodes screen, the DM picker, and
+>   the NVS save/load paths) add ~10 KB more — about 41 KB reclaimed in total by
+>   the cut. On the boards with PSRAM that is free; on the only one without, it came
+>   out of the same internal DRAM the SoftAP and the web-config page need, and a
+>   failing 24-byte DMA allocation during an AP session is what it cost. The mesh
+>   does not notice: the table is local bookkeeping about who has been heard
+>   recently, not anything the protocol carries. Favorites are evicted last, which
+>   is the mitigation to reach for on that board. See issue #49.
 > - **M9 receive ceiling:** the LR11x0's `SetPacketParams` `PayloadLength` field
 >   is both "bytes to transmit" and "largest payload the receiver will accept".
 >   RadioLib writes the TX length there on every transmit and never restores it

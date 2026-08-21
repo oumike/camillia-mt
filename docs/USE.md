@@ -39,6 +39,8 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - L opens Live
 - A opens Channel Actions — M mutes/unmutes the channel, L toggles whether this
   node broadcasts its position on it (Share Location in Config gates all channels)
+- In the DM list, D deletes the selected conversation. A confirmation dialog
+  names the conversation first — see [Direct messages](#direct-messages)
 - **Space opens compose** — a new message, or a reply when a chat row is
   selected. Space replaced Enter for this on both the chat and DM screens.
 - **Enter moves the cursor into the messages** — on chat it drops into the
@@ -66,7 +68,6 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - J/K map to Up/Down navigation in lists and chat row selection
 - Trackball Up/Down follows the same Up/Down behavior as J/K
 - Modal close key is Backspace (Esc is also accepted)
-- DM delete trigger on selected conversation: Backspace
 - Compose close behavior: Backspace on an empty compose closes the compose modal
 - Trackball click hold for 2 seconds puts the screen to sleep
 
@@ -80,7 +81,6 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - Config modal: I focuses the info panel; Wheel Click swaps focus between actions/info
 - DM modal: Wheel Click swaps focus between conversation and message panels
 - Modal close key is Backspace (Esc is also accepted)
-- DM delete trigger on selected conversation: Backspace (including Symbol+Backspace / hold path)
 - Compose close behavior: Backspace on an empty compose closes the compose modal
 
 ### M5Stack Cardputer + Cap LoRa/GPS (cardputer-cap)
@@ -92,7 +92,6 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 - Esc closes modals and exits chat-focus modes
 - Enter confirms actions and moves the cursor into the channel's messages;
   Space opens compose, and Fn+Enter is also accepted for the compose/reply flow
-- DM delete trigger on selected conversation: Fn+Backspace
 - Compose close behavior: Esc closes compose (Backspace only deletes characters)
 - Picker modals (Chat Style, Chat Names) show option names without the
   explanatory line underneath, and scroll when they outgrow the 240x135 panel
@@ -136,7 +135,8 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 - **Under the chat: Actions on the left, New Message on the right**, splitting
   that strip one third to two thirds. Both act on the conversation you are
   reading, which is why they are together under it rather than in the nav bar
-- DM delete trigger: long-press a conversation row
+- DM delete trigger: long-press a conversation row for 3 seconds, then answer
+  the Delete conversation? dialog
 - Tap and hold a chat message to open Message Actions (reactions, Reply, and
   the sender's node actions). On this
   build that is the only route to the menu from chat, since Enter keeps its
@@ -605,12 +605,21 @@ screen sleeps after it has expired the light stays dark.
 
 ### Node management
 
-The device keeps a fixed number of the most recently heard nodes (250 on current
-builds). When that fills up, the **least recently heard non-favorite** is dropped
-to make room — **favorited nodes are never dropped, however old they are**. The
-only things that drop a favorite are the two deliberate wipes: Clear Nodes (All)
-and Factory Reset. Clear Nodes (Keep Favorites) exists precisely so you can flush
-a table full of stale mesh nodes without losing the ones you pinned.
+The device keeps a fixed number of the most recently heard nodes: **250 on every
+board except the Cardputer, which holds 50**. When that fills up, the **least
+recently heard non-favorite** is dropped to make room — **favorited nodes are
+never dropped, however old they are**. The only things that drop a favorite are
+the two deliberate wipes: Clear Nodes (All) and Factory Reset. Clear Nodes (Keep
+Favorites) exists precisely so you can flush a table full of stale mesh nodes
+without losing the ones you pinned.
+
+**Why the Cardputer holds fewer.** It is the only board here with no PSRAM, so
+its node table competes with Wi-Fi, the LVGL pool and the web-config page for the
+same internal memory — a full 250-entry table is 41 KB of it. Fifty entries is
+what leaves that board able to serve its own settings page. Nothing about the
+mesh changes: it still hears, displays and routes for every node it receives. It
+just remembers fewer of the ones it has not heard from lately, so on a busy mesh
+expect the table to turn over sooner and **favorite the nodes you care about**.
 
 Optionally, dropped nodes can be preserved instead of discarded. In Web Config,
 **Node Management** has an *Archive dropped nodes to SD card* checkbox:
@@ -765,6 +774,8 @@ Also under **Node Management** in Web Config:
 When enabled, any node reporting a position within the radius is favorited
 automatically. This matters beyond sorting: favorites are never dropped when the
 node table fills up, so this is a way to automatically protect your local nodes.
+It is worth the most on the Cardputer, whose table holds 50 rather than 250 and
+therefore fills five times sooner (see [Node management](#node-management)).
 
 Two deliberate limits:
 
@@ -806,7 +817,14 @@ with the usual up/down input and press Enter (or tap) to choose Classic,
 Bubbles, or Outline; Backspace/Esc cancels. Choosing a *different* style reboots
 to apply it; re-choosing the current style just closes without a reboot.
 
-- **Classic** — one flat, colored text line per message
+- **Classic** — one flat, colored text line per message. Your sent messages
+  gain an `[ACK]` marker just after the timestamp once the message is
+  acknowledged, and turn red on failure — in channel chat and Direct Messages
+  alike, on every build. The color separates the two kinds of acknowledgement:
+  **green** for an explicit routing ACK (always the case for a DM, which is
+  addressed to one node), and the accent color for channel text, which goes
+  out as a broadcast that usually settles for a relay confirming it carried
+  the message on rather than a reply from any one recipient
 - **Bubbles** — per-message rounded bubbles with a solid fill; your messages are
   right-aligned in the accent color (turning green on ACK, red on failure),
   other nodes' are left-aligned in a stable per-node color with a short-name tag
@@ -1174,8 +1192,9 @@ Nodes shows discovered nodes and detail fields, including map position details.
   focused panel is the one with the bright border. The close key steps back out
   to the list; from the list it closes the screen
 - **A opens the actions menu** for the selected node, from either panel. (It used
-  to be Enter, which now focuses the details.) With the filter open, letters are
-  filter text — close the filter first
+  to be Enter, which now focuses the details.) While you are typing a filter,
+  letters are filter text; press Enter to commit the filter and A works again on
+  the narrowed list
 - On the T-Lora Pager the wheel click toggles between the two panels, the same
   way it swaps panels on Config and DM
 - Close with the device close key
@@ -1185,6 +1204,10 @@ right with the details taking the left. Four sections of aligned fields need
 width for two columns and height for roughly seventeen rows, and 240x135 has
 neither. Everything else on this screen — the filter, the selection, Enter for
 details focus, A for actions — works there the same way.
+
+It also lists **at most 50 nodes** rather than 250, because it is the one board
+with no PSRAM to keep the table in. The list is otherwise identical; it just
+turns over sooner on a busy mesh. See [Node management](#node-management).
 
 **On Heltec**, drag either panel to scroll it; there is no focus to move because
 there are no navigation keys. Tapping a node opens its actions menu, and the
@@ -1227,6 +1250,14 @@ single-block detail text described above.
 - Typing a letter on its own no longer starts the filter — only Space does
 - Backspace edits the filter text; backspacing past the last character closes the
   filter and clears the brackets
+- **Enter commits the filter.** The rows stay narrowed and the brackets stay in
+  the header, but the keyboard goes back to the list: Up/Down move the cursor
+  over the matching nodes and A opens the actions menu for the selected one
+  instead of typing an `a`. A second Enter focuses the details panel, the same
+  as it does with no filter
+- With a committed filter, Backspace goes back to editing the text (it does not
+  discard it), and Space does the same — so you can narrow, act, and re-narrow
+  without leaving the screen. The hint line names whichever keys are live
 
 ![Node details screen](screenshots/RiCa_screen_20260730_194331.png)
 
@@ -1246,9 +1277,15 @@ Direct messaging:
 ![Message view](screenshots/RiCa_screen_20260730_194306.png)
 
 Delete behavior:
-- T-Deck and T-Lora Pager: Backspace triggers delete confirmation on selected conversation
-- Cardputer: Fn+Backspace triggers delete confirmation on selected conversation
-- Heltec touch build: long-press a conversation row for delete confirmation
+- Every keyboard build: D on the selected conversation opens a **Delete
+  conversation?** dialog naming the peer and warning that the message history
+  goes with it. Y or Enter confirms, N or the modal close key cancels, and the
+  dialog swallows every other key while it is up. D does nothing on the New DM
+  row, or while the message panel has focus
+- Heltec touch build: long-press a conversation row for 3 seconds to raise the
+  same dialog; tap (Y)es or (N)o, or tap outside it to cancel
+- Deleting removes the conversation and its stored history, and cannot be
+  undone. The list re-renders with the New DM row selected
 
 ## Help screen
 
@@ -1308,7 +1345,7 @@ Primary usage is keyboard.
 - Escape closes modals and exits chat focus mode
 - Space (or Fn+Enter) opens compose; Enter confirms selected actions and moves the cursor into the channel's messages,
   and Enter again opens Message Actions for the highlighted message
-- Fn+Backspace is the DM delete trigger
+- D is the DM delete trigger
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)
 

@@ -565,6 +565,8 @@ static lv_obj_t *s_dmNodePickerList = nullptr;
 static lv_obj_t *s_dmNodePickerTitle = nullptr;
 static lv_obj_t *s_dmNodePickerHint = nullptr;
 static lv_obj_t *s_dmNodePickerRows[MAX_NODES] = {};
+static lv_obj_t *s_dmDelBackdrop = nullptr;
+static lv_obj_t *s_dmDelModal = nullptr;
 // Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
 // Without it the picker built a button+label for every match — up to MAX_NODES
 // of them — and tore the whole lot down again on each arrow key, which is what
@@ -614,8 +616,10 @@ static uint32_t s_dmRenderedNodeId = 0;
 static int s_dmRenderedMsgCount = -1;
 static int s_dmRenderedUnreadTotal = -1;
 static bool s_dmMsgPanelFocused = false;
-static uint32_t s_dmDeletePendingNodeId = 0;
-static uint32_t s_dmDeleteConfirmUntilMs = 0;
+// The conversation the open delete prompt will remove. Held by node id, not by
+// list index: the prompt sits on the root screen and an arriving DM can rebuild
+// the list underneath it while the question is still on screen.
+static uint32_t s_dmDeleteTargetNodeId = 0;
 static char s_dmDeleteFlashMsg[64] = "";
 static uint32_t s_dmDeleteFlashUntilMs = 0;
 static uint32_t s_dmTouchPressStartMs = 0;
@@ -719,7 +723,13 @@ static int s_nodesSelected = -1;
 static constexpr int kNodesFilterMax = 24;
 static char s_nodesFilter[kNodesFilterMax + 1] = {};
 static int s_nodesFilterLen = 0;
+// Armed: the filter is applied to the list and the header shows its brackets.
 static bool s_nodesFilterOpen = false;
+// Capturing: typed characters go into the filter text. Split from the flag above
+// so Enter can commit a filter — leaving the rows narrowed while handing the
+// keyboard back to the list, where the navigation keys move the cursor and A
+// opens Actions instead of typing an "a".
+static bool s_nodesFilterEditing = false;
 // Node Actions modal: 6 actions arranged 2-per-row. Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
 static constexpr int kNodesActionCount = 6;
@@ -1484,6 +1494,7 @@ static void emojiPickerActivate(int idx);
 // Bubble chat helpers (defined further down, but also used by the DM renderer
 // so DMs can share the Bubbles style).
 static const char *chatStripPrefix(const char *line);
+static void chatInsertAckMarker(char *line, size_t lineCap, const char *marker);
 static void chatBubbleBeginRender(lv_obj_t *list);
 static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            const char *metaTag, const char *nameTag,
@@ -1534,7 +1545,7 @@ static void chatSenderLabel(uint32_t nodeId, char *out, size_t outLen) {
     liveNodeLabel(nodeId, out, outLen, false);
 }
 
-static bool dmDeleteConfirmActive(uint32_t nowMs);
+static void closeDmDeleteConfirm();
 static void dmRequestDeleteSelectedConversation();
 static void onDmConversationPressed(lv_event_t *e);
 static void onDmConversationPressState(lv_event_t *e);
@@ -10224,11 +10235,13 @@ static void applyFontSizeSelection(int size) {
     s_appliedFontSize = s_cfg.fontSize;
     if (changed) {
         persistConfigToPrefs();
-        // Re-render both message views so the new size takes effect immediately.
+        // Re-render every view that draws with this face so the new size takes
+        // effect immediately.
         s_lastRenderedChannel = -1;
         s_lastRenderedCount = -1;
         refreshChatView(true);
         refreshDmModal(true);
+        refreshLiveView(true);
     }
     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Font Size: %s%s",
              fontSizeName((uint8_t)size), changed ? "" : " (unchanged)");
@@ -14395,6 +14408,7 @@ static void closeSnrRssiChartModal() {
 
 static void closeDmModal() {
     closeDmNodePicker();
+    closeDmDeleteConfirm();
     lvObjDeleteSafe(s_dmModal);
     s_dmConvPanel = nullptr;
     s_dmConvList = nullptr;
@@ -14408,8 +14422,6 @@ static void closeDmModal() {
     s_dmRenderedMsgCount = -1;
     s_dmRenderedUnreadTotal = -1;
     s_dmMsgPanelFocused = false;
-    s_dmDeletePendingNodeId = 0;
-    s_dmDeleteConfirmUntilMs = 0;
     s_dmDeleteFlashMsg[0] = '\0';
     s_dmDeleteFlashUntilMs = 0;
     s_dmTouchPressStartMs = 0;
@@ -14459,6 +14471,7 @@ static void closeNodesModal() {
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
+    s_nodesFilterEditing = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
     s_nodesRenderStart = 0;
@@ -14515,6 +14528,7 @@ static void snapshotNodesForModal() {
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
+    s_nodesFilterEditing = false;
     s_nodesFilterLen = 0;
     s_nodesFilter[0] = '\0';
 
@@ -14621,6 +14635,8 @@ static void applyNodesFilterText(const char *text) {
         s_nodesFilterLen = 0;
         s_nodesFilter[0] = '\0';
     }
+    // The dialog returns finished text, so the filter arrives committed.
+    s_nodesFilterEditing = false;
 
     nodesApplyFilter();
     refreshNodesListRows();
@@ -15561,9 +15577,16 @@ static void refreshNodesHint() {
         // the list's legend up over a panel it no longer drives.
         lv_label_set_text_fmt(s_nodesHintLabel, "%s=Scroll  A=Actions  %s=List",
                               navKeys, modalCloseKeyLabel());
-    } else if (s_nodesFilterOpen) {
+    } else if (s_nodesFilterEditing) {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "Type=Filter  %s=Select  Enter=Info  Bksp=Edit/Exit  %s=Back",
+                              "Type=Filter  %s=Select  Enter=Done  Bksp=Edit/Exit  %s=Back",
+                              navKeys, modalCloseKeyLabel());
+    } else if (s_nodesFilterOpen) {
+        // Committed: the list is still filtered, but the shortcuts are live
+        // again. Naming Bksp is what tells the reader the filter is still
+        // editable rather than stuck.
+        lv_label_set_text_fmt(s_nodesHintLabel,
+                              "%s=Select  Enter=Info  A=Actions  Bksp=Edit  %s=Back",
                               navKeys, modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
@@ -17148,11 +17171,18 @@ static void refreshLiveView(bool force) {
         return;
     }
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-    const lv_font_t *liveBodyFont = &lv_font_montserrat_12;
-#else
-    const lv_font_t *liveBodyFont = &lv_font_montserrat_10;
-#endif
+    // The same face the chat and DM views draw with, so one Font Size setting
+    // governs every text surface rather than the feed keeping a size of its own.
+    // This was a fixed montserrat_10 (12 on the Pager), which ignored the
+    // setting entirely — and, being a raw Montserrat face rather than an
+    // emoji-enabled one, drew any emoji in a live line as a fallback box
+    // despite the text going through setLabelTextEmojiSafe() below.
+    //
+    // Only the feed rows scale. The header's filter chip and Tools button are
+    // fixed-size boxes (52x20, and a 92px chip sized to hold the longest filter
+    // name), so a larger face would spill out of them rather than move the
+    // layout with it.
+    const lv_font_t *liveBodyFont = scaledChatFont(kChannelChatFont);
 
     const Channel &ch = Channels.get(CHAN_LIVE);
     if (!force && s_lastRenderedLiveCount == ch.count && s_lastRenderedLiveScrollOff == ch.scrollOff) {
@@ -20302,14 +20332,6 @@ static DmConv *selectedDmConversation() {
 }
 
 static void activateDmSelection(bool allowCompose) {
-    if (s_dmSelection > 0 && dmDeleteConfirmActive(millis())) {
-        DmConv *selected = selectedDmConversation();
-        if (selected && selected->nodeId == s_dmDeletePendingNodeId) {
-            dmRequestDeleteSelectedConversation();
-            return;
-        }
-    }
-
     if (s_dmSelection == 0) {
         openDmNodePicker();
         return;
@@ -20327,25 +20349,13 @@ static void activateDmSelection(bool allowCompose) {
 }
 
 static const char *dmDeleteTriggerLabel() {
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    return "Fn+Bksp";
-#elif defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
-    return "Bksp";
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
     return "Long-press";
 #else
-    return "Sym+Bksp";
+    // Every keyboard build deletes with D, the same letter the Wi-Fi picker
+    // already uses for it (see openCfgWifiDeleteConfirm).
+    return "D";
 #endif
-}
-
-static bool dmDeleteConfirmActive(uint32_t nowMs) {
-    if (s_dmDeletePendingNodeId == 0) return false;
-    if ((int32_t)(nowMs - s_dmDeleteConfirmUntilMs) > 0) {
-        s_dmDeletePendingNodeId = 0;
-        s_dmDeleteConfirmUntilMs = 0;
-        return false;
-    }
-    return true;
 }
 
 static void dmDeleteSetFlash(const char *msg, uint32_t ttlMs = 2200) {
@@ -20355,47 +20365,165 @@ static void dmDeleteSetFlash(const char *msg, uint32_t ttlMs = 2200) {
     s_dmDeleteFlashUntilMs = millis() + ttlMs;
 }
 
-static bool dmDeleteTriggerKey(char k) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    LV_UNUSED(k);
-    return false;
-#elif defined(DEVICE_TDECK)
-    return (k == KEY_BACKSPACE_HOLD || k == KEY_BACKSPACE);
-#else
-    return (k == KEY_BACKSPACE_HOLD);
-#endif
+// ── Delete confirmation ──────────────────────────────────────────────────
+// Deleting drops the whole conversation and its stored history, which nothing
+// on the device can bring back, so it asks first — the same Y/N prompt shape
+// the WiFi picker uses (openCfgWifiDeleteConfirm). Y/Enter confirms, N/close
+// cancels, and the prompt consumes every other key while it is up.
+static void closeDmDeleteConfirm() {
+    if (lvObjValid(s_dmDelBackdrop)) {
+        lv_obj_del(s_dmDelBackdrop);
+    } else if (lvObjValid(s_dmDelModal)) {
+        lv_obj_del(s_dmDelModal);
+    }
+    s_dmDelBackdrop = nullptr;
+    s_dmDelModal = nullptr;
+    s_dmDeleteTargetNodeId = 0;
+}
+
+static void dmDeleteConfirmAccept() {
+    // Read before the close, which clears the target.
+    uint32_t nodeId = s_dmDeleteTargetNodeId;
+    closeDmDeleteConfirm();
+    if (nodeId == 0) return;
+
+    if (DMs.deleteConversation(nodeId)) {
+        dmDeleteSetFlash("Conversation deleted");
+        s_dmSelection = 0;
+        s_dmMsgPanelFocused = false;
+        s_dmRenderedConvCount = -1;
+        s_dmRenderedNodeId = 0;
+        s_dmRenderedMsgCount = -1;
+        s_dmRenderedUnreadTotal = -1;
+    } else {
+        dmDeleteSetFlash("Delete failed");
+    }
+    refreshDmModal(true);
+}
+
+static void dmDeleteConfirmReject() {
+    closeDmDeleteConfirm();
+    refreshDmModal(true);
+}
+
+static void onDmDelYesPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    dmDeleteConfirmAccept();
+}
+
+static void onDmDelNoPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    dmDeleteConfirmReject();
+}
+
+static void onDmDelBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_dmDelBackdrop) return;
+    dmDeleteConfirmReject();
+}
+
+static void openDmDeleteConfirm(uint32_t nodeId) {
+    if (!s_rootScreen || nodeId == 0) return;
+    if (s_dmDelModal || s_dmDelBackdrop) return;
+
+    s_dmDeleteTargetNodeId = nodeId;
+
+    char who[48];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 40;
+    if (modalW < 160) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
+    const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
+
+    s_dmDelBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_dmDelBackdrop, w, h);
+    lv_obj_align(s_dmDelBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_dmDelBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_dmDelBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_dmDelBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_dmDelBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_dmDelBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_dmDelBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_dmDelBackdrop, onDmDelBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_dmDelModal = lv_obj_create(s_dmDelBackdrop);
+    lv_obj_set_size(s_dmDelModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_dmDelModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_dmDelModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_dmDelModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_dmDelModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_dmDelModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_dmDelModal, 1, 0);
+    lv_obj_set_style_border_color(s_dmDelModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_dmDelModal, 10, 0);
+    lv_obj_set_style_pad_row(s_dmDelModal, 8, 0);
+    lv_obj_set_flex_flow(s_dmDelModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_dmDelModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_dmDelBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_dmDelModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, titleTextColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Delete conversation?");
+
+    lv_obj_t *body = lv_label_create(s_dmDelModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(body, bodyTextColor, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    // Names the peer and says what goes with it. The stored history is the part
+    // a list keystroke does not look like it can reach.
+    lv_label_set_text_fmt(body, "%s\nMessage history will be erased", who);
+
+    lv_obj_t *btnRow = lv_obj_create(s_dmDelModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 14, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeDmDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
+                           lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 32);
+        lv_obj_set_style_min_width(btn, 78, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+        return btn;
+    };
+    makeDmDelBtn(btnRow, "(N)o", noBtnBg, onDmDelNoPressed);
+    makeDmDelBtn(btnRow, "(Y)es", yesBtnBg, onDmDelYesPressed);
 }
 
 static void dmRequestDeleteSelectedConversation() {
     DmConv *selected = selectedDmConversation();
-    if (!selected) return;
-
-    uint32_t nodeId = selected->nodeId;
-    uint32_t now = millis();
-
-    if (dmDeleteConfirmActive(now) && s_dmDeletePendingNodeId == nodeId) {
-        bool ok = DMs.deleteConversation(nodeId);
-        s_dmDeletePendingNodeId = 0;
-        s_dmDeleteConfirmUntilMs = 0;
-        if (ok) {
-            dmDeleteSetFlash("Conversation deleted");
-            s_dmSelection = 0;
-            s_dmMsgPanelFocused = false;
-            s_dmRenderedConvCount = -1;
-            s_dmRenderedNodeId = 0;
-            s_dmRenderedMsgCount = -1;
-            s_dmRenderedUnreadTotal = -1;
-        } else {
-            dmDeleteSetFlash("Delete failed");
-        }
-        refreshDmModal(true);
-        return;
-    }
-
-    s_dmDeletePendingNodeId = nodeId;
-    s_dmDeleteConfirmUntilMs = now + 6000UL;
-    dmDeleteSetFlash("Confirm delete");
-    refreshDmModal(true);
+    if (!selected || selected->nodeId == 0) return;
+    openDmDeleteConfirm(selected->nodeId);
 }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
@@ -20443,16 +20571,8 @@ static void refreshDmPanelFocusStyles() {
 static void onDmConversationPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx > s_dmConvCount) return;
-    uint32_t selectedNodeId = 0;
-    if (idx > 0 && idx - 1 < s_dmConvCount) {
-        selectedNodeId = s_dmConvNodeIds[idx - 1];
-    }
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
-    if (selectedNodeId == 0 || selectedNodeId != s_dmDeletePendingNodeId) {
-        s_dmDeletePendingNodeId = 0;
-        s_dmDeleteConfirmUntilMs = 0;
-    }
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
     // Asked for, not performed. This handler runs on LV_EVENT_PRESSED — finger
     // still down — and refreshDmModal() rebuilds the list with lv_obj_clean(),
@@ -21007,12 +21127,6 @@ static void refreshDmModal(bool force) {
     }
 
     uint32_t now = millis();
-    bool hadDeletePending = (s_dmDeletePendingNodeId != 0);
-    bool hasDeletePending = dmDeleteConfirmActive(now);
-    if (hadDeletePending != hasDeletePending) {
-        force = true;
-    }
-
     if (s_dmDeleteFlashUntilMs != 0 && (int32_t)(now - s_dmDeleteFlashUntilMs) > 0) {
         s_dmDeleteFlashMsg[0] = '\0';
         s_dmDeleteFlashUntilMs = 0;
@@ -21291,9 +21405,15 @@ static void refreshDmModal(bool force) {
             lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
 
             uint16_t lineColor = dl->color;
+            const char *ackSuffix = nullptr;
             switch (dl->ack) {
                 case DmLine::ACKED:
                     lineColor = (s_cfg.uiMode == UI_MODE_LIGHT) ? (uint16_t)0x0320 : TFT_GREEN;
+                    // The same marker the classic channel view appends. Color
+                    // alone is the weaker signal of the two: it competes with
+                    // the per-node line colors, and a theme where green reads
+                    // close to the base text color loses it entirely.
+                    ackSuffix = " [ACK]";
                     break;
                 case DmLine::ACKED_RELAY:
                     lineColor = userMessageAccentColor565();
@@ -21312,7 +21432,14 @@ static void refreshDmModal(bool force) {
 
             lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
-            setLabelTextEmojiSafe(msg, dl->text);
+            if (ackSuffix) {
+                char acked[DM_LINE_LEN + 8];
+                snprintf(acked, sizeof(acked), "%s", dl->text);
+                chatInsertAckMarker(acked, sizeof(acked), ackSuffix);
+                setLabelTextEmojiSafe(msg, acked);
+            } else {
+                setLabelTextEmojiSafe(msg, dl->text);
+            }
         }
 
         if (autoScrollToLatest && lastMsgObj) {
@@ -21352,24 +21479,17 @@ static void refreshDmModal(bool force) {
     s_dmRenderedUnreadTotal = unreadTotal;
 
     if (s_dmHintLabel) {
-        if (s_dmDeletePendingNodeId != 0 && s_dmDeleteConfirmUntilMs != 0) {
-            uint32_t remainS = (uint32_t)((s_dmDeleteConfirmUntilMs - now + 999UL) / 1000UL);
-            if (remainS > 9) remainS = 9;
-            lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Delete pending: %s again to confirm (%lus)",
-                                  dmDeleteTriggerLabel(),
-                                  (unsigned long)remainS);
-        } else if (s_dmDeleteFlashMsg[0]) {
+        if (s_dmDeleteFlashMsg[0]) {
             lv_label_set_text(s_dmHintLabel, s_dmDeleteFlashMsg);
         } else {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
             lv_label_set_text(s_dmHintLabel, "");   // no static legend here
 #elif defined(DEVICE_TDECK)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
+                                  "J/K = Select   Space = Compose   Enter = Focus   D = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
             lv_label_set_text_fmt(s_dmHintLabel,
-                                  "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
+                                  "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Tap = Open   Long-press 3s = Delete"
@@ -21586,10 +21706,10 @@ static void openDmModal() {
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
 #elif defined(DEVICE_TDECK)
     lv_label_set_text_fmt(hint,
-                          "J/K = Select   Space = Compose   Enter = Focus   Bksp = Delete");
+                          "J/K = Select   Space = Compose   Enter = Focus   D = Delete");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text_fmt(hint,
-                          "Up/Down = Select   Space = Compose   Enter = Focus   Bksp = Delete");
+                          "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
     lv_label_set_text_fmt(hint,
                           "Tap = Open   Long-press 3s = Delete"
@@ -25585,6 +25705,15 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+        if (s_dmDelModal) {
+            if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
+                dmDeleteConfirmAccept();
+            } else if (k == 'n' || k == 'N' || isBackspaceKey(k) || isModalCloseKey(k)) {
+                dmDeleteConfirmReject();
+            }
+            continue;
+        }
+
         if (s_dmModal) {
             if (s_composeModal) {
                 switch (k) {
@@ -25681,40 +25810,19 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            // T-Deck: when a conversation is selected, backspace is a delete
-            // action and should not be interpreted as focus/navigation behavior.
+            // Backspace steps out of the message pane; from the conversation
+            // list it falls through to the close handling below. It keeps the
+            // selection now that delete lives on D behind its own prompt —
+            // there is no longer an armed state a stray Backspace could trip.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
-            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_dmSelection > 0) {
-                if (s_dmMsgPanelFocused) {
-                    // Move focus out of the message pane to the "New DM" row
-                    // (index 0) rather than the previously-selected conversation
-                    // so a follow-up backspace closes the DM modal instead of
-                    // arming the delete-conversation confirmation.
-                    s_dmMsgPanelFocused = false;
-                    s_dmSelection = 0;
-                    s_dmDeletePendingNodeId = 0;
-                    s_dmDeleteConfirmUntilMs = 0;
-                    refreshDmModal(true);
-                } else {
-                    dmRequestDeleteSelectedConversation();
-                }
+            if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_dmMsgPanelFocused) {
+                s_dmMsgPanelFocused = false;
+                refreshDmPanelFocusStyles();
                 continue;
             }
 #endif
 
-            if (dmDeleteTriggerKey(k) && s_dmSelection > 0) {
-                dmRequestDeleteSelectedConversation();
-                continue;
-            }
-
             if (isModalCloseKey(k)) {
-                if (dmDeleteConfirmActive(millis())) {
-                    s_dmDeletePendingNodeId = 0;
-                    s_dmDeleteConfirmUntilMs = 0;
-                    dmDeleteSetFlash("Delete canceled");
-                    refreshDmModal(true);
-                    continue;
-                }
                 closeDmModal();
                 continue;
             }
@@ -25722,6 +25830,14 @@ static void pumpKeyboardInput() {
             if (k == KEY_ROLLER && s_dmSelection > 0) {
                 s_dmMsgPanelFocused = !s_dmMsgPanelFocused;
                 refreshDmPanelFocusStyles();
+                continue;
+            }
+
+            if ((k == 'd' || k == 'D') && s_dmSelection > 0 && !s_dmMsgPanelFocused) {
+                // Raises the confirmation prompt, which answers for itself from
+                // here (openDmDeleteConfirm). Inert on the "New DM" row and
+                // while the message pane holds focus.
+                dmRequestDeleteSelectedConversation();
                 continue;
             }
 
@@ -25764,8 +25880,6 @@ static void pumpKeyboardInput() {
                     if (next < 0) next = 0;
                     if (next >= totalRows) next = totalRows - 1;
                     if (next != s_dmSelection) {
-                        s_dmDeletePendingNodeId = 0;
-                        s_dmDeleteConfirmUntilMs = 0;
                         s_dmMsgPanelFocused = false;
                         s_dmSelection = next;
                         refreshDmModal(true);
@@ -25891,10 +26005,16 @@ static void pumpKeyboardInput() {
             }
 
             if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_nodesFilterOpen) {
+                // Reopens a committed filter rather than discarding it: a typo
+                // stays one keystroke from being fixed, and the unwind chain
+                // (edit down to empty, disarm, then Back) is the one this screen
+                // already had.
+                s_nodesFilterEditing = true;
                 if (s_nodesFilterLen > 0) {
                     s_nodesFilter[--s_nodesFilterLen] = '\0';
                 } else {
                     s_nodesFilterOpen = false;
+                    s_nodesFilterEditing = false;
                 }
                 nodesApplyFilter();
                 refreshNodesListRows();
@@ -25906,9 +26026,11 @@ static void pumpKeyboardInput() {
             // The filter is entered explicitly with the spacebar; the space
             // itself is never added to the filter text. Letters no longer
             // start the filter on their own — they only append once it's open.
+            // Space is also the way back into a filter Enter has committed.
             if (k == ' ') {
-                if (!s_nodesFilterOpen) {
+                if (!s_nodesFilterOpen || !s_nodesFilterEditing) {
                     s_nodesFilterOpen = true;
+                    s_nodesFilterEditing = true;
                     nodesApplyFilter();
                     refreshNodesListRows();
                     refreshNodesListSelection();
@@ -25917,7 +26039,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
 
-            if (k > 0x20 && k < 0x7F && s_nodesFilterOpen) {
+            if (k > 0x20 && k < 0x7F && s_nodesFilterEditing) {
                 if (s_nodesFilterLen < kNodesFilterMax) {
                     s_nodesFilter[s_nodesFilterLen++] = k;
                     s_nodesFilter[s_nodesFilterLen] = '\0';
@@ -25930,8 +26052,10 @@ static void pumpKeyboardInput() {
             }
 
             // Actions moved off Enter and onto A when Enter became "focus the
-            // details". Guarded on the filter: with it open, letters are text.
-            if (!s_nodesFilterOpen && (k == 'a' || k == 'A')) {
+            // details". Guarded on the filter only while it is being typed into:
+            // once Enter commits it, the rows stay narrowed but A is a shortcut
+            // again rather than a character.
+            if (!s_nodesFilterEditing && (k == 'a' || k == 'A')) {
                 openNodesActionMenu();
                 continue;
             }
@@ -25949,6 +26073,15 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
+                // While the filter is being typed into, a confirm gesture means
+                // "done typing" and nothing else: the rows keep the filter and
+                // the keyboard goes back to the list. A second Enter then
+                // focuses the details as usual.
+                if (s_nodesFilterEditing) {
+                    s_nodesFilterEditing = false;
+                    refreshNodesHint();
+                    continue;
+                }
                 // Enter hands the keys to the details; the Pager's wheel click
                 // toggles, matching how it swaps panels on Config and DM.
                 const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
@@ -26924,15 +27057,16 @@ static void onWebCfgSaved() {
 
     // Font size is not part of the theme, so a theme rebuild does not cover it,
     // and web config no longer reboots for it — which leaves this as the only
-    // thing that makes the change visible. Same three steps the on-device picker
+    // thing that makes the change visible. Same steps the on-device picker
     // takes: clear the render cache so the refresh is not skipped as a no-op,
-    // then rebuild both message views.
+    // then rebuild every view that draws with this face.
     s_cfg.fontSize = (uint8_t)constrain((int)s_cfg.fontSize, 0, FONT_SIZE_MAX);
     if (prevFontSize != s_cfg.fontSize && s_rootScreen) {
         s_lastRenderedChannel = -1;
         s_lastRenderedCount = -1;
         refreshChatView(true);
         refreshDmModal(true);
+        refreshLiveView(true);
     }
     s_appliedFontSize = s_cfg.fontSize;
 }
@@ -30949,6 +31083,43 @@ static void chatParsePrefix(const char *line,
     }
 }
 
+// Places the classic style's ACK marker directly after the clock, where it
+// reads as part of the line's own metadata ("12:34 [ACK] [Name] body") instead
+// of as a word appended to whatever the sender happened to end on. On a message
+// long enough to wrap, the end of the line is also the worst place for it: it
+// lands alone on the last row, far from the message it belongs to.
+//
+// Same clock scan chatParsePrefix() uses, widened to accept the "--:--"
+// placeholder liveBuildPrefix() writes before the clock is set — that line has
+// a prefix like any other, and the marker should not move because the time is
+// unknown. A line with no clock at all (the bare "! TX failed" notices) has
+// nothing to sit beside, so the marker goes to the end there.
+static void chatInsertAckMarker(char *line, size_t lineCap, const char *marker) {
+    if (!line || !marker || !marker[0]) return;
+    const size_t len = strlen(line);
+    const size_t mlen = strlen(marker);
+    if (len + mlen + 1 > lineCap) return;
+
+    auto clockDigit = [](char c) { return (bool)(isdigit((unsigned char)c) || c == '-'); };
+
+    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    char *at = nullptr;
+    for (char *p = line; *p && (int)(p - line) < kWindow; p++) {
+        if (clockDigit(p[0]) && clockDigit(p[1]) && p[2] == ':'
+            && clockDigit(p[3]) && clockDigit(p[4])) {
+            at = p + 5;
+            break;
+        }
+    }
+    if (!at) {
+        memcpy(line + len, marker, mlen + 1);
+        return;
+    }
+    // +1 moves the terminator along with the tail.
+    memmove(at + mlen, at, len - (size_t)(at - line) + 1);
+    memcpy(at, marker, mlen);
+}
+
 // Joins the icon and clock into the bubble's leading meta field, in the same
 // order classic shows them. Either half may be absent.
 static void chatComposeBubbleMeta(const char *icon, const char *clock,
@@ -31613,7 +31784,16 @@ static void refreshChatView(bool force) {
                             ackSuffix = " [ACK]";
                             break;
                         case DisplayLine::ACKED_RELAY:
+                            // Marked, not just tinted. Channel text is broadcast,
+                            // so expireAcks() settles nearly every sent message
+                            // here rather than at ACKED — and the accent color
+                            // this assigns is the one an own message already
+                            // carries with chat colors on, which left the whole
+                            // state invisible in this style. The bubble renderer
+                            // has always tagged both states "ME (ACK)"; the
+                            // green above still separates a hard ACK from this.
                             textColor565 = userMessageAccentColor565();
+                            ackSuffix = " [ACK]";
                             break;
                         case DisplayLine::NAKED:
                         case DisplayLine::TX_FAILED:
@@ -31625,8 +31805,8 @@ static void refreshChatView(bool force) {
                 }
 
                 lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
-                if (ackSuffix && ml < sizeof(merged) - 1) {
-                    snprintf(merged + ml, sizeof(merged) - ml, "%s", ackSuffix);
+                if (ackSuffix) {
+                    chatInsertAckMarker(merged, sizeof(merged), ackSuffix);
                 }
                 setLabelTextEmojiSafe(msg, merged);
 
