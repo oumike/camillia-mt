@@ -1195,6 +1195,7 @@ Nodes shows discovered nodes and detail fields, including map position details.
   to be Enter, which now focuses the details.) While you are typing a filter,
   letters are filter text; press Enter to commit the filter and A works again on
   the narrowed list
+- **Locate** in that menu shows where the node is — see [Locate](#locate)
 - On the T-Lora Pager the wheel click toggles between the two panels, the same
   way it swaps panels on Config and DM
 - Close with the device close key
@@ -1240,6 +1241,68 @@ abreast.
 
 This section describes every build except the Cardputer, which keeps the older
 single-block detail text described above.
+
+### Locate
+
+The node actions menu has a **(L)ocate** row (just **Locate** on Heltec, which
+has no keyboard to name a shortcut for). It opens a plain map of the US state the
+node's last reported position falls in, with a pin on that position, the state's
+name, and the coordinates. That is deliberately all it shows — the detailed map,
+with tiles and zoom, lives in Web Config, which has a browser to fetch it with.
+
+- **A node with no position greys the row out.** It stays visible in its usual
+  place rather than disappearing, so the menu does not reshuffle from node to
+  node. Pressing L or Enter on it does nothing
+- **Nodes outside the US** keep the row active. There is no state map to draw, so
+  the modal shows the coordinates and says so rather than pretending to fail
+- Close it with the device close key, Enter, Space, by tapping outside it, or
+  with the Close button on Heltec
+- **Not available on the Cardputer.** That board has no PSRAM, and decoding a map
+  image into a full-panel object is the kind of allocation it has no room for —
+  the same reason Message Actions is absent there. The row is not shown at all
+
+The state maps themselves are PNG files the device reads from
+`/camillia/state_maps/<CODE>.png`. Until that folder is populated the modal
+reports **"map not on card"** alongside the state name and coordinates, so a
+device without them still answers the question, just without the picture.
+
+**See [MAPS.md](MAPS.md)** for the whole picture: getting maps onto the device,
+where the files live, clearing them, and what to check when something is
+missing.
+
+#### Getting the maps onto the device
+
+Covered in full in **[MAPS.md](MAPS.md)**; the short version follows.
+
+This firmware has no TLS client, so it cannot fetch maps itself. The browser
+does it instead, from **Web Config &rarr; Utilities &rarr; Maps Download**. That
+section lists the states your known nodes are actually in and which of them are
+already cached, so only the maps you have a use for get downloaded.
+
+- The section is **not shown at all** on a device with no storage — no card slot,
+  or a slot with no card in it. There is nothing to save to, so there is nothing
+  to offer
+- It is a **full Web Config** feature, which means a device joined to your
+  network. The access-point page has no Utilities tab, and the browser needs
+  internet to reach the tiles in any case
+- Downloading writes to the card over the same SPI bus the radio uses, so the
+  mesh will miss traffic while it runs
+- Tiles come from OpenStreetMap. Each state is assembled from a handful of them
+  (typically four to nine) at the lowest zoom that still carries the detail the
+  saved image keeps, so a run fetches tens of tiles rather than hundreds
+- The button reports progress per state and per tile, and saves each map as it
+  finishes, so stopping partway leaves the states already done on the card
+- A map cached at an older resolution is listed as such and offered for refresh.
+  It still draws in the meantime — just less sharply — so raising the map size in
+  a firmware update never leaves a device without maps, and you never have to
+  clear the cache to get the better ones
+
+**Clear Maps** sits with the other destructive actions in *Danger Zone*, beside
+the Clear Nodes buttons, and appears on the same terms as Maps Download. It
+deletes every cached state map and nothing else — no node, message or config
+data, and no other file on the card, not even one sitting in the same folder,
+because it removes the maps it knows about by name rather than sweeping the
+directory. It reports how many it removed.
 
 ### Filtering nodes
 

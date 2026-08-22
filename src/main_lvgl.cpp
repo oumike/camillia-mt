@@ -52,6 +52,7 @@
 #include <esp_partition.h>
 #include <esp_ota_ops.h>
 #include "storage.h"
+#include "state_maps.h"
 #include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #include <AudioBoard.h>
@@ -730,18 +731,49 @@ static bool s_nodesFilterOpen = false;
 // keyboard back to the list, where the navigation keys move the cursor and A
 // opens Actions instead of typing an "a".
 static bool s_nodesFilterEditing = false;
-// Node Actions modal: 6 actions arranged 2-per-row. Each entry has a single-key
+// Locate is compiled out on the Cardputer, for the same reason Message Actions
+// is (see HAS_MESSAGE_ACTIONS below): no PSRAM, and decoding a PNG into a
+// full-panel image object is exactly the allocation that board has no room to
+// make — it is the one whose internal DRAM budget issue #49 is about. The row
+// is absent there rather than permanently greyed: a control that can never be
+// used on this hardware is not a disabled control, it is clutter.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_NODE_LOCATE 0
+#else
+#define HAS_NODE_LOCATE 1
+#endif
+
+// Node Actions modal: 7 actions arranged 2-per-row (6 without Locate). Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
+#if HAS_NODE_LOCATE
+static constexpr int kNodesActionCount = 7;
+#else
 static constexpr int kNodesActionCount = 6;
+#endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
 // Action ordering (also referenced by executeNodesActionSelection):
 //   0=Traceroute, 1=Send DM, 2=Favorite toggle, 3=Request Info,
-//   4=Request Position, 5=Ignore toggle.
+//   4=Request Position, 5=Ignore toggle, 6=Locate.
 static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
-    'T', 'D', 'F', 'I', 'P', 'G'
+    'T', 'D', 'F', 'I', 'P', 'G',
+#if HAS_NODE_LOCATE
+    'L',
+#endif
 };
+#if HAS_NODE_LOCATE
+// Named because three places have to agree on which row Locate is: the disabled
+// styling, the shortcut key, and the activate path.
+static constexpr int kNodesActionLocate = 6;
+#endif
+#if HAS_NODE_LOCATE
+// Locate needs a position to show. The row is built either way — a menu whose
+// contents move around depending on the node is harder to learn than one with a
+// greyed row in a fixed place — so the state is carried here and consulted by
+// the styling, the shortcut, and the activate path alike.
+static bool s_nodesActionLocateEnabled = false;
+#endif
 
 // The six reactions Message Actions offers on a chat message. Deliberately the
 // same set, in the same order, as CHAT_TAPS in web_config.cpp — a reaction
@@ -782,7 +814,9 @@ static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTa
 // grid come out even — Reply plus five actions is three full rows, where seven
 // buttons left a half-empty row of padding under the menu. The Nodes screen
 // still offers it.
-static constexpr uint8_t kMsgActionNodeMap[] = { 0, 1, 3, 4, 5 };   // skips 2 = Favorite
+// Skips 2 = Favorite, and 6 = Locate: both are properties of the node rather
+// than of the message, and message mode is already the taller of the two menus.
+static constexpr uint8_t kMsgActionNodeMap[] = { 0, 1, 3, 4, 5 };
 static constexpr int kMsgActionNodeCount =
     (int)(sizeof(kMsgActionNodeMap) / sizeof(kMsgActionNodeMap[0]));
 static constexpr int kMsgActionMoreIdx  = kTapbackTrayCount;        // 6
@@ -809,6 +843,18 @@ static inline int activeActionCount() {
 }
 static inline const char *activeActionShortcuts() {
     return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
+}
+
+// Locate is the only row that can be unavailable, and only in node mode —
+// message mode's action map does not carry it.
+static inline bool nodesActionRowDisabled(int idx) {
+#if HAS_NODE_LOCATE
+    if (s_nodesActionMsgMode) return false;
+    return idx == kNodesActionLocate && !s_nodesActionLocateEnabled;
+#else
+    LV_UNUSED(idx);
+    return false;
+#endif
 }
 
 // Channel Actions modal: overlay opened with (A) from the main screen. Acts on
@@ -1014,7 +1060,19 @@ static int s_stateMapBootstrapDownloaded = 0;
 static int s_stateMapBootstrapFailed = 0;
 static uint32_t s_stateMapOnDemandLastTryMs = 0;
 static char s_stateMapOnDemandLastCode[3] = "";
-static constexpr bool kStateMapsEnabled = false;
+// Cached state maps are drawn by the Locate modal.
+static constexpr bool kStateMapsEnabled = true;
+// ...but this device cannot *fetch* them. nodesDownloadStateMap() is a stub
+// returning false: its HTTPS downloads went when WiFiClientSecure was dropped
+// from the firmware, and the staticmap host they targeted no longer resolves.
+// Maps arrive by upload from web config instead (POST /state-map-upload).
+//
+// So everything downstream of "the cache is incomplete, go and get it" has to
+// stay switched off. Left on, an incomplete cache would make every boot flip
+// WiFi modes, run the connect, and fail fifty downloads that cannot succeed —
+// and the stale-cache sweep below would recursively delete maps the user put
+// there by hand, which nothing on the device can put back.
+static constexpr bool kStateMapsCanDownload = false;
 static constexpr uint32_t kRuntimeTlsMinInternalFree = 70000;
 static constexpr uint32_t kRuntimeTlsMinLargestBlock = 52000;
 
@@ -1176,6 +1234,19 @@ static int s_seenHead = 0;
 
 // Count of packets we have relayed onto the mesh this boot (managed flood).
 static uint32_t s_rebroadcastCount = 0;
+
+#if LV_USE_LOG
+// LVGL's warnings, on the same wire as everything else. Without this they are
+// discarded, and a failed image decode looks identical to a blank image.
+static void lvglLogToSerial(lv_log_level_t level, const char *buf) {
+    if (!buf) return;
+    const char *tag = (level >= LV_LOG_LEVEL_ERROR) ? "ERROR"
+                    : (level >= LV_LOG_LEVEL_WARN)  ? "warn" : "info";
+    Serial.printf("[lvgl:%s] %s", tag, buf);
+    size_t n = strlen(buf);
+    if (n == 0 || buf[n - 1] != '\n') Serial.println();
+}
+#endif
 
 static inline bool isBackspaceKey(char k) {
     return k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD;
@@ -1581,6 +1652,9 @@ static void onNodesActionRowPressed(lv_event_t *e);
 static void openNodesActionMenu();
 static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode = false,
                                    uint32_t packetId = 0);
+// Defined down with the action menu, but the Locate modal above it wants the
+// same name-for-a-node rule (long name, short name on the narrow panel, else id).
+static void nodesActionTitleLabel(uint32_t nodeId, char *out, size_t outLen);
 // Message Actions: the same modal with the tapback/Reply rows, acting on a chat
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
@@ -1603,6 +1677,10 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut = null
 static bool nodesSnapshotContains(uint32_t nodeId);
 static const NodeEntry *currentNodesSelection();
 static void refreshNodesMap(const NodeEntry *node);
+#if HAS_NODE_LOCATE
+static void openNodeLocateModal(uint32_t nodeId);
+static void closeNodeLocateModal();
+#endif
 static void onWebCfgSaved();
 static bool captureWebScreenshotPng(const char *outPath);
 static bool pollMeshRx();
@@ -14440,6 +14518,11 @@ static void closeDmModal() {
 static void closeNodesModal() {
     closeNodesFilterDialog();
     closeNodesActionMenu();
+#if HAS_NODE_LOCATE
+    // Parented to the root screen, so closing the screen it was opened from
+    // would otherwise strand it with nothing behind it.
+    closeNodeLocateModal();
+#endif
     lvObjDeleteSafe(s_nodesModal);
     nodesPanelWifiRestore();
     s_nodesMapSelectionNodeId = 0;
@@ -14755,14 +14838,14 @@ static bool nodesSnapshotContains(uint32_t nodeId) {
 }
 
 static bool nodesPanelCanDownloadTiles() {
-    if (!kStateMapsEnabled) return false;
+    if (!kStateMapsCanDownload) return false;
     if (WiFi.status() != WL_CONNECTED) return false;
     wifi_mode_t mode = WiFi.getMode();
     return mode != WIFI_AP;
 }
 
 static void nodesPanelWifiEnter() {
-    if (!kStateMapsEnabled) return;
+    if (!kStateMapsCanDownload) return;
     if (s_nodesWifiSessionActive || webCfgRunning()) return;
 
     s_nodesWifiSessionActive = true;
@@ -14897,12 +14980,27 @@ static lv_fs_res_t nodesMapFsSeekCb(lv_fs_drv_t *drv, void *file_p,
     if (!file_p) return LV_FS_RES_INV_PARAM;
     File *f = (File *)file_p;
 
-    size_t base = 0;
-    if (whence == LV_FS_SEEK_CUR) base = f->position();
-    else if (whence == LV_FS_SEEK_END) base = f->size();
-
-    size_t target = base + (size_t)pos;
-    if (!f->seek((uint32_t)target)) return LV_FS_RES_FS_ERR;
+    // Hand the whence straight to Arduino rather than resolving it here. The
+    // arithmetic version this replaced turned SEEK_END into an absolute
+    // seek(size) — a seek to exactly EOF, which the SD backend can refuse. That
+    // is precisely where lodepng_filesize() lands (lv_fs_seek(f, 0, SEEK_END)
+    // followed by lv_fs_tell), and its failure makes lodepng_load_file() give up
+    // with error 78. The image then draws nothing at all, with no diagnostic:
+    // header reads keep working because lv_image_decoder_get_info() only ever
+    // calls lv_fs_read(), never a seek.
+    bool ok;
+    switch (whence) {
+        case LV_FS_SEEK_SET: ok = f->seek((uint32_t)pos, SeekSet); break;
+        case LV_FS_SEEK_CUR: ok = f->seek((uint32_t)pos, SeekCur); break;
+        case LV_FS_SEEK_END: ok = f->seek((uint32_t)pos, SeekEnd); break;
+        default: return LV_FS_RES_INV_PARAM;
+    }
+    if (!ok) {
+        // Landing on EOF is legitimate and is what the size probe above wants;
+        // some backends report the seek itself as a failure even so.
+        if (f->position() == f->size()) return LV_FS_RES_OK;
+        return LV_FS_RES_FS_ERR;
+    }
     return LV_FS_RES_OK;
 }
 
@@ -14943,90 +15041,6 @@ static bool nodesMapEnsureDir(const char *path) {
 #endif
 }
 
-struct UsStateMapSpec {
-    const char *code;
-    float latMin;
-    float latMax;
-    float lonMin;
-    float lonMax;
-};
-
-static constexpr UsStateMapSpec kUsStateMaps[] = {
-    {"AL", 30.1f, 35.1f, -88.5f, -84.9f}, {"AK", 51.2f, 71.5f, -170.0f, -129.9f},
-    {"AZ", 31.3f, 37.0f, -114.9f, -109.0f}, {"AR", 33.0f, 36.5f, -94.6f, -89.6f},
-    {"CA", 32.5f, 42.1f, -124.5f, -114.1f}, {"CO", 37.0f, 41.0f, -109.1f, -102.0f},
-    {"CT", 40.9f, 42.1f, -73.8f, -71.8f}, {"DE", 38.4f, 39.9f, -75.8f, -75.0f},
-    {"FL", 24.4f, 31.1f, -87.7f, -80.0f}, {"GA", 30.3f, 35.0f, -85.6f, -80.8f},
-    {"HI", 18.9f, 22.3f, -160.5f, -154.8f}, {"ID", 41.9f, 49.1f, -117.3f, -111.0f},
-    {"IL", 36.9f, 42.5f, -91.6f, -87.0f}, {"IN", 37.8f, 41.8f, -88.1f, -84.8f},
-    {"IA", 40.3f, 43.6f, -96.7f, -90.1f}, {"KS", 37.0f, 40.1f, -102.1f, -94.6f},
-    {"KY", 36.5f, 39.2f, -89.7f, -82.9f}, {"LA", 28.9f, 33.1f, -94.1f, -88.8f},
-    {"ME", 43.0f, 47.5f, -71.2f, -66.9f}, {"MD", 37.9f, 39.8f, -79.6f, -75.0f},
-    {"MA", 41.2f, 42.9f, -73.6f, -69.9f}, {"MI", 41.7f, 48.3f, -90.5f, -82.1f},
-    {"MN", 43.5f, 49.4f, -97.3f, -89.5f}, {"MS", 30.1f, 35.0f, -91.7f, -88.1f},
-    {"MO", 35.9f, 40.7f, -95.9f, -89.1f}, {"MT", 44.3f, 49.1f, -116.1f, -104.0f},
-    {"NE", 39.9f, 43.1f, -104.1f, -95.3f}, {"NV", 35.0f, 42.1f, -120.1f, -114.0f},
-    {"NH", 42.7f, 45.4f, -72.6f, -70.6f}, {"NJ", 38.9f, 41.4f, -75.6f, -73.9f},
-    {"NM", 31.3f, 37.0f, -109.1f, -103.0f}, {"NY", 40.4f, 45.1f, -79.8f, -71.8f},
-    {"NC", 33.8f, 36.7f, -84.4f, -75.4f}, {"ND", 45.9f, 49.1f, -104.1f, -96.5f},
-    {"OH", 38.4f, 42.3f, -84.9f, -80.5f}, {"OK", 33.6f, 37.1f, -103.0f, -94.4f},
-    {"OR", 41.9f, 46.3f, -124.7f, -116.5f}, {"PA", 39.7f, 42.5f, -80.6f, -74.7f},
-    {"RI", 41.1f, 42.1f, -71.9f, -71.1f}, {"SC", 32.0f, 35.2f, -83.4f, -78.5f},
-    {"SD", 42.5f, 45.9f, -104.1f, -96.4f}, {"TN", 34.9f, 36.7f, -90.4f, -81.6f},
-    {"TX", 25.8f, 36.6f, -106.7f, -93.5f}, {"UT", 37.0f, 42.1f, -114.1f, -109.0f},
-    {"VT", 42.7f, 45.1f, -73.5f, -71.5f}, {"VA", 36.5f, 39.5f, -83.7f, -75.2f},
-    {"WA", 45.5f, 49.1f, -124.9f, -116.9f}, {"WV", 37.2f, 40.7f, -82.7f, -77.7f},
-    {"WI", 42.4f, 47.3f, -92.9f, -86.8f}, {"WY", 41.0f, 45.1f, -111.1f, -104.0f},
-};
-
-static constexpr int kUsStateMapCount =
-    (int)(sizeof(kUsStateMaps) / sizeof(kUsStateMaps[0]));
-static constexpr int kStateMapImageW = 240;
-static constexpr int kStateMapImageH = 160;
-static constexpr const char *kStateMapCacheVersion = "v2";
-static constexpr const char *kStateMapMarkerPath = "/camillia/state_maps/state_maps.complete";
-static constexpr const char *kStateMapLegacyMarkerPath = "/camillia/state_maps/.complete";
-
-static String nodesStateMapPath(const char *stateCode) {
-    String p = "/camillia/state_maps/";
-    p += stateCode;
-    p += ".png";
-    return p;
-}
-
-static String nodesStateMapMetaPath(const char *stateCode) {
-    String p = "/camillia/state_maps/";
-    p += stateCode;
-    p += ".meta";
-    return p;
-}
-
-static bool nodesFileLooksLikePng(const char *path) {
-#if !HAS_FILE_STORAGE
-    LV_UNUSED(path);
-    return false;
-#else
-    if (!path || !path[0]) return false;
-    File f = storageFs().open(path, FILE_READ);
-    if (!f) return false;
-
-    if (f.size() < 64) {
-        f.close();
-        return false;
-    }
-
-    uint8_t hdr[24] = {0};
-    size_t n = f.read(hdr, sizeof(hdr));
-    f.close();
-    if (n != sizeof(hdr)) return false;
-
-    static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
-    if (memcmp(hdr, kPngSig, sizeof(kPngSig)) != 0) return false;
-    // Ensure first chunk type is IHDR.
-    return hdr[12] == 'I' && hdr[13] == 'H' && hdr[14] == 'D' && hdr[15] == 'R';
-#endif
-}
-
 static bool nodesStateMapMarkerMatchesVersion() {
 #if !HAS_FILE_STORAGE
     return false;
@@ -15044,6 +15058,9 @@ static bool nodesStateMapMarkerMatchesVersion() {
 
 static void nodesResetStateMapCacheIfStale() {
 #if HAS_FILE_STORAGE
+    // Only ever correct for a cache this device downloaded itself. Uploaded maps
+    // carry no version, are not replaceable from here, and must never be swept.
+    if (!kStateMapsCanDownload) return;
     if (!sdBegin()) return;
     bool hasCurrentMarker = storageFs().exists(kStateMapMarkerPath);
     bool hasLegacyMarker = storageFs().exists(kStateMapLegacyMarkerPath);
@@ -15058,68 +15075,6 @@ static void nodesResetStateMapCacheIfStale() {
 #endif
 }
 
-static bool nodesWriteStateMapMeta(const char *stateCode,
-                                   float latMin, float latMax,
-                                   float lonMin, float lonMax) {
-#if !HAS_FILE_STORAGE
-    LV_UNUSED(stateCode);
-    LV_UNUSED(latMin);
-    LV_UNUSED(latMax);
-    LV_UNUSED(lonMin);
-    LV_UNUSED(lonMax);
-    return false;
-#else
-    String p = nodesStateMapMetaPath(stateCode);
-    if (storageFs().exists(p.c_str())) storageFs().remove(p.c_str());
-    File f = storageFs().open(p.c_str(), FILE_WRITE);
-    if (!f) return false;
-    f.printf("%.6f,%.6f,%.6f,%.6f\n", (double)latMin, (double)latMax, (double)lonMin, (double)lonMax);
-    f.close();
-    return true;
-#endif
-}
-
-static bool nodesReadStateMapMeta(const char *stateCode,
-                                  float &latMin, float &latMax,
-                                  float &lonMin, float &lonMax) {
-#if !HAS_FILE_STORAGE
-    LV_UNUSED(stateCode);
-    LV_UNUSED(latMin);
-    LV_UNUSED(latMax);
-    LV_UNUSED(lonMin);
-    LV_UNUSED(lonMax);
-    return false;
-#else
-    String p = nodesStateMapMetaPath(stateCode);
-    File f = storageFs().open(p.c_str(), FILE_READ);
-    if (!f) return false;
-    String line = f.readStringUntil('\n');
-    f.close();
-
-    double a = 0.0, b = 0.0, c = 0.0, d = 0.0;
-    if (sscanf(line.c_str(), "%lf,%lf,%lf,%lf", &a, &b, &c, &d) != 4) return false;
-    latMin = (float)a;
-    latMax = (float)b;
-    lonMin = (float)c;
-    lonMax = (float)d;
-    return true;
-#endif
-}
-
-static const UsStateMapSpec *nodesStateForCoords(float lat, float lon) {
-    const UsStateMapSpec *best = nullptr;
-    float bestArea = 1e9f;
-    for (int i = 0; i < kUsStateMapCount; i++) {
-        const UsStateMapSpec &s = kUsStateMaps[i];
-        if (lat < s.latMin || lat > s.latMax || lon < s.lonMin || lon > s.lonMax) continue;
-        float area = (s.latMax - s.latMin) * (s.lonMax - s.lonMin);
-        if (!best || area < bestArea) {
-            best = &s;
-            bestArea = area;
-        }
-    }
-    return best;
-}
 
 static bool nodesStateMapCacheComplete() {
 #if !HAS_FILE_STORAGE
@@ -15139,11 +15094,12 @@ static bool nodesStateMapCacheComplete() {
 static bool nodesDownloadStateMap(const UsStateMapSpec &s,
                                   bool staticHostResolvable,
                                   bool tileHostResolvable) {
-    // On-device state maps are disabled (kStateMapsEnabled == false) and the
-    // Nodes map panel is never built, so this never ran. Its HTTPS tile /
-    // staticmap downloads were the last TLS consumer in the firmware; they are
-    // removed so WiFiClientSecure can be dropped entirely. Maps live in the web
-    // config UI, which the browser renders and fetches tiles for.
+    // Permanently false, and every caller is gated on kStateMapsCanDownload so
+    // none of them reach here. Its HTTPS tile / staticmap downloads were the
+    // last TLS consumer in the firmware and were removed so WiFiClientSecure
+    // could be dropped entirely; the staticmap host they used no longer resolves
+    // either. Maps now arrive by upload from web config, which has a browser to
+    // fetch tiles with (POST /state-map-upload).
     LV_UNUSED(s);
     LV_UNUSED(staticHostResolvable);
     LV_UNUSED(tileHostResolvable);
@@ -15154,7 +15110,12 @@ static void bootstrapStateMapsIfMissing() {
     if (s_stateMapCacheReady) return;
     if (s_stateMapBootstrapDone) return;
 
-    if (!kStateMapsEnabled) {
+    if (!kStateMapsEnabled || !kStateMapsCanDownload) {
+        // Nothing to bootstrap: maps are uploaded, not fetched. Retire the pass
+        // immediately rather than falling through to the WiFi session and the
+        // fifty stubbed downloads below, which is what this used to do on every
+        // boot whenever the cache was not exactly complete. Marking it done also
+        // stops the per-loop call re-entering here forever.
         s_stateMapBootstrapTried = true;
         s_stateMapBootstrapDone = true;
         return;
@@ -15305,8 +15266,11 @@ static void bootstrapStateMapsIfMissing() {
 
 static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int h,
                                int &markerX, int &markerY) {
-    markerX = x0 + (w / 2) - 3;
-    markerY = y0 + (h / 2) - 3;
+    // markerX/markerY are the exact point the coordinate lands on, not the
+    // top-left of any particular marker: a centred dot and a tip-anchored pin
+    // need different offsets, and only the caller knows which it is drawing.
+    markerX = x0 + (w / 2);
+    markerY = y0 + (h / 2);
     if (!s_nodesMapTileLayer || !s_nodesMapImage) return 0;
 
     if (!kStateMapsEnabled) {
@@ -15329,6 +15293,13 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 
     String diskPath = nodesStateMapPath(state->code);
     if (!storageFs().exists(diskPath.c_str())) {
+        // No map for this state: say so and return. The on-demand fetch below is
+        // dead code now (nodesDownloadStateMap() is a stub) and must not be
+        // reached — it opens with two blocking WiFi.hostByName() calls, one of
+        // them to a host that no longer resolves, so it would stall the UI for
+        // the full DNS timeout every time Locate opened on an uncached state.
+        if (!kStateMapsCanDownload) return 0;
+
         uint32_t now = millis();
         bool sameState = (strncmp(s_stateMapOnDemandLastCode, state->code, 2) == 0);
         bool retryAllowed = !sameState || (uint32_t)(now - s_stateMapOnDemandLastTryMs) >= 5000UL;
@@ -15396,22 +15367,59 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 
     lv_img_set_src(s_nodesMapImage, s_nodesMapImageSrc);
 
-    uint16_t zoomW = (uint16_t)max(16, (w * 256) / (int)srcW);
-    uint16_t zoomH = (uint16_t)max(16, (h * 256) / (int)srcH);
-    uint16_t zoom = min(zoomW, zoomH);
-    lv_img_set_zoom(s_nodesMapImage, zoom);
-
-    int drawW = ((int)srcW * (int)zoom) / 256;
-    int drawH = ((int)srcH * (int)zoom) / 256;
-
-    // Anchor transforms at top-left and size object to rendered bounds so
-    // clipping/layout remain predictable in the map layer.
-    lv_img_set_pivot(s_nodesMapImage, 0, 0);
+    // Aspect fit, computed here because the pin below has to land on the drawn
+    // pixels rather than on the widget box.
+    const int32_t scaleX = ((int32_t)w * LV_SCALE_NONE) / (int32_t)srcW;
+    const int32_t scaleY = ((int32_t)h * LV_SCALE_NONE) / (int32_t)srcH;
+    const int32_t scale = (scaleX < scaleY) ? scaleX : scaleY;
+    int drawW = ((int)srcW * (int)scale) / LV_SCALE_NONE;
+    int drawH = ((int)srcH * (int)scale) / LV_SCALE_NONE;
+    if (drawW < 1) drawW = 1;
+    if (drawH < 1) drawH = 1;
     int drawX = (w - drawW) / 2;
     int drawY = (h - drawH) / 2;
+
+    // Size the widget to the fitted bounds, then let LVGL derive the scale from
+    // it. STRETCH sets scale_x and scale_y from the widget's own width/height
+    // (update_align() in lv_image.c), and because those bounds already carry the
+    // source aspect ratio, both come out equal — a uniform scale, centred, with
+    // no letterboxing inside the widget.
+    //
+    // This replaced a hand-computed lv_img_set_zoom()/lv_img_set_pivot() pair
+    // carried over from LVGL v8. That code drew nothing at all on v9: the map
+    // panel it was written for was never built, so it had never once run until
+    // Locate started calling it.
     lv_obj_set_size(s_nodesMapImage, drawW, drawH);
     lv_obj_set_pos(s_nodesMapImage, drawX, drawY);
+    lv_image_set_inner_align(s_nodesMapImage, LV_IMAGE_ALIGN_STRETCH);
     lv_obj_clear_flag(s_nodesMapImage, LV_OBJ_FLAG_HIDDEN);
+
+    // The decode itself happens later, during the draw, and a failure there is
+    // silent — the widget simply renders nothing and the map area stays blank.
+    // This line is what tells the difference between "never got here" and "got
+    // here and LVGL still drew nothing", which is exactly the distinction that
+    // was missing the first time this ran.
+    // Mirrors lodepng_filesize() step for step, so the log says outright whether
+    // the decoder's own size probe can succeed on this card.
+    {
+        lv_fs_file_t probe;
+        uint32_t probeSize = 0;
+        lv_fs_res_t rOpen = lv_fs_open(&probe, s_nodesMapImageSrc, LV_FS_MODE_RD);
+        lv_fs_res_t rSeek = LV_FS_RES_UNKNOWN;
+        lv_fs_res_t rTell = LV_FS_RES_UNKNOWN;
+        if (rOpen == LV_FS_RES_OK) {
+            rSeek = lv_fs_seek(&probe, 0, LV_FS_SEEK_END);
+            rTell = lv_fs_tell(&probe, &probeSize);
+            lv_fs_close(&probe);
+        }
+        Serial.printf("[map] fs probe: open=%d seekEnd=%d tell=%d size=%lu (0=OK)\n",
+                      (int)rOpen, (int)rSeek, (int)rTell, (unsigned long)probeSize);
+    }
+
+    Serial.printf("[map] %s draw: src %ux%u box %dx%d scale %ld -> %dx%d at (%d,%d)\n",
+                  state->code,
+                  (unsigned)srcW, (unsigned)srcH, w, h,
+                  (long)scale, drawW, drawH, drawX, drawY);
 
     float latMin = state->latMin;
     float latMax = state->latMax;
@@ -15426,8 +15434,8 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
     if (yNorm < 0.0f) yNorm = 0.0f;
     if (yNorm > 1.0f) yNorm = 1.0f;
 
-    markerX = x0 + drawX + (int)(xNorm * (float)drawW) - 3;
-    markerY = y0 + drawY + (int)(yNorm * (float)drawH) - 3;
+    markerX = x0 + drawX + (int)(xNorm * (float)drawW);
+    markerY = y0 + drawY + (int)(yNorm * (float)drawH);
     return 1;
 #endif
 }
@@ -15480,7 +15488,8 @@ static void refreshNodesMap(const NodeEntry *node) {
     }
 
     if (hasNodePos && markerX >= 0 && markerY >= 0) {
-        lv_obj_set_pos(s_nodesMapMarker, markerX, markerY);
+        // A 7px dot, so half its size back from the point to centre it.
+        lv_obj_set_pos(s_nodesMapMarker, markerX - 3, markerY - 3);
         lv_obj_clear_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
@@ -15492,6 +15501,231 @@ static void refreshNodesMap(const NodeEntry *node) {
         lv_label_set_text(s_nodesMapTitle, visibleTiles > 0 ? "State Map" : "State Map (loading)");
     }
 }
+
+#if HAS_NODE_LOCATE
+// ── Locate ───────────────────────────────────────────────────────────────────
+// Node Actions -> (L)ocate. Shows the state a node's last reported position
+// falls in, with a pin on it, and nothing else — the detail belongs on the web
+// config map, which has a browser to fetch tiles with.
+//
+// The drawing is nodesMapRenderTiles()' job, and that function works through
+// the s_nodesMap* globals rather than taking objects. Those globals were built
+// for a Nodes-panel map that is never constructed, so this modal lends them its
+// own objects for as long as it is open and takes them back down on close. One
+// renderer, one set of pin math, whichever surface is showing it.
+// Pin geometry. The head is a circle of kLocatePinW; the stem makes up the
+// rest of kLocatePinH and ends at the tip.
+static constexpr int kLocatePinW = 15;
+static constexpr int kLocatePinH = 24;
+
+static lv_obj_t *s_nodeLocateBackdrop = nullptr;
+static lv_obj_t *s_nodeLocateModal = nullptr;
+static uint32_t s_nodeLocateNodeId = 0;
+
+static void closeNodeLocateModal() {
+    if (lvObjValid(s_nodeLocateBackdrop)) {
+        lv_obj_del(s_nodeLocateBackdrop);
+    } else if (lvObjValid(s_nodeLocateModal)) {
+        lv_obj_del(s_nodeLocateModal);
+    }
+    s_nodeLocateBackdrop = nullptr;
+    s_nodeLocateModal = nullptr;
+    s_nodeLocateNodeId = 0;
+    // Handed back: these point into the tree that was just deleted.
+    s_nodesMapTileLayer = nullptr;
+    s_nodesMapImage = nullptr;
+    s_nodesMapMarker = nullptr;
+    s_nodesMapImageSrc[0] = '\0';
+}
+
+static void onNodeLocateClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodeLocateModal();
+}
+
+static void onNodeLocateBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_nodeLocateBackdrop) return;
+    closeNodeLocateModal();
+}
+
+static void openNodeLocateModal(uint32_t nodeId) {
+    if (!s_rootScreen || nodeId == 0) return;
+    if (s_nodeLocateModal || s_nodeLocateBackdrop) return;
+
+    const NodeEntry *node = Nodes.find(nodeId);
+    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
+
+    const float lat = (float)node->latI / 10000000.0f;
+    const float lon = (float)node->lonI / 10000000.0f;
+    const UsStateMapSpec *state = nodesStateForCoords(lat, lon);
+
+    s_nodeLocateNodeId = nodeId;
+
+    const int scrW = lv_disp_get_hor_res(NULL);
+    const int scrH = lv_disp_get_ver_res(NULL);
+    int modalW = scrW - 24;
+    if (modalW > 300) modalW = 300;
+    int modalH = scrH - 20;
+    if (modalH > 224) modalH = 224;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xE8F1FF);
+
+    s_nodeLocateBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_nodeLocateBackdrop, scrW, scrH);
+    lv_obj_align(s_nodeLocateBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_nodeLocateBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_nodeLocateBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_nodeLocateBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_nodeLocateBackdrop, onNodeLocateBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_nodeLocateModal = lv_obj_create(s_nodeLocateBackdrop);
+    lv_obj_set_size(s_nodeLocateModal, modalW, modalH);
+    lv_obj_align(s_nodeLocateModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodeLocateModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_nodeLocateModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_nodeLocateModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodeLocateModal, 1, 0);
+    lv_obj_set_style_border_color(s_nodeLocateModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateModal, 6, 0);
+    lv_obj_set_style_pad_row(s_nodeLocateModal, 3, 0);
+    lv_obj_set_flex_flow(s_nodeLocateModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodeLocateModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_nodeLocateBackdrop);
+
+    char who[40];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    lv_obj_t *title = lv_label_create(s_nodeLocateModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    char titleBuf[56];
+    snprintf(titleBuf, sizeof(titleBuf), "Locate: %s", who);
+    setLabelTextEmojiSafe(title, titleBuf);
+
+    // The map area. Its own container so the renderer can position the image and
+    // the pin in coordinates that belong to nobody else.
+    lv_obj_t *mapBox = lv_obj_create(s_nodeLocateModal);
+    lv_obj_set_width(mapBox, lv_pct(100));
+    lv_obj_set_flex_grow(mapBox, 1);
+    lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(mapBox, lightUi ? lv_color_hex(0xDCE6F6) : lv_color_hex(0x0A1E45), 0);
+    lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(mapBox, 1, 0);
+    lv_obj_set_style_border_color(mapBox, modalBorder, 0);
+    lv_obj_set_style_pad_all(mapBox, 0, 0);
+    lv_obj_set_style_radius(mapBox, 3, 0);
+
+    lv_obj_t *status = lv_label_create(s_nodeLocateModal);
+    lv_obj_set_width(status, lv_pct(100));
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(status, bodyColor, 0);
+    lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecCloseButton(s_nodeLocateModal, onNodeLocateClosePressed, 84);
+#endif
+
+    // Lend the renderer its objects, then let it draw.
+    lv_obj_update_layout(s_nodeLocateModal);
+    const int mapW = lv_obj_get_width(mapBox);
+    const int mapH = lv_obj_get_height(mapBox);
+
+    s_nodesMapTileLayer = lv_obj_create(mapBox);
+    lv_obj_remove_style_all(s_nodesMapTileLayer);
+    lv_obj_clear_flag(s_nodesMapTileLayer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_nodesMapTileLayer, 0, 0);
+    lv_obj_set_size(s_nodesMapTileLayer, mapW, mapH);
+
+    s_nodesMapImage = lv_img_create(s_nodesMapTileLayer);
+    lv_obj_add_flag(s_nodesMapImage, LV_OBJ_FLAG_HIDDEN);
+
+    // A map pin rather than a dot: a round head over a short stem, tip down.
+    // Built from two plain objects because there is no pin glyph to lean on —
+    // this build already falls back LV_SYMBOL_GPS to LV_SYMBOL_DRIVE — and a
+    // canvas would cost a buffer for something this simple.
+    //
+    // Red with a white outline on both parts. The outline is what keeps it
+    // readable over dark map features; red alone disappears into a highway.
+    s_nodesMapMarker = lv_obj_create(s_nodesMapTileLayer);
+    lv_obj_remove_style_all(s_nodesMapMarker);
+    lv_obj_clear_flag(s_nodesMapMarker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_nodesMapMarker, kLocatePinW, kLocatePinH);
+
+    lv_obj_t *pinHead = lv_obj_create(s_nodesMapMarker);
+    lv_obj_remove_style_all(pinHead);
+    lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
+    lv_obj_set_pos(pinHead, 0, 0);
+    lv_obj_set_style_radius(pinHead, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(pinHead, lv_color_hex(0xE04A4A), 0);
+    lv_obj_set_style_bg_opa(pinHead, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(pinHead, 2, 0);
+    lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_t *pinStem = lv_obj_create(s_nodesMapMarker);
+    lv_obj_remove_style_all(pinStem);
+    lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
+    // Overlapping the head by two rows hides the seam between them.
+    lv_obj_set_pos(pinStem, (kLocatePinW - 5) / 2, kLocatePinW - 2);
+    lv_obj_set_style_radius(pinStem, 1, 0);
+    lv_obj_set_style_bg_color(pinStem, lv_color_hex(0xE04A4A), 0);
+    lv_obj_set_style_bg_opa(pinStem, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(pinStem, 1, 0);
+    lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
+
+    lv_obj_add_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
+
+    int markerX = -1;
+    int markerY = -1;
+    const int drawn = nodesMapRenderTiles(lat, lon, 0, 0, mapW, mapH, markerX, markerY);
+
+    if (drawn > 0 && markerX >= 0 && markerY >= 0) {
+        // The tip is what points at the position, so the pin hangs above it.
+        int pinX = markerX - (kLocatePinW / 2);
+        int pinY = markerY - kLocatePinH;
+        // A node against the top or side of its state would otherwise have the
+        // head clipped away by the map layer, leaving a stump. Nudging the whole
+        // pin back inside costs a few pixels of precision at the very edge and
+        // keeps it recognisable, which is the better trade for a marker.
+        if (pinX < 0) pinX = 0;
+        if (pinY < 0) pinY = 0;
+        if (pinX > mapW - kLocatePinW) pinX = mapW - kLocatePinW;
+        if (pinY > mapH - kLocatePinH) pinY = mapH - kLocatePinH;
+        lv_obj_set_pos(s_nodesMapMarker, pinX, pinY);
+        lv_obj_clear_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Three honest outcomes, and they read differently on purpose: outside the
+    // table's coverage is not the same as inside it with the map not yet on the
+    // card, and neither is a failure of the position itself — which is why the
+    // coordinates are printed in all three.
+    char statusBuf[96];
+    if (!state) {
+        snprintf(statusBuf, sizeof(statusBuf),
+                 "No regional map for this location\n%.4f, %.4f", lat, lon);
+    } else if (drawn > 0) {
+        snprintf(statusBuf, sizeof(statusBuf),
+                 "%s\n%.4f, %.4f", state->name, lat, lon);
+    } else {
+        snprintf(statusBuf, sizeof(statusBuf),
+                 "%s - map not on card\n%.4f, %.4f", state->name, lat, lon);
+    }
+    lv_label_set_text(status, statusBuf);
+}
+#endif  // HAS_NODE_LOCATE
 
 static void sdRmDirRecursive(const char *path) {
 #if HAS_FILE_STORAGE
@@ -15579,19 +15813,21 @@ static void refreshNodesHint() {
                               navKeys, modalCloseKeyLabel());
     } else if (s_nodesFilterEditing) {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "Type=Filter  %s=Select  Enter=Done  Bksp=Edit/Exit  %s=Back",
-                              navKeys, modalCloseKeyLabel());
+                              "Type=Filter  Enter=Done  Bksp=Edit/Exit  %s=Back",
+                              modalCloseKeyLabel());
     } else if (s_nodesFilterOpen) {
         // Committed: the list is still filtered, but the shortcuts are live
         // again. Naming Bksp is what tells the reader the filter is still
-        // editable rather than stuck.
+        // editable rather than stuck — "Edit/Exit" for the same reason the
+        // editing state says it, since on most boards Backspace is also the
+        // close key and only reaches Back once the filter is unwound.
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "%s=Select  Enter=Info  A=Actions  Bksp=Edit  %s=Back",
-                              navKeys, modalCloseKeyLabel());
+                              "Enter=Info  A=Actions  Bksp=Edit/Exit  %s=Back",
+                              modalCloseKeyLabel());
     } else {
         lv_label_set_text_fmt(s_nodesHintLabel,
-                              "%s=Select  Enter=Info  A=Actions  Space=Filter  %s=Back",
-                              navKeys, modalCloseKeyLabel());
+                              "Enter=Info  A=Actions  Space=Filter  %s=Back",
+                              modalCloseKeyLabel());
     }
 #endif   // !DEVICE_HELTEC_V4_EXPANSION
 }
@@ -16534,15 +16770,30 @@ static void refreshNodesActionMenuSelection() {
     const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
     const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
 
+    const lv_color_t disabledText = isLight ? lv_color_hex(0x8A97AC) : lv_color_hex(0x5F7093);
+    const lv_color_t enabledText = isLight ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+
     const int count = activeActionCount();
     for (int i = 0; i < count; i++) {
         lv_obj_t *row = s_nodesActionRows[i];
         if (!row) continue;
+        const bool disabled = nodesActionRowDisabled(i);
+        // A disabled row still highlights when the cursor is on it — the cursor
+        // has to be somewhere, and a row that swallows the highlight looks like
+        // the menu stopped responding. It reads as unavailable through its
+        // washed-out label instead.
         bool selected = (i == s_nodesActionSelection);
         lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_bg_opa(row,
+                                disabled ? (isLight ? LV_OPA_40 : LV_OPA_20)
+                                         : (selected ? LV_OPA_COVER
+                                                     : (isLight ? LV_OPA_90 : LV_OPA_40)),
+                                0);
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
+        if (lv_obj_t *lbl = lv_obj_get_child(row, 0)) {
+            lv_obj_set_style_text_color(lbl, disabled ? disabledText : enabledText, 0);
+        }
     }
 }
 
@@ -16603,6 +16854,18 @@ static void executeNodesActionSelection() {
         }
         s_nodesActionSelection = (int)kMsgActionNodeMap[nodeSel];
     }
+
+#if HAS_NODE_LOCATE
+    if (s_nodesActionSelection == kNodesActionLocate) {
+        // Greyed rows keep the highlight but do nothing when activated; the
+        // label already says why.
+        if (!s_nodesActionLocateEnabled) return;
+        uint32_t nodeId = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        openNodeLocateModal(nodeId);
+        return;
+    }
+#endif
 
     if (s_nodesActionSelection == 0) {
         uint32_t packetId = 0;
@@ -16814,6 +17077,14 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     const NodeEntry *actionNode = Nodes.find(nodeId);
     const bool selectedIsFavorite = actionNode && actionNode->favorite;
     const bool selectedIsIgnored = Ignored.contains(nodeId);
+#if HAS_NODE_LOCATE
+    // A node the table has never had a position for has nothing to point at, so
+    // Locate is greyed rather than opening an empty map. (0, 0) is a real place
+    // in the Gulf of Guinea, but as a stored value it means "never set".
+    s_nodesActionLocateEnabled =
+        actionNode && actionNode->hasPosition
+        && (actionNode->latI != 0 || actionNode->lonI != 0);
+#endif
     const char *kActionLabels[kNodesActionCount] = {
         "(T)raceroute",
         "Sen(d) DM",
@@ -16821,6 +17092,14 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Request (I)nfo",
         "Request (P)osition",
         selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
+#if HAS_NODE_LOCATE
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // No keyboard to name a shortcut for.
+        "Locate",
+#else
+        "(L)ocate",
+#endif
+#endif
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                     ? lv_color_hex(0x13233D)
@@ -22109,13 +22388,12 @@ static void openNodesModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-#if defined(DEVICE_TDECK)
-    lv_label_set_text_fmt(hint, "J/K=Select   Enter=Info   A=Actions   %s=Back",
-                          modalCloseKeyLabel());
-#else
-    lv_label_set_text_fmt(hint, "Up/Down=Select   Enter=Info   A=Actions   %s=Back",
-                          modalCloseKeyLabel());
-#endif
+    // The legend itself is refreshNodesHint()'s to write, and now that the label
+    // exists it can. The earlier refreshNodesListRows() call above ran before
+    // this label was created, so its own attempt was a no-op. This used to be a
+    // hardcoded copy of the same text, which had already drifted from the real
+    // one in its spacing.
+    refreshNodesHint();
 #endif
 }
 
@@ -25915,6 +26193,17 @@ static void pumpKeyboardInput() {
         //
         // Still yields to an open composer, which is the precedence it had when
         // it lived inside the Nodes branch (the compose block there runs first).
+#if HAS_NODE_LOCATE
+        // Nothing to interact with, so every key that could mean "done" closes
+        // it and nothing else is consumed by it.
+        if (s_nodeLocateModal) {
+            if (isModalCloseKey(k) || k == KEY_ENTER || k == ' ') {
+                closeNodeLocateModal();
+            }
+            continue;
+        }
+#endif
+
         if (s_nodesActionModal && !s_composeModal) {
             if (isModalCloseKey(k)) {
                 closeNodesActionMenu();
@@ -25946,7 +26235,9 @@ static void pumpKeyboardInput() {
             // Single-key shortcuts select and execute the corresponding action,
             // mirroring the (X) hints in the labels. Message mode adds 1-6 for
             // the tapbacks, M for the full tray and R for Reply; T/D/F/I/P/G
-            // keep their meanings in both modes.
+            // keep their meanings in both modes. L is node mode's alone, and on
+            // a node with no position it moves the highlight and stops there —
+            // executeNodesActionSelection() declines it exactly as Enter does.
             if (k >= 0x20 && k < 0x7F) {
                 char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
                 const char *shortcuts = activeActionShortcuts();
@@ -33274,6 +33565,10 @@ void setup() {
     }
 
     lv_init();
+#if LV_USE_LOG
+    // Must follow lv_init(): registering earlier is overwritten by it.
+    lv_log_register_print_cb(lvglLogToSerial);
+#endif
     // v9 dropped the LV_TICK_CUSTOM compile-time hook; the tick source is
     // installed here instead. Must happen before the first lv_timer_handler().
     lv_tick_set_cb((lv_tick_get_cb_t)millis);

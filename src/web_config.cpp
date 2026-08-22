@@ -15,6 +15,7 @@
 #include <Preferences.h>
 #include <nvs_flash.h>
 #include "storage.h"
+#include "state_maps.h"
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
@@ -1517,6 +1518,316 @@ static void sendFlash(const char *progmem) {
 // a pbuf allocation that fails mid-write wedges the main loop.
 static void sendChunkIfBig(String &html, size_t threshold = 700) {
     if (html.length() >= threshold) sendChunk(html);
+}
+
+// ── State map cache ──────────────────────────────────────────────────────────
+// The Locate modal on the device draws a node's position onto a cached PNG of
+// the state it falls in. This firmware has no TLS client, so it cannot fetch
+// those maps itself — the browser, which already renders the Nodes heatmap from
+// live OSM tiles, does the fetching and hands the finished image back here.
+//
+// This file owns the receiving half: what is already cached (/state-map-status)
+// and where new ones land (/state-map-upload). The bounding boxes both ends
+// work from come from state_maps.h so the two cannot drift apart.
+
+// Compile-time: some boards have nowhere to put a file at all. Runtime: a board
+// with a slot still needs a card in it. The Maps Download section is hidden
+// outright when either is false, rather than shown disabled — there is nothing
+// actionable to say to a browser about a card slot it cannot see.
+static bool stateMapStorageReady() {
+#if !HAS_FILE_STORAGE
+    return false;
+#else
+    return storageBegin() && storageMounted();
+#endif
+}
+
+static bool stateMapEnsureDir() {
+#if !HAS_FILE_STORAGE
+    return false;
+#else
+    if (!stateMapStorageReady()) return false;
+    if (!storageFs().exists("/camillia")) storageFs().mkdir("/camillia");
+    if (!storageFs().exists("/camillia/state_maps")) storageFs().mkdir("/camillia/state_maps");
+    return storageFs().exists("/camillia/state_maps");
+#endif
+}
+
+// A cached map counts only when the PNG is real. A truncated upload leaves a
+// file the device would reject at decode time anyway; reporting it as present
+// would just move the confusion to the device.
+static bool stateMapCached(const char *code) {
+#if !HAS_FILE_STORAGE
+    (void)code;
+    return false;
+#else
+    if (!stateMapStorageReady()) return false;
+    String p = nodesStateMapPath(code);
+    if (!storageFs().exists(p.c_str())) return false;
+    return nodesFileLooksLikePng(p.c_str());
+#endif
+}
+
+// GET /state-map-status
+// One object per state: the bounds to composite against, and whether it is
+// already on the card. The browser intersects this with the node positions it
+// already has (NODE_HEAT_POINTS) to decide what to download.
+static void handleGetStateMapStatus() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+
+    const bool ready = stateMapStorageReady();
+
+    // gSendAborted is sticky across requests: once any response gives up on a
+    // stalled socket, every later chunked send is skipped until someone clears
+    // it. Every chunked sender in this file has to open by resetting it — a
+    // client that walked away mid-download would otherwise mute this endpoint
+    // until the next reboot.
+    gSendAborted = false;
+
+    // Chunked rather than one String: 50 entries of bounds is a few KB, and this
+    // file's rule is that nothing assembles a multi-KB contiguous buffer it can
+    // avoid.
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "application/json", "");
+
+    String out;
+    out.reserve(1024);
+    out += "{\"storage\":";
+    out += (ready ? "true" : "false");
+    out += ",\"imageW\":";
+    out += String(kStateMapImageW);
+    out += ",\"imageH\":";
+    out += String(kStateMapImageH);
+    out += ",\"states\":[";
+
+    for (int i = 0; i < kUsStateMapCount; i++) {
+        const UsStateMapSpec &st = kUsStateMaps[i];
+        if (i) out += ",";
+        out += "{\"code\":\"";
+        out += st.code;
+        out += "\",\"name\":\"";
+        out += st.name;
+        out += "\",\"latMin\":";
+        out += String(st.latMin, 4);
+        out += ",\"latMax\":";
+        out += String(st.latMax, 4);
+        out += ",\"lonMin\":";
+        out += String(st.lonMin, 4);
+        out += ",\"lonMax\":";
+        out += String(st.lonMax, 4);
+        const bool have = ready && stateMapCached(st.code);
+        out += ",\"cached\":";
+        out += have ? "true" : "false";
+        // A map cached at an older resolution still renders, just softly, so it
+        // is reported rather than hidden: the page offers to refresh it instead
+        // of making the user clear the whole cache to get a sharper one.
+        if (have) {
+            uint32_t cw = 0, ch = 0;
+            if (nodesReadPngSize(nodesStateMapPath(st.code).c_str(), cw, ch)) {
+                out += ",\"w\":";
+                out += String((unsigned)cw);
+                out += ",\"h\":";
+                out += String((unsigned)ch);
+            }
+        }
+        out += "}";
+        sendChunkIfBig(out, 900);
+    }
+
+    out += "]}";
+    sendChunk(out);
+    server.sendContent("");
+}
+
+// POST /state-map-upload   (multipart, one state per request)
+//
+// The state code travels in the *filename* ("PA.png"), not a form field: the
+// upload callback runs while the body is still streaming, long before
+// server.arg() can see any field that follows the file part. The bounds do come
+// from form fields, read in the completion handler below once the body is in.
+//
+// Bytes go straight to the file as they arrive. The /import handler above
+// buffers into a static 8 KB array because a YAML config has to be parsed whole;
+// a PNG does not, so this path holds one File handle and nothing else — cheaper
+// than the upload that already ships.
+static File   stateMapUploadFile;
+static char   stateMapUploadCode[3] = "";
+static bool   stateMapUploadOk = false;
+static size_t stateMapUploadBytes = 0;
+
+// Case-folded by hand rather than with strncasecmp(): that is POSIX, not C, and
+// nothing else in this firmware relies on it being pulled in.
+static const UsStateMapSpec *stateMapSpecForCode(const char *code) {
+    if (!code || !code[0] || !code[1]) return nullptr;
+    auto up = [](char c) -> char { return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; };
+    const char a = up(code[0]);
+    const char b = up(code[1]);
+    for (int i = 0; i < kUsStateMapCount; i++) {
+        if (kUsStateMaps[i].code[0] == a && kUsStateMaps[i].code[1] == b) {
+            return &kUsStateMaps[i];
+        }
+    }
+    return nullptr;
+}
+
+static void handleStateMapUpload() {
+#if !HAS_FILE_STORAGE
+    return;
+#else
+    HTTPUpload &upload = server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        stateMapUploadOk = false;
+        stateMapUploadBytes = 0;
+        stateMapUploadCode[0] = '\0';
+        if (stateMapUploadFile) stateMapUploadFile.close();
+
+        // Not logged in, no storage, or a filename that is not a state we know:
+        // accept the body and drop it. Refusing mid-stream leaves the socket
+        // holding a partial request the browser reports as a network error
+        // rather than the refusal it is; the completion handler sends the real
+        // status once the body is drained.
+        if (!isLoggedIn() || !stateMapEnsureDir()) return;
+
+        char code[3] = "";
+        strncpy(code, upload.filename.c_str(), 2);
+        code[2] = '\0';
+        const UsStateMapSpec *spec = stateMapSpecForCode(code);
+        if (!spec) return;
+
+        strncpy(stateMapUploadCode, spec->code, 2);
+        stateMapUploadCode[2] = '\0';
+
+        // Written to its final name directly. A half-written file is caught by
+        // the PNG sniff on the way out and removed, so a temp-and-rename dance
+        // would buy nothing on a filesystem this simple.
+        String path = nodesStateMapPath(stateMapUploadCode);
+        if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+        stateMapUploadFile = storageFs().open(path.c_str(), FILE_WRITE);
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!stateMapUploadFile) return;   // keep draining the socket
+        size_t wrote = stateMapUploadFile.write(upload.buf, upload.currentSize);
+        if (wrote != upload.currentSize) {
+            // Card full or gone. Stop writing but keep reading, same reason as
+            // the refusals above.
+            stateMapUploadFile.close();
+            return;
+        }
+        stateMapUploadBytes += wrote;
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_END) {
+        if (!stateMapUploadFile) return;
+        stateMapUploadFile.close();
+        stateMapUploadOk = (stateMapUploadBytes > 0);
+        return;
+    }
+
+    // UPLOAD_FILE_ABORTED
+    if (stateMapUploadFile) stateMapUploadFile.close();
+#endif
+}
+
+// POST /clear-maps
+// Deletes every cached state map. Enumerated from kUsStateMaps rather than
+// swept as a directory: this owns exactly the files it writes and has no
+// business deleting whatever else a user keeps on their card. The completion
+// markers go too, so a later cache-version check cannot decide a now-empty
+// directory is a finished download.
+static void handlePostClearMaps() {
+#if !HAS_FILE_STORAGE
+    server.send(503, "text/plain", "No storage on this board");
+#else
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    if (!stateMapStorageReady()) {
+        redirectHomeWithFlash("No storage detected - nothing to clear");
+        return;
+    }
+
+    int removed = 0;
+    for (int i = 0; i < kUsStateMapCount; i++) {
+        String png = nodesStateMapPath(kUsStateMaps[i].code);
+        if (storageFs().exists(png.c_str()) && storageFs().remove(png.c_str())) removed++;
+        String meta = nodesStateMapMetaPath(kUsStateMaps[i].code);
+        if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
+    }
+    if (storageFs().exists(kStateMapMarkerPath)) storageFs().remove(kStateMapMarkerPath);
+    if (storageFs().exists(kStateMapLegacyMarkerPath)) storageFs().remove(kStateMapLegacyMarkerPath);
+
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Cleared %d cached map%s", removed, removed == 1 ? "" : "s");
+    redirectHomeWithFlash(msg);
+#endif
+}
+
+static void handleStateMapUploadDone() {
+#if !HAS_FILE_STORAGE
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"no storage on this board\"}");
+#else
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return;
+    }
+    if (!stateMapUploadCode[0]) {
+        server.send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"unknown or missing state code\"}");
+        return;
+    }
+
+    String path = nodesStateMapPath(stateMapUploadCode);
+
+    // The sniff is the whole validation. Anything that is not a PNG here is a
+    // truncated or failed upload, and leaving it on the card would have the
+    // device retry a decode that can never succeed.
+    if (!stateMapUploadOk || !nodesFileLooksLikePng(path.c_str())) {
+        if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+        String meta = nodesStateMapMetaPath(stateMapUploadCode);
+        if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
+        stateMapUploadCode[0] = '\0';
+        server.send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"upload was not a complete PNG\"}");
+        return;
+    }
+
+    // Bounds are what the browser actually composited, which is not the state's
+    // nominal box — tiles do not stop at state lines. Recording the real extent
+    // is what puts the pin in the right place; without it the device falls back
+    // to the nominal box and the position drifts by miles.
+    const UsStateMapSpec *spec = stateMapSpecForCode(stateMapUploadCode);
+    bool haveBounds = server.hasArg("latMin") && server.hasArg("latMax")
+                      && server.hasArg("lonMin") && server.hasArg("lonMax");
+    float latMin = spec ? spec->latMin : 0.0f;
+    float latMax = spec ? spec->latMax : 0.0f;
+    float lonMin = spec ? spec->lonMin : 0.0f;
+    float lonMax = spec ? spec->lonMax : 0.0f;
+    if (haveBounds) {
+        latMin = server.arg("latMin").toFloat();
+        latMax = server.arg("latMax").toFloat();
+        lonMin = server.arg("lonMin").toFloat();
+        lonMax = server.arg("lonMax").toFloat();
+        // A degenerate or inverted box would divide by zero in the pin math.
+        if (!(latMax > latMin) || !(lonMax > lonMin)) haveBounds = false;
+    }
+    if (haveBounds) {
+        nodesWriteStateMapMeta(stateMapUploadCode, latMin, latMax, lonMin, lonMax);
+    }
+
+    char out[160];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"code\":\"%s\",\"bytes\":%u,\"bounds\":%s}",
+             stateMapUploadCode,
+             (unsigned)stateMapUploadBytes,
+             haveBounds ? "true" : "false");
+    stateMapUploadCode[0] = '\0';
+    server.send(200, "application/json", out);
+#endif
 }
 
 // Appends text into a single-quoted HTML attribute. Channel names are free text
@@ -3128,6 +3439,34 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
+    // ── Maps Download ─────────────────────────────────────────────
+    // Absent, not disabled, when there is nowhere to put the files: on a board
+    // with no storage there is nothing the reader could do about it, and a
+    // permanently greyed section is worse than one that was never there.
+    if (stateMapStorageReady()) {
+        section(html, false, "Maps Download", false);
+        html +=
+            "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
+            "The device shows a node's position on a cached map of the state it "
+            "falls in (Nodes &rarr; Actions &rarr; Locate). It cannot fetch those "
+            "maps itself, so this page downloads them and saves them to the "
+            "card. Only the states your known nodes are actually in get "
+            "downloaded.</p>";
+        html +=
+            "<div id='mapdl-status' style='font-size:.82em;color:#888;margin:.2em 0 .6em'>"
+            "Checking cached maps&hellip;</div>";
+        html +=
+            "<button type='button' id='mapdl-btn' style='background:#2a6f97' disabled>"
+            "&#128506; Download maps for known nodes</button>";
+        html +=
+            "<p style='font-size:.82em;color:#888;margin:.4em 0 1em'>"
+            "Downloading writes to the card over the same SPI bus the radio uses, "
+            "so expect the mesh to miss traffic while it runs. Map tiles come from "
+            "OpenStreetMap.</p>";
+        sectionEnd(html, false);
+        sendChunk(html);
+    }
+
     section(html, false, "Debug Output", false);
     html +=
         "<form method='POST' action='/set-debug-monitor'>"
@@ -3248,7 +3587,28 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "</form>"
         "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
         "Clears the entire persisted node database &mdash; favorites included &mdash; "
-        "and reboots.</p>"
+        "and reboots.</p>";
+
+    // Only where there is a cache to clear. Hidden on the same terms as the
+    // Maps Download section above, so the two never disagree about whether this
+    // device has maps at all.
+    if (stateMapStorageReady()) {
+        html +=
+            "<form method='POST' action='/clear-maps'"
+            " onsubmit=\"return confirm('This will delete every cached state map from the card. "
+            "Putting them back means running Maps Download again - the device cannot "
+            "fetch maps on its own. Continue?')\">"
+            "<button type='submit' style='background:#c0392b'>"
+            "Clear Maps</button>"
+            "</form>"
+            "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+            "Deletes the cached state maps that Nodes &rarr; Actions &rarr; Locate draws on. "
+            "Nothing else on the card is touched, and no node or message data is affected. "
+            "This is reversible: <em>Maps Download</em> above puts them back, since maps "
+            "always arrive from this page rather than being fetched by the device.</p>";
+    }
+
+    html +=
         "<form method='POST' action='/factory-reset'"
         " onsubmit=\"return confirm('This will erase ALL settings and reboot the device. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -3366,6 +3726,139 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "null";
     }
     html += ";</script>";
+
+    // Maps Download status. Runs after NODE_HEAT_POINTS is defined above, and
+    // no-ops when the section was not rendered (no storage on this device).
+    //
+    // The containing-state search deliberately mirrors nodesStateForCoords() in
+    // the firmware, smallest-box tie-break included: if the two disagreed about
+    // which state a node is in, this page would cache a map the device never
+    // looks at.
+    html +=
+        "<script>\n"
+        "(function(){\n"
+        "var el=document.getElementById('mapdl-status');\n"
+        "if(!el)return;\n"
+        "var btn=document.getElementById('mapdl-btn');\n"
+        "var TILE=256,MAXTILES=64,ST=null,NEED=[];\n"
+        "// Web Mercator pixel coords at zoom z.\n"
+        "function lon2px(lon,z){return (lon+180)/360*TILE*Math.pow(2,z);}\n"
+        "function lat2px(lat,z){var s=Math.sin(lat*Math.PI/180);\n"
+        "  return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*TILE*Math.pow(2,z);}\n"
+        "// Smallest zoom whose tiles already carry at least the detail we keep, so we\n"
+        "// downscale rather than upscale and never fetch more than we can use.\n"
+        "function zoomFor(s,W,H){\n"
+        "  for(var z=2;z<=11;z++){\n"
+        "    var w=lon2px(s.lonMax,z)-lon2px(s.lonMin,z);\n"
+        "    var h=lat2px(s.latMin,z)-lat2px(s.latMax,z);\n"
+        "    if(w>=W&&h>=H){\n"
+        "      var nx=Math.ceil(w/TILE)+1,ny=Math.ceil(h/TILE)+1;\n"
+        "      if(nx*ny>MAXTILES)return z-1<2?2:z-1;\n"
+        "      return z;\n"
+        "    }\n"
+        "  }\n"
+        "  return 11;\n"
+        "}\n"
+        "function loadTile(z,x,y){\n"
+        "  return new Promise(function(res){\n"
+        "    var img=new Image();\n"
+        "    img.crossOrigin='anonymous';                       // needed to read pixels back\n"
+        "    img.onload=function(){res(img);};\n"
+        "    img.onerror=function(){res(null);};                // a hole beats a failed run\n"
+        "    img.src='https://tile.openstreetmap.org/'+z+'/'+x+'/'+y+'.png';\n"
+        "  });\n"
+        "}\n"
+        "// Build the Mercator mosaic covering the state's box, then resample it into an\n"
+        "// equirectangular image: the device places its pin with a LINEAR latitude\n"
+        "// mapping, so a Mercator image would sit the marker wrong - by 13px on Alaska.\n"
+        "// Each destination row is drawn from the Mercator rows that actually cover it.\n"
+        "async function buildStatePng(s,W,H,onTile){\n"
+        "  var z=zoomFor(s,W,H);\n"
+        "  var px0=lon2px(s.lonMin,z),px1=lon2px(s.lonMax,z);\n"
+        "  var py0=lat2px(s.latMax,z),py1=lat2px(s.latMin,z);\n"
+        "  var tx0=Math.floor(px0/TILE),tx1=Math.floor(px1/TILE);\n"
+        "  var ty0=Math.floor(py0/TILE),ty1=Math.floor(py1/TILE);\n"
+        "  var mw=(tx1-tx0+1)*TILE,mh=(ty1-ty0+1)*TILE;\n"
+        "  var mos=document.createElement('canvas');mos.width=mw;mos.height=mh;\n"
+        "  var mc=mos.getContext('2d');\n"
+        "  mc.fillStyle='#e8eef7';mc.fillRect(0,0,mw,mh);\n"
+        "  var total=(tx1-tx0+1)*(ty1-ty0+1),done=0;\n"
+        "  for(var ty=ty0;ty<=ty1;ty++){\n"
+        "    for(var tx=tx0;tx<=tx1;tx++){\n"
+        "      var img=await loadTile(z,tx,ty);\n"
+        "      if(img)mc.drawImage(img,(tx-tx0)*TILE,(ty-ty0)*TILE);\n"
+        "      done++;if(onTile)onTile(done,total);\n"
+        "    }\n"
+        "  }\n"
+        "  var out=document.createElement('canvas');out.width=W;out.height=H;\n"
+        "  var oc=out.getContext('2d');\n"
+        "  oc.imageSmoothingEnabled=true;\n"
+        "  var sx=px0-tx0*TILE,sw=px1-px0;\n"
+        "  for(var dy=0;dy<H;dy++){\n"
+        "    var latT=s.latMax-(s.latMax-s.latMin)*dy/H;\n"
+        "    var latB=s.latMax-(s.latMax-s.latMin)*(dy+1)/H;\n"
+        "    var syT=lat2px(latT,z)-ty0*TILE,syB=lat2px(latB,z)-ty0*TILE;\n"
+        "    var sh=Math.max(1,syB-syT);\n"
+        "    oc.drawImage(mos,sx,syT,sw,sh,0,dy,W,1);\n"
+        "  }\n"
+        "  return new Promise(function(res){out.toBlob(res,'image/png');});\n"
+        "}\n"
+        "function upload(code,blob,s){\n"
+        "  var fd=new FormData();\n"
+        "  fd.append('file',blob,code+'.png');\n"
+        "  var q='?latMin='+s.latMin+'&latMax='+s.latMax+'&lonMin='+s.lonMin+'&lonMax='+s.lonMax;\n"
+        "  return fetch('/state-map-upload'+q,{method:'POST',body:fd}).then(function(r){return r.json();});\n"
+        "}\n"
+        "function say(t){el.textContent=t;}\n"
+        "async function run(){\n"
+        "  btn.disabled=true;\n"
+        "  var okN=0,failN=0;\n"
+        "  for(var i=0;i<NEED.length;i++){\n"
+        "    var s=NEED[i];\n"
+        "    try{\n"
+        "      var blob=await buildStatePng(s,ST.imageW,ST.imageH,function(d,t){\n"
+        "        say('['+(i+1)+'/'+NEED.length+'] '+s.name+': tile '+d+' of '+t);\n"
+        "      });\n"
+        "      say('['+(i+1)+'/'+NEED.length+'] '+s.name+': uploading '+Math.round(blob.size/1024)+' KB');\n"
+        "      var r=await upload(s.code,blob,s);\n"
+        "      if(r&&r.ok){okN++;}else{failN++;}\n"
+        "    }catch(e){failN++;}\n"
+        "  }\n"
+        "  say('Done. '+okN+' saved'+(failN?', '+failN+' failed':'')+'. Reload to refresh the list.');\n"
+        "  btn.disabled=false;\n"
+        "}\n"
+        "fetch('/state-map-status').then(function(r){return r.json();}).then(function(d){\n"
+        "  ST=d;\n"
+        "  if(!d||!d.storage){say('No storage detected on the device.');return;}\n"
+        "  var pts=(window.NODE_HEAT_POINTS||[]),need={};\n"
+        "  pts.forEach(function(p){\n"
+        "    var best=null,ba=1e9;\n"
+        "    d.states.forEach(function(s){\n"
+        "      if(p.lat<s.latMin||p.lat>s.latMax||p.lon<s.lonMin||p.lon>s.lonMax)return;\n"
+        "      var a=(s.latMax-s.latMin)*(s.lonMax-s.lonMin);\n"
+        "      if(!best||a<ba){best=s;ba=a;}});\n"
+        "    if(best)need[best.code]=best;});\n"
+        "  // Cached at a different resolution is stale, not finished: the device still\n"
+        "  // draws it, just softly, and re-running the download replaces it in place.\n"
+        "  function fresh(s){return s.cached && s.w==d.imageW && s.h==d.imageH;}\n"
+        "  var codes=Object.keys(need).sort();\n"
+        "  if(!codes.length){say('No known node reports a position inside the United States, so there is nothing to download yet.');return;}\n"
+        "  NEED=codes.filter(function(c){return !fresh(need[c]);}).map(function(c){return need[c];});\n"
+        "  var stale=codes.filter(function(c){return need[c].cached && !fresh(need[c]);}).length;\n"
+        "  say(codes.length+' state'+(codes.length==1?'':'s')+' needed: '+\n"
+        "      codes.map(function(c){\n"
+        "        var s=need[c];\n"
+        "        return s.name+(fresh(s)?' (cached)':s.cached?' (cached at '+s.w+'x'+s.h+', now '+d.imageW+'x'+d.imageH+')':'');\n"
+        "      }).join(', ')+\n"
+        "      '. '+(NEED.length?NEED.length+' to download'+(stale?' ('+stale+' to refresh at the higher resolution)':'')+'.':'All cached.'));\n"
+        "  if(btn){\n"
+        "    btn.disabled=!NEED.length;\n"
+        "    btn.title=NEED.length?'Downloads '+NEED.length+' state map'+(NEED.length==1?'':'s')+' at '+d.imageW+'x'+d.imageH:'Every needed state is already cached at the current resolution';\n"
+        "    btn.onclick=run;\n"
+        "  }\n"
+        "}).catch(function(){say('Could not read the map cache status.');});\n"
+        "})();\n"
+        "</script>";
 
     html += "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
             "<script src='https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js'></script>";
@@ -5541,6 +6034,11 @@ static void handleGetNodesCsv() {
     server.sendHeader("Content-Disposition", cd);
     server.sendHeader("Cache-Control", "no-store");
 
+    // See handleGetStateMapStatus(): the abort flag outlives the request that
+    // set it, so a chunked sender that does not clear it here stays silent
+    // after any client walks away mid-download.
+    gSendAborted = false;
+
     // Chunked: the live table alone can be MAX_NODES rows, too big to assemble
     // in one String on a device this size.
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -5645,6 +6143,9 @@ static void handleGetMessagesCsv() {
     snprintf(cd, sizeof(cd), "attachment; filename=\"%s\"", fileName);
     server.sendHeader("Content-Disposition", cd);
     server.sendHeader("Cache-Control", "no-store");
+
+    // Same reset as the node CSV above, for the same reason.
+    gSendAborted = false;
 
     // Chunked for the same reason as the node CSV: every channel of history
     // plus every DM is far too much to assemble in one String here.
@@ -5950,6 +6451,11 @@ static void registerCommonRoutes() {
     if (gOnScreenshotPng) {
         onRoute("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
+    // Map cache. Full-page routes only: filling it needs the browser to reach
+    // OSM, which means a station connection, and the lite page AP mode serves
+    // has no Utilities tab to put the control on.
+    onRoute("/state-map-status",  HTTP_GET,  handleGetStateMapStatus);
+    onRoute("/state-map-upload",  HTTP_POST, handleStateMapUploadDone, handleStateMapUpload);
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
     onRoute("/export",            HTTP_GET,  handleGetExport);
@@ -5961,6 +6467,7 @@ static void registerCommonRoutes() {
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
+    onRoute("/clear-maps",        HTTP_POST, handlePostClearMaps);
     onRoute("/node-favorite",     HTTP_POST, handlePostNodeFavorite);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
     registerNotFound();
