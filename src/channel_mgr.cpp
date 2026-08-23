@@ -456,6 +456,41 @@ void ChannelMgr::loadPersisted() {
 #if HAS_FILE_STORAGE
     if (!_persistReady) return;
 
+    // One directory pass instead of two exists() probes per channel.
+    //
+    // On a LittleFS board a miss is a failed open that the VFS layer charges for
+    // and logs, and a device with no stored history misses on every single one:
+    // twenty of them measured ~330 ms of boot on the Heltec. Listing the folder
+    // costs one open no matter how empty it is. (Same fix, and the same reason,
+    // as the state-map cache scan in web_config.cpp.)
+    bool haveLog[MESH_CHANNELS] = {};
+    bool haveTmp[MESH_CHANNELS] = {};
+    {
+        File dir = storageFs().open(kChanPersistDir);
+        if (dir && dir.isDirectory()) {
+            for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+                const char *nm = f.name();
+                if (!nm) { f.close(); continue; }
+                const char *base = nm;
+                for (const char *p2 = nm; *p2; p2++) {
+                    if (*p2 == '/') base = p2 + 1;
+                }
+                // "ch<N>.log" or "ch<N>.tmp"; anything else is not ours.
+                if (base[0] != 'c' || base[1] != 'h') { f.close(); continue; }
+                int idx = 0;
+                const char *d = base + 2;
+                if (*d < '0' || *d > '9') { f.close(); continue; }
+                while (*d >= '0' && *d <= '9') { idx = idx * 10 + (*d - '0'); d++; }
+                if (idx >= 0 && idx < MESH_CHANNELS) {
+                    if (strcmp(d, ".log") == 0) haveLog[idx] = true;
+                    else if (strcmp(d, ".tmp") == 0) haveTmp[idx] = true;
+                }
+                f.close();
+            }
+        }
+        if (dir) dir.close();
+    }
+
     _persistLoading = true;
     for (int chanIdx = 0; chanIdx < MESH_CHANNELS; chanIdx++) {
         if (!_chans[chanIdx].lines) continue;
@@ -469,16 +504,17 @@ void ChannelMgr::loadPersisted() {
         // under .tmp with no log beside it; promote it. A .tmp alongside an
         // intact log is instead a write that died before it finished — that one
         // is incomplete, so the log wins and the leftover is dropped.
-        if (storageFs().exists(tmpPath)) {
-            if (!storageFs().exists(path)) {
+        if (haveTmp[chanIdx]) {
+            if (!haveLog[chanIdx]) {
                 if (storageFs().rename(tmpPath, path)) {
+                    haveLog[chanIdx] = true;   // it is the log now
                     debugLogMessages("[chanmgr] ch%d recovered staged snapshot\n", chanIdx);
                 }
             } else {
                 storageFs().remove(tmpPath);
             }
         }
-        if (!storageFs().exists(path)) continue;
+        if (!haveLog[chanIdx]) continue;
 
         int totalLines = 0;
         {

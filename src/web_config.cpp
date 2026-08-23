@@ -16,6 +16,7 @@
 #include <nvs_flash.h>
 #include "storage.h"
 #include "state_maps.h"
+#include "env_sensor.h"
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
@@ -1520,6 +1521,7 @@ static void sendChunkIfBig(String &html, size_t threshold = 700) {
     if (html.length() >= threshold) sendChunk(html);
 }
 
+#if HAS_STATE_MAPS
 // ── State map cache ──────────────────────────────────────────────────────────
 // The Locate modal on the device draws a node's position onto a cached PNG of
 // the state it falls in. This firmware has no TLS client, so it cannot fetch
@@ -1538,7 +1540,20 @@ static bool stateMapStorageReady() {
 #if !HAS_FILE_STORAGE
     return false;
 #else
-    return storageBegin() && storageMounted();
+    // sdBegin(), not storageBegin(). They are not interchangeable: sdBegin() is
+    // the board-aware mount — it runs SPI.begin() with this board's LoRa pins and
+    // deasserts the SD, LoRa and TFT chip selects before touching the card, which
+    // is what makes a shared SPI bus safe, and it carries the per-board speed and
+    // profile ladders. storageBegin() only calls SD.begin() against whatever state
+    // the bus happens to be in, and tracks its own separate mounted flag.
+    //
+    // On a board where something had already brought the bus up, the difference
+    // was invisible. On the M9 it was not. Every other storage call site in this
+    // file and in main_lvgl.cpp already uses sdBegin(); this was the odd one out.
+    //
+    // Boards with no slot but internal flash are covered too: sdBegin() mounts
+    // LittleFS for them, so callers never need to know which backend they have.
+    return sdBegin();
 #endif
 }
 
@@ -1556,15 +1571,77 @@ static bool stateMapEnsureDir() {
 // A cached map counts only when the PNG is real. A truncated upload leaves a
 // file the device would reject at decode time anyway; reporting it as present
 // would just move the confusion to the device.
-static bool stateMapCached(const char *code) {
+// One directory pass, in place of fifty path probes.
+//
+// The status endpoint used to ask stateMapCached() about every state in the
+// table. On a board backed by LittleFS each miss is a failed open that the VFS
+// layer both charges for and logs, and fifty of them measured ~625 ms on the
+// Heltec — a blocking stall in loop() every time the config page was opened,
+// which is ~20 dropped UI frames and reads as exactly the lag issue #53 is
+// about. Reading the directory costs one open regardless of how empty it is.
+//
+// Dimensions come off the directory entry's own handle, so a cached map costs no
+// extra open either.
+struct StateMapCacheEntry {
+    char code[3];
+    uint32_t w;
+    uint32_t h;
+};
+
+static int stateMapScanCache(StateMapCacheEntry *out, int maxOut) {
 #if !HAS_FILE_STORAGE
-    (void)code;
-    return false;
+    (void)out; (void)maxOut;
+    return 0;
 #else
-    if (!stateMapStorageReady()) return false;
-    String p = nodesStateMapPath(code);
-    if (!storageFs().exists(p.c_str())) return false;
-    return nodesFileLooksLikePng(p.c_str());
+    if (!out || maxOut <= 0) return 0;
+    if (!stateMapStorageReady()) return 0;
+
+    File dir = storageFs().open("/camillia/state_maps");
+    if (!dir) return 0;
+    if (!dir.isDirectory()) { dir.close(); return 0; }
+
+    int n = 0;
+    for (File f = dir.openNextFile(); f && n < maxOut; f = dir.openNextFile()) {
+        if (f.isDirectory()) { f.close(); continue; }
+
+        // name() is a full path on some cores and a bare name on others.
+        const char *nm = f.name();
+        if (!nm) { f.close(); continue; }
+        const char *base = nm;
+        for (const char *p2 = nm; *p2; p2++) {
+            if (*p2 == '/') base = p2 + 1;
+        }
+
+        // Exactly "XX.png"; anything else in the folder is not ours.
+        auto lower = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; };
+        if (strlen(base) != 6
+            || lower(base[2]) != '.' || lower(base[3]) != 'p'
+            || lower(base[4]) != 'n' || lower(base[5]) != 'g') {
+            f.close();
+            continue;
+        }
+
+        uint8_t hdr[24] = {0};
+        const bool readOk = (f.read(hdr, sizeof(hdr)) == sizeof(hdr));
+        f.close();
+        if (!readOk) continue;
+
+        static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+        if (memcmp(hdr, kPngSig, sizeof(kPngSig)) != 0) continue;
+        if (!(hdr[12] == 'I' && hdr[13] == 'H' && hdr[14] == 'D' && hdr[15] == 'R')) continue;
+
+        out[n].code[0] = (char)toupper((unsigned char)base[0]);
+        out[n].code[1] = (char)toupper((unsigned char)base[1]);
+        out[n].code[2] = '\0';
+        out[n].w = ((uint32_t)hdr[16] << 24) | ((uint32_t)hdr[17] << 16)
+                 | ((uint32_t)hdr[18] << 8) | hdr[19];
+        out[n].h = ((uint32_t)hdr[20] << 24) | ((uint32_t)hdr[21] << 16)
+                 | ((uint32_t)hdr[22] << 8) | hdr[23];
+        if (out[n].w == 0 || out[n].h == 0) continue;
+        n++;
+    }
+    dir.close();
+    return n;
 #endif
 }
 
@@ -1579,6 +1656,11 @@ static void handleGetStateMapStatus() {
     }
 
     const bool ready = stateMapStorageReady();
+
+    // Scanned once up front. Everything below answers from this, so the endpoint
+    // touches the filesystem a fixed number of times instead of once per state.
+    StateMapCacheEntry cached[kUsStateMapCount];
+    const int cachedCount = ready ? stateMapScanCache(cached, kUsStateMapCount) : 0;
 
     // gSendAborted is sticky across requests: once any response gives up on a
     // stalled socket, every later chunked send is skipped until someone clears
@@ -1618,20 +1700,23 @@ static void handleGetStateMapStatus() {
         out += String(st.lonMin, 4);
         out += ",\"lonMax\":";
         out += String(st.lonMax, 4);
-        const bool have = ready && stateMapCached(st.code);
+        const StateMapCacheEntry *hit = nullptr;
+        for (int c = 0; c < cachedCount; c++) {
+            if (cached[c].code[0] == st.code[0] && cached[c].code[1] == st.code[1]) {
+                hit = &cached[c];
+                break;
+            }
+        }
         out += ",\"cached\":";
-        out += have ? "true" : "false";
+        out += hit ? "true" : "false";
         // A map cached at an older resolution still renders, just softly, so it
         // is reported rather than hidden: the page offers to refresh it instead
         // of making the user clear the whole cache to get a sharper one.
-        if (have) {
-            uint32_t cw = 0, ch = 0;
-            if (nodesReadPngSize(nodesStateMapPath(st.code).c_str(), cw, ch)) {
-                out += ",\"w\":";
-                out += String((unsigned)cw);
-                out += ",\"h\":";
-                out += String((unsigned)ch);
-            }
+        if (hit) {
+            out += ",\"w\":";
+            out += String((unsigned)hit->w);
+            out += ",\"h\":";
+            out += String((unsigned)hit->h);
         }
         out += "}";
         sendChunkIfBig(out, 900);
@@ -1829,6 +1914,7 @@ static void handleStateMapUploadDone() {
     server.send(200, "application/json", out);
 #endif
 }
+#endif  // HAS_STATE_MAPS
 
 // Appends text into a single-quoted HTML attribute. Channel names are free text
 // typed on the device or imported from YAML, and one apostrophe in a name would
@@ -3055,11 +3141,47 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<h3 style='font-size:.95em;margin:.8em 0 .3em'>Sensor Telemetry</h3>";
     html += "<div class='row2'>";
 #if HAS_ENV_SENSOR_TELEMETRY
-    html += "<label>Environment Sensor Telemetry<select name='tel_env_en'>"
-            "<option value='1'"; if ( gCfg->telEnvEnabled) html += " selected"; html += ">Enabled</option>"
-            "<option value='0'"; if (!gCfg->telEnvEnabled) html += " selected"; html += ">Disabled</option>"
-            "</select></label>";
-    html += "<label>Sensor Interval<input type='text' value='Uses broadcast interval above' disabled></label>";
+    // Three states, and they are worth telling apart. A board that supports the
+    // feature but has nothing on the bus used to look identical to one that was
+    // simply switched off — the setting sat there saying "Enabled" while nothing
+    // was ever sent, which is exactly the doubt this is meant to remove.
+    //
+    // Same shape as the Archive dropped nodes checkbox above: the control is
+    // disabled where it cannot do anything, and the reason takes the place of
+    // the description. The stored preference is left untouched either way, so it
+    // survives until a sensor is present.
+    {
+        const bool sensorFound = envHasSensor();
+        const bool stillLooking = !sensorFound && !envProbeExhausted();
+
+        // Left enabled even with no sensor detected. Disabling it was a mistake:
+        // it is a perfectly reasonable thing to switch on before fitting a
+        // sensor, and the setting is harmless without one — the announce path
+        // simply finds nothing to read. The status line below says what is
+        // actually there; it does not need to police the control as well.
+        html += "<label>Environment Sensor Telemetry<select name='tel_env_en'>"
+                "<option value='1'"; if ( gCfg->telEnvEnabled) html += " selected"; html += ">Enabled</option>"
+                "<option value='0'"; if (!gCfg->telEnvEnabled) html += " selected"; html += ">Disabled</option>"
+                "</select></label>";
+        html += "<label>Sensor Interval<input type='text' value='Uses broadcast interval above' disabled></label>";
+
+        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em;grid-column:1/-1'>";
+        if (sensorFound) {
+            html += "Detected <b>";
+            html += envSensorName();
+            html += "</b> on <code>";
+            html += envProbeRouteName();
+            html += "</code>.";
+        } else if (stillLooking) {
+            html += "Still looking for a sensor. Reload the page to see the result.";
+        } else {
+            html += "<b>No sensor detected</b> at boot, so nothing is sent even with "
+                    "this enabled. You can still turn it on ready for one. Run "
+                    "<code>i2c scan all</code> on the serial console to see every "
+                    "address that answered, on every candidate bus.";
+        }
+        html += "</p>";
+    }
 #else
     html += "<label>Environment Sensor Telemetry<input type='text' value='Unavailable on this build' disabled></label>";
     html += "<label>Sensor Interval<input type='text' value='Unavailable on this build' disabled></label>";
@@ -3439,6 +3561,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sectionEnd(html, false);
     sendChunk(html);
 
+#if HAS_STATE_MAPS
     // ── Maps Download ─────────────────────────────────────────────
     // Absent, not disabled, when there is nowhere to put the files: on a board
     // with no storage there is nothing the reader could do about it, and a
@@ -3466,6 +3589,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         sectionEnd(html, false);
         sendChunk(html);
     }
+#endif
 
     section(html, false, "Debug Output", false);
     html +=
@@ -3589,6 +3713,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "Clears the entire persisted node database &mdash; favorites included &mdash; "
         "and reboots.</p>";
 
+#if HAS_STATE_MAPS
     // Only where there is a cache to clear. Hidden on the same terms as the
     // Maps Download section above, so the two never disagree about whether this
     // device has maps at all.
@@ -3607,6 +3732,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "This is reversible: <em>Maps Download</em> above puts them back, since maps "
             "always arrive from this page rather than being fetched by the device.</p>";
     }
+#endif
 
     html +=
         "<form method='POST' action='/factory-reset'"
@@ -3727,6 +3853,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
     html += ";</script>";
 
+#if HAS_STATE_MAPS
     // Maps Download status. Runs after NODE_HEAT_POINTS is defined above, and
     // no-ops when the section was not rendered (no storage on this device).
     //
@@ -3859,6 +3986,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "}).catch(function(){say('Could not read the map cache status.');});\n"
         "})();\n"
         "</script>";
+#endif
+
 
     html += "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
             "<script src='https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js'></script>";
@@ -6451,11 +6580,13 @@ static void registerCommonRoutes() {
     if (gOnScreenshotPng) {
         onRoute("/screenshot",    HTTP_GET,  handleGetScreenshot);
     }
+#if HAS_STATE_MAPS
     // Map cache. Full-page routes only: filling it needs the browser to reach
     // OSM, which means a station connection, and the lite page AP mode serves
     // has no Utilities tab to put the control on.
     onRoute("/state-map-status",  HTTP_GET,  handleGetStateMapStatus);
     onRoute("/state-map-upload",  HTTP_POST, handleStateMapUploadDone, handleStateMapUpload);
+#endif
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
     onRoute("/export",            HTTP_GET,  handleGetExport);
@@ -6467,7 +6598,9 @@ static void registerCommonRoutes() {
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
+#if HAS_STATE_MAPS
     onRoute("/clear-maps",        HTTP_POST, handlePostClearMaps);
+#endif
     onRoute("/node-favorite",     HTTP_POST, handlePostNodeFavorite);
     onRoute("/factory-reset",     HTTP_POST, handlePostFactoryReset);
     registerNotFound();

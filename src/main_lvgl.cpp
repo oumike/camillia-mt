@@ -737,11 +737,7 @@ static bool s_nodesFilterEditing = false;
 // make — it is the one whose internal DRAM budget issue #49 is about. The row
 // is absent there rather than permanently greyed: a control that can never be
 // used on this hardware is not a disabled control, it is clutter.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define HAS_NODE_LOCATE 0
-#else
-#define HAS_NODE_LOCATE 1
-#endif
+#define HAS_NODE_LOCATE HAS_STATE_MAPS
 
 // Node Actions modal: 7 actions arranged 2-per-row (6 without Locate). Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
@@ -967,6 +963,14 @@ static uint32_t s_nextDeviceTelemetryTxMs = 0;
 static uint32_t s_nextEnvTelemetryTxMs = 0;
 static uint32_t s_nextNeighborInfoTxMs = 0;
 static uint32_t s_nextMapReportMs = 0;
+// Consecutive failed sends per announce, so a retry can back off instead of
+// re-entering a blocking transmit every five seconds forever. See issue #53.
+static uint8_t s_nodeInfoTxFails = 0;
+static uint8_t s_positionTxFails = 0;
+static uint8_t s_deviceTelemetryTxFails = 0;
+static uint8_t s_envTelemetryTxFails = 0;
+static uint8_t s_neighborInfoTxFails = 0;
+static uint8_t s_mapReportFails = 0;
 static char s_serialCmdBuf[96] = {};
 static size_t s_serialCmdLen = 0;
 
@@ -1060,8 +1064,8 @@ static int s_stateMapBootstrapDownloaded = 0;
 static int s_stateMapBootstrapFailed = 0;
 static uint32_t s_stateMapOnDemandLastTryMs = 0;
 static char s_stateMapOnDemandLastCode[3] = "";
-// Cached state maps are drawn by the Locate modal.
-static constexpr bool kStateMapsEnabled = true;
+// Cached state maps are drawn by the Locate modal, on the boards that have it.
+static constexpr bool kStateMapsEnabled = (HAS_STATE_MAPS != 0);
 // ...but this device cannot *fetch* them. nodesDownloadStateMap() is a stub
 // returning false: its HTTPS downloads went when WiFiClientSecure was dropped
 // from the firmware, and the staticmap host they targeted no longer resolves.
@@ -4630,6 +4634,93 @@ static bool s_backlightPendingOn = false;
 // pace because the T-Deck keyboard needs a sub-12 ms poll cadence; only the
 // redraw work is throttled.
 static constexpr uint32_t kUiRefreshTickMs = 30;
+
+// ── Loop latency probe ───────────────────────────────────────────────────────
+// Times the parts of loop() that can block, and reports the worst offenders on
+// a rolling window. Built because the Heltec sluggishness in issue #53 is
+// intermittent: a freeze you cannot reproduce on demand cannot be attributed by
+// reading the code, and this session already spent two flashes on hypotheses
+// that measurement would have settled immediately.
+//
+// Cost when nothing is slow: two millis() calls per wrapped phase. The report
+// only prints when something actually exceeded the threshold, so a healthy
+// device stays silent.
+#ifndef LOOP_LATENCY_DEBUG
+#define LOOP_LATENCY_DEBUG 1
+#endif
+
+#if LOOP_LATENCY_DEBUG
+// One UI tick. Anything longer than this has dropped a frame by definition.
+static constexpr uint32_t kLoopPhaseWarnMs = 30;
+static constexpr uint32_t kLoopReportMs = 15000;
+
+struct LoopPhaseStat {
+    const char *name;
+    uint32_t worstMs;
+    uint32_t overCount;
+    uint32_t totalOverMs;
+};
+static LoopPhaseStat s_loopPhases[20];
+static int s_loopPhaseCount = 0;
+static uint32_t s_loopReportLastMs = 0;
+static uint32_t s_loopWorstTotalMs = 0;
+
+static void loopPhaseNote(const char *name, uint32_t ms) {
+    if (ms < kLoopPhaseWarnMs) return;          // only the interesting ones
+    for (int i = 0; i < s_loopPhaseCount; i++) {
+        if (s_loopPhases[i].name == name) {     // literals, so pointer compare
+            if (ms > s_loopPhases[i].worstMs) s_loopPhases[i].worstMs = ms;
+            s_loopPhases[i].overCount++;
+            s_loopPhases[i].totalOverMs += ms;
+            return;
+        }
+    }
+    if (s_loopPhaseCount >= (int)(sizeof(s_loopPhases) / sizeof(s_loopPhases[0]))) return;
+    s_loopPhases[s_loopPhaseCount++] = LoopPhaseStat{name, ms, 1, ms};
+}
+
+// Called at the end of loop(); prints only when the window caught something.
+static void loopPhaseReport(uint32_t nowMs, uint32_t loopMs) {
+    if (loopMs > s_loopWorstTotalMs) s_loopWorstTotalMs = loopMs;
+    if (s_loopReportLastMs == 0) s_loopReportLastMs = nowMs;
+    if ((uint32_t)(nowMs - s_loopReportLastMs) < kLoopReportMs) return;
+    s_loopReportLastMs = nowMs;
+
+    // Print when any phase blew the budget, and also when the iteration as a
+    // whole did even though nothing single-handedly caused it — a loop that is
+    // slow from many small costs looks healthy phase by phase.
+    if (s_loopPhaseCount > 0 || s_loopWorstTotalMs >= kLoopPhaseWarnMs) {
+        Serial.printf("[loop] worst %lums | over %lums:",
+                      (unsigned long)s_loopWorstTotalMs,
+                      (unsigned long)kLoopPhaseWarnMs);
+        for (int i = 0; i < s_loopPhaseCount; i++) {
+            Serial.printf(" %s=%lums x%lu (%lums total)",
+                          s_loopPhases[i].name,
+                          (unsigned long)s_loopPhases[i].worstMs,
+                          (unsigned long)s_loopPhases[i].overCount,
+                          (unsigned long)s_loopPhases[i].totalOverMs);
+        }
+        if (s_loopPhaseCount == 0) Serial.print(" (no single phase over budget)");
+        Serial.println();
+    }
+    s_loopPhaseCount = 0;
+    s_loopWorstTotalMs = 0;
+}
+
+// Wraps a statement and records how long it took. __VA_ARGS__ so assignments
+// and multi-argument calls pass through unchanged.
+#define LOOP_PHASE(tag, ...) do {                    \
+        uint32_t _lp0 = millis();                    \
+        __VA_ARGS__;                                 \
+        loopPhaseNote(tag, millis() - _lp0);         \
+    } while (0)
+#else
+#define LOOP_PHASE(tag, ...) do { __VA_ARGS__; } while (0)
+static inline void loopPhaseNote(const char *, uint32_t) {}
+static inline void loopPhaseReport(uint32_t, uint32_t) {}
+#endif
+
+
 
 // ── Pre-sleep dim ────────────────────────────────────────────────────────────
 // The backlight is usually the largest single draw while the screen is on, so
@@ -13409,6 +13500,36 @@ static void closeNodeInfoModal() {
 
 // Shows the current node's identity/radio details in a dismissible popup,
 // layered over the CFG modal. Any key (or the close key) dismisses it.
+#if HAS_ENV_SENSOR_TELEMETRY
+// Transparent, non-scrolling flex column. The Device Info page puts the device
+// rows in one and the environment readings in another; the modal itself keeps
+// ownership of scrolling, so neither column scrolls on its own.
+static lv_obj_t *infoMakeColumn(lv_obj_t *parent) {
+    lv_obj_t *col = lv_obj_create(parent);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(col, 0, 0);
+    lv_obj_set_style_pad_all(col, 0, 0);
+    lv_obj_set_style_pad_row(col, 3, 0);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    return col;
+}
+
+static void infoAddRow(lv_obj_t *parent, const lv_font_t *font,
+                       uint32_t color, const char *text) {
+    lv_obj_t *row = lv_label_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_style_text_font(row, font, 0);
+    lv_obj_set_style_text_color(row, lv_color_hex(color), 0);
+    lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+    lv_label_set_text(row, text);
+}
+#endif  // HAS_ENV_SENSOR_TELEMETRY
+
 static void openNodeInfoModal() {
     if (!s_rootScreen || s_nodeInfoModal) return;
 
@@ -13489,14 +13610,69 @@ static void openNodeInfoModal() {
     lv_label_set_text(title, "Device Info");
 #endif
 
+    // Device rows go in the left column and environment readings in the right,
+    // but only when there is actually something to put on the right. With no
+    // sensor detected the rows stay full width rather than sitting in a
+    // half-width column beside an empty gap.
+    lv_obj_t *rowsParent = s_nodeInfoModal;
+#if HAS_ENV_SENSOR_TELEMETRY
+    const uint8_t envCount = envSensorCount();
+    lv_obj_t *envCol = nullptr;
+    if (envCount > 0) {
+        lv_obj_t *body = lv_obj_create(s_nodeInfoModal);
+        lv_obj_set_width(body, lv_pct(100));
+        lv_obj_set_height(body, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(body, 0, 0);
+        lv_obj_set_style_pad_all(body, 0, 0);
+        lv_obj_set_style_pad_column(body, 8, 0);
+        lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        rowsParent = infoMakeColumn(body);
+        envCol = infoMakeColumn(body);
+    }
+#endif
+
     for (int i = 0; i < infoCount; i++) {
-        lv_obj_t *row = lv_label_create(s_nodeInfoModal);
+        lv_obj_t *row = lv_label_create(rowsParent);
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_style_text_font(row, bodyFont, 0);
         lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, info[i]);
     }
+
+#if HAS_ENV_SENSOR_TELEMETRY
+    if (envCol) {
+        infoAddRow(envCol, bodyFont, 0xA7C7FF, "Environment");
+        char line[48];
+        for (uint8_t i = 0; i < envCount; i++) {
+            EnvSensorInfo si;
+            if (!envSensorInfoAt(i, si)) {
+                // Detected but not answering right now. Naming it is more use
+                // than dropping the row: it says the part is there and the read
+                // failed, which is a different problem from having no sensor.
+                infoAddRow(envCol, bodyFont, 0xD9E8FF, "sensor: read failed");
+                continue;
+            }
+            infoAddRow(envCol, bodyFont, 0xD9E8FF, si.name ? si.name : "sensor");
+            if (si.hasTemperature) {
+                snprintf(line, sizeof(line), "  Temp   %.1f C", si.temperatureC);
+                infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
+            }
+            if (si.hasHumidity) {
+                snprintf(line, sizeof(line), "  Humid  %.1f %%", si.humidityPct);
+                infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
+            }
+            if (si.hasPressure) {
+                snprintf(line, sizeof(line), "  Press  %.1f hPa", si.pressureHpa);
+                infoAddRow(envCol, bodyFont, 0xD9E8FF, line);
+            }
+        }
+    }
+#endif
 
     // Heltec has the Close button above instead: naming a key on a build with no
     // keyboard was only ever telling the user to look for something that is not
@@ -30812,7 +30988,9 @@ static bool announceDue(uint32_t nowMs, uint32_t nextMs, uint32_t intervalS) {
     return (int32_t)(nowMs - nextMs) >= 0;
 }
 
-static void scheduleAnnounceNext(uint32_t &nextMs, uint32_t nowMs, uint32_t intervalS) {
+static void scheduleAnnounceNext(uint32_t &nextMs, uint8_t &fails,
+                                 uint32_t nowMs, uint32_t intervalS) {
+    fails = 0;
     uint32_t intervalMs = announceIntervalMs(intervalS);
     if (intervalMs == 0) {
         nextMs = 0;
@@ -30821,8 +30999,27 @@ static void scheduleAnnounceNext(uint32_t &nextMs, uint32_t nowMs, uint32_t inte
     nextMs = nowMs + intervalMs;
 }
 
-static void scheduleAnnounceRetry(uint32_t &nextMs, uint32_t nowMs) {
-    nextMs = nowMs + 5000UL;
+// Exponential backoff, capped both by a hard ceiling and by the announce's own
+// interval — retrying more often than the thing would normally be sent is never
+// useful.
+//
+// This was a flat 5 s with no attempt counter, which is what turned a radio that
+// cannot transmit into a permanently sluggish device rather than an occasional
+// hitch: MeshRadio::transmit() blocks the main loop for the full airtime across
+// its internal attempts (~0.85 s per packet on LongFast, up to ~3.5 s if all
+// four attempts fail), and a failing announce re-entered that every five seconds
+// for the rest of the session. Backing off means a dead TX path settles at
+// costing no more loop time than a working one. See issue #53.
+static constexpr uint32_t kAnnounceRetryBaseMs = 5000UL;
+static constexpr uint8_t  kAnnounceRetryMaxShift = 6;      // 5, 10, 20, 40, 80, 160 s
+
+static void scheduleAnnounceRetry(uint32_t &nextMs, uint8_t &fails,
+                                  uint32_t nowMs, uint32_t intervalS) {
+    if (fails < kAnnounceRetryMaxShift) fails++;
+    uint32_t delayMs = kAnnounceRetryBaseMs << (fails - 1);
+    uint32_t intervalMs = announceIntervalMs(intervalS);
+    if (intervalMs != 0 && delayMs > intervalMs) delayMs = intervalMs;
+    nextMs = nowMs + delayMs;
 }
 
 static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM) {
@@ -30881,8 +31078,8 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                         0xFFFFFFFF,
                                         false,
                                         s_cfg.okToMqtt);
-        if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, nowMs, s_cfg.nodeInfoIntervalS);
-        else scheduleAnnounceRetry(s_nextNodeInfoTxMs, nowMs);
+        if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
+        else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
     }
 
     if (positionDue) {
@@ -30903,9 +31100,9 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                           s_cfg.positionPrecision)) sent++;
             }
             if (sent > 0 || attempted == 0) {
-                scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
+                scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
             } else {
-                scheduleAnnounceRetry(s_nextPositionTxMs, nowMs);
+                scheduleAnnounceRetry(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
             }
             if (attempted == 0 && forceAnnounce) {
                 // Sharing is on and we have coordinates, but no channel is set to
@@ -30914,7 +31111,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                     TFT_DARKGREY, 0, false);
             }
         } else {
-            scheduleAnnounceNext(s_nextPositionTxMs, nowMs, s_cfg.posIntervalS);
+            scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
             if (forceAnnounce) {
                 // "Off" and "nothing to send" look identical from the outside,
                 // and the announce button is exactly where someone checks.
@@ -30961,34 +31158,58 @@ static void serviceTelemetryAnnounce(uint32_t nowMs) {
     }
 
     if (devDue) {
-        bool ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt);
-        if (ok) scheduleAnnounceNext(s_nextDeviceTelemetryTxMs, nowMs, s_cfg.telDeviceIntervalS);
-        else scheduleAnnounceRetry(s_nextDeviceTelemetryTxMs, nowMs);
+        bool ok = false;
+        LOOP_PHASE("tx:telemetry", ok = Channels.sendTelemetryDevice(s_myNodeId, s_cfg.okToMqtt));
+        if (ok) scheduleAnnounceNext(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
+        else scheduleAnnounceRetry(s_nextDeviceTelemetryTxMs, s_deviceTelemetryTxFails, nowMs, s_cfg.telDeviceIntervalS);
     }
 
 #if HAS_ENV_SENSOR_TELEMETRY
     if (envDue) {
-        bool hasSensor = envHasSensor() || envBegin();
+        // Timed separately: this is the probe sweep, and the first measurement
+        // that covered serviceTelemetryAnnounce() as a whole read 20 s, which is
+        // far more than a LoRa transmit can account for.
+        bool hasSensor = false;
+        LOOP_PHASE("env:probe", hasSensor = envHasSensor() || envBegin());
         if (!hasSensor) {
-            // If the sensor was slow to come up at boot, retry sooner than the
-            // full telemetry interval so env telemetry starts promptly.
-            s_nextEnvTelemetryTxMs = nowMs + 30000UL;
+            // A sensor that was slow to come up at boot is worth retrying sooner
+            // than the full telemetry interval. A sensor that is not there is
+            // not: once envBegin() has exhausted its sweeps it will never
+            // succeed this session, so fall back to the configured interval
+            // rather than waking every 30 s forever. See issue #53.
+            if (envProbeExhausted()) {
+                scheduleAnnounceNext(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails,
+                                     nowMs, s_cfg.telEnvIntervalS);
+            } else {
+                s_nextEnvTelemetryTxMs = nowMs + 30000UL;
+            }
             return;
         }
 
         EnvReading env = {};
         if (!envRead(env)) {
-            scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, nowMs);
+            // Detected but unreadable is a different fault from never detected,
+            // and until now both looked identical from outside: the announce
+            // just quietly rescheduled.
+            Serial.printf("[env] read failed (%s via %s)\n",
+                          envSensorName(), envProbeRouteName());
+            scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
             return;
         }
+
+        // Hourly at most, so this is not chatty — and it is the only way to tell
+        // "the sensor is reporting" from "the sensor is reporting zeroes".
+        Serial.printf("[env] read %.1fC %.1f%% %.1fhPa via %s\n",
+                      (double)env.temperatureC, (double)env.humidityPct,
+                      (double)env.pressureHpa, envProbeRouteName());
 
         bool ok = Channels.sendTelemetryEnvironment(s_myNodeId,
                                                     env.temperatureC,
                                                     env.humidityPct,
                                                     env.pressureHpa,
                                                     s_cfg.okToMqtt);
-        if (ok) scheduleAnnounceNext(s_nextEnvTelemetryTxMs, nowMs, s_cfg.telEnvIntervalS);
-        else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, nowMs);
+        if (ok) scheduleAnnounceNext(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
+        else scheduleAnnounceRetry(s_nextEnvTelemetryTxMs, s_envTelemetryTxFails, nowMs, s_cfg.telEnvIntervalS);
     }
 #endif
 }
@@ -31083,7 +31304,7 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     }
 
     if (neighborCount == 0) {
-        scheduleAnnounceNext(s_nextNeighborInfoTxMs, nowMs, s_cfg.neighborInfoIntervalS);
+        scheduleAnnounceNext(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
         return;
     }
 
@@ -31092,8 +31313,8 @@ static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
                                         neighbors,
                                         neighborCount,
                                         s_cfg.okToMqtt);
-    if (ok) scheduleAnnounceNext(s_nextNeighborInfoTxMs, nowMs, s_cfg.neighborInfoIntervalS);
-    else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, nowMs);
+    if (ok) scheduleAnnounceNext(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
+    else scheduleAnnounceRetry(s_nextNeighborInfoTxMs, s_neighborInfoTxFails, nowMs, s_cfg.neighborInfoIntervalS);
 }
 
 // ── MQTT map report ──────────────────────────────────────────────────────────
@@ -31136,7 +31357,7 @@ static void serviceMapReport(uint32_t nowMs) {
     // Not connected yet: come back on the next tick rather than burning the
     // interval, so enabling the bridge does not mean a 15-minute wait.
     if (!mqttBridgeConnected()) {
-        scheduleAnnounceRetry(s_nextMapReportMs, nowMs);
+        scheduleAnnounceRetry(s_nextMapReportMs, s_mapReportFails, nowMs, kMapReportIntervalS);
         return;
     }
 
@@ -31179,7 +31400,7 @@ static void serviceMapReport(uint32_t nowMs) {
     // Rescheduled before the early return, not after it: without a position
     // there is nothing to map, and a return that left the timer alone would log
     // this line on every pass through the loop.
-    scheduleAnnounceNext(s_nextMapReportMs, nowMs, kMapReportIntervalS);
+    scheduleAnnounceNext(s_nextMapReportMs, s_mapReportFails, nowMs, kMapReportIntervalS);
     if (!info.hasPosition) {
         Serial.println("[mqtt] map report skipped: no position "
                        "(location sharing off, or no fix and no fixed position)");
@@ -33466,7 +33687,21 @@ void setup() {
 #endif
 #if (BOARD_VEXT_ENABLE >= 0)
     pinMode(BOARD_VEXT_ENABLE, OUTPUT);
+#if defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
+    // Rail parked OFF here and raised with the display below, mirroring the
+    // wadamesh MeshCore port on this board:
+    //
+    //   RefCountedDigitalPin::begin()  -> digitalWrite(pin, !active)   // off
+    //   LGFXDisplay::begin()           -> claim() -> digitalWrite(pin, active)
+    //                                  -> _lcd.init()
+    //
+    // Driving it active this early is what broke the touch controller: it holds
+    // the rail up through the whole pre-display bring-up, a window that port
+    // deliberately keeps powered down.
+    digitalWrite(BOARD_VEXT_ENABLE, !BOARD_VEXT_ON_LEVEL);
+#else
     digitalWrite(BOARD_VEXT_ENABLE, BOARD_VEXT_ON_LEVEL);
+#endif
     delay(20);
 #endif
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
@@ -33533,6 +33768,13 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL, 100000UL);
     meshDeckReleaseTouchReset();
 #endif
+#if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
+    // The claim() the display makes on the peripheral rail. Everything on it —
+    // panel, touch controller, I2C sensors — powers up from here, so the settle
+    // has to happen before lcd.init() probes the touch bus.
+    digitalWrite(BOARD_VEXT_ENABLE, BOARD_VEXT_ON_LEVEL);
+    delay(50);
+#endif
     lcd.init();
     displayDev().setRotation(TFT_ROTATION_DEFAULT);
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
@@ -33573,7 +33815,9 @@ void setup() {
     // installed here instead. Must happen before the first lv_timer_handler().
     lv_tick_set_cb((lv_tick_get_cb_t)millis);
     emojiFontInit();   // build emoji-fallback text faces before any UI
+#if HAS_STATE_MAPS
     nodesMapInitFsDriver();
+#endif
     // Allocate the LVGL draw buffer here, on the normal-UI path only. The OTA
     // worker path returns/reboots before reaching this point, so the buffer is
     // never allocated during a firmware update — leaving the full contiguous
@@ -33690,6 +33934,19 @@ void setup() {
     bootSplashStatus("Web config");
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
+#if HAS_ENV_SENSOR_TELEMETRY
+    // Detect at boot, independent of whether env telemetry is switched on.
+    //
+    // Probing used to happen only on the announce path, which meant detection
+    // required the setting to be enabled — and the web UI disabled that setting
+    // when no sensor had been detected. Nothing could break the loop: you could
+    // not enable it to find a sensor, because no sensor had been found. Boot is
+    // also simply the right place, now that the probe is one declared route
+    // rather than a sweep of guesses.
+    bootSplashStatus("Sensors");
+    (void)envBegin();
+#endif
+
     bootSplashStatus("Map storage");
     bootstrapStateMapsIfMissing();
     // Before batteryInitAdc(), which takes the first sample: the trim has to be
@@ -34002,7 +34259,7 @@ void loop() {
 #endif
 
     serviceCpuScaling();
-    serviceSerialCommands();
+    LOOP_PHASE("serial", serviceSerialCommands());
     bootstrapStateMapsIfMissing();
 #if HAS_VNC_HOST
     // A connected browser is an active operator. Wake once on connect and keep
@@ -34013,14 +34270,14 @@ void loop() {
         s_lastActivityMs = now;
     }
 #endif
-    pumpKeyboardInput();
-    processPendingThemeRebuild();
+    LOOP_PHASE("keys", pumpKeyboardInput());
+    LOOP_PHASE("theme", processPendingThemeRebuild());
     // lv_timer_handler() deliberately runs below the screen-asleep gate now —
     // there is nothing to draw with the panel in SLPIN, and its indev timer
     // would otherwise keep polling the touch controller over I2C the whole
     // time the screen is off.
     if (webCfgRunning()) {
-        webCfgLoop();
+        LOOP_PHASE("web", webCfgLoop());
 #if HAS_VNC_HOST
         serviceWebVncToggle();
 #endif
@@ -34042,20 +34299,20 @@ void loop() {
     if (s_sysStatsModal) refreshSysStatsModal(false);
     bool meshChanged = false;
     if (s_radioReady) {
-        meshChanged = pollMeshRx();
-        servicePendingRebroadcast(now);
+        LOOP_PHASE("rx", meshChanged = pollMeshRx());
+        LOOP_PHASE("rebroadcast", servicePendingRebroadcast(now));
     }
-    serviceWifiStation(now);
-    serviceOtaAutoCheck(now);
-    mqttBridgeLoop(now);
+    LOOP_PHASE("wifi", serviceWifiStation(now));
+    LOOP_PHASE("otacheck", serviceOtaAutoCheck(now));
+    LOOP_PHASE("mqtt", mqttBridgeLoop(now));
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
     // Mirrored every pass so a web save / YAML import / factory reset can never
     // leave the duty cycle out of step with config, the same way
     // nodeArchiveSetEnabled() below does.
     gpsSetDutyCycle(s_cfg.gpsDutyCycleEnabled, s_cfg.gpsPollIntervalS);
-    gpsLoop();
-    serviceAutoTimeSync(now);
-    serviceGpsTimeSync(now);
+    LOOP_PHASE("gps", gpsLoop());
+    LOOP_PHASE("timesync", serviceAutoTimeSync(now));
+    LOOP_PHASE("gpstime", serviceGpsTimeSync(now));
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {
@@ -34074,12 +34331,12 @@ void loop() {
             s_lastGpsSampleMs = now;
         }
     }
-    serviceNodeInfoAnnounce(now);
-    serviceTelemetryAnnounce(now);
-    serviceNeighborInfoAnnounce(now);
-    serviceMapReport(now);
-    serviceAutoFavorite(now);
-    serviceConfigFlush(now);
+    LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
+    LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
+    LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+    LOOP_PHASE("ann:mapreport", serviceMapReport(now));
+    LOOP_PHASE("autofav", serviceAutoFavorite(now));
+    LOOP_PHASE("cfgflush", serviceConfigFlush(now));
     // Debounced transcript snapshots. Each writes at most one channel and one
     // conversation per pass, so a burst of traffic costs one bounded write here
     // rather than a full rewrite on every rendered line down in _pushLine().
@@ -34092,8 +34349,8 @@ void loop() {
     // few hundred milliseconds rather than starving it.
     const bool inputIdle =
         (uint32_t)(now - s_lastActivityMs) >= kPersistInputIdleMs;
-    Channels.servicePersistence(now, inputIdle);
-    DMs.servicePersistence(now, inputIdle);
+    LOOP_PHASE("persist:chan", Channels.servicePersistence(now, inputIdle));
+    LOOP_PHASE("persist:dm", DMs.servicePersistence(now, inputIdle));
     serviceEmojiPickerRepeat(now);
     serviceTracerouteTimeout();
 #if FEATURE_DISCOVERY
@@ -34166,6 +34423,10 @@ void loop() {
         const bool meshDirty = s_meshChangedPending;
         s_meshChangedPending = false;
 
+        // Timed with explicit calls rather than LOOP_PHASE(): this block
+        // contains preprocessor directives, and those cannot legally appear
+        // inside a macro argument.
+        const uint32_t uiPhaseStartMs = millis();
         refreshChannelGlow(false);
         refreshHeaderTime(false);
         refreshHeaderStatus(false);
@@ -34199,6 +34460,7 @@ void loop() {
 #else
         refreshDmModal(meshDirty);
 #endif
+        loopPhaseNote("ui:refresh", millis() - uiPhaseStartMs);
     }
 
     // Runs after the refresh block so the flush carries this pass's updates,
@@ -34209,8 +34471,13 @@ void loop() {
         lv_obj_invalidate(lv_screen_active());
     }
 #endif
-    lv_timer_handler();
+    LOOP_PHASE("lvgl", lv_timer_handler());
     serviceBacklightWake();
+
+    // Whole-iteration cost, and the periodic report. Placed before the delay so
+    // the fixed 5 ms pace is not counted as work.
+    loopPhaseReport(millis(), millis() - now);
+
     delay(5);
 }
 

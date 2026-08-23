@@ -50,8 +50,16 @@
 // pool in place, so this is spare capacity that was simply never claimed, and
 // it leaves room for a higher-resolution map (480x320 decodes to 614 KB).
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-// 2 MB part, shared with everything else on the board: a smaller step.
-#define LV_MEM_SIZE (768U * 1024U)
+// 2 MB part. This was 768 KB to fit a state map decode; maps are compiled out
+// on this board now (HAS_STATE_MAPS), so that reason is gone — but the other
+// one is not. The glyph-cache failures quoted above are an emoji/tiny_ttf
+// problem, not a map problem, and they were happening against the old 384 KB
+// on a panel this size. 512 KB keeps that headroom without reserving a quarter
+// of the board's PSRAM for it.
+//
+// Measurable rather than guessed: the "[lvgl] openLiveModal pool used=N%" line
+// reports actual occupancy, so trim or raise this against a real reading.
+#define LV_MEM_SIZE (512U * 1024U)
 #else
 // 8 MB parts (T-Deck, Pager, M9, Mesh Deck).
 #define LV_MEM_SIZE (2048U * 1024U)

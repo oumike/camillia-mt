@@ -11,9 +11,11 @@
 //   • L76K GPS on UART1
 //   • Heltec "USER" button (GPIO0, active LOW) and side display-toggle button
 //     (GPIO35, active LOW)
-//   • Switched 3.3V VEXT rail (active LOW enable) for display + peripherals
+//   • Switched 3.3V VEXT rail (active LOW enable, GPIO36) for display + peripherals
 //   • Battery ADC with a switchable sense-enable pin to avoid parasitic drain
-//   • BME280 environment sensor (temp/humidity/pressure) via I2C
+//   • Environment sensors on I2C (ENV_SDA/ENV_SCL below): a BME280
+//     (temp/humidity/pressure) and an SHT4x/GXHT30-class temp/humidity part.
+//     Only the BME280 has a driver here; the second is not read yet.
 //   • No keyboard or trackball — uses touch + buttons for input
 //
 // The FEM (PA/LNA) is controlled by three dedicated GPIOs that must be driven
@@ -23,8 +25,33 @@
 // ── Power & board peripherals ────────────────────────────────────────────────
 #define BOARD_POWERON              7   // Hold HIGH to keep module powered
 #define BOARD_BUZZER               6   // Passive buzzer (GPIO PWM tone)
-#define BOARD_VEXT_ENABLE         36   // Drive LOW to enable switched VEXT rail
+// Switched peripheral rail. Drive LOW to enable. Do not change this.
+//
+// Verified twice on hardware, the second time with no other change in the build:
+// driving GPIO36 HIGH makes the touch controller's I2C fail continuously —
+//
+//     [E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error 263
+//
+// once per second, each timeout blocking lv_timer_handler() for ~1 s (the loop
+// probe measured lvgl at 1082 ms x14 in one 15 s window). LOW restores it.
+//
+// wadamesh's non-R8 Heltec env does set PIN_VEXT_EN=36 / PIN_VEXT_EN_ACTIVE=HIGH
+// on the same hardware, which made this look like an unresolved contradiction
+// for a long time. It was a red herring: LOW powers this rail correctly, and the
+// environment sensors were never unpowered.
+//
+// The sensors were missing because ENV_SDA/ENV_SCL were swapped (see below), not
+// because of this pin. With 4/3 the BME280 answers in ~119 ms with the rail
+// driven LOW exactly as it is here. Do not revisit GPIO36 to chase a sensor
+// problem; on this unit HIGH only ever broke touch.
+#define BOARD_VEXT_ENABLE         36
 #define BOARD_VEXT_ON_LEVEL       LOW
+// Deliberately NOT using BOARD_VEXT_RAIL_ON_AT_DISPLAY here. Parking the rail
+// off and raising it at lcd.init() — matching wadamesh's claim()-then-init
+// order — stopped this board booting at all: no serial, no network, no display.
+// Every attempt to make GPIO36 behave the way that port describes has made this
+// unit worse. LOW from the top of setup() is the only configuration observed to
+// boot and keep touch working.
 
 // ── TFT display — ST7789 320×240 with custom init sequence ──────────────────
 // Uses a subclassed Panel_ST7789 to inject a GAMMA_CURVE init command; the
@@ -102,6 +129,40 @@
 #define TOUCH_INT                 -1   // No interrupt routed; uses polling
 #define TOUCH_RST                 44
 #define TOUCH_I2C_PORT             1   // Wire1
+
+// ── Environment sensor (BME280) ──────────────────────────────────────────────
+// Not declared, which is why env_sensor.cpp falls back to probing a short list
+// of candidate routes instead of going straight to the right one.
+//
+// Declaring these turns that sweep off entirely: the probe uses this route and
+// nothing else, which is both faster and safer — the sweep is what used to
+// reconfigure TFT_SPI_SCK (17) and TFT_RST (18) as an I2C bus while the display
+// was running. That route is gone now, but the shotgun is still a bring-up tool
+// standing in for wiring nobody has written down. See issue #53.
+//
+// Taken from the wadamesh MeshCore port's heltec_v4 variant, which reads both
+// on-board sensors from this bus:
+//
+//   variants/heltec_v4/pins_arduino.h:
+//     static const uint8_t SDA = 3;
+//     static const uint8_t SCL = 4;
+//
+// Both pins are otherwise unassigned in this profile, and the sensors sit on the
+// switched VEXT rail (BOARD_VEXT_ENABLE above), which setup() enables before any
+// probe runs.
+//
+// Declaring them means the probe targets this route alone instead of guessing —
+// see kEnvRoutes in env_sensor.cpp. Note the board carries more than the BME280
+// this header used to claim: wadamesh also reports an SHT4x/GXHT30-class
+// temperature+humidity part, which this firmware has no driver for yet.
+// SDA=4 / SCL=3, NOT 3/4. variants/heltec_v4/pins_arduino.h declares the
+// generic board defaults SDA=3/SCL=4, but the TFT env overrides them with
+// -D PIN_BOARD_SDA=4 -D PIN_BOARD_SCL=3 — the two lines are swapped relative
+// to the board JSON. Probing 3/4 scans an empty bus and finds nothing, which
+// is exactly what this profile did before.
+#define ENV_SDA                    4
+#define ENV_SCL                    3
+#define ENV_I2C_PORT               0   // Wire
 #ifndef TOUCH_POLL_ENABLED
 #define TOUCH_POLL_ENABLED         1
 #endif

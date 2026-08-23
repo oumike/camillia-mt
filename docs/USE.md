@@ -1244,8 +1244,7 @@ single-block detail text described above.
 
 ### Locate
 
-The node actions menu has a **(L)ocate** row (just **Locate** on Heltec, which
-has no keyboard to name a shortcut for). It opens a plain map of the US state the
+The node actions menu has a **(L)ocate** row. It opens a plain map of the US state the
 node's last reported position falls in, with a pin on that position, the state's
 name, and the coordinates. That is deliberately all it shows — the detailed map,
 with tiles and zoom, lives in Web Config, which has a browser to fetch it with.
@@ -1255,11 +1254,11 @@ with tiles and zoom, lives in Web Config, which has a browser to fetch it with.
   node. Pressing L or Enter on it does nothing
 - **Nodes outside the US** keep the row active. There is no state map to draw, so
   the modal shows the coordinates and says so rather than pretending to fail
-- Close it with the device close key, Enter, Space, by tapping outside it, or
-  with the Close button on Heltec
-- **Not available on the Cardputer.** That board has no PSRAM, and decoding a map
-  image into a full-panel object is the kind of allocation it has no room for —
-  the same reason Message Actions is absent there. The row is not shown at all
+- Close it with the device close key, Enter, Space, or by tapping outside it
+- **Not available on the Cardputer or the Heltec V4.** Neither has the memory to
+  decode a map — the Cardputer has no PSRAM at all, and the Heltec shares 2 MB
+  with everything else and has no card slot to keep maps on. The row is not
+  shown at all on either. See [MAPS.md](MAPS.md)
 
 The state maps themselves are PNG files the device reads from
 `/camillia/state_maps/<CODE>.png`. Until that folder is populated the modal

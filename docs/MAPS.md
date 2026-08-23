@@ -87,18 +87,28 @@ On the device:
 1. Open **Nodes**
 2. Select the node
 3. Press **A** for its actions menu
-4. Choose **(L)ocate** — just **Locate** on Heltec, which has no keyboard
+4. Choose **(L)ocate**
 
 The map appears with a pin on the node's last reported position, the state name,
-and the coordinates. Close it with the device's close key, Enter, Space, by
-tapping outside it, or with the Close button on Heltec.
+and the coordinates. Close it with the device's close key, Enter, Space, or by
+tapping outside it.
 
 The **Locate** row is greyed out for a node that has never reported a position.
 It stays visible in its usual place rather than disappearing, so the menu does
 not reshuffle from one node to the next.
 
-Not available on the Cardputer. That board has no PSRAM, and decoding a map
-image needs more memory than it has to give.
+### Boards without maps
+
+The feature is compiled out on two boards — no Locate entry, no Maps Download
+section, no upload routes — for the same underlying reason, not enough memory to
+decode a map, reached from opposite directions:
+
+- **Cardputer.** No PSRAM at all. One map costs about 490 KB while it decodes,
+  more than that board's entire graphics pool. It also serves web config in lite
+  form only, which has no Utilities tab to put the controls on.
+- **Heltec V4.** 2 MB of PSRAM shared with everything else, and no card slot —
+  maps would have to live in the same internal flash partition as chat history
+  and configuration. Worth revisiting if an 8 MB (R8) variant appears.
 
 ## Clearing maps
 

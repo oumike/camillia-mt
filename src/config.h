@@ -549,6 +549,31 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #else
 #define MAX_NODES        250
 #endif
+
+// ── State maps ────────────────────────────────────────────────
+// Cached state maps and everything attached to them: the Locate modal, the web
+// config Maps Download section and its upload/status/clear routes, and the
+// LVGL filesystem driver they read through.
+//
+// Off on two boards, for the same underlying reason — not enough memory to
+// decode a map — reached from opposite directions:
+//
+//   * Cardputer: no PSRAM at all. One map costs ~490 KB transiently, more than
+//     that board's entire LVGL pool. It also serves web config in lite form
+//     only, so the download UI could never be reached there in any case.
+//   * Heltec V4: 2 MB PSRAM shared with everything else, and no card slot —
+//     maps would live in the same internal flash partition as chat history and
+//     config. Revisit if an R8 (8 MB) variant appears; every Heltec-specific
+//     path in the map code is still in place, so this flag is the only thing
+//     that has to change.
+//
+// Compiling it out keeps the handlers, the 50-state table and ~5 KB of page
+// JavaScript out of images whose memory budgets are the tightest here.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#define HAS_STATE_MAPS 0
+#else
+#define HAS_STATE_MAPS 1
+#endif
 // How far back a Store-and-Forward replay request asks for, in minutes. The
 // router clamps this to its own history_return_window, so asking for more than
 // it kept is harmless. Shared so the device row and the web button agree.
