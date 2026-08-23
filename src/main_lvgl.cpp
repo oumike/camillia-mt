@@ -33508,7 +33508,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | chatdump | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | batt | chatdump | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
         return;
     }
 
@@ -33592,6 +33592,13 @@ static void handleSerialCommandLine(char *line) {
         seedChatForRepro(target);
         return;
     }
+
+#if HAS_GPS
+    if (strcmp(line, "gps") == 0 || strcmp(line, "gps status") == 0) {
+        gpsDebugReport();
+        return;
+    }
+#endif
 
     if (strcmp(line, "env") == 0 || strcmp(line, "env status") == 0) {
         bool hasSensor = envHasSensor() || envBegin();

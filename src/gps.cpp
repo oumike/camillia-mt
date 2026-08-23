@@ -129,18 +129,20 @@ static const GpsProbePort GPS_PORT_PROBE_LIST[] = {
     { GPS_TX, -1 },
 #endif
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Some Heltec revisions/modules are labeled opposite from effective UART wiring.
+    // Receive-only, then the reversed labelling, for revisions wired the other
+    // way round. That is the whole search space: the module is on 38/39.
+    //
+    // 43/44 used to be probed here as well. GPIO44 is TOUCH_RST on this board,
+    // so a GPS probe reconfigured the touch controller's reset line as a UART
+    // RX — the same "never probe a pin another driver owns" hazard that
+    // env_sensor.cpp documents after it cost the display. 43/44 are also
+    // U0TXD/U0RXD. Nothing could ever have answered there.
+    //
+    // The literal { 38, 39 } / { 39, 38 } duplicates are gone too: they only
+    // repeated the two entries above, and the redundancy is what let the RX/TX
+    // pins stay swapped without anyone noticing.
     { GPS_RX, -1 },
     { GPS_TX, GPS_RX },
-    { GPS_TX, -1 },
-    { 44, 43 },
-    { 44, -1 },
-    { 43, 44 },
-    { 43, -1 },
-    { 38, 39 },
-    { 38, -1 },
-    { 39, 38 },
-    { 39, -1 },
 #endif
 };
 static const size_t GPS_PORT_PROBE_COUNT = sizeof(GPS_PORT_PROBE_LIST) / sizeof(GPS_PORT_PROBE_LIST[0]);
@@ -288,6 +290,57 @@ static uint8_t parseCustomU8(TinyGPSCustom &term, bool &fresh) {
     return (uint8_t)v;
 }
 
+// ── Generic GPS enable / reset lines ─────────────────────────────────────────
+// A board that wires the module's enable (and optionally reset) straight to a
+// GPIO declares GPS_ENABLE_PIN / GPS_ENABLE_ON_LEVEL and GPS_RESET_PIN /
+// GPS_RESET_ACTIVE_LEVEL. Boards that switch the rail through an expander keep
+// their own path (the T-Deck Pager's XL9555, below).
+//
+// hw_m9.h has declared GPS_ENABLE_PIN and GPS_RESET_PIN since it was written and
+// nothing ever read them, so the M9 named an enable pin it never drove. These
+// are honoured now, which covers the M9 as well as the Heltec.
+#if defined(GPS_ENABLE_PIN) && (GPS_ENABLE_PIN >= 0)
+#  define GPS_HAS_ENABLE_PIN 1
+#  ifndef GPS_ENABLE_ON_LEVEL
+#    define GPS_ENABLE_ON_LEVEL HIGH
+#  endif
+#else
+#  define GPS_HAS_ENABLE_PIN 0
+#endif
+
+#if defined(GPS_RESET_PIN) && (GPS_RESET_PIN >= 0)
+#  define GPS_HAS_RESET_PIN 1
+#  ifndef GPS_RESET_ACTIVE_LEVEL
+#    define GPS_RESET_ACTIVE_LEVEL LOW
+#  endif
+#else
+#  define GPS_HAS_RESET_PIN 0
+#endif
+
+static void gpsSetEnablePin(bool on) {
+#if GPS_HAS_ENABLE_PIN
+    pinMode(GPS_ENABLE_PIN, OUTPUT);
+    // !LEVEL rather than a second macro: LOW is 0 and HIGH is 1, so the logical
+    // negation is the opposite drive level whichever polarity the board uses.
+    digitalWrite(GPS_ENABLE_PIN, on ? (GPS_ENABLE_ON_LEVEL) : (!GPS_ENABLE_ON_LEVEL));
+#else
+    (void)on;
+#endif
+}
+
+// Pulse the module's reset line and release it. Worth doing once at start: a
+// receiver left mid-sentence by a warm reset can sit mute, and the baud prober
+// would then walk every candidate looking for a stream that cannot arrive.
+static void gpsPulseResetPin() {
+#if GPS_HAS_RESET_PIN
+    pinMode(GPS_RESET_PIN, OUTPUT);
+    digitalWrite(GPS_RESET_PIN, GPS_RESET_ACTIVE_LEVEL);
+    delay(10);
+    digitalWrite(GPS_RESET_PIN, !(GPS_RESET_ACTIVE_LEVEL));
+    delay(10);
+#endif
+}
+
 static void gpsApplyPortAndBaud(int8_t rx, int8_t tx, uint32_t baud) {
     _serial.end();
     _serial.begin(baud, SERIAL_8N1, rx, tx);
@@ -335,6 +388,10 @@ void gpsBegin() {
     _pagerRailRetried = false;
     (void)pagerPrimeGpsRails(_pagerRailInverted);
 #endif
+    // Power and release the module before the first probe, so the prober is
+    // listening to a receiver that is actually running.
+    gpsSetEnablePin(true);
+    gpsPulseResetPin();
     _baudProbeIdx  = 0;
     _portProbeIdx  = 0;
     _activeRx      = GPS_PORT_PROBE_LIST[0].rx;
@@ -409,8 +466,10 @@ static void gpsPowerDown() {
         return;   // still powered; don't claim otherwise
     }
 #else
-    // No GPS enable pin on these boards; the module is fed from the board rail.
-    // Standby is the only lever, and it has to be sent before the UART closes.
+    // Standby first, and it has to be sent before the UART closes. On a board
+    // with no enable line that is the only lever there is; on one that has a
+    // line (Heltec, M9) the pin is cut afterwards, because standby is a request
+    // the module may ignore and the pin is not.
     //
     // The port may not be open at all: booting with GPS disabled never calls
     // gpsBegin(), and that is precisely the case this needs to cover. Open it
@@ -430,6 +489,7 @@ static void gpsPowerDown() {
     gpsSendNmea("PMTK161,0");
     delay(20);
     if (!hadPort) _serial.end();
+    gpsSetEnablePin(false);
 #endif
     _powered = false;
     // Not debug-gated. Power state changes are rare, user-initiated, and the
@@ -445,11 +505,74 @@ static void gpsPowerUp() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     (void)pagerSetGpsRail(true);
     delay(20);   // let the rail settle before the module is probed
+#else
+    // Restore the enable line and release reset. A board with neither still
+    // needs no action: the module keeps power and gpsBegin() nudges it out of
+    // standby once the UART is open, which is what these calls compile down to
+    // when GPS_ENABLE_PIN / GPS_RESET_PIN are not declared.
+    gpsSetEnablePin(true);
+    gpsPulseResetPin();
+    delay(20);
 #endif
-    // Non-pager boards need no action here: the module still has power, and
-    // gpsBegin() nudges it out of standby once the UART is open.
     _powered = true;
     Serial.println("[gps] powered up");
+}
+
+void gpsDebugReport() {
+    Serial.printf("[gps] enabled=%d powered=%d asleep=%d uptime=%lus\n",
+                  (int)_enabled, (int)_powered, (int)_dutyAsleep,
+                  (unsigned long)((millis() - _startMs) / 1000UL));
+    Serial.printf("[gps] uart rx=%d tx=%d baud=%lu\n",
+                  (int)_activeRx, (int)_activeTx, (unsigned long)_activeBaud);
+    Serial.printf("[gps] bytes=%lu nmea_ok=%lu nmea_bad=%lu stream=%d\n",
+                  (unsigned long)_totalBytes,
+                  (unsigned long)_gps.passedChecksum(),
+                  (unsigned long)_gps.failedChecksum(),
+                  (int)gpsHasNmeaStream());
+    // Not "fixAge": gpsFixAgeMs() is millis() - _firstFixMs, i.e. how long we
+    // have HELD a fix, not how stale the current one is. Labelling it as age
+    // makes a healthy 68 s of continuous fix look like a 68 s old reading.
+    Serial.printf("[gps] fix=%d sats=%u ttff=%lums held=%lums\n",
+                  (int)gpsHasFix(), (unsigned)gpsSats(),
+                  (unsigned long)gpsSearchTimeMs(),
+                  (unsigned long)gpsFixAgeMs());
+
+    // digitalRead() on a pin we drive as OUTPUT reads back the level we are
+    // driving, which is the point: it shows whether these lines are actually
+    // being held, not merely declared.
+#if GPS_HAS_ENABLE_PIN
+    Serial.printf("[gps] EN  pin=%d enableLevel=%s driving=%s\n",
+                  (int)GPS_ENABLE_PIN,
+                  (GPS_ENABLE_ON_LEVEL) ? "HIGH" : "LOW",
+                  digitalRead(GPS_ENABLE_PIN) ? "HIGH" : "LOW");
+#else
+    Serial.println("[gps] EN  pin: none declared for this board");
+#endif
+#if GPS_HAS_RESET_PIN
+    Serial.printf("[gps] RST pin=%d assertLevel=%s driving=%s\n",
+                  (int)GPS_RESET_PIN,
+                  (GPS_RESET_ACTIVE_LEVEL) ? "HIGH" : "LOW",
+                  digitalRead(GPS_RESET_PIN) ? "HIGH" : "LOW");
+#else
+    Serial.println("[gps] RST pin: none declared for this board");
+#endif
+
+    // State the conclusion rather than leaving it to be inferred from counters.
+    if (!_enabled) {
+        Serial.println("[gps] VERDICT: GPS is switched off in config - nothing to diagnose.");
+    } else if (_totalBytes == 0) {
+        Serial.println("[gps] VERDICT: zero bytes received. The module is not "
+                       "running - unpowered, held in reset, or we are listening "
+                       "on the wrong pin. This is NOT a sky-view problem.");
+    } else if (_gps.passedChecksum() == 0) {
+        Serial.println("[gps] VERDICT: bytes arriving but no valid NMEA - wrong "
+                       "baud rate, or noise rather than a real talker.");
+    } else if (!gpsHasFix()) {
+        Serial.println("[gps] VERDICT: valid NMEA, no fix. The module IS working; "
+                       "this is antenna/sky view. Try outdoors for a few minutes.");
+    } else {
+        Serial.println("[gps] VERDICT: fix acquired, all good.");
+    }
 }
 
 void gpsEnd() {

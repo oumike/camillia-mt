@@ -9,6 +9,15 @@
 // Initialise UART and begin parsing NMEA.
 void gpsBegin();
 
+// Prints a one-shot diagnostic to Serial: UART config, byte and NMEA-checksum
+// counters, fix state, and the live drive level of the enable/reset pins.
+//
+// It exists to separate two failures that look identical from the outside — a
+// module that is not running at all, and a working module that cannot see the
+// sky. A receiver indoors still streams valid NMEA with no fix, so byte and
+// checksum counts tell the two apart where "no fix" alone cannot.
+void gpsDebugReport();
+
 // Shut down UART (low-power disable).
 void gpsEnd();
 

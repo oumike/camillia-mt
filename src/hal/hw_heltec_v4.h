@@ -185,9 +185,25 @@
 
 // ── GPS — L76K on UART1 ──────────────────────────────────────────────────────
 #define HAS_GPS                    1
-#define GPS_RX                    38
-#define GPS_TX                    39
+// GPS_RX is the pin WE RECEIVE ON: gps.cpp calls
+// _serial.begin(baud, SERIAL_8N1, rx, tx) and Arduino's third argument is this
+// core's RX. That makes the naming the exact reverse of wadamesh's, whose
+// PIN_GPS_TX macro means "the module's TX", i.e. the pin it receives on.
+//
+// These were 38/39 — backwards. wadamesh probed this on real hardware
+// (2026-08-19): with the enable line asserted the module streams NMEA on
+// GPIO39 and GPIO38 is silent. So GPIO39 is ours to listen on.
+#define GPS_RX                    39
+#define GPS_TX                    38
 #define GPS_BAUD               38400
+// Enable and reset lines, from wadamesh's heltec_v4_tft env
+// (PIN_GPS_EN=34 / PIN_GPS_EN_ACTIVE=LOW, PIN_GPS_RESET=42 /
+// PIN_GPS_RESET_ACTIVE=LOW). Nothing drove these before, so the module was
+// only ever heard if it happened to power up enabled.
+#define GPS_ENABLE_PIN            34
+#define GPS_ENABLE_ON_LEVEL      LOW
+#define GPS_RESET_PIN             42
+#define GPS_RESET_ACTIVE_LEVEL   LOW
 
 // ── Battery ADC with switched sense line ─────────────────────────────────────
 // BATT_SENSE_ENABLE_PIN is driven to avoid constant ADC loading on the divider.

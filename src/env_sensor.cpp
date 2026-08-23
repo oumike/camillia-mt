@@ -130,7 +130,6 @@ static const EnvRoute kEnvRoutes[] = {
 #endif
 #endif
 #if defined(ENV_PROBE_SHOTGUN) && ENV_PROBE_SHOTGUN
-    { &Wire, 41, 42, "wire0-41/42", false },
     { &Wire,  3,  4, "wire0-3/4",   false },
 #endif
 };
@@ -153,8 +152,12 @@ static const EnvRoute kEnvDiagRoutes[] = {
 #if defined(ENV_SDA) && defined(ENV_SCL)
     { &ENV_WIRE_BUS, ENV_SDA, ENV_SCL, "env-declared", false },
 #endif
-    { &Wire, 41, 42, "wire0-41/42", false },
-    // Both orderings. Which line is SDA and which is SCL is a real ambiguity on
+    // 41/42 is no longer probed. GPIO42 is the GPS reset line on the Heltec V4
+    // (active LOW), so an "i2c scan all" drove a peripheral's reset pin — the
+    // same class of harm as the TFT pins this table already excludes. It never
+    // found anything either: every scan of it reported count=0.
+    //
+    // Both orderings below. Which line is SDA and which is SCL is a real ambiguity on
     // the Heltec V4 — the board JSON says 3/4, the TFT build flags say 4/3 —
     // and a scan that only tries one of them reports "nothing here" either way.
     { &Wire,  3,  4, "wire0-3/4",   false },

@@ -6,19 +6,14 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Heltec V4: the on-board environment sensors are now found and read - temperature, humidity and pressure are reported over the mesh.
-- Added support for Sensirion SHT4x, SHT3x/GXHT30 and SHTC3 temperature/humidity parts alongside the existing BME280, BMP280 and AHT20.
-- Device Info now has an Environment column listing every detected sensor by name and address with its current readings.
-- Web Config's Environment Sensor Telemetry section says which sensor was detected and on which bus, or reports that none was found; the setting can now be switched on ahead of fitting a sensor instead of being greyed out.
+- Serial console command `gps` (also `gps status`) prints a GPS diagnostic: which pins and baud rate are in use, how many bytes and valid NMEA sentences have arrived, fix and satellite counts, the live state of the enable/reset lines, and a plain-language verdict telling you whether the module is dead, mis-wired, or simply needs a better view of the sky.
 
 Changed
-- Heltec V4: Locate and the state map download section are gone - that board has no card slot and too little spare memory to decode a map.
-- Sensor detection now happens once at boot, on the buses the board actually declares, and stops after two attempts instead of re-scanning every half minute for the rest of the session.
-- The serial `i2c scan` and `i2c scan all` commands check more addresses and both SDA/SCL orderings, so a mis-wired sensor shows up instead of reading as "nothing there".
+- Heltec V4 and ThinkNode M9: when GPS duty cycling parks the receiver, the module's enable line is now switched off as well as being asked to sleep, so a module that ignores the standby request no longer keeps drawing current.
 
 Fixed
-- Heltec V4: touch dropouts and second-long freezes caused by sensor scanning reconfiguring the display's clock and reset pins while the panel was running.
-- A radio that cannot transmit no longer leaves the device permanently sluggish - failed announcements now back off from 5 seconds up to a few minutes instead of blocking the interface every 5 seconds forever.
-- Opening Web Config no longer stalls the screen for over half a second while it checks which state maps are stored.
-- Boards that keep chat history in internal flash boot faster.
-- ThinkNode M9: the Maps Download section now reaches storage correctly.)CAMNOTES";
+- Heltec V4: GPS receive and transmit pins were swapped, so the device listened on a silent pin and never saw the module. GPS now works.
+- Heltec V4: the GPS module's enable and reset lines are now driven at startup and after wake, instead of the module only being heard if it happened to power up already enabled.
+- ThinkNode M9: GPS receive and transmit pins were swapped, which left the receiver reading as completely silent at every baud rate. GPS now works.
+- Heltec V4: `env scan all` no longer probes GPIO 41/42, which was driving the GPS module's reset line during an I2C scan.
+- Heltec V4: GPS pin probing no longer touches GPIO 43/44, which was reconfiguring the touch controller's reset line while searching for the receiver.)CAMNOTES";

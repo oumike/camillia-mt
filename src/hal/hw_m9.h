@@ -210,8 +210,24 @@
 // GPS_RST goes through an NPN whose base is driven by the GPIO, so a HIGH
 // asserts reset and a LOW releases it — inverted from the usual sense.
 #define HAS_GPS                   1
-#define GPS_RX                    3
-#define GPS_TX                    2
+// GPS_RX is the pin WE RECEIVE ON, matching gps.cpp's
+// _serial.begin(baud, SERIAL_8N1, rx, tx).
+//
+// These were 3/2 — backwards, and fatally so on this board: unlike the Heltec
+// there are no fallback entries in GPS_PORT_PROBE_LIST, so a wrong pin is never
+// recovered from and the module reads as silent (bytes=0 at every baud).
+//
+// wadamesh's m9 env sets PIN_GPS_RX=3 / PIN_GPS_TX=2, and MeshCore's own
+// variant header defines the convention explicitly:
+//
+//     #define PIN_GPS_TX   PIN_SERIAL1_RX
+//     #define PIN_GPS_RX   PIN_SERIAL1_TX
+//
+// so their PIN_GPS_TX is our RX. PIN_GPS_TX=2 => we receive on GPIO2.
+// (variants/thinknode_m9/M9_PORT.md's prose table says "GPS RX/TX 2/3", which
+// reads the other way round — the build flags are the ground truth.)
+#define GPS_RX                    2
+#define GPS_TX                    3
 #define GPS_BAUD             115200
 #define GPS_ENABLE_PIN           11
 #define GPS_ENABLE_ON_LEVEL     LOW
