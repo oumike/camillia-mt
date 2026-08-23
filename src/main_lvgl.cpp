@@ -8910,6 +8910,57 @@ static void setCfgBrightnessPreview(int pct) {
     }
 }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+// Cancel/Save row for the touch build's slider modals.
+//
+// A slider on a touch-only board can stage a value but cannot commit one: there
+// is no Enter to press and no close key to back out with. Brightness, volume and
+// battery-trim previewed live and then had no control at all — the only way out
+// was a tap outside the modal, which cancels, so a value dragged exactly where
+// the user wanted it could not be kept.
+//
+// Shared by every slider modal so all four look and behave the same; geometry
+// matches the Close button on the Device Info popup.
+static void cfgAddSliderModalButtons(lv_obj_t *parent, lv_event_cb_t cancelCb,
+                                     lv_event_cb_t saveCb) {
+    if (!parent) return;
+
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 8, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    struct Local {
+        static void make(lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+            lv_obj_t *btn = lv_btn_create(parent);
+            lv_obj_set_size(btn, 78, 26);
+            lv_obj_set_style_radius(btn, 4, 0);
+            lv_obj_set_style_pad_all(btn, 0, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
+            lv_obj_set_style_border_width(btn, 1, 0);
+            lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
+            lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+            lv_obj_t *lbl = lv_label_create(btn);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+            lv_label_set_text(lbl, text);
+            lv_obj_center(lbl);
+        }
+    };
+    Local::make(row, "Cancel", cancelCb);
+    Local::make(row, "Save",   saveCb);
+}
+#endif  // DEVICE_HELTEC_V4_EXPANSION
+
 static void closeCfgBrightnessModal() {
     if (lvObjValid(s_cfgBrightBackdrop)) {
         lv_obj_del(s_cfgBrightBackdrop);
@@ -9032,18 +9083,19 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    cfgAddSliderModalButtons(
+        s_cfgBrightModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBrightness(); },
+        [](lv_event_t *e) { LV_UNUSED(e); applyCfgBrightness(); });
+#else
     lv_obj_t *hint = lv_label_create(s_cfgBrightModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Drag to adjust"
-#else
-                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
 #endif
-    );
 
     setCfgBrightnessPreview(s_cfgBrightOriginal);
 }
@@ -9188,18 +9240,19 @@ static void openCfgVolumeModal() {
     lv_obj_set_style_bg_color(s_cfgVolSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgVolSlider, onCfgVolSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    cfgAddSliderModalButtons(
+        s_cfgVolModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cancelCfgVolume(); },
+        [](lv_event_t *e) { LV_UNUSED(e); applyCfgVolume(); });
+#else
     lv_obj_t *hint = lv_label_create(s_cfgVolModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Drag to adjust"
-#else
-                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
 #endif
-    );
 
     // Silent on open: announce the level visually, do not beep before asked.
     setCfgVolumePreview(s_cfgVolOriginal, false);
@@ -9361,39 +9414,10 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Touch build: the slider alone can only stage a value, so committing needs
-    // a button. Tapping outside cancels, as everywhere else.
-    lv_obj_t *row = lv_obj_create(s_cfgSliderModal);
-    lv_obj_set_width(row, lv_pct(100));
-    lv_obj_set_height(row, LV_SIZE_CONTENT);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_style_pad_column(row, 8, 0);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    auto makeBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
-        lv_obj_t *btn = lv_btn_create(parent);
-        lv_obj_set_size(btn, 78, 26);
-        lv_obj_set_style_radius(btn, 4, 0);
-        lv_obj_set_style_pad_all(btn, 0, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
-        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
-        lv_obj_center(lbl);
-    };
-    makeBtn(row, "Cancel", [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); });
-    makeBtn(row, "Save",   [](lv_event_t *e) { LV_UNUSED(e); applyCfgSlider(); });
+    cfgAddSliderModalButtons(
+        s_cfgSliderModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); },
+        [](lv_event_t *e) { LV_UNUSED(e); applyCfgSlider(); });
 #else
     lv_obj_t *hint = lv_label_create(s_cfgSliderModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -9701,18 +9725,19 @@ static void openCfgBattCalModal() {
                                 "Percent follows it. 0% = uncalibrated.");
     }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    cfgAddSliderModalButtons(
+        s_cfgBattCalModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBattCal(); },
+        [](lv_event_t *e) { LV_UNUSED(e); applyCfgBattCal(); });
+#else
     lv_obj_t *hint = lv_label_create(s_cfgBattCalModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-                      "Drag to adjust"
-#else
-                      "j/k=Adjust  Enter=Save  Backspace=Cancel"
+    lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
 #endif
-    );
 
     setCfgBattCalPreview(s_cfgBattCalOriginal);
 }
