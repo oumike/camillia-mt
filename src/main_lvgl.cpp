@@ -1855,6 +1855,11 @@ static void stateMapBootstrapRestoreWifi() {
 #endif
 }
 
+#ifndef LV_SYMBOL_CLOSE
+// Same defensive shape as LV_SYMBOL_GPS below: a plain X renders in montserrat
+// on any build, where a missing symbol would draw a tofu box.
+#define LV_SYMBOL_CLOSE "X"
+#endif
 #ifndef LV_SYMBOL_GPS
 #define LV_SYMBOL_GPS LV_SYMBOL_DRIVE
 #endif
@@ -7666,10 +7671,30 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
     lv_obj_set_height(s_composeInput, composeInputH);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Same idea as the band boards below, but this layout has no band: the
+    // legend and counter are IGNORE_LAYOUT and bottom-anchored, so the flex
+    // column does not know they are there. Growing the input into the slack
+    // would slide it underneath them, so reserve their line as bottom padding
+    // on the modal first and let the box take what is genuinely left.
+    lv_obj_set_style_pad_bottom(
+        s_composeModal,
+        (lv_coord_t)(lv_font_get_line_height(&lv_font_montserrat_10) + composeModalBottomPad), 0);
+    lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
+    lv_obj_set_flex_grow(s_composeInput, 1);
+#endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
+    // composeInputH is the FLOOR now, not the exact height. It used to be both:
+    // min and max were pinned to it, so the centre band grew to take the slack
+    // the title and reply row left and then handed none of it to the box —
+    // every spare pixel became empty band above and below a short input.
+    //
+    // Growing into that slack costs nothing and buys the thing the modal is
+    // for: more of the message visible while typing, which matters most on the
+    // boards whose d-pad/wheel can now move the caret through it.
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
-    lv_obj_set_style_max_height(s_composeInput, composeInputH, 0);
+    lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
     lv_obj_set_style_text_font(s_composeInput, composeBodyFont, 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
@@ -8944,18 +8969,23 @@ static void setCfgBrightnessPreview(int pct) {
 }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-// Cancel/Save row for the touch build's slider modals.
+// Cancel/commit row for the touch build's modals that stage a value.
 //
-// A slider on a touch-only board can stage a value but cannot commit one: there
-// is no Enter to press and no close key to back out with. Brightness, volume and
+// A modal on a touch-only board can stage a value but cannot commit one: there
+// is no Enter to press and no close key to back out with. Brightness and
 // battery-trim previewed live and then had no control at all — the only way out
 // was a tap outside the modal, which cancels, so a value dragged exactly where
-// the user wanted it could not be kept.
+// the user wanted it could not be kept. The same gap applies to anything else
+// that stages: the sound picker committed on a second tap of the same row, and
+// Channel Edit and Time & Date had a Save cell in their grid but no signposted
+// discard at all.
 //
-// Shared by every slider modal so all four look and behave the same; geometry
-// matches the Close button on the Device Info popup.
-static void cfgAddSliderModalButtons(lv_obj_t *parent, lv_event_cb_t cancelCb,
-                                     lv_event_cb_t saveCb) {
+// Named next to appendHeltecCloseButton() because it is the same class of
+// affordance, and shares its styling so a board only ever grows one look.
+// commitText lets a caller say "Apply" where that reads better than "Save".
+static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
+                                      lv_event_cb_t commitCb,
+                                      const char *commitText = "Save") {
     if (!parent) return;
 
     lv_obj_t *row = lv_obj_create(parent);
@@ -8990,7 +9020,7 @@ static void cfgAddSliderModalButtons(lv_obj_t *parent, lv_event_cb_t cancelCb,
         }
     };
     Local::make(row, "Cancel", cancelCb);
-    Local::make(row, "Save",   saveCb);
+    Local::make(row, commitText, commitCb);
 }
 #endif  // DEVICE_HELTEC_V4_EXPANSION
 
@@ -9117,7 +9147,7 @@ static void openCfgBrightnessModal() {
     lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    cfgAddSliderModalButtons(
+    appendHeltecCancelSaveRow(
         s_cfgBrightModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBrightness(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyCfgBrightness(); });
@@ -9273,19 +9303,18 @@ static void openCfgVolumeModal() {
     lv_obj_set_style_bg_color(s_cfgVolSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgVolSlider, onCfgVolSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    cfgAddSliderModalButtons(
-        s_cfgVolModal,
-        [](lv_event_t *e) { LV_UNUSED(e); cancelCfgVolume(); },
-        [](lv_event_t *e) { LV_UNUSED(e); applyCfgVolume(); });
-#else
+    // No Heltec branch here, unlike the other staged modals: the whole volume
+    // picker lives inside HAS_VOLUME_CONTROL, which is
+    // HAS_AUDIO_ALERTS && (BOARD_BUZZER < 0), and Heltec declares BOARD_BUZZER 6
+    // — a passive buzzer with no amplitude control. Volume does not exist on
+    // that board, so a Cancel/Save row for it was unreachable code that read
+    // like a fourth working example.
     lv_obj_t *hint = lv_label_create(s_cfgVolModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
-#endif
 
     // Silent on open: announce the level visually, do not beep before asked.
     setCfgVolumePreview(s_cfgVolOriginal, false);
@@ -9447,7 +9476,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    cfgAddSliderModalButtons(
+    appendHeltecCancelSaveRow(
         s_cfgSliderModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyCfgSlider(); });
@@ -9759,7 +9788,7 @@ static void openCfgBattCalModal() {
     }
 
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    cfgAddSliderModalButtons(
+    appendHeltecCancelSaveRow(
         s_cfgBattCalModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBattCal(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyCfgBattCal(); });
@@ -11167,6 +11196,14 @@ static void onChanCfgRowPressed(lv_event_t *e) {
     openChanEditModal(idx);
 }
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+static void onChanCfgClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeChanCfgModal();
+    refreshCfgModal();
+}
+#endif
+
 static void onChanCfgBackdropPressed(lv_event_t *e) {
     if (lv_event_get_target_obj(e) != s_chanCfgBackdrop) return;
     closeChanCfgModal();
@@ -11260,6 +11297,35 @@ static void openChanCfgModal() {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chanCfgBackdrop);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // A corner close rather than the usual bottom Close button, because this
+    // modal is a scrolling list: anything appended at the end sits below the
+    // fold once there are enough channels, and a control you have to scroll to
+    // find is barely a control.
+    //
+    // Parented to the BACKDROP, not the modal. A child of the modal would be
+    // part of its scroll content and would slide out of the corner as soon as
+    // the list moved. The backdrop's own click handler ignores events whose
+    // target is not the backdrop itself, so tapping this never doubles as a
+    // dismiss. Positioned against the modal once the layout is resolved, at the
+    // end of this function.
+    lv_obj_t *chanCloseBtn = lv_btn_create(s_chanCfgBackdrop);
+    lv_obj_set_size(chanCloseBtn, 26, 26);
+    lv_obj_set_style_radius(chanCloseBtn, 4, 0);
+    lv_obj_set_style_pad_all(chanCloseBtn, 0, 0);
+    lv_obj_set_style_shadow_width(chanCloseBtn, 0, 0);
+    lv_obj_set_style_bg_color(chanCloseBtn, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(chanCloseBtn, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(chanCloseBtn, 1, 0);
+    lv_obj_set_style_border_color(chanCloseBtn, lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(chanCloseBtn, onChanCfgClosePressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *chanCloseLbl = lv_label_create(chanCloseBtn);
+    lv_obj_set_style_text_font(chanCloseLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(chanCloseLbl, lv_color_hex(0xE8F1FF), 0);
+    lv_label_set_text(chanCloseLbl, LV_SYMBOL_CLOSE);
+    lv_obj_center(chanCloseLbl);
+#endif
+
     lv_obj_t *title = lv_label_create(s_chanCfgModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
@@ -11327,6 +11393,12 @@ static void openChanCfgModal() {
     // scroll_to_view() is a no-op until the tree has geometry, so resolve the
     // layout before the initial selection tries to scroll itself into view.
     lv_obj_update_layout(s_chanCfgModal);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // After the layout: the modal is LV_SIZE_CONTENT, so before this it has no
+    // height to align against. Foreground so the rows cannot draw over it.
+    lv_obj_align_to(chanCloseBtn, s_chanCfgModal, LV_ALIGN_TOP_RIGHT, -3, 3);
+    lv_obj_move_foreground(chanCloseBtn);
+#endif
     refreshChanCfgSelection();
 }
 
@@ -11524,6 +11596,8 @@ static void openChanEditModal(int slot) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Cancel/Save is on the buttons below now, so this only has to explain the
+    // one gesture the buttons do not.
     lv_label_set_text(hint, "Tap a field to change it");
 #else
     lv_label_set_text_fmt(hint, "Move  Enter=Change  %s=Cancel", modalCloseKeyLabel());
@@ -11592,6 +11666,28 @@ static void openChanEditModal(int slot) {
         lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
         lv_label_set_text(val, "");
     }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Appended under the grid rather than added as a grid cell. A cell would
+    // drag CHAN_EDIT_ROW_COUNT, three per-board CHAN_EDIT_LABELS copies, the
+    // column-major index maths and the keyboard builds' selection walk along
+    // with it — and would put a Cancel on boards that already have a close key,
+    // which is not what this is for.
+    //
+    // Save has a twin in the grid on this board; both run the same sequence, so
+    // either works. Cancel is the half that had no signposted route at all: a
+    // backdrop tap discarded staged edits and nothing said so.
+    appendHeltecCancelSaveRow(
+        s_chanEditModal,
+        [](lv_event_t *e) { LV_UNUSED(e); closeChanEditModal(); },
+        [](lv_event_t *e) {
+            LV_UNUSED(e);
+            chanEditSave();
+            closeChanEditModal();
+            // The picker underneath still shows the pre-save name/encryption.
+            refreshChanCfgLabels();
+        });
+#endif
 
     lv_obj_update_layout(s_chanEditModal);
     refreshChanEditRows();
@@ -12057,8 +12153,9 @@ static void refreshTimeCfgRows() {
 
     if (s_timeCfgHint) {
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // "then Save" is redundant now the button row says it.
         lv_label_set_text(s_timeCfgHint, timeCfgIsManual()
-                              ? "Tap a field to step it, then Save"
+                              ? "Tap a field to step it"
                               : "Tap the source to change it");
 #else
         // Context-sensitive: one short line that fits the Cardputer beats one
@@ -12225,6 +12322,18 @@ static void openTimeCfgModal() {
     makeCell(s_timeCfgTimeGrid, TIME_CFG_MINUTE, 32);
     makeCell(s_timeCfgTimeGrid, TIME_CFG_SAVE,   32);
 
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Below both grids, not beside Save: TIME_CFG_SAVE shares the time row with
+    // Hour and Minute at 32% each, so there is no room next to it. A footer row
+    // is also independent of refreshTimeCfgRows() rewriting the Save cell's
+    // width between Manual and Automatic — it lays out the same either way,
+    // which is what makes it work when the date/time grids are hidden.
+    appendHeltecCancelSaveRow(
+        s_timeCfgModal,
+        [](lv_event_t *e) { LV_UNUSED(e); closeTimeCfgModal(); },
+        [](lv_event_t *e) { LV_UNUSED(e); timeCfgSave(); });
+#endif
+
     lv_obj_update_layout(s_timeCfgModal);
     refreshTimeCfgRows();
 }
@@ -12248,6 +12357,11 @@ static void closeAlertSoundModal() {
 
 // Cancel path: undo any preview-driven change before closing.
 static void cancelAlertSoundModal() {
+    // Guarded like revertCfgBrightnessPreview(), and for a sharper reason now
+    // that closeCfgModal() calls this on every Config teardown: applying a tone
+    // does NOT update s_alertSoundOriginal, so an unguarded revert would undo a
+    // sound the user had just saved, every time they left the Config screen.
+    if (!s_alertSoundModal && !s_alertSoundBackdrop) return;
     s_cfg.msgAlertSound = s_alertSoundOriginal;
     closeAlertSoundModal();
     refreshCfgModal();
@@ -12365,7 +12479,10 @@ static void openAlertSoundModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_HELTEC_V4_EXPANSION)
-    lv_label_set_text(hint, "Tap to preview, tap again to apply");
+    // Just the preview gesture now: the Apply button below says what commits,
+    // so the hint no longer has to carry the whole discoverability burden.
+    // Tapping the selected row again still applies, for muscle memory.
+    lv_label_set_text(hint, "Tap to preview");
 #else
     // Kept short so it fits the narrowed modal without wrapping to three lines.
     lv_label_set_text_fmt(hint, "Move=Preview  Enter=OK  %s=Cancel",
@@ -12407,6 +12524,21 @@ static void openAlertSoundModal() {
         lv_label_set_text(name, msgAlertSoundName((uint8_t)i));
         lv_obj_center(name);
     }
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // "Apply" rather than "Save": this picker's whole point is hearing a tone
+    // before committing, and the button that ends that audition reads better as
+    // the verb for it.
+    //
+    // Built after the tone grid on purpose — if LVGL is short of memory the
+    // modal loses its buttons rather than its content, and the backdrop tap
+    // still cancels.
+    appendHeltecCancelSaveRow(
+        s_alertSoundModal,
+        [](lv_event_t *e) { LV_UNUSED(e); cancelAlertSoundModal(); },
+        [](lv_event_t *e) { LV_UNUSED(e); applyAlertSoundSelection(s_alertSoundSelection); },
+        "Apply");
+#endif
 
     refreshAlertSoundSelection();
 }
@@ -13362,6 +13494,13 @@ static void closeCfgModal() {
     revertCfgVolumePreview();
 #endif
     cancelCfgSlider();    // an unapplied slider position must not persist either
+    // The sound picker stages the same way the sliders do: previewing writes the
+    // tone straight into s_cfg.msgAlertSound, and persistMessageAlertSetting()
+    // is only a markConfigDirty() — a deferred whole-config flush. So a tone
+    // auditioned and never applied would be written out by the next unrelated
+    // setting change. Reverting here closes that, and matches what the four
+    // lines above already do for brightness, battery trim and the sliders.
+    cancelAlertSoundModal();
     // Reopening Config should show all of it. A filter left armed from last
     // time reads as rows having gone missing.
     s_cfgFilterOpen = false;

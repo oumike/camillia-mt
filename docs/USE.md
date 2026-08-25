@@ -562,7 +562,9 @@ Default, Chirpy, Bass, and Off. Moving the selection **plays that tone as a
 preview**, so you can hear each one before committing. Enter applies the
 highlighted tone; Backspace/Esc cancels and restores whatever was set before you
 opened the picker, so previewing never changes your setting by accident. On
-touch builds, tapping a row previews it and tapping it again applies it.
+touch builds, tapping a row previews it, and **Apply** commits — tapping the
+highlighted row a second time still works too. **Cancel** restores what you
+opened the picker with, and so does a tap outside it.
 
 Notification Sound and Splash Melody now sit directly under My Message Color,
 with the other presentation settings.
@@ -1445,6 +1447,12 @@ Primary usage is touch.
   here instead** — Device Info, Action Result, the emoji tray, the traceroute
   progress popup, the New DM node picker and the hidden system-stats screen.
   Where a popup also dismissed on a tap outside it, that still works
+- **Every popup that stages a value before committing has a Cancel/Save row**,
+  in the same place and the same shape — the Brightness, Battery Trim, Location
+  Precision and Light Timeout sliders, Notification Sound (whose commit reads
+  **Apply**), Channel Edit and Time & Date. On a keyboard build Enter commits
+  and Backspace cancels; with neither key, the buttons are how you say which
+  you meant. A tap outside is still a cancel everywhere
 - The full-screen views — Config, DM, Nodes, Live — are closed by tapping their
   own button in the bottom nav, which is lit while you are on them. Their
   legends say so rather than naming a key
