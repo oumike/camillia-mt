@@ -115,6 +115,10 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   code on the wire, so Enter wakes it too
 - D-pad Up/Down navigates lists and chat rows; Left/Right switches channels, and
   moves between columns in multi-column pickers (Tools, channel grid)
+- In the New Message box the d-pad moves the text cursor instead: Left/Right by
+  one character, Up/Down by one line. Typing inserts at the cursor and Back
+  deletes the character before it, so a typo several words back can be fixed
+  without deleting everything after it
 - Modal close key is Back; hold Back for the long-press close. (A held Enter no
   longer closes — past two seconds it is the sleep gesture above)
 - No touch panel and no trackball — the keyboard and d-pad are the only input
@@ -1260,6 +1264,18 @@ with tiles and zoom, lives in Web Config, which has a browser to fetch it with.
   with everything else and has no card slot to keep maps on. The row is not
   shown at all on either. See [MAPS.md](MAPS.md)
 
+### Terrain line of sight (LOS)
+
+A separate action on the same menu, and a different question: not *where* a node
+is, but whether the ground between you and it is likely to block the path. It
+samples the elevation profile along the great circle, adds earth curvature, and
+reports **LINE OF SIGHT**, **MARGINAL (Fresnel)** or **NO LINE OF SIGHT** with a
+cross-section showing where the tightest point is.
+
+It needs an elevation proxy on your network — the firmware has no TLS client and
+every elevation API is HTTPS-only. **See [LOS.md](LOS.md)** for the setup, which
+is one small script and one Web Config field.
+
 The state maps themselves are PNG files the device reads from
 `/camillia/state_maps/<CODE>.png`. Until that folder is populated the modal
 reports **"map not on card"** alongside the state name and coordinates, so a
@@ -1439,7 +1455,9 @@ Primary usage is keyboard plus the d-pad and the dedicated function row.
 
 - Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere
 - Holding the d-pad centre sleeps the screen
-- D-pad Up/Down navigates, Left/Right switches channels or hops columns
+- D-pad Up/Down navigates, Left/Right switches channels or hops columns —
+  except in the New Message box, where the d-pad moves the text cursor
+  (Left/Right by a character, Up/Down by a line)
 - H toggles the channel selector
 - Space opens compose or reply compose; Enter moves the cursor into the
   channel's messages, and Enter again opens Message Actions for the highlighted

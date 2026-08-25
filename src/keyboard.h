@@ -31,6 +31,16 @@
 #define KEY_OPEN_DISCOVERY 0x8D
 #define KEY_OPEN_NODES  0x8E
 #define KEY_SLEEP_SCREEN 0x8F
+// The M9's dedicated Back button, distinct from the keyboard's Backspace key.
+// Both used to map to KEY_BACKSPACE, which made them impossible to tell apart
+// downstream — Back deleted one character at a time and could not be given its
+// own meaning. Compose treats this as "discard the draft and close"; every
+// other consumer goes through isBackspaceKey(), which counts it, so Back
+// behaves as it always did everywhere else.
+//
+// 0x91 rather than 0x90: the M9 driver already names raw 0x90 as a value it
+// drops, and reusing the number for a mapped code invites confusing the two.
+#define KEY_BACK_BTN    0x91
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/
@@ -42,6 +52,15 @@
 // lost — a half that never came up looks exactly like a keymap bug otherwise.
 bool     meshDeckKeyboardHalfPresent(int half);   // 0 = left 0x5A, 1 = right 0x5B
 #endif
+
+// Logs every raw scancode and the code it maps to, until switched off again.
+//
+// Which physical key produced a given code is not always obvious — the M9's Back
+// button and its keyboard Backspace both used to look like KEY_BACKSPACE from
+// the outside, and a board's controller revision can move a scancode. This turns
+// the guess into a reading. Off by default; toggled by the "keys" serial command.
+void     keyboardSetKeyTrace(bool on);
+bool     keyboardKeyTrace();
 
 char     keyboardHeldKey();
 uint32_t keyboardHeldMs();

@@ -1,0 +1,20 @@
+# systemd alternative to the container, if you would rather not add one.
+#   sudo cp elev_proxy.py /opt/camillia/
+#   sudo cp camillia-elev.service /etc/systemd/system/
+#   sudo systemctl enable --now camillia-elev
+[Unit]
+Description=Camillia elevation proxy (terrain line-of-sight)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/camillia/elev_proxy.py
+Restart=on-failure
+RestartSec=5
+User=nobody
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

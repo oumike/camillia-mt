@@ -927,6 +927,11 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.btFixedPin         = MY_BT_PIN;
     strncpy(cfg.ntpServer,   MY_NTP_SERVER,  sizeof(cfg.ntpServer)  - 1);
     cfg.ntpServer[sizeof(cfg.ntpServer) - 1] = '\0';
+    // No default: there is no public plain-HTTP elevation service to point at,
+    // and guessing one would produce a feature that fails on first use with a
+    // network error. Empty means "not configured", which the LOS modal reports
+    // in terms the operator can act on.
+    cfg.losElevServer[0] = '\0';
     cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);

@@ -34,6 +34,19 @@
 #  define HAS_ENV_SENSOR_TELEMETRY 0
 #endif
 
+// Terrain line-of-sight ("LOS") between this node and a contact.
+//
+// Off on the Cardputer. Not for the reason Locate is — a 24-point line costs
+// nothing next to a decoded PNG — but because the elevation endpoint has to be
+// configured somewhere, and that board serves web config in lite form only,
+// with no Utilities tab to put the field on. A feature that can be reached but
+// never configured is worse than one that is absent.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#  define HAS_NODE_LOS 0
+#else
+#  define HAS_NODE_LOS 1
+#endif
+
 // ── Hardware pin definitions (per-device) ────────────────────────────────────
 // All BOARD_*, TFT_*, LORA_*, GPS_*, BATT_*, HAS_* macros are defined here.
 #include "hal/board.h"

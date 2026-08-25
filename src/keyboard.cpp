@@ -24,6 +24,12 @@ static TwoWire &keyboardBus() {
 #endif
 }
 
+// Board-independent: the trace is useful on any keyboard build, and the M9 block
+// below is the wrong scope for it.
+static bool sKeyTrace = false;
+void keyboardSetKeyTrace(bool on) { sKeyTrace = on; }
+bool keyboardKeyTrace() { return sKeyTrace; }
+
 #if defined(DEVICE_M9)
 static uint8_t sM9KeyReg = KB_REG_KEY;
 static uint32_t sM9NextEarlyProbeMs = 0;
@@ -1100,6 +1106,11 @@ char TDeckKeyboard::readKey() {
     lastKeyHitMs = now;
 #endif
     char mapped = mapKey(raw);
+    if (sKeyTrace) {
+        Serial.printf("[kb] raw=0x%02X -> mapped=0x%02X%s\n",
+                      raw, (uint8_t)mapped,
+                      mapped == KEY_NONE ? "  (dropped)" : "");
+    }
 #if defined(DEVICE_M9)
     // Remembered so the log below can report how long the controller waits
     // before calling a press a long-press — the one number this side does not
@@ -1301,10 +1312,14 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         case 0xB7: return KEY_NEXT_CHAN;    // d-pad right
         // Early controllers report Back as 0x86. Production STC firmware uses
         // 0x86 for Map hold and reports the same Back matrix position as 0x87.
+        // KEY_BACK_BTN, not KEY_BACKSPACE: this is the dedicated Back button,
+        // and the keyboard's own Backspace arrives separately as 0x08/0x7F.
+        // Mapping both to KEY_BACKSPACE made them the same key to every
+        // consumer, so Back could only ever do what Backspace did.
         case 0x86:
-            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_BACKSPACE : KEY_NONE;
+            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_BACK_BTN : KEY_NONE;
         case 0x87:
-            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_NONE : KEY_BACKSPACE;
+            return (sM9KeyReg == KB_REG_KEY_EARLY) ? KEY_NONE : KEY_BACK_BTN;
         case 0x89: return KEY_BACKSPACE_HOLD;  // Back/Delete long-press
         // Centre held. The controller raises this on its own, and it is the
         // only "still held" signal the early protocol gives us — see the note

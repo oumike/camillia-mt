@@ -391,6 +391,17 @@ struct RhinoConfig {
     // 4-aligned struct, so the stored blob carries three bytes past it that the
     // load memcpy's straight over anything placed there.
     uint8_t  _reservedPad9[3];
+    // Base URL of the elevation endpoint used by the terrain line-of-sight
+    // feature (Node Actions -> LOS). Must be plain http:// — this firmware has
+    // no TLS client, so an https:// address cannot be reached at all. Empty is
+    // the default and means "not configured": the LOS modal says so instead of
+    // failing with a network error that looks like a bug.
+    //
+    // Safe at the end: _reservedPad9 above consumes the old struct's trailing
+    // padding, so this array starts exactly at the previous sizeof(RhinoConfig)
+    // and keeps its compiled default on an upgraded device. 96 is a multiple of
+    // 4, so the struct stays 4-aligned and the next appender needs no new pad.
+    char     losElevServer[96];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

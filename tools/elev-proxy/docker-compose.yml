@@ -1,0 +1,28 @@
+# Camillia elevation proxy.
+#
+#   docker compose up -d --build
+#   curl "http://localhost:5005/elev?locations=39.7,-105.2|39.7,-105.6"
+#
+# Standalone by default: it publishes 5005 and joins no custom network, so it
+# works on any host and a reverse proxy elsewhere reaches it by IP. That is the
+# normal case — the proxy and the elevation service usually live on different
+# machines.
+#
+# If you DO run it on the same host as Nginx Proxy Manager and would rather keep
+# the traffic on the Docker bridge, add NPM's network and drop the published
+# port, then forward to `camillia-elev:5005` instead of the host IP:
+#
+#   networks:
+#     - npm
+#   ...
+#   networks:
+#     npm:
+#       external: true
+#       name: <whatever `docker network ls` shows for your NPM stack>
+services:
+  camillia-elev:
+    build: .
+    container_name: camillia-elev
+    restart: unless-stopped
+    ports:
+      - "5005:5005"

@@ -23,6 +23,7 @@
 #include "emoji_font.h"
 #include "env_sensor.h"
 #include "gps.h"
+#include "los.h"
 #include "keyboard.h"
 #if defined(DEVICE_MESH_DECK)
 #include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
@@ -742,9 +743,17 @@ static bool s_nodesFilterEditing = false;
 // Node Actions modal: 7 actions arranged 2-per-row (6 without Locate). Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
 #if HAS_NODE_LOCATE
-static constexpr int kNodesActionCount = 7;
+static constexpr int kNodesActionBaseCount = 7;
 #else
-static constexpr int kNodesActionCount = 6;
+static constexpr int kNodesActionBaseCount = 6;
+#endif
+#if HAS_NODE_LOS
+// LOS sits after Locate where both exist, and takes Locate's index where it
+// does not — the Heltec has LOS but no Locate, so the two are independent.
+static constexpr int kNodesActionCount = kNodesActionBaseCount + 1;
+static constexpr int kNodesActionLos   = kNodesActionBaseCount;
+#else
+static constexpr int kNodesActionCount = kNodesActionBaseCount;
 #endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
@@ -757,11 +766,22 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
 #if HAS_NODE_LOCATE
     'L',
 #endif
+#if HAS_NODE_LOS
+    // 'S' for Sightline: 'L' already belongs to Locate on the boards that
+    // have both, and a shortcut that moves between builds is worse than one
+    // that is not the word's first letter.
+    'S',
+#endif
 };
 #if HAS_NODE_LOCATE
 // Named because three places have to agree on which row Locate is: the disabled
 // styling, the shortcut key, and the activate path.
 static constexpr int kNodesActionLocate = 6;
+#endif
+#if HAS_NODE_LOS
+// LOS needs a position at BOTH ends: the contact's, and one for this node
+// (a live fix or a set location). Same greying rule as Locate.
+static bool s_nodesActionLosEnabled = false;
 #endif
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
@@ -844,13 +864,17 @@ static inline const char *activeActionShortcuts() {
 // Locate is the only row that can be unavailable, and only in node mode —
 // message mode's action map does not carry it.
 static inline bool nodesActionRowDisabled(int idx) {
-#if HAS_NODE_LOCATE
+#if HAS_NODE_LOCATE || HAS_NODE_LOS
     if (s_nodesActionMsgMode) return false;
-    return idx == kNodesActionLocate && !s_nodesActionLocateEnabled;
-#else
+#endif
+#if HAS_NODE_LOCATE
+    if (idx == kNodesActionLocate && !s_nodesActionLocateEnabled) return true;
+#endif
+#if HAS_NODE_LOS
+    if (idx == kNodesActionLos && !s_nodesActionLosEnabled) return true;
+#endif
     LV_UNUSED(idx);
     return false;
-#endif
 }
 
 // Channel Actions modal: overlay opened with (A) from the main screen. Acts on
@@ -1253,7 +1277,11 @@ static void lvglLogToSerial(lv_log_level_t level, const char *buf) {
 #endif
 
 static inline bool isBackspaceKey(char k) {
-    return k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD;
+    // KEY_BACK_BTN is the M9's dedicated Back button, split out from
+    // KEY_BACKSPACE so the compose box can treat the two differently. It is
+    // counted here on purpose: every other caller wants the old behaviour, and
+    // only the compose switches, which match exact case values, see it apart.
+    return k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD || k == KEY_BACK_BTN;
 }
 
 static inline bool isModalCloseKey(char k) {
@@ -1684,6 +1712,11 @@ static void refreshNodesMap(const NodeEntry *node);
 #if HAS_NODE_LOCATE
 static void openNodeLocateModal(uint32_t nodeId);
 static void closeNodeLocateModal();
+#endif
+#if HAS_NODE_LOS
+static void closeNodeLosModal();
+static bool nodeLosSelfPosition(double &lat, double &lon);
+static void openNodeLosModal(uint32_t nodeId);
 #endif
 static void onWebCfgSaved();
 static bool captureWebScreenshotPng(const char *outPath);
@@ -14724,6 +14757,9 @@ static void closeNodesModal() {
     // would otherwise strand it with nothing behind it.
     closeNodeLocateModal();
 #endif
+#if HAS_NODE_LOS
+    closeNodeLosModal();
+#endif
     lvObjDeleteSafe(s_nodesModal);
     nodesPanelWifiRestore();
     s_nodesMapSelectionNodeId = 0;
@@ -15928,6 +15964,329 @@ static void openNodeLocateModal(uint32_t nodeId) {
 }
 #endif  // HAS_NODE_LOCATE
 
+#if HAS_NODE_LOS
+// ── LOS (terrain line of sight) ──────────────────────────────────────────────
+// Node Actions -> LOS. Fetches a ground-elevation profile along the great
+// circle to the contact, adds earth curvature, and reports whether the path is
+// clear, grazing the Fresnel zone, or blocked — with a cross-section to show
+// where. The fetch runs on a worker task (see los.cpp), so this side is a
+// poll: open the modal, show "Analyzing…", render when the result lands.
+//
+// Antenna heights are fixed at 2 m both ends for now. They move the verdict
+// materially, so this is a deliberate simplification rather than an oversight:
+// the reference port exposes +/- buttons and that is the natural follow-up.
+static constexpr float kLosAntennaSelfM = 2.0f;
+static constexpr float kLosAntennaPeerM = 2.0f;
+
+static lv_obj_t  *s_nodeLosBackdrop = nullptr;
+static lv_obj_t  *s_nodeLosModal    = nullptr;
+static lv_obj_t  *s_nodeLosStatus   = nullptr;
+static lv_obj_t  *s_nodeLosPlot     = nullptr;
+static lv_obj_t  *s_nodeLosVerdict  = nullptr;
+static lv_timer_t *s_nodeLosTimer   = nullptr;
+static uint32_t   s_nodeLosNodeId   = 0;
+// lv_line keeps the caller's array by pointer, so these outlive the draw call.
+static lv_point_precise_t s_nodeLosTerrainPts[kLosSamples];
+static lv_point_precise_t s_nodeLosSightPts[2];
+
+static void closeNodeLosModal() {
+    if (s_nodeLosTimer) { lv_timer_del(s_nodeLosTimer); s_nodeLosTimer = nullptr; }
+    if (lvObjValid(s_nodeLosBackdrop)) {
+        lv_obj_del(s_nodeLosBackdrop);
+    } else if (lvObjValid(s_nodeLosModal)) {
+        lv_obj_del(s_nodeLosModal);
+    }
+    s_nodeLosBackdrop = nullptr;
+    s_nodeLosModal    = nullptr;
+    s_nodeLosStatus   = nullptr;
+    s_nodeLosPlot     = nullptr;
+    s_nodeLosVerdict  = nullptr;
+    s_nodeLosNodeId   = 0;
+    // Leaves a mid-flight fetch alone; losReset() declines while the worker is
+    // still running so its arrays are never pulled out from under it.
+    losReset();
+}
+
+static void onNodeLosClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodeLosModal();
+}
+
+static void onNodeLosBackdropPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodeLosModal();
+}
+
+// Our own position: a live fix when there is one, the stored/manual position
+// otherwise. Without either there is no path to analyse.
+static bool nodeLosSelfPosition(double &lat, double &lon) {
+#if HAS_GPS
+    if (gpsHasFix() && (gpsLatI() != 0 || gpsLonI() != 0)) {
+        lat = (double)gpsLatI() / 1e7;
+        lon = (double)gpsLonI() / 1e7;
+        return true;
+    }
+#endif
+    if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+        lat = (double)s_cfg.latI / 1e7;
+        lon = (double)s_cfg.lonI / 1e7;
+        return true;
+    }
+    return false;
+}
+
+static void nodeLosRenderResult() {
+    if (!lvObjValid(s_nodeLosPlot) || !lvObjValid(s_nodeLosVerdict)) return;
+
+    LosAnalysis a;
+    if (!losAnalyze(kLosAntennaSelfM, kLosAntennaPeerM, a)) return;
+
+    lv_obj_clean(s_nodeLosPlot);
+    lv_obj_update_layout(s_nodeLosPlot);
+    const int gw = lv_obj_get_width(s_nodeLosPlot);
+    const int gh = lv_obj_get_height(s_nodeLosPlot);
+    if (gw < 8 || gh < 8) return;
+
+    // Scale to whatever the profile actually spans, including both antennas —
+    // a flat path and a mountain range both want to fill the box.
+    double vmin = 1e9, vmax = -1e9;
+    for (int i = 0; i < kLosSamples; ++i) {
+        const double v = (double)a.terrainM[i];
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+    }
+    if (a.h0M < vmin) vmin = a.h0M;
+    if (a.h0M > vmax) vmax = a.h0M;
+    if (a.hNM < vmin) vmin = a.hNM;
+    if (a.hNM > vmax) vmax = a.hNM;
+    if (vmax - vmin < 1.0) vmax = vmin + 1.0;
+
+    const int pad = 4;
+    auto X = [&](int i) -> lv_value_precise_t {
+        return (lv_value_precise_t)(i * (gw - 1) / (kLosSamples - 1));
+    };
+    auto Y = [&](double v) -> lv_value_precise_t {
+        const double t = (v - vmin) / (vmax - vmin);
+        return (lv_value_precise_t)(gh - pad - t * (gh - 2 * pad));
+    };
+
+    for (int i = 0; i < kLosSamples; ++i) {
+        s_nodeLosTerrainPts[i].x = X(i);
+        s_nodeLosTerrainPts[i].y = Y((double)a.terrainM[i]);
+    }
+    lv_obj_t *tline = lv_line_create(s_nodeLosPlot);
+    lv_line_set_points(tline, s_nodeLosTerrainPts, kLosSamples);
+    lv_obj_set_style_line_color(tline, lv_color_hex(0x6FBF73), 0);
+    lv_obj_set_style_line_width(tline, 2, 0);
+    lv_obj_set_style_line_rounded(tline, true, 0);
+
+    const uint32_t vcol = (a.verdict == LOS_BLOCKED)  ? 0xD7574E
+                        : (a.verdict == LOS_MARGINAL) ? 0xC8A030
+                                                      : 0x4DA8FF;
+    s_nodeLosSightPts[0].x = X(0);
+    s_nodeLosSightPts[0].y = Y(a.h0M);
+    s_nodeLosSightPts[1].x = X(kLosSamples - 1);
+    s_nodeLosSightPts[1].y = Y(a.hNM);
+    lv_obj_t *sline = lv_line_create(s_nodeLosPlot);
+    lv_line_set_points(sline, s_nodeLosSightPts, 2);
+    lv_obj_set_style_line_color(sline, lv_color_hex(vcol), 0);
+    lv_obj_set_style_line_width(sline, 2, 0);
+
+    // Mark the tightest point, which is the whole answer to "where".
+    if (a.verdict != LOS_CLEAR && a.worstIdx >= 0) {
+        lv_obj_t *dot = lv_obj_create(s_nodeLosPlot);
+        lv_obj_remove_style_all(dot);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(dot, 6, 6);
+        lv_obj_set_style_radius(dot, 3, 0);
+        lv_obj_set_style_bg_color(dot, lv_color_hex(0xD7574E), 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_pos(dot, (int)X(a.worstIdx) - 3,
+                            (int)Y((double)a.terrainM[a.worstIdx]) - 3);
+    }
+
+    const char *vstr = (a.verdict == LOS_BLOCKED)  ? "NO LINE OF SIGHT"
+                     : (a.verdict == LOS_MARGINAL) ? "MARGINAL (Fresnel)"
+                                                   : "LINE OF SIGHT";
+    char detail[64];
+    if (a.verdict == LOS_BLOCKED) {
+        snprintf(detail, sizeof(detail), "Blocked @ %.1f km, %dm over sight",
+                 a.worstD1M / 1000.0, (int)(-a.minClearM + 0.5));
+    } else if (a.verdict == LOS_MARGINAL) {
+        snprintf(detail, sizeof(detail), "Grazes terrain - F1=%dm",
+                 (int)(a.worstF1M + 0.5));
+    } else {
+        snprintf(detail, sizeof(detail), "Clear by %dm at tightest",
+                 (int)(a.minClearM + 0.5));
+    }
+
+    char body[160];
+    snprintf(body, sizeof(body),
+             "%s\n%.1f km - brg %03d %s\n%s\nyou %dm - peer %dm - %.0f MHz",
+             vstr, a.distanceKm, (int)(a.bearingDeg + 0.5), a.compass, detail,
+             (int)kLosAntennaSelfM, (int)kLosAntennaPeerM, a.freqMhz);
+    lv_label_set_text(s_nodeLosVerdict, body);
+    lv_obj_set_style_text_color(s_nodeLosVerdict, lv_color_hex(vcol), 0);
+
+    if (lvObjValid(s_nodeLosStatus)) {
+        lv_obj_add_flag(s_nodeLosStatus, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void nodeLosPoll(lv_timer_t *t) {
+    LV_UNUSED(t);
+    if (!lvObjValid(s_nodeLosModal)) return;
+
+    const LosState st = losState();
+    if (st == LOS_FETCHING) return;
+
+    if (s_nodeLosTimer) { lv_timer_del(s_nodeLosTimer); s_nodeLosTimer = nullptr; }
+
+    if (st == LOS_OK) {
+        nodeLosRenderResult();
+        return;
+    }
+
+    if (!lvObjValid(s_nodeLosStatus)) return;
+    // Each failure names the thing the operator can actually change. A bare
+    // "failed" here would be indistinguishable from a bug in the analysis.
+    const char *msg;
+    char httpBuf[72];
+    switch (st) {
+        case LOS_ERR_NO_SERVER:
+            msg = "No elevation server set.\nWeb Config -> Elevation Server (LOS)";
+            break;
+        case LOS_ERR_NO_WIFI:
+            msg = "Wi-Fi needed to fetch the\nterrain profile for this path.";
+            break;
+        case LOS_ERR_BADREPLY:
+            msg = "Server answered, but not with\nelevation data. Check the proxy\npoints at the elevation service.";
+            break;
+        case LOS_ERR_DATA:
+            msg = "Elevation data too sparse\nfor this path.";
+            break;
+        default:
+            snprintf(httpBuf, sizeof(httpBuf),
+                     "Elevation fetch failed (%d).\nCheck the server URL - it must be http://",
+                     losHttpCode());
+            msg = httpBuf;
+            break;
+    }
+    lv_label_set_text(s_nodeLosStatus, msg);
+}
+
+static void openNodeLosModal(uint32_t nodeId) {
+    if (!s_rootScreen || nodeId == 0) return;
+    if (s_nodeLosModal || s_nodeLosBackdrop) return;
+
+    const NodeEntry *node = Nodes.find(nodeId);
+    if (!node || !node->hasPosition || (node->latI == 0 && node->lonI == 0)) return;
+
+    double selfLat = 0, selfLon = 0;
+    const bool haveSelf = nodeLosSelfPosition(selfLat, selfLon);
+    const double peerLat = (double)node->latI / 1e7;
+    const double peerLon = (double)node->lonI / 1e7;
+
+    s_nodeLosNodeId = nodeId;
+
+    const int scrW = lv_disp_get_hor_res(NULL);
+    const int scrH = lv_disp_get_ver_res(NULL);
+    int modalW = scrW - 24;
+    if (modalW > 300) modalW = 300;
+    int modalH = scrH - 20;
+    if (modalH > 224) modalH = 224;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xE8F1FF);
+
+    s_nodeLosBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_nodeLosBackdrop, scrW, scrH);
+    lv_obj_align(s_nodeLosBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodeLosBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_nodeLosBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_nodeLosBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_nodeLosBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_nodeLosBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_nodeLosBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_nodeLosBackdrop, onNodeLosBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_nodeLosModal = lv_obj_create(s_nodeLosBackdrop);
+    lv_obj_set_size(s_nodeLosModal, modalW, modalH);
+    lv_obj_align(s_nodeLosModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_nodeLosModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_nodeLosModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_nodeLosModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_nodeLosModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_nodeLosModal, 1, 0);
+    lv_obj_set_style_border_color(s_nodeLosModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_nodeLosModal, 6, 0);
+    lv_obj_set_style_pad_row(s_nodeLosModal, 3, 0);
+    lv_obj_set_flex_flow(s_nodeLosModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_nodeLosModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_nodeLosBackdrop);
+
+    char who[40];
+    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    lv_obj_t *title = lv_label_create(s_nodeLosModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_label_set_text(title, who);
+
+    lv_obj_t *plot = lv_obj_create(s_nodeLosModal);
+    s_nodeLosPlot = plot;
+    lv_obj_remove_style_all(plot);
+    lv_obj_set_width(plot, modalW - 20);
+    lv_obj_set_height(plot, 74);
+    lv_obj_clear_flag(plot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(plot, lv_color_hex(0x0B0D0F), 0);
+    lv_obj_set_style_bg_opa(plot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(plot, 4, 0);
+
+    s_nodeLosStatus = lv_label_create(s_nodeLosModal);
+    lv_obj_set_width(s_nodeLosStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodeLosStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_nodeLosStatus, bodyColor, 0);
+    lv_obj_set_style_text_align(s_nodeLosStatus, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_nodeLosStatus, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_nodeLosStatus, "Analyzing terrain...");
+
+    s_nodeLosVerdict = lv_label_create(s_nodeLosModal);
+    lv_obj_set_width(s_nodeLosVerdict, lv_pct(100));
+    lv_obj_set_style_text_font(s_nodeLosVerdict, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_nodeLosVerdict, bodyColor, 0);
+    lv_obj_set_style_text_align(s_nodeLosVerdict, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_nodeLosVerdict, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_nodeLosVerdict, "");
+
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    appendHeltecCloseButton(s_nodeLosModal, onNodeLosClosePressed, 84);
+#endif
+
+    if (!haveSelf) {
+        // The peer's position is not the missing half — say which one is, or the
+        // operator checks the wrong node.
+        lv_label_set_text(s_nodeLosStatus,
+                          "This node has no position yet.\nNeeds a GPS fix or a set location.");
+        return;
+    }
+
+    losReset();
+    if (!losRequest(s_cfg.losElevServer, selfLat, selfLon, peerLat, peerLon,
+                    (double)s_cfg.loraFreq)) {
+        nodeLosPoll(nullptr);      // publishes whatever refusal reason was set
+        return;
+    }
+    s_nodeLosTimer = lv_timer_create(nodeLosPoll, 250, nullptr);
+}
+#endif  // HAS_NODE_LOS
+
 static void sdRmDirRecursive(const char *path) {
 #if HAS_FILE_STORAGE
     if (!path || !path[0]) return;
@@ -17056,6 +17415,16 @@ static void executeNodesActionSelection() {
         s_nodesActionSelection = (int)kMsgActionNodeMap[nodeSel];
     }
 
+#if HAS_NODE_LOS
+    if (s_nodesActionSelection == kNodesActionLos) {
+        if (!s_nodesActionLosEnabled) return;
+        uint32_t losNodeId = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        openNodeLosModal(losNodeId);
+        return;
+    }
+#endif
+
 #if HAS_NODE_LOCATE
     if (s_nodesActionSelection == kNodesActionLocate) {
         // Greyed rows keep the highlight but do nothing when activated; the
@@ -17286,6 +17655,14 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         actionNode && actionNode->hasPosition
         && (actionNode->latI != 0 || actionNode->lonI != 0);
 #endif
+#if HAS_NODE_LOS
+    {
+        const bool peerHasPos = actionNode && actionNode->hasPosition
+                                && (actionNode->latI != 0 || actionNode->lonI != 0);
+        double dummyLat = 0, dummyLon = 0;
+        s_nodesActionLosEnabled = peerHasPos && nodeLosSelfPosition(dummyLat, dummyLon);
+    }
+#endif
     const char *kActionLabels[kNodesActionCount] = {
         "(T)raceroute",
         "Sen(d) DM",
@@ -17299,6 +17676,13 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Locate",
 #else
         "(L)ocate",
+#endif
+#endif
+#if HAS_NODE_LOS
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        "LOS",
+#else
+        "LO(S)",
 #endif
 #endif
     };
@@ -25077,7 +25461,21 @@ static void pumpKeyboardInput() {
                          || (s_chanEditModal && !s_chanTextModal)
                          || s_timeCfgModal
                          || s_liveToolsModal;
-        if (!m9FourWaySelection) {
+        // Compose is exempt too: it drives a caret, so it wants all four
+        // directions. Collapsing here is irreversible — it happens before
+        // `rawKey` is taken below, so no handler downstream can tell Left from
+        // Up once it has run.
+        //
+        // Scoped to compose rather than the whole of typingContext, and that is
+        // deliberate. The other typing contexts do NOT ignore the collapsed
+        // keys the way it looks: the DM node picker with its filter armed, the
+        // WiFi password modal and the armed theme filter all act on
+        // KEY_SCROLL_UP/DN and none of them handle KEY_PREV_CHAN/KEY_NEXT_CHAN.
+        // Exempting them would therefore take Left/Right away as a navigation
+        // alias and give nothing back, since they have no caret to move yet.
+        // Widen this to typingContext at the point their carets get wired.
+        const bool m9ComposeCaret = (s_composeModal && !s_emojiPickerModal);
+        if (!m9FourWaySelection && !m9ComposeCaret) {
             if (k == KEY_PREV_CHAN)      k = KEY_SCROLL_UP;
             else if (k == KEY_NEXT_CHAN) k = KEY_SCROLL_DN;
         }
@@ -26158,29 +26556,49 @@ static void pumpKeyboardInput() {
             continue;   // swallow all other keys while the tray is up
         }
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
-        // Wheel steps the caret through the message being typed.
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9)
+        // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
         // from chat, DMs and the nodes list, and those three carry identical
         // copies of the compose key switch — one branch here beats three. The
         // emoji tray above already swallows every key while it is up, so it
-        // keeps the wheel for its own grid without being named here.
+        // keeps the pad/wheel for its own grid without being named here.
         //
-        // Direction follows invertScrollNav, the rule every other pager list
-        // uses, so the detent that steps a selection forward moves the caret
-        // right. Only the wheel can reach this: j/k stay literal characters in a
-        // typing context, so they never fold onto KEY_SCROLL_UP/DN while a
-        // compose box is open.
-        if (s_composeModal && s_composeInput
-            && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
-            const bool forward = (k == KEY_SCROLL_UP) ? invertScrollNav : !invertScrollNav;
-            if (forward) {
-                lv_textarea_cursor_right(s_composeInput);
-            } else {
-                lv_textarea_cursor_left(s_composeInput);
+        // Every board's compose edit goes through lv_textarea_add_text() and
+        // lv_textarea_delete_char(), both cursor-relative, so insert-in-the-
+        // middle and backspace-in-the-middle come free once the caret can move.
+        if (s_composeModal && s_composeInput) {
+#if defined(DEVICE_M9)
+            // D-pad: Left/Right by a character, Up/Down by a display line. The
+            // compose box is multi-line here (lv_textarea_set_one_line(false)),
+            // which is what makes the vertical pair meaningful.
+            //
+            // Deliberately NOT reusing the pager's invertScrollNav below: that
+            // is kPagerWheelChatNav && !navFromJk, and kPagerWheelChatNav is
+            // false on M9, so folding this board into that expression would
+            // pick a direction by accident rather than state one.
+            if (k == KEY_PREV_CHAN) { lv_textarea_cursor_left(s_composeInput);  continue; }
+            if (k == KEY_NEXT_CHAN) { lv_textarea_cursor_right(s_composeInput); continue; }
+            if (k == KEY_SCROLL_UP) { lv_textarea_cursor_up(s_composeInput);    continue; }
+            if (k == KEY_SCROLL_DN) { lv_textarea_cursor_down(s_composeInput);  continue; }
+#else
+            // Pager: the wheel is one axis, so it maps to left/right. Direction
+            // follows invertScrollNav, the rule every other pager list uses, so
+            // the detent that steps a selection forward moves the caret right.
+            // Only the wheel reaches this — j/k stay literal characters in a
+            // typing context, so they never fold onto KEY_SCROLL_UP/DN while a
+            // compose box is open.
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                const bool forward = (k == KEY_SCROLL_UP) ? invertScrollNav : !invertScrollNav;
+                if (forward) {
+                    lv_textarea_cursor_right(s_composeInput);
+                } else {
+                    lv_textarea_cursor_left(s_composeInput);
+                }
+                continue;
             }
-            continue;
+#endif
         }
 #endif
 
@@ -26224,6 +26642,23 @@ static void pumpKeyboardInput() {
 #endif
                         }
                         break;
+#if defined(DEVICE_M9)
+                    // The M9's dedicated Back button. It used to be indistinguishable from the
+                    // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
+                    // character at a time and there was no way for compose to tell them apart.
+                    // The driver now gives it its own code, so Back can mean "abandon this
+                    // draft": clear the box and close. Backspace keeps deleting a character.
+                    //
+                    // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
+                    // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
+                    // exactly as it always did.
+                    case KEY_BACK_BTN:
+                        if (s_composeInput) {
+                            lv_textarea_set_text(s_composeInput, "");
+                            closeComposePrompt();
+                        }
+                        break;
+#endif
                     default:
                         if (k >= 0x20 && k < 0x7F && s_composeInput) {
                             char one[2] = {k, '\0'};
@@ -26486,6 +26921,23 @@ static void pumpKeyboardInput() {
 #endif
                         }
                         break;
+#if defined(DEVICE_M9)
+                    // The M9's dedicated Back button. It used to be indistinguishable from the
+                    // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
+                    // character at a time and there was no way for compose to tell them apart.
+                    // The driver now gives it its own code, so Back can mean "abandon this
+                    // draft": clear the box and close. Backspace keeps deleting a character.
+                    //
+                    // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
+                    // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
+                    // exactly as it always did.
+                    case KEY_BACK_BTN:
+                        if (s_composeInput) {
+                            lv_textarea_set_text(s_composeInput, "");
+                            closeComposePrompt();
+                        }
+                        break;
+#endif
                     default:
                         if (k >= 0x20 && k < 0x7F && s_composeInput) {
                             char one[2] = {k, '\0'};
@@ -27356,6 +27808,23 @@ static void pumpKeyboardInput() {
 #endif
                 }
                 break;
+#if defined(DEVICE_M9)
+            // The M9's dedicated Back button. It used to be indistinguishable from the
+            // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
+            // character at a time and there was no way for compose to tell them apart.
+            // The driver now gives it its own code, so Back can mean "abandon this
+            // draft": clear the box and close. Backspace keeps deleting a character.
+            //
+            // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
+            // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
+            // exactly as it always did.
+            case KEY_BACK_BTN:
+                if (s_composeInput) {
+                    lv_textarea_set_text(s_composeInput, "");
+                    closeComposePrompt();
+                }
+                break;
+#endif
             default:
                 if (k >= 0x20 && k < 0x7F && s_composeInput) {
                     char one[2] = {k, '\0'};
@@ -33533,7 +34002,7 @@ static void handleSerialCommandLine(char *line) {
     if (!line || !line[0]) return;
 
     if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
-        Serial.println("[cli] commands: help | nvs | batt | chatdump | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
+        Serial.println("[cli] commands: help | nvs | batt | chatdump | keys | gps | env | env scan | env scan all | telemetry now | announce now | nodes stats | nodes seed [count] | chat seed [count]");
         return;
     }
 
@@ -33615,6 +34084,14 @@ static void handleSerialCommandLine(char *line) {
         }
         Serial.printf("[cli] seeding %d synthetic chat messages...\n", target);
         seedChatForRepro(target);
+        return;
+    }
+
+    if (strcmp(line, "keys") == 0 || strcmp(line, "keys trace") == 0) {
+        const bool on = !keyboardKeyTrace();
+        keyboardSetKeyTrace(on);
+        Serial.printf("[cli] key trace %s\n", on ? "ON - press keys to see raw/mapped codes"
+                                                 : "off");
         return;
     }
 
