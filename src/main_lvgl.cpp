@@ -32,6 +32,9 @@
 #if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
+#if HAS_BLE_KEYBOARD
+#include "ble_keyboard.h"
+#endif
 #include "ota_update.h"
 #include "debug_flags.h"
 #include "release_notes.h"   // generated from RELEASE_NOTES.md at build time
@@ -259,6 +262,22 @@ static lv_obj_t *s_cfgWifiHint = nullptr;
 // CFG screen on either answer, which would tear down the picker underneath.
 static lv_obj_t *s_cfgWifiDelBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiDelModal = nullptr;
+#if HAS_BLE_KEYBOARD
+// Pairing dialog for an external Bluetooth keyboard. Modelled on the WiFi scan
+// modal below, because scan -> pick -> pair -> remember is the same shape as
+// scan -> pick -> password -> connect.
+static lv_obj_t *s_cfgBleKbdBackdrop = nullptr;
+static lv_obj_t *s_cfgBleKbdModal = nullptr;
+static lv_obj_t *s_cfgBleKbdList = nullptr;
+static lv_obj_t *s_cfgBleKbdStatus = nullptr;
+static int       s_cfgBleKbdSelection = 0;
+static uint32_t  s_cfgBleKbdPaintMs = 0;
+// The dialog scans as soon as it opens, but opening it right after switching
+// the feature on can beat the radio coming up -- the worker starts the stack
+// asynchronously. So the request is retried from the loop until one takes,
+// rather than silently doing nothing and waiting for the user to press Scan.
+static bool      s_cfgBleKbdAutoScanned = false;
+#endif
 static lv_obj_t *s_cfgWifiScanBackdrop = nullptr;
 static lv_obj_t *s_cfgWifiScanModal = nullptr;
 static lv_obj_t *s_cfgWifiScanList = nullptr;
@@ -1511,6 +1530,12 @@ static void refreshCfgWifiPickerModal();
 static void onCfgWifiRowPressed(lv_event_t *e);
 static void onCfgWifiBackdropPressed(lv_event_t *e);
 static void applyCfgWifiSelection(int idx);
+#if HAS_BLE_KEYBOARD
+static void openCfgBleKbdModal();
+static void closeCfgBleKbdModal();
+static void refreshCfgBleKbdModal();
+static void onCfgBleKbdRowPressed(lv_event_t *e);
+#endif
 static void openCfgWifiScanModal();
 static void closeCfgWifiScanModal();
 static void refreshCfgWifiScanModal(bool runScan);
@@ -2105,6 +2130,10 @@ enum CfgActionId {
 #endif
     CFG_ACTION_WIFI_TOGGLE,
     CFG_ACTION_CHOOSE_WIFI,
+#if HAS_BLE_KEYBOARD
+    CFG_ACTION_BLE_KBD_TOGGLE,
+    CFG_ACTION_BLE_KBD_PAIR,
+#endif
     CFG_ACTION_GPS_TOGGLE,
     CFG_ACTION_SHARE_LOCATION,
     CFG_ACTION_POSITION_PRECISION,
@@ -3765,6 +3794,24 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Choose WiFi: (none)");
             }
             break;
+#if HAS_BLE_KEYBOARD
+        case CFG_ACTION_BLE_KBD_TOGGLE: {
+            if (!s_cfg.bleKbdEnabled) {
+                snprintf(buf, bufLen, "BT Keyboard: Off");
+            } else {
+                char status[80];
+                bleKeyboardStatusText(status, sizeof(status));
+                snprintf(buf, bufLen, "BT Keyboard: %s", status);
+            }
+        } break;
+        case CFG_ACTION_BLE_KBD_PAIR:
+            if (s_cfg.bleKbdName[0]) {
+                snprintf(buf, bufLen, "Pair BT Keyboard: %s", s_cfg.bleKbdName);
+            } else {
+                snprintf(buf, bufLen, "Pair BT Keyboard: (none)");
+            }
+            break;
+#endif
         case CFG_ACTION_WEBCFG:
             if (!s_cfg.wifiEnabled) {
                 snprintf(buf, bufLen, "Web Config: Off (WiFi off)");
@@ -4001,6 +4048,11 @@ static bool cfgActionDisabled(int actionId) {
         // still be turned off. Only activation requires a live station.
         case CFG_ACTION_VNC_HOST: return !s_vncEnabled && !vncNetworkConnected();
 #endif
+#if HAS_BLE_KEYBOARD
+        // Scanning needs the radio up, and the radio only comes up with the
+        // feature switched on.
+        case CFG_ACTION_BLE_KBD_PAIR: return !s_cfg.bleKbdEnabled;
+#endif
         default:                     return false;
     }
 }
@@ -4085,6 +4137,55 @@ static void persistWebCfgEnabled() {
     p.putBool("webCfgEnabled", s_webCfgEnabled);
     p.end();
 }
+
+#if HAS_BLE_KEYBOARD
+// ── Web config and the BLE keyboard are mutually exclusive ──────────────────
+// Not a preference: the two genuinely cannot share this hardware. Web config
+// turns Wi-Fi modem power-save off, because the synchronous WebServer stalls on
+// DTIM-buffered packets; Espressif's Wi-Fi/BT coexistence requires modem sleep
+// to be on. Bringing the BT controller up in that state does not fail with an
+// error code -- it calls abort() from inside coex_core_enable() and takes the
+// device down with it.
+//
+// Coexistence with modem sleep forced on does work, but it makes every web page
+// slow enough to look broken. So whichever the user switches on wins, the other
+// is switched off and persisted off, and they are told which and why. Turning
+// one off does not bring the other back: that would be a second surprise, and
+// the row they want is one press away.
+//
+// Both helpers return true when they actually stopped something, so the caller
+// knows whether to raise the notice.
+static bool bleKbdStopWebConfigForBt() {
+    const bool wasOn = s_webCfgEnabled || webCfgRunning();
+    if (!wasOn) return false;
+    Serial.println("[blekbd] stopping web config: cannot share the radio with Bluetooth");
+    s_webCfgEnabled = false;
+    persistWebCfgEnabled();
+    if (webCfgRunning()) webCfgEnd();   // tears the radio down
+    s_wifiStaKickMs = 0;                // re-associate the station right away
+    return true;
+}
+
+static bool webCfgStopBleKeyboardForWeb() {
+    if (!s_cfg.bleKbdEnabled && !bleKeyboardEnabled()) return false;
+    Serial.println("[web] stopping BLE keyboard: cannot share the radio with web config");
+    bleKeyboardSetEnabled(false);
+    s_cfg.bleKbdEnabled = false;
+    markConfigDirty();
+    return true;
+}
+
+static const char kBleKbdWebExclusiveNotice[] =
+    "Web Config stopped.\n\n"
+    "The Bluetooth keyboard and Web Config share one radio and cannot run at "
+    "the same time.\n\n"
+    "Turn the keyboard off to use Web Config again.";
+static const char kWebBleKbdExclusiveNotice[] =
+    "BT Keyboard turned off.\n\n"
+    "Web Config and the Bluetooth keyboard share one radio and cannot run at "
+    "the same time.\n\n"
+    "Turn Web Config off to use the keyboard again.";
+#endif
 
 #if HAS_VNC_HOST
 static void persistVncEnabled() {
@@ -7887,6 +7988,13 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
+#if HAS_BLE_KEYBOARD
+    // Same two-row shape as WiFi directly above -- a toggle, then the picker
+    // that chooses what it connects to -- because it is the same job, and
+    // someone looking for one row routinely means the other.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_TOGGLE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_PAIR;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
     // Directly under GPS, because that row is where people look for this and
     // the two are routinely confused: GPS picks whether the hardware is one of
@@ -13264,6 +13372,279 @@ static void openCfgWifiPassModal(int scanIdx) {
 #endif
 }
 
+#if HAS_BLE_KEYBOARD
+// ── External Bluetooth keyboard pairing ─────────────────────────────────────
+// Deliberately the same scan -> pick -> pair -> remember shape as the WiFi scan
+// modal directly below, because that is what the flow is; the one difference is
+// that a BLE keyboard often asks for a code to be typed *on the keyboard*, so
+// the status line has to carry a passkey the WiFi flow never needs.
+static void closeCfgBleKbdModal() {
+    if (lvObjValid(s_cfgBleKbdBackdrop)) {
+        lv_obj_del(s_cfgBleKbdBackdrop);
+    } else if (lvObjValid(s_cfgBleKbdModal)) {
+        lv_obj_del(s_cfgBleKbdModal);
+    }
+    s_cfgBleKbdBackdrop = nullptr;
+    s_cfgBleKbdModal    = nullptr;
+    s_cfgBleKbdList     = nullptr;
+    s_cfgBleKbdStatus   = nullptr;
+}
+
+// Copies whatever the worker settled on into config. Called from the modal and
+// from the loop, so a keyboard that pairs while the dialog is closed is still
+// remembered.
+static void syncBleKbdPairingToConfig() {
+    if (!bleKeyboardTakePairingDirty()) return;
+    utf8util::copyTruncate(s_cfg.bleKbdAddr, sizeof(s_cfg.bleKbdAddr), bleKeyboardPairedAddr());
+    utf8util::copyTruncate(s_cfg.bleKbdName, sizeof(s_cfg.bleKbdName), bleKeyboardPairedName());
+    s_cfg.bleKbdAddrType = bleKeyboardPairedAddrType();
+    markConfigDirty();
+    Serial.printf("[blekbd] pairing saved: \"%s\" %s\n", s_cfg.bleKbdName, s_cfg.bleKbdAddr);
+}
+
+static void refreshCfgBleKbdModal() {
+    if (!lvObjValid(s_cfgBleKbdModal) || !lvObjValid(s_cfgBleKbdList)) return;
+    s_cfgBleKbdPaintMs = millis();
+
+    if (lvObjValid(s_cfgBleKbdStatus)) {
+        char status[96];
+        bleKeyboardStatusText(status, sizeof(status));
+        const uint32_t passkey = bleKeyboardPasskey();
+        char line[160];
+        if (passkey) {
+            // The keyboard has no screen, so the number can only come from
+            // here. Worth showing for the whole attempt rather than only when
+            // the peer asks: by the time it asks, the user is already looking
+            // at the keyboard.
+            snprintf(line, sizeof(line), "%s\nType %06u then Enter on the keyboard",
+                     status, (unsigned)passkey);
+        } else {
+            snprintf(line, sizeof(line), "%s", status);
+        }
+        lv_label_set_text(s_cfgBleKbdStatus, line);
+    }
+
+    const int count = bleKeyboardScanCount();
+    if (s_cfgBleKbdSelection >= count) s_cfgBleKbdSelection = count > 0 ? count - 1 : 0;
+    if (s_cfgBleKbdSelection < 0) s_cfgBleKbdSelection = 0;
+
+    lv_obj_clean(s_cfgBleKbdList);
+    if (count == 0) {
+        lv_obj_t *row = lv_label_create(s_cfgBleKbdList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xA7C7FF), 0);
+        lv_obj_set_style_pad_all(row, 6, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(row,
+                          bleKeyboardScanning()
+                              ? "Looking for keyboards..."
+                              : "No keyboards found yet.\n\nPut the keyboard into pairing "
+                                "mode, then press Scan.\n\nOnly Bluetooth LE keyboards can "
+                                "pair - this hardware has no Bluetooth Classic radio.");
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        char name[32] = {0};
+        char addr[20] = {0};
+        int  rssi = 0;
+        bool hid = false;
+        if (!bleKeyboardScanEntry(i, name, sizeof(name), addr, sizeof(addr), &rssi, &hid)) continue;
+
+        char rowText[96];
+        snprintf(rowText, sizeof(rowText), "%s  %d dBm%s", name, rssi, hid ? "" : "  ?");
+
+        lv_obj_t *row = lv_label_create(s_cfgBleKbdList);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_pad_left(row, 6, 0);
+        lv_obj_set_style_pad_right(row, 6, 0);
+        lv_obj_set_style_pad_top(row, 4, 0);
+        lv_obj_set_style_pad_bottom(row, 4, 0);
+        lv_obj_set_style_radius(row, 3, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex((i & 1) ? 0x123266 : 0x0F2A5C), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
+        lv_label_set_text(row, rowText);
+
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, onCfgBleKbdRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        if (i == s_cfgBleKbdSelection) {
+            lv_obj_set_style_bg_color(row, lvColorFrom565(s_ui.selectBg), 0);
+            lv_obj_set_style_bg_opa(row, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80, 0);
+            lv_obj_set_style_border_width(row, 1, 0);
+            lv_obj_set_style_border_color(row, lv_color_hex(0xE8F1FF), 0);
+            lv_obj_set_style_text_color(row,
+                                        (s_cfg.uiMode == UI_MODE_LIGHT)
+                                            ? lv_color_hex(0x000000)
+                                            : lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        }
+    }
+}
+
+static void cfgBleKbdPairSelected() {
+    if (bleKeyboardScanCount() <= 0) return;
+    if (!bleKeyboardPairWith(s_cfgBleKbdSelection)) return;
+    refreshCfgBleKbdModal();
+}
+
+static void cfgBleKbdForget() {
+    bleKeyboardForget();
+    s_cfg.bleKbdAddr[0] = '\0';
+    s_cfg.bleKbdName[0] = '\0';
+    s_cfg.bleKbdAddrType = 0;
+    markConfigDirty();
+    refreshCfgBleKbdModal();
+}
+
+static void onCfgBleKbdRowPressed(lv_event_t *e) {
+    s_cfgBleKbdSelection = (int)(intptr_t)lv_event_get_user_data(e);
+    refreshCfgBleKbdModal();
+}
+
+static void onCfgBleKbdBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgBleKbdBackdrop) return;
+    closeCfgBleKbdModal();
+    refreshCfgModal();
+}
+
+static void onCfgBleKbdClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeCfgBleKbdModal();
+    refreshCfgModal();
+}
+
+static void onCfgBleKbdScanPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    if (bleKeyboardStartScan()) s_cfgBleKbdAutoScanned = true;
+    refreshCfgBleKbdModal();
+}
+
+static void onCfgBleKbdPairPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgBleKbdPairSelected();
+}
+
+static void onCfgBleKbdForgetPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgBleKbdForget();
+}
+
+static void openCfgBleKbdModal() {
+    if (!s_rootScreen || s_cfgBleKbdModal || s_cfgBleKbdBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 340) modalW = 340;
+
+    s_cfgBleKbdSelection = 0;
+
+    s_cfgBleKbdBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgBleKbdBackdrop, w, h);
+    lv_obj_align(s_cfgBleKbdBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgBleKbdBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgBleKbdBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBleKbdBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgBleKbdBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgBleKbdBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgBleKbdBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgBleKbdBackdrop, onCfgBleKbdBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_cfgBleKbdModal = lv_obj_create(s_cfgBleKbdBackdrop);
+    lv_obj_set_size(s_cfgBleKbdModal, modalW, (h > 120) ? (h - 20) : LV_SIZE_CONTENT);
+    lv_obj_align(s_cfgBleKbdModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgBleKbdModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgBleKbdModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgBleKbdModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_cfgBleKbdModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgBleKbdModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgBleKbdModal, lv_color_hex(0x5C86C6), 0);
+    lv_obj_set_style_pad_all(s_cfgBleKbdModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgBleKbdModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgBleKbdModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgBleKbdModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_cfgBleKbdBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgBleKbdModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Bluetooth Keyboard");
+
+    s_cfgBleKbdStatus = lv_label_create(s_cfgBleKbdModal);
+    lv_obj_set_width(s_cfgBleKbdStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBleKbdStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgBleKbdStatus, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgBleKbdStatus, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_cfgBleKbdStatus, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_cfgBleKbdStatus, "");
+
+    s_cfgBleKbdList = lv_obj_create(s_cfgBleKbdModal);
+    lv_obj_set_width(s_cfgBleKbdList, lv_pct(100));
+    lv_obj_set_flex_grow(s_cfgBleKbdList, 1);
+    lv_obj_add_flag(s_cfgBleKbdList, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(s_cfgBleKbdList);
+    lv_obj_set_scrollbar_mode(s_cfgBleKbdList, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_color(s_cfgBleKbdList, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(s_cfgBleKbdList, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgBleKbdList, 1, 0);
+    lv_obj_set_style_border_color(s_cfgBleKbdList, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_pad_all(s_cfgBleKbdList, 2, 0);
+    lv_obj_set_style_pad_row(s_cfgBleKbdList, 2, 0);
+    lv_obj_set_flex_flow(s_cfgBleKbdList, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgBleKbdList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    // Buttons, not key hints: this board has no keyboard of its own, so until
+    // one is paired the only way to drive this dialog is the touch panel.
+    lv_obj_t *btnRow = lv_obj_create(s_cfgBleKbdModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    struct BleKbdButton { const char *label; lv_event_cb_t cb; };
+    const BleKbdButton kButtons[] = {
+        { "Close",  onCfgBleKbdClosePressed  },
+        { "Scan",   onCfgBleKbdScanPressed   },
+        { "Pair",   onCfgBleKbdPairPressed   },
+        { "Forget", onCfgBleKbdForgetPressed },
+    };
+    for (const BleKbdButton &b : kButtons) {
+        lv_obj_t *btn = lv_btn_create(btnRow);
+        lv_obj_set_flex_grow(btn, 1);
+        lv_obj_set_height(btn, lv_pct(100));
+        lv_obj_set_style_pad_all(btn, 2, 0);
+        lv_obj_add_event_cb(btn, b.cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_label_set_text(lbl, b.label);
+        lv_obj_center(lbl);
+    }
+
+    refreshCfgBleKbdModal();
+    // Opening the dialog is the moment someone is looking for a keyboard, so
+    // start looking without making them press Scan first.
+    s_cfgBleKbdAutoScanned = bleKeyboardStartScan();
+}
+#endif  // HAS_BLE_KEYBOARD
+
 static void openCfgWifiScanModal() {
     if (!s_rootScreen || s_cfgWifiScanModal || s_cfgWifiScanBackdrop) return;
 
@@ -13507,6 +13888,9 @@ static void closeCfgModal() {
     s_cfgFilterLen = 0;
     s_cfgFilter[0] = '\0';
     closeCfgWifiPickerModal();
+#if HAS_BLE_KEYBOARD
+    closeCfgBleKbdModal();
+#endif
     closeCfgConfirmModal();
     closeCfgActionMessageModal();
     closeSysStatsModal();
@@ -17009,6 +17393,21 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
     uint32_t routeBack[kMaxPathNodes] = {};
     int routeCount = 0;
     int routeBackCount = 0;
+    // RouteDiscovery fields 2 and 4 — snr_towards and snr_back — one entry per
+    // edge, in quarter-dB. They were arriving on every traceroute and being
+    // dropped by the skip below; this is the same data wadamesh surfaces as
+    // "Trace SNR", except Meshtastic already carries it in the reply we ask for.
+    //
+    // One more than the node list: RouteDiscovery omits both endpoints from
+    // `route`, but reports an SNR for the final hop into the destination too.
+    constexpr int kMaxSnr = kMaxPathNodes + 2;
+    int32_t snrTowards[kMaxSnr] = {};
+    int32_t snrBack[kMaxSnr] = {};
+    int snrTowardsCount = 0;
+    int snrBackCount = 0;
+    // Meshtastic's "no measurement" marker. Rendering it as -32 dB would be a
+    // plausible-looking lie, so it stays distinguishable from a real reading.
+    constexpr int32_t kSnrUnknown = -128;
 
     auto skipPb = [](const uint8_t *buf, size_t len, size_t off, uint32_t wtype) -> size_t {
         if (wtype == 0) {
@@ -17074,6 +17473,43 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
             continue;
         }
 
+        // int32, so a varint — and protobuf encodes a negative int32 as a full
+        // 10-byte varint rather than zigzag, which is why this takes the low 32
+        // bits and reinterprets rather than casting the 64-bit value directly.
+        const bool isSnrField = (field == 2 || field == 4);
+        auto appendSnr = [](uint64_t raw, int32_t *out, int cap, int &count) {
+            if (count >= cap) return;
+            out[count++] = (int32_t)(uint32_t)raw;
+        };
+
+        if (isSnrField && wtype == 0) {
+            uint64_t v = 0;
+            size_t j = pbReadVarint(payload, payloadLen, i, v);
+            if (!j) break;
+            if (field == 2) appendSnr(v, snrTowards, kMaxSnr, snrTowardsCount);
+            else            appendSnr(v, snrBack,    kMaxSnr, snrBackCount);
+            i = j;
+            continue;
+        }
+
+        if (isSnrField && wtype == 2) {
+            uint64_t sz = 0;
+            size_t j = pbReadVarint(payload, payloadLen, i, sz);
+            if (!j) break;
+            if (j + sz > payloadLen) break;
+            const size_t end = j + sz;
+            while (j < end) {
+                uint64_t v = 0;
+                const size_t k = pbReadVarint(payload, payloadLen, j, v);
+                if (!k || k > end) break;
+                if (field == 2) appendSnr(v, snrTowards, kMaxSnr, snrTowardsCount);
+                else            appendSnr(v, snrBack,    kMaxSnr, snrBackCount);
+                j = k;
+            }
+            i = end;
+            continue;
+        }
+
         i = skipPb(payload, payloadLen, i, wtype);
         if (!i) break;
     }
@@ -17082,13 +17518,24 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
         uint32_t from;
         uint32_t to;
         bool viaMqtt;
+        bool hasSnr;
+        float snrDb;
     };
     Edge edges[kMaxEdges] = {};
     int edgeCount = 0;
 
-    auto appendEdges = [&](const uint32_t *path, int count, bool viaMqtt) {
+    // Edge idx takes snr[idx]: both are ordered from the sending end outward,
+    // and the path array here has already had the endpoints put back on, so the
+    // two line up one-for-one.
+    auto appendEdges = [&](const uint32_t *path, int count, bool viaMqtt,
+                           const int32_t *snrQ, int snrCount) {
         for (int idx = 0; idx + 1 < count && edgeCount < kMaxEdges; idx++) {
-            edges[edgeCount++] = {path[idx], path[idx + 1], viaMqtt};
+            Edge e = {path[idx], path[idx + 1], viaMqtt, false, 0.0f};
+            if (snrQ && idx < snrCount && snrQ[idx] != kSnrUnknown) {
+                e.hasSnr = true;
+                e.snrDb = (float)snrQ[idx] / 4.0f;   // quarter-dB on the wire
+            }
+            edges[edgeCount++] = e;
         }
     };
 
@@ -17109,7 +17556,7 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
     appendHop(s_myNodeId);
     for (int idx = 0; idx < routeCount; idx++) appendHop(route[idx]);
     appendHop(s_tracerouteNodeId);
-    appendEdges(hops, hopCount, false);
+    appendEdges(hops, hopCount, false, snrTowards, snrTowardsCount);
 
     // The return leg is only drawn when the reply actually reported one; a
     // symmetric route comes back with route_back empty and needs no second line.
@@ -17118,11 +17565,11 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
         appendHop(s_tracerouteNodeId);
         for (int idx = 0; idx < routeBackCount; idx++) appendHop(routeBack[idx]);
         appendHop(s_myNodeId);
-        appendEdges(hops, hopCount, viaMqtt);
+        appendEdges(hops, hopCount, viaMqtt, snrBack, snrBackCount);
     } else if (viaMqtt && edgeCount < kMaxEdges && s_tracerouteNodeId != 0 && s_myNodeId != 0) {
         // No return path was reported, but the reply came in over MQTT rather
         // than RF. That changes what the result means, so it still gets a line.
-        edges[edgeCount++] = {s_tracerouteNodeId, s_myNodeId, true};
+        edges[edgeCount++] = {s_tracerouteNodeId, s_myNodeId, true, false, 0.0f};
     }
 
     char text[420];
@@ -17147,11 +17594,22 @@ static void tracerouteProgressRenderRoutesPayload(const uint8_t *payload, size_t
             sep = ((idx % 3) == 0) ? "\n" : ", ";
         }
 
-        const char *transport = edges[idx].viaMqtt ? "mqtt" : "radio";
+        // The SNR replaces the transport label rather than joining it: "7.5dB"
+        // is the same width as "radio", so a path that fitted before still fits,
+        // and an RF hop with a measurement is self-evidently radio anyway.
+        // "radio" survives for hops the reply gave no measurement for.
+        char metric[12];
+        if (edges[idx].viaMqtt) {
+            snprintf(metric, sizeof(metric), "mqtt");
+        } else if (edges[idx].hasSnr) {
+            snprintf(metric, sizeof(metric), "%.1fdB", (double)edges[idx].snrDb);
+        } else {
+            snprintf(metric, sizeof(metric), "radio");
+        }
 
         size_t used = strlen(text);
         if (used + 8 >= sizeof(text)) break;
-        snprintf(text + used, sizeof(text) - used, "%s%s -> %s (%s)", sep, from, to, transport);
+        snprintf(text + used, sizeof(text) - used, "%s%s -> %s (%s)", sep, from, to, metric);
     }
 
     if (!text[0]) {
@@ -23673,6 +24131,11 @@ static void activateCfgSelection() {
             disabledMessage = "Connect to WiFi before enabling VNC";
         }
 #endif
+#if HAS_BLE_KEYBOARD
+        else if (actionId == CFG_ACTION_BLE_KBD_PAIR) {
+            disabledMessage = "Turn BT Keyboard on first";
+        }
+#endif
         snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", disabledMessage);
         openCfgActionMessageModal(s_cfgStatus);
         return;
@@ -23719,6 +24182,12 @@ static void performCfgAction(int actionId) {
                 snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Web Config disabled");
             } else {
                 Serial.println("[web] CFG action: enable web config");
+#if HAS_BLE_KEYBOARD
+                // The other half of the exclusion enforced when the keyboard is
+                // switched on. Stopped before webCfgBegin(), so the server never
+                // touches Wi-Fi power save while a BT controller is live.
+                const bool stoppedBleKbd = webCfgStopBleKeyboardForWeb();
+#endif
                 s_webCfgEnabled = true;
                 persistWebCfgEnabled();
                 webCfgSetForceAp(wifiForceApMode());
@@ -23749,6 +24218,16 @@ static void performCfgAction(int actionId) {
                                  webCfgIP());
                         openCfgActionMessageModal(warn);
                     }
+#if HAS_BLE_KEYBOARD
+                    // After the chat-paused warning, not before: that one costs
+                    // the user messages and outranks this. In practice they
+                    // cannot both fire -- chat pausing is a no-PSRAM board and
+                    // none of those build the keyboard in -- but the order is
+                    // the one that would be right if they ever could.
+                    else if (stoppedBleKbd) {
+                        openCfgActionMessageModal(kWebBleKbdExclusiveNotice);
+                    }
+#endif
                 } else {
                     s_webCfgEnabled = false;
                     persistWebCfgEnabled();
@@ -23792,6 +24271,48 @@ static void performCfgAction(int actionId) {
                 openCfgActionMessageModal(s_cfgStatus);
             }
         } break;
+#endif
+
+#if HAS_BLE_KEYBOARD
+        case CFG_ACTION_BLE_KBD_TOGGLE: {
+            showActionPopup = false;   // the row already reads the state back
+            if (s_cfg.bleKbdEnabled) {
+                bleKeyboardSetEnabled(false);
+                s_cfg.bleKbdEnabled = false;
+                markConfigDirty();
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "BT Keyboard off");
+                break;
+            }
+            // Web config goes first, before the stack comes up and never after:
+            // starting the BT controller while web config holds modem
+            // power-save off aborts inside coex_core_enable(), and that is not
+            // survivable -- the device reboots.
+            const bool stoppedWeb = bleKbdStopWebConfigForBt();
+            if (!bleKeyboardSetEnabled(true)) {
+                // Leave the setting off rather than claiming a stack that is
+                // not there; the row would otherwise read On forever.
+                s_cfg.bleKbdEnabled = false;
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "BT Keyboard failed to start (low memory)");
+                openCfgActionMessageModal(s_cfgStatus);
+                break;
+            }
+            s_cfg.bleKbdEnabled = true;
+            markConfigDirty();
+            if (s_cfg.bleKbdAddr[0]) {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "BT Keyboard on - connecting to %s", s_cfg.bleKbdName);
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         "BT Keyboard on - use Pair to choose one");
+            }
+            if (stoppedWeb) openCfgActionMessageModal(kBleKbdWebExclusiveNotice);
+        } break;
+
+        case CFG_ACTION_BLE_KBD_PAIR:
+            showActionPopup = false;
+            openCfgBleKbdModal();
+            break;
 #endif
 
         case CFG_ACTION_GPS_TOGGLE: {
@@ -24195,6 +24716,23 @@ static void performCfgAction(int actionId) {
                 webCfgEnd();
                 delay(120);
             }
+#if HAS_BLE_KEYBOARD
+            // Same reason as the web-config teardown directly above, and it has
+            // to happen here rather than being left to the reboot handoff: the
+            // "immediate worker run" below downloads and flashes inside the
+            // *running* firmware, so a resident BLE stack spends 30-40 KB of
+            // internal DRAM through the one moment the update needs it most.
+            //
+            // Restored below only if the update did not happen. A successful
+            // install reboots, and setup() brings the keyboard back from the
+            // saved pairing on the way up.
+            const bool bleKbdWasOn = bleKeyboardEnabled();
+            if (bleKbdWasOn) {
+                Serial.println("[ota-worker] stopping BLE keyboard to free internal heap");
+                bleKeyboardSetEnabled(false);
+                delay(120);
+            }
+#endif
 
             bool flagSaved = requestOtaWorkerModeOnce();
             bool nvsVisible = isOtaWorkerModeRequestedOnce();
@@ -24206,6 +24744,9 @@ static void performCfgAction(int actionId) {
                           nvsVisible ? 1 : 0,
                           rtcVisible ? 1 : 0);
             if (!(flagSaved && flagVisible)) {
+#if HAS_BLE_KEYBOARD
+                if (bleKbdWasOn) bleKeyboardSetEnabled(true);
+#endif
                 snprintf(s_cfgStatus,
                          sizeof(s_cfgStatus),
                          "OTA request failed (NVS write). Retry.");
@@ -24214,6 +24755,11 @@ static void performCfgAction(int actionId) {
 
             Serial.println("[ota-worker] attempting immediate worker run");
             if (runOtaWorkerModeIfRequested()) {
+                // Only reached when the update did not install -- a successful
+                // one restarts inside the call and never comes back here.
+#if HAS_BLE_KEYBOARD
+                if (bleKbdWasOn) bleKeyboardSetEnabled(true);
+#endif
                 if (s_otaWorkerBootNotice[0]) {
                     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", s_otaWorkerBootNotice);
                 } else {
@@ -25474,9 +26020,24 @@ static void pumpKeyboardInput() {
             fromVnc = true;
         }
 #endif
+#if HAS_BLE_KEYBOARD
+        // One more source of the same kind as the VNC queue above, popped
+        // before the built-in keyboard rather than instead of it: the two are
+        // additive, and neither has to know about the other. Everything
+        // downstream -- modals, typing contexts, the j/k remap, screen wake --
+        // sees an ordinary key.
+        bool fromBle = false;
+        if (!fromVnc && bleKeyboardPopKey(&k) && k != KEY_NONE) fromBle = true;
+        if (!fromVnc && !fromBle) k = s_keyboard.readKey();
+#else
         if (!fromVnc) k = s_keyboard.readKey();
+#endif
         bool fromTrackball = false;
+#if HAS_BLE_KEYBOARD
+        const char *src = fromVnc ? "vnc" : (fromBle ? "ble" : "key");
+#else
         const char *src = fromVnc ? "vnc" : "key";
+#endif
 #if defined(DEVICE_MESH_DECK)
         // D-pad presses arrive here as ordinary keys, so screen wake, the j/k
         // remap and every per-screen handler treat them identically.
@@ -26308,6 +26869,44 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+#if HAS_BLE_KEYBOARD
+        // Reachable once a keyboard is paired (or over VNC): the dialog is
+        // driven by its buttons on a bare board, but there is no reason a
+        // keyboard cannot drive the dialog that pairs the next one.
+        if (s_cfgBleKbdModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgBleKbdModal();
+                refreshCfgModal();
+                continue;
+            }
+            if (k == 'n' || k == 'N') {
+                bleKeyboardStartScan();
+                refreshCfgBleKbdModal();
+                continue;
+            }
+            if (k == 'f' || k == 'F') {
+                cfgBleKbdForget();
+                continue;
+            }
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                const bool down = (k == KEY_SCROLL_DN) != invertScrollNav;
+                const int count = bleKeyboardScanCount();
+                if (down) {
+                    if (s_cfgBleKbdSelection + 1 < count) s_cfgBleKbdSelection++;
+                } else if (s_cfgBleKbdSelection > 0) {
+                    s_cfgBleKbdSelection--;
+                }
+                refreshCfgBleKbdModal();
+                continue;
+            }
+            if (k == KEY_ENTER) {
+                cfgBleKbdPairSelected();
+                continue;
+            }
+            continue;
+        }
+#endif
 
         if (s_cfgWifiScanModal) {
             if (isModalCloseKey(k)) {
@@ -30522,7 +31121,7 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
 // another board running this firmware — waited for a reply that never came.
 static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
                                 const uint8_t *routePayload, size_t routePayloadLen,
-                                int chanIdx) {
+                                int chanIdx, float rxSnr) {
     if (!Radio.isReady()) return false;
     if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
     if (s_myNodeId == 0) deriveNodeId();
@@ -30534,7 +31133,7 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     uint8_t proto[208];
     size_t protoLen = encodeTracerouteReply(proto, sizeof(proto),
                                             routePayload, routePayloadLen,
-                                            requestId, s_myNodeId);
+                                            requestId, s_myNodeId, rxSnr);
     if (protoLen == 0) return false;
 
     // Reply on the channel the request arrived on: that is the one the sender is
@@ -31440,7 +32039,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             const bool isRequestToUs = addressedToMe && pkt.wantResponse;
             if (isRequestToUs) {
                 (void)sendTracerouteReply(pkt.hdr.from, pkt.hdr.id,
-                                          pkt.payload, pkt.payloadLen, chanIdx);
+                                          pkt.payload, pkt.payloadLen, chanIdx,
+                                          pkt.snr);
             } else {
                 tracerouteProgressOnResponse(pkt);
             }
@@ -34706,6 +35306,26 @@ void setup() {
         Serial.println("[vnc] disabled: startup prerequisites unavailable");
     }
 #endif
+#if HAS_BLE_KEYBOARD
+    // Last thing in setup, and only when the setting says so: with it off this
+    // costs nothing but remembering which keyboard was paired, which is the
+    // point -- the radio's 30-40 KB of internal DRAM is not spent by a board
+    // that never uses the feature.
+    // Web config wins a tie at boot. The two are kept mutually exclusive at
+    // every point either is switched on, so both being set can only come from a
+    // config written before that rule existed, or edited by hand -- but the
+    // failure if it does happen is an abort inside coex_core_enable() rather
+    // than a wrong setting, so it is checked rather than assumed. Web config is
+    // the one that wins because it is the recovery path: it is how a device
+    // with no keyboard gets reconfigured.
+    if (s_cfg.bleKbdEnabled && (s_webCfgEnabled || webCfgRunning())) {
+        Serial.println("[blekbd] not starting: web config owns the radio this boot");
+        s_cfg.bleKbdEnabled = false;
+        markConfigDirty();
+    }
+    bleKeyboardBegin(s_cfg.bleKbdEnabled, s_cfg.bleKbdAddr, s_cfg.bleKbdAddrType,
+                     s_cfg.bleKbdName);
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     // Cardputer (no PSRAM): auto-start web config only now that the node DB,
     // chat/DM buffers, radio, and UI are all allocated — this mirrors the
@@ -34735,6 +35355,12 @@ static bool powerSaveShouldNap() {
         // the trade — holding the CPU through the idle gap too would disable
         // power saving outright for as long as anything stayed unread.
         && !kbBlinkBusy()
+#endif
+#if HAS_BLE_KEYBOARD
+        // A nap stops servicing the BLE controller, and a keyboard link does
+        // not survive that -- it drops and has to reconnect, which is both
+        // slower than the nap saved and loses whatever was typed to wake it.
+        && !bleKeyboardActive()
 #endif
         && WiFi.getMode() == WIFI_OFF     // light sleep + active Wi-Fi don't mix
         // Light sleep stops the UART ISR, so the RX FIFO (128 B) overruns after
@@ -34916,6 +35542,32 @@ void loop() {
     if (vncHostClientConnected()) {
         if (s_screenAsleep) wakeScreen();
         s_lastActivityMs = now;
+    }
+#endif
+#if HAS_BLE_KEYBOARD
+    // Auto-repeat and the pairing bookkeeping. Must run before the key pump so
+    // a synthesized repeat is picked up in the same pass it was generated.
+    bleKeyboardService(now);
+    syncBleKbdPairingToConfig();
+    // Hand web config its low-latency radio back the moment the keyboard
+    // releases modem sleep. Done on the falling edge here rather than in the
+    // toggle handler because the stack comes down on the worker task, and
+    // several paths take it down (the settings toggle, the OTA teardown) --
+    // this catches all of them with one rule.
+    {
+        static bool sBleHeldModemSleep = false;
+        const bool holds = bleKeyboardHoldsWifiModemSleep();
+        if (sBleHeldModemSleep && !holds && webCfgRunning()) {
+            Serial.println("[blekbd] released Wi-Fi modem sleep; web config latency restored");
+            WiFi.setSleep(false);
+        }
+        sBleHeldModemSleep = holds;
+    }
+    if (s_cfgBleKbdModal && (uint32_t)(now - s_cfgBleKbdPaintMs) >= 400UL) {
+        // Scanning and connecting both finish on the worker task with nothing
+        // to push the change into LVGL, so the dialog polls.
+        if (!s_cfgBleKbdAutoScanned) s_cfgBleKbdAutoScanned = bleKeyboardStartScan();
+        refreshCfgBleKbdModal();
     }
 #endif
     LOOP_PHASE("keys", pumpKeyboardInput());

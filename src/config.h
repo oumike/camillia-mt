@@ -187,6 +187,12 @@
 #define MY_CHAT_NAME_STYLE  CHAT_NAME_SHORT
 #define MY_USER_MSG_COLOR   0xFF   // own-message color: 0..15 palette index, 0xFF=adaptive default
 
+// ── External BLE keyboard defaults ─────────────────────────────
+// Off, deliberately. A resident NimBLE stack costs 30-40 KB of internal DRAM,
+// which is the same pool the runtime TLS thresholds guard, so every board must
+// be able to decline the feature rather than pay for it at boot.
+#define MY_BLE_KBD_ENABLED  0
+
 // ── Bluetooth defaults ─────────────────────────────────────────
 #define MY_BT_ENABLED       1
 #define MY_BT_MODE          0      // RANDOM_PIN

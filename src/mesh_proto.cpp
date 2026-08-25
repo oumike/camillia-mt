@@ -1,3 +1,4 @@
+#include <math.h>   // lroundf, for the traceroute SNR field
 #include "mesh_proto.h"
 #include "debug_flags.h"
 #include "mbedtls/aes.h"
@@ -1172,11 +1173,33 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
 
 size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
                              const uint8_t *routePayload, size_t routePayloadLen,
-                             uint32_t requestId, uint32_t fromNodeId) {
+                             uint32_t requestId, uint32_t fromNodeId,
+                             float rxSnr) {
     if (!buf) return 0;
     if (!routePayload) routePayloadLen = 0;
+
+    // RouteDiscovery.snr_towards (field 2, repeated int32) for the hop into this
+    // node, in quarter-dB. Built first so the payload length below can account
+    // for it: protobuf writes the length before the bytes.
+    //
+    // Appended rather than inserted, and that is what keeps it aligned: relays
+    // add their entry as the request passes through, so appending puts ours
+    // last, which is the position of the final hop.
+    uint8_t snrField[8];
+    size_t snrLen = 0;
+    if (rxSnr == rxSnr) {              // NAN check without <cmath>
+        long q = lroundf(rxSnr * 4.0f);
+        // -128 is Meshtastic's "no measurement" marker, so a genuine reading
+        // must never land on it and be read back as unknown.
+        if (q < -127) q = -127;
+        if (q >  127) q =  127;
+        snrField[snrLen++] = (2 << 3) | 0;
+        snrLen += pbWriteVarint(snrField + snrLen, (uint64_t)(int64_t)q);
+    }
+
+    const size_t routeLen = routePayloadLen + snrLen;
     // portnum (2) + payload tag and length (up to 4) + source (5) + request_id (5).
-    if (routePayloadLen + 16 > bufLen) return 0;
+    if (routeLen + 16 > bufLen) return 0;
 
     size_t n = 0;
 
@@ -1184,12 +1207,16 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
     n += pbWriteVarint(buf + n, (1 << 3) | 0);
     n += pbWriteVarint(buf + n, TRACEROUTE_APP);
 
-    // Data.payload = the RouteDiscovery we were sent, unchanged.
+    // Data.payload = the RouteDiscovery we were sent, plus our own SNR reading.
     n += pbWriteVarint(buf + n, (2 << 3) | 2);
-    n += pbWriteVarint(buf + n, routePayloadLen);
+    n += pbWriteVarint(buf + n, routeLen);
     if (routePayloadLen > 0) {
         memcpy(buf + n, routePayload, routePayloadLen);
         n += routePayloadLen;
+    }
+    if (snrLen > 0) {
+        memcpy(buf + n, snrField, snrLen);
+        n += snrLen;
     }
 
     // Data.source (field 5), fixed32

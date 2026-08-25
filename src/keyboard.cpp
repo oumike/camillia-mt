@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include "keyboard.h"
+#if HAS_BLE_KEYBOARD
+#include "ble_keyboard.h"
+#endif
 
 #if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
 #include "soc/usb_serial_jtag_reg.h"
@@ -1400,7 +1403,15 @@ char keyboardHeldKey() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     return sTloraHeldKey;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#  if HAS_BLE_KEYBOARD
+    // This board has no keyboard of its own, so a held key can only come from a
+    // paired Bluetooth one -- and that link reports real press and release
+    // events, which makes the answer exact rather than the best-effort
+    // heuristic the other builds fall back to.
+    return bleKeyboardHeldKey();
+#  else
     return KEY_NONE;
+#  endif
 #else
     uint32_t now = millis();
     expireHeldKeyBestEffort(now);
@@ -1413,7 +1424,11 @@ uint32_t keyboardHeldMs() {
     if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
     return millis() - sTloraHeldSinceMs;
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#  if HAS_BLE_KEYBOARD
+    return bleKeyboardHeldMs();
+#  else
     return 0;
+#  endif
 #else
     uint32_t now = millis();
     expireHeldKeyBestEffort(now);

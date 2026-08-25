@@ -922,6 +922,10 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.chatNameStyle      = MY_CHAT_NAME_STYLE;
     cfg.chatColorsEnabled  = MY_CHAT_COLORS_EN;
     cfg.userMsgColor       = MY_USER_MSG_COLOR;
+    cfg.bleKbdEnabled      = MY_BLE_KBD_ENABLED;
+    cfg.bleKbdAddr[0]      = '\0';
+    cfg.bleKbdName[0]      = '\0';
+    cfg.bleKbdAddrType     = 0;
     cfg.btEnabled          = MY_BT_ENABLED;
     cfg.btMode             = MY_BT_MODE;
     cfg.btFixedPin         = MY_BT_PIN;

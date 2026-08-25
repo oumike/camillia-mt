@@ -1,8 +1,13 @@
 # Bluetooth Keyboards
 
-> **Status: not implemented.** No Camillia build can pair a Bluetooth keyboard today.
-> This document exists so that anyone buying hardware in anticipation buys something
-> that *can* work. Design and progress are tracked in
+> **Status: implemented on the Heltec builds only** (`heltec-v4`,
+> `heltec-v4-vertical`). That board has no keyboard of its own, so it is where an
+> external one is worth the most, and where the feature is being proven. Every
+> other build is unchanged and cannot pair a keyboard. Nothing in the
+> implementation is board-specific — the `HAS_BLE_KEYBOARD` macro in
+> `src/hal/board.h` plus one `build_src_filter` entry is the entire gate — but
+> each board has its own internal-RAM budget, so they opt in one at a time.
+> Design and progress are tracked in
 > [issue #40](https://github.com/oumike/camillia-mt/issues/40).
 
 ## The one rule
@@ -118,30 +123,80 @@ a BLE scanner before relying on any of these.**
   published sources whether it presents as BLE HID to a non-Apple host, and Apple
   peripherals carry extra pairing behavior. Scan it yourself before assuming.
 
+## Pairing one (Heltec builds)
+
+Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
+
+1. **BT Keyboard** — off by default. Turning it on starts the radio and, if a
+   keyboard was paired before, reconnects to it. The row reads the live state
+   back: `Off`, `Connecting to …`, `Connected: <name> (78%)`, `Waiting for …`.
+2. **Pair BT Keyboard** — opens the pairing dialog. It starts scanning as soon
+   as it opens. Put the keyboard into pairing mode, tap it in the list, then
+   **Pair**. **Forget** drops the bond and the saved address.
+
+The dialog is driven by its on-screen buttons because on this board there is no
+keyboard to drive it with until one is paired. Once one is, it also takes
+arrow keys, Enter to pair, `N` to rescan and `F` to forget.
+
+A row with a `?` after the signal strength advertised no HID service and was
+listed only because its appearance code says "keyboard" — it may well work,
+but it is a guess rather than a declaration.
+
+The bond is stored by the Bluetooth stack itself and survives reboots and
+turning the feature off and on, so pairing is a once-per-keyboard job.
+
+Turning **BT Keyboard** on stops **Web Config** if it was running, with a dialog
+explaining why, and turning Web Config on stops the keyboard the same way. See
+the radio note under *Practical notes for a handheld* below. LoRa is unaffected
+by either — it is a separate radio on its own bus.
+
 ## Even a BLE keyboard may not work on day one
 
-Advertising `0x1812` means "worth trying," not "guaranteed." The planned first
-implementation uses HID **Boot Protocol** — it asks the keyboard to switch to a
-fixed 8-byte report format, which avoids parsing each keyboard's custom report
-descriptor.
+Advertising `0x1812` means "worth trying," not "guaranteed." The implementation
+uses HID **Boot Protocol** — it asks the keyboard to switch to a fixed 8-byte
+report format, which avoids parsing each keyboard's custom report descriptor.
 
-Boot protocol is mandatory only for devices that claim the boot keyboard role.
-A keyboard can be entirely legitimate BLE HID and still not offer it, in which
-case it needs the report-protocol fallback, planned as a later phase. So expect
-some BLE keyboards to work immediately, and some to need additional firmware work.
+Boot protocol is mandatory only for devices that claim the boot keyboard role. A
+keyboard can be entirely legitimate BLE HID and still not offer it. Those fall
+back to subscribing to the keyboard's ordinary input reports and reading any
+8-byte one as the same standard layout, which covers most of them — but a
+keyboard whose reports are laid out differently will type nothing, and making
+that work needs the full report-descriptor parser that has deliberately not been
+written yet.
 
 Two other things to expect when pairing:
 
 - **Passkey entry.** Many BLE keyboards require a 6-digit passkey to be typed *on
-  the keyboard* to complete pairing. That is normal and will be part of the pairing screen.
+  the keyboard* to complete pairing. The pairing dialog shows the number; type it
+  on the keyboard and press Enter there.
 - **Media and function keys.** Boot protocol exposes only the standard keyboard.
-  Volume keys, media controls and trackpads on combo devices will not pass through initially.
+  Volume keys, media controls and trackpads on combo devices do not pass through.
+
+What does pass through: letters, digits, punctuation and Space with Shift and
+Caps Lock applied; Enter, Backspace, Delete, Escape and Tab; the four arrows
+(mapped to the same scroll/channel navigation the built-in keys use on other
+boards); and Page Up / Page Down. Ctrl and Command chords are ignored rather
+than typed as their bare letter. Holding a key repeats it, which the host has to
+synthesize — BLE keyboards send one report on press, one on release, and nothing
+in between.
 
 ## Practical notes for a handheld
 
+- **Web Config and the keyboard cannot both run.** Switching one on switches the
+  other off, and says so on screen. This is hardware, not policy: Web Config
+  turns Wi-Fi modem power-save off so its synchronous server does not stall on
+  DTIM-buffered packets, and Espressif's Wi-Fi/BT coexistence requires modem
+  sleep to be *on*. Starting Bluetooth in that state does not return an error —
+  it aborts inside `coex_core_enable()` and reboots the device. Coexistence with
+  modem sleep forced on does work, but it makes every page slow enough to look
+  broken, so the firmware picks whichever you switched on last. Turning one off
+  does not bring the other back; the row you want is one press away.
 - **Power.** A connected BLE keyboard means the BLE stack stays resident, costing
-  roughly 30–40 KB of internal RAM plus radio time shared with Wi-Fi. Expect the
-  feature to be off by default and switchable, rather than always on.
+  roughly 30–40 KB of internal RAM plus radio time shared with Wi-Fi. That is why
+  the feature is off by default and switchable at runtime, and why light-sleep
+  power saving is suspended while it is on — a nap drops the link. Internal heap
+  is logged on every start and stop (`[blekbd] after init internal free=…`), so
+  the cost on your board is a reading rather than an estimate.
 - **Multi-device keyboards** with channel keys (the Logitech and Keychron style)
   are convenient here: one channel for your laptop, one for the mesh device.
 - **LoRa is unaffected.** It is a separate radio on its own SPI bus; only Wi-Fi

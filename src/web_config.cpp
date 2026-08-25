@@ -1,4 +1,5 @@
 #include "web_config.h"
+#include "ble_keyboard.h"   // coexistence holds Wi-Fi modem sleep on
 #if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
@@ -6736,7 +6737,13 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         // Disable modem power-save for the AP session too (the STA path does the
         // same below): with it on, the synchronous WebServer stalls on inbound
         // packets and the page load times out. webCfgEnd() powers the radio off.
-        WiFi.setSleep(false);
+        //
+        // Except while the BLE keyboard is up. Wi-Fi/BT coexistence requires
+        // modem sleep, and turning it off underneath a live BT controller is
+        // the same fault that aborts inside coex_core_enable() when the two are
+        // started the other way round. A slower page is the correct trade
+        // against taking the device down.
+        if (!bleKeyboardHoldsWifiModemSleep()) WiFi.setSleep(false);
         IPAddress apIP = WiFi.softAPIP();
         apIP.toString().toCharArray(ipBuf, sizeof(ipBuf));
 
@@ -6816,7 +6823,11 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     // beacon (~100-300ms), which the synchronous WebServer turns into stalls,
     // retransmits, and browser timeouts. webCfgEnd() powers the radio off, so
     // this only stays in effect while web config is up.
-    WiFi.setSleep(false);
+    //
+    // Skipped while the BLE keyboard holds modem sleep on -- see the AP path
+    // above and startStack() in ble_keyboard.cpp for why coexistence cannot
+    // run without it.
+    if (!bleKeyboardHoldsWifiModemSleep()) WiFi.setSleep(false);
 
     if (kLiteOnlyBoard) {
         registerLiteRoutes();

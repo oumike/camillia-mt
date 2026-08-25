@@ -122,6 +122,28 @@ DEVICE_MESH_DECK, DEVICE_M9"
 #  define HAS_VNC_HOST 0
 #endif
 
+// ── BLE keyboard host (HID over GATT central) ────────────────────────────────
+// Boards that can pair an external Bluetooth keyboard and merge its keypresses
+// into the same pipeline as the built-in one. See src/ble_keyboard.cpp.
+//
+// One hardware fact governs the whole feature and is worth stating here rather
+// than only in the docs: every board this project supports is an ESP32-S3,
+// which has no Bluetooth Classic (BR/EDR) radio at all. Only a BLE / "Bluetooth
+// Low Energy" keyboard can ever pair; a Classic-only one cannot, on any board,
+// with any firmware. docs/BLUETOOTH_KEYBOARDS.md has the buying guidance.
+//
+// Heltec first because it is the one board with no keyboard of its own
+// (HAS_KEYBOARD 0 in hw_heltec_v4.h) and therefore gains the most. Nothing in
+// the implementation is board-specific — this macro plus a build_src_filter
+// entry is the entire gate — but the NimBLE stack costs 30-40 KB of internal
+// DRAM while it is running, and that budget differs per board, so each one opts
+// in only after someone has watched it pair with the radio and web config up.
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#  define HAS_BLE_KEYBOARD 1
+#else
+#  define HAS_BLE_KEYBOARD 0
+#endif
+
 // ── Panel offset defaults ─────────────────────────────────────────────────────
 // Some panels have a pixel offset baked into the driver IC.  Boards that don't
 // need an offset simply don't define these in their hw_*.h; default to zero.

@@ -402,6 +402,21 @@ struct RhinoConfig {
     // and keeps its compiled default on an upgraded device. 96 is a multiple of
     // 4, so the struct stays 4-aligned and the next appender needs no new pad.
     char     losElevServer[96];
+    // ── External BLE (HID over GATT) keyboard ───────────────────────────────
+    // The device as the HID *host*, connecting out to a keyboard. Nothing to do
+    // with btEnabled/btMode/btFixedPin above, which describe the opposite role
+    // -- the device as a peripheral a phone pairs to -- and remain inert.
+    //
+    // Safe at the end for the usual reason: losElevServer is a char[96], a
+    // multiple of 4, so the struct has no trailing padding for these to land in
+    // and an upgraded device reads its compiled defaults for all of them. The
+    // block below is itself 56 bytes, so the struct stays 4-aligned and the
+    // next appender needs no new pad.
+    char     bleKbdAddr[20];     // "aa:bb:cc:dd:ee:ff", empty = nothing paired
+    char     bleKbdName[32];     // advertised name, for the settings row
+    bool     bleKbdEnabled;      // off by default: the stack costs internal DRAM
+    uint8_t  bleKbdAddrType;     // BLE_ADDR_*; random static is the common case
+    uint8_t  _reservedPad10[2];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
