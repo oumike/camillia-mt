@@ -2,8 +2,8 @@
 // hal/xl9555.cpp — XL9555 16-bit I2C GPIO expander implementation
 //
 // See hal/xl9555.h for the full description and usage guide.
-// This file is only compiled for the T-LoRa Pager TFT build; all call sites
-// are already guarded by  #if defined(DEVICE_TLORA_PAGER_TFT).
+// This file is compiled for boards that use a PCA9555-compatible expander.
+// Board-specific pin assignments and sequencing stay in their HAL modules.
 // ════════════════════════════════════════════════════════════════════════════
 
 #include "xl9555.h"

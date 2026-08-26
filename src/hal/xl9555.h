@@ -2,8 +2,8 @@
 // ════════════════════════════════════════════════════════════════════════════
 // hal/xl9555.h — XL9555 16-bit I2C GPIO expander driver
 //
-// The XL9555 (compatible with TCA9555 / PCA9555) is used on the T-LoRa Pager
-// TFT to control power rails and peripheral resets through a single I2C address.
+// The XL9555 (compatible with TCA9555 / PCA9555) controls power rails and
+// peripheral resets through a single I2C address on multiple boards.
 //
 // Pin layout on the pager:
 //   Port 0 (pins 0-7):   DRV_EN, AMP_EN, KB_RST, LORA_EN, GPS_EN, NFC_EN, -, GPS_RST

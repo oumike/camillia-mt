@@ -31,6 +31,7 @@
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
 //   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
 //   DEVICE_M9                   Elecrow ThinkNode M9 (LR1110, no touch)
+//   DEVICE_SQUARE               Square (QSPI NV3031B, expander-gated rails)
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -45,10 +46,12 @@
 #  include "hw_mesh_deck.h"
 #elif defined(DEVICE_M9)
 #  include "hw_m9.h"
+#elif defined(DEVICE_SQUARE)
+#  include "hw_square.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
-DEVICE_MESH_DECK, DEVICE_M9"
+DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 #endif
 
 #ifndef KB_INT_ACTIVE_LEVEL
@@ -59,6 +62,11 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // Most boards use landscape (rotation=1).  Override per-device where needed.
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 3
+#elif defined(DEVICE_SQUARE)
+// The panel carries offset_rotation=1. LovyanGFX adds that to this logical
+// rotation, so 0 produces internal rotation 1: 320x240, rotated left 90 degrees
+// from the previous internal rotation 2. Keep the sourced panel/touch offsets.
+#  define TFT_ROTATION_DEFAULT 0
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #  define TFT_ROTATION_DEFAULT 3
 #elif defined(DEVICE_MESH_DECK)
@@ -88,10 +96,20 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_SQUARE)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
+#endif
+
+// ── Touch-only UI profile ───────────────────────────────────────────────────
+// Boards with touch input but no built-in keyboard use tap-first controls,
+// an on-screen keyboard and the roomier 320x240 touch layout. Keep this
+// separate from hardware-specific Heltec paths such as CHSC6X and VEXT.
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_SQUARE)
+#  define UI_TOUCH_ONLY_PROFILE 1
+#else
+#  define UI_TOUCH_ONLY_PROFILE 0
 #endif
 
 // ── Screen mirror (VNC host) ─────────────────────────────────────────────────
@@ -101,11 +119,9 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // = 208 KB) that internal RAM cannot spare, and a WiFi station, since the
 // stream needs a routable address.
 //
-// Every board now qualifies except the Cardputer, which has no PSRAM at all —
-// see the LV_MEM_SIZE split in lv_conf.h, where it is likewise the one target
-// keeping LVGL's pool in internal DRAM. This stays an explicit allowlist rather
-// than a test of BOARD_HAS_PSRAM so that a new board opts in deliberately,
-// after someone has actually watched it mirror.
+// This stays an explicit allowlist rather than a test of BOARD_HAS_PSRAM so a
+// new board opts in deliberately. Square has the same 320x240 / 8 MB PSRAM
+// shape as the existing hosts and exposes the browser Remote controls.
 //
 // The Heltec entry covers both its environments — heltec-v4 and the vertical
 // variant share DEVICE_HELTEC_V4_EXPANSION and differ only in rotation, which
@@ -116,7 +132,7 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // three files, which is twenty-six chances to miss one when a board joins.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+    || defined(DEVICE_M9) || defined(DEVICE_SQUARE)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0
@@ -138,7 +154,11 @@ DEVICE_MESH_DECK, DEVICE_M9"
 // entry is the entire gate — but the NimBLE stack costs 30-40 KB of internal
 // DRAM while it is running, and that budget differs per board, so each one opts
 // in only after someone has watched it pair with the radio and web config up.
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_SQUARE)
+// Square uses the on-screen keyboard for every text field during bring-up.
+// Keep NimBLE and ble_keyboard.cpp out of this target until explicitly enabled.
+#  define HAS_BLE_KEYBOARD 0
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

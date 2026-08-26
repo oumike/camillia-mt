@@ -10,6 +10,8 @@ RELEASE_ENVS=(
     mesh-deck
     m9
 )
+# Square stays out until its hardware acceptance checks pass. Do not publish an
+# artifact merely because the environment compiles.
 
 # Lookups are functions rather than associative arrays so the script runs on
 # macOS's stock bash 3.2 (which lacks `declare -A`).

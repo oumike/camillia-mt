@@ -11,6 +11,9 @@
 #include "config_io.h"
 #include "hal/display.h"
 #include "hal/xl9555.h"
+#if defined(DEVICE_SQUARE)
+#include "hal/square_io.h"
+#endif
 #include "live_util.h"
 #include "live_feed.h"
 #include "mesh_proto.h"
@@ -646,7 +649,7 @@ static uint32_t s_dmDeleteFlashUntilMs = 0;
 static uint32_t s_dmTouchPressStartMs = 0;
 static int s_dmTouchPressRowIdx = -1;
 static bool s_dmTouchLongPressTriggered = false;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // A finger is down on a conversation-list row. While it is, the list must not be
 // rebuilt: refreshDmModal() rebuilds it with lv_obj_clean(), and deleting the
 // row the gesture belongs to makes LVGL abandon the rest of that gesture. The
@@ -991,7 +994,7 @@ static uint32_t s_selectedMsgReplyPacketId = 0;
 static uint32_t s_selectedMsgSenderNodeId = 0;
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
 static constexpr size_t kReplyPreviewTextMax = 128;
-#elif defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif defined(DEVICE_TDECK) || UI_TOUCH_ONLY_PROFILE
 static constexpr size_t kReplyPreviewTextMax = 192;
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr size_t kReplyPreviewTextMax = 256;
@@ -1072,9 +1075,9 @@ static uint32_t s_lastActivityMs = 0;
 // "still interacting" rather than repeatedly opening a window for a write.
 static constexpr uint32_t kPersistInputIdleMs = 250UL;
 static constexpr uint32_t kScreenWakeInputDelayMs = 3000UL;
+static constexpr uint32_t kScreenSleepHoldMs = 2000UL;
 static uint32_t s_screenWakeBlockedUntilMs = 0;
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
-static constexpr uint32_t kTdeckTrackballSleepHoldMs = 2000UL;
 static bool s_tdeckTrackballHoldActive = false;
 static bool s_tdeckTrackballHoldTriggered = false;
 static uint32_t s_tdeckTrackballHoldStartMs = 0;
@@ -1324,7 +1327,7 @@ static void setupVScroll(lv_obj_t *obj) {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // One Close button, for every modal on the touch-only build that a keyboard
 // build closes with Backspace. There is no key to name in a hint here, so those
 // modals need a control instead — and they should all be the same control, in
@@ -1403,7 +1406,7 @@ static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
 }
 #endif
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
 static inline char remapJkUiKey(char k, bool allowScrollRemap) {
     if (!allowScrollRemap) return k;
     // This firmware's convention is j=up, k=down — deliberately NOT vim's
@@ -1542,7 +1545,7 @@ static void refreshCfgWifiScanModal(bool runScan);
 static void openCfgWifiPassModal(int scanIdx);
 static void closeCfgWifiPassModal();
 static void cfgWifiConnectFromPassModal();
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onCfgHeaderInfoPressed(lv_event_t *e);
 #endif
 #if !defined(DEVICE_TLORA_PAGER_TFT)
@@ -1702,7 +1705,7 @@ static void refreshNodesListRows();
 static void refreshNodesListSelection();
 static void refreshNodesDetails();
 static void onNodeSnapshotPressed(lv_event_t *e);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onNodeSnapshotClicked(lv_event_t *e);
 #endif
 static void onNodesActionRowPressed(lv_event_t *e);
@@ -1815,6 +1818,9 @@ static void bootSplashTick();
 static void bootSplashStatusEnd();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
+#if defined(DEVICE_SQUARE)
+static bool serviceSquareWakeButton(uint32_t nowMs);
+#endif
 #if defined(DEVICE_MESH_DECK)
 // Defined further down with the expander code; called from triggerMessageAlert()
 // above it.
@@ -5524,6 +5530,13 @@ static void wakeScreen() {
     s_lastBattPct = 255;
     s_lastBattCentiV = 0xFFFF;
     s_lastGpsSats = 255;
+#if defined(DEVICE_SQUARE)
+    // Panel_NV3031B::setSleep(false) performs a software reset and reruns the
+    // controller init sequence, so panel RAM no longer contains a valid frame.
+    // Cache invalidation above only refreshes objects whose data changed; mark
+    // the whole LVGL screen dirty while the LP5814 backlight is still dark.
+    if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
+#endif
     Serial.println("[screen] woke");
 }
 
@@ -5532,6 +5545,11 @@ static void wakeScreen() {
 // defers the backlight to the next full pass rather than losing it.
 static void serviceBacklightWake() {
     if (!s_backlightPendingOn) return;
+#if defined(DEVICE_SQUARE)
+    // LVGL's flush is synchronous today, but wait on the panel bus explicitly
+    // before exposing the freshly rebuilt frame if that implementation changes.
+    displayDev().waitDMA();
+#endif
     s_backlightPendingOn = false;
     applyBrightness();
 }
@@ -5562,7 +5580,7 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
         }
 
         if (!s_tdeckTrackballHoldTriggered
-            && (uint32_t)(nowMs - s_tdeckTrackballHoldStartMs) >= kTdeckTrackballSleepHoldMs) {
+            && (uint32_t)(nowMs - s_tdeckTrackballHoldStartMs) >= kScreenSleepHoldMs) {
             s_tdeckTrackballHoldTriggered = true;
             // Ignore any pending click event from this same press.
             s_tdeckSuppressRollerClick = true;
@@ -5583,7 +5601,57 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
     return false;
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_SQUARE)
+static bool serviceSquareWakeButton(uint32_t nowMs) {
+    static bool rawPressed = false;
+    static bool stablePressed = false;
+    static bool sleepTriggered = false;
+    static uint32_t changedMs = 0;
+    static uint32_t holdStartMs = 0;
+    static uint32_t nextReadMs = 0;
+
+    const bool interruptActive = digitalRead(EXPANDER_INT) == LOW;
+    if (!rawPressed && !stablePressed && !interruptActive) return false;
+    if ((int32_t)(nowMs - nextReadMs) < 0) return false;
+    nextReadMs = nowMs + 15;
+
+    bool pressed = false;
+    if (!squareIoReadWakeButton(pressed)) return false;
+
+    if (pressed != rawPressed) {
+        rawPressed = pressed;
+        changedMs = nowMs;
+    }
+    if ((uint32_t)(nowMs - changedMs) >= 25 && stablePressed != rawPressed) {
+        stablePressed = rawPressed;
+        if (stablePressed) {
+            holdStartMs = nowMs;
+            sleepTriggered = false;
+        } else {
+            holdStartMs = 0;
+            sleepTriggered = false;
+        }
+    }
+
+    if (!stablePressed || sleepTriggered) return false;
+    if (s_screenAsleep) {
+        wakeScreen();
+        sleepTriggered = true;
+        Serial.println("[screen] square Wake button");
+        return true;
+    }
+    s_lastActivityMs = nowMs;
+    if (holdStartMs != 0
+        && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
+        sleepTriggered = true;
+        sleepScreen("Square Wake button hold");
+        return true;
+    }
+    return false;
+}
+#endif
+
+#if UI_TOUCH_ONLY_PROFILE
 // True when the chat screen is what the user is looking at — nothing floating
 // over it. Only the USER button needs this: a tap lands on whatever is actually
 // on top, while a button press has to work out for itself who it is for.
@@ -5625,7 +5693,7 @@ static bool pollUserButton(uint32_t nowMs) {
                 activateCfgSelection();
                 return true;
             }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
             // Innermost surface first. Each entry is the same thing its screen
             // activates on a tap — this button is the Enter key's stand-in on a
             // build that has no Enter key, so the two must not disagree about
@@ -7320,7 +7388,7 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // No "tap outside to close" any more: the Close button at the foot of the
     // modal says it, and it says it where the finger can reach. The tray covers
     // all but a 6px margin of the screen, so the backdrop it was pointing at was
@@ -7341,7 +7409,7 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_remove_style_all(grid);
     lv_obj_set_width(grid, lv_pct(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // 28px lower than the other builds: the Close button below the grid and its
     // row gap have to fit inside the modal's own (h - 14) cap, and the grid is
     // what gives up the space. Hint + gap + grid + gap + button + padding then
@@ -7401,7 +7469,7 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
         lv_obj_center(g);
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Built after the grid, not before it: refreshEmojiPickerSelection() reaches
     // the grid as child [1] of the modal, so the button has to land at [2].
     //
@@ -7490,6 +7558,24 @@ static void showTextareaCursor(lv_obj_t *ta) {
     lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST);
 }
 
+#if UI_TOUCH_ONLY_PROFILE
+static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
+    if (!keyboard) return;
+    lv_obj_set_width(keyboard, lv_pct(100));
+    lv_obj_set_flex_grow(keyboard, 1);
+#if defined(DEVICE_SQUARE)
+    // Text entry owns the screen on Square. Remove keyboard chrome and keep
+    // only a one-pixel key gap so the narrow QWERTY rows spend their width on
+    // tap targets rather than nested modal/theme padding.
+    lv_obj_set_style_border_width(keyboard, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(keyboard, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(keyboard, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 1, LV_PART_ITEMS);
+#endif
+}
+#endif
+
 static void openComposePrompt(uint32_t replyPacketId,
                               const char *replyText,
                               bool allowSelectedReplyFallback) {
@@ -7559,8 +7645,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     s_composeReplyPacketId = replyPacketId;
     s_composeChannelIdx = s_activeChannel;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
+#if defined(DEVICE_SQUARE)
+    int modalW = lv_disp_get_hor_res(NULL);
+#else
     int modalW = lv_disp_get_hor_res(NULL) - 8;
+#endif
     int modalH = lv_disp_get_ver_res(NULL) - 8;
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL);
     if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
@@ -7575,6 +7665,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_border_width(s_composeModal, 1, 0);
     lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_composeModal, 2, 0);
+    lv_obj_set_style_pad_right(s_composeModal, 2, 0);
+#endif
     lv_obj_set_style_pad_bottom(s_composeModal, composeModalBottomPad, 0);
     lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
     lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
@@ -7666,8 +7760,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_center(sendLbl);
 
     s_composeKeyboard = lv_keyboard_create(s_composeModal);
-    lv_obj_set_width(s_composeKeyboard, lv_pct(100));
-    lv_obj_set_flex_grow(s_composeKeyboard, 1);
+    configureOnScreenKeyboard(s_composeKeyboard);
     lv_keyboard_set_textarea(s_composeKeyboard, s_composeInput);
     lv_obj_add_event_cb(s_composeKeyboard, onComposeKeyboardEvent, LV_EVENT_READY, nullptr);
     lv_obj_add_event_cb(s_composeKeyboard, onComposeKeyboardEvent, LV_EVENT_CANCEL, nullptr);
@@ -8062,7 +8155,9 @@ static void initCfgActions() {
     // notes are baked into the image, so this needs neither OTA nor WiFi, and
     // the Cardputer (no OTA) still gets to see what its build contains.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RELEASE_NOTES;
-#if HAS_FILE_STORAGE && !defined(DEVICE_HELTEC_V4_EXPANSION)
+// Every real SD-card target gets firmware-side config transfer. Preserve the
+// Mesh Deck's existing internal-flash transfer path; Heltec remains excluded.
+#if HAS_SD_CARD || (HAS_FILE_STORAGE && !defined(DEVICE_HELTEC_V4_EXPANSION))
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
@@ -8372,7 +8467,7 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 6;
     const int cfgPadBottom = 6;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     // Touch-only build: tall rows give a comfortable tap target. The action list
     // scrolls, so the extra height just means a bit more scrolling.
     const lv_font_t *cfgRowFont = &lv_font_montserrat_10;
@@ -8460,7 +8555,7 @@ static void onCfgActionRowPressed(lv_event_t *e) {
     s_cfgSelection = idx;
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch-only build: a tap is the whole gesture, so it selects the row and
     // runs it. Every other build has an Enter key for the second half, and
     // leaves the tap as a way to move the highlight without committing.
@@ -8479,7 +8574,7 @@ static void onCfgActionRowPressed(lv_event_t *e) {
 #endif
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onCfgHeaderInfoPressed(lv_event_t *e) {
     LV_UNUSED(e);
     openNodeInfoModal();
@@ -9076,7 +9171,7 @@ static void setCfgBrightnessPreview(int pct) {
     }
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // Cancel/commit row for the touch build's modals that stage a value.
 //
 // A modal on a touch-only board can stage a value but cannot commit one: there
@@ -9130,7 +9225,7 @@ static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
     Local::make(row, "Cancel", cancelCb);
     Local::make(row, commitText, commitCb);
 }
-#endif  // DEVICE_HELTEC_V4_EXPANSION
+#endif  // UI_TOUCH_ONLY_PROFILE
 
 static void closeCfgBrightnessModal() {
     if (lvObjValid(s_cfgBrightBackdrop)) {
@@ -9254,7 +9349,7 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgBrightModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBrightness(); },
@@ -9583,7 +9678,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         lv_label_set_text_fmt(ends, "%s  <->  %s", spec->leftEnd, spec->rightEnd);
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgSliderModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgSliderAndRefresh(); },
@@ -9895,7 +9990,7 @@ static void openCfgBattCalModal() {
                                 "Percent follows it. 0% = uncalibrated.");
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgBattCalModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBattCal(); },
@@ -10032,7 +10127,7 @@ static void openChatStyleModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                       "Tap a style to apply"
 #else
                       "Arrows=Move  Enter=Select  Backspace=Cancel"
@@ -10248,7 +10343,7 @@ static void rebuildThemeRows() {
             }
         } else {
             lv_label_set_text(s_themeFilterLabel,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                               "Tap a theme to apply"
 #else
                               "Space=Filter  Enter=Select"
@@ -10513,7 +10608,7 @@ static void openChatNameModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                       "Tap a name style to apply"
 #else
                       "Arrows=Move  Enter=Select  Backspace=Cancel"
@@ -10680,7 +10775,7 @@ static void openFontSizeModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a size to apply");
 #else
     // Kept short so it fits the narrowed modal without wrapping to three lines.
@@ -11002,7 +11097,7 @@ static lv_obj_t *s_beaconsStatusLabel = nullptr;
 static lv_obj_t *s_beaconAgeLabels[kBeaconOfferMax] = {};
 static uint32_t  s_beaconsRenderedSig = 0;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static const lv_font_t *kBeaconsBodyFont  = &lv_font_montserrat_12;
 static const lv_font_t *kBeaconsTitleFont = &lv_font_montserrat_14;
 #else
@@ -11079,7 +11174,7 @@ static constexpr int kDiscoveryColHeard    = 0;
 #endif
 static constexpr int kDiscoveryCols = kDiscoveryColHeard + 1;
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // Touch build with no keyboard and one column of results: it has the width to
 // spend on legibility, and nothing competing for it.
 static const lv_font_t *kDiscoveryBodyFont   = &lv_font_montserrat_12;
@@ -11304,7 +11399,7 @@ static void onChanCfgRowPressed(lv_event_t *e) {
     openChanEditModal(idx);
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onChanCfgClosePressed(lv_event_t *e) {
     LV_UNUSED(e);
     closeChanCfgModal();
@@ -11405,7 +11500,7 @@ static void openChanCfgModal() {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chanCfgBackdrop);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // A corner close rather than the usual bottom Close button, because this
     // modal is a scrolling list: anything appended at the end sits below the
     // fold once there are enough channels, and a control you have to scroll to
@@ -11446,7 +11541,7 @@ static void openChanCfgModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a channel to edit");
 #else
     lv_label_set_text_fmt(hint, "Move  Enter=Edit  %s=Back", modalCloseKeyLabel());
@@ -11501,7 +11596,7 @@ static void openChanCfgModal() {
     // scroll_to_view() is a no-op until the tree has geometry, so resolve the
     // layout before the initial selection tries to scroll itself into view.
     lv_obj_update_layout(s_chanCfgModal);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // After the layout: the modal is LV_SIZE_CONTENT, so before this it has no
     // height to align against. Foreground so the rows cannot draw over it.
     lv_obj_align_to(chanCloseBtn, s_chanCfgModal, LV_ALIGN_TOP_RIGHT, -3, 3);
@@ -11703,7 +11798,7 @@ static void openChanEditModal(int slot) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Cancel/Save is on the buttons below now, so this only has to explain the
     // one gesture the buttons do not.
     lv_label_set_text(hint, "Tap a field to change it");
@@ -11775,7 +11870,7 @@ static void openChanEditModal(int slot) {
         lv_label_set_text(val, "");
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Appended under the grid rather than added as a grid cell. A cell would
     // drag CHAN_EDIT_ROW_COUNT, three per-board CHAN_EDIT_LABELS copies, the
     // column-major index maths and the keyboard builds' selection walk along
@@ -11807,7 +11902,7 @@ static void onChanTextBackdropPressed(lv_event_t *e) {
     closeChanTextModal();
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onChanTextOkPressed(lv_event_t *e) {
     LV_UNUSED(e);
     commitChanTextModal();
@@ -11881,6 +11976,9 @@ static void openChanTextModal(int field) {
     int modalW = w - 24;
     if (modalW < 170) modalW = w - 8;
     if (modalW > 320) modalW = 320;
+#if defined(DEVICE_SQUARE)
+    modalW = w;
+#endif
 
     s_chanTextBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_chanTextBackdrop, w, h);
@@ -11896,7 +11994,7 @@ static void openChanTextModal(int field) {
     s_chanTextModal = lv_obj_create(s_chanTextBackdrop);
     lv_obj_set_size(s_chanTextModal,
                     modalW,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                     h - 18
 #else
                     LV_SIZE_CONTENT
@@ -11909,6 +12007,10 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_border_width(s_chanTextModal, 1, 0);
     lv_obj_set_style_border_color(s_chanTextModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_chanTextModal, 8, 0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_chanTextModal, 2, 0);
+    lv_obj_set_style_pad_right(s_chanTextModal, 2, 0);
+#endif
     lv_obj_set_style_pad_row(s_chanTextModal, 6, 0);
     lv_obj_set_flex_flow(s_chanTextModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chanTextModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
@@ -11956,7 +12058,7 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_text_font(s_chanTextStatus, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_chanTextStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_chanTextStatus, LV_TEXT_ALIGN_LEFT, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(s_chanTextStatus, "Type, then tap OK");
 #else
     // Backspace erases here on every board (and backs out of an empty field), so
@@ -12002,7 +12104,7 @@ static void openChanTextModal(int field) {
     }
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *btnRow = lv_obj_create(s_chanTextModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, 30);
@@ -12034,8 +12136,7 @@ static void openChanTextModal(int field) {
     lv_obj_center(okLbl);
 
     s_chanTextKeyboard = lv_keyboard_create(s_chanTextModal);
-    lv_obj_set_width(s_chanTextKeyboard, lv_pct(100));
-    lv_obj_set_flex_grow(s_chanTextKeyboard, 1);
+    configureOnScreenKeyboard(s_chanTextKeyboard);
     lv_keyboard_set_textarea(s_chanTextKeyboard, s_chanTextInput);
 #endif
 }
@@ -12260,7 +12361,7 @@ static void refreshTimeCfgRows() {
     }
 
     if (s_timeCfgHint) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // "then Save" is redundant now the button row says it.
         lv_label_set_text(s_timeCfgHint, timeCfgIsManual()
                               ? "Tap a field to step it"
@@ -12430,7 +12531,7 @@ static void openTimeCfgModal() {
     makeCell(s_timeCfgTimeGrid, TIME_CFG_MINUTE, 32);
     makeCell(s_timeCfgTimeGrid, TIME_CFG_SAVE,   32);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Below both grids, not beside Save: TIME_CFG_SAVE shares the time row with
     // Hour and Minute at 32% each, so there is no room next to it. A footer row
     // is also independent of refreshTimeCfgRows() rewriting the Save cell's
@@ -12586,7 +12687,7 @@ static void openAlertSoundModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Just the preview gesture now: the Apply button below says what commits,
     // so the hint no longer has to carry the whole discoverability burden.
     // Tapping the selected row again still applies, for muscle memory.
@@ -12633,7 +12734,7 @@ static void openAlertSoundModal() {
         lv_obj_center(name);
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // "Apply" rather than "Save": this picker's whole point is hearing a tone
     // before committing, and the button that ends that audition reads better as
     // the verb for it.
@@ -12888,7 +12989,7 @@ static void openCfgColorPickerModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                       "Tap a color to apply"
 #else
                       "Arrows=Move  Enter=Select  Backspace=Cancel"
@@ -13263,6 +13364,9 @@ static void openCfgWifiPassModal(int scanIdx) {
     int modalW = w - 24;
     if (modalW < 170) modalW = w - 8;
     if (modalW > 320) modalW = 320;
+#if defined(DEVICE_SQUARE)
+    modalW = w;
+#endif
 
     s_cfgWifiPassBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_cfgWifiPassBackdrop, w, h);
@@ -13278,7 +13382,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     s_cfgWifiPassModal = lv_obj_create(s_cfgWifiPassBackdrop);
     lv_obj_set_size(s_cfgWifiPassModal,
                     modalW,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                     h - 18
 #else
                     LV_SIZE_CONTENT
@@ -13291,6 +13395,10 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_border_width(s_cfgWifiPassModal, 1, 0);
     lv_obj_set_style_border_color(s_cfgWifiPassModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_cfgWifiPassModal, 8, 0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_cfgWifiPassModal, 2, 0);
+    lv_obj_set_style_pad_right(s_cfgWifiPassModal, 2, 0);
+#endif
     lv_obj_set_style_pad_row(s_cfgWifiPassModal, 6, 0);
     lv_obj_set_flex_flow(s_cfgWifiPassModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_cfgWifiPassModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
@@ -13329,13 +13437,13 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_text_font(s_cfgWifiPassStatus, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_cfgWifiPassStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_cfgWifiPassStatus, LV_TEXT_ALIGN_LEFT, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(s_cfgWifiPassStatus, "Enter password, then tap Connect");
 #else
     lv_label_set_text(s_cfgWifiPassStatus, "Enter=Connect  Backspace=Back");
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *btnRow = lv_obj_create(s_cfgWifiPassModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, 30);
@@ -13366,8 +13474,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_center(connectLbl);
 
     s_cfgWifiPassKeyboard = lv_keyboard_create(s_cfgWifiPassModal);
-    lv_obj_set_width(s_cfgWifiPassKeyboard, lv_pct(100));
-    lv_obj_set_flex_grow(s_cfgWifiPassKeyboard, 1);
+    configureOnScreenKeyboard(s_cfgWifiPassKeyboard);
     lv_keyboard_set_textarea(s_cfgWifiPassKeyboard, s_cfgWifiPassInput);
 #endif
 }
@@ -13694,7 +13801,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_style_text_color(s_cfgWifiScanStatus, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_cfgWifiScanStatus, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_cfgWifiScanStatus,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                       "Pick a network, then Connect"
 #else
                       "Enter=Connect  N=Rescan  Backspace=Back"
@@ -13717,7 +13824,7 @@ static void openCfgWifiScanModal() {
     lv_obj_set_flex_align(s_cfgWifiScanList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *btnRow = lv_obj_create(s_cfgWifiScanModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, 30);
@@ -13811,7 +13918,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_style_text_color(s_cfgWifiHint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_cfgWifiHint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_cfgWifiHint,
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                       "Pick known WiFi or tap New"
 #else
                       "Enter=Select  N=New  D=Delete  Bksp=Cancel"
@@ -13834,7 +13941,7 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     lv_obj_set_flex_align(s_cfgWifiList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *btnRow = lv_obj_create(s_cfgWifiModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, 30);
@@ -13957,7 +14064,7 @@ static void openCfgActionMessageModal(const char *msg) {
     const lv_color_t titleTextColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyPanelBg = lightUi ? lv_color_hex(0xF5F9FF) : lv_color_hex(0x123266);
     const lv_color_t bodyTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     const lv_color_t hintTextColor = lightUi ? lv_color_hex(0x35567E) : lv_color_hex(0xA7C7FF);
 #endif
 
@@ -14034,7 +14141,7 @@ static void openCfgActionMessageModal(const char *msg) {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body, displayMsg);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch-only build: a Close button where the key hint used to be. Tapping
     // the backdrop already dismissed this, but that is a gesture you have to
     // know about, and this popup is the one that tells you what an action just
@@ -14141,7 +14248,7 @@ static void openNodeInfoModal() {
     lv_obj_set_flex_flow(s_nodeInfoModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeInfoModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch-only build: there is no key to press, so the title shares its row
     // with a real Close button. It goes at the top rather than under the rows
     // because the list can be taller than the panel — a button below it would
@@ -14258,7 +14365,7 @@ static void openNodeInfoModal() {
     // Heltec has the Close button above instead: naming a key on a build with no
     // keyboard was only ever telling the user to look for something that is not
     // there.
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_nodeInfoModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, bodyFont, 0);
@@ -14272,7 +14379,7 @@ static void openNodeInfoModal() {
                           "Up/Down/J/K = Scroll   %s = Close",
                           modalCloseKeyLabel());
 #endif
-#endif   // !DEVICE_HELTEC_V4_EXPANSION
+#endif   // !UI_TOUCH_ONLY_PROFILE
 }
 #endif
 
@@ -14491,7 +14598,7 @@ static void openSysStatsModal() {
         s_sysStatsCols[2] = nullptr;
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Reachable here only through a keyboard driven over VNC (five presses of
     // I), so without this the one way out was the keyboard that opened it —
     // and whoever walked over to the device itself was stuck.
@@ -14524,7 +14631,7 @@ static void onLegendClosePressed(lv_event_t *e) {
 }
 
 static void onHeltecBottomNavPressed(lv_event_t *e) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     int target = (int)(intptr_t)lv_event_get_user_data(e);
     switch (target) {
         case HELTEC_NAV_CFG:
@@ -14582,7 +14689,7 @@ static lv_opa_t chatPanelBackgroundOpa() {
 }
 
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (!bar) return;
 
     struct NavItem {
@@ -14673,7 +14780,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 }
 
 static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (!parent) return;
 
     // Match the height used by the main chat screen's shortcut bar
@@ -15262,7 +15369,7 @@ static void closeDmModal() {
     s_dmTouchPressStartMs = 0;
     s_dmTouchPressRowIdx = -1;
     s_dmTouchLongPressTriggered = false;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // The rows that would have reported the release are gone with the modal.
     // Left set, these would suppress every future refresh of a reopened screen.
     s_dmRowPressActive = false;
@@ -15517,7 +15624,7 @@ static void onNodesFilterInputEvent(lv_event_t *e) {
 }
 
 static void openNodesFilterDialog() {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (!s_nodesModal || s_nodesFilterDialog) return;
 
     int dialogW = lv_disp_get_hor_res(NULL);
@@ -15536,6 +15643,10 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
     lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_nodesFilterDialog, 2, 0);
+    lv_obj_set_style_pad_right(s_nodesFilterDialog, 2, 0);
+#endif
     lv_obj_set_style_pad_row(s_nodesFilterDialog, 3, 0);
     lv_obj_set_flex_flow(s_nodesFilterDialog, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodesFilterDialog, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -15574,8 +15685,7 @@ static void openNodesFilterDialog() {
     lv_obj_add_event_cb(s_nodesFilterInput, onNodesFilterInputEvent, LV_EVENT_READY, nullptr);
 
     s_nodesFilterKeyboard = lv_keyboard_create(s_nodesFilterDialog);
-    lv_obj_set_width(s_nodesFilterKeyboard, lv_pct(100));
-    lv_obj_set_flex_grow(s_nodesFilterKeyboard, 1);
+    configureOnScreenKeyboard(s_nodesFilterKeyboard);
     lv_keyboard_set_mode(s_nodesFilterKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s_nodesFilterKeyboard, s_nodesFilterInput);
     lv_obj_add_event_cb(s_nodesFilterKeyboard, onNodesFilterKeyboardEvent, LV_EVENT_READY, nullptr);
@@ -16393,7 +16503,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecCloseButton(s_nodeLocateModal, onNodeLocateClosePressed, 84);
 #endif
 
@@ -16788,7 +16898,7 @@ static void openNodeLosModal(uint32_t nodeId) {
     lv_label_set_long_mode(s_nodeLosVerdict, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_nodeLosVerdict, "");
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecCloseButton(s_nodeLosModal, onNodeLosClosePressed, 84);
 #endif
 
@@ -16876,7 +16986,7 @@ static void clearNodeDbOnSd() {
 // line of text would be real LVGL churn on a full node table.
 static void refreshNodesHint() {
     if (!s_nodesHintLabel) return;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // One line for every state, because none of the three states below can be
     // reached without a keyboard: there is no Space to open the filter and no
     // Enter to focus the info panel. Naming the way out matters more here than
@@ -16912,7 +17022,7 @@ static void refreshNodesHint() {
                               "Enter=Info  A=Actions  Space=Filter  %s=Back",
                               modalCloseKeyLabel());
     }
-#endif   // !DEVICE_HELTEC_V4_EXPANSION
+#endif   // !UI_TOUCH_ONLY_PROFILE
 }
 
 static void refreshNodesListRows() {
@@ -17010,7 +17120,7 @@ static void refreshNodesListRows() {
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_add_event_cb(row, onNodeSnapshotPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         lv_obj_add_event_cb(row, onNodeSnapshotClicked, LV_EVENT_CLICKED, (void *)(intptr_t)rowIdx);
 #endif
 
@@ -17330,7 +17440,7 @@ static void onNodeSnapshotPressed(lv_event_t *e) {
     }
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // Tap a row to act on it. Selecting is what the LV_EVENT_PRESSED handler above
 // does; this is the second half of the gesture, which on the keyboard builds is
 // Enter on the highlighted row.
@@ -17365,7 +17475,7 @@ static void closeTracerouteProgressModal() {
 }
 
 static void onTracerouteBackdropPressed(lv_event_t *e) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (lv_event_get_target_obj(e) == s_tracerouteBackdrop) {
         closeTracerouteProgressModal();
     }
@@ -17662,7 +17772,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_set_style_bg_opa(s_tracerouteBackdrop, LV_OPA_40, 0);
     lv_obj_set_style_border_width(s_tracerouteBackdrop, 0, 0);
     lv_obj_set_style_pad_all(s_tracerouteBackdrop, 0, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_add_event_cb(s_tracerouteBackdrop, onTracerouteBackdropPressed, LV_EVENT_PRESSED, nullptr);
 #endif
 
@@ -17740,7 +17850,7 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -2);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // The hint object above is left unused on this build: a button goes in its
     // place, pinned the same way so the fixed 96px modal spends no extra height
     // on it.
@@ -18268,7 +18378,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Request (P)osition",
         selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
 #if HAS_NODE_LOCATE
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // No keyboard to name a shortcut for.
         "Locate",
 #else
@@ -18276,7 +18386,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
 #endif
 #if HAS_NODE_LOS
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         "LOS",
 #else
         "LO(S)",
@@ -18420,7 +18530,7 @@ static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId) {
 static void refreshChannelActionsModal() {
     if (!s_channelActionsMuteLabel || !s_channelActionsMuteBtn) return;
     const bool muted = channelIsMuted(s_channelActionsChanIdx);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(s_channelActionsMuteLabel, muted ? "Unmute" : "Mute");
 #else
     lv_label_set_text(s_channelActionsMuteLabel, muted ? "Un(m)ute" : "(M)ute");
@@ -18444,7 +18554,7 @@ static void refreshChannelActionsModal() {
     const char *shareState = !share            ? "Off"
                              : s_cfg.shareLocation ? "On"
                                                    : "On (global off)";
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text_fmt(s_channelActionsShareLabel, "Location: %s", shareState);
 #else
     lv_label_set_text_fmt(s_channelActionsShareLabel, "(L)ocation: %s", shareState);
@@ -18583,7 +18693,7 @@ static void openChannelActionsModal() {
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
     lv_obj_center(shareLbl);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch-only board: provide an explicit Close button instead of a keyboard hint.
     lv_obj_t *closeBtn = lv_btn_create(s_channelActionsModal);
     lv_obj_set_width(closeBtn, lv_pct(100));
@@ -18731,7 +18841,7 @@ static void refreshLiveView(bool force) {
         } else {
             lv_label_set_text_fmt(empty, "No %s traffic yet\n(filter is on - %s)",
                                   liveFilterName(s_liveFilter),
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                                   "tap Filter to change"
 #else
                                   "press F to change"
@@ -18850,21 +18960,15 @@ static void openLiveModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "LIVE");
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    // Vertical Heltec is narrow; the right-anchored Tools button would overdraw
-    // a centered title. Left-align with a small inset instead.
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
-#else
     lv_obj_center(title);
-#endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
-    // Single header button (Heltec touch) into the Tools modal.
-    auto makeLiveHeaderBtn = [](lv_obj_t *parent, const char *text, int xOffset,
+#if UI_TOUCH_ONLY_PROFILE
+    auto makeLiveHeaderBtn = [](lv_obj_t *parent, const char *text, int width,
+                                lv_align_t align,
                                 lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
-        lv_obj_set_size(btn, 52, 20);
-        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_size(btn, width, 20);
+        lv_obj_align(btn, align, 0, 0);
         lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_pad_left(btn, 4, 0);
         lv_obj_set_style_pad_right(btn, 4, 0);
@@ -18883,14 +18987,14 @@ static void openLiveModal() {
         lv_obj_center(lbl);
         return btn;
     };
-    makeLiveHeaderBtn(header, "Tools", -4,
+    makeLiveHeaderBtn(header, "Tools", 52, LV_ALIGN_LEFT_MID,
                       [](lv_event_t *e) { LV_UNUSED(e); openLiveToolsModal(); });
-    // Touch build: the header chip is the control, since there is no F key. It
-    // sits left of Tools and carries the active filter as its label.
+    // Touch build: the header chip is the control, since there is no F key.
+    // Size it before right-aligning so its long active-filter label stays
+    // anchored to the far edge instead of growing back toward the center.
     lv_obj_t *filterBtn =
-        makeLiveHeaderBtn(header, "Filter", -60,
+        makeLiveHeaderBtn(header, "Filter", 92, LV_ALIGN_RIGHT_MID,
                           [](lv_event_t *e) { LV_UNUSED(e); openLiveFilterModal(); });
-    lv_obj_set_width(filterBtn, 92);   // holds "Filter: Telemetry", the longest
     s_liveFilterHeaderLabel = lv_obj_get_child(filterBtn, 0);
 #else
     // Keyboard builds: a plain chip on the right of the centered LIVE title. Not
@@ -18923,7 +19027,7 @@ static void openLiveModal() {
     lv_obj_set_flex_flow(s_liveList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_liveList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecBottomNav(s_liveModal, HELTEC_NAV_LIVE);
 #else
     lv_obj_t *hint = lv_label_create(s_liveModal);
@@ -19050,7 +19154,7 @@ static void openLiveToolsModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Tools");
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
         "SNR/RSSI", "ChUtil",
 #if FEATURE_DISCOVERY
@@ -19141,7 +19245,7 @@ static void openLiveToolsModal() {
         lv_obj_center(lbl);
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // No close key on this build, so the way out has to be on screen. The chart
     // modals hang this off a header bar; this modal has none, so it goes in the
     // flex flow under the grid where it is also a bigger tap target.
@@ -19273,7 +19377,7 @@ static void openLiveFilterModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Live Filter");
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_liveFilterModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -19346,7 +19450,7 @@ static void openLiveFilterModal() {
         lv_obj_center(lbl);
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // No close key on this build, so the way out has to be on screen — same
     // treatment the Tools modal gets.
     lv_obj_t *closeBtn = lv_btn_create(s_liveFilterModal);
@@ -19561,7 +19665,7 @@ static void openChUtilChartModal() {
     lv_obj_center(title);
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch close button anchored to the right side of the header.
     lv_obj_t *headerClose = lv_btn_create(header);
     lv_obj_set_size(headerClose, 48, 20);
@@ -19624,7 +19728,7 @@ static void openChUtilChartModal() {
     lv_obj_set_style_text_color(s_chUtilStatsLabel, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(s_chUtilStatsLabel, "ChUtil  cur --  avg --  max --   n=0\nAirTx   cur --  avg --  max --   n=0");
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_chUtilChartModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -19753,7 +19857,7 @@ static void openSnrRssiChartModal() {
     lv_obj_center(title);
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch close button anchored to the right side of the header.
     lv_obj_t *headerClose = lv_btn_create(header);
     lv_obj_set_size(headerClose, 48, 20);
@@ -19826,7 +19930,7 @@ static void openSnrRssiChartModal() {
                       "SNR   cur --  avg --  min --  max --   n=0\n"
                       "RSSI  cur --  avg --  min --  max --   n=0");
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_snrChartModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -20114,7 +20218,7 @@ static void openBeaconsModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Beacons");
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     // Touch build: no keyboard, so the way out and the only action both have to
@@ -20172,7 +20276,7 @@ static void openBeaconsModal() {
     lv_obj_set_flex_align(s_beaconsList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_beaconsModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -20552,7 +20656,7 @@ static void openMqttMonitorModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_label_set_text(title, titleText);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Three buttons now sit on the right of this header, not two.
     lv_obj_set_width(title, modalW - 156);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
@@ -20619,7 +20723,7 @@ static void openMqttMonitorModal() {
     lv_obj_set_flex_align(s_mqttMonList, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_mqttMonModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -20793,7 +20897,7 @@ static void openMqttConfirmModal(int chan) {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body, preview);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *btnRow = lv_obj_create(s_mqttConfirmModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
@@ -20937,7 +21041,7 @@ static void openMqttSendModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a channel");
 #else
     lv_label_set_text_fmt(hint, "Move  Enter=Pick  %s=Back", modalCloseKeyLabel());
@@ -21661,7 +21765,7 @@ static void openDiscoveryModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Discovery");
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     // Touch build: Sweep and Close both live in the header, as on the charts.
@@ -21765,7 +21869,7 @@ static void openDiscoveryModal() {
                               LV_FLEX_ALIGN_START);
     }
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
     lv_obj_t *hint = lv_label_create(s_discoveryModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -21810,7 +21914,7 @@ static void activateDmSelection(bool allowCompose) {
 }
 
 static const char *dmDeleteTriggerLabel() {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     return "Long-press";
 #else
     // Every keyboard build deletes with D, the same letter the Wi-Fi picker
@@ -21987,7 +22091,7 @@ static void dmRequestDeleteSelectedConversation() {
     openDmDeleteConfirm(selected->nodeId);
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 // The right panel's own compose button. Writes to whichever conversation is
 // selected; with none selected there is nobody to write to, so it falls through
 // to the picker that chooses one — the same thing the New DM row does.
@@ -22034,7 +22138,7 @@ static void onDmConversationPressed(lv_event_t *e) {
     if (idx < 0 || idx > s_dmConvCount) return;
     s_dmSelection = idx;
     s_dmMsgPanelFocused = (idx > 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Asked for, not performed. This handler runs on LV_EVENT_PRESSED — finger
     // still down — and refreshDmModal() rebuilds the list with lv_obj_clean(),
     // which would delete this very row and take the LV_EVENT_CLICKED that
@@ -22048,7 +22152,7 @@ static void onDmConversationPressed(lv_event_t *e) {
 }
 
 static void onDmConversationPressState(lv_event_t *e) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
 
     // Press tracking covers every row, New DM (index 0) included, so the list
@@ -22319,7 +22423,7 @@ static void refreshDmNodePicker(bool force) {
 
     if (s_dmNodePickerHint) {
         lv_obj_set_style_text_color(s_dmNodePickerHint, dmPickerHintColor, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // Nothing here changes with the filter — there is no keyboard to open
         // one — so the line says the one thing that is always true.
         lv_label_set_text(s_dmNodePickerHint, "Tap a node to start a DM");
@@ -22400,7 +22504,7 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // Second half of the gesture, matching the USER button on this screen —
         // without it the picker's own "Tap a node to start a DM" was a promise
         // the row could not keep.
@@ -22509,7 +22613,7 @@ static void openDmNodePicker() {
         0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a node to start a DM");
     appendHeltecCloseButton(s_dmNodePickerModal,
                             [](lv_event_t *ev) { LV_UNUSED(ev); closeDmNodePicker(); },
@@ -22566,7 +22670,7 @@ static DisplayLine::AckState dmAckToDisplayAck(DmLine::AckState a) {
 }
 
 static void refreshDmModal(bool force) {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // A DM arriving mid-gesture used to rebuild the list under the finger,
     // which cancelled whatever the finger was doing — a tap, or a hold that was
     // three seconds into a delete. Hold the redraw until the gesture ends.
@@ -22695,7 +22799,7 @@ static void refreshDmModal(bool force) {
         lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // Tap runs it, the same as the USER button does on this row. On CLICKED,
         // so dragging the conversation list past it only scrolls.
         //
@@ -22951,7 +23055,7 @@ static void refreshDmModal(bool force) {
 #elif defined(DEVICE_TLORA_PAGER_TFT)
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
             lv_label_set_text_fmt(s_dmHintLabel,
                                   "Tap = Open   Long-press 3s = Delete"
                                   "   DM below = Back");
@@ -23123,7 +23227,7 @@ static void openDmModal() {
     lv_obj_set_flex_flow(s_dmMsgList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_dmMsgList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Sits under the messages, in the panel it writes to. Reading a thread and
     // answering it are the same errand, and on a touch-only build there was no
     // way to start the second half from here at all.
@@ -23171,7 +23275,7 @@ static void openDmModal() {
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text_fmt(hint,
                           "Up/Down = Select   Space = Compose   Enter = Focus   D = Delete");
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     lv_label_set_text_fmt(hint,
                           "Tap = Open   Long-press 3s = Delete"
                           "   DM below = Back");
@@ -23189,7 +23293,7 @@ static void openDmModal() {
     s_dmMsgPanelFocused = false;
     refreshDmModal(true);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
 #endif
 }
@@ -23304,7 +23408,7 @@ static void openNodesModal() {
     lv_label_set_text(title, "NODES");
     lv_obj_center(title);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     s_nodesFilterBtn = lv_btn_create(header);
     lv_obj_set_size(s_nodesFilterBtn, 58, 20);
     lv_obj_align(s_nodesFilterBtn, LV_ALIGN_RIGHT_MID, -4, 0);
@@ -23562,7 +23666,7 @@ static void openNodesModal() {
     refreshNodesDetails();
     refreshNodesPanelFocusStyles();
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecBottomNav(s_nodesModal, HELTEC_NAV_NODES);
 #else
     lv_obj_t *hint = lv_label_create(s_nodesModal);
@@ -23599,7 +23703,7 @@ static void onReleaseNotesBackdropPressed(lv_event_t *e) {
     closeReleaseNotesModal();
 }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
 static void onReleaseNotesClosePressed(lv_event_t *e) {
     LV_UNUSED(e);
     closeReleaseNotesModal();
@@ -23676,7 +23780,7 @@ static void openReleaseNotesModal() {
         lv_label_set_text(body, "No release notes in this build.");
     }
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Touch-only: the backdrop margin is too thin to aim at, so closing needs a
     // real target.
     lv_obj_t *closeBtn = lv_btn_create(s_releaseNotesModal);
@@ -23720,7 +23824,7 @@ static void openLegendModal() {
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     int modalH = 132;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     modalH = 142;
 #if defined(DEVICE_UI_VERTICAL)
     // Vertical Heltec wraps legend body text into more lines; reserve extra
@@ -23758,7 +23862,7 @@ static void openLegendModal() {
     lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_legendModal, 6, 0);
     lv_obj_set_style_pad_row(s_legendModal, 4, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_style_pad_bottom(s_legendModal, 8, 0);
     lv_obj_set_style_pad_row(s_legendModal, 5, 0);
 #if defined(DEVICE_UI_VERTICAL)
@@ -23774,7 +23878,7 @@ static void openLegendModal() {
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Help");
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *body = lv_label_create(s_legendModal);
     lv_obj_set_width(body, lv_pct(100));
     lv_obj_set_style_text_font(body, legendBodyFont, 0);
@@ -23888,7 +23992,7 @@ static void openLegendModal() {
         LV_SYMBOL_GLOBE_TINY);
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *closeBtn = lv_btn_create(s_legendModal);
     lv_obj_set_width(closeBtn, lv_pct(100));
     lv_obj_set_height(closeBtn, 24);
@@ -23989,7 +24093,7 @@ static void openCfgModal() {
     lv_label_set_text(title, "Configuration");
 
     s_cfgHeaderStatus = lv_label_create(header);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_width(s_cfgHeaderStatus, lv_pct(40));
 #else
     lv_obj_set_width(s_cfgHeaderStatus, lv_pct(58));
@@ -24006,7 +24110,7 @@ static void openCfgModal() {
     lv_label_set_long_mode(s_cfgHeaderStatus, LV_LABEL_LONG_DOT);
     lv_label_set_text(s_cfgHeaderStatus, "Ready");
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_t *infoBtn = lv_btn_create(header);
     lv_obj_set_height(infoBtn, 22);
     lv_obj_set_style_min_width(infoBtn, 48, 0);
@@ -24098,7 +24202,7 @@ static void openCfgModal() {
     lv_obj_set_flex_align(s_cfgActionList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     appendHeltecBottomNav(s_cfgModal, HELTEC_NAV_CFG);
 #else
     lv_obj_t *hint = lv_label_create(s_cfgModal);
@@ -25248,6 +25352,10 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
     modalH = screenH - 20;
     if (modalH < 140) modalH = screenH - 4;
 
+#if defined(DEVICE_SQUARE)
+    modalW = screenW;
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (stage == ONBOARD_STAGE_ASK_IMPORT) {
         // Cardputer import prompt is keyboard-only and titleless, so keep the
@@ -25297,6 +25405,10 @@ static void renderOnboardingStage() {
     lv_obj_set_style_pad_all(s_onboardingModal,
                              compactImportStage ? 6 : (compactOnboarding ? 8 : 10),
                              0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_onboardingModal, 2, 0);
+    lv_obj_set_style_pad_right(s_onboardingModal, 2, 0);
+#endif
     lv_obj_set_style_pad_row(s_onboardingModal,
                              compactImportStage ? 4 : (compactOnboarding ? 6 : 8),
                              0);
@@ -25464,7 +25576,7 @@ static void renderOnboardingStage() {
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
         #if defined(DEVICE_CARDPUTER_LORA_HAT)
             lv_label_set_text(s_onboardingStatus, "j/k=Change   Enter=Next   Bksp=Back");
-        #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+        #elif UI_TOUCH_ONLY_PROFILE
         lv_label_set_text(s_onboardingStatus, "Use arrows to choose, then tap Next");
         #else
         lv_label_set_text(s_onboardingStatus, "Wheel/j-k=Change   Enter=Next");
@@ -25621,7 +25733,7 @@ static void renderOnboardingStage() {
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         const char *statusHint = "Enter=Next";
         if (isShortStage)      statusHint = "Enter=Next   Bksp(empty)=Back";
-    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    #elif UI_TOUCH_ONLY_PROFILE
         const char *statusHint = isShortStage
                                      ? "Tap Next to continue, or Back"
                                      : "Tap Next to continue";
@@ -25673,10 +25785,9 @@ static void renderOnboardingStage() {
                 [](lv_event_t *) { onboardingCommitName(); });
     #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         s_onboardingKeyboard = lv_keyboard_create(s_onboardingModal);
-        lv_obj_set_width(s_onboardingKeyboard, lv_pct(100));
-        lv_obj_set_flex_grow(s_onboardingKeyboard, 1);
+        configureOnScreenKeyboard(s_onboardingKeyboard);
         lv_keyboard_set_mode(s_onboardingKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_onboardingKeyboard, s_onboardingInput);
         lv_obj_add_event_cb(s_onboardingKeyboard,
@@ -26189,7 +26300,7 @@ static void pumpKeyboardInput() {
         k = remapCardputerUiKey(k, !typingContext);
 #endif
 
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
         navFromJk = (k == 'j' || k == 'J' || k == 'k' || k == 'K');
         jkDirectionInvert = navFromJk;
         // Enable vim-style j/k navigation for all keyboard-capable builds.
@@ -27081,7 +27192,7 @@ static void pumpKeyboardInput() {
         // modal close key. Heltec is touch-first with no keyboard, so there any
         // key just dismisses it.
         if (s_nodeInfoModal) {
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
             if (k == KEY_SCROLL_UP) {
                 scrollListClamped(s_nodeInfoModal, 18);
                 continue;
@@ -27539,7 +27650,7 @@ static void pumpKeyboardInput() {
                 }
                 continue;
             }
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
             if (k == KEY_ENTER || k == ' ') {
                 activateDmSelection();
                 continue;
@@ -28142,7 +28253,7 @@ static void pumpKeyboardInput() {
         }
 
         if (!s_composeModal) {
-#if !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !UI_TOUCH_ONLY_PROFILE
             if (isChannelDropdownVisible()) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
                 // Cardputer directional labels: '/' is right, ',' is left.
@@ -28441,13 +28552,13 @@ static void pumpKeyboardInput() {
                 // to the active channel (see sendQuickEmoji / emojiPickerActivate).
                 openEmojiPicker(true);
             } else if (k == 'h' || k == 'H') {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
                 openLegendModal();
 #else
                 setChannelDropdownVisible(!isChannelDropdownVisible());
                 refreshChannelGlow(true);
 #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
             // Touch-first build: Enter keeps its original new-message behavior.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
@@ -28577,7 +28688,7 @@ static void pumpKeyboardInput() {
 // so the USER button can do the same thing: on this build that button is the
 // Enter key's stand-in, and Enter on the chat screen composes.
 static void chatComposeFromButton() {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (s_legendModal) return;
 #endif
     if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
@@ -28593,7 +28704,7 @@ static void onChatNewMessagePressed(lv_event_t *e) {
 }
 
 static void refreshChatComposeButtonState() {
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (!s_chatNewMsgLabel) return;
 
     if (s_chatNewMsgBtn) {
@@ -30069,7 +30180,7 @@ static void refreshChannelGlow(bool force) {
             // the pulse, and lv_label_set_text() reflows the label.
             if (!textSame) {
                 lv_label_set_text(lbl, text);
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
                 sizeChannelButtonToLabel(i);
 #endif
             }
@@ -30356,7 +30467,7 @@ static void refreshChannelSelectorLabel() {
     }
 #endif
     if (!name || !name[0]) name = "Channel";
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (useCompactVerticalHeltecSelector()) {
         name = "";
     }
@@ -30368,7 +30479,7 @@ static void refreshChannelSelectorLabel() {
 // glass, so channel names have less room to be legible in.
 #if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = useCompactVerticalHeltecSelector();
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const bool showSelectorCaret = false;
@@ -30396,7 +30507,7 @@ static void refreshChannelSelectorLabel() {
 
 #if UI_CHANNEL_LIST_DROPDOWN
     bool allowDynamicSelectorWidth = true;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     allowDynamicSelectorWidth = !useCompactVerticalHeltecSelector();
 #endif
     if (allowDynamicSelectorWidth && s_channelSelectorBtn) {
@@ -30535,7 +30646,7 @@ static const char *channelName(int idx) {
 }
 
 static void sizeChannelButtonToLabel(int idx) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
     if (s_channelList && !s_channelStrip) return;
     if (idx < 0 || idx >= MESH_CHANNELS) return;
     lv_obj_t *btn = s_channelBtns[idx];
@@ -30547,7 +30658,7 @@ static void sizeChannelButtonToLabel(int idx) {
     lv_obj_update_layout(lbl);
 
     lv_coord_t targetW = lv_obj_get_width(lbl) + 14;
-    #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    #if UI_TOUCH_ONLY_PROFILE
     if (targetW < 52) targetW = 52;
     #else
     if (targetW < 34) targetW = 34;
@@ -30809,7 +30920,7 @@ static void layoutHeaderInlineItems() {
     lv_obj_get_coords(s_chatHeaderBattText, &battTextArea);
     lv_coord_t selectorRight = selectorArea.x2 + 1;
     lv_coord_t battLeft = battTextArea.x1;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_coord_t rightBoundLeft = battLeft;
     if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
         lv_area_t gpsArea;
@@ -33671,7 +33782,7 @@ static void buildUi() {
 // Full-width chat, no side panel: these boards put channels in the overlay
 // dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
 // a column for one leaves an empty strip down the side.
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
 #if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const int panelMargin = 6;
@@ -33771,7 +33882,7 @@ static void buildUi() {
 #else
     const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
 #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
     const int headerPadX = (chatHeaderH >= 25) ? 6 : 4;
@@ -33780,7 +33891,7 @@ static void buildUi() {
     s_channelList = nullptr;
 
     const int selectorBtnH = chatHeaderH - 6;
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     const bool compactHeltecSelector = useCompactVerticalHeltecSelector();
     const int selectorBtnW = compactHeltecSelector
         ? max((int)lv_font_get_line_height(headerTextFont) + 4, 14)
@@ -33800,7 +33911,7 @@ static void buildUi() {
 // glass, so channel names have less room to be legible in.
 #if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = compactHeltecSelector;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const bool showSelectorCaret = false;
@@ -33817,7 +33928,7 @@ static void buildUi() {
     const lv_font_t *selectorTextFont = headerTextFont;
 #if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
 
@@ -33825,7 +33936,7 @@ static void buildUi() {
     lv_obj_set_size(s_channelSelectorBtn, selectorBtnW, selectorBtnH);
     lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, selectorBtnOffsetX, 0);
     lv_obj_set_style_radius(s_channelSelectorBtn, 6, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (compactHeltecSelector) {
         lv_obj_set_style_pad_left(s_channelSelectorBtn, 1, 0);
         lv_obj_set_style_pad_right(s_channelSelectorBtn, 1, 0);
@@ -33850,7 +33961,7 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_channelSelectorLabel, selectorTextFont, 0);
     lv_obj_set_style_text_align(s_channelSelectorLabel, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_channelSelectorLabel, LV_LABEL_LONG_DOT);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (compactHeltecSelector) {
         lv_obj_set_width(s_channelSelectorLabel, 1);
         lv_obj_align(s_channelSelectorLabel, LV_ALIGN_LEFT_MID, 0, selectorTextYOffset);
@@ -33867,7 +33978,7 @@ static void buildUi() {
     s_channelSelectorCaretLabel = lv_label_create(s_channelSelectorBtn);
     lv_obj_set_style_text_font(s_channelSelectorCaretLabel, selectorTextFont, 0);
     lv_obj_set_style_text_color(s_channelSelectorCaretLabel, lv_color_hex(0xD9E8FF), 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     if (compactHeltecSelector) {
         lv_obj_align(s_channelSelectorCaretLabel, LV_ALIGN_CENTER, 0, selectorTextYOffset);
     } else {
@@ -33892,7 +34003,7 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_chatHeaderTime, clockTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     s_chatHeaderGps = lv_label_create(s_chatHeaderBar);
     lv_obj_align_to(s_chatHeaderGps, s_channelSelectorBtn, LV_ALIGN_OUT_RIGHT_MID, 8, 0);
     lv_obj_set_style_text_font(s_chatHeaderGps, headerTextFont, 0);
@@ -33923,7 +34034,7 @@ static void buildUi() {
     lv_obj_set_style_text_font(s_chatHeaderBattText, headerTextFont, 0);
     lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     s_chatHeaderWifi = lv_label_create(s_chatHeaderBar);
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     lv_obj_set_style_text_font(s_chatHeaderWifi, headerIconFont, 0);
@@ -33957,14 +34068,14 @@ static void buildUi() {
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
     lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
     lv_obj_set_style_pad_all(s_chatPanel, 4, 0);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_style_pad_row(s_chatPanel, 4, 0);
     lv_obj_set_flex_flow(s_chatPanel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_chatPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 #endif
 
     s_chatList = lv_obj_create(s_chatPanel);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_width(s_chatList, lv_pct(100));
     lv_obj_set_flex_grow(s_chatList, 1);
 #else
@@ -34000,7 +34111,7 @@ static void buildUi() {
     channelNavFont = &lv_font_montserrat_14;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
 #if defined(DEVICE_MESH_DECK)
@@ -34061,7 +34172,7 @@ static void buildUi() {
     }
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Actions and New Message share the strip under the chat: both act on the
     // conversation being read, so they belong next to it rather than in the
     // bottom nav, which is about going somewhere else. Actions is the narrow one
@@ -34145,7 +34256,7 @@ static void buildUi() {
     lv_obj_set_style_pad_top(s_chatShortcutBar, 0, 0);
     lv_obj_set_style_pad_bottom(s_chatShortcutBar, 0, 0);
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     s_chatShortcutText = nullptr;
     populateHeltecBottomNav(s_chatShortcutBar, -1);
 #else
@@ -34229,7 +34340,7 @@ static void buildUi() {
         lv_obj_t *btn = lv_obj_create(s_channelList ? s_channelList : screen);
         lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    #elif UI_TOUCH_ONLY_PROFILE
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
     #elif defined(DEVICE_TLORA_PAGER_TFT)
         lv_obj_t *btn = lv_obj_create(panel);
@@ -34244,7 +34355,7 @@ static void buildUi() {
         s_channelBtns[i] = btn;
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
         lv_obj_set_size(btn, 40, kMainScreenChannelBtnHeight);
-    #elif defined(DEVICE_HELTEC_V4_EXPANSION)
+    #elif UI_TOUCH_ONLY_PROFILE
         lv_obj_set_width(btn, LV_SIZE_CONTENT);
         lv_obj_set_height(btn, kMainScreenChannelBtnHeight);
     #elif defined(DEVICE_TLORA_PAGER_TFT)
@@ -34259,7 +34370,7 @@ static void buildUi() {
         lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
-    #if defined(DEVICE_HELTEC_V4_EXPANSION)
+    #if UI_TOUCH_ONLY_PROFILE
         lv_obj_add_event_cb(btn, onChannelPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     #else
         lv_obj_add_event_cb(btn, onChannelPressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
@@ -34268,14 +34379,14 @@ static void buildUi() {
         lv_obj_t *lbl = lv_label_create(btn);
         s_channelLabels[i] = lbl;
         lv_obj_set_style_text_font(lbl, kMainScreenFont, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
         lv_obj_set_width(lbl, LV_SIZE_CONTENT);
     #else
         lv_obj_set_width(lbl, lv_pct(100));
     #endif
         lv_obj_set_height(lbl, lv_font_get_line_height(kMainScreenFont));
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
     #else
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
@@ -34286,7 +34397,7 @@ static void buildUi() {
         } else {
             lv_label_set_text(lbl, "Channel");
         }
-    #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
+    #if defined(DEVICE_CARDPUTER_LORA_HAT) || UI_TOUCH_ONLY_PROFILE
         sizeChannelButtonToLabel(i);
     #endif
         lv_obj_center(lbl);
@@ -34403,7 +34514,7 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
 
     if (s_channelList) {
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_TDECK) || UI_TOUCH_ONLY_PROFILE
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
@@ -35016,6 +35127,11 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL, 100000UL);
     meshDeckReleaseTouchReset();
 #endif
+#if defined(DEVICE_SQUARE)
+    if (!squareIoBegin()) {
+        Serial.println("[square-io] initialization failed; display may remain unavailable");
+    }
+#endif
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
     // The claim() the display makes on the peripheral rail. Everything on it —
     // panel, touch controller, I2C sensors — powers up from here, so the settle
@@ -35116,7 +35232,7 @@ void setup() {
     lv_indev_set_type(touchIndev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(touchIndev, lvglTouchRead);
     lv_indev_set_display(touchIndev, s_lvDisplay);
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
     // Long-press has to survive a finger that does not hold perfectly still.
     //
     // LVGL only raises LV_EVENT_LONG_PRESSED while the press has not turned
@@ -35397,6 +35513,9 @@ static const NapWakeLine kNapWakeLines[] = {
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
     { DISPLAY_TOGGLE_BUTTON_PIN, (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL) == HIGH },
 #endif
+#if defined(DEVICE_SQUARE)
+    { EXPANDER_INT, false }, // PCA9555 wake-button interrupt (active low)
+#endif
 };
 
 // Returns false if it decided not to sleep, so the caller can fall back to a
@@ -35518,6 +35637,12 @@ void loop() {
         delay(5);
         return;
     }
+#if defined(DEVICE_SQUARE)
+    if (serviceSquareWakeButton(now)) {
+        delay(5);
+        return;
+    }
+#endif
     if (pollUserButton(now)) {
         delay(5);
         return;
@@ -35752,7 +35877,7 @@ void loop() {
         // Cheap no-op unless the monitor is open; it throttles its own retally.
         refreshMqttMonitorModal();
 #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if UI_TOUCH_ONLY_PROFILE
         // Evaluated first, not folded into the argument: || would short-circuit
         // past it whenever meshDirty is already true and leave the flag set.
         const bool dmDeferred = dmTakeDeferredRefresh();

@@ -13,6 +13,81 @@
 #define BATT_CAL 1.0f
 #endif
 
+#if defined(DEVICE_SQUARE)
+#include <Adafruit_ADS1X15.h>
+#include "hal/square_io.h"
+namespace {
+constexpr uint32_t kSquareAdsRetryBackoffMs = 15000UL;
+constexpr uint32_t kSquareAdsReadIntervalMs = 30000UL;
+constexpr uint8_t kSquareAdsSampleCount = 3;
+
+Adafruit_ADS1115 sSquareAds;
+bool sSquareAdsReady = false;
+bool sSquareAdsReadDone = false;
+uint32_t sSquareAdsNextProbeMs = 0;
+uint32_t sSquareAdsLastReadMs = 0;
+float sSquareAdsCachedVolts = 0.0f;
+
+static bool squareAdsEnsureReady() {
+    if (sSquareAdsReady) return true;
+
+    const uint32_t nowMs = millis();
+    if (sSquareAdsNextProbeMs != 0
+        && (int32_t)(nowMs - sSquareAdsNextProbeMs) < 0) {
+        return false;
+    }
+    if (!squareIoReady() || !squareIoSetBatterySense(true)) {
+        sSquareAdsNextProbeMs = nowMs + kSquareAdsRetryBackoffMs;
+        return false;
+    }
+
+    delay(10);
+    if (!sSquareAds.begin(ADS1115_ADDR, &Wire)) {
+        (void)squareIoSetBatterySense(false);
+        sSquareAdsNextProbeMs = nowMs + kSquareAdsRetryBackoffMs;
+        Serial.printf("[batt] square ADS1115 not found at 0x%02X\n", ADS1115_ADDR);
+        return false;
+    }
+
+    sSquareAds.setGain(GAIN_TWO);
+    sSquareAdsReady = true;
+    sSquareAdsNextProbeMs = 0;
+    (void)squareIoSetBatterySense(false);
+    Serial.printf("[batt] square ADS1115 ready addr=0x%02X channel=%u divider=%.2f\n",
+                  ADS1115_ADDR, (unsigned)ADS1115_BATT_CHANNEL, (double)BATT_DIV);
+    return true;
+}
+
+static float batteryReadSquareAdsVolts() {
+    const uint32_t nowMs = millis();
+    if (sSquareAdsReadDone
+        && (uint32_t)(nowMs - sSquareAdsLastReadMs) < kSquareAdsReadIntervalMs) {
+        return sSquareAdsCachedVolts;
+    }
+    if (!squareAdsEnsureReady() || !squareIoSetBatterySense(true)) {
+        return sSquareAdsCachedVolts;
+    }
+
+    delay(10);
+    float voltsSum = 0.0f;
+    uint8_t validSamples = 0;
+    for (uint8_t sample = 0; sample < kSquareAdsSampleCount; sample++) {
+        const int16_t raw = sSquareAds.readADC_SingleEnded(ADS1115_BATT_CHANNEL);
+        if (raw <= 0) continue;
+        voltsSum += sSquareAds.computeVolts(raw);
+        validSamples++;
+    }
+    (void)squareIoSetBatterySense(false);
+
+    if (validSamples == 0) return sSquareAdsCachedVolts;
+    sSquareAdsCachedVolts = (voltsSum / validSamples) * BATT_DIV * BATT_CAL;
+    sSquareAdsLastReadMs = nowMs;
+    sSquareAdsReadDone = true;
+    return sSquareAdsCachedVolts;
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
 constexpr uint8_t kBq25896Addr = 0x6B;
@@ -398,6 +473,9 @@ void batteryInitAdc() {
         bqMarkUnavailable(millis());
     }
 #endif
+#if defined(DEVICE_SQUARE)
+    (void)squareAdsEnsureReady();
+#endif
 
     batteryResetFilter();
     batteryRefreshFilter(true);
@@ -407,7 +485,9 @@ void batteryInitAdc() {
 // gauge, or divider-scaled ADC.
 static float batteryReadVoltageHw() {
 #if (BATT_ADC_PIN < 0)
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_SQUARE)
+    return batteryReadSquareAdsVolts();
+#elif defined(DEVICE_TLORA_PAGER_TFT)
     return batteryReadPagerBqVolts();
 #elif defined(DEVICE_MESH_DECK)
     return batteryReadMeshDeckVolts();

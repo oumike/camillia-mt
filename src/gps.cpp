@@ -4,6 +4,44 @@
 #include <TinyGPSPlus.h>
 #include <Wire.h>
 
+#if defined(DEVICE_SQUARE)
+#include "hal/square_io.h"
+namespace {
+
+static bool squarePrimeGpsRails() {
+    if (!squareIoReady()) {
+        Serial.println("[gps] square expander is not ready");
+        return false;
+    }
+    if (!squareIoSetGnssPower(true)
+        || !squareIoSetGnssResetReleased(false)) {
+        Serial.println("[gps] square GNSS power/reset assertion failed");
+        return false;
+    }
+
+    delay(20);
+    if (!squareIoSetGnssResetReleased(true)) {
+        Serial.println("[gps] square GNSS reset release failed");
+        return false;
+    }
+
+    Serial.printf("[gps] square GNSS rail on, reset released (expander=0x%02X powerBit=%d resetBit=%d)\n",
+                  EXPANDER_ADDR, EXP_BIT_GNSS_POWER, EXP_BIT_GNSS_RST);
+    return true;
+}
+
+static bool squareSetGpsRail(bool on) {
+    if (!squareIoSetGnssPower(on)) {
+        Serial.printf("[gps] square GNSS rail %s failed\n", on ? "on" : "off");
+        return false;
+    }
+    Serial.printf("[gps] square GNSS rail %s\n", on ? "on" : "off");
+    return true;
+}
+
+} // namespace
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #include "hal/xl9555.h"
 namespace {
@@ -142,6 +180,11 @@ static const GpsProbePort GPS_PORT_PROBE_LIST[] = {
     // repeated the two entries above, and the redundancy is what let the RX/TX
     // pins stay swapped without anyone noticing.
     { GPS_RX, -1 },
+    { GPS_TX, GPS_RX },
+#endif
+#if defined(DEVICE_SQUARE)
+    // The upstream reference names the UART pins from the module side. Probe
+    // the reversed MCU-side interpretation as well so either convention works.
     { GPS_TX, GPS_RX },
 #endif
 };
@@ -387,6 +430,8 @@ void gpsBegin() {
     _pagerRailInverted = false;
     _pagerRailRetried = false;
     (void)pagerPrimeGpsRails(_pagerRailInverted);
+#elif defined(DEVICE_SQUARE)
+    (void)squarePrimeGpsRails();
 #endif
     // Power and release the module before the first probe, so the prober is
     // listening to a receiver that is actually running.
@@ -441,7 +486,7 @@ void gpsBegin() {
 
 static void gpsSendNmea(const char *body);   // defined with the duty-cycle code
 
-#if !defined(DEVICE_TLORA_PAGER_TFT)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_SQUARE)
 // Indefinite standby, for boards with no GPS enable pin. PMTK161,0 is genuinely
 // open-ended. PCAS12 takes a duration and has no documented "forever", so it
 // gets a day — if a CASIC part self-wakes after that with GPS switched off it
@@ -465,6 +510,8 @@ static void gpsPowerDown() {
         debugLogGps("[gps] inverted rail polarity - leaving GPS powered\n");
         return;   // still powered; don't claim otherwise
     }
+#elif defined(DEVICE_SQUARE)
+    if (!squareSetGpsRail(false)) return;
 #else
     // Standby first, and it has to be sent before the UART closes. On a board
     // with no enable line that is the only lever there is; on one that has a
@@ -505,6 +552,9 @@ static void gpsPowerUp() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     (void)pagerSetGpsRail(true);
     delay(20);   // let the rail settle before the module is probed
+#elif defined(DEVICE_SQUARE)
+    if (!squareSetGpsRail(true)) return;
+    delay(20);
 #else
     // Restore the enable line and release reset. A board with neither still
     // needs no action: the module keeps power and gpsBegin() nudges it out of
@@ -540,7 +590,10 @@ void gpsDebugReport() {
     // digitalRead() on a pin we drive as OUTPUT reads back the level we are
     // driving, which is the point: it shows whether these lines are actually
     // being held, not merely declared.
-#if GPS_HAS_ENABLE_PIN
+#if defined(DEVICE_SQUARE)
+    Serial.printf("[gps] EN  expander=0x%02X bit=%d requested=%s\n",
+                  EXPANDER_ADDR, EXP_BIT_GNSS_POWER, _powered ? "on" : "off");
+#elif GPS_HAS_ENABLE_PIN
     Serial.printf("[gps] EN  pin=%d enableLevel=%s driving=%s\n",
                   (int)GPS_ENABLE_PIN,
                   (GPS_ENABLE_ON_LEVEL) ? "HIGH" : "LOW",
@@ -548,7 +601,10 @@ void gpsDebugReport() {
 #else
     Serial.println("[gps] EN  pin: none declared for this board");
 #endif
-#if GPS_HAS_RESET_PIN
+#if defined(DEVICE_SQUARE)
+    Serial.printf("[gps] RST expander=0x%02X bit=%d state=released\n",
+                  EXPANDER_ADDR, EXP_BIT_GNSS_RST);
+#elif GPS_HAS_RESET_PIN
     Serial.printf("[gps] RST pin=%d assertLevel=%s driving=%s\n",
                   (int)GPS_RESET_PIN,
                   (GPS_RESET_ACTIVE_LEVEL) ? "HIGH" : "LOW",

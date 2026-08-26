@@ -22,6 +22,9 @@ Supported release file names:
 - `camillia-mt-mesh-deck-vX.Y.Z.bin`
 - `camillia-mt-m9-vX.Y.Z.bin`
 
+The `square` environment is a bring-up target and intentionally has no release
+binary until its hardware acceptance checks pass.
+
 Then run:
 
 ```bash
@@ -49,6 +52,7 @@ pio run -e heltec-v4
 pio run -e heltec-v4-vertical
 pio run -e mesh-deck
 pio run -e m9
+pio run -e square
 ```
 
 Open serial monitor without rebuilding:
@@ -60,7 +64,7 @@ pio device monitor
 ### Build and flash with helper script
 
 ```bash
-Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--erase|-E]
+Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
   --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap)
@@ -69,6 +73,7 @@ Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--p
   --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical)
   --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment (mesh-deck)
   --m9, -9      Use Elecrow ThinkNode M9 environment (m9)
+  --square      Use Square environment (square)
                 If neither is provided, you'll be prompted to choose a device.
   --erase, -E   Erase flash before clean build/upload
                 M9 uses the combined upload_erase target.
@@ -83,6 +88,7 @@ Example usage:
 ./build-upload-monitor.sh --heltec
 ./build-upload-monitor.sh --vertical
 ./build-upload-monitor.sh --m9
+./build-upload-monitor.sh --square
 ```
 
 You can also run the script with no flags and pick a device from the prompt.
@@ -93,13 +99,14 @@ You can also run the script with no flags and pick a device from the prompt.
 |---|---|
 | Platform | espressif32 7.0.1 |
 | Framework | Arduino |
-| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). The two card-less boards — Mesh Deck and Heltec — use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots |
+| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots; Square uses the standard table and stores files on SD_MMC |
 | PSRAM | enabled (OPI; none on Cardputer) |
 | Upload speed | 115200 |
 
 ## Notes
 
 - The board must be in download mode to flash. On the T-Deck, hold the trackball button while pressing reset, or let PlatformIO trigger it automatically via USB CDC.
+- Square uses native USB-CDC and may require its DFU/download-mode gesture before upload.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.
 
@@ -120,9 +127,11 @@ that lists the script.
   the memory budget that causes the failure in the first place.
 - `tools/patch_radiolib_lr11x0.py` — `m9` only; see the ThinkNode M9 notes below.
 
-Both are idempotent and both print a warning instead of failing silently if the
-upstream text moves under them. If you see `NOT patched - run the build once
-more` on a fresh checkout, the library had not been fetched yet; build again.
+Both are idempotent. The LovyanGFX patch fails the build if an existing
+`Bus_SPI.cpp` no longer matches or is only partially patched; the RadioLib
+patch still emits a warning on version drift. If you see `NOT patched - run the
+build once more` on a fresh checkout, the library had not been fetched yet;
+build again.
 
 ### Heltec (heltec-v4, heltec-v4-vertical)
 

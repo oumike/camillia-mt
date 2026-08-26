@@ -990,10 +990,17 @@ void cfgInitDefaults(RhinoConfig &cfg) {
 }
 
 // ── SD init ──────────────────────────────────────────────────
-bool sdCardMounted() { return sdReady; }
+bool sdCardMounted() { return sdReady || storageMounted(); }
 
 bool sdBegin() {
-#if (SD_CS < 0)
+    if (storageMounted()) {
+        sdReady = true;
+        return true;
+    }
+#if defined(HAS_SD_MMC) && HAS_SD_MMC
+    sdReady = storageBegin();
+    return sdReady;
+#elif (SD_CS < 0)
 #if defined(HAS_INTERNAL_FS)
     // No card slot, but this board keeps the same files in internal flash.
     // Everything above this layer is written against sdBegin()/sdCardMounted(),
@@ -1996,7 +2003,8 @@ bool cfgExport(const RhinoConfig &cfg) {
     cfgToYaml(cfg, yaml);
     f.print(yaml);
     f.close();
-    Serial.printf("[cfg] exported to %s (%u bytes)\n", kPath, (unsigned)yaml.length());
+    Serial.printf("[cfg] exported to %s on %s (%u bytes)\n",
+                  kPath, storageName(), (unsigned)yaml.length());
     return true;
 }
 
@@ -2008,7 +2016,7 @@ bool cfgImport(RhinoConfig &cfg) {
     String content = f.readString();
     f.close();
     bool ok = cfgImportFromBuf(content.c_str(), content.length(), cfg);
-    if (ok) Serial.printf("[cfg] imported from %s\n", kPath);
+    if (ok) Serial.printf("[cfg] imported from %s on %s\n", kPath, storageName());
     return ok;
 }
 

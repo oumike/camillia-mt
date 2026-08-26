@@ -132,7 +132,7 @@ bool cardputerSpeakerTone(float frequency, uint32_t duration, int channel, bool 
 }
 #endif
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
 namespace {
 char sHeldKeyBestEffort = KEY_NONE;
 uint32_t sHeldSinceMsBestEffort = 0;
@@ -1006,7 +1006,7 @@ char TDeckKeyboard::readKey() {
         bool inBurstDrain = (now - lastKeyHitMs) < kBurstWindowMs;
         if (!inBurstDrain) {
             if (now - lastIdleProbeMs < kIdleProbeMs) {
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
                 expireHeldKeyBestEffort(now);
 #endif
                 return KEY_NONE;
@@ -1015,7 +1015,7 @@ char TDeckKeyboard::readKey() {
         }
 #else
         if (now - lastIdleProbeMs < kIdleProbeMs) {
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
             expireHeldKeyBestEffort(now);
 #endif
             return KEY_NONE;
@@ -1086,7 +1086,7 @@ char TDeckKeyboard::readKey() {
             return KEY_NONE;
         }
     #endif
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
         expireHeldKeyBestEffort(now);
 #endif
         return KEY_NONE;
@@ -1100,7 +1100,7 @@ char TDeckKeyboard::readKey() {
             return KEY_NONE;
         }
     #endif
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
         expireHeldKeyBestEffort(now);
 #endif
         return KEY_NONE;
@@ -1136,7 +1136,7 @@ char TDeckKeyboard::readKey() {
                       sM9LastEnterMs ? (unsigned long)(now - sM9LastEnterMs) : 0UL);
     }
 #endif
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
     noteHeldKeyBestEffort(mapped, now);
 #endif
     return mapped;
@@ -1192,7 +1192,7 @@ void TDeckKeyboard::pumpCardputerKeys() {
         }
     }
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
     char heldCandidate = KEY_NONE;
     if (enterPressed) {
         heldCandidate = fnActiveForEnter ? KEY_FN_ENTER : KEY_ENTER;
@@ -1402,7 +1402,7 @@ void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = t
 char keyboardHeldKey() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     return sTloraHeldKey;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     // This board has no keyboard of its own, so a held key can only come from a
     // paired Bluetooth one -- and that link reports real press and release
@@ -1423,7 +1423,7 @@ uint32_t keyboardHeldMs() {
 #if defined(DEVICE_TLORA_PAGER_TFT)
     if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
     return millis() - sTloraHeldSinceMs;
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
     return bleKeyboardHeldMs();
 #  else

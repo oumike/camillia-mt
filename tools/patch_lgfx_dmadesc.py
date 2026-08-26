@@ -40,7 +40,8 @@
 #
 # Idempotent, and safe to run before libdeps exist: on a fresh checkout the first
 # build may run this before the graphics library has been downloaded, in which
-# case it warns and the patch lands on the next build.
+# case it warns and the patch lands on the next build. If Bus_SPI.cpp exists but
+# no longer matches, fail the build rather than silently shipping it unpatched.
 Import("env")
 import os
 
@@ -94,6 +95,7 @@ CANDIDATES = (
 libdeps = os.path.join(env.subst("$PROJECT_LIBDEPS_DIR"), env.subst("$PIOENV"))
 patched_any = False
 found_any = False
+drifted = []
 
 for rel in CANDIDATES:
     path = os.path.join(libdeps, rel)
@@ -102,9 +104,14 @@ for rel in CANDIDATES:
     found_any = True
     with open(path, encoding='utf-8') as f:
         src = f.read()
-    if MARKER in src:
+    marker_count = src.count(MARKER)
+    if marker_count == 2:
         print("[patch_lgfx_dmadesc] already patched: %s" % rel.split(os.sep)[0])
         patched_any = True
+        continue
+    if marker_count != 0:
+        print("[patch_lgfx_dmadesc] ERROR: partial patch in %s" % rel)
+        drifted.append(rel)
         continue
     if OLD_ALLOC in src and OLD_SETUP in src:
         src = src.replace(OLD_ALLOC, NEW_ALLOC, 1).replace(OLD_SETUP, NEW_SETUP, 1)
@@ -114,10 +121,14 @@ for rel in CANDIDATES:
               % rel.split(os.sep)[0])
         patched_any = True
     else:
-        # Better to build unpatched and see the panic again than to believe a
-        # patch landed that did not.
-        print("[patch_lgfx_dmadesc] WARNING: pattern not found in %s - version drift?" % rel)
-        print("[patch_lgfx_dmadesc] WARNING: NOT patched, check Bus_SPI.cpp by hand")
+        print("[patch_lgfx_dmadesc] ERROR: pattern not found in %s - version drift?" % rel)
+        drifted.append(rel)
+
+if drifted:
+    raise RuntimeError(
+        "[patch_lgfx_dmadesc] refusing to build with unpatched Bus_SPI.cpp: %s"
+        % ", ".join(drifted)
+    )
 
 if not found_any:
     print("[patch_lgfx_dmadesc] graphics library not fetched yet under %s" % libdeps)

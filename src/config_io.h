@@ -648,7 +648,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg);
 // them to NVS for the identity to survive the reboot that follows an import.
 bool cfgImportRestoredKeys();
 
-// Mount SD card (call after SPI.begin). Returns true if card present.
+// Mount the configured storage backend. SPI-SD boards initialize their bus in
+// this path; SD_MMC and internal-flash boards use storageBegin().
 bool sdBegin();
 
 // Cached mount state — true if a card is currently mounted. Unlike sdBegin()
@@ -662,6 +663,6 @@ bool cfgExport(const RhinoConfig &cfg);
 // Updates CHANNEL_KEYS[] and fills cfg. Returns true on success.
 bool cfgImport(RhinoConfig &cfg);
 
-// Returns true if /camillia/config.yaml is present on the SD card. Mounts
-// the card if needed; returns false if SD is unavailable.
+// Returns true if /camillia/config.yaml is present on the configured storage.
+// Mounts it if needed; returns false if storage is unavailable.
 bool cfgSdConfigExists();

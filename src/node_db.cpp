@@ -447,7 +447,7 @@ static bool s_archEnabled = false;   // opt-in; mirrored from config by the main
 void nodeArchiveSetEnabled(bool enabled) { s_archEnabled = enabled; }
 bool nodeArchiveIsEnabled() { return s_archEnabled; }
 
-#if (SD_CS >= 0)
+#if HAS_SD_CARD
 static const char *kArchivePath = "/camillia/nodes_archive.csv";
 static const char *kArchiveDir  = "/camillia";
 
@@ -556,11 +556,10 @@ void nodeArchiveFlush() {
     f.close();
 }
 
-#else   // (SD_CS < 0)
+#else   // !HAS_SD_CARD
 
-// Boards with no SD slot (Heltec V4) have nowhere to preserve an evicted node,
-// so it is simply dropped. The queue, its 1.3 KB of RAM, and the CSV writer are
-// all compiled out rather than queueing records that could never be written.
+// Boards with no SD slot do not expose the removable-card archive, so the
+// queue, its 1.3 KB of RAM, and the CSV writer are compiled out.
 static inline void archiveQueue(const NodeEntry &) {}
 void     nodeArchiveFlush() {}
 int      nodeArchivePending() { return 0; }
@@ -570,7 +569,7 @@ bool     nodeArchiveSlotExists() { return false; }
 bool     nodeArchiveAvailable() { return false; }
 const char *nodeArchiveFilePath() { return nullptr; }
 
-#endif  // (SD_CS >= 0)
+#endif  // HAS_SD_CARD
 
 NodeEntry *NodeDB::upsert(uint32_t nodeId) {
     NodeEntry *e = find(nodeId);

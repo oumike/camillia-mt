@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_SQUARE)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -28,7 +28,9 @@
 #  define DEVICE_UI_VERTICAL 0
 #endif
 
-#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#if defined(DEVICE_SQUARE)
+#  define HAS_ENV_SENSOR_TELEMETRY 0
+#elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #  define HAS_ENV_SENSOR_TELEMETRY 1
 #else
 #  define HAS_ENV_SENSOR_TELEMETRY 0
@@ -96,6 +98,9 @@
 // The Mesh Deck has no HardwareModel of its own — it is not in the upstream
 // enum. PRIVATE_HW is the value Meshtastic reserves for exactly this case, so
 // the node advertises "custom hardware" instead of impersonating another board.
+// Allocated upstream for this board, so it can advertise itself honestly
+// rather than falling back to PRIVATE_HW the way the Mesh Deck and M9 do.
+#define MESH_HW_MODEL_SQUARE        137
 #define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
@@ -108,6 +113,8 @@
 #define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
 #elif defined(DEVICE_MESH_DECK)
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
+#elif defined(DEVICE_SQUARE)
+#define MY_HW_MODEL MESH_HW_MODEL_SQUARE
 #elif defined(DEVICE_M9)
 // Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
 // the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
@@ -480,7 +487,7 @@
 #define NODE_W           36   // compact side node pane for shortname-only rows
 #define DIVIDER_X       443   // 1px vertical divider
 #define INPUT_H          30   // keeps DM composer visible while maximizing chat rows
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+#elif UI_TOUCH_ONLY_PROFILE
 #define STATUS_H         32   // top status bar (slightly taller for richer status icons)
 #define TAB_H            14   // channel tab bar (taller for labeled pills)
 #define MSG_W           283   // reclaim most side whitespace from node pane
