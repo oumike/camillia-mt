@@ -1,9 +1,9 @@
 # Bluetooth Keyboards
 
-> **Status: implemented on the Heltec builds only** (`heltec-v4`,
-> `heltec-v4-vertical`). That board has no keyboard of its own, so it is where an
-> external one is worth the most, and where the feature is being proven. Every
-> other build is unchanged and cannot pair a keyboard. Nothing in the
+> **Status: implemented on the keyboard-less Heltec builds** (`heltec-v4`,
+> `heltec-v4-vertical`) **and `square`**. These boards use an on-screen keyboard,
+> so an external one adds a second text-input path. Every other build is
+> unchanged and cannot pair a keyboard. Nothing in the
 > implementation is board-specific — the `HAS_BLE_KEYBOARD` macro in
 > `src/hal/board.h` plus one `build_src_filter` entry is the entire gate — but
 > each board has its own internal-RAM budget, so they opt in one at a time.
@@ -16,7 +16,7 @@
 Classic keyboard cannot be made to work by any firmware change.
 
 Every board Camillia supports — T-Deck, T-LoRa Pager, Cardputer, Heltec V3/V4,
-Attaky Mesh Deck, Elecrow ThinkNode M9 — is built on an **ESP32-S3**, and the S3
+Attaky Mesh Deck, Elecrow ThinkNode M9, and Square — is built on an **ESP32-S3**, and the S3
 has no Bluetooth Classic (BR/EDR) radio at all. Only the original ESP32 in
 Espressif's lineup has one. BLE and Classic are separate protocols on shared
 spectrum: a BLE-only device and a Classic-only device
@@ -64,8 +64,8 @@ That last case is the one worth knowing before you spend money.
 ## Keyboards by confidence
 
 These tiers are about *how well established the BLE support is*, not about
-keyboard quality. Nothing here has been tested against Camillia, because the
-feature does not exist yet.
+keyboard quality. Treat the list as compatibility guidance rather than a claim
+that each model has been tested against Camillia.
 
 ### Tier 1 — Certain, by silicon
 
@@ -123,7 +123,7 @@ a BLE scanner before relying on any of these.**
   published sources whether it presents as BLE HID to a non-Apple host, and Apple
   peripherals carry extra pairing behavior. Scan it yourself before assuming.
 
-## Pairing one (Heltec builds)
+## Pairing one (Heltec and Square builds)
 
 Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
 
@@ -134,8 +134,8 @@ Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
    as it opens. Put the keyboard into pairing mode, tap it in the list, then
    **Pair**. **Forget** drops the bond and the saved address.
 
-The dialog is driven by its on-screen buttons because on this board there is no
-keyboard to drive it with until one is paired. Once one is, it also takes
+The dialog is driven by its on-screen buttons because these boards have no
+physical keyboard to drive it with until one is paired. Once one is, it also takes
 arrow keys, Enter to pair, `N` to rescan and `F` to forget.
 
 A row with a `?` after the signal strength advertised no HID service and was

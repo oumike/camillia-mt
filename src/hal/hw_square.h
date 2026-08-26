@@ -235,14 +235,21 @@
 #define DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL LOW
 
 // ── Audio — ES8311 DAC/amp + ES7243E mic ADC on I2S ─────────────────────────
-// Pins recorded so the port does not have to be re-derived later. Camillia only
-// needs tones, and nothing drives these yet — see the audio scope question on
-// issue #56. PA power is expander bit 12.
+// Notifications use the ES8311 output path. The microphone's ES7243E data input
+// is recorded separately and is not needed for synthesized tones. PA power is
+// active-high on expander bit 12; upstream requires 250 ms to settle.
 #define I2S_BCK                   11
 #define I2S_WS                    12
 #define I2S_DOUT                  16
 #define I2S_DIN                   15
 #define I2S_MCLK                  10
+#define AUDIO_CODEC_ADDR        0x18
+#define AUDIO_DAC_I2S_BCK       I2S_BCK
+#define AUDIO_DAC_I2S_WS        I2S_WS
+#define AUDIO_DAC_I2S_DOUT      I2S_DOUT
+#define AUDIO_DAC_I2S_DIN          -1
+#define AUDIO_DAC_I2S_MCLK      I2S_MCLK
+#define AUDIO_AMP_SETTLE_MS        250
 
 // ── Memory / display geometry ───────────────────────────────────────────────
 #define HAS_PSRAM                  1

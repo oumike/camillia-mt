@@ -148,17 +148,11 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // Low Energy" keyboard can ever pair; a Classic-only one cannot, on any board,
 // with any firmware. docs/BLUETOOTH_KEYBOARDS.md has the buying guidance.
 //
-// Heltec first because it is the one board with no keyboard of its own
-// (HAS_KEYBOARD 0 in hw_heltec_v4.h) and therefore gains the most. Nothing in
-// the implementation is board-specific — this macro plus a build_src_filter
-// entry is the entire gate — but the NimBLE stack costs 30-40 KB of internal
-// DRAM while it is running, and that budget differs per board, so each one opts
-// in only after someone has watched it pair with the radio and web config up.
-#if defined(DEVICE_SQUARE)
-// Square uses the on-screen keyboard for every text field during bring-up.
-// Keep NimBLE and ble_keyboard.cpp out of this target until explicitly enabled.
-#  define HAS_BLE_KEYBOARD 0
-#elif defined(DEVICE_HELTEC_V4_EXPANSION)
+// Keyboard-less touch boards gain the most. Nothing in the implementation is
+// board-specific — this macro plus a build_src_filter entry is the entire gate
+// — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
+// so BLE remains an explicit per-board opt-in.
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_SQUARE)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

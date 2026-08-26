@@ -110,12 +110,13 @@
 
 // ── ES8311 I2S audio codec ───────────────────────────────────────────────────
 // The codec is managed by the arduino-audio-driver library.
-#define PAGER_AUDIO_CODEC_ADDR  0x18
-#define PAGER_DAC_I2S_BCK         11
-#define PAGER_DAC_I2S_WS          18
-#define PAGER_DAC_I2S_DOUT        45
-#define PAGER_DAC_I2S_DIN         17
-#define PAGER_DAC_I2S_MCLK        10
+#define AUDIO_CODEC_ADDR        0x18
+#define AUDIO_DAC_I2S_BCK          11
+#define AUDIO_DAC_I2S_WS           18
+#define AUDIO_DAC_I2S_DOUT         45
+#define AUDIO_DAC_I2S_DIN          17
+#define AUDIO_DAC_I2S_MCLK         10
+#define AUDIO_AMP_SETTLE_MS          8
 
 // ── Battery — BQ25896 charger IC via I2C; no dedicated ADC pin ───────────────
 // Voltage is read from the BQ25896 ADC register over I2C (battery_util.cpp).

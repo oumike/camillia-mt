@@ -61,10 +61,10 @@
 #include "storage.h"
 #include "state_maps.h"
 #include <Curve25519.h>
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
 #include <AudioBoard.h>
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_SQUARE)
 #include <driver/i2s.h>
 #endif
 #include <esp_sleep.h>
@@ -527,6 +527,7 @@ static lv_obj_t *s_nodeInfoModal = nullptr;
 #endif
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
+static uint32_t s_liveClearFlashUntilMs = 0;
 
 // Hidden "system stats" screen: pressing (I) five times in a row on the CFG
 // screen reveals a live CPU/memory readout. Layered over the CFG modal; any
@@ -591,6 +592,12 @@ static lv_obj_t *s_dmNodePickerHint = nullptr;
 static lv_obj_t *s_dmNodePickerRows[MAX_NODES] = {};
 static lv_obj_t *s_dmDelBackdrop = nullptr;
 static lv_obj_t *s_dmDelModal = nullptr;
+enum DestructiveConfirmAction : uint8_t {
+    DESTRUCTIVE_CONFIRM_NONE = 0,
+    DESTRUCTIVE_CONFIRM_DM_DELETE,
+    DESTRUCTIVE_CONFIRM_LIVE_CLEAR,
+};
+static DestructiveConfirmAction s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
 // Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
 // Without it the picker built a button+label for every match — up to MAX_NODES
 // of them — and tore the whole lot down again on each arrow key, which is what
@@ -1677,6 +1684,10 @@ static void chatSenderLabel(uint32_t nodeId, char *out, size_t outLen) {
 }
 
 static void closeDmDeleteConfirm();
+#if UI_TOUCH_ONLY_PROFILE
+static void openLiveClearConfirm();
+static void onLiveRowLongPressed(lv_event_t *e);
+#endif
 static void dmRequestDeleteSelectedConversation();
 static void onDmConversationPressed(lv_event_t *e);
 static void onDmConversationPressState(lv_event_t *e);
@@ -2396,7 +2407,7 @@ static uint16_t notifyLedColorPreview565(uint8_t color) {
 }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
 namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
@@ -2415,17 +2426,24 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
     sPagerAudioVolume = volume;
 }
 
-// Gate the speaker power amp (XL9555 AMP_EN). The amp is left OFF while idle so
-// it can't turn power-supply transients (e.g. LoRa TX current spikes) into
-// random clicks; it is powered only for the duration of an actual sound.
+// Gate the speaker power amp. It stays off while idle so power-supply
+// transients (for example LoRa TX current spikes) cannot become random clicks.
+#if defined(DEVICE_TLORA_PAGER_TFT)
 static int sPagerExpAddr = -2;  // -2 = not yet probed
+#endif
 static void pagerAudioSetAmp(bool on) {
+#if defined(DEVICE_SQUARE)
+    if (!squareIoSetAudioPaPower(on)) {
+        Serial.printf("[audio] square PA %s failed\n", on ? "on" : "off");
+    }
+#else
     if (sPagerExpAddr == -2) sPagerExpAddr = xl9555FindAddr();
     if (sPagerExpAddr < 0) return;
     uint8_t out0, out1, cfg0, cfg1;
     if (!xl9555ReadAll((uint8_t)sPagerExpAddr, out0, out1, cfg0, cfg1)) return;
     xl9555SetOutput(XL9555_PIN_AMP_EN, on, out0, out1, cfg0, cfg1);
     (void)xl9555WriteAll((uint8_t)sPagerExpAddr, out0, out1, cfg0, cfg1);
+#endif
 }
 
 static bool pagerAudioSelectCommFormat(i2s_config_t &cfg) {
@@ -2463,12 +2481,12 @@ static bool pagerAudioInitI2S() {
     }
 
     i2s_pin_config_t pinCfg = {};
-    pinCfg.bck_io_num = PAGER_DAC_I2S_BCK;
-    pinCfg.ws_io_num = PAGER_DAC_I2S_WS;
-    pinCfg.data_out_num = PAGER_DAC_I2S_DOUT;
+    pinCfg.bck_io_num = AUDIO_DAC_I2S_BCK;
+    pinCfg.ws_io_num = AUDIO_DAC_I2S_WS;
+    pinCfg.data_out_num = AUDIO_DAC_I2S_DOUT;
     pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
 #if defined(ESP_IDF_VERSION) && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
-    pinCfg.mck_io_num = PAGER_DAC_I2S_MCLK;
+    pinCfg.mck_io_num = AUDIO_DAC_I2S_MCLK;
 #endif
 
     err = i2s_set_pin(kPagerI2SPort, &pinCfg);
@@ -2495,19 +2513,19 @@ static bool pagerAudioEnsureReady() {
     if (!sPagerAudioInitTried) {
         sPagerAudioInitTried = true;
     } else {
-        // Splash playback can run before full UI init on pager; keep retrying.
-        Serial.println("[audio] pager init retry");
+        // Splash playback can run before full UI init; keep retrying.
+        Serial.println("[audio] ES8311 init retry");
     }
 
     sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, Wire);
     sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
-                           PAGER_DAC_I2S_MCLK,
-                           PAGER_DAC_I2S_BCK,
-                           PAGER_DAC_I2S_WS,
-                           PAGER_DAC_I2S_DOUT,
-                           PAGER_DAC_I2S_DIN);
+                           AUDIO_DAC_I2S_MCLK,
+                           AUDIO_DAC_I2S_BCK,
+                           AUDIO_DAC_I2S_WS,
+                           AUDIO_DAC_I2S_DOUT,
+                           AUDIO_DAC_I2S_DIN);
 
-    (void)sPagerAudioBoard.driver().setI2CAddress(PAGER_AUDIO_CODEC_ADDR);
+    (void)sPagerAudioBoard.driver().setI2CAddress(AUDIO_CODEC_ADDR);
 
     audio_driver::CodecConfig cfg;
     cfg.input_device = audio_driver::ADC_INPUT_NONE;
@@ -2537,14 +2555,14 @@ static bool pagerAudioEnsureReady() {
     }
 
     sPagerAudioReady = true;
-    Serial.println("[audio] pager codec/i2s ready");
+    Serial.println("[audio] ES8311 codec/i2s ready");
     return true;
 }
 
 static inline void pagerAudioStartPlayback() {
     // Power the speaker amp and let the class-D output stage settle before audio.
     pagerAudioSetAmp(true);
-    delay(8);
+    delay(AUDIO_AMP_SETTLE_MS);
     // Raise the gain while still muted so the analog volume step is inaudible.
     pagerAudioApplyVolume(kPagerAudioVolActive);
     i2s_zero_dma_buffer(kPagerI2SPort);
@@ -3065,7 +3083,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
 
     switch (s_cfg.msgAlertSound) {
@@ -3143,7 +3161,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 // back up. Plays the default pattern whatever the alert style is set to — the
 // slider is about level, not about which sound.
 static void playVolumePreviewTone() {
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
     pagerAudioPlayAlertPattern();
 #elif defined(DEVICE_TDECK)
     tdeckPlayAlertPattern();
@@ -3165,7 +3183,7 @@ static void playSplashStartupRiff() {
     };
     static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
@@ -15271,6 +15289,8 @@ static void closeLiveModal() {
     // belong to.
     closeLiveToolsModal();
     closeLiveFilterModal();
+    closeDmDeleteConfirm();
+    s_liveClearFlashUntilMs = 0;
     if (s_liveModal && lv_obj_is_valid(s_liveModal)) {
         lv_obj_del(s_liveModal);
     }
@@ -18756,6 +18776,13 @@ static void refreshLiveView(bool force) {
     const lv_font_t *liveBodyFont = scaledChatFont(kChannelChatFont);
 
     const Channel &ch = Channels.get(CHAN_LIVE);
+    const uint32_t nowMs = millis();
+    if (s_liveClearFlashUntilMs != 0
+        && (int32_t)(nowMs - s_liveClearFlashUntilMs) >= 0) {
+        s_liveClearFlashUntilMs = 0;
+        s_lastRenderedLiveCount = -1;
+        s_lastRenderedLiveScrollOff = -1;
+    }
     if (!force && s_lastRenderedLiveCount == ch.count && s_lastRenderedLiveScrollOff == ch.scrollOff) {
         return;
     }
@@ -18800,6 +18827,10 @@ static void refreshLiveView(bool force) {
         lv_obj_set_style_pad_bottom(msg, 1, 0);
         lv_obj_set_style_radius(msg, 2, 0);
         lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+#if UI_TOUCH_ONLY_PROFILE
+        lv_obj_add_flag(msg, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(msg, onLiveRowLongPressed, LV_EVENT_LONG_PRESSED, nullptr);
+#endif
 
         uint16_t lineColor = liveLineTrafficColor(*dl);
         if (dl->packetId) {
@@ -18836,7 +18867,9 @@ static void refreshLiveView(bool force) {
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
         // Naming the filter matters here: an empty screen under a filter looks
         // exactly like a dead radio, and the difference is one word.
-        if (s_liveFilter == LIVE_FILTER_ALL) {
+        if (s_liveClearFlashUntilMs != 0) {
+            lv_label_set_text(empty, "Live feed cleared");
+        } else if (s_liveFilter == LIVE_FILTER_ALL) {
             lv_label_set_text(empty, "No live traffic yet");
         } else {
             lv_label_set_text_fmt(empty, "No %s traffic yet\n(filter is on - %s)",
@@ -21930,11 +21963,10 @@ static void dmDeleteSetFlash(const char *msg, uint32_t ttlMs = 2200) {
     s_dmDeleteFlashUntilMs = millis() + ttlMs;
 }
 
-// ── Delete confirmation ──────────────────────────────────────────────────
-// Deleting drops the whole conversation and its stored history, which nothing
-// on the device can bring back, so it asks first — the same Y/N prompt shape
-// the WiFi picker uses (openCfgWifiDeleteConfirm). Y/Enter confirms, N/close
-// cancels, and the prompt consumes every other key while it is up.
+// ── Destructive confirmation ─────────────────────────────────────────────
+// Shared by DM deletion and touch-only Live clearing. Both use the same Y/N
+// prompt shape as the WiFi picker: Y/Enter confirms, N/close cancels, and the
+// prompt consumes every other key while it is up.
 static void closeDmDeleteConfirm() {
     if (lvObjValid(s_dmDelBackdrop)) {
         lv_obj_del(s_dmDelBackdrop);
@@ -21944,12 +21976,24 @@ static void closeDmDeleteConfirm() {
     s_dmDelBackdrop = nullptr;
     s_dmDelModal = nullptr;
     s_dmDeleteTargetNodeId = 0;
+    s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
 }
 
 static void dmDeleteConfirmAccept() {
-    // Read before the close, which clears the target.
+    // Read before the close, which clears the action and target.
+    const DestructiveConfirmAction action = s_destructiveConfirmAction;
     uint32_t nodeId = s_dmDeleteTargetNodeId;
     closeDmDeleteConfirm();
+
+    if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
+        Channels.clearChannel(CHAN_LIVE);
+        s_lastRenderedLiveCount = -1;
+        s_lastRenderedLiveScrollOff = -1;
+        s_liveClearFlashUntilMs = millis() + 2200;
+        refreshLiveView(true);
+        return;
+    }
+    if (action != DESTRUCTIVE_CONFIRM_DM_DELETE) return;
     if (nodeId == 0) return;
 
     if (DMs.deleteConversation(nodeId)) {
@@ -21967,8 +22011,9 @@ static void dmDeleteConfirmAccept() {
 }
 
 static void dmDeleteConfirmReject() {
+    const DestructiveConfirmAction action = s_destructiveConfirmAction;
     closeDmDeleteConfirm();
-    refreshDmModal(true);
+    if (action == DESTRUCTIVE_CONFIRM_DM_DELETE) refreshDmModal(true);
 }
 
 static void onDmDelYesPressed(lv_event_t *e) {
@@ -21986,14 +22031,32 @@ static void onDmDelBackdropPressed(lv_event_t *e) {
     dmDeleteConfirmReject();
 }
 
-static void openDmDeleteConfirm(uint32_t nodeId) {
-    if (!s_rootScreen || nodeId == 0) return;
+static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nodeId) {
+    if (!s_rootScreen || action == DESTRUCTIVE_CONFIRM_NONE) return;
+    if (action == DESTRUCTIVE_CONFIRM_DM_DELETE && nodeId == 0) return;
+    if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR
+        && (!s_liveModal || Channels.get(CHAN_LIVE).count <= 0)) return;
     if (s_dmDelModal || s_dmDelBackdrop) return;
 
+    s_destructiveConfirmAction = action;
     s_dmDeleteTargetNodeId = nodeId;
 
-    char who[48];
-    nodesActionTitleLabel(nodeId, who, sizeof(who));
+    char titleText[40];
+    char bodyText[112];
+    if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR) {
+        snprintf(titleText, sizeof(titleText), "Clear entire live feed?");
+        if (s_liveFilter == LIVE_FILTER_ALL) {
+            snprintf(bodyText, sizeof(bodyText), "All live traffic will be erased");
+        } else {
+            snprintf(bodyText, sizeof(bodyText),
+                     "All live traffic will be erased, including lines hidden by the filter");
+        }
+    } else {
+        char who[48];
+        nodesActionTitleLabel(nodeId, who, sizeof(who));
+        snprintf(titleText, sizeof(titleText), "Delete conversation?");
+        snprintf(bodyText, sizeof(bodyText), "%s\nMessage history will be erased", who);
+    }
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -22041,7 +22104,7 @@ static void openDmDeleteConfirm(uint32_t nodeId) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Delete conversation?");
+    lv_label_set_text(title, titleText);
 
     lv_obj_t *body = lv_label_create(s_dmDelModal);
     lv_obj_set_width(body, lv_pct(100));
@@ -22049,9 +22112,7 @@ static void openDmDeleteConfirm(uint32_t nodeId) {
     lv_obj_set_style_text_color(body, bodyTextColor, 0);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-    // Names the peer and says what goes with it. The stored history is the part
-    // a list keystroke does not look like it can reach.
-    lv_label_set_text_fmt(body, "%s\nMessage history will be erased", who);
+    lv_label_set_text(body, bodyText);
 
     lv_obj_t *btnRow = lv_obj_create(s_dmDelModal);
     lv_obj_set_width(btnRow, lv_pct(100));
@@ -22084,6 +22145,21 @@ static void openDmDeleteConfirm(uint32_t nodeId) {
     makeDmDelBtn(btnRow, "(N)o", noBtnBg, onDmDelNoPressed);
     makeDmDelBtn(btnRow, "(Y)es", yesBtnBg, onDmDelYesPressed);
 }
+
+static void openDmDeleteConfirm(uint32_t nodeId) {
+    openDestructiveConfirm(DESTRUCTIVE_CONFIRM_DM_DELETE, nodeId);
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+static void openLiveClearConfirm() {
+    openDestructiveConfirm(DESTRUCTIVE_CONFIRM_LIVE_CLEAR, 0);
+}
+
+static void onLiveRowLongPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    openLiveClearConfirm();
+}
+#endif
 
 static void dmRequestDeleteSelectedConversation() {
     DmConv *selected = selectedDmConversation();

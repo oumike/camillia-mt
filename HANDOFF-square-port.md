@@ -34,8 +34,7 @@ Completed in this continuation:
   `tools/patch_lgfx_dmadesc.py`; the fresh-checkout "library not fetched yet"
   retry remains non-fatal.
 - Added `--square`, the interactive build menu entry, hardware-test array entry
-  and CI build. `release.sh` explicitly keeps Square out pending hardware
-  acceptance.
+  and CI build. `release.sh` now builds and publishes Square firmware assets.
 - Updated README and build/hardware docs using only the public `square`
   codename and marked it as a bring-up target with no release artifact.
 - Researched the user-supplied upstream Meshtastic branch. It resolves the
@@ -53,9 +52,10 @@ Completed in this continuation:
 - Set Square's logical display rotation to 0. With the sourced panel offset of
   1, LovyanGFX resolves this to internal rotation 1 (320x240), rotating the UI
   left 90 degrees from the previous internal rotation 2.
-- Square text entry is on-screen-only. All five reachable textarea flows share
-  a full-width keyboard layout; the target explicitly keeps `HAS_BLE_KEYBOARD`
-  at 0 and has no NimBLE/`ble_keyboard.cpp` build entries.
+- All five reachable Square textarea flows share a full-width on-screen keyboard
+  layout. The target also supports an optional external BLE keyboard through
+  `HAS_BLE_KEYBOARD`, with NimBLE 1.x and `ble_keyboard.cpp`; it remains off by
+  default and uses the existing Web Config mutual-exclusion safeguards.
 - The top Wake button reads expander bit 0 through the GPIO45 interrupt: a press
   wakes immediately, while a two-second hold when awake shuts the screen off.
 - Enabled the card as a one-bit SD_MMC backend on CLK 2 / CMD 3 / D0 1. Mounting
@@ -85,8 +85,7 @@ Validation performed in this continuation:
 
 The reference-fact blockers are resolved. Remaining work is executable
 validation: build, flash, inspect serial logs, sweep brightness, compare battery
-voltage against a meter, and test touch corners/radio/GNSS/SD. Audio remains a
-separate follow-up.
+voltage against a meter, and test touch corners/radio/GNSS/SD/audio.
 
 ---
 
@@ -126,7 +125,8 @@ keyboard feature (issue #40), which is *done and committed*. See §5.
 
 **All 8 targets build clean** (`pio run`), `square` included:
 `square` = 84.4% flash (2,764,617 / 3,276,800), 44.6% RAM. Most headroom of any
-board — it carries neither NimBLE (Heltec) nor the audio driver (Pager).
+board at that checkpoint. This result predates Square's later NimBLE and ES8311
+dependencies; no post-audio PlatformIO build has been run in this continuation.
 
 That satisfies the first acceptance criterion on #56. Nothing has been run on
 hardware yet.
@@ -233,7 +233,7 @@ source-backed bring-up state is:
 | 9 | GNSS RST | high (assert) → low (release) |
 | 10 | user LED | off |
 | 11 | USB OTG | off |
-| 12 | audio PA | off (no audio driver) |
+| 12 | audio PA | off while idle; enabled only during notification playback |
 | 13 | GNSS power | on |
 | 14 | SD power | enabled when SD_MMC mounts |
 | 15 | battery sense | off; enable only around a read |
@@ -258,17 +258,21 @@ vertical, compact-selector and low-memory paths stay separate.
 Square is in local selection, the hardware-test list and CI, but intentionally
 not in `RELEASE_ENVS`.
 
-### Remaining feature follow-up
+### ES8311 notification audio — implemented, needs hardware verification
 
-- Add ES8311/ES7243E audio only if tone/microphone support is desired.
+Square shares the Pager's click-suppressed 44.1 kHz ES8311 tone engine. The
+codec stays muted and PA bit 12 stays off while idle; playback powers the amp,
+waits the upstream 250 ms settle time, primes silence, then unmutes. Message
+sound styles, volume preview and splash melody use the existing settings. The
+ES7243E microphone remains out of scope.
 
 ---
 
 ## 5. Context: BLE keyboard (issue #40) — done, committed in v4.6.0
 
-Shipped on the **Heltec envs only** (`heltec-v4`, `heltec-v4-vertical`).
-`HAS_BLE_KEYBOARD` in `hal/board.h` is the whole gate; NimBLE and
-`ble_keyboard.cpp` are in those two envs' `lib_deps` / `build_src_filter` only.
+Originally shipped on the two Heltec envs. Square now opts into the same
+`HAS_BLE_KEYBOARD` gate, NimBLE dependency and `ble_keyboard.cpp` source path;
+its hardware coexistence remains to be verified.
 
 The one thing to know if you touch it: **Web Config and the BLE keyboard are
 mutually exclusive, enforced in both directions with an on-screen dialog**

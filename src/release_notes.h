@@ -6,11 +6,9 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Added a `square` build target for an unreleased 320240 touch board (SX1262 LoRa, GNSS, microSD, browser Host/Remote control). It is a bring-up target with hardware still unverified, so no `square` binary is attached to this release - build it yourself with `./build-upload-monitor.sh --square`.
+- Square: firmware is now published as a downloadable release binary (`camillia-mt-square-vX.Y.Z.bin`) instead of being build-only.
+- Square: can now pair an external Bluetooth Low Energy keyboard alongside the on-screen one, using the same default-off Config toggle, pairing dialog, and reconnect behavior as the Heltec V4 builds.
+- Square: the built-in speaker now plays message notifications and the optional startup melody, with the Default/Chirpy/Bass/Off sound styles and notification-volume controls. The amplifier stays powered down between sounds to avoid stray clicks.
 
 Changed
-- Heltec V4 (both orientations): in the Live view the Tools button moved to the left of the header and the filter chip is now pinned to the right edge, so long filter names like "Filter: Telemetry" stay fully readable; the "LIVE" title is now centered in the vertical layout as well.
-
----
-
-Not part of the notes: `platformio.ini:254` switches **heltec-v4** (landscape only) from `partitions_16mb_fs.csv` to `partitions.csv`, which drops the 9.5 MB LittleFS partition that board uses for config export/import and the node archive - while the new `square` env takes `partitions_16mb_fs.csv` even though `docs/HARDWARE.md`/`BUILD.md` in this same diff say Heltec keeps the FS table and Square uses the standard one. It reads like the two values landed in the wrong env blocks; worth checking before you tag v4.6.1.)CAMNOTES";
+- Heltec V4 (both orientations) and Square: long-pressing a line in the Live feed now asks for confirmation before clearing the feed. Declining leaves the feed and your scroll position untouched; confirming erases all Live traffic, including lines hidden by the active filter.)CAMNOTES";

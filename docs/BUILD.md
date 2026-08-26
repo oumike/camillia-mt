@@ -21,9 +21,7 @@ Supported release file names:
 - `camillia-mt-heltec-vertical-vX.Y.Z.bin`
 - `camillia-mt-mesh-deck-vX.Y.Z.bin`
 - `camillia-mt-m9-vX.Y.Z.bin`
-
-The `square` environment is a bring-up target and intentionally has no release
-binary until its hardware acceptance checks pass.
+- `camillia-mt-square-vX.Y.Z.bin`
 
 Then run:
 

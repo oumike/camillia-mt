@@ -320,7 +320,7 @@
 #define MY_SPLASH_MELODY_ENABLED 1
 
 // Notification volume, percent. Scales the tone amplitude on boards that
-// synthesize audio (Pager/T-Deck I2S, Cardputer speaker). Boards that alert
+// synthesize audio (Pager/Square/T-Deck I2S, Cardputer speaker). Boards that alert
 // through a plain piezo buzzer have no amplitude control, so the setting is
 // hidden there rather than shown doing nothing. Same 10% steps as brightness.
 #define VOLUME_PCT_MIN   0
@@ -329,12 +329,12 @@
 #define MY_VOLUME_PCT    50
 
 // Whether the board can make a sound at all. Mirrors the branches that actually
-// exist in triggerMessageAlert() and playSplashStartupRiff(): the three boards
-// with an audio path, plus anything with a passive buzzer on a GPIO. The Mesh
+// exist in triggerMessageAlert() and playSplashStartupRiff(): the boards with a
+// synthesized-audio path, plus anything with a passive buzzer on a GPIO. The Mesh
 // Deck has neither — BOARD_BUZZER is -1 and no I2S/codec path is wired — so
 // every tone call there compiles to nothing, and the alert-sound, splash-melody
 // and volume settings were UI for hardware that does not exist.
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) \
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_SQUARE) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || (BOARD_BUZZER >= 0)
 #define HAS_AUDIO_ALERTS 1
 #else

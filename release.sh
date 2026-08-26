@@ -9,9 +9,8 @@ RELEASE_ENVS=(
     heltec-v4-vertical
     mesh-deck
     m9
+    square
 )
-# Square stays out until its hardware acceptance checks pass. Do not publish an
-# artifact merely because the environment compiles.
 
 # Lookups are functions rather than associative arrays so the script runs on
 # macOS's stock bash 3.2 (which lacks `declare -A`).
@@ -309,7 +308,7 @@ generate_ai_summary() {
 
     prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
 firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Lora Pager TFT, M5Stack
-Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9).
+Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Square).
 
 Summarize what changed in release ${TAG} for the people who flash and use it.
 
