@@ -1334,44 +1334,6 @@ static void setupVScroll(lv_obj_t *obj) {
     lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLL_ELASTIC);
 }
 
-#if UI_TOUCH_ONLY_PROFILE
-// One Close button, for every modal on the touch-only build that a keyboard
-// build closes with Backspace. There is no key to name in a hint here, so those
-// modals need a control instead — and they should all be the same control, in
-// the same place, looking the same.
-//
-// Returns the button so a caller can override its placement: the traceroute
-// popup is a fixed 96px tall and pins its footer with IGNORE_LAYOUT rather than
-// spending a flex row on it.
-static lv_obj_t *appendHeltecCloseButton(lv_obj_t *parent, lv_event_cb_t onClose,
-                                         int width, int height = 24,
-                                         const char *text = "Close") {
-    if (!parent) return nullptr;
-    lv_obj_t *btn = lv_btn_create(parent);
-    if (!btn) return nullptr;
-    if (width > 0) lv_obj_set_width(btn, width);
-    else           lv_obj_set_width(btn, lv_pct(100));
-    lv_obj_set_height(btn, height);
-    lv_obj_set_style_radius(btn, 4, 0);
-    lv_obj_set_style_pad_all(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 0, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(btn, onClose, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *lbl = lv_label_create(btn);
-    if (lbl) {
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(lbl, text);
-        lv_obj_center(lbl);
-    }
-    return btn;
-}
-#endif
-
 static inline bool lvObjValid(lv_obj_t *obj) {
     return obj && lv_obj_is_valid(obj);
 }
@@ -1913,6 +1875,90 @@ static void stateMapBootstrapRestoreWifi() {
 #ifndef LV_SYMBOL_GLOBE_TINY
 #define LV_SYMBOL_GLOBE_TINY LV_SYMBOL_WIFI
 #endif
+
+#if UI_TOUCH_ONLY_PROFILE
+// One X, in the top-right corner, for every screen and modal on the touch-only
+// build that a keyboard build closes with Backspace.
+//
+// These used to be three different controls: a full-width "Close" at the foot
+// of some modals, a 44-48px "Close" in the header bar of the full-screen ones,
+// and a corner X on Channels — one action wearing three shapes, in three
+// places. The corner X is the one that works everywhere. It costs no row in the
+// layout, so nothing has to give up height for it; it never ends up below the
+// fold of a scrolling list; and it lands in the same place on every screen, so
+// the way out is somewhere you look rather than somewhere you hunt for.
+//
+// FLOATING rather than IGNORE_LAYOUT: LVGL skips floating children in the flex
+// layout AND in the content-size and scroll calculations, and does not move
+// them when the parent scrolls. That lets this be a child of the modal itself —
+// deleted with it, no orphan left on the screen behind — while still staying
+// pinned in the corner of a modal whose body scrolls (Device Info, Channels)
+// and adding nothing to the height of one sized LV_SIZE_CONTENT.
+//
+// Returns the button so a caller can re-align it: the full-screen tools hang it
+// off the right end of their header bar instead of the modal's own corner.
+static constexpr int kHeltecCloseXSize = 26;
+
+static lv_obj_t *appendHeltecCloseX(lv_obj_t *parent, lv_event_cb_t onClose,
+                                    int size = kHeltecCloseXSize) {
+    if (!parent) return nullptr;
+    lv_obj_t *btn = lv_btn_create(parent);
+    if (!btn) return nullptr;
+    const bool light = (s_cfg.uiMode == UI_MODE_LIGHT);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(btn, size, size);
+    lv_obj_align(btn, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_radius(btn, 4, 0);
+    lv_obj_set_style_pad_all(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn, light ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(btn, light ? LV_OPA_COVER : LV_OPA_80, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, light ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x8FB5E6), 0);
+    lv_obj_add_event_cb(btn, onClose, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    if (lbl) {
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, light ? lv_color_hex(0x13233D)
+                                               : lv_color_hex(0xE8F1FF), 0);
+        lv_label_set_text(lbl, LV_SYMBOL_CLOSE);
+        lv_obj_center(lbl);
+    }
+    // Above whatever the modal draws under it: a title that runs the full width
+    // of the panel, a chart, a list row.
+    lv_obj_move_foreground(btn);
+    return btn;
+}
+
+// Keeps a full-width title clear of the corner X. A centred LV_LABEL_LONG_DOT
+// title is laid out in the label's content box, so padding the right edge is
+// what moves the ellipsis in from under the button. For a title that is already
+// taller than the button — a two-line one — this is all that is needed.
+static void reserveHeltecCloseXGap(lv_obj_t *title, int size = kHeltecCloseXSize) {
+    if (title) lv_obj_set_style_pad_right(title, size + 4, 0);
+}
+
+// The same, for the usual single-line title: it also grows the title row to the
+// height of the button. The X floats, so nothing else in the modal reserves
+// space for it — without this it would hang below the title and cover the top
+// of whatever comes next (the first list row, the corner of a map or a chart,
+// the first line of a body of text), which is both ugly and, since the button
+// is in front, a tap target sitting on top of another one.
+//
+// The text is centred against the button rather than left at the top of the
+// taller row, so the two read as one title bar.
+static void reserveHeltecCloseXRow(lv_obj_t *title, int size = kHeltecCloseXSize) {
+    if (!title) return;
+    const lv_font_t *font = lv_obj_get_style_text_font(title, LV_PART_MAIN);
+    const int lineH = font ? (int)lv_font_get_line_height(font) : 16;
+    int padTop = (size - lineH) / 2;
+    if (padTop < 0) padTop = 0;
+    lv_obj_set_height(title, size);
+    lv_obj_set_style_pad_top(title, padTop, 0);
+    reserveHeltecCloseXGap(title, size);
+}
+#endif  // UI_TOUCH_ONLY_PROFILE
 
 static size_t decodeUtf8Codepoint(const char *src, size_t avail, uint32_t &cp) {
     cp = 0;
@@ -7407,14 +7453,16 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    // No "tap outside to close" any more: the Close button at the foot of the
-    // modal says it, and it says it where the finger can reach. The tray covers
-    // all but a 6px margin of the screen, so the backdrop it was pointing at was
-    // barely a target at all.
+    // No "tap outside to close" any more: the corner X says it, and it says it
+    // where the finger can reach. The tray covers all but a 6px margin of the
+    // screen, so the backdrop it was pointing at was barely a target at all.
     lv_label_set_text(hint, symbolTray ? "Tap a symbol"
                             : tapback  ? "Tap to react"
                             : sendMode ? "Tap to send"
                                        : "Tap to add");
+    // This modal has no title: the hint is its top row, so it is the one that
+    // has to make room for the X above the tray.
+    reserveHeltecCloseXRow(hint);
 #else
     lv_label_set_text_fmt(hint, symbolTray ? "Move • Enter=Insert • %s=Close"
                                 : tapback  ? "Move • Enter=React • %s=Close"
@@ -7428,11 +7476,10 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     lv_obj_set_width(grid, lv_pct(100));
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
 #if UI_TOUCH_ONLY_PROFILE
-    // 28px lower than the other builds: the Close button below the grid and its
-    // row gap have to fit inside the modal's own (h - 14) cap, and the grid is
-    // what gives up the space. Hint + gap + grid + gap + button + padding then
-    // comes to exactly that cap.
-    lv_obj_set_style_max_height(grid, (h > 88) ? (h - 72) : LV_SIZE_CONTENT, 0);
+    // 12px lower than the keyboard builds: the hint row is grown to the height
+    // of the corner X, and the grid is what gives up the space. Hint + gap +
+    // grid + padding then comes to the modal's own (h - 14) cap.
+    lv_obj_set_style_max_height(grid, (h > 72) ? (h - 56) : LV_SIZE_CONTENT, 0);
 #else
     lv_obj_set_style_max_height(grid, (h > 60) ? (h - 44) : LV_SIZE_CONTENT, 0);
 #endif
@@ -7489,36 +7536,16 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
 
 #if UI_TOUCH_ONLY_PROFILE
     // Built after the grid, not before it: refreshEmojiPickerSelection() reaches
-    // the grid as child [1] of the modal, so the button has to land at [2].
+    // the grid as child [1] of the modal, and the X has to land after it.
     //
     // Allocated like the cells above — this is the largest burst in the UI and
     // the tray is what usually exhausts the pool, so a failure here closes the
     // picker rather than leaving one with no way out.
-    lv_obj_t *emojiCloseBtn = lv_btn_create(s_emojiPickerModal);
-    if (!emojiCloseBtn) {
+    if (!appendHeltecCloseX(s_emojiPickerModal,
+                            [](lv_event_t *ev) { LV_UNUSED(ev); closeEmojiPicker(); })) {
         logLvglMemDiag("emoji picker aborted (low LVGL mem)");
         closeEmojiPicker();
         return;
-    }
-    lv_obj_set_width(emojiCloseBtn, lv_pct(100));
-    lv_obj_set_height(emojiCloseBtn, 24);
-    lv_obj_set_style_radius(emojiCloseBtn, 4, 0);
-    lv_obj_set_style_pad_all(emojiCloseBtn, 0, 0);
-    lv_obj_set_style_shadow_width(emojiCloseBtn, 0, 0);
-    lv_obj_set_style_bg_color(emojiCloseBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(emojiCloseBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(emojiCloseBtn, 1, 0);
-    lv_obj_set_style_border_color(emojiCloseBtn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(emojiCloseBtn,
-                        [](lv_event_t *ev) { LV_UNUSED(ev); closeEmojiPicker(); },
-                        LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *emojiCloseLbl = lv_label_create(emojiCloseBtn);
-    if (emojiCloseLbl) {
-        lv_obj_set_style_text_font(emojiCloseLbl, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(emojiCloseLbl, lv_color_hex(0xE8F1FF), 0);
-        lv_label_set_text(emojiCloseLbl, "Close");
-        lv_obj_center(emojiCloseLbl);
     }
 #endif
 
@@ -9201,7 +9228,7 @@ static void setCfgBrightnessPreview(int pct) {
 // Channel Edit and Time & Date had a Save cell in their grid but no signposted
 // discard at all.
 //
-// Named next to appendHeltecCloseButton() because it is the same class of
+// Named next to appendHeltecCloseX() because it is the same class of
 // affordance, and shares its styling so a board only ever grows one look.
 // commitText lets a caller say "Apply" where that reads better than "Save".
 static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
@@ -11518,41 +11545,19 @@ static void openChanCfgModal() {
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_move_foreground(s_chanCfgBackdrop);
 
-#if UI_TOUCH_ONLY_PROFILE
-    // A corner close rather than the usual bottom Close button, because this
-    // modal is a scrolling list: anything appended at the end sits below the
-    // fold once there are enough channels, and a control you have to scroll to
-    // find is barely a control.
-    //
-    // Parented to the BACKDROP, not the modal. A child of the modal would be
-    // part of its scroll content and would slide out of the corner as soon as
-    // the list moved. The backdrop's own click handler ignores events whose
-    // target is not the backdrop itself, so tapping this never doubles as a
-    // dismiss. Positioned against the modal once the layout is resolved, at the
-    // end of this function.
-    lv_obj_t *chanCloseBtn = lv_btn_create(s_chanCfgBackdrop);
-    lv_obj_set_size(chanCloseBtn, 26, 26);
-    lv_obj_set_style_radius(chanCloseBtn, 4, 0);
-    lv_obj_set_style_pad_all(chanCloseBtn, 0, 0);
-    lv_obj_set_style_shadow_width(chanCloseBtn, 0, 0);
-    lv_obj_set_style_bg_color(chanCloseBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(chanCloseBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(chanCloseBtn, 1, 0);
-    lv_obj_set_style_border_color(chanCloseBtn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(chanCloseBtn, onChanCfgClosePressed, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *chanCloseLbl = lv_label_create(chanCloseBtn);
-    lv_obj_set_style_text_font(chanCloseLbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(chanCloseLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(chanCloseLbl, LV_SYMBOL_CLOSE);
-    lv_obj_center(chanCloseLbl);
-#endif
-
     lv_obj_t *title = lv_label_create(s_chanCfgModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Channels");
+#if UI_TOUCH_ONLY_PROFILE
+    // The corner X this modal has always had, now the shared one. It is a child
+    // of the modal like every other: the FLOATING flag keeps it pinned to the
+    // corner while the channel list scrolls underneath.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_chanCfgModal, onChanCfgClosePressed);
+#endif
 
     lv_obj_t *hint = lv_label_create(s_chanCfgModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -11614,12 +11619,6 @@ static void openChanCfgModal() {
     // scroll_to_view() is a no-op until the tree has geometry, so resolve the
     // layout before the initial selection tries to scroll itself into view.
     lv_obj_update_layout(s_chanCfgModal);
-#if UI_TOUCH_ONLY_PROFILE
-    // After the layout: the modal is LV_SIZE_CONTENT, so before this it has no
-    // height to align against. Foreground so the rows cannot draw over it.
-    lv_obj_align_to(chanCloseBtn, s_chanCfgModal, LV_ALIGN_TOP_RIGHT, -3, 3);
-    lv_obj_move_foreground(chanCloseBtn);
-#endif
     refreshChanCfgSelection();
 }
 
@@ -13706,6 +13705,11 @@ static void openCfgBleKbdModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Bluetooth Keyboard");
 
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_cfgBleKbdModal, onCfgBleKbdClosePressed);
+#endif
+
     s_cfgBleKbdStatus = lv_label_create(s_cfgBleKbdModal);
     lv_obj_set_width(s_cfgBleKbdStatus, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgBleKbdStatus, &lv_font_montserrat_10, 0);
@@ -13731,7 +13735,8 @@ static void openCfgBleKbdModal() {
                           LV_FLEX_ALIGN_START);
 
     // Buttons, not key hints: this board has no keyboard of its own, so until
-    // one is paired the only way to drive this dialog is the touch panel.
+    // one is paired the only way to drive this dialog is the touch panel. Only
+    // the three actions live here — closing is the corner X, as everywhere.
     lv_obj_t *btnRow = lv_obj_create(s_cfgBleKbdModal);
     lv_obj_set_width(btnRow, lv_pct(100));
     lv_obj_set_height(btnRow, 30);
@@ -13746,7 +13751,6 @@ static void openCfgBleKbdModal() {
 
     struct BleKbdButton { const char *label; lv_event_cb_t cb; };
     const BleKbdButton kButtons[] = {
-        { "Close",  onCfgBleKbdClosePressed  },
         { "Scan",   onCfgBleKbdScanPressed   },
         { "Pair",   onCfgBleKbdPairPressed   },
         { "Forget", onCfgBleKbdForgetPressed },
@@ -14160,32 +14164,13 @@ static void openCfgActionMessageModal(const char *msg) {
     lv_label_set_text(body, displayMsg);
 
 #if UI_TOUCH_ONLY_PROFILE
-    // Touch-only build: a Close button where the key hint used to be. Tapping
-    // the backdrop already dismissed this, but that is a gesture you have to
-    // know about, and this popup is the one that tells you what an action just
-    // did — it should not be the one you have to guess your way out of.
-    lv_obj_t *closeBtn = lv_btn_create(s_cfgActionMsgModal);
-    lv_obj_set_width(closeBtn, contentW);
-    lv_obj_set_height(closeBtn, 24);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 0, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    // Takes its colours from the modal's own light/dark pair rather than the
-    // fixed blues used by the buttons on the chat screen: this popup is the one
-    // that flips its whole palette in light mode.
-    lv_obj_set_style_bg_color(closeBtn, lightUi ? bodyPanelBg : lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(closeBtn, 1, 0);
-    lv_obj_set_style_border_color(closeBtn, modalBorder, 0);
-    lv_obj_add_event_cb(closeBtn,
-                        [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgActionMessageModal(); },
-                        LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(closeLbl, lightUi ? bodyTextColor : lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    // Touch-only build: a corner X where the key hint used to be. Tapping the
+    // backdrop already dismissed this, but that is a gesture you have to know
+    // about, and this popup is the one that tells you what an action just did —
+    // it should not be the one you have to guess your way out of.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_cfgActionMsgModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgActionMessageModal(); });
 #else
     lv_obj_t *hint = lv_label_create(s_cfgActionMsgModal);
     lv_obj_set_width(hint, contentW);
@@ -14266,54 +14251,20 @@ static void openNodeInfoModal() {
     lv_obj_set_flex_flow(s_nodeInfoModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_nodeInfoModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-#if UI_TOUCH_ONLY_PROFILE
-    // Touch-only build: there is no key to press, so the title shares its row
-    // with a real Close button. It goes at the top rather than under the rows
-    // because the list can be taller than the panel — a button below it would
-    // have to be scrolled to before it could be tapped.
-    lv_obj_t *header = lv_obj_create(s_nodeInfoModal);
-    lv_obj_set_width(header, lv_pct(100));
-    lv_obj_set_height(header, LV_SIZE_CONTENT);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_set_style_pad_column(header, 6, 0);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *title = lv_label_create(header);
-    lv_obj_set_flex_grow(title, 1);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, "Device Info");
-
-    // Same shape as the touch buttons on the slider modal, so the one control
-    // this popup has looks like the ones next door.
-    lv_obj_t *closeBtn = lv_btn_create(header);
-    lv_obj_set_size(closeBtn, 62, 24);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 0, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(closeBtn, 1, 0);
-    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(closeBtn,
-                        [](lv_event_t *ev) { LV_UNUSED(ev); closeNodeInfoModal(); },
-                        LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
-#else
     lv_obj_t *title = lv_label_create(s_nodeInfoModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "Device Info");
+
+#if UI_TOUCH_ONLY_PROFILE
+    // The title no longer has to share its row with a Close button: the X
+    // floats over the corner. It still has to be the corner rather than the
+    // foot of the list — this modal scrolls, and a control down there would
+    // have to be scrolled to before it could be tapped.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_nodeInfoModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeNodeInfoModal(); });
 #endif
 
     // Device rows go in the left column and environment readings in the right,
@@ -14620,9 +14571,9 @@ static void openSysStatsModal() {
     // Reachable here only through a keyboard driven over VNC (five presses of
     // I), so without this the one way out was the keyboard that opened it —
     // and whoever walked over to the device itself was stuck.
-    appendHeltecCloseButton(s_sysStatsModal,
-                            [](lv_event_t *ev) { LV_UNUSED(ev); closeSysStatsModal(); },
-                            /*width=*/0);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_sysStatsModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeSysStatsModal(); });
 #else
     lv_obj_t *hint = lv_label_create(s_sysStatsModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -16524,7 +16475,10 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
 
 #if UI_TOUCH_ONLY_PROFILE
-    appendHeltecCloseButton(s_nodeLocateModal, onNodeLocateClosePressed, 84);
+    // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
+    // width, so it has to be told to stop short of the X.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
 #endif
 
     // Lend the renderer its objects, then let it draw.
@@ -16919,7 +16873,8 @@ static void openNodeLosModal(uint32_t nodeId) {
     lv_label_set_text(s_nodeLosVerdict, "");
 
 #if UI_TOUCH_ONLY_PROFILE
-    appendHeltecCloseButton(s_nodeLosModal, onNodeLosClosePressed, 84);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_nodeLosModal, onNodeLosClosePressed);
 #endif
 
     if (!haveSelf) {
@@ -17871,17 +17826,13 @@ static void openTracerouteProgressModal(uint32_t nodeId, uint32_t packetId) {
     lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -2);
 #if UI_TOUCH_ONLY_PROFILE
-    // The hint object above is left unused on this build: a button goes in its
-    // place, pinned the same way so the fixed 96px modal spends no extra height
-    // on it.
+    // The hint object above is left unused on this build: there is no key to
+    // name, and the way out is the corner X. The fixed 96px modal spends no
+    // height on either.
     lv_obj_add_flag(hint, LV_OBJ_FLAG_HIDDEN);
-    if (lv_obj_t *closeBtn = appendHeltecCloseButton(
-            s_tracerouteModal,
-            [](lv_event_t *ev) { LV_UNUSED(ev); closeTracerouteProgressModal(); },
-            /*width=*/64, /*height=*/18)) {
-        lv_obj_add_flag(closeBtn, LV_OBJ_FLAG_IGNORE_LAYOUT);
-        lv_obj_align(closeBtn, LV_ALIGN_BOTTOM_MID, 0, -1);
-    }
+    appendHeltecCloseX(s_tracerouteModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeTracerouteProgressModal(); },
+                       /*size=*/22);
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(hint, "Bksp=Close");
 #else
@@ -18714,24 +18665,12 @@ static void openChannelActionsModal() {
     lv_obj_center(shareLbl);
 
 #if UI_TOUCH_ONLY_PROFILE
-    // Touch-only board: provide an explicit Close button instead of a keyboard hint.
-    lv_obj_t *closeBtn = lv_btn_create(s_channelActionsModal);
-    lv_obj_set_width(closeBtn, lv_pct(100));
-    lv_obj_set_height(closeBtn, btnH);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 2, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
-    lv_obj_add_event_cb(closeBtn, onChannelActionClosePressed, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(closeLbl,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    // Touch-only board: the corner X stands in for the keyboard hint, and the
+    // two actions keep the full width of the modal to themselves. The title
+    // carries a channel name on its second line, so it is told to stop short of
+    // the button.
+    reserveHeltecCloseXGap(title);
+    appendHeltecCloseX(s_channelActionsModal, onChannelActionClosePressed);
 #else
     lv_obj_t *hint = lv_label_create(s_channelActionsModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -19279,27 +19218,11 @@ static void openLiveToolsModal() {
     }
 
 #if UI_TOUCH_ONLY_PROFILE
-    // No close key on this build, so the way out has to be on screen. The chart
-    // modals hang this off a header bar; this modal has none, so it goes in the
-    // flex flow under the grid where it is also a bigger tap target.
-    lv_obj_t *closeBtn = lv_btn_create(s_liveToolsModal);
-    lv_obj_set_size(closeBtn, 72, 22);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 0, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(closeBtn, 1, 0);
-    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(closeBtn,
-                        [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); },
-                        LV_EVENT_CLICKED,
-                        nullptr);
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    // No close key on this build, so the way out has to be on screen — the same
+    // corner X the tools it opens are closed with.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_liveToolsModal,
+                       [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); });
 #endif
 
     refreshLiveToolsSelection();
@@ -19431,9 +19354,11 @@ static void openLiveFilterModal() {
     // everywhere else — on every panel above the Cardputer's, all five rows fit
     // and no scrollbar appears.
     {
-        // Title, hint (or the touch build's Close button) and the paddings
-        // between them; the rest of the panel is the grid's to use.
-        constexpr int kFilterChromeH = 52;
+        // Title, the hint below it on keyboard builds, and the paddings
+        // between them; the rest of the panel is the grid's to use. The touch
+        // build has neither hint nor footer — its X floats over the corner — so
+        // the grid gets that height back.
+        constexpr int kFilterChromeH = UI_TOUCH_ONLY_PROFILE ? 30 : 52;
         int gridMaxH = h - 2 * kChanModalPad - kFilterChromeH;
         const int minGridH = 2 * (kChanModalRowH + kChanModalGap);
         if (gridMaxH < minGridH) gridMaxH = minGridH;
@@ -19486,23 +19411,9 @@ static void openLiveFilterModal() {
 #if UI_TOUCH_ONLY_PROFILE
     // No close key on this build, so the way out has to be on screen — same
     // treatment the Tools modal gets.
-    lv_obj_t *closeBtn = lv_btn_create(s_liveFilterModal);
-    lv_obj_set_size(closeBtn, 72, 22);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 0, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(closeBtn, 1, 0);
-    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(closeBtn,
-                        [](lv_event_t *e) { LV_UNUSED(e); closeLiveFilterModal(); },
-                        LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_liveFilterModal,
+                       [](lv_event_t *e) { LV_UNUSED(e); closeLiveFilterModal(); });
 #endif
 
     refreshLiveFilterSelection();
@@ -19699,26 +19610,13 @@ static void openChUtilChartModal() {
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
-    // Touch close button anchored to the right side of the header.
-    lv_obj_t *headerClose = lv_btn_create(header);
-    lv_obj_set_size(headerClose, 48, 20);
-    lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_radius(headerClose, 4, 0);
-    lv_obj_set_style_pad_all(headerClose, 0, 0);
-    lv_obj_set_style_shadow_width(headerClose, 0, 0);
-    lv_obj_set_style_bg_color(headerClose, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(headerClose, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(headerClose, 1, 0);
-    lv_obj_set_style_border_color(headerClose, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(headerClose,
-                        [](lv_event_t *e) { LV_UNUSED(e); closeChUtilChartModal(); },
-                        LV_EVENT_CLICKED,
-                        nullptr);
-    lv_obj_t *headerCloseLbl = lv_label_create(headerClose);
-    lv_obj_set_style_text_font(headerCloseLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(headerCloseLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(headerCloseLbl, "Close");
-    lv_obj_center(headerCloseLbl);
+    // The corner X, sized to the header bar it sits in. This modal fills the
+    // panel, so the right end of its header is the top-right corner.
+    if (lv_obj_t *headerClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeChUtilChartModal(); },
+            /*size=*/20)) {
+        lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
 #endif
 
     // Bottom-to-top, matching lv_scale's vertical tick order.
@@ -19891,26 +19789,13 @@ static void openSnrRssiChartModal() {
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
-    // Touch close button anchored to the right side of the header.
-    lv_obj_t *headerClose = lv_btn_create(header);
-    lv_obj_set_size(headerClose, 48, 20);
-    lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_radius(headerClose, 4, 0);
-    lv_obj_set_style_pad_all(headerClose, 0, 0);
-    lv_obj_set_style_shadow_width(headerClose, 0, 0);
-    lv_obj_set_style_bg_color(headerClose, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(headerClose, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(headerClose, 1, 0);
-    lv_obj_set_style_border_color(headerClose, lv_color_hex(0x8FB5E6), 0);
-    lv_obj_add_event_cb(headerClose,
-                        [](lv_event_t *e) { LV_UNUSED(e); closeSnrRssiChartModal(); },
-                        LV_EVENT_CLICKED,
-                        nullptr);
-    lv_obj_t *headerCloseLbl = lv_label_create(headerClose);
-    lv_obj_set_style_text_font(headerCloseLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(headerCloseLbl, lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(headerCloseLbl, "Close");
-    lv_obj_center(headerCloseLbl);
+    // The corner X, sized to the header bar it sits in. This modal fills the
+    // panel, so the right end of its header is the top-right corner.
+    if (lv_obj_t *headerClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeSnrRssiChartModal(); },
+            /*size=*/20)) {
+        lv_obj_align(headerClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
 #endif
 
     // Bottom-to-top. Units live in the modal title ("SNR (dB) / RSSI (dBm)")
@@ -20275,9 +20160,14 @@ static void openBeaconsModal() {
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
     };
-    makeBeaconsBtn(header, "Close", 0,
-                   [](lv_event_t *e) { LV_UNUSED(e); closeBeaconsModal(); });
-    makeBeaconsBtn(header, "Clear", -48,
+    // Close is the corner X, at the right end of the bar; the actions queue up
+    // to its left, 24px per X and 48 per 44px button.
+    if (lv_obj_t *beaconsClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeBeaconsModal(); },
+            /*size=*/20)) {
+        lv_obj_align(beaconsClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    makeBeaconsBtn(header, "Clear", -24,
                    [](lv_event_t *e) { LV_UNUSED(e); beaconsClear(); });
 #else
     lv_obj_center(title);
@@ -20690,8 +20580,8 @@ static void openMqttMonitorModal() {
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_label_set_text(title, titleText);
 #if UI_TOUCH_ONLY_PROFILE
-    // Three buttons now sit on the right of this header, not two.
-    lv_obj_set_width(title, modalW - 156);
+    // Two buttons and the corner X sit on the right of this header.
+    lv_obj_set_width(title, modalW - 136);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     auto makeMqttMonBtn = [](lv_obj_t *parent, const char *text, int xOffset,
@@ -20713,11 +20603,14 @@ static void openMqttMonitorModal() {
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
     };
-    makeMqttMonBtn(header, "Close", 0,
-                   [](lv_event_t *e) { LV_UNUSED(e); closeMqttMonitorModal(); });
-    makeMqttMonBtn(header, "Reset", -48,
+    if (lv_obj_t *mqttMonClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeMqttMonitorModal(); },
+            /*size=*/20)) {
+        lv_obj_align(mqttMonClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    makeMqttMonBtn(header, "Reset", -24,
                    [](lv_event_t *e) { LV_UNUSED(e); mqttMonitorReset(); });
-    makeMqttMonBtn(header, "Send", -96,
+    makeMqttMonBtn(header, "Send", -72,
                    [](lv_event_t *e) { LV_UNUSED(e); openMqttSendModal(); });
 #else
     lv_obj_set_width(title, lv_pct(100));
@@ -21801,10 +21694,10 @@ static void openDiscoveryModal() {
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
-    // Touch build: Sweep and Close both live in the header, as on the charts.
-    // 44px rather than the charts' 48: three buttons plus their gaps have to
-    // clear the title, and the vertical build only has 240px of header to
-    // spend. Heltec has no SD slot, so there is no Save button to fit as well.
+    // Touch build: Sweep and Clear live in the header beside the corner X, as
+    // on the charts. 44px buttons: they plus the X and their gaps have to clear
+    // the title, and the vertical build only has 240px of header to spend.
+    // Heltec has no SD slot, so there is no Save button to fit as well.
     auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, int xOffset,
                                lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
@@ -21824,14 +21717,17 @@ static void openDiscoveryModal() {
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
     };
-    makeDiscoveryBtn(header, "Close", 0,
-                     [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); });
-    makeDiscoveryBtn(header, "Sweep", -48, [](lv_event_t *e) {
+    if (lv_obj_t *discoveryClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); },
+            /*size=*/20)) {
+        lv_obj_align(discoveryClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    makeDiscoveryBtn(header, "Sweep", -24, [](lv_event_t *e) {
         LV_UNUSED(e);
         discoveryStartSweep();
         refreshDiscoveryModal(true);
     });
-    makeDiscoveryBtn(header, "Clear", -96, [](lv_event_t *e) {
+    makeDiscoveryBtn(header, "Clear", -72, [](lv_event_t *e) {
         LV_UNUSED(e);
         discoveryClear();
         refreshDiscoveryModal(true);
@@ -22691,9 +22587,9 @@ static void openDmNodePicker() {
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Esc = Back");
 #elif UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a node to start a DM");
-    appendHeltecCloseButton(s_dmNodePickerModal,
-                            [](lv_event_t *ev) { LV_UNUSED(ev); closeDmNodePicker(); },
-                            /*width=*/0);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_dmNodePickerModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeDmNodePicker(); });
 #else
     lv_label_set_text(hint, "Type = Filter   Enter = Open DM   Bksp = Back");
 #endif
@@ -23858,24 +23754,10 @@ static void openReleaseNotesModal() {
 
 #if UI_TOUCH_ONLY_PROFILE
     // Touch-only: the backdrop margin is too thin to aim at, so closing needs a
-    // real target.
-    lv_obj_t *closeBtn = lv_btn_create(s_releaseNotesModal);
-    lv_obj_set_width(closeBtn, lv_pct(100));
-    lv_obj_set_height(closeBtn, 30);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_pad_all(closeBtn, 2, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xE6ECF5) : lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_COVER, 0);
-    lv_obj_add_event_cb(closeBtn, onReleaseNotesClosePressed, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(closeLbl,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x13233D) : lv_color_hex(0xE8F1FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    // real target. The X takes no row of its own, so the notes get the height
+    // the old footer button was spending.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_releaseNotesModal, onReleaseNotesClosePressed);
 #else
     lv_obj_t *hint = lv_label_create(s_releaseNotesModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -23901,11 +23783,14 @@ static void openLegendModal() {
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     int modalH = 132;
 #if UI_TOUCH_ONLY_PROFILE
-    modalH = 142;
+    // Shorter than it was: the corner X floats, so the panel no longer has to
+    // find a row for a footer button — it only pays the 11px the title row
+    // grows by to sit level with the X.
+    modalH = 126;
 #if defined(DEVICE_UI_VERTICAL)
-    // Vertical Heltec wraps legend body text into more lines; reserve extra
-    // height so the Close button remains fully visible with padding.
-    modalH = 162;
+    // Vertical Heltec wraps legend body text into more lines, so it needs the
+    // extra height even without the button.
+    modalH = 142;
 #endif
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
@@ -24069,22 +23954,8 @@ static void openLegendModal() {
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
-    lv_obj_t *closeBtn = lv_btn_create(s_legendModal);
-    lv_obj_set_width(closeBtn, lv_pct(100));
-    lv_obj_set_height(closeBtn, 24);
-    lv_obj_set_style_radius(closeBtn, 4, 0);
-    lv_obj_set_style_shadow_width(closeBtn, 0, 0);
-    lv_obj_set_style_bg_color(closeBtn, lv_color_hex(0x16386F), 0);
-    lv_obj_set_style_bg_opa(closeBtn, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(closeBtn, 1, 0);
-    lv_obj_set_style_border_color(closeBtn, lv_color_hex(0x335D9D), 0);
-    lv_obj_add_event_cb(closeBtn, onLegendClosePressed, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *closeLbl = lv_label_create(closeBtn);
-    lv_obj_set_style_text_font(closeLbl, legendBodyFont, 0);
-    lv_obj_set_style_text_color(closeLbl, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(closeLbl, "Close");
-    lv_obj_center(closeLbl);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_legendModal, onLegendClosePressed);
 #else
     lv_obj_t *hint = lv_label_create(s_legendModal);
     lv_obj_set_width(hint, lv_pct(100));

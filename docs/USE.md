@@ -1443,10 +1443,16 @@ Primary usage is touch.
 - Use on-screen touch lists and buttons inside each modal
 - Tapping a Config row runs that action; tapping a node on the Nodes screen
   opens its node actions
-- **Every popup that a keyboard build closes with Backspace has a Close button
-  here instead** — Device Info, Action Result, the emoji tray, the traceroute
-  progress popup, the New DM node picker and the hidden system-stats screen.
-  Where a popup also dismissed on a tap outside it, that still works
+- **Every popup that a keyboard build closes with Backspace has an X in its
+  top-right corner here instead** — the same button, in the same place, on
+  every one of them: Channels, Device Info, Action Result, Help, Release Notes,
+  Bluetooth Keyboard, the emoji tray, Channel Actions, the Tools and Live
+  Filter pickers, Locate, Line of Sight, the traceroute progress popup, the New
+  DM node picker and the hidden system-stats screen. The full-screen tools —
+  the SNR/RSSI and Channel Utilization charts, Beacons, Discovery and the MQTT
+  monitor — put the same X at the right end of their header bar, with their own
+  actions to its left. Where a popup also dismissed on a tap outside it, that
+  still works
 - **Every popup that stages a value before committing has a Cancel/Save row**,
   in the same place and the same shape — the Brightness, Battery Trim, Location
   Precision and Light Timeout sliders, Notification Sound (whose commit reads
