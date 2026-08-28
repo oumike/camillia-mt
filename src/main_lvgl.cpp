@@ -1071,15 +1071,13 @@ enum HeltecNavTarget : uint8_t {
 };
 
 #if UI_TOUCH_NAV_BAR
-// Height of the bar, and so of the strip the chat screen gives up for it. The
-// touch-only boards have no keys to reach these screens with, so their bar is
-// sized for a thumb; the T-Deck's is a second way in beside the keyboard and
-// can afford to be the shorter one.
-#if UI_TOUCH_ONLY_PROFILE
+// Height of the bar, and so of the strip the chat screen gives up for it.
+//
+// One number for every board that draws the bar. The keyboard boards ran 24
+// for a while, on the reasoning that their bar is a second way in beside the
+// keys — but a tap target is a tap target whoever is aiming at it, and the four
+// pixels come out of a message list that can spare them.
 static constexpr int kBottomNavHeight = 28;
-#else
-static constexpr int kBottomNavHeight = 24;
-#endif
 #endif
 
 // Whether to draw the bottom nav bar at all. A touch-only board always does —
@@ -14894,15 +14892,13 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // U+1F464 with the base face would put a tofu box in the nav bar. A list
     // icon is a worse Nodes icon than a person, and a much better one than a
     // rectangle.
-#if UI_TOUCH_ONLY_PROFILE
+    // 14 on every board, keyboard ones included. The glyph and its shortcut
+    // letter do fit side by side at this size: the widest pair is the node
+    // roster's — a 16 px emoji beside "(N)" at 14.9 px — which comes to 32 px
+    // against the ~35 px a button has to give on a 320 px bar. (The letters are
+    // narrower than they look: "(C)" is 14 px at montserrat_10, not the ~17 px
+    // a glance at the parens suggests.)
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
-#else
-    // A keyboard board draws the shortcut letter beside the glyph, and the two
-    // together have to fit a button roughly 39 px wide. 12 rather than 14 is
-    // what buys the letter its room; on the widest symbol the pair would
-    // otherwise overrun the button and wrap.
-    const lv_font_t *const navIconFont = &lv_font_montserrat_12;
-#endif
     const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
     const bool navEmojiReady = (navEmojiFont != navIconFont);
     const char *const kContactIcon = "\U0001F464";  // bust in silhouette
@@ -14992,7 +14988,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_column(btn, 2, 0);
+        // 1 px, not 2: the glyph grew and this is part of what pays for it. The
+        // two read as one control at either gap — they are already the only
+        // things inside a bordered button.
+        lv_obj_set_style_pad_column(btn, 1, 0);
 
         lv_obj_t *label = lv_label_create(btn);
         // Bigger than the 10 the words used: a glyph carries no letters to
@@ -15039,8 +15038,10 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     if (!bar) return;
 
     // Fits "GPS 12" plus the wifi and envelope glyphs at montserrat_10, which
-    // is the widest this ever gets.
-    const int statusBoxW = 74;
+    // measure ~61 px together — the widest this realistically gets. The slack
+    // above that went to the buttons beside it, which need the width more: this
+    // box is read, not aimed at.
+    const int statusBoxW = 68;
 
     lv_obj_t *box = lv_obj_create(bar);
     lv_obj_set_size(box, statusBoxW, lv_pct(100));
