@@ -3113,6 +3113,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "clock restarts on each new message, and reading the message stops it "
             "immediately either way. Never means it keeps reminding until read.</p>";
 #endif
+#if HAS_NAV_BAR_TOGGLE
+    html += "<label>Bottom Nav Bar<select name='nav_bar'>"
+            "<option value='1'"; if ( gCfg->navBarEnabled) html += " selected"; html += ">Enabled</option>"
+            "<option value='0'"; if (!gCfg->navBarEnabled) html += " selected"; html += ">Disabled</option>"
+            "</select></label>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+            "Row of tappable icons along the bottom of the screen - Home, "
+            "Config, DM, Nodes, Live, Help. Disabled restores the keyboard "
+            "shortcut hints that used to sit there. The keys work either way.</p>";
+#endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"
             "<option value='1'"; if ( gCfg->splashMelodyEnabled) html += " selected"; html += ">Enabled</option>"
@@ -5233,6 +5243,12 @@ static void handlePostSave() {
     // save.
     if (server.hasArg("splash_melody")) {
         gCfg->splashMelodyEnabled = server.arg("splash_melody").toInt() != 0;
+    }
+    // hasArg-guarded for the same reason as splash_melody above: the control is
+    // only rendered where the bar is optional, and an absent field would
+    // otherwise read back as 0 and switch it off on every save.
+    if (server.hasArg("nav_bar")) {
+        gCfg->navBarEnabled = server.arg("nav_bar").toInt() != 0;
     }
 #if defined(DEVICE_MESH_DECK)
     // Legacy compatibility for older cached pages that still post notify_led:

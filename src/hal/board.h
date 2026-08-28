@@ -112,6 +112,23 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 #  define UI_TOUCH_ONLY_PROFILE 0
 #endif
 
+// ── Bottom icon nav bar ──────────────────────────────────────────────────────
+// Wider than UI_TOUCH_ONLY_PROFILE: a bar of tap targets is worth having on
+// anything you can tap, so the test is the panel, not the absence of a
+// keyboard. That takes in the touch-only boards and the two that have both a
+// keyboard and a touch panel (T-Deck, Mesh Deck).
+//
+// Board-capability driven rather than a list of DEVICE_ names, so a new board
+// with a touch panel gets the bar by declaring HAS_TOUCH and nothing else.
+// Where the board has a keyboard as well the bar is a preference — see
+// HAS_NAV_BAR_TOGGLE in config.h — and where it does not, taps are the only way
+// off a screen and the bar is not negotiable.
+#if UI_TOUCH_ONLY_PROFILE || HAS_TOUCH
+#  define UI_TOUCH_NAV_BAR 1
+#else
+#  define UI_TOUCH_NAV_BAR 0
+#endif
+
 // ── Screen mirror (VNC host) ─────────────────────────────────────────────────
 // Boards that serve their own browser viewer and stream the panel to it. Two
 // hardware prerequisites: PSRAM, because the host keeps a full RGB565 copy of

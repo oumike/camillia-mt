@@ -216,6 +216,32 @@ static lv_obj_t *s_chatNewMsgLabel = nullptr;
 static lv_obj_t *s_chatActBtn = nullptr;
 static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
+// Right-hand cluster of the bottom bar on builds where the nav buttons share it
+// with the GPS/WiFi/DM icons. nullptr everywhere else.
+static lv_obj_t *s_chatStatusBox = nullptr;
+#if HAS_NAV_BAR_TOGGLE
+// The same cluster on the copy of the bar that Config/DM/Nodes/Live carry. They
+// have to be their own objects rather than the chat screen's moved across: the
+// chat screen is still built underneath, and an object lives in exactly one
+// parent. Both sets are painted from one set of values in refreshHeaderStatus().
+static lv_obj_t *s_navStatusBox = nullptr;
+static lv_obj_t *s_navStatusGps = nullptr;
+static lv_obj_t *s_navStatusWifi = nullptr;
+static lv_obj_t *s_navStatusDm = nullptr;
+
+// Called by every modal that carries a bar, as it closes. Explicit rather than
+// leaning on lv_obj_is_valid(): the modal takes these objects with it, and LVGL
+// hands the freed addresses straight back to whatever is allocated next, so a
+// stale pointer can come back "valid" as something else entirely.
+static inline void clearNavBarStatusIcons() {
+    s_navStatusBox = nullptr;
+    s_navStatusGps = nullptr;
+    s_navStatusWifi = nullptr;
+    s_navStatusDm = nullptr;
+}
+#else
+static inline void clearNavBarStatusIcons() {}
+#endif
 static lv_obj_t *s_rootScreen = nullptr;
 static lv_obj_t *s_composeModal = nullptr;
 static lv_obj_t *s_composeInput = nullptr;
@@ -1039,7 +1065,36 @@ enum HeltecNavTarget : uint8_t {
     HELTEC_NAV_LIVE,
     HELTEC_NAV_ACTIONS,
     HELTEC_NAV_LEGEND,
+    // Not a screen of its own: chat is what is left when everything stacked on
+    // top of it is gone, so this one closes rather than opens.
+    HELTEC_NAV_HOME,
 };
+
+#if UI_TOUCH_NAV_BAR
+// Height of the bar, and so of the strip the chat screen gives up for it. The
+// touch-only boards have no keys to reach these screens with, so their bar is
+// sized for a thumb; the T-Deck's is a second way in beside the keyboard and
+// can afford to be the shorter one.
+#if UI_TOUCH_ONLY_PROFILE
+static constexpr int kBottomNavHeight = 28;
+#else
+static constexpr int kBottomNavHeight = 24;
+#endif
+#endif
+
+// Whether to draw the bottom nav bar at all. A touch-only board always does —
+// there is no keyboard to fall back on, so this is not a preference. Where the
+// board has both (HAS_NAV_BAR_TOGGLE), it is the user's call, and off restores
+// the key-hint strip the bar replaced.
+static inline bool bottomNavEnabled() {
+#if UI_TOUCH_ONLY_PROFILE
+    return true;
+#elif HAS_NAV_BAR_TOGGLE
+    return s_cfg.navBarEnabled;
+#else
+    return false;
+#endif
+}
 
 static ComposeTarget s_composeTarget = COMPOSE_TARGET_CHANNEL;
 static uint32_t s_composeDmNodeId = 0;
@@ -1091,6 +1146,12 @@ static uint32_t s_tdeckTrackballHoldStartMs = 0;
 static bool s_tdeckSuppressRollerClick = false;
 #endif
 static bool s_themeRebuildPending = false;
+#if HAS_NAV_BAR_TOGGLE
+// Same deferral as the theme rebuild, for the setting that changes the shape of
+// every screen rather than its colors.
+static bool s_navRebuildPending = false;
+static bool s_navRebuildReopenCfg = false;
+#endif
 static bool s_themeRebuildReopenCfg = false;
 static int s_themeRebuildCfgSelection = 0;
 static bool s_nodesWifiSessionActive = false;
@@ -1441,6 +1502,8 @@ static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
 static void openCfgColorPickerModal();
 static void openCfgBrightnessModal();
+static void openCfgScreenTimeoutModal();
+static const char *screenTimeoutName(uint32_t secs);
 static void closeCfgBrightnessModal();
 #if HAS_VOLUME_CONTROL
 static void openCfgVolumeModal();
@@ -1808,6 +1871,9 @@ static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
 static void rebuildUiForThemeChange(bool reopenCfg);
 static void scheduleThemeRebuild(bool reopenCfg);
+#if HAS_NAV_BAR_TOGGLE
+static void scheduleNavBarRebuild(bool reopenCfg);
+#endif
 static void processPendingThemeRebuild();
 static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection);
 static void applyChannelButtonTheme();
@@ -2210,9 +2276,13 @@ enum CfgActionId {
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_BRIGHTNESS,
+    CFG_ACTION_SCREEN_TIMEOUT,
     CFG_ACTION_BATT_DISPLAY,
     #if HAS_SCROLL_INVERT
     CFG_ACTION_INVERT_SCROLL,
+    #endif
+    #if HAS_NAV_BAR_TOGGLE
+    CFG_ACTION_NAV_BAR,
     #endif
     CFG_ACTION_BATT_CAL,
     CFG_ACTION_ANNOUNCE,
@@ -2412,6 +2482,13 @@ static uint8_t s_appliedUiMode = 0xFF;
 // applyUiThemePalette(); this one has no equivalent hook, so it is updated
 // wherever the font size is applied.
 static uint8_t s_appliedFontSize = 0xFF;
+#if HAS_NAV_BAR_TOGGLE
+// What the screens on display were actually built with. The web form writes
+// straight into s_cfg before the save callback runs, so s_cfg is no use for
+// telling "changed" from "unchanged" there — this is, the same way
+// s_appliedFontSize is for the font.
+static bool s_appliedNavBar = false;
+#endif
 
 static const char *msgAlertSoundName(uint8_t mode) {
     switch (mode) {
@@ -3977,9 +4054,18 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_BRIGHTNESS:
             snprintf(buf, bufLen, "Brightness: %u%%", (unsigned)s_cfg.brightness);
             break;
+        case CFG_ACTION_SCREEN_TIMEOUT:
+            snprintf(buf, bufLen, "Screen Timeout: %s",
+                     screenTimeoutName(s_cfg.screenOnSecs));
+            break;
         #if HAS_SCROLL_INVERT
         case CFG_ACTION_INVERT_SCROLL:
             snprintf(buf, bufLen, "Invert Scrolling: %s", s_cfg.invertScroll ? "On" : "Off");
+            break;
+        #endif
+        #if HAS_NAV_BAR_TOGGLE
+        case CFG_ACTION_NAV_BAR:
+            snprintf(buf, bufLen, "Nav Bar: %s", s_cfg.navBarEnabled ? "On" : "Off");
             break;
         #endif
         case CFG_ACTION_BATT_CAL:
@@ -8153,11 +8239,19 @@ static void initCfgActions() {
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
+    // Next to Brightness: both are about the backlight, and the pair is the
+    // usual reason someone opens this screen on a device running on a battery.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SCREEN_TIMEOUT;
     // Sits with the display preferences rather than the maintenance actions:
     // it is a comfort setting, changed once to taste. Only on boards with a
     // trackball to invert.
     #if HAS_SCROLL_INVERT
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_INVERT_SCROLL;
+    #endif
+    // With the display preferences for the same reason: it decides what the
+    // bottom of every screen looks like, and is set once to taste.
+    #if HAS_NAV_BAR_TOGGLE
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
     #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
@@ -9818,6 +9912,101 @@ static void openCfgLightTimeoutModal() {
 }
 #endif  // HAS_LIGHT_NOTIFY
 
+
+// ── Screen timeout ───────────────────────────────────────────────────────────
+// How long the panel stays lit with no input before it sleeps. Same ordered
+// slider as the light timeout above, and ascending with Never last for the same
+// reason: left to right has to mean "stays on longer" the whole way across.
+//
+// The web form takes a free-form number of seconds, so a stored value need not
+// be one of these. Nothing coerces it — the slider opens on the nearest stop
+// and only writes a listed value when the user actually saves, which leaves a
+// hand-set 45 alone until they choose to change it.
+struct ScreenTimeoutOption {
+    uint32_t    secs;
+    const char *label;
+};
+
+static const ScreenTimeoutOption kScreenTimeouts[] = {
+    {  15, "15 sec" },
+    {  30, "30 sec" },
+    {  60, "1 min"  },
+    { 120, "2 min"  },
+    { 300, "5 min"  },
+    { 600, "10 min" },
+    {   0, "Never"  },
+};
+static constexpr int kScreenTimeoutCount =
+    (int)(sizeof(kScreenTimeouts) / sizeof(kScreenTimeouts[0]));
+
+// Label for any stored value, listed or not, so the config row can render a
+// number the slider cannot itself produce. The fallback buffer is static
+// because callers copy the text immediately (lv_label_set_text, snprintf).
+static const char *screenTimeoutName(uint32_t secs) {
+    for (int i = 0; i < kScreenTimeoutCount; i++) {
+        if (kScreenTimeouts[i].secs == secs) return kScreenTimeouts[i].label;
+    }
+    static char buf[16];
+    if (secs >= 60 && (secs % 60) == 0) {
+        snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
+    } else {
+        snprintf(buf, sizeof(buf), "%u sec", (unsigned)secs);
+    }
+    return buf;
+}
+
+// Nearest listed stop to a stored value. Never (0) is matched exactly and
+// otherwise skipped by value rather than by index, so the table stays free to
+// be reordered and a stray 5 opens on 15 seconds instead of switching the
+// timeout off.
+static int screenTimeoutNearestIdx(uint32_t secs) {
+    int best = 0;
+    long bestDelta = -1;
+    for (int i = 0; i < kScreenTimeoutCount; i++) {
+        if (kScreenTimeouts[i].secs == secs) return i;
+        if (kScreenTimeouts[i].secs == 0) continue;
+        long delta = (long)kScreenTimeouts[i].secs - (long)secs;
+        if (delta < 0) delta = -delta;
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            best = i;
+        }
+    }
+    return best;
+}
+
+static const char *cfgScreenTimeoutLabelFor(int idx) {
+    if (idx < 0 || idx >= kScreenTimeoutCount) idx = 0;
+    return kScreenTimeouts[idx].label;
+}
+
+static void cfgScreenTimeoutApply(int idx) {
+    if (idx < 0 || idx >= kScreenTimeoutCount) idx = 0;
+    s_cfg.screenOnSecs = kScreenTimeouts[idx].secs;
+    persistConfigToPrefs();
+    // Restart the idle clock. Without this the new timeout is measured against
+    // whenever input was last recorded, so shortening it from 10 minutes to 15
+    // seconds could put the panel out before the user has read the confirmation.
+    s_lastActivityMs = millis();
+    if (s_cfg.screenOnSecs == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen stays on");
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen sleeps after %s",
+                 screenTimeoutName(s_cfg.screenOnSecs));
+    }
+}
+
+static void openCfgScreenTimeoutModal() {
+    static const CfgSliderPicker kSpec = {
+        "Screen Timeout",
+        kScreenTimeoutCount,
+        cfgScreenTimeoutLabelFor,
+        cfgScreenTimeoutApply,
+        "15 sec",
+        "never",
+    };
+    openCfgSliderModal(&kSpec, screenTimeoutNearestIdx(s_cfg.screenOnSecs));
+}
 
 // ── Battery calibration ──────────────────────────────────────────────────────
 // Same slider shape as brightness, trimming the measured battery voltage by
@@ -13998,6 +14187,9 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
 }
 
 static void closeCfgModal() {
+    // This screen may have been carrying a copy of the nav bar, and its status
+    // icons go with it.
+    clearNavBarStatusIcons();
     revertCfgBrightnessPreview();
     revertCfgBattCalPreview();  // same reason: an unapplied preview must not persist
 #if HAS_VOLUME_CONTROL
@@ -14600,7 +14792,7 @@ static void onLegendClosePressed(lv_event_t *e) {
 }
 
 static void onHeltecBottomNavPressed(lv_event_t *e) {
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_NAV_BAR
     int target = (int)(intptr_t)lv_event_get_user_data(e);
     switch (target) {
         case HELTEC_NAV_CFG:
@@ -14626,6 +14818,23 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
         case HELTEC_NAV_LEGEND:
             if (s_legendModal) closeLegendModal();
             else openLegendModal();
+            break;
+        case HELTEC_NAV_HOME:
+            // Chat is the root screen; the nav-reachable screens are modals
+            // layered over it. So "go home" is "close them", innermost first —
+            // a menu opened from one of these screens has to go before the
+            // screen it was opened from, or it is left floating over chat.
+            //
+            // Every one is checked rather than just the active screen's own:
+            // Home is on the bar of all of them, and whichever is on top is the
+            // only one the tap can be coming from anyway.
+            if (s_nodesActionModal) closeNodesActionMenu();
+            if (s_channelActionsModal) closeChannelActionsModal();
+            if (s_legendModal) closeLegendModal();
+            if (s_cfgModal) closeCfgModal();
+            if (s_dmModal) closeDmModal();
+            if (s_nodesModal) closeNodesModal();
+            if (s_liveModal) closeLiveModal();
             break;
         default:
             break;
@@ -14658,13 +14867,57 @@ static lv_opa_t chatPanelBackgroundOpa() {
 }
 
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_NAV_BAR
     if (!bar) return;
 
     struct NavItem {
-        const char *label;
+        const char *icon;
         int target;
+        // The one glyph that is not from the built-in symbol set, and so has to
+        // be drawn with the emoji face instead of the plain one.
+        bool emoji;
+        // The key that does the same thing from the chat screen, drawn beside
+        // the icon on keyboard boards and ignored on touch-only ones. nullptr
+        // where there is no key: Home is Backspace, which is not a letter to
+        // print, and Help has no chat-screen key at all — the button is the
+        // only way to it on this board.
+        const char *key;
     };
+
+    // Nodes is a list of people, so it gets a person. LVGL's symbol set has no
+    // contact glyph — it is FontAwesome's icon subset, and no bust/user icon is
+    // in the montserrat cmap — so this one comes from the emoji fallback face
+    // that already renders emoji in chat.
+    //
+    // With a fallback: emojiFont() hands back the base face unchanged when the
+    // emoji font failed to initialize (a full LVGL pool at boot), and drawing
+    // U+1F464 with the base face would put a tofu box in the nav bar. A list
+    // icon is a worse Nodes icon than a person, and a much better one than a
+    // rectangle.
+#if UI_TOUCH_ONLY_PROFILE
+    const lv_font_t *const navIconFont = &lv_font_montserrat_14;
+#else
+    // A keyboard board draws the shortcut letter beside the glyph, and the two
+    // together have to fit a button roughly 39 px wide. 12 rather than 14 is
+    // what buys the letter its room; on the widest symbol the pair would
+    // otherwise overrun the button and wrap.
+    const lv_font_t *const navIconFont = &lv_font_montserrat_12;
+#endif
+    const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
+    const bool navEmojiReady = (navEmojiFont != navIconFont);
+    const char *const kContactIcon = "\U0001F464";  // bust in silhouette
+    // Icons rather than words. Six buttons of text across 240 px meant either
+    // an abbreviation per board ("Config" on the wide one, "Cfg" on the tall
+    // one) or a 10 px label with nothing left over; a glyph is the same size on
+    // both and reads at a glance on a bar you hit with a thumb.
+    //
+    // Home first, on the far left, where the way back belongs. It is not a
+    // sixth screen — see HELTEC_NAV_HOME in onHeltecBottomNavPressed().
+    //
+    // The glyphs are all in the built-in montserrat symbol set except Help,
+    // which has no symbol to borrow: LVGL's font carries no question mark icon,
+    // so the ASCII one stands in and reads the same.
+    //
     // No Actions entry. It acts on the channel you are reading, so it belongs
     // with the chat screen's own buttons and nowhere else — offering it from
     // Nodes or Live meant a button that silently acted on a channel that was
@@ -14672,20 +14925,15 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     //
     // HELTEC_NAV_ACTIONS itself stays: that button routes through
     // onHeltecBottomNavPressed() below, so the open/close behaviour is shared.
-    static const NavItem kItems[] = {
-#if defined(DEVICE_UI_VERTICAL)
-        {"Cfg", HELTEC_NAV_CFG},
-        {"DM", HELTEC_NAV_DM},
-        {"Nodes", HELTEC_NAV_NODES},
-        {"Live", HELTEC_NAV_LIVE},
-        {"Help", HELTEC_NAV_LEGEND},
-#else
-        {"Config", HELTEC_NAV_CFG},
-        {"DM", HELTEC_NAV_DM},
-        {"Nodes", HELTEC_NAV_NODES},
-        {"Live", HELTEC_NAV_LIVE},
-        {"Help", HELTEC_NAV_LEGEND},
-#endif
+    const NavItem kItems[] = {
+        {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false, nullptr},
+        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
+        {LV_SYMBOL_ENVELOPE, HELTEC_NAV_DM,     false, "(D)"},
+        // The node roster, and the packet feed coming in over the air.
+        {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
+                             HELTEC_NAV_NODES,  navEmojiReady, "(N)"},
+        {LV_SYMBOL_WIFI,     HELTEC_NAV_LIVE,   false, "(L)"},
+        {"?",                HELTEC_NAV_LEGEND, false, nullptr},
     };
 
 #if defined(DEVICE_UI_VERTICAL)
@@ -14736,11 +14984,36 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                             LV_EVENT_PRESSED,
                             (void *)(intptr_t)kItems[i].target);
 
+        // A flex row rather than a centered label: on keyboard boards the
+        // button holds two children — the glyph and the key that does the same
+        // thing — and centering the pair as a row is what keeps them one
+        // control instead of two things that happen to overlap. With a single
+        // child it centers exactly as lv_obj_center() did.
+        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(btn, 2, 0);
+
         lv_obj_t *label = lv_label_create(btn);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_10, 0);
+        // Bigger than the 10 the words used: a glyph carries no letters to
+        // read, so it has to be big enough to recognise by shape. Still clears
+        // the bar with room for the button's border and padding.
+        lv_obj_set_style_text_font(label,
+                                   kItems[i].emoji ? navEmojiFont : navIconFont, 0);
         lv_obj_set_style_text_color(label, navTextColor, 0);
-        lv_label_set_text(label, kItems[i].label);
-        lv_obj_center(label);
+        lv_label_set_text(label, kItems[i].icon);
+
+#if !UI_TOUCH_ONLY_PROFILE
+        // Dimmer than the icon and a size down: it labels the button rather
+        // than being the button, the same relationship the key hints it
+        // replaced had with the text around them.
+        if (kItems[i].key) {
+            lv_obj_t *keyLabel = lv_label_create(btn);
+            lv_obj_set_style_text_font(keyLabel, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(keyLabel, lv_color_hex(0xA7C7FF), 0);
+            lv_label_set_text(keyLabel, kItems[i].key);
+        }
+#endif
     }
 #else
     LV_UNUSED(bar);
@@ -14748,14 +15021,70 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 #endif
 }
 
+#if HAS_NAV_BAR_TOGGLE
+// The GPS/WiFi/DM icons that share the nav bar with the buttons, as a fixed
+// width box at the end of the row.
+//
+// Boxed rather than dropped loose into the bar for two reasons. The buttons are
+// flex_grow, so they divide up whatever is left after this — a bare label would
+// be measured mid-layout and the buttons would resize with the satellite count.
+// And the DM envelope blinks by toggling HIDDEN, which a flex row answers by
+// re-laying out every sibling; boxed, the blink stays inside.
+//
+// The labels are positioned by hand inside the box, packed right to left the
+// way this bar has always packed them. refreshHeaderStatus() re-runs the same
+// alignments as the GPS label grows and shrinks with the satellite count.
+static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **gpsOut,
+                                  lv_obj_t **wifiOut, lv_obj_t **dmOut) {
+    if (!bar) return;
+
+    // Fits "GPS 12" plus the wifi and envelope glyphs at montserrat_10, which
+    // is the widest this ever gets.
+    const int statusBoxW = 74;
+
+    lv_obj_t *box = lv_obj_create(bar);
+    lv_obj_set_size(box, statusBoxW, lv_pct(100));
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+
+    lv_obj_t *gps = lv_label_create(box);
+    lv_obj_set_style_text_font(gps, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(gps, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_align(gps, LV_ALIGN_RIGHT_MID, -2, 0);
+
+    lv_obj_t *wifi = lv_label_create(box);
+    lv_obj_set_style_text_font(wifi, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(wifi, lv_color_hex(0xBFD6FF), 0);
+    lv_obj_align_to(wifi, gps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+
+    lv_obj_t *dm = lv_label_create(box);
+    lv_obj_set_style_text_font(dm, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(dm, lv_color_hex(0xF4D35E), 0);
+    lv_label_set_text(dm, LV_SYMBOL_ENVELOPE);
+    lv_obj_align_to(dm, wifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+    lv_obj_add_flag(dm, LV_OBJ_FLAG_HIDDEN);
+
+    if (boxOut)  *boxOut  = box;
+    if (gpsOut)  *gpsOut  = gps;
+    if (wifiOut) *wifiOut = wifi;
+    if (dmOut)   *dmOut   = dm;
+}
+#endif
+
 static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_NAV_BAR
     if (!parent) return;
+    // Where the bar is a setting, this is what makes it one on every screen but
+    // chat: the callers below ask unconditionally and get nothing when it is
+    // off, so no screen has to know about the preference.
+    if (!bottomNavEnabled()) return;
 
     // Match the height used by the main chat screen's shortcut bar
-    // (chatLegendH == 28) so the nav buttons render at the exact same
-    // width/height inside DM/Cfg/Nodes/Live as on the home screen.
-    const int navBarHeight = 28;
+    // (chatLegendH) so the nav buttons render at the exact same width/height
+    // inside DM/Cfg/Nodes/Live as on the home screen.
+    const int navBarHeight = kBottomNavHeight;
 
     // Modal containers all use border_width=1 + pad_all=4. The bar needs to
     // span the full display width and sit flush with the bottom edge, so it
@@ -14791,6 +15120,20 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
     lv_obj_set_style_border_color(bar, lv_color_hex(0x335D9D), 0);
 
     populateHeltecBottomNav(bar, activeTarget);
+
+#if HAS_NAV_BAR_TOGGLE
+    // Same icons as the chat screen's copy of this bar. Without them, walking
+    // into Config or Nodes is the one place the GPS fix and the WiFi state go
+    // dark — this board keeps them on the bottom bar, and the bottom bar is
+    // right here.
+    buildNavStatusCluster(bar, &s_navStatusBox, &s_navStatusGps,
+                          &s_navStatusWifi, &s_navStatusDm);
+    // The labels are created empty, and the periodic refresh early-outs while
+    // nothing has changed — which, opening a screen, is the normal case. Force
+    // one pass so they arrive with the readings already on them.
+    refreshHeaderStatus(true);
+    refreshDmAlertIndicator();
+#endif
 #else
     LV_UNUSED(parent);
     LV_UNUSED(activeTarget);
@@ -15235,6 +15578,9 @@ static void closeLiveFilterModal() {
 }
 
 static void closeLiveModal() {
+    // This screen may have been carrying a copy of the nav bar, and its status
+    // icons go with it.
+    clearNavBarStatusIcons();
     // Tools and the filter picker are parented to the root screen, not to the
     // Live modal, so nothing else would take them down with the screen they
     // belong to.
@@ -15320,6 +15666,9 @@ static void closeSnrRssiChartModal() {
 }
 
 static void closeDmModal() {
+    // This screen may have been carrying a copy of the nav bar, and its status
+    // icons go with it.
+    clearNavBarStatusIcons();
     closeDmNodePicker();
     closeDmDeleteConfirm();
     lvObjDeleteSafe(s_dmModal);
@@ -15351,6 +15700,9 @@ static void closeDmModal() {
 }
 
 static void closeNodesModal() {
+    // This screen may have been carrying a copy of the nav bar, and its status
+    // icons go with it.
+    clearNavBarStatusIcons();
     closeNodesFilterDialog();
     closeNodesActionMenu();
 #if HAS_NODE_LOCATE
@@ -18044,6 +18396,13 @@ static void closeNodesActionMenu() {
     memset(s_nodesActionRows, 0, sizeof(s_nodesActionRows));
 }
 
+#if UI_TOUCH_ONLY_PROFILE
+static void onNodesActionClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeNodesActionMenu();
+}
+#endif
+
 static void executeNodesActionSelection() {
     if (s_nodesActionNodeId == 0) {
         closeNodesActionMenu();
@@ -18467,6 +18826,28 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         lv_label_set_text(lbl, labelText);
         lv_obj_center(lbl);
     }
+
+#if UI_TOUCH_ONLY_PROFILE
+    // Touch-only board: no Backspace to dismiss with, and every row in here
+    // *does* something to a node — so without a way out the only exits are
+    // firing an action or leaving the modal on screen. Same corner X as every
+    // other modal on this build.
+    //
+    // Gap rather than reserveHeltecCloseXRow(): the title wraps to two lines
+    // for a long node name, and pinning it to the button's height would clip
+    // the second one. The min-height keeps the one-line case from letting the
+    // tapback strip (or the first grid row) slide up under the button.
+    reserveHeltecCloseXGap(title);
+    lv_obj_set_style_min_height(title, kHeltecCloseXSize, 0);
+    {
+        // Centre the first line against the button so the two read as one
+        // title bar, the way reserveHeltecCloseXRow() does it.
+        const int lineH = (int)lv_font_get_line_height(&lv_font_montserrat_12);
+        const int padTop = (kHeltecCloseXSize - lineH) / 2;
+        if (padTop > 0) lv_obj_set_style_pad_top(title, padTop, 0);
+    }
+    appendHeltecCloseX(s_nodesActionModal, onNodesActionClosePressed);
+#endif
 
     refreshNodesActionMenuSelection();
 }
@@ -19015,6 +19396,16 @@ static void openLiveModal() {
     lv_label_set_text_fmt(hint, "%s = Back   C = Clear   T = Tools   F = Filter",
                           modalCloseKeyLabel());
 #endif
+#endif
+
+#if HAS_NAV_BAR_TOGGLE
+    // Keyboard board with the bar switched on: it joins the key hints above
+    // rather than replacing them — the hints name the keys this screen answers
+    // to, which six navigation buttons say nothing about. Appended after the
+    // hint so the bar's layout spacer is the last child and the hint is not
+    // pushed under it. A no-op with the bar switched off, which is what leaves
+    // this screen exactly as it looked before the bar existed.
+    appendHeltecBottomNav(s_liveModal, HELTEC_NAV_LIVE);
 #endif
 
     refreshLiveView(true);
@@ -23265,7 +23656,7 @@ static void openDmModal() {
     s_dmMsgPanelFocused = false;
     refreshDmModal(true);
 
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_NAV_BAR
     appendHeltecBottomNav(s_dmModal, HELTEC_NAV_DM);
 #endif
 }
@@ -23652,6 +24043,16 @@ static void openNodesModal() {
     // hardcoded copy of the same text, which had already drifted from the real
     // one in its spacing.
     refreshNodesHint();
+#endif
+
+#if HAS_NAV_BAR_TOGGLE
+    // Keyboard board with the bar switched on: it joins the key hints above
+    // rather than replacing them — the hints name the keys this screen answers
+    // to, which six navigation buttons say nothing about. Appended after the
+    // hint so the bar's layout spacer is the last child and the hint is not
+    // pushed under it. A no-op with the bar switched off, which is what leaves
+    // this screen exactly as it looked before the bar existed.
+    appendHeltecBottomNav(s_nodesModal, HELTEC_NAV_NODES);
 #endif
 }
 
@@ -24166,6 +24567,16 @@ static void openCfgModal() {
     lv_label_set_text(hint, "To close hit backspace.  (I)nformation");
 #endif
 
+#if HAS_NAV_BAR_TOGGLE
+    // Keyboard board with the bar switched on: it joins the key hints above
+    // rather than replacing them — the hints name the keys this screen answers
+    // to, which six navigation buttons say nothing about. Appended after the
+    // hint so the bar's layout spacer is the last child and the hint is not
+    // pushed under it. A no-op with the bar switched off, which is what leaves
+    // this screen exactly as it looked before the bar existed.
+    appendHeltecBottomNav(s_cfgModal, HELTEC_NAV_CFG);
+#endif
+
     refreshCfgModal();
 }
 
@@ -24509,6 +24920,12 @@ static void performCfgAction(int actionId) {
             openCfgBrightnessModal();   // previews live, no reboot
             break;
 
+        case CFG_ACTION_SCREEN_TIMEOUT:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SCREEN_TIMEOUT");
+            showActionPopup = false;    // row already reads the chosen value
+            openCfgScreenTimeoutModal();
+            break;
+
 #if HAS_SCROLL_INVERT
         case CFG_ACTION_INVERT_SCROLL:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec INVERT_SCROLL");
@@ -24517,6 +24934,23 @@ static void performCfgAction(int actionId) {
             persistConfigToPrefs();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Invert Scrolling: %s",
                      s_cfg.invertScroll ? "On" : "Off");
+            break;
+#endif
+
+#if HAS_NAV_BAR_TOGGLE
+        case CFG_ACTION_NAV_BAR:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NAV_BAR");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.navBarEnabled = !s_cfg.navBarEnabled;
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Nav Bar: %s",
+                     s_cfg.navBarEnabled ? "On" : "Off");
+            // The bar is built into the screens, not painted over them, and the
+            // chat screen gives up a different amount of height for it — so
+            // this is a rebuild, not a restyle. Deferred like the theme rebuild
+            // for the same reason: we are inside an LVGL event callback on a
+            // row that the rebuild is about to delete.
+            scheduleNavBarRebuild(true);
             break;
 #endif
 
@@ -28756,6 +29190,9 @@ static void onWebCfgSaved() {
     uint8_t prevTheme = s_appliedUiTheme;
     uint8_t prevMode = s_appliedUiMode;
     const uint8_t prevFontSize = s_appliedFontSize;
+#if HAS_NAV_BAR_TOGGLE
+    const bool prevNavBar = s_appliedNavBar;
+#endif
 
 #if !HAS_ENV_SENSOR_TELEMETRY
     s_cfg.telEnvEnabled = false;
@@ -28811,6 +29248,14 @@ static void onWebCfgSaved() {
     if ((prevTheme != s_appliedUiTheme || prevMode != s_appliedUiMode) && s_rootScreen) {
         scheduleThemeRebuild(s_cfgModal != nullptr);
     }
+
+#if HAS_NAV_BAR_TOGGLE
+    // Turned on or off from the browser: same rebuild the on-device row asks
+    // for, so the screen matches the setting without waiting for a reboot.
+    if (prevNavBar != s_cfg.navBarEnabled && s_rootScreen) {
+        scheduleNavBarRebuild(s_cfgModal != nullptr);
+    }
+#endif
 
     // Font size is not part of the theme, so a theme rebuild does not cover it,
     // and web config no longer reboots for it — which leaves this as the only
@@ -30921,6 +31366,41 @@ static inline lv_color_t headerBatteryDotColor(uint8_t battPct) {
         : lv_color_hex(0xFF6B6B);
 }
 
+// Text, color and strikethrough for one GPS/WiFi pair. Two pairs can be on
+// screen at once — the chat screen's and the one on a modal's copy of the nav
+// bar — and they must never disagree, so both are painted from the same values
+// by the same code. Placement stays with the caller: these live in bars that
+// pack in different directions.
+static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
+                             bool gpsEnabled, bool gpsFix, uint8_t gpsSatCount,
+                             bool wifiApMode, bool wifiConnected) {
+    if (gpsLabel) {
+        if (gpsEnabled) {
+            lv_label_set_text_fmt(gpsLabel, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
+        } else {
+            lv_label_set_text(gpsLabel, LV_SYMBOL_GPS);
+        }
+        lv_obj_set_style_text_color(
+            gpsLabel,
+            (gpsEnabled && gpsFix) ? headerGoodGreenColor() : headerGpsBadColor(), 0);
+    }
+
+    if (wifiLabel) {
+        const bool wifiOffOrDisconnected = (!wifiApMode && !wifiConnected);
+        lv_label_set_text(wifiLabel, wifiApMode ? LV_SYMBOL_UPLOAD : LV_SYMBOL_WIFI);
+        lv_obj_set_style_text_color(
+            wifiLabel,
+            wifiApMode ? lv_color_hex(0xF4D35E)
+                       : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B)
+                                                : headerGoodGreenColor()),
+            0);
+        lv_obj_set_style_text_decor(
+            wifiLabel,
+            wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
+            0);
+    }
+}
+
 static void refreshHeaderStatus(bool force) {
     if (!s_chatHeaderGps || !s_chatHeaderWifi || !s_chatHeaderBattText || !s_chatHeaderBattBar) return;
 
@@ -30981,33 +31461,15 @@ static void refreshHeaderStatus(bool force) {
 #endif
     }
 
-    if (gpsEnabled) {
-        lv_label_set_text_fmt(s_chatHeaderGps, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
-    } else {
-        lv_label_set_text(s_chatHeaderGps, LV_SYMBOL_GPS);
-    }
+    paintStatusIcons(s_chatHeaderGps, s_chatHeaderWifi,
+                     gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected);
 
-    if (gpsEnabled && gpsFix) {
-        lv_obj_set_style_text_color(s_chatHeaderGps, headerGoodGreenColor(), 0);
-    } else {
-        lv_obj_set_style_text_color(s_chatHeaderGps, headerGpsBadColor(), 0);
-    }
-
-    bool wifiOffOrDisconnected = (!wifiApMode && !wifiConnected);
-    lv_label_set_text(s_chatHeaderWifi, wifiApMode ? LV_SYMBOL_UPLOAD : LV_SYMBOL_WIFI);
-    lv_obj_set_style_text_color(
-        s_chatHeaderWifi,
-        wifiApMode ? lv_color_hex(0xF4D35E)
-                   : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B) : headerGoodGreenColor()),
-        0);
-    lv_obj_set_style_text_decor(
-        s_chatHeaderWifi,
-        wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
-        0);
     lv_obj_t *gpsParent = lv_obj_get_parent(s_chatHeaderGps);
     lv_obj_t *wifiParent = lv_obj_get_parent(s_chatHeaderWifi);
+    const bool packFromRight = (gpsParent == s_chatShortcutBar)
+                               || (s_chatStatusBox && gpsParent == s_chatStatusBox);
     if (gpsParent && gpsParent == wifiParent) {
-        if (gpsParent == s_chatShortcutBar) {
+        if (packFromRight) {
             lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
             lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
         } else {
@@ -31019,12 +31481,27 @@ static void refreshHeaderStatus(bool force) {
         // Bottom shortcut bar packs icons from the right edge, so DM sits
         // left of wifi. The Heltec top bar packs from the left, so DM sits
         // right of wifi (between wifi and the battery indicator).
-        if (wifiParent == s_chatShortcutBar) {
+        if (packFromRight) {
             lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
         } else {
             lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
         }
     }
+#if HAS_NAV_BAR_TOGGLE
+    // The copy on whichever modal is open. Its own box, always packed from the
+    // right, so none of the parent-sniffing above applies to it.
+    if (s_navStatusGps || s_navStatusWifi) {
+        paintStatusIcons(s_navStatusGps, s_navStatusWifi,
+                         gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected);
+        if (s_navStatusGps) lv_obj_align(s_navStatusGps, LV_ALIGN_RIGHT_MID, -2, 0);
+        if (s_navStatusGps && s_navStatusWifi) {
+            lv_obj_align_to(s_navStatusWifi, s_navStatusGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+        }
+        if (s_navStatusWifi && s_navStatusDm) {
+            lv_obj_align_to(s_navStatusDm, s_navStatusWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+        }
+    }
+#endif
 #if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
 #endif
@@ -31041,26 +31518,26 @@ static void refreshHeaderStatus(bool force) {
 // Envelope icon left of the wifi icon that blinks whenever any DM
 // conversation has unread messages. Cleared as soon as the user opens the
 // conversation (DMs.markRead runs).
-static void refreshDmAlertIndicator() {
-    if (!s_chatDmAlert || !lv_obj_is_valid(s_chatDmAlert)) return;
-
-    const bool hasUnread = DMs.hasUnread();
-    if (!hasUnread) {
-        if (!lv_obj_has_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN)) {
-            lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
-        }
-        return;
-    }
-
-    // 500 ms on / 500 ms off blink; derived from the free-running millis()
-    // counter so we don't need to persist a phase across calls.
-    const bool visible = ((millis() / 500UL) & 1UL) == 0UL;
-    const bool currentlyHidden = lv_obj_has_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+static void setDmAlertVisible(lv_obj_t *label, bool visible) {
+    if (!label || !lv_obj_is_valid(label)) return;
+    const bool currentlyHidden = lv_obj_has_flag(label, LV_OBJ_FLAG_HIDDEN);
     if (visible && currentlyHidden) {
-        lv_obj_clear_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
     } else if (!visible && !currentlyHidden) {
-        lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+static void refreshDmAlertIndicator() {
+    // 500 ms on / 500 ms off blink; derived from the free-running millis()
+    // counter so we don't need to persist a phase across calls. Both envelopes
+    // read the same clock, so the one on a modal's nav bar blinks in step with
+    // the chat screen's rather than on a phase of its own.
+    const bool visible = DMs.hasUnread() && (((millis() / 500UL) & 1UL) == 0UL);
+    setDmAlertVisible(s_chatDmAlert, visible);
+#if HAS_NAV_BAR_TOGGLE
+    setDmAlertVisible(s_navStatusDm, visible);
+#endif
 }
 
 // True when the given real channel has been muted via Channel Actions. Muted
@@ -33716,6 +34193,9 @@ static void refreshChatView(bool force) {
 }
 
 static void buildUi() {
+#if HAS_NAV_BAR_TOGGLE
+    s_appliedNavBar = bottomNavEnabled();
+#endif
     lv_obj_t *screen = lv_obj_create(NULL);
     s_rootScreen = screen;
     s_channelSelectorFixedBtnW = 0;
@@ -33734,7 +34214,16 @@ static void buildUi() {
 #if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const int panelMargin = 6;
     const int chatGap = 6;
+#if HAS_NAV_BAR_TOGGLE
+    // Taller than the 14 px key-hint strip when the bar is on, because it
+    // carries tappable icon buttons rather than a line of text; the extra
+    // pixels come out of the message list, which is what chatH measures. With
+    // the bar off it is the old 14 again, so the screen is the one that shipped
+    // before the bar down to the pixel.
+    const int chatLegendH = bottomNavEnabled() ? kBottomNavHeight : 14;
+#else
     const int chatLegendH = 14;
+#endif
 #else
     const int panelMargin = 0;
     const int chatGap = 3;
@@ -33746,7 +34235,22 @@ static void buildUi() {
     const int chatX = panelMargin;
     const int chatW = screenW - panelMargin * 2;
     const int chatY = panelMargin + chatHeaderH + chatGap;
+#if UI_TOUCH_NAV_BAR
+    // The bar runs the full width of the display and sits flush with the bottom
+    // edge — the same place and size the copy inside every modal takes, so the
+    // buttons stay put as you navigate instead of shifting by the panel margin
+    // on the way in and back out. The margin is therefore not subtracted here:
+    // there is nothing below the bar to leave room for.
+    //
+    // On a touch-only board this is what the arithmetic already worked out to
+    // (panelMargin 0, chatLegendH 28 == kBottomNavHeight); spelling it out is
+    // what makes it true on the boards where the margin is 6.
+    const int chatH = bottomNavEnabled()
+                      ? (screenH - chatY - kBottomNavHeight - 3)
+                      : (screenH - panelMargin - chatY - chatLegendH - 3);
+#else
     const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
+#endif
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
     const int panelMargin = 2;
     const int chatGap = 0;
@@ -34127,9 +34631,16 @@ static void buildUi() {
     //
     // Split by flex_grow 1 : 2 rather than percentages, so the row's column gap
     // comes out of the total instead of pushing the pair past 100% and wrapping.
+    // 22, not 28. The label inside is montserrat_10, so 22 still leaves ~4 px
+    // of clear space above and below the text — enough that the buttons do not
+    // read as cramped — and the six pixels go straight to the message list,
+    // which is the flex_grow child of this panel and takes whatever the fixed
+    // rows leave behind.
+    const int chatBtnRowH = 22;
+
     lv_obj_t *chatBtnRow = lv_obj_create(s_chatPanel);
     lv_obj_set_width(chatBtnRow, lv_pct(100));
-    lv_obj_set_height(chatBtnRow, 28);
+    lv_obj_set_height(chatBtnRow, chatBtnRowH);
     lv_obj_clear_flag(chatBtnRow, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(chatBtnRow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(chatBtnRow, 0, 0);
@@ -34191,8 +34702,22 @@ static void buildUi() {
 #endif
 
     s_chatShortcutBar = lv_obj_create(screen);
+#if UI_TOUCH_NAV_BAR
+    if (bottomNavEnabled()) {
+        // Edge to edge along the bottom, matching appendHeltecBottomNav()'s
+        // copy exactly. Anything else and the same six buttons are a different
+        // width here than they are one screen in, which reads as the bar
+        // jumping every time you navigate.
+        lv_obj_set_size(s_chatShortcutBar, lv_disp_get_hor_res(NULL), kBottomNavHeight);
+        lv_obj_align(s_chatShortcutBar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    } else {
+        lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
+        lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
+    }
+#else
     lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
     lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
+#endif
     lv_obj_clear_flag(s_chatShortcutBar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_60, 0);
@@ -34205,8 +34730,29 @@ static void buildUi() {
 
 #if UI_TOUCH_ONLY_PROFILE
     s_chatShortcutText = nullptr;
-    populateHeltecBottomNav(s_chatShortcutBar, -1);
-#else
+    // Chat is home, so Home is the lit button here — the one screen where the
+    // bar marks where you already are rather than where you can go.
+    populateHeltecBottomNav(s_chatShortcutBar, HELTEC_NAV_HOME);
+#elif HAS_NAV_BAR_TOGGLE
+    if (bottomNavEnabled()) {
+    // Touch nav on a board that also has a keyboard: the same icon row the
+    // touch-only builds use, sharing this bar with the GPS/WiFi/DM icons that
+    // already lived on it. The key-hint text that used to fill the left is what
+    // pays for the room — six buttons plus the status icons is the whole line.
+    // The keys themselves still work, and each button that has one now prints
+    // it beside its icon, so the hints are on the buttons rather than gone.
+    s_chatShortcutText = nullptr;
+    populateHeltecBottomNav(s_chatShortcutBar, HELTEC_NAV_HOME);
+
+    // The same cluster the modals' copies of this bar carry.
+    buildNavStatusCluster(s_chatShortcutBar, &s_chatStatusBox, &s_chatHeaderGps,
+                          &s_chatHeaderWifi, &s_chatDmAlert);
+    } else {
+    // Bar switched off: fall through to the key-hint strip below, which is the
+    // footer this board had before the bar and is still what every other
+    // keyboard build draws.
+#endif
+#if !UI_TOUCH_ONLY_PROFILE
     s_chatShortcutText = lv_label_create(s_chatShortcutBar);
     const lv_coord_t bottomStatusReserve = (chatLegendH >= 14) ? 74 : 62;
     lv_coord_t legendTextW = chatW - bottomStatusReserve;
@@ -34241,6 +34787,9 @@ static void buildUi() {
     lv_label_set_text(s_chatDmAlert, LV_SYMBOL_ENVELOPE);
     lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
     lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+#endif
+#if HAS_NAV_BAR_TOGGLE
+    }
 #endif
 
     for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -34410,6 +34959,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_chatActBtn = nullptr;
     s_chatShortcutBar = nullptr;
     s_chatShortcutText = nullptr;
+    s_chatStatusBox = nullptr;
 
     s_activeChannel = preservedChannel;
     buildUi();
@@ -34427,6 +34977,13 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
         refreshCfgModal();
     }
 }
+
+#if HAS_NAV_BAR_TOGGLE
+static void scheduleNavBarRebuild(bool reopenCfg) {
+    s_navRebuildPending = true;
+    if (reopenCfg) s_navRebuildReopenCfg = true;
+}
+#endif
 
 static void scheduleThemeRebuild(bool reopenCfg) {
     s_themeRebuildPending = true;
@@ -34613,6 +35170,20 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
 }
 
 static void processPendingThemeRebuild() {
+#if HAS_NAV_BAR_TOGGLE
+    if (s_navRebuildPending) {
+        const bool reopenCfg = s_navRebuildReopenCfg;
+        s_navRebuildPending = false;
+        s_navRebuildReopenCfg = false;
+        // A full teardown and rebuild draws everything a theme restyle would
+        // have, so a theme change queued in the same breath is already covered
+        // — running it afterwards would restyle objects that no longer exist.
+        s_themeRebuildPending = false;
+        s_themeRebuildReopenCfg = false;
+        rebuildUiForThemeChange(reopenCfg);
+        return;
+    }
+#endif
     if (!s_themeRebuildPending) return;
 
     bool reopenCfg = s_themeRebuildReopenCfg;

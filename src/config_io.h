@@ -417,6 +417,20 @@ struct RhinoConfig {
     bool     bleKbdEnabled;      // off by default: the stack costs internal DRAM
     uint8_t  bleKbdAddrType;     // BLE_ADDR_*; random static is the common case
     uint8_t  _reservedPad10[2];
+    // Bottom icon nav bar on boards that have both a keyboard and a touch panel
+    // (HAS_NAV_BAR_TOGGLE — the T-Deck today). Off restores the key-hint strip
+    // that bar replaced. Ignored where the bar is not optional: a touch-only
+    // board has no keys to fall back to, so it always draws the bar.
+    //
+    // Safe at the end: the BLE block above ends on a 4-byte boundary, so the
+    // struct had no trailing padding for this to land in and an upgraded device
+    // reads its compiled default. Defaults on, which is what every T-Deck that
+    // took the firmware introducing the bar already sees.
+    bool     navBarEnabled;
+    // For whoever appends next: navBarEnabled is one byte at the end of a
+    // 4-aligned struct, so the stored blob carries three bytes past it that the
+    // load memcpy's straight over anything placed there.
+    uint8_t  _reservedPad11[3];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

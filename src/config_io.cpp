@@ -977,6 +977,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.chatColorSalt      = 0;   // original node-color mapping
     cfg.notifyLedEnabled   = MY_NOTIFY_LED_ENABLED;
     cfg.invertScroll       = MY_INVERT_SCROLL;
+    cfg.navBarEnabled      = (bool)MY_NAV_BAR_ENABLED;
     cfg.notifyLedColorChannel = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_CHANNEL);
     cfg.notifyLedColorDm      = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_DM);
     cfg.kbBlinkEnabled     = (bool)MY_KB_BLINK_ENABLED;
@@ -1226,6 +1227,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
              notifyLightTimeoutName(cfg.notifyLightTimeoutS));
     out += tmp;
     snprintf(tmp, sizeof(tmp), "    invertScroll: %s\n", cfg.invertScroll ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    navBar: %s\n", cfg.navBarEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    messageAlertSound: %s\n",
              kMsgAlertSoundNames[constrain((int)cfg.msgAlertSound, 0, kNumMsgAlertSounds - 1)]);
     out += tmp;
@@ -1779,6 +1781,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "lightNotifyTimeoutSecs"))
                     cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout(atol(val));
                 else if (!strcmp(key, "invertScroll"))    cfg.invertScroll = parseBoolValue(val);
+                else if (!strcmp(key, "navBar"))         cfg.navBarEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "messageAlertSound")) cfg.msgAlertSound = parseMsgAlertSound(val);
                 else if (!strcmp(key, "messageAlertBeep")) {
                     cfg.msgAlertSound = parseBoolValue(val)

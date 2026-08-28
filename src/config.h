@@ -364,6 +364,22 @@
 #endif
 #define MY_INVERT_SCROLL 0
 
+// ── Bottom icon nav bar (optional) ───────────────────────────────────────────
+// Where the nav bar is one of two ways to get around rather than the only one,
+// it is a setting. That means a board with a keyboard *and* a touch panel — the
+// T-Deck and the Mesh Deck today. On a touch-only board there is nothing to
+// fall back to, so the bar is not negotiable and no toggle is offered.
+// UI_TOUCH_NAV_BAR / UI_TOUCH_ONLY_PROFILE live in hal/board.h, which config.h
+// has already pulled in by this point.
+#if UI_TOUCH_NAV_BAR && !UI_TOUCH_ONLY_PROFILE
+#define HAS_NAV_BAR_TOGGLE 1
+#else
+#define HAS_NAV_BAR_TOGGLE 0
+#endif
+// On by default: the bar shipped on before it was optional, and this keeps a
+// device that upgrades looking like the release it upgraded from.
+#define MY_NAV_BAR_ENABLED 1
+
 // A notification LED that blinks while messages are unread. Only the Mesh Deck
 // has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
 // meshDeckServiceLed). Gate the setting on this so it is absent, not inert,
