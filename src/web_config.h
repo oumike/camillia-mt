@@ -25,6 +25,17 @@ void webCfgLoop();
 // True while the server is active.
 bool webCfgRunning();
 
+// Milliseconds since the last HTTP request, or UINT32_MAX when the server is
+// not running. The clock starts when the server comes up rather than at the
+// first request, because someone who has just switched web config on is about
+// to open the page — that window is exactly as busy as one full of requests.
+//
+// Callers use it to keep multi-second work off the main loop while a browser is
+// waiting on it: webCfgLoop() only runs once per loop pass, so anything that
+// blocks in that pass is a request nobody answers. See the announce holds in
+// main_lvgl.cpp.
+uint32_t webCfgMsSinceRequest();
+
 // True once the server has gone webCfgIdleTimeoutS seconds with no HTTP
 // request. The main loop polls this and performs the teardown itself, so the
 // shutdown takes the same path as the manual toggle (radio down, station

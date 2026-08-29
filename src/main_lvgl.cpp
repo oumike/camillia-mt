@@ -527,6 +527,46 @@ static bool s_firstBoot = false;
 // setup. This is only about what the device says it is.
 static inline bool announceHeldForOnboarding() { return s_firstBoot; }
 
+// ── Announce hold while the web UI is in use ────────────────────────────────
+// A scheduled announce is seconds of blocking airtime — a NodeInfo at SF11
+// measured 6.4 s, and the telemetry behind it another 0.6 s. webCfgLoop() runs
+// once per main loop pass, so for that whole time no HTTP request is looked at:
+// a browser opening the config page lands in the gap, waits, and gives up. That
+// is what "the web config will not come up" turned out to be — the log line is
+// "[web] main loop was busy for 7067 ms - socket unserviced", with the browser
+// hanging up mid-page immediately after.
+//
+// So: while someone is demonstrably using the page, let a due announce wait.
+// Returning early leaves the schedule untouched, so it stays due and goes out
+// on a later pass rather than being skipped.
+//
+// Two bounds keep this from turning into "a node that never announces". The
+// window is short — a request within the last 10 s — so a closed page frees the
+// radio almost at once. And the hold itself is capped: the chat tab polls every
+// two seconds, which would otherwise read as "busy" forever, so after two
+// minutes of continuous holding the announce goes out regardless. A poll landing
+// in that transmit fails, the client retries two seconds later, and nothing is
+// lost; a page *load* landing in it is the failure this exists to prevent.
+static constexpr uint32_t kAnnounceWebBusyWindowMs = 10000;
+static constexpr uint32_t kAnnounceWebHoldMaxMs    = 120000;
+static uint32_t s_announceWebHoldSinceMs = 0;
+
+static bool announceHeldForWebCfg(uint32_t nowMs) {
+    if (webCfgMsSinceRequest() >= kAnnounceWebBusyWindowMs) {
+        s_announceWebHoldSinceMs = 0;   // page idle or server down: no hold
+        return false;
+    }
+    if (s_announceWebHoldSinceMs == 0) s_announceWebHoldSinceMs = nowMs;
+    if ((uint32_t)(nowMs - s_announceWebHoldSinceMs) >= kAnnounceWebHoldMaxMs) {
+        // Held long enough. Clear the start stamp so the next hold is measured
+        // from now, not from the beginning of this one — otherwise the cap
+        // stays tripped and the hold never applies again.
+        s_announceWebHoldSinceMs = 0;
+        return false;
+    }
+    return true;
+}
+
 // Node name / region / role / WiFi are buffered in scratch while the user steps
 // through the wizard, so s_cfg isn't touched until everything is confirmed at
 // the final stage (which then persists and reboots).
@@ -622,6 +662,7 @@ enum DestructiveConfirmAction : uint8_t {
     DESTRUCTIVE_CONFIRM_NONE = 0,
     DESTRUCTIVE_CONFIRM_DM_DELETE,
     DESTRUCTIVE_CONFIRM_LIVE_CLEAR,
+    DESTRUCTIVE_CONFIRM_NODE_DELETE,
 };
 static DestructiveConfirmAction s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
 // Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
@@ -795,8 +836,10 @@ static bool s_nodesFilterEditing = false;
 // used on this hardware is not a disabled control, it is clutter.
 #define HAS_NODE_LOCATE HAS_STATE_MAPS
 
-// Node Actions modal: 7 actions arranged 2-per-row (6 without Locate). Each entry has a single-key
+// Node Actions modal: actions arranged 2-per-row. Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
+// The count varies by board — Locate and LOS are each compiled out where the
+// hardware cannot support them — so nothing should assume a fixed total.
 #if HAS_NODE_LOCATE
 static constexpr int kNodesActionBaseCount = 7;
 #else
@@ -805,17 +848,21 @@ static constexpr int kNodesActionBaseCount = 6;
 #if HAS_NODE_LOS
 // LOS sits after Locate where both exist, and takes Locate's index where it
 // does not — the Heltec has LOS but no Locate, so the two are independent.
-static constexpr int kNodesActionCount = kNodesActionBaseCount + 1;
-static constexpr int kNodesActionLos   = kNodesActionBaseCount;
+static constexpr int kNodesActionLos    = kNodesActionBaseCount;
+static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
 #else
-static constexpr int kNodesActionCount = kNodesActionBaseCount;
+static constexpr int kNodesActionDelete = kNodesActionBaseCount;
 #endif
+// Delete goes last on every board, after whichever of Locate and LOS this one
+// has. Appending rather than inserting is what keeps kMsgActionNodeMap — which
+// indexes this list by position — pointing at the same actions it always did.
+static constexpr int kNodesActionCount = kNodesActionDelete + 1;
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
 // Action ordering (also referenced by executeNodesActionSelection):
 //   0=Traceroute, 1=Send DM, 2=Favorite toggle, 3=Request Info,
-//   4=Request Position, 5=Ignore toggle, 6=Locate.
+//   4=Request Position, 5=Ignore toggle, 6=Locate, then LOS, then Delete.
 static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     'T', 'D', 'F', 'I', 'P', 'G',
 #if HAS_NODE_LOCATE
@@ -827,6 +874,10 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // that is not the word's first letter.
     'S',
 #endif
+    // 'E' for Del(e)te: D is Send DM's and L is Locate's. It is one key on a
+    // destructive action, which is why it opens a confirmation rather than
+    // doing anything.
+    'E',
 };
 #if HAS_NODE_LOCATE
 // Named because three places have to agree on which row Locate is: the disabled
@@ -838,6 +889,11 @@ static constexpr int kNodesActionLocate = 6;
 // (a live fix or a set location). Same greying rule as Locate.
 static bool s_nodesActionLosEnabled = false;
 #endif
+// There has to be a record to delete. Opened from a chat message the sender may
+// not be in the node table at all — a cleared table, or someone only ever heard
+// relayed — and a confirmation prompt that deletes nothing is worse than a row
+// that says up front it has nothing to act on.
+static bool s_nodesActionDeleteEnabled = false;
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -916,19 +972,20 @@ static inline const char *activeActionShortcuts() {
     return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
 }
 
-// Locate is the only row that can be unavailable, and only in node mode —
-// message mode's action map does not carry it.
+// Rows that can be unavailable — Locate, LOS and Delete — and only in node
+// mode. Message mode lays a different set of rows over the same index space
+// (see kMsgActionNodeMap), carries none of these three, and greys nothing; the
+// early return is what stops a node-mode position matching a message-mode row
+// that happens to sit at the same index.
 static inline bool nodesActionRowDisabled(int idx) {
-#if HAS_NODE_LOCATE || HAS_NODE_LOS
     if (s_nodesActionMsgMode) return false;
-#endif
 #if HAS_NODE_LOCATE
     if (idx == kNodesActionLocate && !s_nodesActionLocateEnabled) return true;
 #endif
 #if HAS_NODE_LOS
     if (idx == kNodesActionLos && !s_nodesActionLosEnabled) return true;
 #endif
-    LV_UNUSED(idx);
+    if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
     return false;
 }
 
@@ -1749,6 +1806,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode = false,
 // Defined down with the action menu, but the Locate modal above it wants the
 // same name-for-a-node rule (long name, short name on the narrow panel, else id).
 static void nodesActionTitleLabel(uint32_t nodeId, char *out, size_t outLen);
+// Defined with the DM/Live confirmations it shares a dialog with; the node
+// action menu, which is built well above them, opens it for Delete Node.
+static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nodeId);
 // Message Actions: the same modal with the tapback/Reply rows, acting on a chat
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
@@ -18468,6 +18528,19 @@ static void executeNodesActionSelection() {
     }
 #endif
 
+    if (s_nodesActionSelection == kNodesActionDelete) {
+        // Greyed rows keep the highlight but do nothing when activated, same as
+        // Locate and LOS below.
+        if (!s_nodesActionDeleteEnabled) return;
+        uint32_t deleteNodeId = s_nodesActionNodeId;
+        // The menu goes first: the confirmation layers over whatever is behind
+        // it, and leaving this open would put a dialog on top of a menu acting
+        // on the node the dialog is about.
+        closeNodesActionMenu();
+        openDestructiveConfirm(DESTRUCTIVE_CONFIRM_NODE_DELETE, deleteNodeId);
+        return;
+    }
+
 #if HAS_NODE_LOCATE
     if (s_nodesActionSelection == kNodesActionLocate) {
         // Greyed rows keep the highlight but do nothing when activated; the
@@ -18690,6 +18763,10 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     const NodeEntry *actionNode = Nodes.find(nodeId);
     const bool selectedIsFavorite = actionNode && actionNode->favorite;
     const bool selectedIsIgnored = Ignored.contains(nodeId);
+    // Nothing to delete if the table has never had this node — see the flag's
+    // definition. Favorites are deletable: pinning a node says "keep this one
+    // when the table evicts", not "protect it from me".
+    s_nodesActionDeleteEnabled = (actionNode != nullptr);
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -18727,6 +18804,12 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #else
         "LO(S)",
 #endif
+#endif
+#if UI_TOUCH_ONLY_PROFILE
+        // No keyboard to name a shortcut for.
+        "Delete",
+#else
+        "Del(e)te",
 #endif
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -22286,6 +22369,33 @@ static void dmDeleteConfirmAccept() {
         refreshLiveView(true);
         return;
     }
+    if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE) {
+        if (nodeId == 0) return;
+        const bool gone = Nodes.remove(nodeId);
+        // Only the Nodes screen shows a list to repair. Opened from the chat
+        // cursor there is nothing behind this dialog, and re-snapshotting would
+        // rebuild rows for a modal that is not on screen — the same reasoning
+        // the favorite toggle uses.
+        if (gone && s_nodesModal) {
+            snapshotNodesForModal();
+            // The row under the cursor is the one that just went away, so the
+            // index cannot be restored by identity the way the favorite toggle
+            // restores it. Keep the position instead, clamped to the shorter
+            // list, which lands the cursor on whatever moved up into the gap.
+            if (s_nodesFilteredCount <= 0) {
+                s_nodesSelected = -1;
+            } else if (s_nodesSelected >= s_nodesFilteredCount) {
+                s_nodesSelected = s_nodesFilteredCount - 1;
+            } else if (s_nodesSelected < 0) {
+                s_nodesSelected = 0;
+            }
+            refreshNodesListRows();
+            refreshNodesListSelection();
+            refreshNodesDetails();
+        }
+        return;
+    }
+
     if (action != DESTRUCTIVE_CONFIRM_DM_DELETE) return;
     if (nodeId == 0) return;
 
@@ -22327,6 +22437,7 @@ static void onDmDelBackdropPressed(lv_event_t *e) {
 static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nodeId) {
     if (!s_rootScreen || action == DESTRUCTIVE_CONFIRM_NONE) return;
     if (action == DESTRUCTIVE_CONFIRM_DM_DELETE && nodeId == 0) return;
+    if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE && nodeId == 0) return;
     if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR
         && (!s_liveModal || Channels.get(CHAN_LIVE).count <= 0)) return;
     if (s_dmDelModal || s_dmDelBackdrop) return;
@@ -22344,6 +22455,15 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
             snprintf(bodyText, sizeof(bodyText),
                      "All live traffic will be erased, including lines hidden by the filter");
         }
+    } else if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE) {
+        char who[48];
+        nodesActionTitleLabel(nodeId, who, sizeof(who));
+        snprintf(titleText, sizeof(titleText), "Delete node?");
+        // Says what it is not, because the row next to it is Ignore and the two
+        // read alike: this forgets a record, and the node reappears the next
+        // time it is heard.
+        snprintf(bodyText, sizeof(bodyText),
+                 "%s will be removed from the node list.", who);
     } else {
         char who[48];
         nodesActionTitleLabel(nodeId, who, sizeof(who));
@@ -32834,6 +32954,9 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
     // An explicit Announce press is a deliberate instruction and still goes
     // out; a button that silently did nothing would read as broken.
     if (announceHeldForOnboarding() && !forceAnnounce) return;
+    // Same exemption as onboarding above: a button the user just pressed is an
+    // instruction, and waiting on it would read as broken.
+    if (announceHeldForWebCfg(nowMs) && !forceAnnounce) return;
 
     bool nodeInfoDue = forceAnnounce || announceDue(nowMs, s_nextNodeInfoTxMs, s_cfg.nodeInfoIntervalS);
     bool positionDue = forceAnnounce || announceDue(nowMs, s_nextPositionTxMs, s_cfg.posIntervalS);
@@ -32914,6 +33037,7 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
 static void serviceTelemetryAnnounce(uint32_t nowMs) {
     if (announceHeldForOnboarding()) return;   // see announceHeldForOnboarding()
     bool forceTelemetry = webCfgTelemetryRequested();
+    if (announceHeldForWebCfg(nowMs) && !forceTelemetry) return;
 
     bool devDue = forceTelemetry || (s_cfg.telDeviceEnabled
         && announceDue(nowMs, s_nextDeviceTelemetryTxMs, s_cfg.telDeviceIntervalS));
@@ -33054,6 +33178,7 @@ static void serviceAutoFavorite(uint32_t nowMs) {
 
 static void serviceNeighborInfoAnnounce(uint32_t nowMs) {
     if (announceHeldForOnboarding()) return;   // see announceHeldForOnboarding()
+    if (announceHeldForWebCfg(nowMs)) return;  // see announceHeldForWebCfg()
     bool due = s_cfg.neighborInfoEnabled
         && s_cfg.neighborInfoOverLora
         && announceDue(nowMs, s_nextNeighborInfoTxMs, s_cfg.neighborInfoIntervalS);

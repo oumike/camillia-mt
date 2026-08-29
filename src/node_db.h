@@ -98,6 +98,15 @@ public:
     NodeEntry *upsert(uint32_t nodeId);
     NodeEntry *find(uint32_t nodeId);
 
+    // Forget one node: its RAM entry and its NVS blob. Returns false when the
+    // table did not have it.
+    //
+    // Not an ignore, and deliberately not sticky: nothing here stops the node
+    // coming straight back the next time a packet from it arrives, which is
+    // what will happen if it is still on the mesh. It removes a record, not a
+    // node — for "stop showing me this node", see IgnoreList.
+    bool remove(uint32_t nodeId);
+
     // Sorted with favorites first, then by recency. The sort is memoized: it
     // runs on the first call after a ranking field changes and is skipped by
     // every call until the next change, so walking rank 0..count-1 costs one

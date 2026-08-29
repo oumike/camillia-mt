@@ -355,6 +355,43 @@ int NodeDB::clearNonFavorites() {
     return removed;
 }
 
+bool NodeDB::remove(uint32_t nodeId) {
+    if (!nodeId) return false;
+    int idx = -1;
+    for (int i = 0; i < _count; i++) {
+        if (_nodes[i].nodeId == nodeId) { idx = i; break; }
+    }
+    if (idx < 0) return false;
+
+    // One key, not a namespace clear: every other node's blob has to survive
+    // untouched. Same retirement upsert() performs on an evicted node, and the
+    // same reasoning as clearNonFavorites() above.
+    Preferences p;
+    if (p.begin("nodes", false)) {
+        char key[12];
+        nodeKey(key, nodeId);
+        p.remove(key);
+        p.end();
+    }
+
+    // Compact in place. Relative order among the survivors does not matter —
+    // _sort() rebuilds the ranking — but the tail has to stay contiguous,
+    // because _count is what every walk of the table trusts.
+    for (int i = idx; i < _count - 1; i++) _nodes[i] = _nodes[i + 1];
+    memset(&_nodes[_count - 1], 0, sizeof(_nodes[0]));
+    _count--;
+    _sortDirty = true;
+
+    // The surviving blobs were not touched, so only the index needs rewriting —
+    // and if persistence is currently refusing writes, a stale index listing an
+    // id whose blob is gone is already healed on the next boot by the staleIds
+    // pass in init().
+    _saveIds();
+    Serial.printf("[nodedb] removed node !%08X (%d left)\n",
+                  (unsigned)nodeId, _count);
+    return true;
+}
+
 void NodeDB::saveAll() {
     _saveIds();
     for (int i = 0; i < _count; i++)

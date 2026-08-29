@@ -63,6 +63,13 @@ static bool           gOnboarding      = false;
 // once the window passes and the main loop performs the actual teardown, so
 // the shutdown path stays the same one the manual toggle uses.
 static uint32_t       gLastRequestMs   = 0;
+// Cleared on every start/stop, set on the first webCfgLoop() pass after the
+// server comes up. Everything that asks "how long since the page was busy" or
+// "how long has the socket gone unserviced" has to measure from there, not from
+// webCfgBegin(): the rest of setup() — the node DB, the radio, GPS, LVGL — runs
+// before loop() does, and for that whole stretch the server is listening but
+// single-threadedly unable to answer anyone.
+static uint32_t       gFirstServiceMs  = 0;
 static uint32_t       gIdleTimeoutMs   = 0;     // 0 = never expire
 static bool           gIdleExpired     = false;
 // True while the server is serving the SoftAP variant ("web config lite"): the
@@ -1384,7 +1391,17 @@ static bool clientWritable(uint32_t timeoutMs) {
 // part is cheap and needs no network) and simply lands nowhere.
 static bool sendStalled() {
     if (gSendAborted) return true;
-    if (!server.client().connected()) { gSendAborted = true; return true; }
+    if (!server.client().connected()) {
+        // Said out loud, because the two ways a response dies want opposite
+        // fixes and used to look identical in the log: an abandoned page with
+        // no reason given. This one is the browser hanging up — it gave up
+        // waiting, was reloaded, or navigated away — and points at how long the
+        // device took to answer, not at the socket. The other, below, is the
+        // device unable to push bytes into a connection still nominally open.
+        Serial.println("[web] client hung up mid-response — abandoning");
+        gSendAborted = true;
+        return true;
+    }
     if (!clientWritable(kWriteWindowMs)) {
         Serial.println("[web] socket not draining — abandoning response");
         gSendAborted = true;
@@ -4642,10 +4659,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "var CHAT_TAPS=['\\uD83D\\uDC4D','\\uD83D\\uDC4E','\\u203C\\uFE0F','\\u2753','\\uD83D\\uDE02','\\uD83D\\uDE22'];"
                         "var chatIsDm=false;var chatId='';var chatCursor=-1;var chatLines=[];"
                         "var chatReplyPid=0;var chatPreview={};var chatTimer=null;var chatTargetsTimer=null;"
+                        "var chatPollBusy=false;var chatRenderPending=false;var chatTargetsHtml='';"
                         "function chatEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
                         "function chatTargetChanged(){"
                             "var sel=document.getElementById('chat-target');var v=sel?sel.value:'';"
-                            "chatLines=[];chatCursor=-1;chatReplyPid=0;chatPreview={};"
+                            // Drop the in-flight guard, not just the data: the poll below has to
+                            // start now rather than wait out a request for the target we just
+                            // left. That request's reply is discarded by the target check in
+                            // pollChat(), so both being in flight is safe.
+                            "chatLines=[];chatCursor=-1;chatReplyPid=0;chatPreview={};chatPollBusy=false;"
+                            "chatRenderPending=false;"
                             "chatCancelReply();"
                             "var feed=document.getElementById('chat-feed');if(feed)feed.innerHTML='';"
                             "if(v===''){chatId='';return;}"
@@ -4661,19 +4684,58 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                     "d.channels.forEach(function(c){h+='<option value=\"c:'+c.id+'\">'+chatEsc(c.name)+'</option>';});h+='</optgroup>';}"
                                 "if(d.dms&&d.dms.length){h+='<optgroup label=\"Direct Messages\">';"
                                     "d.dms.forEach(function(c){h+='<option value=\"d:'+c.id+'\">'+chatEsc(c.name)+'</option>';});h+='</optgroup>';}"
+                                // Every 5 s this runs; the list changes maybe once an hour.
+                                // Reassigning innerHTML rebuilds the option nodes, and on a
+                                // phone that is enough to shut an open dropdown and lose the
+                                // scroll position inside it.
+                                "if(h===chatTargetsHtml)return;chatTargetsHtml=h;"
                                 "sel.innerHTML=h;if(cur)sel.value=cur;"
                             "}).catch(function(){});"
                         "}"
+                        // Two guards against the same message arriving twice, because the
+                        // cursor only advances when a reply lands. The device can take
+                        // longer than the 2 s poll interval to answer — it is building up
+                        // to 6 KB of JSON between mesh work — and sending adds a poll of
+                        // its own 600 ms later. Two requests in flight at once therefore
+                        // both carry the pre-send cursor, both come back with the new
+                        // message, and both used to append it. The feed then showed it
+                        // repeated: chatRender() groups consecutive lines by packet id, so
+                        // the duplicates were glued into one bubble carrying the same text
+                        // two or three times over.
+                        //
+                        // The authoritative fix is the per-line index: every line carries
+                        // its absolute "i" (see handleGetChatData), so anything at or
+                        // below the cursor is something we already hold, whatever order
+                        // the replies arrive in. The busy flag is the cheaper half — it
+                        // stops a slow device accumulating a queue of redundant requests.
                         "function pollChat(){"
-                            "if(chatId==='')return;"
+                            "if(chatId===''||chatPollBusy)return;"
                             "var q=chatIsDm?('dm='+encodeURIComponent(chatId)):('ch='+encodeURIComponent(chatId));"
                             "var url='/chat-data?'+q+(chatCursor>=0?('&after='+chatCursor):'');"
+                            // Which conversation this reply belongs to. A target switch
+                            // mid-flight would otherwise splice the old one's lines into
+                            // the new one's feed.
+                            "var wantId=chatId;var wantDm=chatIsDm;"
+                            "chatPollBusy=true;"
                             "fetch(url,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){"
+                                "chatPollBusy=false;"
                                 "if(!d||!d.lines)return;"
-                                "for(var i=0;i<d.lines.length;i++)chatLines.push(d.lines[i]);"
-                                "if(typeof d.total==='number')chatCursor=d.total-1;"
-                                "chatRender();"
-                            "}).catch(function(){});"
+                                "if(chatId!==wantId||chatIsDm!==wantDm)return;"
+                                "var added=0;"
+                                "for(var i=0;i<d.lines.length;i++){var ln=d.lines[i];"
+                                    "if(typeof ln.i==='number'){if(ln.i<=chatCursor)continue;chatCursor=ln.i;}"
+                                    "chatLines.push(ln);added++;}"
+                                "if(typeof d.total==='number'&&d.total-1>chatCursor)chatCursor=d.total-1;"
+                                // The poll runs every 2 s and almost always brings nothing.
+                                // Rendering anyway rebuilt the whole feed from a string each
+                                // time — hundreds of nodes on a busy channel, since every
+                                // message carries a Reply button and six tapbacks — which is
+                                // most of why this tab felt heavy. chatRenderPending covers
+                                // the case where a render was skipped because the composer
+                                // had focus: without it, a feed that changed during typing
+                                // would wait for the *next* new message to be drawn.
+                                "if(added>0||chatRenderPending)chatRender();"
+                            "}).catch(function(){chatPollBusy=false;});"
                         "}"
                         "function chatBubble(pid,mine,txt){"
                             "if(pid!==0)chatPreview[pid]=txt;"
@@ -4689,7 +4751,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "var feed=document.getElementById('chat-feed');if(!feed)return;"
                             // Don't rebuild the feed while the user is composing — reassigning
                             // innerHTML blurs the focused input / drops the mobile keyboard.
-                            "var ae=document.activeElement;if(ae&&ae.id==='chat-input')return;"
+                            "var ae=document.activeElement;if(ae&&ae.id==='chat-input'){chatRenderPending=true;return;}"
+                            "chatRenderPending=false;"
                             "var atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<40;"
                             "var h='';var i=0;var L=chatLines;"
                             // A wrapped message is stored one line per wrap, and
@@ -6559,6 +6622,18 @@ static void registerNotFound() {
             server.send(302, "text/plain", "");
             return;
         }
+        // Safari asks for these on every page load — four requests per load,
+        // each one a full connect/parse/answer cycle this server pays for out
+        // of the main loop, and four ESP error lines in a log someone is
+        // usually reading a real problem out of. A 404 is not cacheable enough
+        // to stop the asking; an empty 204 with a long max-age is. Matched
+        // here rather than registered as routes so it costs no handler heap,
+        // which the AP path does not have to spare.
+        if (server.uri().startsWith("/apple-touch-icon")) {
+            server.sendHeader("Cache-Control", "public, max-age=604800, immutable");
+            server.send(204, "text/plain", "");
+            return;
+        }
         Serial.printf("[web] 404 %s %s\n",
                       (server.method() == HTTP_GET) ? "GET" : "POST",
                       server.uri().c_str());
@@ -6774,6 +6849,16 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
 
         // Both AP paths serve web config lite; the full page is STA-only.
         registerLiteRoutes();
+        // No delay(1) inside handleClient() when no client is waiting.
+        // WebServer takes that delay on every single call, which — with
+        // webCfgLoop() running once per main-loop pass — is a full FreeRTOS
+        // tick added to every iteration for the entire time the server is up,
+        // whether or not anyone is connected. The loop already ends with its
+        // own delay(5), so the yield it exists to provide is still there; this
+        // only stops paying for it twice, and it is one tick less latency
+        // before a request that has arrived gets noticed.
+        gFirstServiceMs = 0;   // clocks start at first service, not here
+        server.enableDelay(false);
         server.begin();
         running = true;
         Serial.printf("[web] %s at http://%s/\n",
@@ -6850,6 +6935,10 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     } else {
         registerCommonRoutes();
     }
+    // Same reason as the AP path above: WebServer's idle delay(1) is a
+    // per-main-loop-pass tax for as long as the server is running.
+    gFirstServiceMs = 0;   // clocks start at first service, not here
+    server.enableDelay(false);
     server.begin();
     running = true;
     Serial.printf("[web] ready at http://%s/\n", ipBuf);
@@ -6861,6 +6950,8 @@ void webCfgEnd() {
     if (!running) return;
     gIdleExpired    = false;
     gIdleTimeoutMs  = 0;
+    // Re-armed here so the next start measures its own clocks; see webCfgLoop().
+    gFirstServiceMs = 0;
     sessionToken[0] = '\0';
     gFlashMsg[0] = '\0';
     gRebootPending = false;
@@ -6953,6 +7044,39 @@ void webCfgClearWifiCreds() {
 void webCfgLoop() {
     if (!running) return;
 
+    // How long the socket went unserviced. This function runs once per main
+    // loop pass, so a gap here is the main loop having been busy elsewhere —
+    // and nothing in the request path can tell the difference between "the
+    // browser gave up" and "we never got round to answering it". The blocking
+    // radio transmits are the ones worth catching: a NodeInfo announce at SF11
+    // is seconds of airtime during which no HTTP request is looked at, which a
+    // browser opening the page at that moment experiences as a dead server.
+    {
+        static uint32_t sLastServiceMs = 0;
+        const uint32_t nowMs = millis();
+        if (gFirstServiceMs == 0) {
+            // First pass after the server came up. Two clocks start here rather
+            // than in webCfgBegin(). The gap report, because the previous value
+            // is from before the last shutdown — across a Config-screen disable
+            // and re-enable that measured the user's own dwell time and printed
+            // it as a stall. And gLastRequestMs, because the "someone is using
+            // the page" window it feeds is meant to cover the moments a browser
+            // could actually be talking to us; boot init is not one of them, and
+            // spending the window there left the first announce unheld — which
+            // is the whole problem this was meant to prevent.
+            gFirstServiceMs = nowMs;
+            gLastRequestMs = nowMs;
+            sLastServiceMs = nowMs;
+        } else {
+            const uint32_t gap = nowMs - sLastServiceMs;
+            if (gap >= 1000) {
+                Serial.printf("[web] main loop was busy for %lu ms - socket unserviced\n",
+                              (unsigned long)gap);
+            }
+            sLastServiceMs = nowMs;
+        }
+    }
+
     if (gCaptiveActive) gDns.processNextRequest();
     server.handleClient();
 
@@ -6986,6 +7110,11 @@ void webCfgLoop() {
 }
 
 bool webCfgRunning() { return running; }
+
+uint32_t webCfgMsSinceRequest() {
+    if (!running) return 0xFFFFFFFFu;   // UINT32_MAX, spelled without the header
+    return (uint32_t)(millis() - gLastRequestMs);
+}
 
 bool webCfgIdleExpired() { return gIdleExpired; }
 const char *webCfgIP() { return ipBuf; }
