@@ -14921,14 +14921,19 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     //
     // HELTEC_NAV_ACTIONS itself stays: that button routes through
     // onHeltecBottomNavPressed() below, so the open/close behaviour is shared.
+    // Home, then the three screens that carry content, then the two that do
+    // not. Config used to sit second, which put the settings screen under the
+    // thumb of anyone reaching for Home and split the reading destinations
+    // apart; it now sits with Help at the right end, where you go deliberately
+    // rather than in passing.
     const NavItem kItems[] = {
         {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false, nullptr},
-        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
         {LV_SYMBOL_ENVELOPE, HELTEC_NAV_DM,     false, "(D)"},
         // The node roster, and the packet feed coming in over the air.
         {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
                              HELTEC_NAV_NODES,  navEmojiReady, "(N)"},
         {LV_SYMBOL_WIFI,     HELTEC_NAV_LIVE,   false, "(L)"},
+        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
         {"?",                HELTEC_NAV_LEGEND, false, nullptr},
     };
 
@@ -24250,7 +24255,7 @@ static void openLegendModal() {
     lv_label_set_text_fmt(
         body,
         "Touch Navigation:\n"
-        "Use bottom buttons for Config, DM, Nodes, Live, Help.\n"
+        "Use bottom buttons for Home, DM, Nodes, Live, Config, Help.\n"
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"

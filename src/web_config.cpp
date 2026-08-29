@@ -3120,7 +3120,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "</select></label>";
     html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
             "Row of tappable icons along the bottom of the screen - Home, "
-            "Config, DM, Nodes, Live, Help. Disabled restores the keyboard "
+            "DM, Nodes, Live, Config, Help. Disabled restores the keyboard "
             "shortcut hints that used to sit there. The keys work either way.</p>";
 #endif
 #if HAS_AUDIO_ALERTS

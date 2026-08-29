@@ -133,7 +133,8 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
   they go to a LittleFS partition in its own flash. Devices flashed before this
   existed need one USB flash to get the partition — the partition table is not
   part of an OTA update, so an OTA alone leaves history in RAM as before
-- Bottom touch nav: Config, DM, Nodes, Live, Help — the same five everywhere.
+- Bottom touch nav: Home, DM, Nodes, Live, Config, Help — the same six in the
+  same order everywhere.
   Actions is not one of them: it acts on the channel you are reading, so it
   lives on the chat screen only
 - **Under the chat: Actions on the left, New Message on the right**, splitting
@@ -1431,7 +1432,8 @@ Primary usage is keyboard.
 
 Primary usage is touch.
 
-- Bottom touch nav provides Config, DM, Nodes, Live, and Help
+- Bottom touch nav provides Home, DM, Nodes, Live, Config, and Help, in that
+  order left to right
 - Actions is not in the nav. On the chat screen it shares the strip under the
   conversation with New Message, one third and two thirds respectively; no other
   screen offers it, since there is no conversation there for it to act on
