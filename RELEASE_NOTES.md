@@ -1,24 +1,14 @@
 ### New
-- **Locate** is now a live OpenStreetMap view: it opens centered on the selected node at zoom 13 and can be panned and zoomed anywhere in the world, from zoom 2 down to building level at zoom 19 (T-Deck, T-Lora Pager, Square, Mesh Deck, ThinkNode M9).
-- Drag the map to pan, and use the on-screen `+` / `-` buttons and the GPS button to zoom or recenter the node (T-Deck, T-Lora Pager, Square, Mesh Deck).
-- Keyboard controls in Locate: `I`/`J`/`K`/`L`, arrows or trackball to pan, `M`/`N` or the page keys to zoom, `H` or `C` to recenter the node, and Space to return to the opening view (T-Deck, T-Lora Pager, Mesh Deck, ThinkNode M9).
-- Map tiles you view while the device is on Wi-Fi are saved to storage, so the same area redraws later with no network; areas never visited show as blank gaps offline.
-- Panning wraps across the antimeridian, so the view is no longer confined to one state, country, or downloaded area, and nodes outside the United States now get a real map.
-- Web Config's **Maps Download** now pre-loads offline tiles around every positioned node, with a Roads / Streets / Buildings detail choice, a progress bar, a Stop button, and cached-versus-pending tile counts; stopping keeps everything already saved and a later run picks up where it left off.
-- After upgrading, the device offers once to **Keep** or **Remove** the old state and detail map files, which the new map no longer uses; the answer is remembered.
-- The Web Config chat box is now multi-line with a live character counter, and sends with Ctrl+Enter (Cmd+Enter on a Mac).
+- Map settings page now has a "Map download debug" panel that records each tile attempt and its result, with a one-click "Copy report" button for sharing when downloads misbehave.
+- Failed tile downloads now report why they failed — which stage broke, the upstream response, bytes received, and timings — instead of a bare error.
 
 ### Changed
-- The Locate map now fills the whole panel — the state name and coordinate line under it is gone, and text appears over the map only when there is something to say (`Loading map...`, `Waiting for Wi-Fi...`, `Map unavailable`).
-- Space no longer closes Locate; it resets the view instead. Close with Enter, the close key, or by tapping outside.
-- Opening **Nodes** now brings up Wi-Fi using your saved network so Locate can fill in missing tiles, and puts Wi-Fi back the way it was when you leave.
-- Position, telemetry and neighbour announcements are paused while the Locate map is open, so panning and zooming stay smooth.
-- **Clear Maps** now deletes the offline tile cache along with any leftover legacy map files, and reports how many of each it removed.
-- Chat messages typed in Web Config now use the mesh's own length limit instead of a fixed 200 characters.
-- Maps and other images redraw noticeably faster on boards with PSRAM (T-Deck, T-Lora Pager, Square, Mesh Deck, ThinkNode M9).
-- On-screen buttons drop their keyboard-shortcut letters on the boards that have no keyboard — "Locate", "Delete", "Reply", "Yes", "No" (Heltec V4, Square).
+- Map tile downloads retry each tile up to three times and keep going past a failed tile, rather than stopping the whole run at the first error.
+- If a tile download appears to fail but was actually written to the device, the page now re-checks storage and counts it as saved instead of reporting a failure.
+- After five tiles in a row can't be confirmed, the download pauses and says so, keeping every tile already saved.
+- Offline map status is checked in much smaller batches, so the check is far less likely to time out over a weak Wi-Fi link.
+- The map download summary now reads in plain terms — tiles "stored on the device" and "remaining" instead of cache jargon — and confirms explicitly when everything at the chosen zoom is already stored.
 
 ### Fixed
-- A tile service refusal is no longer drawn on the map as if it were a map image.
-- An interrupted tile download can no longer leave a half-written file that later looks like a valid cached tile.
-- Deleting a folder on the card could leave files behind on some cards; every file is now removed.
+- The web config page no longer renders as garbled text or stray tag fragments when Wi-Fi is slow; page data is now written to the connection in a way that can't desynchronize the browser mid-page.
+- Closing or navigating away from the config page while it is still loading now ends the transfer immediately instead of leaving the device building a page nobody is reading.

@@ -22,8 +22,10 @@
 #include <esp_heap_caps.h>
 #include <math.h>
 #include <ctype.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/select.h>   // clientWritable(): poll the socket before writing
+#include <sys/socket.h>   // writeAllRaw(): bounded nonblocking socket writes
 #include "debug_flags.h"
 #include "gps.h"
 #include "ota_update.h"   // otaLayoutSupportsUpdate()
@@ -1413,32 +1415,59 @@ static bool sendStalled() {
     return false;
 }
 
-// Writes every byte or gives up and marks the response aborted.
+// Writes every byte or gives up after one full no-progress window.
 //
-// This exists because WiFiClient::write() is allowed to write *less* than asked:
-// it retries WIFI_CLIENT_MAX_WRITE_RETRY times and then returns however many
-// bytes it managed. WebServer::sendContent() throws that return value away, and
-// in chunked mode it has already announced the full length in the chunk header
-// — so a short write leaves the browser reading the next chunk's size line as
-// payload. The stream desyncs and the rest of the page renders as garbage
-// (stray tag fragments and interleaved text), which is not obviously a network
-// problem when you are looking at it.
-//
-// Looping on the return value is the whole fix. A write that cannot finish is
-// then an abandoned response, which the page builder already copes with,
-// instead of a corrupt one.
+// WiFiClient::write() has its own ten-attempt select loop, outside our timeout,
+// and can still return a partial count after that loop. Writing on the socket
+// directly keeps every retry under this function's deadline. Partial sends are
+// safe to resume because sendChunkedRaw() has already assembled the complete
+// frame in stable storage; only a full no-progress window or a hard socket error
+// abandons it.
 static bool writeAllRaw(const char *data, size_t len) {
     // Bound once: client() returns by value, and the copy shares the socket
     // through a refcounted handle. Fetching it per iteration would be correct
     // but pointless churn.
     WiFiClient c = server.client();
+    const int sock = c.fd();
+    if (sock < 0) {
+        Serial.println("[web] raw write failed: invalid socket");
+        return false;
+    }
+
     size_t off = 0;
+    uint32_t deadline = millis() + kWriteWindowMs;
     while (off < len) {
-        if (!c.connected()) return false;
-        if (!clientWritable(kWriteWindowMs)) return false;
-        const size_t n = c.write((const uint8_t *)(data + off), len - off);
-        if (n == 0) return false;
-        off += n;
+        if (!c.connected()) {
+            Serial.printf("[web] raw write failed: client closed at %u/%u bytes\n",
+                          (unsigned)off, (unsigned)len);
+            return false;
+        }
+
+        const uint32_t now = millis();
+        if ((int32_t)(now - deadline) >= 0) {
+            Serial.printf("[web] raw write failed: no progress at %u/%u bytes\n",
+                          (unsigned)off, (unsigned)len);
+            return false;
+        }
+        const uint32_t waitMs = deadline - now;
+        if (!clientWritable(waitMs)) {
+            Serial.printf("[web] raw write failed: socket stalled at %u/%u bytes\n",
+                          (unsigned)off, (unsigned)len);
+            return false;
+        }
+
+        const ssize_t sent = send(sock, data + off, len - off, MSG_DONTWAIT);
+        if (sent > 0) {
+            off += (size_t)sent;
+            deadline = millis() + kWriteWindowMs;
+            continue;
+        }
+        if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            Serial.printf("[web] raw write failed: send errno=%d at %u/%u bytes\n",
+                          errno, (unsigned)off, (unsigned)len);
+            return false;
+        }
+        delay(1);
     }
     return true;
 }
@@ -2330,6 +2359,58 @@ static size_t mapTileUploadBytes = 0;
 static char mapTileUploadPath[96] = {};
 static char mapTileUploadTempPath[104] = {};
 
+struct MapTileFetchDiag {
+    int zoom = -1;
+    int32_t tileX = -1;
+    int32_t tileY = -1;
+    const char *stage = "request";
+    uint32_t startedAtMs = 0;
+    uint32_t headersMs = 0;
+    uint32_t bodyMs = 0;
+    int upstreamCode = 0;
+    int expectedBytes = -1;
+    size_t writtenBytes = 0;
+    int remainingBytes = -1;
+    bool blocked = false;
+    bool connected = false;
+    bool idleTimedOut = false;
+    bool pngValid = false;
+};
+
+static void sendMapTileFetchError(int responseCode,
+                                  const char *error,
+                                  const MapTileFetchDiag &diag) {
+    const size_t freeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t largestInternal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const uint32_t totalMs = millis() - diag.startedAtMs;
+    char response[384];
+    snprintf(response, sizeof(response),
+             "{\"ok\":false,\"error\":\"%s\",\"stage\":\"%s\","
+             "\"upstream\":%d,\"expected\":%d,\"written\":%u,\"remaining\":%d,"
+             "\"blocked\":%s,\"connected\":%s,\"idleTimeout\":%s,\"pngValid\":%s,"
+             "\"headersMs\":%u,\"bodyMs\":%u,\"totalMs\":%u,"
+             "\"heap\":%u,\"largestHeap\":%u}",
+             error, diag.stage, diag.upstreamCode, diag.expectedBytes,
+             (unsigned)diag.writtenBytes, diag.remainingBytes,
+             diag.blocked ? "true" : "false",
+             diag.connected ? "true" : "false",
+             diag.idleTimedOut ? "true" : "false",
+             diag.pngValid ? "true" : "false",
+             (unsigned)diag.headersMs, (unsigned)diag.bodyMs, (unsigned)totalMs,
+             (unsigned)freeInternal, (unsigned)largestInternal);
+    Serial.printf("[map-web] fail stage=%s error=%s z=%d x=%ld y=%ld upstream=%d "
+                  "expected=%d written=%u remaining=%d blocked=%d connected=%d "
+                  "idle_timeout=%d png=%d headers=%ums body=%ums total=%ums "
+                  "heap=%u largest=%u\n",
+                  diag.stage, error, diag.zoom, (long)diag.tileX, (long)diag.tileY,
+                  diag.upstreamCode, diag.expectedBytes, (unsigned)diag.writtenBytes,
+                  diag.remainingBytes, diag.blocked, diag.connected,
+                  diag.idleTimedOut, diag.pngValid,
+                  (unsigned)diag.headersMs, (unsigned)diag.bodyMs, (unsigned)totalMs,
+                  (unsigned)freeInternal, (unsigned)largestInternal);
+    server.send(responseCode, "application/json", response);
+}
+
 // GET /map-tile-status?keys=13_123_456.png,...
 // Status is intentionally plan-scoped and bounded. Returning an entire cache
 // index would grow without limit as users pan online and fill gaps.
@@ -2515,38 +2596,50 @@ static uint8_t mapTileFetchBuffer[1024] = {};
 // operator proxy, so Web Config asks the device to fetch one tile at a time
 // using Camillia's stable application User-Agent.
 static void handlePostMapTileFetch() {
+    MapTileFetchDiag diag;
+    diag.startedAtMs = millis();
 #if !HAS_FILE_STORAGE
-    server.send(503, "application/json", "{\"ok\":false,\"error\":\"no storage\"}");
+    diag.stage = "storage";
+    sendMapTileFetchError(503, "no storage", diag);
 #else
     if (!isLoggedIn()) {
-        server.send(403, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        diag.stage = "auth";
+        sendMapTileFetchError(403, "unauthorized", diag);
         return;
     }
     if (!server.hasArg("z") || !server.hasArg("x") || !server.hasArg("y")) {
-        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing tile coordinates\"}");
+        sendMapTileFetchError(400, "missing tile coordinates", diag);
         return;
     }
 
     int zoom = server.arg("z").toInt();
     int32_t tileX = (int32_t)server.arg("x").toInt();
     int32_t tileY = (int32_t)server.arg("y").toInt();
+    diag.zoom = zoom;
+    diag.tileX = tileX;
+    diag.tileY = tileY;
     if (!nodesMapTileCoordsValid(zoom, tileX, tileY)) {
-        server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid tile coordinates\"}");
+        sendMapTileFetchError(400, "invalid tile coordinates", diag);
         return;
     }
     if (!stateMapStorageReady() || !nodesMapTileEnsureParentDirs(zoom, tileX)) {
-        server.send(503, "application/json", "{\"ok\":false,\"error\":\"storage unavailable\"}");
+        diag.stage = "storage";
+        sendMapTileFetchError(503, "storage unavailable", diag);
         return;
     }
 
     String path = nodesMapTilePath(zoom, tileX, tileY);
     String tempPath = nodesMapTileUploadTempPath(zoom, tileX, tileY);
     if (storageFs().exists(path.c_str()) && nodesMapTileFileValid(path.c_str())) {
-        char response[144];
+        const uint32_t totalMs = millis() - diag.startedAtMs;
+        char response[176];
         snprintf(response, sizeof(response),
-                 "{\"ok\":true,\"cached\":true,\"z\":%d,\"x\":%ld,\"y\":%ld}",
-                 zoom, (long)tileX, (long)tileY);
+                 "{\"ok\":true,\"cached\":true,\"z\":%d,\"x\":%ld,\"y\":%ld,"
+                 "\"totalMs\":%u}",
+                 zoom, (long)tileX, (long)tileY, (unsigned)totalMs);
         server.send(200, "application/json", response);
+        Serial.printf("[map-web] ok cached=1 z=%d x=%ld y=%ld total=%ums\n",
+                      zoom, (long)tileX, (long)tileY, (unsigned)totalMs);
         return;
     }
     if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
@@ -2562,7 +2655,8 @@ static void handlePostMapTileFetch() {
     http.setTimeout(12000);
     if (!http.begin(client, url)) {
         client.stop();
-        server.send(502, "application/json", "{\"ok\":false,\"error\":\"proxy connection failed\"}");
+        diag.stage = "proxy-connect";
+        sendMapTileFetchError(502, "proxy connection failed", diag);
         return;
     }
     char userAgent[112];
@@ -2573,37 +2667,52 @@ static void handlePostMapTileFetch() {
     const char *responseHeaders[] = {"x-blocked"};
     http.collectHeaders(responseHeaders, 1);
 
+    const uint32_t headersStartedAtMs = millis();
     int upstreamCode = http.GET();
-    if (upstreamCode != HTTP_CODE_OK || http.hasHeader("x-blocked")) {
+    diag.headersMs = millis() - headersStartedAtMs;
+    diag.upstreamCode = upstreamCode;
+    diag.expectedBytes = http.getSize();
+    diag.blocked = http.hasHeader("x-blocked");
+    if (upstreamCode != HTTP_CODE_OK || diag.blocked) {
+        diag.stage = "upstream-status";
         http.end();
         client.stop();
-        server.send(502, "application/json", "{\"ok\":false,\"error\":\"tile service rejected request\"}");
+        sendMapTileFetchError(502, "tile service rejected request", diag);
         return;
     }
 
     int remaining = http.getSize();
     if (remaining > (int)kMapTileUploadMaxBytes) {
+        diag.stage = "upstream-size";
+        diag.remainingBytes = remaining;
         http.end();
         client.stop();
-        server.send(502, "application/json", "{\"ok\":false,\"error\":\"tile response too large\"}");
+        sendMapTileFetchError(502, "tile response too large", diag);
         return;
     }
     File output = storageFs().open(tempPath.c_str(), FILE_WRITE);
     if (!output) {
+        diag.stage = "storage-open";
+        diag.remainingBytes = remaining;
         http.end();
         client.stop();
-        server.send(503, "application/json", "{\"ok\":false,\"error\":\"tile file open failed\"}");
+        sendMapTileFetchError(503, "tile file open failed", diag);
         return;
     }
 
     WiFiClient *stream = http.getStreamPtr();
     size_t written = 0;
     bool ok = true;
+    bool idleTimedOut = false;
+    const uint32_t bodyStartedAtMs = millis();
     uint32_t idleDeadline = millis() + 12000UL;
     while (http.connected() && (remaining > 0 || remaining < 0)) {
         int available = stream->available();
         if (available <= 0) {
-            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            if ((int32_t)(millis() - idleDeadline) >= 0) {
+                idleTimedOut = true;
+                break;
+            }
             delay(1);
             continue;
         }
@@ -2616,7 +2725,10 @@ static void handlePostMapTileFetch() {
         }
         int read = stream->readBytes(mapTileFetchBuffer, wanted);
         if (read <= 0) {
-            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            if ((int32_t)(millis() - idleDeadline) >= 0) {
+                idleTimedOut = true;
+                break;
+            }
             delay(1);
             continue;
         }
@@ -2632,25 +2744,44 @@ static void handlePostMapTileFetch() {
         delay(1);
     }
     output.close();
+    diag.bodyMs = millis() - bodyStartedAtMs;
+    diag.stage = "body";
+    diag.writtenBytes = written;
+    diag.remainingBytes = remaining;
+    diag.connected = http.connected();
+    diag.idleTimedOut = idleTimedOut;
+    diag.pngValid = written >= 24 && nodesMapTileFileValid(tempPath.c_str());
     http.end();
     client.stop();
 
-    if (!ok || written < 24 || remaining > 0 || !nodesMapTileFileValid(tempPath.c_str())) {
+    if (!ok || written < 24 || remaining > 0 || !diag.pngValid) {
         storageFs().remove(tempPath.c_str());
-        server.send(502, "application/json", "{\"ok\":false,\"error\":\"incomplete tile response\"}");
+        sendMapTileFetchError(502, "incomplete tile response", diag);
         return;
     }
     if (!storageFs().rename(tempPath.c_str(), path.c_str())) {
+        diag.stage = "storage-rename";
         storageFs().remove(tempPath.c_str());
-        server.send(500, "application/json", "{\"ok\":false,\"error\":\"tile rename failed\"}");
+        sendMapTileFetchError(500, "tile rename failed", diag);
         return;
     }
 
-    char response[176];
+    const uint32_t totalMs = millis() - diag.startedAtMs;
+    char response[320];
     snprintf(response, sizeof(response),
-             "{\"ok\":true,\"cached\":false,\"z\":%d,\"x\":%ld,\"y\":%ld,\"bytes\":%u}",
-             zoom, (long)tileX, (long)tileY, (unsigned)written);
+             "{\"ok\":true,\"cached\":false,\"z\":%d,\"x\":%ld,\"y\":%ld,"
+             "\"bytes\":%u,\"upstream\":%d,\"expected\":%d,"
+             "\"headersMs\":%u,\"bodyMs\":%u,\"totalMs\":%u,\"heap\":%u}",
+             zoom, (long)tileX, (long)tileY, (unsigned)written,
+             upstreamCode, diag.expectedBytes,
+             (unsigned)diag.headersMs, (unsigned)diag.bodyMs, (unsigned)totalMs,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     server.send(200, "application/json", response);
+    Serial.printf("[map-web] ok cached=0 z=%d x=%ld y=%ld upstream=%d "
+                  "expected=%d written=%u headers=%ums body=%ums total=%ums\n",
+                  zoom, (long)tileX, (long)tileY, upstreamCode,
+                  diag.expectedBytes, (unsigned)written,
+                  (unsigned)diag.headersMs, (unsigned)diag.bodyMs, (unsigned)totalMs);
 #endif
 }
 #endif  // HAS_STATE_MAPS
@@ -2762,6 +2893,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // it: kHead is ~4 KB and even kLiteHead is ~1 KB, and a contiguous
     // allocation that size is exactly what a fragmented heap can't provide.
     sendFlash(lite ? kLiteHead : kHead);
+    if (gSendAborted) {
+        server.client().stop();
+        logWifiHeapDiag(lite ? "lite page abandoned" : "config page abandoned");
+        return;
+    }
     String html;
     uint8_t themePreset = themePresetFromConfig(*gCfg);
     // Zero in lite mode: the node loops below accumulate tens of KB of options
@@ -2847,6 +2983,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         bool sawFavorite = false;
         bool sawDivider  = false;
         for (int i = 0; i < totalNodes; i++) {
+            if (gSendAborted) break;
             NodeEntry *n = Nodes.getByRank(i);
             if (!n) continue;
             if (n->favorite) {
@@ -2886,6 +3023,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         int cnt = 0;
         char t[64];
         for (int i = 0; i < totalNodes; i++) {
+            if (gSendAborted) break;
             NodeEntry *n = Nodes.getByRank(i);
             if (!n) continue;
             float lat = 0.0f, lon = 0.0f;
@@ -2906,6 +3044,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         String buf;
         char tmp[96];
         for (int i = 0; i < totalNodes; i++) {
+            if (gSendAborted) break;
             NodeEntry *n = Nodes.getByRank(i);
             if (!n) continue;
 
@@ -4342,7 +4481,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "fills and saves missing viewport tiles whenever internet access is available.</p>";
         html +=
             "<div id='mapdl-status' style='font-size:.82em;color:#888;margin:.2em 0 .6em'>"
-            "Checking cached maps&hellip;</div>";
+            "Checking maps stored on the device&hellip;</div>";
         html +=
             "<div style='display:flex;align-items:center;gap:.45em;margin:.1em 0 .15em'>"
             "<div id='mapdl-progress-wrap' role='progressbar' aria-label='Map download progress' "
@@ -4369,6 +4508,18 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "Detailed plans can take a very long time. Buildings may require up to 42 tile "
             "downloads per positioned node before overlap is removed. Keep this page open "
             "and the device connected for the entire run.</div>";
+        html +=
+            "<details id='mapdl-debug-wrap' style='margin:.55em 0 .8em'>"
+            "<summary style='font-size:.82em;color:#68788a;cursor:pointer'>"
+            "Map download debug (<span id='mapdl-debug-count'>0</span>)</summary>"
+            "<textarea id='mapdl-debug' readonly spellcheck='false' "
+            "style='box-sizing:border-box;width:100%;height:170px;margin:.45em 0 .35em;"
+            "font:11px/1.35 monospace;white-space:pre;resize:vertical'></textarea>"
+            "<div style='display:flex;align-items:center;gap:.4em;flex-wrap:wrap'>"
+            "<button type='button' id='mapdl-debug-copy' style='margin:0;background:#355f9b'>Copy report</button>"
+            "<button type='button' id='mapdl-debug-clear' style='margin:0;background:#68788a'>Clear</button>"
+            "<span id='mapdl-debug-copy-status' style='font-size:.78em;color:#68788a'></span>"
+            "</div></details>";
         html +=
             "<p style='font-size:.82em;color:#888;margin:.4em 0 1em'>"
             "Downloading writes to the card over the same SPI bus the radio uses, "
@@ -5030,9 +5181,47 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "var progressBar=document.getElementById('mapdl-progress-bar');\n"
         "var progressText=document.getElementById('mapdl-progress-text');\n"
         "var stopButton=document.getElementById('mapdl-stop');\n"
+        "var debugBox=document.getElementById('mapdl-debug');\n"
+        "var debugCount=document.getElementById('mapdl-debug-count');\n"
+        "var debugCopy=document.getElementById('mapdl-debug-copy');\n"
+        "var debugClear=document.getElementById('mapdl-debug-clear');\n"
+        "var debugCopyStatus=document.getElementById('mapdl-debug-copy-status');\n"
         "var active=false,cancelRequested=false,plan=[],pending=[],refreshToken=0;\n"
-        "var ROAD_Z=13,STATUS_BATCH=48,TILE=256,VIEW_W=282,VIEW_H=188;\n"
+        "var MAX_TILE_ATTEMPTS=3,UNCONFIRMED_STREAK_LIMIT=5;\n"
+        "var MAP_DEBUG_MAX=120,MAP_DEBUG_FW='" APP_VERSION "';\n"
+        "var mapDebugStarted=Date.now(),mapDebugEvents=[];\n"
+        "var mapDebugMeta={event:'map-debug',firmware:MAP_DEBUG_FW,started:new Date().toISOString(),browser:navigator.userAgent,online:navigator.onLine};\n"
+        "var ROAD_Z=13,STATUS_BATCH=8,TILE=256,VIEW_W=282,VIEW_H=188;\n"
         "function say(text){statusEl.textContent=text;}\n"
+        "function waitMs(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});}\n"
+        "function mapDebugText(){return JSON.stringify(mapDebugMeta)+'\\n'+mapDebugEvents.join('\\n');}\n"
+        "function renderMapDebug(){\n"
+        "  if(debugBox){debugBox.value=mapDebugText();debugBox.scrollTop=debugBox.scrollHeight;}\n"
+        "  if(debugCount)debugCount.textContent=String(mapDebugEvents.length);\n"
+        "}\n"
+        "function appendMapDebug(event,fields){\n"
+        "  var entry={event:event,at:new Date().toISOString(),elapsedMs:Date.now()-mapDebugStarted};\n"
+        "  if(fields)for(var key in fields)if(Object.prototype.hasOwnProperty.call(fields,key))entry[key]=fields[key];\n"
+        "  mapDebugEvents.push(JSON.stringify(entry));\n"
+        "  if(mapDebugEvents.length>MAP_DEBUG_MAX)mapDebugEvents.splice(0,mapDebugEvents.length-MAP_DEBUG_MAX);\n"
+        "  renderMapDebug();\n"
+        "}\n"
+        "function resetMapDebug(reason){\n"
+        "  mapDebugStarted=Date.now();mapDebugEvents=[];\n"
+        "  mapDebugMeta={event:'map-debug',firmware:MAP_DEBUG_FW,started:new Date().toISOString(),browser:navigator.userAgent,online:navigator.onLine,reason:reason};\n"
+        "  if(debugCopyStatus)debugCopyStatus.textContent='';renderMapDebug();\n"
+        "}\n"
+        "function showCopyResult(text){if(debugCopyStatus){debugCopyStatus.textContent=text;setTimeout(function(){debugCopyStatus.textContent='';},2500);}}\n"
+        "if(debugCopy)debugCopy.onclick=function(){\n"
+        "  var text=mapDebugText();\n"
+        "  if(navigator.clipboard&&window.isSecureContext){\n"
+        "    navigator.clipboard.writeText(text).then(function(){showCopyResult('Copied');},function(){showCopyResult('Copy failed; select the report above');});\n"
+        "  }else if(debugBox){\n"
+        "    debugBox.focus();debugBox.select();\n"
+        "    try{showCopyResult(document.execCommand('copy')?'Copied':'Copy failed; report selected');}catch(ignore){showCopyResult('Copy failed; report selected');}\n"
+        "  }\n"
+        "};\n"
+        "if(debugClear)debugClear.onclick=function(){resetMapDebug('manual-clear');};\n"
         "function setProgress(done,total,label){\n"
         "  var fraction=total>0?done/total:0;if(fraction<0)fraction=0;if(fraction>1)fraction=1;\n"
         "  var percent=Math.round(fraction*100);\n"
@@ -5090,6 +5279,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "  }\n"
         "  return storage;\n"
         "}\n"
+        "async function verifySaved(tile){\n"
+        "  tile.cached=false;\n"
+        "  var storage=await markCached([tile]);\n"
+        "  if(!storage)throw new Error('device storage unavailable');\n"
+        "  return tile.cached;\n"
+        "}\n"
         "function durationText(tileCount){\n"
         "  var minutes=Math.max(1,Math.ceil(tileCount*1.5/60));\n"
         "  if(minutes<60)return 'at least about '+minutes+' minute'+(minutes===1?'':'s');\n"
@@ -5098,22 +5293,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     sendChunk(html);
 
     html +=
-        "async function refreshPlan(prefix){\n"
-        "  var token=++refreshToken;button.disabled=true;say('Checking offline tile cache...');\n"
-        "  plan=buildPlan();pending=[];\n"
-        "  if(!plan.length){say('No positioned nodes are available for map downloads.');setProgress(0,1,'No tiles');return;}\n"
-        "  try{\n"
-        "    var storage=await markCached(plan);if(token!==refreshToken)return;\n"
-        "    if(!storage){say('No writable storage is available on the device.');setProgress(0,1,'Unavailable');return;}\n"
+        "function renderPlan(prefix){\n"
         "    pending=plan.filter(function(tile){return !tile.cached;});\n"
         "    var cached=plan.length-pending.length,maxZoom=selectedMaxZoom();\n"
-        "    var summary=plan.length+' unique node-centered viewport tile'+(plan.length===1?'':'s')+' through zoom '+maxZoom+\n"
-        "      ': '+cached+' cached, '+pending.length+' pending.';\n"
+        "    mapDebugMeta.maxZoom=maxZoom;mapDebugMeta.planTiles=plan.length;mapDebugMeta.cachedTiles=cached;mapDebugMeta.pendingTiles=pending.length;renderMapDebug();\n"
+        "    var summary=plan.length+' planned tile'+(plan.length===1?'':'s')+' through zoom '+maxZoom+\n"
+        "      ': '+cached+' stored on the device, '+pending.length+' remaining.';\n"
         "    say(prefix?prefix+' '+summary:summary);\n"
-        "    setProgress(cached,plan.length,pending.length?'Ready':'Cached');\n"
-        "    if(maxZoom>=19){\n"
+        "    setProgress(cached,plan.length,pending.length?'Ready':'All stored');\n"
+        "    if(!pending.length){\n"
+        "      warning.textContent='All planned tiles through zoom '+maxZoom+' are stored on the device.';warning.style.color='#2f7652';\n"
+        "    }else if(maxZoom>=19){\n"
         "      warning.textContent='WARNING: Buildings detail can take a very, very long time. '+pending.length+\n"
-        "        ' pending tile'+(pending.length===1?'':'s')+' may take '+durationText(pending.length)+\n"
+        "        ' remaining tile'+(pending.length===1?'':'s')+' may take '+durationText(pending.length)+\n"
         "        ', and the page must remain open for the entire run.';warning.style.color='#a33a18';\n"
         "    }else if(maxZoom>=16){\n"
         "      warning.textContent='Streets detail can take a long time on a large node database. '+pending.length+\n"
@@ -5122,17 +5314,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "      warning.textContent='Roads downloads the zoom-13 tiles covering each node-centered Locate viewport after overlap is removed.';warning.style.color='#68788a';\n"
         "    }\n"
         "    button.disabled=!pending.length;\n"
+        "}\n"
+        "async function refreshPlan(prefix){\n"
+        "  var token=++refreshToken;button.disabled=true;say('Checking maps stored on the device...');\n"
+        "  plan=buildPlan();pending=[];\n"
+        "  if(!plan.length){say('No positioned nodes are available for map downloads.');setProgress(0,1,'No tiles');return;}\n"
+        "  try{\n"
+        "    var storage=await markCached(plan);if(token!==refreshToken)return;\n"
+        "    if(!storage){say('No writable storage is available on the device.');setProgress(0,1,'Unavailable');return;}\n"
+        "    renderPlan(prefix);\n"
         "  }catch(error){\n"
-        "    if(token!==refreshToken)return;say('Could not read offline tile status: '+error.message);\n"
+        "    appendMapDebug('status-failed',{message:(error&&error.message)?error.message:String(error)});\n"
+        "    if(token!==refreshToken)return;say('Could not check maps stored on the device. Try refreshing this page.');\n"
         "    setProgress(0,1,'Unavailable');warning.textContent='';\n"
         "  }\n"
         "}\n"
         "async function fetchTile(tile){\n"
         "  var query='?z='+tile.z+'&x='+tile.x+'&y='+tile.y;\n"
-        "  var response=await fetch('/map-tile-fetch'+query,{method:'POST'});\n"
-        "  var data=null;try{data=await response.json();}catch(ignore){}\n"
-        "  if(!response.ok||!data||!data.ok)throw new Error((data&&data.error)||('HTTP '+response.status));\n"
-        "  return data;\n"
+        "  var started=Date.now(),response;\n"
+        "  try{response=await fetch('/map-tile-fetch'+query,{method:'POST'});}\n"
+        "  catch(error){var transport=new Error((error&&error.message)?error.message:'browser fetch failed');transport.mapDebug={stage:'browser-fetch',clientMs:Date.now()-started};throw transport;}\n"
+        "  var body=await response.text(),data=null;try{data=JSON.parse(body);}catch(ignore){}\n"
+        "  var details={clientStatus:response.status,clientMs:Date.now()-started};\n"
+        "  if(data)details.device=data;else details.body=body.slice(0,160);\n"
+        "  if(!response.ok||!data||!data.ok){var failure=new Error((data&&data.error)||('HTTP '+response.status));failure.mapDebug=details;throw failure;}\n"
+        "  return {data:data,clientMs:details.clientMs};\n"
         "}\n"
         "async function run(){\n"
         "  if(active||!pending.length)return;\n"
@@ -5140,21 +5346,72 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "  if((maxZoom>=19||jobs.length>200)&&!confirm('This plan will download '+jobs.length+\n"
         "      ' tiles through zoom '+maxZoom+'. Detailed maps can take a very, very long time. Continue?'))return;\n"
         "  active=true;cancelRequested=false;button.disabled=true;level.disabled=true;setStop(true);\n"
-        "  var saved=0,failed=0;setProgress(0,jobs.length,'Starting');\n"
+        "  var saved=0,unconfirmed=0,unconfirmedStreak=0;\n"
+        "  var pausedForConnection=false,lastError='',runStarted=Date.now();\n"
+        "  appendMapDebug('run-start',{maxZoom:maxZoom,jobs:jobs.length,planTiles:plan.length,pendingTiles:pending.length});\n"
+        "  setProgress(0,jobs.length,'Starting');\n"
         "  for(var i=0;i<jobs.length;i++){\n"
         "    if(cancelRequested)break;var tile=jobs[i];\n"
         "    say('['+(i+1)+'/'+jobs.length+'] Downloading zoom '+tile.z+' tile '+tile.x+'/'+tile.y);\n"
-        "    try{await fetchTile(tile);tile.cached=true;saved++;setProgress(i+1,jobs.length,'Saved zoom '+tile.z);}\n"
-        "    catch(error){failed++;setProgress(i,jobs.length,'Interrupted');say('Stopped on '+tile.key+': '+error.message);break;}\n"
+        "    var tileOk=false;\n"
+        "    for(var attempt=1;attempt<=MAX_TILE_ATTEMPTS;attempt++){\n"
+        "      if(cancelRequested)break;\n"
+        "      try{\n"
+        "        var result=await fetchTile(tile);\n"
+        "        tile.cached=true;saved++;unconfirmedStreak=0;tileOk=true;\n"
+        "        appendMapDebug('tile-saved',{tile:tile.key,z:tile.z,x:tile.x,y:tile.y,attempt:attempt,clientMs:result.clientMs,cached:!!result.data.cached,bytes:result.data.bytes||0,upstream:result.data.upstream||0,expected:typeof result.data.expected==='number'?result.data.expected:null,headersMs:result.data.headersMs||0,bodyMs:result.data.bodyMs||0,deviceTotalMs:result.data.totalMs||0,heap:result.data.heap||0});\n"
+        "        setProgress(i+1,jobs.length,'Saved zoom '+tile.z);\n"
+        "        break;\n"
+        "      }catch(error){\n"
+        "        lastError=(error&&error.message)?error.message:String(error||'error');\n"
+        "        appendMapDebug('attempt-failed',{tile:tile.key,z:tile.z,x:tile.x,y:tile.y,attempt:attempt,maxAttempts:MAX_TILE_ATTEMPTS,message:lastError,details:error&&error.mapDebug?error.mapDebug:null});\n"
+        "        var deviceAnswered=!!(error&&error.mapDebug&&error.mapDebug.device);\n"
+        "        if(!deviceAnswered&&!cancelRequested){\n"
+        "          say('['+(i+1)+'/'+jobs.length+'] Checking whether '+tile.key+' was saved...');\n"
+        "          setProgress(i,jobs.length,'Confirming saved tile');\n"
+        "          try{\n"
+        "            if(await verifySaved(tile)){\n"
+        "              saved++;unconfirmedStreak=0;tileOk=true;\n"
+        "              appendMapDebug('tile-confirmed',{tile:tile.key,z:tile.z,x:tile.x,y:tile.y,attempt:attempt,message:'Saved on device; download response was not received'});\n"
+        "              setProgress(i+1,jobs.length,'Saved (confirmed)');\n"
+        "              break;\n"
+        "            }\n"
+        "          }catch(verifyError){\n"
+        "            appendMapDebug('verification-unavailable',{tile:tile.key,attempt:attempt,message:(verifyError&&verifyError.message)?verifyError.message:String(verifyError)});\n"
+        "          }\n"
+        "        }\n"
+        "        if(attempt<MAX_TILE_ATTEMPTS&&!cancelRequested){\n"
+        "          say('['+(i+1)+'/'+jobs.length+'] Retrying '+tile.key+' ('+(attempt+1)+' of '+MAX_TILE_ATTEMPTS+')');\n"
+        "          setProgress(i,jobs.length,'Retrying');\n"
+        "          await waitMs(250*attempt);\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "    if(tileOk)continue;\n"
+        "    if(cancelRequested)break;\n"
+        "    unconfirmed++;\n"
+        "    unconfirmedStreak++;\n"
+        "    appendMapDebug('tile-still-pending',{tile:tile.key,consecutiveUnconfirmed:unconfirmedStreak,message:lastError});\n"
+        "    setProgress(i+1,jobs.length,'Still pending');\n"
+        "    say('Could not confirm '+tile.key+' after '+MAX_TILE_ATTEMPTS+' attempts. It remains available to retry.');\n"
+        "    if(unconfirmedStreak>=UNCONFIRMED_STREAK_LIMIT){\n"
+        "      pausedForConnection=true;\n"
+        "      say('Pausing after '+unconfirmedStreak+' consecutive tiles could not be confirmed. Saved tiles are kept.');\n"
+        "      break;\n"
+        "    }\n"
         "  }\n"
         "  active=false;level.disabled=false;setStop(false);\n"
-        "  var prefix=cancelRequested?'Stopped. '+saved+' saved.':(failed?'Interrupted. '+saved+' saved, '+failed+' failed.':'Complete. '+saved+' saved.');\n"
-        "  await refreshPlan(prefix);\n"
+        "  pending=plan.filter(function(tile){return !tile.cached;});\n"
+        "  appendMapDebug('run-finished',{reason:cancelRequested?'user-stop':(pausedForConnection?'connection-pause':'complete'),saved:saved,unconfirmed:unconfirmed,remaining:pending.length,elapsedMs:Date.now()-runStarted,lastError:lastError||null});\n"
+        "  var prefix=cancelRequested?'Stopped by you.':\n"
+        "    (pausedForConnection?'Paused after repeated connection problems.':\n"
+        "    (pending.length?'Finished this pass; unconfirmed tiles can be retried.':'Download complete.'));\n"
+        "  renderPlan(prefix);\n"
         "}\n"
         "stopButton.onclick=function(){if(active){cancelRequested=true;setStop(false);say('Stopping after the current tile...');}};\n"
         "button.onclick=run;\n"
         "level.onchange=function(){if(!active)refreshPlan();};\n"
-        "setStop(false);refreshPlan();\n"
+        "resetMapDebug('page-load');setStop(false);refreshPlan();\n"
         "})();\n"
         "</script>";
     sendChunk(html);
