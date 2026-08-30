@@ -10,6 +10,7 @@
 // Everything is `inline` rather than `static`: one copy of the 50-entry table in
 // the image, not one per includer.
 #include <Arduino.h>
+#include <math.h>
 #include "config.h"
 #include "storage.h"
 
@@ -95,6 +96,95 @@ inline constexpr const char *kStateMapCacheVersion = "v2";
 inline constexpr const char *kStateMapMarkerPath = "/camillia/state_maps/state_maps.complete";
 inline constexpr const char *kStateMapLegacyMarkerPath = "/camillia/state_maps/.complete";
 
+// Fixed-lat/lon detail maps are keyed by 0.1-degree cells. A key names the
+// cell's lower-left corner in tenths of a degree.
+inline constexpr int kDetailMapCellScale = 10;   // 10 tenths per degree
+inline constexpr float kDetailMapCellDeg = 0.1f;
+inline constexpr int kDetailMapImageW = kStateMapImageW;
+inline constexpr int kDetailMapImageH = kStateMapImageH;
+inline constexpr const char *kDetailMapCacheVersion = "v1";
+inline constexpr const char *kDetailMapMarkerPath = "/camillia/detail_maps/detail_maps.version";
+
+inline bool nodesDetailMapKeyFromIndex(int lat10, int lon10, char *out, size_t outLen) {
+    if (!out || outLen < 11) return false;
+    // Valid cell starts: latitude [-90.0, 89.9], longitude [-180.0, 179.9].
+    if (lat10 < -900 || lat10 > 899) return false;
+    if (lon10 < -1800 || lon10 > 1799) return false;
+    const char latHem = (lat10 < 0) ? 'S' : 'N';
+    const char lonHem = (lon10 < 0) ? 'W' : 'E';
+    const int latAbs = (lat10 < 0) ? -lat10 : lat10;
+    const int lonAbs = (lon10 < 0) ? -lon10 : lon10;
+    snprintf(out, outLen, "%c%04d%c%04d", latHem, latAbs, lonHem, lonAbs);
+    return true;
+}
+
+inline bool nodesDetailMapParseKey(const char *key, int &lat10, int &lon10) {
+    if (!key || strlen(key) != 10) return false;
+    auto digit = [](char c) -> int { return (c >= '0' && c <= '9') ? (c - '0') : -1; };
+
+    const char latHem = key[0];
+    const char lonHem = key[5];
+    if (!(latHem == 'N' || latHem == 'S')) return false;
+    if (!(lonHem == 'E' || lonHem == 'W')) return false;
+
+    int la = 0;
+    int lo = 0;
+    for (int i = 1; i <= 4; i++) {
+        int d = digit(key[i]);
+        if (d < 0) return false;
+        la = la * 10 + d;
+    }
+    for (int i = 6; i <= 9; i++) {
+        int d = digit(key[i]);
+        if (d < 0) return false;
+        lo = lo * 10 + d;
+    }
+
+    lat10 = (latHem == 'S') ? -la : la;
+    lon10 = (lonHem == 'W') ? -lo : lo;
+    if (lat10 < -900 || lat10 > 899) return false;
+    if (lon10 < -1800 || lon10 > 1799) return false;
+    return true;
+}
+
+inline void nodesDetailMapBoundsFromIndex(int lat10, int lon10,
+                                          float &latMin, float &latMax,
+                                          float &lonMin, float &lonMax) {
+    latMin = (float)lat10 / (float)kDetailMapCellScale;
+    lonMin = (float)lon10 / (float)kDetailMapCellScale;
+    latMax = latMin + kDetailMapCellDeg;
+    lonMax = lonMin + kDetailMapCellDeg;
+}
+
+inline bool nodesDetailMapKeyForCoords(float lat, float lon, char *out, size_t outLen,
+                                       float *latMinOut = nullptr, float *latMaxOut = nullptr,
+                                       float *lonMinOut = nullptr, float *lonMaxOut = nullptr) {
+    if (!(lat >= -90.0f && lat <= 90.0f)) return false;
+    if (!(lon > -100000.0f && lon < 100000.0f)) return false;
+
+    // [90.0, 90.1) and [180.0, 180.1) do not exist as cell starts.
+    if (lat >= 90.0f) lat = 89.9999f;
+
+    lon = fmodf(lon + 180.0f, 360.0f);
+    if (lon < 0.0f) lon += 360.0f;
+    lon -= 180.0f;
+    if (lon >= 180.0f) lon = 179.9999f;
+
+    const int lat10 = (int)floorf(lat * (float)kDetailMapCellScale);
+    const int lon10 = (int)floorf(lon * (float)kDetailMapCellScale);
+    if (!nodesDetailMapKeyFromIndex(lat10, lon10, out, outLen)) return false;
+
+    if (latMinOut || latMaxOut || lonMinOut || lonMaxOut) {
+        float latMin = 0.0f, latMax = 0.0f, lonMin = 0.0f, lonMax = 0.0f;
+        nodesDetailMapBoundsFromIndex(lat10, lon10, latMin, latMax, lonMin, lonMax);
+        if (latMinOut) *latMinOut = latMin;
+        if (latMaxOut) *latMaxOut = latMax;
+        if (lonMinOut) *lonMinOut = lonMin;
+        if (lonMaxOut) *lonMaxOut = lonMax;
+    }
+    return true;
+}
+
 inline String nodesStateMapPath(const char *stateCode) {
     String p = "/camillia/state_maps/";
     p += stateCode;
@@ -105,6 +195,20 @@ inline String nodesStateMapPath(const char *stateCode) {
 inline String nodesStateMapMetaPath(const char *stateCode) {
     String p = "/camillia/state_maps/";
     p += stateCode;
+    p += ".meta";
+    return p;
+}
+
+inline String nodesDetailMapPath(const char *cellKey) {
+    String p = "/camillia/detail_maps/";
+    p += cellKey;
+    p += ".png";
+    return p;
+}
+
+inline String nodesDetailMapMetaPath(const char *cellKey) {
+    String p = "/camillia/detail_maps/";
+    p += cellKey;
     p += ".meta";
     return p;
 }
@@ -202,6 +306,60 @@ inline bool nodesReadStateMapMeta(const char *stateCode,
     latMax = (float)b;
     lonMin = (float)c;
     lonMax = (float)d;
+    return true;
+#endif
+}
+
+inline bool nodesWriteDetailMapMeta(const char *cellKey,
+                                    float latMin, float latMax,
+                                    float lonMin, float lonMax) {
+#if !HAS_FILE_STORAGE
+    (void)(cellKey);
+    (void)(latMin);
+    (void)(latMax);
+    (void)(lonMin);
+    (void)(lonMax);
+    return false;
+#else
+    String p = nodesDetailMapMetaPath(cellKey);
+    if (storageFs().exists(p.c_str())) storageFs().remove(p.c_str());
+    File f = storageFs().open(p.c_str(), FILE_WRITE);
+    if (!f) return false;
+    f.printf("%.6f,%.6f,%.6f,%.6f\n", (double)latMin, (double)latMax,
+             (double)lonMin, (double)lonMax);
+    f.close();
+    return true;
+#endif
+}
+
+inline bool nodesReadDetailMapMeta(const char *cellKey,
+                                   float &latMin, float &latMax,
+                                   float &lonMin, float &lonMax,
+                                   int *lodOut = nullptr) {
+#if !HAS_FILE_STORAGE
+    (void)(cellKey);
+    (void)(latMin);
+    (void)(latMax);
+    (void)(lonMin);
+    (void)(lonMax);
+    if (lodOut) *lodOut = -1;
+    return false;
+#else
+    String p = nodesDetailMapMetaPath(cellKey);
+    File f = storageFs().open(p.c_str(), FILE_READ);
+    if (!f) return false;
+    String line = f.readStringUntil('\n');
+    f.close();
+
+    double a = 0.0, b = 0.0, c = 0.0, d = 0.0;
+    int lod = -1;
+    int n = sscanf(line.c_str(), "%lf,%lf,%lf,%lf,%d", &a, &b, &c, &d, &lod);
+    if (n < 4) return false;
+    latMin = (float)a;
+    latMax = (float)b;
+    lonMin = (float)c;
+    lonMax = (float)d;
+    if (lodOut) *lodOut = (n >= 5) ? lod : -1;
     return true;
 #endif
 }

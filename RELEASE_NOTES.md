@@ -1,14 +1,24 @@
 ### New
-- Node Actions menu gained a **Delete** entry (shortcut `E`) that forgets a node's record from the node list after a confirmation prompt; the row is greyed out when the node isn't in the table. Deleting is not the same as Ignore — the node reappears the next time it's heard.
+- **Locate** is now a live OpenStreetMap view: it opens centered on the selected node at zoom 13 and can be panned and zoomed anywhere in the world, from zoom 2 down to building level at zoom 19 (T-Deck, T-Lora Pager, Square, Mesh Deck, ThinkNode M9).
+- Drag the map to pan, and use the on-screen `+` / `-` buttons and the GPS button to zoom or recenter the node (T-Deck, T-Lora Pager, Square, Mesh Deck).
+- Keyboard controls in Locate: `I`/`J`/`K`/`L`, arrows or trackball to pan, `M`/`N` or the page keys to zoom, `H` or `C` to recenter the node, and Space to return to the opening view (T-Deck, T-Lora Pager, Mesh Deck, ThinkNode M9).
+- Map tiles you view while the device is on Wi-Fi are saved to storage, so the same area redraws later with no network; areas never visited show as blank gaps offline.
+- Panning wraps across the antimeridian, so the view is no longer confined to one state, country, or downloaded area, and nodes outside the United States now get a real map.
+- Web Config's **Maps Download** now pre-loads offline tiles around every positioned node, with a Roads / Streets / Buildings detail choice, a progress bar, a Stop button, and cached-versus-pending tile counts; stopping keeps everything already saved and a later run picks up where it left off.
+- After upgrading, the device offers once to **Keep** or **Remove** the old state and detail map files, which the new map no longer uses; the answer is remembered.
+- The Web Config chat box is now multi-line with a live character counter, and sends with Ctrl+Enter (Cmd+Enter on a Mac).
 
 ### Changed
-- The web chat tab is noticeably lighter on the browser: the message feed is only redrawn when new messages actually arrive instead of every two seconds.
-- The recipient dropdown in web chat no longer rebuilds itself on every refresh, so it stays open and keeps its scroll position while you're picking a target on a phone.
+- The Locate map now fills the whole panel — the state name and coordinate line under it is gone, and text appears over the map only when there is something to say (`Loading map...`, `Waiting for Wi-Fi...`, `Map unavailable`).
+- Space no longer closes Locate; it resets the view instead. Close with Enter, the close key, or by tapping outside.
+- Opening **Nodes** now brings up Wi-Fi using your saved network so Locate can fill in missing tiles, and puts Wi-Fi back the way it was when you leave.
+- Position, telemetry and neighbour announcements are paused while the Locate map is open, so panning and zooming stay smooth.
+- **Clear Maps** now deletes the offline tile cache along with any leftover legacy map files, and reports how many of each it removed.
+- Chat messages typed in Web Config now use the mesh's own length limit instead of a fixed 200 characters.
+- Maps and other images redraw noticeably faster on boards with PSRAM (T-Deck, T-Lora Pager, Square, Mesh Deck, ThinkNode M9).
+- On-screen buttons drop their keyboard-shortcut letters on the boards that have no keyboard — "Locate", "Delete", "Reply", "Yes", "No" (Heltec V4, Square).
 
 ### Fixed
-- The web config page no longer fails to load or hangs while the device is transmitting. Scheduled NodeInfo, telemetry and neighbour announces are held back while a browser is actively using the page (up to two minutes), so a page load doesn't land in the middle of seconds of blocking radio airtime.
-- Messages sent from the web chat no longer appear two or three times in the feed, or get glued together into one repeated bubble.
-- Switching conversations in web chat no longer splices the previous conversation's messages into the new one.
-- The web server responds faster overall: a per-loop idle delay was removed, cutting latency before an incoming request is noticed.
-- Safari's automatic touch-icon requests are answered cleanly and cached instead of generating four errors in the serial log on every page load.
-- The serial log now says when a browser hangs up mid-response and reports how long the main loop was busy, making a stalled web page diagnosable instead of silent.
+- A tile service refusal is no longer drawn on the map as if it were a map image.
+- An interrupted tile download can no longer leave a half-written file that later looks like a valid cached tile.
+- Deleting a folder on the card could leave files behind on some cards; every file is now removed.

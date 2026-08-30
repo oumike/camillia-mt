@@ -47,6 +47,9 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <lvgl.h>
+#if HAS_STATE_MAPS
+#include <src/misc/cache/instance/lv_image_cache.h>
+#endif
 #include <time.h>
 #include <sys/time.h>   // settimeofday() for the manual/GPS clock paths
 #include <math.h>
@@ -60,6 +63,7 @@
 #include <esp_ota_ops.h>
 #include "storage.h"
 #include "state_maps.h"
+#include "map_tiles.h"
 #include <Curve25519.h>
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
 #include <AudioBoard.h>
@@ -322,6 +326,13 @@ static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
 static lv_obj_t *s_otaPromptBackdrop = nullptr;
 static lv_obj_t *s_otaPromptModal = nullptr;
+#if HAS_STATE_MAPS
+static lv_obj_t *s_legacyMapPromptBackdrop = nullptr;
+static lv_obj_t *s_legacyMapPromptModal = nullptr;
+static lv_obj_t *s_legacyMapPromptStatus = nullptr;
+static bool s_legacyMapMigrationChecked = false;
+static uint32_t s_legacyMapMigrationNextCheckMs = 0;
+#endif
 static bool s_otaAutoCheckDone = false;     // one check attempt per boot
 // Settle delay after the station associates, before the release check fires.
 static constexpr uint32_t kOtaAutoCheckSettleMs = 8000;
@@ -791,8 +802,17 @@ static lv_obj_t *s_nodesMapMarker = nullptr;
 static lv_obj_t *s_nodesMapTileLayer = nullptr;
 static lv_obj_t *s_nodesMapImage = nullptr;
 static char s_nodesMapImageSrc[96] = {};
+static bool s_nodesMapLastRenderUsedDetail = false;
+static char s_nodesMapLastDetailKey[11] = {};
+static int s_nodesMapLastDetailLod = -1;
+static bool s_nodesMapLastBoundsValid = false;
+static float s_nodesMapLastLatMin = 0.0f;
+static float s_nodesMapLastLatMax = 0.0f;
+static float s_nodesMapLastLonMin = 0.0f;
+static float s_nodesMapLastLonMax = 0.0f;
 static lv_fs_drv_t s_nodesMapFsDrv;
 static bool s_nodesMapFsDrvReady = false;
+static SemaphoreHandle_t s_nodesMapFsMutex = nullptr;
 static lv_obj_t *s_nodesList = nullptr;
 static lv_obj_t *s_nodesTitleLabel = nullptr;
 static lv_obj_t *s_nodesHintLabel = nullptr;
@@ -835,6 +855,10 @@ static bool s_nodesFilterEditing = false;
 // is absent there rather than permanently greyed: a control that can never be
 // used on this hardware is not a disabled control, it is clutter.
 #define HAS_NODE_LOCATE HAS_STATE_MAPS
+
+#if defined(DEVICE_CARDPUTER_LORA_HAT) && HAS_NODE_LOCATE
+#error "Locate maps must remain disabled on Cardputer: no PSRAM is available"
+#endif
 
 // Node Actions modal: actions arranged 2-per-row. Each entry has a single-key
 // keyboard shortcut (see kNodesActionShortcuts) mirrored in its label as (X).
@@ -1233,12 +1257,26 @@ static int s_stateMapBootstrapDownloaded = 0;
 static int s_stateMapBootstrapFailed = 0;
 static uint32_t s_stateMapOnDemandLastTryMs = 0;
 static char s_stateMapOnDemandLastCode[3] = "";
+static uint32_t s_detailMapOnDemandLastTryMs = 0;
+static char s_detailMapOnDemandLastKey[11] = "";
+static int s_detailMapOnDemandLastLod = -1;
+static TaskHandle_t s_detailMapOnDemandTask = nullptr;
+static volatile bool s_detailMapOnDemandBusy = false;
+static volatile bool s_detailMapOnDemandDone = false;
+static volatile bool s_detailMapOnDemandOk = false;
+static float s_detailMapOnDemandLat = 0.0f;
+static float s_detailMapOnDemandLon = 0.0f;
+static char s_detailMapOnDemandReqKey[11] = "";
+static char s_detailMapOnDemandDoneKey[11] = "";
+static int s_detailMapOnDemandReqLod = 1;
+static int s_detailMapOnDemandReqZoom = 11;
+static bool s_detailMapOnDemandReqReplace = false;
+// Worker-local download buffer kept out of the task stack.
+static uint8_t s_detailMapOnDemandIoBuf[1024] = {0};
 // Cached state maps are drawn by the Locate modal, on the boards that have it.
 static constexpr bool kStateMapsEnabled = (HAS_STATE_MAPS != 0);
-// ...but this device cannot *fetch* them. nodesDownloadStateMap() is a stub
-// returning false: its HTTPS downloads went when WiFiClientSecure was dropped
-// from the firmware, and the staticmap host they targeted no longer resolves.
-// Maps arrive by upload from web config instead (POST /state-map-upload).
+// State maps are uploaded from web config (POST /state-map-upload). Their old
+// in-firmware fetch path used TLS/staticmap hosts and remains disabled.
 //
 // So everything downstream of "the cache is incomplete, go and get it" has to
 // stay switched off. Left on, an incomplete cache would make every boot flip
@@ -1246,6 +1284,16 @@ static constexpr bool kStateMapsEnabled = (HAS_STATE_MAPS != 0);
 // and the stale-cache sweep below would recursively delete maps the user put
 // there by hand, which nothing on the device can put back.
 static constexpr bool kStateMapsCanDownload = false;
+// Live fallback for missing detail maps while viewing Locate. Plain HTTP by
+// design; operator proxy terminates TLS upstream.
+static constexpr bool kLiveDetailMapsCanDownload = (HAS_NODE_LOCATE != 0);
+static constexpr uint32_t kLiveDetailMapRetryMs = 1200UL;
+static constexpr int kLiveDetailMapLodStreet = 1;
+static constexpr int kLiveDetailMapLodBuilding = 2;
+static constexpr int kLiveDetailMapZoomStreet = 11;
+static constexpr int kLiveDetailMapZoomBuilding = 14;
+static constexpr const char *kLiveDetailMapTileProxyBase =
+    "http://maps.camillia.sumat.org";
 static constexpr uint32_t kRuntimeTlsMinInternalFree = 70000;
 static constexpr uint32_t kRuntimeTlsMinLargestBlock = 52000;
 
@@ -1834,6 +1882,8 @@ static void refreshNodesMap(const NodeEntry *node);
 #if HAS_NODE_LOCATE
 static void openNodeLocateModal(uint32_t nodeId);
 static void closeNodeLocateModal();
+static void nodeLocateOnDetailMapUpdated();
+static void serviceNodeLocateLiveMap(uint32_t nowMs);
 #endif
 #if HAS_NODE_LOS
 static void closeNodeLosModal();
@@ -1879,9 +1929,13 @@ static void nodesPanelWifiEnter();
 static void nodesPanelWifiRestore();
 static void nodesMapInitFsDriver();
 static bool nodesMapEnsureDir(const char *path);
+static void nodesQueueDetailMapOnDemand(float lat, float lon, const char *detailKey,
+                                        int detailLodTarget);
+static void serviceDetailMapOnDemand(uint32_t nowMs);
 static void bootstrapStateMapsIfMissing();
 static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int h,
-                               int &markerX, int &markerY);
+                               int &markerX, int &markerY,
+                               int detailLodTarget = 1);
 static void sdRmDirRecursive(const char *path);
 static void clearNodeDbOnSd();
 
@@ -5874,6 +5928,9 @@ static bool serviceSquareWakeButton(uint32_t nowMs) {
 // USER button opens the composer over it. Nothing crashes, and it is visible
 // the first time anyone presses the button on that screen.
 static bool heltecChatScreenIsForeground() {
+#if HAS_STATE_MAPS
+    if (s_legacyMapPromptModal) return false;
+#endif
     return !s_cfgModal && !s_dmModal && !s_nodesModal && !s_liveModal
         && !s_composeModal && !s_emojiPickerModal && !s_legendModal
         && !s_channelActionsModal && !s_nodesActionModal && !s_tracerouteModal
@@ -9224,8 +9281,13 @@ static void openCfgWifiDeleteConfirm() {
         lv_obj_center(lbl);
         return btn;
     };
+#if UI_TOUCH_ONLY_PROFILE
+    makeDelBtn(btnRow, "No", noBtnBg, onCfgWifiDelNoPressed);
+    makeDelBtn(btnRow, "Yes", yesBtnBg, onCfgWifiDelYesPressed);
+#else
     makeDelBtn(btnRow, "(N)o", noBtnBg, onCfgWifiDelNoPressed);
     makeDelBtn(btnRow, "(Y)es", yesBtnBg, onCfgWifiDelYesPressed);
+#endif
 }
 
 // ── Own-message color picker ─────────────────────────────────────────────
@@ -15804,6 +15866,14 @@ static void closeNodesModal() {
     s_nodesFilterInput = nullptr;
     s_nodesFilterKeyboard = nullptr;
     s_nodesMapImageSrc[0] = '\0';
+    s_nodesMapLastRenderUsedDetail = false;
+    s_nodesMapLastDetailKey[0] = '\0';
+    s_nodesMapLastDetailLod = -1;
+    s_nodesMapLastBoundsValid = false;
+    s_nodesMapLastLatMin = 0.0f;
+    s_nodesMapLastLatMax = 0.0f;
+    s_nodesMapLastLonMin = 0.0f;
+    s_nodesMapLastLonMax = 0.0f;
     s_nodesList = nullptr;
     s_nodesListRowCount = 0;
     s_nodesSnapshotCount = 0;
@@ -16097,14 +16167,20 @@ static bool nodesSnapshotContains(uint32_t nodeId) {
 }
 
 static bool nodesPanelCanDownloadTiles() {
-    if (!kStateMapsCanDownload) return false;
+    if (!kLiveDetailMapsCanDownload) return false;
     if (WiFi.status() != WL_CONNECTED) return false;
     wifi_mode_t mode = WiFi.getMode();
     return mode != WIFI_AP;
 }
 
+static int nodesLiveDetailZoomForLod(int lod) {
+    return (lod >= kLiveDetailMapLodBuilding)
+               ? kLiveDetailMapZoomBuilding
+               : kLiveDetailMapZoomStreet;
+}
+
 static void nodesPanelWifiEnter() {
-    if (!kStateMapsCanDownload) return;
+    if (!kLiveDetailMapsCanDownload) return;
     if (s_nodesWifiSessionActive || webCfgRunning()) return;
 
     s_nodesWifiSessionActive = true;
@@ -16188,12 +16264,42 @@ static bool nodesMapFsReadyCb(lv_fs_drv_t *drv) {
 #endif
 }
 
+class NodesMapFsGuard {
+public:
+    explicit NodesMapFsGuard(TickType_t waitTicks = portMAX_DELAY)
+        : locked_(s_nodesMapFsMutex
+                  && xSemaphoreTakeRecursive(s_nodesMapFsMutex, waitTicks) == pdTRUE) {}
+
+    ~NodesMapFsGuard() {
+        if (locked_) xSemaphoreGiveRecursive(s_nodesMapFsMutex);
+    }
+
+    bool locked() const { return locked_; }
+
+private:
+    bool locked_;
+};
+
+struct NodesMapFsFile {
+    NodesMapFsGuard guard;
+    File file;
+};
+
 static void *nodesMapFsOpenCb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode) {
     LV_UNUSED(drv);
     LV_UNUSED(mode);
 #if HAS_FILE_STORAGE
     if (!path || !path[0]) return nullptr;
-    if (!sdBegin()) return nullptr;
+
+    NodesMapFsFile *fileCtx = new NodesMapFsFile();
+    if (!fileCtx || !fileCtx->guard.locked()) {
+        delete fileCtx;
+        return nullptr;
+    }
+    if (!sdBegin()) {
+        delete fileCtx;
+        return nullptr;
+    }
 
     String fullPath;
     if (path[0] == '/') fullPath = path;
@@ -16202,12 +16308,12 @@ static void *nodesMapFsOpenCb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t m
         fullPath += path;
     }
 
-    File *f = new File(storageFs().open(fullPath.c_str(), FILE_READ));
-    if (!*f) {
-        delete f;
+    fileCtx->file = storageFs().open(fullPath.c_str(), FILE_READ);
+    if (!fileCtx->file) {
+        delete fileCtx;
         return nullptr;
     }
-    return f;
+    return fileCtx;
 #else
     LV_UNUSED(path);
     return nullptr;
@@ -16217,9 +16323,9 @@ static void *nodesMapFsOpenCb(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t m
 static lv_fs_res_t nodesMapFsCloseCb(lv_fs_drv_t *drv, void *file_p) {
     LV_UNUSED(drv);
     if (!file_p) return LV_FS_RES_INV_PARAM;
-    File *f = (File *)file_p;
-    if (*f) f->close();
-    delete f;
+    NodesMapFsFile *fileCtx = (NodesMapFsFile *)file_p;
+    if (fileCtx->file) fileCtx->file.close();
+    delete fileCtx;
     return LV_FS_RES_OK;
 }
 
@@ -16227,8 +16333,8 @@ static lv_fs_res_t nodesMapFsReadCb(lv_fs_drv_t *drv, void *file_p,
                                     void *buf, uint32_t btr, uint32_t *br) {
     LV_UNUSED(drv);
     if (!file_p || !buf) return LV_FS_RES_INV_PARAM;
-    File *f = (File *)file_p;
-    size_t n = f->read((uint8_t *)buf, (size_t)btr);
+    NodesMapFsFile *fileCtx = (NodesMapFsFile *)file_p;
+    size_t n = fileCtx->file.read((uint8_t *)buf, (size_t)btr);
     if (br) *br = (uint32_t)n;
     return LV_FS_RES_OK;
 }
@@ -16237,7 +16343,8 @@ static lv_fs_res_t nodesMapFsSeekCb(lv_fs_drv_t *drv, void *file_p,
                                     uint32_t pos, lv_fs_whence_t whence) {
     LV_UNUSED(drv);
     if (!file_p) return LV_FS_RES_INV_PARAM;
-    File *f = (File *)file_p;
+    NodesMapFsFile *fileCtx = (NodesMapFsFile *)file_p;
+    File &file = fileCtx->file;
 
     // Hand the whence straight to Arduino rather than resolving it here. The
     // arithmetic version this replaced turned SEEK_END into an absolute
@@ -16249,15 +16356,15 @@ static lv_fs_res_t nodesMapFsSeekCb(lv_fs_drv_t *drv, void *file_p,
     // calls lv_fs_read(), never a seek.
     bool ok;
     switch (whence) {
-        case LV_FS_SEEK_SET: ok = f->seek((uint32_t)pos, SeekSet); break;
-        case LV_FS_SEEK_CUR: ok = f->seek((uint32_t)pos, SeekCur); break;
-        case LV_FS_SEEK_END: ok = f->seek((uint32_t)pos, SeekEnd); break;
+        case LV_FS_SEEK_SET: ok = file.seek((uint32_t)pos, SeekSet); break;
+        case LV_FS_SEEK_CUR: ok = file.seek((uint32_t)pos, SeekCur); break;
+        case LV_FS_SEEK_END: ok = file.seek((uint32_t)pos, SeekEnd); break;
         default: return LV_FS_RES_INV_PARAM;
     }
     if (!ok) {
         // Landing on EOF is legitimate and is what the size probe above wants;
         // some backends report the seek itself as a failure even so.
-        if (f->position() == f->size()) return LV_FS_RES_OK;
+        if (file.position() == file.size()) return LV_FS_RES_OK;
         return LV_FS_RES_FS_ERR;
     }
     return LV_FS_RES_OK;
@@ -16266,12 +16373,19 @@ static lv_fs_res_t nodesMapFsSeekCb(lv_fs_drv_t *drv, void *file_p,
 static lv_fs_res_t nodesMapFsTellCb(lv_fs_drv_t *drv, void *file_p, uint32_t *pos_p) {
     LV_UNUSED(drv);
     if (!file_p || !pos_p) return LV_FS_RES_INV_PARAM;
-    File *f = (File *)file_p;
-    *pos_p = (uint32_t)f->position();
+    NodesMapFsFile *fileCtx = (NodesMapFsFile *)file_p;
+    *pos_p = (uint32_t)fileCtx->file.position();
     return LV_FS_RES_OK;
 }
 
 static void nodesMapInitFsDriver() {
+    if (!s_nodesMapFsMutex) {
+        s_nodesMapFsMutex = xSemaphoreCreateRecursiveMutex();
+        if (!s_nodesMapFsMutex) {
+            Serial.println("[map] failed to create filesystem mutex");
+            return;
+        }
+    }
     if (s_nodesMapFsDrvReady) return;
     if (lv_fs_get_drv('S')) {
         s_nodesMapFsDrvReady = true;
@@ -16347,6 +16461,383 @@ static bool nodesStateMapCacheComplete() {
         if (!nodesFileLooksLikePng(p.c_str())) return false;
     }
     return true;
+#endif
+}
+
+static void nodesWriteDetailMapVersionMarker() {
+#if HAS_FILE_STORAGE
+    if (storageFs().exists(kDetailMapMarkerPath)) storageFs().remove(kDetailMapMarkerPath);
+    File marker = storageFs().open(kDetailMapMarkerPath, FILE_WRITE);
+    if (!marker) return;
+    marker.print(kDetailMapCacheVersion);
+    marker.close();
+#endif
+}
+
+static bool liveMapTileCoordsForLatLon(float lat, float lon, int zoom,
+                                       int32_t &tileX, int32_t &tileY,
+                                       float &latMin, float &latMax,
+                                       float &lonMin, float &lonMax) {
+    if (!(lat >= -90.0f && lat <= 90.0f)) return false;
+    if (zoom < 1 || zoom > 19) return false;
+
+    double latClamped = (double)lat;
+    if (latClamped > 85.0511) latClamped = 85.0511;
+    if (latClamped < -85.0511) latClamped = -85.0511;
+
+    double lonNorm = fmod((double)lon + 180.0, 360.0);
+    if (lonNorm < 0.0) lonNorm += 360.0;
+    lonNorm -= 180.0;
+
+    const int32_t n = (int32_t)(1UL << zoom);
+    const double x = ((lonNorm + 180.0) / 360.0) * (double)n;
+    const double latRad = latClamped * M_PI / 180.0;
+    const double y = (1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / M_PI) * 0.5 * (double)n;
+
+    tileX = (int32_t)floor(x);
+    tileY = (int32_t)floor(y);
+    if (tileX < 0) tileX = 0;
+    if (tileX >= n) tileX = n - 1;
+    if (tileY < 0) tileY = 0;
+    if (tileY >= n) tileY = n - 1;
+
+    auto tileYToLat = [&](int32_t ty) -> float {
+        const double z = M_PI * (1.0 - 2.0 * ((double)ty / (double)n));
+        return (float)(atan(sinh(z)) * 180.0 / M_PI);
+    };
+
+    lonMin = (float)(((double)tileX / (double)n) * 360.0 - 180.0);
+    lonMax = (float)(((double)(tileX + 1) / (double)n) * 360.0 - 180.0);
+    latMax = tileYToLat(tileY);
+    latMin = tileYToLat(tileY + 1);
+    return (latMax > latMin) && (lonMax > lonMin);
+}
+
+static bool nodesDownloadDetailMapLive(float lat, float lon, const char *detailKey,
+                                       int tileZoom, int lodTag,
+                                       bool replaceExisting) {
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(lat);
+    LV_UNUSED(lon);
+    LV_UNUSED(detailKey);
+    LV_UNUSED(tileZoom);
+    LV_UNUSED(lodTag);
+    LV_UNUSED(replaceExisting);
+    return false;
+#else
+    if (!detailKey || !detailKey[0]) return false;
+    if (!nodesPanelCanDownloadTiles()) return false;
+
+    if (tileZoom < 2) tileZoom = 2;
+    if (tileZoom > 19) tileZoom = 19;
+    if (lodTag < 0) lodTag = 0;
+
+    int32_t tx = 0, ty = 0;
+    float latMin = 0.0f, latMax = 0.0f, lonMin = 0.0f, lonMax = 0.0f;
+    if (!liveMapTileCoordsForLatLon(lat, lon, tileZoom,
+                                    tx, ty, latMin, latMax, lonMin, lonMax)) {
+        return false;
+    }
+
+    char base[96];
+    strncpy(base, kLiveDetailMapTileProxyBase, sizeof(base) - 1);
+    base[sizeof(base) - 1] = '\0';
+    size_t blen = strlen(base);
+    while (blen > 0 && base[blen - 1] == '/') base[--blen] = '\0';
+
+    char url[192];
+    snprintf(url, sizeof(url), "%s/%d/%ld/%ld.png",
+             base, tileZoom, (long)tx, (long)ty);
+
+    const String mapPath = nodesDetailMapPath(detailKey);
+    const String metaPath = nodesDetailMapMetaPath(detailKey);
+    const String tmpPath = mapPath + ".tmp";
+    bool hadValidMap = false;
+
+    {
+        NodesMapFsGuard fsGuard;
+        if (!fsGuard.locked()) return false;
+        if (!sdBegin()) return false;
+        if (!nodesMapEnsureDir("/camillia") || !nodesMapEnsureDir("/camillia/detail_maps")) {
+            return false;
+        }
+
+        // Live fetch is usually a cache-fill path for missing cells. At higher
+        // Locate zoom levels we may deliberately refresh a lower-detail tile.
+        if (storageFs().exists(mapPath.c_str())) {
+            if (nodesFileLooksLikePng(mapPath.c_str())) {
+                if (!replaceExisting) return true;
+                hadValidMap = true;
+            } else {
+                storageFs().remove(mapPath.c_str());
+                if (storageFs().exists(metaPath.c_str())) storageFs().remove(metaPath.c_str());
+            }
+        }
+        if (storageFs().exists(tmpPath.c_str())) storageFs().remove(tmpPath.c_str());
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setReuse(false);
+    http.setConnectTimeout(5000);
+    http.setTimeout(12000);
+    if (!http.begin(client, url)) {
+        client.stop();
+        return false;
+    }
+    http.addHeader("User-Agent", "camillia-mt/1.0 (node-locate live map)");
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        http.end();
+        client.stop();
+        return false;
+    }
+
+    {
+        NodesMapFsGuard fsGuard;
+        if (!fsGuard.locked()) {
+            http.end();
+            client.stop();
+            return false;
+        }
+        File out = storageFs().open(tmpPath.c_str(), FILE_WRITE);
+        if (!out) {
+            http.end();
+            client.stop();
+            return false;
+        }
+        out.close();
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    int remaining = http.getSize();
+    size_t written = 0;
+    bool ok = true;
+    uint8_t *buf = s_detailMapOnDemandIoBuf;
+    uint32_t idleDeadline = millis() + 12000UL;
+
+    while (http.connected() && (remaining > 0 || remaining < 0)) {
+        int avail = stream->available();
+        if (avail <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+
+        size_t want = sizeof(s_detailMapOnDemandIoBuf);
+        if (remaining > 0 && (size_t)remaining < want) want = (size_t)remaining;
+        if ((size_t)avail < want) want = (size_t)avail;
+        if (want == 0) want = 1;
+
+        int n = stream->readBytes(buf, want);
+        if (n <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+
+        size_t wn = 0;
+        {
+            NodesMapFsGuard fsGuard;
+            if (!fsGuard.locked()) {
+                ok = false;
+                break;
+            }
+            File out = storageFs().open(tmpPath.c_str(), FILE_APPEND);
+            if (!out) {
+                ok = false;
+                break;
+            }
+            wn = out.write(buf, (size_t)n);
+            out.close();
+        }
+        if (wn != (size_t)n) {
+            ok = false;
+            break;
+        }
+        written += wn;
+        if (remaining > 0) remaining -= n;
+        idleDeadline = millis() + 12000UL;
+        delay(1);
+        if (remaining == 0) break;
+    }
+
+    http.end();
+    client.stop();
+
+    {
+        NodesMapFsGuard fsGuard;
+        if (!fsGuard.locked()) return false;
+        if (!ok || written < 64 || remaining > 0 || !nodesFileLooksLikePng(tmpPath.c_str())) {
+            if (storageFs().exists(tmpPath.c_str())) storageFs().remove(tmpPath.c_str());
+            return false;
+        }
+
+        if (hadValidMap) {
+            if (storageFs().exists(mapPath.c_str())) storageFs().remove(mapPath.c_str());
+            if (storageFs().exists(metaPath.c_str())) storageFs().remove(metaPath.c_str());
+        }
+
+        if (!storageFs().rename(tmpPath.c_str(), mapPath.c_str())) {
+            if (storageFs().exists(tmpPath.c_str())) storageFs().remove(tmpPath.c_str());
+            return false;
+        }
+
+        if (storageFs().exists(metaPath.c_str())) storageFs().remove(metaPath.c_str());
+        File meta = storageFs().open(metaPath.c_str(), FILE_WRITE);
+        if (!meta) {
+            storageFs().remove(mapPath.c_str());
+            return false;
+        }
+        meta.printf("%.6f,%.6f,%.6f,%.6f,%d,%d\n",
+                    (double)latMin, (double)latMax,
+                    (double)lonMin, (double)lonMax,
+                    lodTag,
+                    tileZoom);
+        meta.close();
+        nodesWriteDetailMapVersionMarker();
+    }
+
+    Serial.printf("[map] live detail cached key=%s lod=%d z=%d x=%ld y=%ld%s\n",
+                  detailKey,
+                  lodTag,
+                  tileZoom,
+                  (long)tx,
+                  (long)ty,
+                  replaceExisting ? " (refresh)" : "");
+    return true;
+#endif
+}
+
+static void nodesDetailMapOnDemandTaskMain(void *arg) {
+    LV_UNUSED(arg);
+    char key[11] = {0};
+    memcpy(key, s_detailMapOnDemandReqKey, sizeof(key));
+    key[sizeof(key) - 1] = '\0';
+    float lat = s_detailMapOnDemandLat;
+    float lon = s_detailMapOnDemandLon;
+    int reqLod = s_detailMapOnDemandReqLod;
+    int reqZoom = s_detailMapOnDemandReqZoom;
+    bool reqReplace = s_detailMapOnDemandReqReplace;
+
+    bool ok = nodesDownloadDetailMapLive(lat, lon, key, reqZoom, reqLod, reqReplace);
+    memcpy(s_detailMapOnDemandDoneKey, key, sizeof(s_detailMapOnDemandDoneKey));
+    s_detailMapOnDemandDoneKey[sizeof(s_detailMapOnDemandDoneKey) - 1] = '\0';
+    s_detailMapOnDemandOk = ok;
+    s_detailMapOnDemandDone = true;
+    s_detailMapOnDemandBusy = false;
+    s_detailMapOnDemandTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static void nodesQueueDetailMapOnDemand(float lat, float lon, const char *detailKey,
+                                        int detailLodTarget) {
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(lat);
+    LV_UNUSED(lon);
+    LV_UNUSED(detailKey);
+    LV_UNUSED(detailLodTarget);
+    return;
+#else
+    if (!kLiveDetailMapsCanDownload) return;
+    if (!detailKey || !detailKey[0]) return;
+    if (s_detailMapOnDemandBusy || s_detailMapOnDemandDone) return;
+    if (!nodesPanelCanDownloadTiles()) return;
+
+    NodesMapFsGuard fsGuard;
+    if (!fsGuard.locked() || !sdBegin()) return;
+
+    if (detailLodTarget < 0) detailLodTarget = 0;
+    const int targetZoom = nodesLiveDetailZoomForLod(detailLodTarget);
+    bool replaceExisting = false;
+
+    const String mapPath = nodesDetailMapPath(detailKey);
+    const String metaPath = nodesDetailMapMetaPath(detailKey);
+    if (storageFs().exists(mapPath.c_str())) {
+        if (!nodesFileLooksLikePng(mapPath.c_str())) {
+            storageFs().remove(mapPath.c_str());
+            if (storageFs().exists(metaPath.c_str())) storageFs().remove(metaPath.c_str());
+        } else {
+            float metaLatMin = 0.0f, metaLatMax = 0.0f, metaLonMin = 0.0f, metaLonMax = 0.0f;
+            int cachedLod = -1;
+            bool haveMeta = nodesReadDetailMapMeta(detailKey,
+                                                   metaLatMin, metaLatMax,
+                                                   metaLonMin, metaLonMax,
+                                                   &cachedLod);
+            if (!haveMeta) {
+                int lat10 = 0, lon10 = 0;
+                if (nodesDetailMapParseKey(detailKey, lat10, lon10)) {
+                    nodesDetailMapBoundsFromIndex(lat10, lon10,
+                                                  metaLatMin, metaLatMax,
+                                                  metaLonMin, metaLonMax);
+                    haveMeta = true;
+                }
+            }
+            if (cachedLod < 0) cachedLod = kLiveDetailMapLodStreet;
+
+            bool coversPoint = haveMeta
+                               && lat >= metaLatMin && lat <= metaLatMax
+                               && lon >= metaLonMin && lon <= metaLonMax;
+            if (coversPoint && cachedLod >= detailLodTarget) {
+                return;
+            }
+            replaceExisting = true;
+        }
+    }
+
+    s_detailMapOnDemandLat = lat;
+    s_detailMapOnDemandLon = lon;
+    strncpy(s_detailMapOnDemandReqKey, detailKey, sizeof(s_detailMapOnDemandReqKey) - 1);
+    s_detailMapOnDemandReqKey[sizeof(s_detailMapOnDemandReqKey) - 1] = '\0';
+    s_detailMapOnDemandReqLod = detailLodTarget;
+    s_detailMapOnDemandReqZoom = targetZoom;
+    s_detailMapOnDemandReqReplace = replaceExisting;
+    s_detailMapOnDemandOk = false;
+    s_detailMapOnDemandDone = false;
+    s_detailMapOnDemandBusy = true;
+
+    BaseType_t rc = xTaskCreate(nodesDetailMapOnDemandTaskMain,
+                                "map_detail_dl",
+                                12288,
+                                nullptr,
+                                1,
+                                &s_detailMapOnDemandTask);
+    if (rc != pdPASS) {
+        s_detailMapOnDemandBusy = false;
+        s_detailMapOnDemandDone = true;
+        s_detailMapOnDemandOk = false;
+        s_detailMapOnDemandTask = nullptr;
+        Serial.println("[map] failed to create detail-map download task");
+    }
+#endif
+}
+
+static void serviceDetailMapOnDemand(uint32_t nowMs) {
+    LV_UNUSED(nowMs);
+#if !HAS_FILE_STORAGE || !HAS_NODE_LOCATE
+    return;
+#else
+    if (!s_detailMapOnDemandDone) return;
+    bool ok = s_detailMapOnDemandOk;
+    s_detailMapOnDemandDone = false;
+
+    if (ok && s_detailMapOnDemandDoneKey[0]) {
+        String detailPath = nodesDetailMapPath(s_detailMapOnDemandDoneKey);
+        char imageSrc[96];
+        snprintf(imageSrc, sizeof(imageSrc), "S:%s", detailPath.c_str());
+        lv_image_cache_drop(imageSrc);
+    }
+
+#if HAS_NODE_LOCATE
+    nodeLocateOnDetailMapUpdated();
+#else
+    LV_UNUSED(ok);
+#endif
+
+    if (!ok) {
+        Serial.println("[map] live detail fetch failed");
+    }
 #endif
 }
 
@@ -16524,13 +17015,20 @@ static void bootstrapStateMapsIfMissing() {
 }
 
 static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int h,
-                               int &markerX, int &markerY) {
+                               int &markerX, int &markerY,
+                               int detailLodTarget) {
     // markerX/markerY are the exact point the coordinate lands on, not the
     // top-left of any particular marker: a centred dot and a tip-anchored pin
     // need different offsets, and only the caller knows which it is drawing.
     markerX = x0 + (w / 2);
     markerY = y0 + (h / 2);
     if (!s_nodesMapTileLayer || !s_nodesMapImage) return 0;
+
+    s_nodesMapLastBoundsValid = false;
+    s_nodesMapLastLatMin = 0.0f;
+    s_nodesMapLastLatMax = 0.0f;
+    s_nodesMapLastLonMin = 0.0f;
+    s_nodesMapLastLonMax = 0.0f;
 
     if (!kStateMapsEnabled) {
         lv_obj_add_flag(s_nodesMapImage, LV_OBJ_FLAG_HIDDEN);
@@ -16547,11 +17045,53 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
     return 0;
 #else
     const UsStateMapSpec *state = nodesStateForCoords(lat, lon);
-    if (!state) return 0;
-    if (!sdBegin()) return 0;
+    NodesMapFsGuard fsGuard;
+    if (!fsGuard.locked() || !sdBegin()) return 0;
 
-    String diskPath = nodesStateMapPath(state->code);
-    if (!storageFs().exists(diskPath.c_str())) {
+    s_nodesMapLastRenderUsedDetail = false;
+    s_nodesMapLastDetailKey[0] = '\0';
+    s_nodesMapLastDetailLod = -1;
+
+    if (detailLodTarget < 0) detailLodTarget = 0;
+
+    char detailKey[11] = {0};
+    float latMin = 0.0f, latMax = 0.0f, lonMin = 0.0f, lonMax = 0.0f;
+    String diskPath;
+    bool usingDetail = false;
+    int cachedDetailLod = -1;
+
+    if (nodesDetailMapKeyForCoords(lat, lon, detailKey, sizeof(detailKey),
+                                   &latMin, &latMax, &lonMin, &lonMax)) {
+        String detailPath = nodesDetailMapPath(detailKey);
+        if (storageFs().exists(detailPath.c_str())) {
+            bool useDetail = true;
+            float metaLatMin = 0.0f, metaLatMax = 0.0f, metaLonMin = 0.0f, metaLonMax = 0.0f;
+            if (nodesReadDetailMapMeta(detailKey,
+                                       metaLatMin, metaLatMax,
+                                       metaLonMin, metaLonMax,
+                                       &cachedDetailLod)) {
+                if (lat < metaLatMin || lat > metaLatMax || lon < metaLonMin || lon > metaLonMax) {
+                    useDetail = false;
+                }
+            }
+            if (cachedDetailLod < 0) cachedDetailLod = kLiveDetailMapLodStreet;
+            if (useDetail) {
+                diskPath = detailPath;
+                usingDetail = true;
+                memcpy(s_nodesMapLastDetailKey, detailKey, sizeof(s_nodesMapLastDetailKey));
+                s_nodesMapLastRenderUsedDetail = true;
+                s_nodesMapLastDetailLod = cachedDetailLod;
+            }
+        }
+
+    }
+
+    if (!usingDetail) {
+        if (!state) return 0;
+        diskPath = nodesStateMapPath(state->code);
+    }
+
+    if (!usingDetail && !storageFs().exists(diskPath.c_str())) {
         // No map for this state: say so and return. The on-demand fetch below is
         // dead code now (nodesDownloadStateMap() is a stub) and must not be
         // reached — it opens with two blocking WiFi.hostByName() calls, one of
@@ -16597,10 +17137,14 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 
     if (!nodesFileLooksLikePng(diskPath.c_str())) {
         storageFs().remove(diskPath.c_str());
-        String meta = nodesStateMapMetaPath(state->code);
+        String meta = usingDetail ? nodesDetailMapMetaPath(detailKey)
+                                  : nodesStateMapMetaPath(state->code);
         if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
         s_stateMapCacheReady = false;
         s_stateMapBootstrapDone = false;
+        s_nodesMapLastRenderUsedDetail = false;
+        s_nodesMapLastDetailKey[0] = '\0';
+        s_nodesMapLastDetailLod = -1;
         Serial.printf("[map] invalid PNG removed: %s\n", diskPath.c_str());
         return 0;
     }
@@ -16616,10 +17160,14 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
         srcH = header.h;
     } else {
         storageFs().remove(diskPath.c_str());
-        String meta = nodesStateMapMetaPath(state->code);
+        String meta = usingDetail ? nodesDetailMapMetaPath(detailKey)
+                                  : nodesStateMapMetaPath(state->code);
         if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
         s_stateMapCacheReady = false;
         s_stateMapBootstrapDone = false;
+        s_nodesMapLastRenderUsedDetail = false;
+        s_nodesMapLastDetailKey[0] = '\0';
+        s_nodesMapLastDetailLod = -1;
         Serial.printf("[map] decode failed, removed: %s\n", diskPath.c_str());
         return 0;
     }
@@ -16675,16 +17223,36 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
                       (int)rOpen, (int)rSeek, (int)rTell, (unsigned long)probeSize);
     }
 
+    const char *mapTag = usingDetail ? detailKey : state->code;
     Serial.printf("[map] %s draw: src %ux%u box %dx%d scale %ld -> %dx%d at (%d,%d)\n",
-                  state->code,
+                  mapTag,
                   (unsigned)srcW, (unsigned)srcH, w, h,
                   (long)scale, drawW, drawH, drawX, drawY);
 
-    float latMin = state->latMin;
-    float latMax = state->latMax;
-    float lonMin = state->lonMin;
-    float lonMax = state->lonMax;
-    nodesReadStateMapMeta(state->code, latMin, latMax, lonMin, lonMax);
+    if (usingDetail) {
+        nodesReadDetailMapMeta(detailKey, latMin, latMax, lonMin, lonMax);
+    } else {
+        latMin = state->latMin;
+        latMax = state->latMax;
+        lonMin = state->lonMin;
+        lonMax = state->lonMax;
+        nodesReadStateMapMeta(state->code, latMin, latMax, lonMin, lonMax);
+    }
+    if (!(latMax > latMin) || !(lonMax > lonMin)) {
+        if (usingDetail) {
+            int lat10 = 0, lon10 = 0;
+            if (nodesDetailMapParseKey(detailKey, lat10, lon10)) {
+                nodesDetailMapBoundsFromIndex(lat10, lon10, latMin, latMax, lonMin, lonMax);
+            }
+        }
+        if (!(latMax > latMin) || !(lonMax > lonMin)) return 0;
+    }
+
+    s_nodesMapLastBoundsValid = true;
+    s_nodesMapLastLatMin = latMin;
+    s_nodesMapLastLatMax = latMax;
+    s_nodesMapLastLonMin = lonMin;
+    s_nodesMapLastLonMax = lonMax;
 
     float xNorm = (lon - lonMin) / (lonMax - lonMin);
     float yNorm = (latMax - lat) / (latMax - latMin);
@@ -16727,7 +17295,9 @@ static void refreshNodesMap(const NodeEntry *node) {
 
     int markerX = -1;
     int markerY = -1;
-    int visibleTiles = nodesMapRenderTiles(lat, lon, 4, 20, mapW, mapH, markerX, markerY);
+    int visibleTiles = nodesMapRenderTiles(lat, lon, 4, 20, mapW, mapH,
+                                           markerX, markerY,
+                                           kLiveDetailMapLodStreet);
 
     if (s_nodesMapCoords) {
         if (visibleTiles <= 0) {
@@ -16755,23 +17325,22 @@ static void refreshNodesMap(const NodeEntry *node) {
     }
 
     if (!kStateMapsEnabled) {
-        lv_label_set_text(s_nodesMapTitle, "State Map (off)");
+        lv_label_set_text(s_nodesMapTitle, "Map (off)");
     } else {
-        lv_label_set_text(s_nodesMapTitle, visibleTiles > 0 ? "State Map" : "State Map (loading)");
+        if (visibleTiles > 0) {
+            lv_label_set_text(s_nodesMapTitle,
+                              s_nodesMapLastRenderUsedDetail ? "Detail Map" : "State Map");
+        } else {
+            lv_label_set_text(s_nodesMapTitle, "Map (loading)");
+        }
     }
 }
 
 #if HAS_NODE_LOCATE
 // ── Locate ───────────────────────────────────────────────────────────────────
-// Node Actions -> (L)ocate. Shows the state a node's last reported position
-// falls in, with a pin on it, and nothing else — the detail belongs on the web
-// config map, which has a browser to fetch tiles with.
-//
-// The drawing is nodesMapRenderTiles()' job, and that function works through
-// the s_nodesMap* globals rather than taking objects. Those globals were built
-// for a Nodes-panel map that is never constructed, so this modal lends them its
-// own objects for as long as it is open and takes them back down on close. One
-// renderer, one set of pin math, whichever surface is showing it.
+// Node Actions -> Locate. This is a live slippy map: Web Mercator center/zoom
+// state drives visible OpenStreetMap tile requests, and each response is
+// composited into one RGB565 canvas. No state/detail cache is consulted.
 // Pin geometry. The head is a circle of kLocatePinW; the stem makes up the
 // rest of kLocatePinH and ends at the tip.
 static constexpr int kLocatePinW = 15;
@@ -16781,21 +17350,693 @@ static lv_obj_t *s_nodeLocateBackdrop = nullptr;
 static lv_obj_t *s_nodeLocateModal = nullptr;
 static uint32_t s_nodeLocateNodeId = 0;
 
+static lv_obj_t *s_nodeLocateMapBox = nullptr;
+static lv_obj_t *s_nodeLocateZoomLabel = nullptr;
+static lv_obj_t *s_nodeLocateTileLayer = nullptr;
+static lv_obj_t *s_nodeLocateMarker = nullptr;
+static int   s_locateMapW = 0;
+static int   s_locateMapH = 0;
+static float s_locateNodeLat = 0.0f;
+static float s_locateNodeLon = 0.0f;
+
+static constexpr int kNodeLocateTilePx = kMapTileSizePx;
+static constexpr int kNodeLocateZoomMin = kMapTileZoomMin;
+static constexpr int kNodeLocateZoomDefault = kMapTileZoomRoads;
+static constexpr int kNodeLocateZoomMax = kMapTileZoomMax;
+static constexpr int kNodeLocateMaxTileJobs = 9;
+static constexpr size_t kNodeLocateMaxTileBytes = 256U * 1024U;
+static constexpr uint32_t kNodeLocatePanDebounceMs = 180UL;
+
+struct NodeLocateTileJob {
+    int zoom = kNodeLocateZoomDefault;
+    int32_t tileX = 0;
+    int32_t tileY = 0;
+    int16_t drawX = 0;
+    int16_t drawY = 0;
+    uint32_t generation = 0;
+    uint32_t cacheEpoch = 0;
+};
+
+static lv_obj_t *s_nodeLocateCanvas = nullptr;
+static lv_draw_buf_t *s_nodeLocateCanvasBuf = nullptr;
+static lv_obj_t *s_nodeLocateStatusLabel = nullptr;
+static int s_nodeLocateZoom = kNodeLocateZoomDefault;
+static double s_nodeLocateCenterWorldX = 0.0;
+static double s_nodeLocateCenterWorldY = 0.0;
+static uint32_t s_nodeLocateGeneration = 0;
+static bool s_nodeLocateRefreshPending = false;
+static uint32_t s_nodeLocateRefreshAtMs = 0;
+static bool s_nodeLocateHasPixels = false;
+static NodeLocateTileJob s_nodeLocateTileJobs[kNodeLocateMaxTileJobs];
+static int s_nodeLocateTileJobCount = 0;
+static int s_nodeLocateTileJobNext = 0;
+static TaskHandle_t s_nodeLocateTileTask = nullptr;
+static volatile bool s_nodeLocateTileBusy = false;
+static volatile bool s_nodeLocateTileDone = false;
+static volatile bool s_nodeLocateTileOk = false;
+static NodeLocateTileJob s_nodeLocateTileRequest;
+static NodeLocateTileJob s_nodeLocateTileCompleted;
+static size_t s_nodeLocateTileCompletedBytes = 0;
+static uint8_t *s_nodeLocateTilePng = nullptr;
+
 static void closeNodeLocateModal() {
+    lv_draw_buf_t *canvasBuf = s_nodeLocateCanvasBuf;
+    s_nodeLocateGeneration++;
+    s_nodeLocateRefreshPending = false;
+    s_nodeLocateTileJobCount = 0;
+    s_nodeLocateTileJobNext = 0;
+    if (canvasBuf) lv_image_cache_drop(canvasBuf);
+
     if (lvObjValid(s_nodeLocateBackdrop)) {
         lv_obj_del(s_nodeLocateBackdrop);
     } else if (lvObjValid(s_nodeLocateModal)) {
         lv_obj_del(s_nodeLocateModal);
     }
+    if (canvasBuf) lv_draw_buf_destroy(canvasBuf);
+
     s_nodeLocateBackdrop = nullptr;
     s_nodeLocateModal = nullptr;
     s_nodeLocateNodeId = 0;
-    // Handed back: these point into the tree that was just deleted.
-    s_nodesMapTileLayer = nullptr;
-    s_nodesMapImage = nullptr;
-    s_nodesMapMarker = nullptr;
-    s_nodesMapImageSrc[0] = '\0';
+    s_nodeLocateMapBox = nullptr;
+    s_nodeLocateZoomLabel = nullptr;
+    s_nodeLocateTileLayer = nullptr;
+    s_nodeLocateMarker = nullptr;
+    s_nodeLocateCanvas = nullptr;
+    s_nodeLocateCanvasBuf = nullptr;
+    s_nodeLocateStatusLabel = nullptr;
+    s_nodeLocateZoom = kNodeLocateZoomDefault;
+    s_nodeLocateCenterWorldX = 0.0;
+    s_nodeLocateCenterWorldY = 0.0;
+    s_nodeLocateHasPixels = false;
+    s_locateNodeLat = 0.0f;
+    s_locateNodeLon = 0.0f;
 }
+
+static double nodeLocateWorldSize(int zoom) {
+    return ldexp((double)kNodeLocateTilePx, zoom);
+}
+
+static void nodeLocateLatLonToWorld(double lat, double lon, int zoom,
+                                    double &worldX, double &worldY) {
+    if (lat > 85.05112878) lat = 85.05112878;
+    if (lat < -85.05112878) lat = -85.05112878;
+    lon = fmod(lon + 180.0, 360.0);
+    if (lon < 0.0) lon += 360.0;
+    lon -= 180.0;
+
+    const double worldSize = nodeLocateWorldSize(zoom);
+    const double sinLat = sin(lat * M_PI / 180.0);
+    worldX = (lon + 180.0) / 360.0 * worldSize;
+    worldY = (0.5 - log((1.0 + sinLat) / (1.0 - sinLat)) / (4.0 * M_PI))
+             * worldSize;
+}
+
+static void nodeLocateWorldToLatLon(double worldX, double worldY, int zoom,
+                                    double &lat, double &lon) {
+    const double worldSize = nodeLocateWorldSize(zoom);
+    worldX = fmod(worldX, worldSize);
+    if (worldX < 0.0) worldX += worldSize;
+    if (worldY < 0.0) worldY = 0.0;
+    if (worldY > worldSize) worldY = worldSize;
+
+    lon = worldX / worldSize * 360.0 - 180.0;
+    const double mercator = M_PI * (1.0 - 2.0 * worldY / worldSize);
+    lat = atan(sinh(mercator)) * 180.0 / M_PI;
+}
+
+static void nodeLocateNormalizeCenter() {
+    const double worldSize = nodeLocateWorldSize(s_nodeLocateZoom);
+    s_nodeLocateCenterWorldX = fmod(s_nodeLocateCenterWorldX, worldSize);
+    if (s_nodeLocateCenterWorldX < 0.0) s_nodeLocateCenterWorldX += worldSize;
+
+    const double halfViewport = (double)s_locateMapH * 0.5;
+    const double minY = halfViewport;
+    const double maxY = worldSize - halfViewport;
+    if (s_nodeLocateCenterWorldY < minY) s_nodeLocateCenterWorldY = minY;
+    if (s_nodeLocateCenterWorldY > maxY) s_nodeLocateCenterWorldY = maxY;
+}
+
+static void nodeLocateSetStatus(const char *text) {
+    if (!s_nodeLocateStatusLabel || !lvObjValid(s_nodeLocateStatusLabel)) return;
+    if (!text || !text[0]) {
+        lv_obj_add_flag(s_nodeLocateStatusLabel, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(s_nodeLocateStatusLabel, text);
+    lv_obj_clear_flag(s_nodeLocateStatusLabel, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_nodeLocateStatusLabel);
+}
+
+static void nodeLocateUpdateLiveMarker() {
+    if (s_nodeLocateZoomLabel && lvObjValid(s_nodeLocateZoomLabel)) {
+        lv_label_set_text_fmt(s_nodeLocateZoomLabel, "%d", s_nodeLocateZoom);
+    }
+    if (!s_nodeLocateMarker || !lvObjValid(s_nodeLocateMarker)
+        || s_locateMapW <= 0 || s_locateMapH <= 0) {
+        return;
+    }
+
+    double nodeWorldX = 0.0;
+    double nodeWorldY = 0.0;
+    nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon, s_nodeLocateZoom,
+                            nodeWorldX, nodeWorldY);
+
+    const double worldSize = nodeLocateWorldSize(s_nodeLocateZoom);
+    double deltaX = nodeWorldX - s_nodeLocateCenterWorldX;
+    if (deltaX > worldSize * 0.5) deltaX -= worldSize;
+    if (deltaX < -worldSize * 0.5) deltaX += worldSize;
+    const double deltaY = nodeWorldY - s_nodeLocateCenterWorldY;
+
+    const int markerX = s_locateMapW / 2 + (int)lround(deltaX);
+    const int markerY = s_locateMapH / 2 + (int)lround(deltaY);
+    if (markerX < 0 || markerX > s_locateMapW
+        || markerY < 0 || markerY > s_locateMapH) {
+        lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    int pinX = markerX - kLocatePinW / 2;
+    int pinY = markerY - kLocatePinH;
+    if (pinX < 0) pinX = 0;
+    if (pinY < 0) pinY = 0;
+    if (pinX > s_locateMapW - kLocatePinW) pinX = s_locateMapW - kLocatePinW;
+    if (pinY > s_locateMapH - kLocatePinH) pinY = s_locateMapH - kLocatePinH;
+    lv_obj_set_pos(s_nodeLocateMarker, pinX, pinY);
+    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
+}
+
+static lv_color_t nodeLocateCanvasBgColor() {
+    return (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xDCE6F6)
+                                           : lv_color_hex(0x0A1E45);
+}
+
+static void nodeLocateClearLiveCanvas() {
+    if (!s_nodeLocateCanvas || !lvObjValid(s_nodeLocateCanvas)) return;
+    lv_canvas_fill_bg(s_nodeLocateCanvas, nodeLocateCanvasBgColor(), LV_OPA_COVER);
+    s_nodeLocateHasPixels = false;
+}
+
+static void nodeLocateShiftLiveCanvas(int dx, int dy) {
+    if (!s_nodeLocateCanvasBuf || !s_nodeLocateCanvas
+        || !lvObjValid(s_nodeLocateCanvas)
+        || s_locateMapW <= 0 || s_locateMapH <= 0) {
+        return;
+    }
+    if (dx == 0 && dy == 0) return;
+    if (abs(dx) >= s_locateMapW || abs(dy) >= s_locateMapH) {
+        nodeLocateClearLiveCanvas();
+        return;
+    }
+
+    const uint16_t fill = lv_color_to_u16(nodeLocateCanvasBgColor());
+    const int yStart = (dy > 0) ? (s_locateMapH - 1) : 0;
+    const int yEnd = (dy > 0) ? -1 : s_locateMapH;
+    const int yStep = (dy > 0) ? -1 : 1;
+
+    for (int destY = yStart; destY != yEnd; destY += yStep) {
+        const int srcY = destY - dy;
+        uint16_t *dest = (uint16_t *)(s_nodeLocateCanvasBuf->data
+                                      + destY * s_nodeLocateCanvasBuf->header.stride);
+        if (srcY < 0 || srcY >= s_locateMapH) {
+            for (int x = 0; x < s_locateMapW; x++) dest[x] = fill;
+            continue;
+        }
+
+        uint16_t *src = (uint16_t *)(s_nodeLocateCanvasBuf->data
+                                     + srcY * s_nodeLocateCanvasBuf->header.stride);
+        if (dx > 0) {
+            memmove(dest + dx, src, (size_t)(s_locateMapW - dx) * sizeof(uint16_t));
+            for (int x = 0; x < dx; x++) dest[x] = fill;
+        } else if (dx < 0) {
+            const int shift = -dx;
+            memmove(dest, src + shift,
+                    (size_t)(s_locateMapW - shift) * sizeof(uint16_t));
+            for (int x = s_locateMapW - shift; x < s_locateMapW; x++) dest[x] = fill;
+        } else if (dest != src) {
+            memmove(dest, src, (size_t)s_locateMapW * sizeof(uint16_t));
+        }
+    }
+
+    lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
+    lv_obj_invalidate(s_nodeLocateCanvas);
+}
+
+static void nodeLocateRequestLiveTiles(uint32_t delayMs, bool clearCanvas) {
+    s_nodeLocateGeneration++;
+    if (s_nodeLocateGeneration == 0) s_nodeLocateGeneration = 1;
+    s_nodeLocateRefreshPending = true;
+    s_nodeLocateRefreshAtMs = millis() + delayMs;
+    s_nodeLocateTileJobCount = 0;
+    s_nodeLocateTileJobNext = 0;
+    if (clearCanvas) nodeLocateClearLiveCanvas();
+    if (!s_nodeLocateHasPixels) nodeLocateSetStatus("Loading map...");
+    nodeLocateUpdateLiveMarker();
+}
+
+static void nodeLocateBuildVisibleTileJobs() {
+    s_nodeLocateTileJobCount = 0;
+    s_nodeLocateTileJobNext = 0;
+    if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+
+    const double left = s_nodeLocateCenterWorldX - (double)s_locateMapW * 0.5;
+    const double top = s_nodeLocateCenterWorldY - (double)s_locateMapH * 0.5;
+    const int32_t firstTileX = (int32_t)floor(left / (double)kNodeLocateTilePx);
+    const int32_t lastTileX = (int32_t)floor((left + s_locateMapW - 0.001)
+                                             / (double)kNodeLocateTilePx);
+    const int32_t firstTileY = (int32_t)floor(top / (double)kNodeLocateTilePx);
+    const int32_t lastTileY = (int32_t)floor((top + s_locateMapH - 0.001)
+                                             / (double)kNodeLocateTilePx);
+    const int32_t tilesPerAxis = (int32_t)(1UL << s_nodeLocateZoom);
+
+    for (int32_t rawY = firstTileY; rawY <= lastTileY; rawY++) {
+        if (rawY < 0 || rawY >= tilesPerAxis) continue;
+        for (int32_t rawX = firstTileX; rawX <= lastTileX; rawX++) {
+            if (s_nodeLocateTileJobCount >= kNodeLocateMaxTileJobs) break;
+            int32_t wrappedX = rawX % tilesPerAxis;
+            if (wrappedX < 0) wrappedX += tilesPerAxis;
+
+            NodeLocateTileJob &job = s_nodeLocateTileJobs[s_nodeLocateTileJobCount++];
+            job.zoom = s_nodeLocateZoom;
+            job.tileX = wrappedX;
+            job.tileY = rawY;
+            job.drawX = (int16_t)lround((double)rawX * kNodeLocateTilePx - left);
+            job.drawY = (int16_t)lround((double)rawY * kNodeLocateTilePx - top);
+            job.generation = s_nodeLocateGeneration;
+            job.cacheEpoch = nodesMapTileCacheEpoch();
+        }
+    }
+
+    for (int i = 0; i < s_nodeLocateTileJobCount - 1; i++) {
+        int best = i;
+        int bestDx = s_nodeLocateTileJobs[i].drawX + kNodeLocateTilePx / 2
+                     - s_locateMapW / 2;
+        int bestDy = s_nodeLocateTileJobs[i].drawY + kNodeLocateTilePx / 2
+                     - s_locateMapH / 2;
+        int bestDistance = bestDx * bestDx + bestDy * bestDy;
+        for (int j = i + 1; j < s_nodeLocateTileJobCount; j++) {
+            int dx = s_nodeLocateTileJobs[j].drawX + kNodeLocateTilePx / 2
+                     - s_locateMapW / 2;
+            int dy = s_nodeLocateTileJobs[j].drawY + kNodeLocateTilePx / 2
+                     - s_locateMapH / 2;
+            int distance = dx * dx + dy * dy;
+            if (distance < bestDistance) {
+                best = j;
+                bestDistance = distance;
+            }
+        }
+        if (best != i) {
+            NodeLocateTileJob tmp = s_nodeLocateTileJobs[i];
+            s_nodeLocateTileJobs[i] = s_nodeLocateTileJobs[best];
+            s_nodeLocateTileJobs[best] = tmp;
+        }
+    }
+}
+
+static bool nodeLocateTileBufferReady() {
+    if (s_nodeLocateTilePng) return true;
+    s_nodeLocateTilePng = (uint8_t *)heap_caps_malloc(
+        kNodeLocateMaxTileBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_nodeLocateTilePng) {
+        Serial.println("[map] live tile buffer allocation failed");
+        return false;
+    }
+    return true;
+}
+
+static bool nodeLocatePngBufferValid(size_t bytes) {
+    return nodesMapTilePngValid(s_nodeLocateTilePng, bytes);
+}
+
+static bool nodeLocateLoadCachedTile(const NodeLocateTileJob &job, size_t &bytesOut) {
+    bytesOut = 0;
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(job);
+    return false;
+#else
+    if (!nodeLocateTileBufferReady()) return false;
+    String path = nodesMapTilePath(job.zoom, job.tileX, job.tileY);
+    if (path.isEmpty()) return false;
+
+    NodesMapFsGuard fsGuard;
+    if (!fsGuard.locked() || !sdBegin() || !storageFs().exists(path.c_str())) return false;
+    File file = storageFs().open(path.c_str(), FILE_READ);
+    if (!file) return false;
+
+    size_t bytes = (size_t)file.size();
+    if (bytes < 24 || bytes > kNodeLocateMaxTileBytes) {
+        file.close();
+        storageFs().remove(path.c_str());
+        return false;
+    }
+    size_t read = file.read(s_nodeLocateTilePng, bytes);
+    file.close();
+    if (read != bytes || !nodeLocatePngBufferValid(bytes)) {
+        storageFs().remove(path.c_str());
+        return false;
+    }
+
+    bytesOut = bytes;
+    Serial.printf("[map] tile cache hit z=%d x=%ld y=%ld, %u bytes\n",
+                  job.zoom, (long)job.tileX, (long)job.tileY, (unsigned)bytes);
+    return true;
+#endif
+}
+
+static bool nodeLocatePersistTile(const NodeLocateTileJob &job, size_t bytes) {
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(job);
+    LV_UNUSED(bytes);
+    return false;
+#else
+    if (!nodeLocatePngBufferValid(bytes)
+        || job.cacheEpoch != nodesMapTileCacheEpoch()) return false;
+    String path = nodesMapTilePath(job.zoom, job.tileX, job.tileY);
+    String tempPath = nodesMapTileLiveTempPath(job.zoom, job.tileX, job.tileY);
+    if (path.isEmpty() || tempPath.isEmpty()) return false;
+
+    NodesMapFsGuard fsGuard;
+    if (!fsGuard.locked() || !sdBegin()) return false;
+    if (job.cacheEpoch != nodesMapTileCacheEpoch()) return false;
+    if (!nodesMapTileEnsureParentDirs(job.zoom, job.tileX)) return false;
+    if (storageFs().exists(path.c_str()) && nodesMapTileFileValid(path.c_str())) return true;
+    if (storageFs().exists(tempPath.c_str())) storageFs().remove(tempPath.c_str());
+
+    File file = storageFs().open(tempPath.c_str(), FILE_WRITE);
+    if (!file) return false;
+    size_t written = file.write(s_nodeLocateTilePng, bytes);
+    file.close();
+    if (written != bytes) {
+        storageFs().remove(tempPath.c_str());
+        return false;
+    }
+
+    if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+    if (!storageFs().rename(tempPath.c_str(), path.c_str())) {
+        storageFs().remove(tempPath.c_str());
+        return false;
+    }
+    Serial.printf("[map] tile cached z=%d x=%ld y=%ld, %u bytes\n",
+                  job.zoom, (long)job.tileX, (long)job.tileY, (unsigned)bytes);
+    return true;
+#endif
+}
+
+static bool nodeLocateDownloadTile(const NodeLocateTileJob &job, size_t &bytesOut) {
+    bytesOut = 0;
+    if (!nodeLocateTileBufferReady() || !nodesPanelCanDownloadTiles()) return false;
+
+    char base[96];
+    strncpy(base, kLiveDetailMapTileProxyBase, sizeof(base) - 1);
+    base[sizeof(base) - 1] = '\0';
+    size_t baseLen = strlen(base);
+    while (baseLen > 0 && base[baseLen - 1] == '/') base[--baseLen] = '\0';
+
+    char url[192];
+    snprintf(url, sizeof(url), "%s/%d/%ld/%ld.png",
+             base, job.zoom, (long)job.tileX, (long)job.tileY);
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setReuse(false);
+    http.setConnectTimeout(5000);
+    http.setTimeout(12000);
+    if (!http.begin(client, url)) {
+        client.stop();
+        return false;
+    }
+    char userAgent[112];
+    snprintf(userAgent, sizeof(userAgent),
+             "Camillia-MT/%s (+https://github.com/oumike/camillia-mt)",
+             APP_VERSION);
+    http.addHeader("User-Agent", userAgent);
+    const char *responseHeaders[] = {"x-blocked"};
+    http.collectHeaders(responseHeaders, 1);
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK || http.hasHeader("x-blocked")) {
+        Serial.printf("[map] live tile rejected HTTP=%d blocked=%s z=%d x=%ld y=%ld\n",
+                      code,
+                      http.hasHeader("x-blocked") ? http.header("x-blocked").c_str() : "no",
+                      job.zoom, (long)job.tileX, (long)job.tileY);
+        http.end();
+        client.stop();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    int remaining = http.getSize();
+    if (remaining > (int)kNodeLocateMaxTileBytes) {
+        http.end();
+        client.stop();
+        return false;
+    }
+
+    size_t written = 0;
+    uint32_t idleDeadline = millis() + 12000UL;
+    bool ok = true;
+    while (http.connected() && (remaining > 0 || remaining < 0)) {
+        int available = stream->available();
+        if (available <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+
+        size_t capacity = kNodeLocateMaxTileBytes - written;
+        if (capacity == 0) {
+            ok = false;
+            break;
+        }
+        size_t wanted = (size_t)available;
+        if (wanted > capacity) wanted = capacity;
+        if (remaining > 0 && wanted > (size_t)remaining) wanted = (size_t)remaining;
+        if (wanted > 4096U) wanted = 4096U;
+
+        int read = stream->readBytes(s_nodeLocateTilePng + written, wanted);
+        if (read <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+        written += (size_t)read;
+        if (remaining > 0) remaining -= read;
+        idleDeadline = millis() + 12000UL;
+        if (remaining == 0) break;
+        delay(1);
+    }
+
+    http.end();
+    client.stop();
+    ok = ok && written >= 24 && remaining <= 0 && nodeLocatePngBufferValid(written);
+    if (ok) bytesOut = written;
+    return ok;
+}
+
+static void nodeLocateTileTaskMain(void *arg) {
+    LV_UNUSED(arg);
+    NodeLocateTileJob job = s_nodeLocateTileRequest;
+    size_t bytes = 0;
+    bool ok = nodeLocateDownloadTile(job, bytes);
+    s_nodeLocateTileCompleted = job;
+    s_nodeLocateTileCompletedBytes = bytes;
+    s_nodeLocateTileOk = ok;
+    s_nodeLocateTileDone = true;
+    s_nodeLocateTileBusy = false;
+    s_nodeLocateTileTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes);
+
+static void nodeLocateStartNextTile() {
+    if (s_nodeLocateTileBusy || s_nodeLocateTileDone) return;
+    if (s_nodeLocateTileJobNext >= s_nodeLocateTileJobCount) return;
+    if (!nodeLocateTileBufferReady()) return;
+
+    NodeLocateTileJob job = s_nodeLocateTileJobs[s_nodeLocateTileJobNext++];
+    size_t cachedBytes = 0;
+    if (nodeLocateLoadCachedTile(job, cachedBytes)) {
+        if (job.generation == s_nodeLocateGeneration) {
+            nodeLocateComposeTile(job, cachedBytes);
+        }
+        return;
+    }
+    if (!nodesPanelCanDownloadTiles()) return;
+
+    s_nodeLocateTileRequest = job;
+    s_nodeLocateTileOk = false;
+    s_nodeLocateTileDone = false;
+    s_nodeLocateTileBusy = true;
+    BaseType_t rc = xTaskCreate(nodeLocateTileTaskMain,
+                                "map_live_tile",
+                                12288,
+                                nullptr,
+                                1,
+                                &s_nodeLocateTileTask);
+    if (rc != pdPASS) {
+        s_nodeLocateTileCompleted = s_nodeLocateTileRequest;
+        s_nodeLocateTileCompletedBytes = 0;
+        s_nodeLocateTileOk = false;
+        s_nodeLocateTileBusy = false;
+        s_nodeLocateTileDone = true;
+        s_nodeLocateTileTask = nullptr;
+        Serial.println("[map] failed to create live tile task");
+    }
+}
+
+static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes) {
+    if (!s_nodeLocateCanvas || !lvObjValid(s_nodeLocateCanvas)
+        || !s_nodeLocateCanvasBuf || !nodeLocatePngBufferValid(pngBytes)) {
+        return false;
+    }
+
+    lv_image_dsc_t source = {};
+    source.header.magic = LV_IMAGE_HEADER_MAGIC;
+    source.data_size = (uint32_t)pngBytes;
+    source.data = s_nodeLocateTilePng;
+
+    lv_draw_image_dsc_t imageDsc;
+    lv_draw_image_dsc_init(&imageDsc);
+    imageDsc.src = &source;
+    imageDsc.antialias = 0;
+
+    lv_area_t tileArea = {
+        job.drawX,
+        job.drawY,
+        (int32_t)job.drawX + kNodeLocateTilePx - 1,
+        (int32_t)job.drawY + kNodeLocateTilePx - 1,
+    };
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_nodeLocateCanvas, &layer);
+    lv_draw_image(&layer, &imageDsc, &tileArea);
+    lv_canvas_finish_layer(s_nodeLocateCanvas, &layer);
+    lv_image_cache_drop(&source);
+    lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
+
+    s_nodeLocateHasPixels = true;
+    nodeLocateSetStatus(nullptr);
+    Serial.printf("[map] live tile draw z=%d x=%ld y=%ld at (%d,%d), %u bytes\n",
+                  job.zoom, (long)job.tileX, (long)job.tileY,
+                  (int)job.drawX, (int)job.drawY, (unsigned)pngBytes);
+    return true;
+}
+
+static void serviceNodeLocateLiveMap(uint32_t nowMs) {
+    if (s_nodeLocateTileDone) {
+        NodeLocateTileJob completed = s_nodeLocateTileCompleted;
+        size_t bytes = s_nodeLocateTileCompletedBytes;
+        bool ok = s_nodeLocateTileOk;
+        s_nodeLocateTileDone = false;
+
+        bool current = s_nodeLocateModal && lvObjValid(s_nodeLocateModal)
+                       && completed.generation == s_nodeLocateGeneration;
+        if (ok) {
+            nodeLocatePersistTile(completed, bytes);
+            if (current) nodeLocateComposeTile(completed, bytes);
+        } else if (!ok && current) {
+            Serial.printf("[map] live tile fetch failed z=%d x=%ld y=%ld\n",
+                          completed.zoom, (long)completed.tileX, (long)completed.tileY);
+        }
+    }
+
+    if (!s_nodeLocateModal || !lvObjValid(s_nodeLocateModal)) return;
+    if (s_nodeLocateTileBusy || s_nodeLocateTileDone) return;
+
+    if (s_nodeLocateRefreshPending
+        && (int32_t)(nowMs - s_nodeLocateRefreshAtMs) >= 0) {
+        if (!nodeLocateTileBufferReady()) {
+            s_nodeLocateRefreshPending = false;
+            nodeLocateSetStatus("Map memory unavailable");
+            return;
+        }
+        nodeLocateBuildVisibleTileJobs();
+        s_nodeLocateRefreshPending = false;
+    }
+
+    if (!s_nodeLocateRefreshPending
+        && s_nodeLocateTileJobNext < s_nodeLocateTileJobCount) {
+        nodeLocateStartNextTile();
+    } else if (!s_nodeLocateRefreshPending
+               && s_nodeLocateTileJobCount > 0
+               && s_nodeLocateTileJobNext >= s_nodeLocateTileJobCount
+               && !s_nodeLocateHasPixels) {
+        nodeLocateSetStatus(nodesPanelCanDownloadTiles()
+                                ? "Map unavailable"
+                                : "Waiting for Wi-Fi...");
+    }
+}
+
+// Puts the node back under the middle of the map box at the current zoom.
+static void nodeLocateCenterOnNode() {
+    if (s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    nodeLocateLatLonToWorld(s_locateNodeLat, s_locateNodeLon, s_nodeLocateZoom,
+                            s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
+    nodeLocateNormalizeCenter();
+    nodeLocateRequestLiveTiles(0, true);
+}
+
+static void nodeLocateZoomStep(int delta) {
+    if (!delta || s_locateMapW <= 0 || s_locateMapH <= 0) return;
+    int nextZoom = s_nodeLocateZoom + delta;
+    if (nextZoom < kNodeLocateZoomMin) nextZoom = kNodeLocateZoomMin;
+    if (nextZoom > kNodeLocateZoomMax) nextZoom = kNodeLocateZoomMax;
+    if (nextZoom == s_nodeLocateZoom) return;
+
+    double centerLat = 0.0;
+    double centerLon = 0.0;
+    nodeLocateWorldToLatLon(s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY,
+                            s_nodeLocateZoom, centerLat, centerLon);
+    s_nodeLocateZoom = nextZoom;
+    nodeLocateLatLonToWorld(centerLat, centerLon, s_nodeLocateZoom,
+                            s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
+    nodeLocateNormalizeCenter();
+    nodeLocateRequestLiveTiles(0, true);
+}
+
+static void nodeLocatePanBy(int dx, int dy) {
+    if (!dx && !dy) return;
+    const double oldY = s_nodeLocateCenterWorldY;
+    s_nodeLocateCenterWorldX -= (double)dx;
+    s_nodeLocateCenterWorldY -= (double)dy;
+    nodeLocateNormalizeCenter();
+
+    int actualDy = (int)lround(oldY - s_nodeLocateCenterWorldY);
+    nodeLocateShiftLiveCanvas(dx, actualDy);
+    nodeLocateRequestLiveTiles(kNodeLocatePanDebounceMs, false);
+}
+
+static void nodeLocateOnDetailMapUpdated() {
+    // The live Locate viewport does not consume persistent detail-map updates.
+}
+
+#if HAS_TOUCH
+// Drag to pan. lv_indev_get_vect() is the movement since the last event, which
+// is exactly the increment wanted here — tracking a press origin ourselves
+// would have to cope with the indev's own drag threshold and gesture handling.
+static void onNodeLocateMapPressing(lv_event_t *e) {
+    LV_UNUSED(e);
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_point_t vect;
+    lv_indev_get_vect(indev, &vect);
+    nodeLocatePanBy((int)vect.x, (int)vect.y);
+}
+
+static void onNodeLocateZoomInPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodeLocateZoomStep(1);
+}
+
+static void onNodeLocateZoomOutPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodeLocateZoomStep(-1);
+}
+
+static void onNodeLocateCenterPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    nodeLocateCenterOnNode();
+}
+#endif  // HAS_TOUCH
 
 static void onNodeLocateClosePressed(lv_event_t *e) {
     LV_UNUSED(e);
@@ -16816,7 +18057,6 @@ static void openNodeLocateModal(uint32_t nodeId) {
 
     const float lat = (float)node->latI / 10000000.0f;
     const float lon = (float)node->lonI / 10000000.0f;
-    const UsStateMapSpec *state = nodesStateForCoords(lat, lon);
 
     s_nodeLocateNodeId = nodeId;
 
@@ -16884,13 +18124,19 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_border_color(mapBox, modalBorder, 0);
     lv_obj_set_style_pad_all(mapBox, 0, 0);
     lv_obj_set_style_radius(mapBox, 3, 0);
+    s_nodeLocateMapBox = mapBox;
+#if HAS_TOUCH
+    // The drag surface. The layers above it — tile layer, image, pin — are
+    // decoration and must not swallow the press, or a drag begun on the map
+    // itself (the usual case) would never reach this handler.
+    lv_obj_add_flag(mapBox, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(mapBox, onNodeLocateMapPressing, LV_EVENT_PRESSING, nullptr);
+#endif
 
-    lv_obj_t *status = lv_label_create(s_nodeLocateModal);
-    lv_obj_set_width(status, lv_pct(100));
-    lv_obj_set_style_text_font(status, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(status, bodyColor, 0);
-    lv_obj_set_style_text_align(status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(status, LV_LABEL_LONG_WRAP);
+#if HAS_TOUCH
+    // No control strip under the map. Controls are overlaid on the map itself,
+    // so the whole reclaimed height becomes viewport.
+#endif
 
 #if UI_TOUCH_ONLY_PROFILE
     // Node names run long, and the title is LV_LABEL_LONG_DOT across the full
@@ -16899,19 +18145,55 @@ static void openNodeLocateModal(uint32_t nodeId) {
     appendHeltecCloseX(s_nodeLocateModal, onNodeLocateClosePressed);
 #endif
 
-    // Lend the renderer its objects, then let it draw.
+    // Build one RGB565 viewport. Live PNG tiles are decoded into this canvas
+    // one at a time, so decoded memory stays bounded regardless of how many
+    // tile boundaries the viewport crosses.
     lv_obj_update_layout(s_nodeLocateModal);
     const int mapW = lv_obj_get_width(mapBox);
     const int mapH = lv_obj_get_height(mapBox);
 
-    s_nodesMapTileLayer = lv_obj_create(mapBox);
-    lv_obj_remove_style_all(s_nodesMapTileLayer);
-    lv_obj_clear_flag(s_nodesMapTileLayer, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(s_nodesMapTileLayer, 0, 0);
-    lv_obj_set_size(s_nodesMapTileLayer, mapW, mapH);
+    s_nodeLocateTileLayer = lv_obj_create(mapBox);
+    lv_obj_remove_style_all(s_nodeLocateTileLayer);
+    lv_obj_clear_flag(s_nodeLocateTileLayer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_nodeLocateTileLayer, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(s_nodeLocateTileLayer, 0, 0);
+    lv_obj_set_size(s_nodeLocateTileLayer, mapW, mapH);
 
-    s_nodesMapImage = lv_img_create(s_nodesMapTileLayer);
-    lv_obj_add_flag(s_nodesMapImage, LV_OBJ_FLAG_HIDDEN);
+    s_nodeLocateCanvasBuf = lv_draw_buf_create((uint32_t)mapW, (uint32_t)mapH,
+                                               LV_COLOR_FORMAT_RGB565,
+                                               LV_STRIDE_AUTO);
+    if (s_nodeLocateCanvasBuf) {
+        s_nodeLocateCanvas = lv_canvas_create(s_nodeLocateTileLayer);
+        lv_canvas_set_draw_buf(s_nodeLocateCanvas, s_nodeLocateCanvasBuf);
+        lv_obj_set_pos(s_nodeLocateCanvas, 0, 0);
+        lv_obj_clear_flag(s_nodeLocateCanvas, LV_OBJ_FLAG_CLICKABLE);
+        lv_canvas_fill_bg(s_nodeLocateCanvas,
+                          lightUi ? lv_color_hex(0xDCE6F6) : lv_color_hex(0x0A1E45),
+                          LV_OPA_COVER);
+    }
+    s_nodeLocateStatusLabel = lv_label_create(s_nodeLocateTileLayer);
+    lv_obj_set_style_text_font(s_nodeLocateStatusLabel, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_nodeLocateStatusLabel, bodyColor, 0);
+    lv_obj_set_style_bg_color(s_nodeLocateStatusLabel,
+                              lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateStatusLabel, LV_OPA_70, 0);
+    lv_obj_set_style_pad_all(s_nodeLocateStatusLabel, 3, 0);
+    lv_obj_set_style_radius(s_nodeLocateStatusLabel, 3, 0);
+    lv_label_set_text(s_nodeLocateStatusLabel,
+                      s_nodeLocateCanvasBuf ? "Loading map..." : "Map memory unavailable");
+    lv_obj_center(s_nodeLocateStatusLabel);
+
+    lv_obj_t *attribution = lv_label_create(s_nodeLocateTileLayer);
+    lv_obj_set_style_text_font(attribution, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(attribution,
+                                lightUi ? lv_color_hex(0x31445E) : lv_color_hex(0xD9E8FF), 0);
+    lv_obj_set_style_bg_color(attribution,
+                              lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(attribution, LV_OPA_70, 0);
+    lv_obj_set_style_pad_left(attribution, 2, 0);
+    lv_obj_set_style_pad_right(attribution, 2, 0);
+    lv_label_set_text(attribution, "(c) OpenStreetMap");
+    lv_obj_align(attribution, LV_ALIGN_BOTTOM_LEFT, 2, -2);
 
     // A map pin rather than a dot: a round head over a short stem, tip down.
     // Built from two plain objects because there is no pin glyph to lean on —
@@ -16920,12 +18202,13 @@ static void openNodeLocateModal(uint32_t nodeId) {
     //
     // Red with a white outline on both parts. The outline is what keeps it
     // readable over dark map features; red alone disappears into a highway.
-    s_nodesMapMarker = lv_obj_create(s_nodesMapTileLayer);
-    lv_obj_remove_style_all(s_nodesMapMarker);
-    lv_obj_clear_flag(s_nodesMapMarker, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(s_nodesMapMarker, kLocatePinW, kLocatePinH);
+    s_nodeLocateMarker = lv_obj_create(s_nodeLocateTileLayer);
+    lv_obj_remove_style_all(s_nodeLocateMarker);
+    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_nodeLocateMarker, kLocatePinW, kLocatePinH);
+    lv_obj_clear_flag(s_nodeLocateMarker, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *pinHead = lv_obj_create(s_nodesMapMarker);
+    lv_obj_t *pinHead = lv_obj_create(s_nodeLocateMarker);
     lv_obj_remove_style_all(pinHead);
     lv_obj_clear_flag(pinHead, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(pinHead, kLocatePinW, kLocatePinW);
@@ -16936,7 +18219,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_border_width(pinHead, 2, 0);
     lv_obj_set_style_border_color(pinHead, lv_color_hex(0xFFFFFF), 0);
 
-    lv_obj_t *pinStem = lv_obj_create(s_nodesMapMarker);
+    lv_obj_t *pinStem = lv_obj_create(s_nodeLocateMarker);
     lv_obj_remove_style_all(pinStem);
     lv_obj_clear_flag(pinStem, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(pinStem, 5, kLocatePinH - kLocatePinW + 2);
@@ -16948,44 +18231,77 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_style_border_width(pinStem, 1, 0);
     lv_obj_set_style_border_color(pinStem, lv_color_hex(0xFFFFFF), 0);
 
-    lv_obj_add_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_nodeLocateMarker, LV_OBJ_FLAG_HIDDEN);
 
-    int markerX = -1;
-    int markerY = -1;
-    const int drawn = nodesMapRenderTiles(lat, lon, 0, 0, mapW, mapH, markerX, markerY);
+#if HAS_TOUCH
+    // Compact zoom / center controls overlaid on the map. Smaller buttons leave
+    // most of the map unobstructed while keeping one-tap access.
+    {
+        lv_obj_t *ctlCol = lv_obj_create(mapBox);
+        lv_obj_set_size(ctlCol, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(ctlCol, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(ctlCol, lv_color_hex(0x102D57), 0);
+        lv_obj_set_style_bg_opa(ctlCol, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(ctlCol, 1, 0);
+        lv_obj_set_style_border_color(ctlCol, lv_color_hex(0x3E649B), 0);
+        lv_obj_set_style_radius(ctlCol, 4, 0);
+        lv_obj_set_style_pad_all(ctlCol, 2, 0);
+        lv_obj_set_style_pad_row(ctlCol, 2, 0);
+        lv_obj_set_flex_flow(ctlCol, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(ctlCol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
 
-    if (drawn > 0 && markerX >= 0 && markerY >= 0) {
-        // The tip is what points at the position, so the pin hangs above it.
-        int pinX = markerX - (kLocatePinW / 2);
-        int pinY = markerY - kLocatePinH;
-        // A node against the top or side of its state would otherwise have the
-        // head clipped away by the map layer, leaving a stump. Nudging the whole
-        // pin back inside costs a few pixels of precision at the very edge and
-        // keeps it recognisable, which is the better trade for a marker.
-        if (pinX < 0) pinX = 0;
-        if (pinY < 0) pinY = 0;
-        if (pinX > mapW - kLocatePinW) pinX = mapW - kLocatePinW;
-        if (pinY > mapH - kLocatePinH) pinY = mapH - kLocatePinH;
-        lv_obj_set_pos(s_nodesMapMarker, pinX, pinY);
-        lv_obj_clear_flag(s_nodesMapMarker, LV_OBJ_FLAG_HIDDEN);
+        struct Local {
+            static lv_obj_t *btn(lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+                lv_obj_t *b = lv_btn_create(parent);
+                lv_obj_set_size(b, 24, 18);
+                lv_obj_set_style_radius(b, 3, 0);
+                lv_obj_set_style_pad_all(b, 0, 0);
+                lv_obj_set_style_shadow_width(b, 0, 0);
+                lv_obj_set_style_bg_color(b, lv_color_hex(0x16386F), 0);
+                lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
+                lv_obj_set_style_border_width(b, 1, 0);
+                lv_obj_set_style_border_color(b, lv_color_hex(0x335D9D), 0);
+                lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+                lv_obj_t *l = lv_label_create(b);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
+                lv_obj_set_style_text_color(l, lv_color_hex(0xE8F1FF), 0);
+                lv_label_set_text(l, text);
+                lv_obj_center(l);
+                return b;
+            }
+        };
+
+        Local::btn(ctlCol, LV_SYMBOL_PLUS, onNodeLocateZoomInPressed);
+        s_nodeLocateZoomLabel = lv_label_create(ctlCol);
+        lv_obj_set_width(s_nodeLocateZoomLabel, 24);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(s_nodeLocateZoomLabel, bodyColor, 0);
+        lv_obj_set_style_text_align(s_nodeLocateZoomLabel, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text_fmt(s_nodeLocateZoomLabel, "%d", kNodeLocateZoomDefault);
+        Local::btn(ctlCol, LV_SYMBOL_MINUS, onNodeLocateZoomOutPressed);
+        Local::btn(ctlCol, LV_SYMBOL_GPS, onNodeLocateCenterPressed);
+
+        lv_obj_align(ctlCol, LV_ALIGN_TOP_RIGHT, -4, 4);
+        lv_obj_move_foreground(ctlCol);
     }
+#endif
 
-    // Three honest outcomes, and they read differently on purpose: outside the
-    // table's coverage is not the same as inside it with the map not yet on the
-    // card, and neither is a failure of the position itself — which is why the
-    // coordinates are printed in all three.
-    char statusBuf[96];
-    if (!state) {
-        snprintf(statusBuf, sizeof(statusBuf),
-                 "No regional map for this location\n%.4f, %.4f", lat, lon);
-    } else if (drawn > 0) {
-        snprintf(statusBuf, sizeof(statusBuf),
-                 "%s\n%.4f, %.4f", state->name, lat, lon);
-    } else {
-        snprintf(statusBuf, sizeof(statusBuf),
-                 "%s - map not on card\n%.4f, %.4f", state->name, lat, lon);
-    }
-    lv_label_set_text(status, statusBuf);
+    // Zoom 13 is the default. The selected node is the canonical view center,
+    // so its pin starts exactly at the center of the map viewport.
+    s_locateMapW = mapW;
+    s_locateMapH = mapH;
+    s_locateNodeLat = lat;
+    s_locateNodeLon = lon;
+    s_nodeLocateZoom = kNodeLocateZoomDefault;
+    nodeLocateLatLonToWorld(lat, lon, s_nodeLocateZoom,
+                            s_nodeLocateCenterWorldX, s_nodeLocateCenterWorldY);
+    nodeLocateNormalizeCenter();
+    s_nodeLocateHasPixels = false;
+    if (s_nodeLocateCanvasBuf) nodeLocateRequestLiveTiles(0, false);
+    else nodeLocateUpdateLiveMarker();
+
+    // Bottom status text removed so the map can take the reclaimed space.
 }
 #endif  // HAS_NODE_LOCATE
 
@@ -17331,11 +18647,16 @@ static void sdRmDirRecursive(const char *path) {
         File child = dir.openNextFile();
         if (!child) break;
 
-        String childPath = String(path);
-        if (!childPath.endsWith("/")) childPath += "/";
-        childPath += child.name();
+        String childPath = child.name();
         bool childIsDir = child.isDirectory();
         child.close();
+
+        if (!childPath.startsWith("/")) {
+            String fullPath = path;
+            if (!fullPath.endsWith("/")) fullPath += "/";
+            fullPath += childPath;
+            childPath = fullPath;
+        }
 
         if (childIsDir) {
             sdRmDirRecursive(childPath.c_str());
@@ -18783,7 +20104,24 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         s_nodesActionLosEnabled = peerHasPos && nodeLosSelfPosition(dummyLat, dummyLon);
     }
 #endif
-    const char *kActionLabels[kNodesActionCount] = {
+    #if UI_TOUCH_ONLY_PROFILE
+        const char *kActionLabels[kNodesActionCount] = {
+        "Traceroute",
+        "Send DM",
+        selectedIsFavorite ? "Unfavorite" : "Favorite",
+        "Request Info",
+        "Request Position",
+        selectedIsIgnored ? "Unignore" : "Ignore",
+    #if HAS_NODE_LOCATE
+        "Locate",
+    #endif
+    #if HAS_NODE_LOS
+        "LOS",
+    #endif
+        "Delete",
+        };
+    #else
+        const char *kActionLabels[kNodesActionCount] = {
         "(T)raceroute",
         "Sen(d) DM",
         selectedIsFavorite ? "Un(f)avorite" : "(F)avorite",
@@ -18791,27 +20129,14 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Request (P)osition",
         selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
 #if HAS_NODE_LOCATE
-#if UI_TOUCH_ONLY_PROFILE
-        // No keyboard to name a shortcut for.
-        "Locate",
-#else
         "(L)ocate",
 #endif
-#endif
 #if HAS_NODE_LOS
-#if UI_TOUCH_ONLY_PROFILE
-        "LOS",
-#else
         "LO(S)",
 #endif
-#endif
-#if UI_TOUCH_ONLY_PROFILE
-        // No keyboard to name a shortcut for.
-        "Delete",
-#else
         "Del(e)te",
-#endif
     };
+    #endif
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                     ? lv_color_hex(0x13233D)
                                     : lv_color_hex(0xD9E8FF);
@@ -18883,7 +20208,11 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     for (int i = gridFirst; i <= gridLast; i++) {
         const char *labelText;
         if (s_nodesActionMsgMode && i == kMsgActionReplyIdx) {
+#if UI_TOUCH_ONLY_PROFILE
+            labelText = "Reply";
+#else
             labelText = "(R)eply";
+#endif
         } else {
             // Message mode's node rows are not a straight offset — the map skips
             // Favorite, so the index has to go through it rather than be shifted.
@@ -22555,8 +23884,13 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
         lv_obj_center(lbl);
         return btn;
     };
+#if UI_TOUCH_ONLY_PROFILE
+    makeDmDelBtn(btnRow, "No", noBtnBg, onDmDelNoPressed);
+    makeDmDelBtn(btnRow, "Yes", yesBtnBg, onDmDelYesPressed);
+#else
     makeDmDelBtn(btnRow, "(N)o", noBtnBg, onDmDelNoPressed);
     makeDmDelBtn(btnRow, "(Y)es", yesBtnBg, onDmDelYesPressed);
+#endif
 }
 
 static void openDmDeleteConfirm(uint32_t nodeId) {
@@ -23802,6 +25136,9 @@ static void openNodesModal() {
         s_nodesMapMarker = nullptr;
         s_nodesMapTileLayer = nullptr;
         s_nodesMapImage = nullptr;
+        s_nodesMapLastRenderUsedDetail = false;
+        s_nodesMapLastDetailKey[0] = '\0';
+        s_nodesMapLastDetailLod = -1;
         s_nodesList = nullptr;
         s_nodesHintLabel = nullptr;
     }
@@ -23812,6 +25149,7 @@ static void openNodesModal() {
     closeCfgModal();
     closeLegendModal();
     closeChannelActionsModal();
+    nodesPanelWifiEnter();
 
     // This modal frame + row list can be large; bail out before lv_obj_create
     // would hit LV_ASSERT_MALLOC and hard-reset the device.
@@ -25623,8 +26961,13 @@ static void openCfgConfirmModal(int actionId) {
         lv_obj_center(lbl);
         return btn;
     };
+#if UI_TOUCH_ONLY_PROFILE
+    makeConfirmBtn(btnRow, "No", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
+    makeConfirmBtn(btnRow, "Yes", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
+#else
     makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
     makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
+#endif
 }
 
 // ── Boot firmware-update prompt ───────────────────────────────────────────────
@@ -25775,9 +27118,336 @@ static void openOtaUpdatePrompt() {
         lv_obj_center(lbl);
         return btn;
     };
+#if UI_TOUCH_ONLY_PROFILE
+    makeOtaBtn(btnRow, "No", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
+    makeOtaBtn(btnRow, "Yes", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+#else
     makeOtaBtn(btnRow, "(N)o", lightUi ? 0xC76565 : 0x6B3030, onOtaPromptNoPressed);
     makeOtaBtn(btnRow, "(Y)es", lightUi ? 0x429A56 : 0x2F6B30, onOtaPromptYesPressed);
+#endif
 }
+
+#if HAS_STATE_MAPS
+static constexpr uint8_t kLegacyMapMigrationVersion = 1;
+static constexpr const char *kLegacyMapMigrationPref = "mapMigVer";
+
+static bool legacyMapFilenameOwned(const char *filename, bool detailMap) {
+    if (!filename || !filename[0]) return false;
+    const char *base = filename;
+    for (const char *cursor = filename; *cursor; cursor++) {
+        if (*cursor == '/' || *cursor == '\\') base = cursor + 1;
+    }
+
+    if (detailMap) {
+        if (strcmp(base, "detail_maps.version") == 0) return true;
+        if (strlen(base) < 14) return false;
+        char key[11] = {};
+        memcpy(key, base, 10);
+        key[10] = '\0';
+        int lat10 = 0;
+        int lon10 = 0;
+        if (!nodesDetailMapParseKey(key, lat10, lon10)) return false;
+        const char *suffix = base + 10;
+        return strcmp(suffix, ".png") == 0
+               || strcmp(suffix, ".meta") == 0
+               || strcmp(suffix, ".png.tmp") == 0;
+    }
+
+    if (strcmp(base, "state_maps.complete") == 0 || strcmp(base, ".complete") == 0) {
+        return true;
+    }
+    if (strlen(base) < 6) return false;
+    char code[3] = {
+        (char)toupper((unsigned char)base[0]),
+        (char)toupper((unsigned char)base[1]),
+        '\0',
+    };
+    bool knownState = false;
+    for (int i = 0; i < kUsStateMapCount; i++) {
+        if (strcmp(code, kUsStateMaps[i].code) == 0) {
+            knownState = true;
+            break;
+        }
+    }
+    if (!knownState) return false;
+    const char *suffix = base + 2;
+    return strcmp(suffix, ".png") == 0
+           || strcmp(suffix, ".meta") == 0
+           || strcmp(suffix, ".png.tmp") == 0;
+}
+
+static bool legacyMapDirHasContent(const char *path, bool detailMap) {
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(path);
+    LV_UNUSED(detailMap);
+    return false;
+#else
+    if (!path || !storageFs().exists(path)) return false;
+    File dir = storageFs().open(path);
+    if (!dir) return false;
+    if (!dir.isDirectory()) {
+        bool owned = legacyMapFilenameOwned(path, detailMap);
+        dir.close();
+        return owned;
+    }
+    bool hasContent = false;
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        bool owned = !entry.isDirectory() && legacyMapFilenameOwned(entry.name(), detailMap);
+        entry.close();
+        if (owned) {
+            hasContent = true;
+            break;
+        }
+    }
+    dir.close();
+    return hasContent;
+#endif
+}
+
+static int removeLegacyMapDirFiles(const char *path, bool detailMap) {
+#if !HAS_FILE_STORAGE
+    LV_UNUSED(path);
+    LV_UNUSED(detailMap);
+    return 0;
+#else
+    if (!path || !storageFs().exists(path)) return 0;
+    File dir = storageFs().open(path);
+    if (!dir || !dir.isDirectory()) {
+        if (dir) dir.close();
+        return 0;
+    }
+
+    int removed = 0;
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        String entryPath = entry.name();
+        bool owned = !entry.isDirectory() && legacyMapFilenameOwned(entry.name(), detailMap);
+        entry.close();
+        if (!owned) continue;
+        if (!entryPath.startsWith("/")) {
+            String fullPath = path;
+            if (!fullPath.endsWith("/")) fullPath += "/";
+            fullPath += entryPath;
+            entryPath = fullPath;
+        }
+        if (storageFs().remove(entryPath.c_str())) removed++;
+    }
+    dir.close();
+    storageFs().rmdir(path);
+    return removed;
+#endif
+}
+
+static bool legacyMapFilesExist() {
+#if !HAS_FILE_STORAGE
+    return false;
+#else
+    if (!sdBegin()) return false;
+        return legacyMapDirHasContent("/camillia/state_maps", false)
+            || legacyMapDirHasContent("/camillia/detail_maps", true);
+#endif
+}
+
+static bool legacyMapMigrationRecorded() {
+    Preferences prefs;
+    if (!prefs.begin("camillia", true)) return false;
+    uint8_t version = prefs.getUChar(kLegacyMapMigrationPref, 0);
+    prefs.end();
+    return version >= kLegacyMapMigrationVersion;
+}
+
+static void recordLegacyMapMigration() {
+    Preferences prefs;
+    if (!prefs.begin("camillia", false)) return;
+    prefs.putUChar(kLegacyMapMigrationPref, kLegacyMapMigrationVersion);
+    prefs.end();
+}
+
+static void closeLegacyMapPrompt() {
+    if (lvObjValid(s_legacyMapPromptBackdrop)) {
+        lv_obj_del(s_legacyMapPromptBackdrop);
+    } else if (lvObjValid(s_legacyMapPromptModal)) {
+        lv_obj_del(s_legacyMapPromptModal);
+    }
+    s_legacyMapPromptBackdrop = nullptr;
+    s_legacyMapPromptModal = nullptr;
+    s_legacyMapPromptStatus = nullptr;
+}
+
+static void keepLegacyMapFiles() {
+    Serial.println("[map-migration] keeping legacy map files");
+    recordLegacyMapMigration();
+    s_legacyMapMigrationChecked = true;
+    closeLegacyMapPrompt();
+}
+
+static void removeLegacyMapFiles() {
+    if (s_legacyMapPromptStatus && lvObjValid(s_legacyMapPromptStatus)) {
+        lv_label_set_text(s_legacyMapPromptStatus, "Removing legacy maps...");
+        lv_obj_clear_flag(s_legacyMapPromptStatus, LV_OBJ_FLAG_HIDDEN);
+        lv_timer_handler();
+    }
+
+    int removed = removeLegacyMapDirFiles("/camillia/state_maps", false)
+                  + removeLegacyMapDirFiles("/camillia/detail_maps", true);
+    if (legacyMapFilesExist()) {
+        Serial.println("[map-migration] legacy map removal incomplete");
+        if (s_legacyMapPromptStatus && lvObjValid(s_legacyMapPromptStatus)) {
+            lv_label_set_text(s_legacyMapPromptStatus,
+                              "Could not remove every file. Check storage and retry.");
+        }
+        return;
+    }
+
+    Serial.printf("[map-migration] removed %d legacy map files\n", removed);
+    recordLegacyMapMigration();
+    s_legacyMapMigrationChecked = true;
+    closeLegacyMapPrompt();
+}
+
+static void onLegacyMapKeepPressed(lv_event_t *event) {
+    LV_UNUSED(event);
+    keepLegacyMapFiles();
+}
+
+static void onLegacyMapRemovePressed(lv_event_t *event) {
+    LV_UNUSED(event);
+    removeLegacyMapFiles();
+}
+
+static void openLegacyMapPrompt() {
+    if (!s_rootScreen || s_legacyMapPromptModal || s_legacyMapPromptBackdrop) return;
+
+    const int screenW = lv_disp_get_hor_res(nullptr);
+    const int screenH = lv_disp_get_ver_res(nullptr);
+    int modalW = screenW - 32;
+    if (modalW < 180) modalW = screenW - 8;
+    if (modalW > 300) modalW = 300;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t textColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xE8F1FF);
+    const lv_color_t mutedColor = lightUi ? lv_color_hex(0x334E75) : lv_color_hex(0xA7C7FF);
+
+    s_legacyMapPromptBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_legacyMapPromptBackdrop, screenW, screenH);
+    lv_obj_align(s_legacyMapPromptBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_legacyMapPromptBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_legacyMapPromptBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_legacyMapPromptBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_legacyMapPromptBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_legacyMapPromptBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_legacyMapPromptBackdrop, 0, 0);
+
+    s_legacyMapPromptModal = lv_obj_create(s_legacyMapPromptBackdrop);
+    lv_obj_set_size(s_legacyMapPromptModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_legacyMapPromptModal,
+                                (screenH > 40) ? (screenH - 12) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_legacyMapPromptModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_legacyMapPromptModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_legacyMapPromptModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_legacyMapPromptModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_legacyMapPromptModal, 1, 0);
+    lv_obj_set_style_border_color(s_legacyMapPromptModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_legacyMapPromptModal, 8, 0);
+    lv_obj_set_style_pad_row(s_legacyMapPromptModal, 7, 0);
+    lv_obj_set_flex_flow(s_legacyMapPromptModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_legacyMapPromptModal, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_legacyMapPromptBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_legacyMapPromptModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, textColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Old Map Files Found");
+
+    lv_obj_t *body = lv_label_create(s_legacyMapPromptModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(body, textColor, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body,
+                      "These files are not used by the new tile map. Remove them to reclaim storage?");
+
+    s_legacyMapPromptStatus = lv_label_create(s_legacyMapPromptModal);
+    lv_obj_set_width(s_legacyMapPromptStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_legacyMapPromptStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_legacyMapPromptStatus, mutedColor, 0);
+    lv_obj_set_style_text_align(s_legacyMapPromptStatus, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_legacyMapPromptStatus, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(s_legacyMapPromptStatus, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *buttonRow = lv_obj_create(s_legacyMapPromptModal);
+    lv_obj_set_width(buttonRow, lv_pct(100));
+    lv_obj_set_height(buttonRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(buttonRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(buttonRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(buttonRow, 0, 0);
+    lv_obj_set_style_pad_all(buttonRow, 0, 0);
+    lv_obj_set_style_pad_column(buttonRow, 10, 0);
+    lv_obj_set_flex_flow(buttonRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(buttonRow, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    auto makeButton = [](lv_obj_t *parent, const char *text, uint32_t color,
+                         lv_event_cb_t callback) {
+        lv_obj_t *button = lv_btn_create(parent);
+        lv_obj_set_height(button, 32);
+        lv_obj_set_style_min_width(button, 86, 0);
+        lv_obj_set_style_radius(button, 4, 0);
+        lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
+        lv_obj_set_style_shadow_width(button, 0, 0);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *label = lv_label_create(button);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+        lv_label_set_text(label, text);
+        lv_obj_center(label);
+    };
+
+#if UI_TOUCH_ONLY_PROFILE
+    makeButton(buttonRow, "Keep", lightUi ? 0x55759D : 0x31527C, onLegacyMapKeepPressed);
+    makeButton(buttonRow, "Remove", lightUi ? 0xC76565 : 0x6B3030, onLegacyMapRemovePressed);
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_legacyMapPromptModal, onLegacyMapKeepPressed);
+#else
+    makeButton(buttonRow, "(K)eep", lightUi ? 0x55759D : 0x31527C, onLegacyMapKeepPressed);
+    makeButton(buttonRow, "(R)emove", lightUi ? 0xC76565 : 0x6B3030,
+               onLegacyMapRemovePressed);
+#endif
+}
+
+static void serviceLegacyMapMigrationPrompt(uint32_t nowMs) {
+    if (s_legacyMapMigrationChecked || s_legacyMapPromptModal) return;
+    if ((int32_t)(nowMs - s_legacyMapMigrationNextCheckMs) < 0) return;
+    if (!s_rootScreen || s_firstBoot || s_onboardingModal || s_otaPromptModal
+        || s_cfgConfirmModal || s_cfgActionMsgModal) {
+        return;
+    }
+    if (legacyMapMigrationRecorded()) {
+        s_legacyMapMigrationChecked = true;
+        return;
+    }
+#if HAS_FILE_STORAGE
+    if (!sdBegin()) {
+        s_legacyMapMigrationNextCheckMs = nowMs + 10000UL;
+        return;
+    }
+#endif
+    if (!legacyMapFilesExist()) {
+        s_legacyMapMigrationChecked = true;
+        return;
+    }
+    openLegacyMapPrompt();
+}
+#endif
 
 // ── First-boot onboarding ─────────────────────────────────────────────────
 // Shown once from setup() on freshly flashed devices. If a config exists on
@@ -26013,12 +27683,21 @@ static void renderOnboardingStage() {
             lv_obj_center(lbl);
             return btn;
         };
+#if UI_TOUCH_ONLY_PROFILE
+        makeBtn(btnRow, "No",  0x6B3030,
+            [](lv_event_t *) { onboardingDeclineImport(); },
+            importBtnH, importBtnMinW, importBtnFont);
+        makeBtn(btnRow, "Yes", 0x2F6B30,
+            [](lv_event_t *) { onboardingAcceptImport(); },
+            importBtnH, importBtnMinW, importBtnFont);
+#else
         makeBtn(btnRow, "(N)o",  0x6B3030,
             [](lv_event_t *) { onboardingDeclineImport(); },
             importBtnH, importBtnMinW, importBtnFont);
         makeBtn(btnRow, "(Y)es", 0x2F6B30,
             [](lv_event_t *) { onboardingAcceptImport(); },
             importBtnH, importBtnMinW, importBtnFont);
+#endif
     #endif
     } else if (s_onboardingStage == ONBOARD_STAGE_SELECT_REGION
                || s_onboardingStage == ONBOARD_STAGE_SELECT_ROLE) {
@@ -26521,6 +28200,9 @@ static void onboardingFinalize() {
 static bool prepareM9GlobalNavigation() {
     // Onboarding owns the whole input surface until identity and region exist.
     if (s_onboardingModal) return false;
+#if HAS_STATE_MAPS
+    if (s_legacyMapPromptModal) return false;
+#endif
 
     if (s_otaPromptModal) otaPromptDecline();
     closeEmojiPicker();
@@ -26911,6 +28593,18 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+#if HAS_STATE_MAPS
+        if (s_legacyMapPromptModal) {
+            if (rawKey == 'r' || rawKey == 'R') {
+                removeLegacyMapFiles();
+            } else if (rawKey == 'k' || rawKey == 'K' || rawKey == 'n' || rawKey == 'N'
+                       || k == KEY_ENTER || isModalCloseKey(k)) {
+                keepLegacyMapFiles();
+            }
+            continue;
+        }
+#endif
 
         // The boot update offer is modal on the same terms as the CFG
         // confirmation below. Declining just closes it; it will not come back
@@ -28189,8 +29883,47 @@ static void pumpKeyboardInput() {
         // Nothing to interact with, so every key that could mean "done" closes
         // it and nothing else is consumed by it.
         if (s_nodeLocateModal) {
-            if (isModalCloseKey(k) || k == KEY_ENTER || k == ' ') {
+            if (isModalCloseKey(k) || k == KEY_ENTER) {
                 closeNodeLocateModal();
+                continue;
+            }
+            // Raw-key controls for Locate: i/j/k/l pans, n/m zooms. Handle
+            // these before remapped nav tokens so j/k keep this meaning here.
+            const int step = 24;   // about a fifth of the map box per press
+            switch (rawKey) {
+                case 'i': case 'I': nodeLocatePanBy(0,  step); continue;   // up
+                case 'k': case 'K': nodeLocatePanBy(0, -step); continue;   // down
+                case 'j': case 'J': nodeLocatePanBy( step, 0); continue;   // left
+                case 'l': case 'L': nodeLocatePanBy(-step, 0); continue;   // right
+                case 'm': case 'M': nodeLocateZoomStep(1);  continue;       // in
+                case 'n': case 'N': nodeLocateZoomStep(-1); continue;       // out
+                default: break;
+            }
+
+            // Pan with the trackball or arrows, zoom with page keys or +/-,
+            // recentre on the node with C, and reset zoom/pan with Space.
+            switch (k) {
+                case KEY_SCROLL_UP:   nodeLocatePanBy(0,  step); continue;
+                case KEY_SCROLL_DN:   nodeLocatePanBy(0, -step); continue;
+                case KEY_PREV_CHAN:   nodeLocatePanBy( step, 0); continue;
+                case KEY_NEXT_CHAN:   nodeLocatePanBy(-step, 0); continue;
+                case KEY_PAGE_UP:     nodeLocateZoomStep(1);  continue;
+                case KEY_PAGE_DN:     nodeLocateZoomStep(-1); continue;
+                default: break;
+            }
+            switch (k) {
+                case 'k': case 'K': nodeLocatePanBy(0,  step); continue;
+                case 'j': case 'J': nodeLocatePanBy(0, -step); continue;
+                case 'l': case 'L': nodeLocatePanBy(-step, 0); continue;
+                case '+': case '=': nodeLocateZoomStep(1);  continue;
+                case '-': case '_': nodeLocateZoomStep(-1); continue;
+                case 'h': case 'H': nodeLocateCenterOnNode(); continue;
+                case 'c': case 'C': nodeLocateCenterOnNode(); continue;
+                case ' ':
+                    s_nodeLocateZoom = kNodeLocateZoomDefault;
+                    nodeLocateCenterOnNode();
+                    continue;
+                default: break;
             }
             continue;
         }
@@ -36232,6 +37965,9 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     // Don't interrupt onboarding or an open dialog — and don't burn the single
     // per-boot attempt before there is a screen to show the answer on.
     if (!s_rootScreen || s_onboardingModal || s_cfgConfirmModal || s_otaPromptModal) return;
+#if HAS_STATE_MAPS
+    if (s_legacyMapPromptModal) return;
+#endif
 
     if (s_otaAutoCheckDueMs == 0) {
         s_otaAutoCheckDueMs = nowMs + kOtaAutoCheckSettleMs;
@@ -36377,6 +38113,9 @@ void loop() {
         LOOP_PHASE("rebroadcast", servicePendingRebroadcast(now));
     }
     LOOP_PHASE("wifi", serviceWifiStation(now));
+#if HAS_STATE_MAPS
+    LOOP_PHASE("map:migrate", serviceLegacyMapMigrationPrompt(now));
+#endif
     LOOP_PHASE("otacheck", serviceOtaAutoCheck(now));
     LOOP_PHASE("mqtt", mqttBridgeLoop(now));
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
@@ -36387,6 +38126,9 @@ void loop() {
     LOOP_PHASE("gps", gpsLoop());
     LOOP_PHASE("timesync", serviceAutoTimeSync(now));
     LOOP_PHASE("gpstime", serviceGpsTimeSync(now));
+#if HAS_NODE_LOCATE
+    LOOP_PHASE("map:live", serviceNodeLocateLiveMap(now));
+#endif
     // Periodically copy live GPS fix into s_cfg so it's available as a
     // "last known position" fallback when GPS is off or has lost lock.
     if (gpsIsEnabled() && gpsHasFix()) {
@@ -36405,9 +38147,18 @@ void loop() {
             s_lastGpsSampleMs = now;
         }
     }
-    LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
-    LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
-    LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+    // Keep the Locate map responsive on keyboard boards: these services can
+    // block for packet airtime/retries and make pan/zoom feel frozen.
+#if HAS_NODE_LOCATE
+    const bool holdAnnounceForLocate = (s_nodeLocateModal && lvObjValid(s_nodeLocateModal));
+#else
+    const bool holdAnnounceForLocate = false;
+#endif
+    if (!holdAnnounceForLocate) {
+        LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
+        LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
+        LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));
+    }
     LOOP_PHASE("ann:mapreport", serviceMapReport(now));
     LOOP_PHASE("autofav", serviceAutoFavorite(now));
     LOOP_PHASE("cfgflush", serviceConfigFlush(now));

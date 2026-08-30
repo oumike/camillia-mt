@@ -92,6 +92,17 @@
 // Used by the SD-card node map image.
 #define LV_USE_LODEPNG 1
 
+// Keep decoded PNGs resident on PSRAM boards so map redraws (status updates,
+// pans, zooms) do not re-run lodepng every frame on the UI thread.
+//
+// 0 disables decoded-image caching completely (LVGL default), which is fine on
+// tiny builds but too expensive for map-heavy screens on boards like T-Deck.
+// Heltec v4 expansion keeps the default disabled path because its LVGL pool is
+// intentionally capped lower.
+#if defined(BOARD_HAS_PSRAM) && !defined(DEVICE_HELTEC_V4_EXPANSION)
+#define LV_CACHE_DEF_SIZE (512U * 1024U)
+#endif
+
 // Monochrome emoji rendering: stb_truetype rasterizes glyphs from a flash-
 // resident Noto Emoji face on demand, wired in as the Montserrat fallback font
 // (see src/emoji_font.*). FILE_SUPPORT stays off — the face is baked in, so no

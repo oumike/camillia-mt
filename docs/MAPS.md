@@ -1,173 +1,151 @@
 # Maps
 
-Camillia can show you where a node is, on a real map, with no internet
-connection at the device. This document covers how the maps get onto the device
-and how to look at them.
+Camillia's **Locate** action opens a live OpenStreetMap view centered on a
+node's last reported position. It uses offline tiles first. With internet
+access, missing viewport tiles are downloaded, displayed, and saved for later.
 
-- [What you get](#what-you-get)
-- [Why the device cannot download maps itself](#why-the-device-cannot-download-maps-itself)
-- [Downloading maps](#downloading-maps)
-- [Viewing a node's location](#viewing-a-nodes-location)
-- [Clearing maps](#clearing-maps)
-- [Where the files live](#where-the-files-live)
-- [Coverage and limits](#coverage-and-limits)
+- [Requirements](#requirements)
+- [Opening Locate](#opening-locate)
+- [Pan and zoom](#pan-and-zoom)
+- [Offline downloads](#offline-downloads)
+- [Tile cache](#tile-cache)
+- [Legacy map migration](#legacy-map-migration)
+- [Supported boards](#supported-boards)
 - [Troubleshooting](#troubleshooting)
 
-## What you get
+## Requirements
 
-A node that has reported a position gets a **Locate** entry in its actions menu.
-Opening it shows a plain map of the US state that position falls in, with a pin
-on the node, the state's name, and the coordinates.
+- The selected node must have reported a position.
+- Offline use requires writable storage and previously downloaded tiles.
+- Filling a missing tile requires a healthy station-mode Wi-Fi connection with
+  internet access. Access-point-only mode cannot fetch gaps.
+- Online filling also requires the configured Camillia map proxy. The firmware
+  currently uses `http://maps.camillia.sumat.org` as its HTTP-to-HTTPS bridge.
 
-It is deliberately a small amount of map. The detailed, zoomable map — with
-every node on it at once — lives in Web Config under the **Map** tab, which runs
-in a browser that can fetch map tiles on demand. What the device carries is the
-answer to "where is this node, roughly", available with the radio off, no Wi-Fi,
-and no phone.
+The device does not connect directly to OpenStreetMap because the firmware does
+not carry a general TLS client. It sends a stable, contactable application
+identity through the proxy as required by OpenStreetMap's tile policy.
 
-## Why the device cannot download maps itself
+## Opening Locate
 
-The firmware has **no TLS client**. It was removed deliberately: the HTTPS code
-was costing internal memory that the Wi-Fi stack and the web config page need
-more, on a device where that memory is the binding constraint. Every map tile
-service is HTTPS-only, so the device cannot reach one.
+1. Open **Nodes**.
+2. Select a node that has a position.
+3. Open **Actions**.
+4. Choose **Locate**.
 
-Your browser can. So the browser does the downloading — it fetches the tiles,
-assembles them into one image per state, and uploads the finished image to the
-device over your local network. The device only ever receives a file and writes
-it to storage.
+Locate opens at zoom `13` with the selected node exactly at the center of the
+viewport. A pin remains tied to that geographic position as the map moves. If
+the node has no position, Locate is disabled in the Actions menu.
 
-This is why maps are a deliberate step you take once, rather than something that
-happens on its own.
+## Pan and zoom
 
-## Downloading maps
+Touch builds can drag the map and use the overlaid controls:
 
-You need the device **joined to your Wi-Fi network** (not its own access point),
-and the computer or phone running the browser needs internet access.
+- `+` zooms in.
+- `-` zooms out.
+- The GPS button recenters the selected node without changing zoom.
 
-1. Open Web Config at the address shown on the device's Config screen
-2. Go to the **Utilities** tab
-3. Find the **Maps Download** section
+Keyboard builds can pan with their directional controls or `I/J/K/L`, zoom with
+page controls or `M/N`, and press `H` or `C` to recenter the selected node. Space
+returns to zoom `13` and the node-centered position.
 
-The section lists the states your known nodes are actually in, and which of them
-are already saved. Only those states are ever downloaded — there is no bulk
-download of all fifty, because there is no reason to carry maps for places you
-have never heard a node from.
+The control between `+` and `-` shows the current Web Mercator zoom as a number.
+The supported range is `2` through `19`; higher values show progressively more
+detail, including building footprints where OpenStreetMap has them.
 
-Press **Download maps for known nodes**. Progress is reported per state and per
-tile:
+Longitude wraps across the antimeridian, so panning is not limited by a state,
+country, or downloaded area. Latitude stops at the normal Web Mercator limits
+near the poles.
 
-```
-[2/3] Pennsylvania: tile 4 of 9
-[2/3] Pennsylvania: uploading 118 KB
-```
+## Offline downloads
 
-Each map is saved as it finishes, so stopping partway keeps whatever is already
-done. Re-running the button picks up the rest.
+Web Config's **Maps Download** section builds coverage from every positioned
+node currently in the node database. Each node is treated as the center of the
+same 282x188 viewport used by Locate. Overlapping tiles are deduplicated.
 
-A few things worth knowing:
+The detail dropdown selects the highest zoom to include:
 
-- **It writes to the card over the same bus the radio uses**, so expect the mesh
-  to miss traffic while a download runs. It is not a good idea to do this while
-  you are relying on the device
-- **Map tiles come from OpenStreetMap.** Scoping the download to states you have
-  nodes in keeps it to a few dozen tiles rather than hundreds
-- **A map saved at an older resolution is offered for refresh.** If a firmware
-  update raises the map size, the section says so — for example
-  `Michigan (cached at 240x160, now 384x256)` — and the button replaces it in
-  place. Nothing is lost in the meantime; the older map keeps working, it is just
-  less sharp
-- **The section does not appear at all** on a device with nowhere to save files:
-  no card slot, or a slot with no card in it
+- **Roads:** zoom `13` only, up to 6 tiles per positioned node.
+- **Streets:** every zoom from `13` through `16`, up to 24 tiles per node.
+- **Buildings:** every zoom from `13` through `19`, up to 42 tiles per node.
 
-## Viewing a node's location
+Actual counts are usually lower because most viewports cross fewer than six
+tile boundaries and nearby nodes share tiles. Web Config reports exact cached
+and pending counts before starting. Buildings coverage can still take a very,
+very long time on a large node database, so it shows a prominent warning and
+requires confirmation.
 
-On the device:
+Downloads are resumable. The browser checks only the current plan in batches,
+and skips tiles already on storage. Stop waits for the current tile to finish,
+then leaves every completed tile intact.
 
-1. Open **Nodes**
-2. Select the node
-3. Press **A** for its actions menu
-4. Choose **(L)ocate**
+## Tile cache
 
-The map appears with a pin on the node's last reported position, the state name,
-and the coordinates. Close it with the device's close key, Enter, Space, or by
-tapping outside it.
+Tiles use canonical slippy-map paths:
 
-The **Locate** row is greyed out for a node that has never reported a position.
-It stays visible in its usual place rather than disappearing, so the menu does
-not reshuffle from one node to the next.
-
-### Boards without maps
-
-The feature is compiled out on two boards — no Locate entry, no Maps Download
-section, no upload routes — for the same underlying reason, not enough memory to
-decode a map, reached from opposite directions:
-
-- **Cardputer.** No PSRAM at all. One map costs about 490 KB while it decodes,
-  more than that board's entire graphics pool. It also serves web config in lite
-  form only, which has no Utilities tab to put the controls on.
-- **Heltec V4.** 2 MB of PSRAM shared with everything else, and no card slot —
-  maps would have to live in the same internal flash partition as chat history
-  and configuration. Worth revisiting if an 8 MB (R8) variant appears.
-
-## Clearing maps
-
-**Utilities → Danger Zone → Clear Maps** deletes every saved map.
-
-It removes only the map files it put there. No node data, no messages, no
-configuration, and nothing else on the card — not even another file sitting in
-the same folder. It reports how many it removed.
-
-This is reversible: run Maps Download again and they come back. Maps always
-arrive from Web Config, so clearing them costs you a download, not the data.
-
-## Where the files live
-
-Maps are PNG files on the device's storage:
-
-```
-/camillia/state_maps/MI.png     the map image
-/camillia/state_maps/MI.meta    the exact area it covers
+```text
+/camillia/map_tiles/<zoom>/<x>/<y>.png
 ```
 
-The `.meta` file records the geographic bounds the image actually spans. That is
-what places the pin correctly — the image is not cropped exactly to the state
-line, so without it the pin would sit some miles off.
+Locate loads each cached tile into a bounded PSRAM buffer and composites it into
+one RGB565 canvas. A cache miss remains a blank gap when offline. When internet
+access is available, the device fetches that exact missing tile and writes it
+atomically before drawing it, so normal online panning gradually improves later
+offline coverage.
 
-You can copy these files on and off the card directly if you prefer. Anything
-that is a valid PNG will be accepted and drawn; the device reads each file's real
-dimensions, so the size does not have to match what the current firmware would
-download.
+Only complete 256x256 PNG files with a terminal `IEND` chunk count as cache
+hits. Interrupted uploads use a temporary filename and cannot become a false
+hit.
 
-## Coverage and limits
+## Legacy map migration
 
-- **United States only.** Maps are organised by state, and there are fifty of
-  them. A node positioned outside the US keeps a working **Locate** entry, but
-  the modal shows its coordinates and says there is no regional map rather than
-  pretending something is wrong
-- **One image per state**, so the view is a whole state at a time. There is no
-  zoom or pan — that is what the Web Config map is for
-- **Position comes from what the node reported.** A node that has never sent a
-  position cannot be located, however recently it was heard
+Older firmware stored whole-state images and fixed 0.1-degree detail images in
+`/camillia/state_maps` and `/camillia/detail_maps`. They are not used by the new
+renderer.
+
+After an upgrade, firmware checks those directories once. If they contain
+files, a modal offers **Keep** or **Remove**. Remove deletes only those two
+legacy map directories; Keep leaves them untouched. Either successful choice is
+remembered so the prompt does not return on every boot. Empty or absent legacy
+directories never produce a prompt.
+
+## Supported boards
+
+Live Locate is available on the map-capable PSRAM builds, including T-Deck,
+T-LoRa Pager, Square, Mesh Deck, and M9.
+
+It is compiled out completely on:
+
+- **Cardputer:** it has no PSRAM and cannot safely hold the viewport plus one
+  decoded map tile.
+- **Heltec V4:** its smaller shared PSRAM budget is not sufficient for this map
+  renderer alongside the rest of the UI.
+
+These builds do not show Locate and do not compile the live tile worker or its
+buffers. Cardputer also has an explicit compile-time guard preventing accidental
+enablement.
 
 ## Troubleshooting
 
-**The Maps Download section is missing.** The device has no storage it can write
-to. Check that a card is inserted and seated; the section appears once one is
-mounted.
+**Locate is disabled.** The selected node has not reported a usable position.
 
-**The button is greyed out.** Every state your nodes are in is already saved at
-the current resolution. If you expected a download, check that the nodes you care
-about have actually reported positions — a node with no position belongs to no
-state.
+**The screen says `Waiting for Wi-Fi...`.** Connect the device to a normal Wi-Fi
+network to fill gaps. Cached tiles continue to render without it.
 
-**The map area is blank and says "map not on card".** That state has no saved
-map. Run Maps Download.
+**The screen says `Map unavailable`.** Tile requests completed without a usable
+PNG. Check internet and proxy reachability, then inspect serial output for
+`[map] live tile rejected` or `[map] live tile fetch failed`.
 
-**The map says "No regional map for this location".** The node is positioned
-outside the United States. The coordinates shown are still good.
+**The map briefly shows blank strips while panning.** Existing canvas pixels move
+immediately with the drag. Cached tiles fill first; remaining strips fill online
+as their tiles arrive. Rapid movement invalidates stale downloads instead of
+drawing them at an old position.
 
-**Downloads fail or stall.** The browser needs internet access, and the device
-needs to be on your network rather than serving its own access point. The
-access-point page has no Utilities tab at all, which is the quickest way to tell
-which mode you are in.
+**Maps Download is very slow.** Tile requests run sequentially through the
+device so each file can be validated and committed safely. Stop the run and
+resume at a lower detail level, or leave the page open; completed files are not
+re-downloaded.
+
+**A policy-denial image appears.** Current firmware rejects OpenStreetMap
+responses carrying the `x-blocked` header before drawing them. Older firmware
+may display that response as if it were a map tile.

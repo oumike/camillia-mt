@@ -17,6 +17,7 @@
 #include <nvs_flash.h>
 #include "storage.h"
 #include "state_maps.h"
+#include "map_tiles.h"
 #include "env_sensor.h"
 #include <esp_heap_caps.h>
 #include <math.h>
@@ -644,8 +645,10 @@ static const char kHead[] =
         ".chat-mini{margin:0;padding:.1em .5em;font-size:.8em;background:var(--panel-2);color:var(--text);border:1px solid var(--line);border-radius:6px;cursor:pointer}"
         ".chat-reply{margin-top:.5em;display:flex;align-items:center;gap:.5em;font-size:.82em;color:var(--text-dim);border-left:3px solid var(--accent);padding:.2em .5em;background:var(--panel)}"
         ".chat-reply span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-        ".chat-compose{margin-top:.5em;display:flex;gap:.5em}"
-        ".chat-compose input{flex:1}"
+        ".chat-compose{margin-top:.5em;display:flex;flex-direction:column;gap:.45em}"
+        ".chat-compose textarea{width:100%;min-height:4.8em;resize:vertical;font:inherit;line-height:1.35}"
+        ".chat-compose-foot{display:flex;align-items:center;gap:.5em}"
+        ".chat-char-count{font-size:.78em;color:var(--text-dim);margin-right:auto}"
         ".chat-compose button{margin:0}"
         ".node-head{display:flex;align-items:flex-start;justify-content:space-between;gap:.6em}"
         ".node-title{font-weight:700;color:var(--accent);margin-bottom:.2em}"
@@ -1586,6 +1589,140 @@ static bool stateMapEnsureDir() {
 #endif
 }
 
+static bool detailMapEnsureDir() {
+#if !HAS_FILE_STORAGE
+    return false;
+#else
+    if (!stateMapStorageReady()) return false;
+    if (!storageFs().exists("/camillia")) storageFs().mkdir("/camillia");
+    if (!storageFs().exists("/camillia/detail_maps")) storageFs().mkdir("/camillia/detail_maps");
+    return storageFs().exists("/camillia/detail_maps");
+#endif
+}
+
+static bool detailMapMarkerMatchesVersion() {
+#if !HAS_FILE_STORAGE
+    return false;
+#else
+    if (!storageFs().exists(kDetailMapMarkerPath)) return false;
+    File marker = storageFs().open(kDetailMapMarkerPath, FILE_READ);
+    if (!marker) return false;
+    String line = marker.readStringUntil('\n');
+    marker.close();
+    line.trim();
+    return line.equals(kDetailMapCacheVersion);
+#endif
+}
+
+static void detailMapWriteVersionMarker() {
+#if HAS_FILE_STORAGE
+    if (!detailMapEnsureDir()) return;
+    if (storageFs().exists(kDetailMapMarkerPath)) storageFs().remove(kDetailMapMarkerPath);
+    File marker = storageFs().open(kDetailMapMarkerPath, FILE_WRITE);
+    if (!marker) return;
+    marker.print(kDetailMapCacheVersion);
+    marker.close();
+#endif
+}
+
+static bool legacyDetailMapArtifactOwned(const char *filename) {
+    if (!filename || !filename[0]) return false;
+    const char *base = filename;
+    for (const char *cursor = filename; *cursor; cursor++) {
+        if (*cursor == '/' || *cursor == '\\') base = cursor + 1;
+    }
+    if (strcmp(base, "detail_maps.version") == 0) return true;
+    if (strlen(base) < 14) return false;
+
+    char key[11] = {};
+    memcpy(key, base, 10);
+    key[10] = '\0';
+    if (key[0] >= 'a' && key[0] <= 'z') key[0] = (char)(key[0] - 32);
+    if (key[5] >= 'a' && key[5] <= 'z') key[5] = (char)(key[5] - 32);
+    int lat10 = 0;
+    int lon10 = 0;
+    if (!nodesDetailMapParseKey(key, lat10, lon10)) return false;
+    const char *suffix = base + 10;
+    return strcmp(suffix, ".png") == 0
+           || strcmp(suffix, ".meta") == 0
+           || strcmp(suffix, ".png.tmp") == 0;
+}
+
+static void detailMapResetIfStale() {
+#if HAS_FILE_STORAGE
+    if (!detailMapEnsureDir()) return;
+    if (detailMapMarkerMatchesVersion()) return;
+
+    File dir = storageFs().open("/camillia/detail_maps");
+    if (dir && dir.isDirectory()) {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+            String path = f.name();
+            bool isDir = f.isDirectory();
+            bool owned = !isDir && legacyDetailMapArtifactOwned(f.name());
+            f.close();
+            if (!owned) continue;
+            if (!path.startsWith("/")) path = String("/camillia/detail_maps/") + path;
+            storageFs().remove(path.c_str());
+        }
+        dir.close();
+    } else if (dir) {
+        dir.close();
+    }
+
+    detailMapWriteVersionMarker();
+#endif
+}
+
+// Accepts either a bare filename or a full path; extracts and validates the
+// 0.1-degree detail cell key.
+static bool detailMapKeyFromFilename(const char *filename, char outKey[11]) {
+    if (!filename || !outKey) return false;
+    const char *base = filename;
+    for (const char *p = filename; *p; p++) {
+        if (*p == '/') base = p + 1;
+    }
+    auto lower = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; };
+    if (strlen(base) != 14
+        || lower(base[10]) != '.' || lower(base[11]) != 'p'
+        || lower(base[12]) != 'n' || lower(base[13]) != 'g') {
+        return false;
+    }
+
+    char key[11];
+    memcpy(key, base, 10);
+    key[10] = '\0';
+    if (key[0] >= 'a' && key[0] <= 'z') key[0] = (char)(key[0] - 32);
+    if (key[5] >= 'a' && key[5] <= 'z') key[5] = (char)(key[5] - 32);
+    int lat10 = 0, lon10 = 0;
+    if (!nodesDetailMapParseKey(key, lat10, lon10)) return false;
+    memcpy(outKey, key, 11);
+    return true;
+}
+
+// Metadata line format: latMin,latMax,lonMin,lonMax,lod
+// Legacy files may have only the first 4 fields.
+static bool detailMapReadLod(const char *cellKey, int &lodOut) {
+#if !HAS_FILE_STORAGE
+    (void)cellKey;
+    lodOut = -1;
+    return false;
+#else
+    if (!cellKey || !cellKey[0]) { lodOut = -1; return false; }
+    String p = nodesDetailMapMetaPath(cellKey);
+    File f = storageFs().open(p.c_str(), FILE_READ);
+    if (!f) { lodOut = -1; return false; }
+    String line = f.readStringUntil('\n');
+    f.close();
+
+    double a = 0.0, b = 0.0, c = 0.0, d = 0.0;
+    int lod = -1;
+    int n = sscanf(line.c_str(), "%lf,%lf,%lf,%lf,%d", &a, &b, &c, &d, &lod);
+    if (n < 4) { lodOut = -1; return false; }
+    lodOut = (n >= 5) ? lod : -1;
+    return (n >= 5);
+#endif
+}
+
 // A cached map counts only when the PNG is real. A truncated upload leaves a
 // file the device would reject at decode time anyway; reporting it as present
 // would just move the confusion to the device.
@@ -1674,6 +1811,7 @@ static void handleGetStateMapStatus() {
     }
 
     const bool ready = stateMapStorageReady();
+    if (ready) detailMapResetIfStale();
 
     // Scanned once up front. Everything below answers from this, so the endpoint
     // touches the filesystem a fixed number of times instead of once per state.
@@ -1740,7 +1878,69 @@ static void handleGetStateMapStatus() {
         sendChunkIfBig(out, 900);
     }
 
-    out += "]}";
+    out += "],\"detail\":{";
+    out += "\"cellDeg\":";
+    out += String(kDetailMapCellDeg, 1);
+    out += ",\"imageW\":";
+    out += String(kDetailMapImageW);
+    out += ",\"imageH\":";
+    out += String(kDetailMapImageH);
+    out += ",\"cached\":[";
+
+    bool firstDetail = true;
+    if (ready && detailMapEnsureDir()) {
+        File dir = storageFs().open("/camillia/detail_maps");
+        if (dir && dir.isDirectory()) {
+            for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+                if (f.isDirectory()) { f.close(); continue; }
+
+                const char *nm = f.name();
+                if (!nm) { f.close(); continue; }
+                char key[11] = {0};
+                if (!detailMapKeyFromFilename(nm, key)) {
+                    f.close();
+                    continue;
+                }
+
+                uint8_t hdr[24] = {0};
+                const bool readOk = (f.read(hdr, sizeof(hdr)) == sizeof(hdr));
+                f.close();
+                if (!readOk) continue;
+
+                static const uint8_t kPngSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+                if (memcmp(hdr, kPngSig, sizeof(kPngSig)) != 0) continue;
+                if (!(hdr[12] == 'I' && hdr[13] == 'H' && hdr[14] == 'D' && hdr[15] == 'R')) continue;
+
+                const uint32_t w = ((uint32_t)hdr[16] << 24) | ((uint32_t)hdr[17] << 16)
+                                 | ((uint32_t)hdr[18] << 8) | hdr[19];
+                const uint32_t h = ((uint32_t)hdr[20] << 24) | ((uint32_t)hdr[21] << 16)
+                                 | ((uint32_t)hdr[22] << 8) | hdr[23];
+                if (w == 0 || h == 0) continue;
+
+                if (!firstDetail) out += ",";
+                firstDetail = false;
+                int lod = -1;
+                detailMapReadLod(key, lod);
+                out += "{\"key\":\"";
+                out += key;
+                out += "\",\"w\":";
+                out += String((unsigned)w);
+                out += ",\"h\":";
+                out += String((unsigned)h);
+                if (lod >= 0) {
+                    out += ",\"lod\":";
+                    out += String(lod);
+                }
+                out += "}";
+                sendChunkIfBig(out, 900);
+            }
+            dir.close();
+        } else if (dir) {
+            dir.close();
+        }
+    }
+
+    out += "]}}";
     sendChunk(out);
     server.sendContent("");
 }
@@ -1760,6 +1960,10 @@ static File   stateMapUploadFile;
 static char   stateMapUploadCode[3] = "";
 static bool   stateMapUploadOk = false;
 static size_t stateMapUploadBytes = 0;
+static File   detailMapUploadFile;
+static char   detailMapUploadKey[11] = "";
+static bool   detailMapUploadOk = false;
+static size_t detailMapUploadBytes = 0;
 
 // Case-folded by hand rather than with strncasecmp(): that is POSIX, not C, and
 // nothing else in this firmware relies on it being pulled in.
@@ -1838,12 +2042,96 @@ static void handleStateMapUpload() {
 #endif
 }
 
+// POST /detail-map-upload   (multipart, one fixed 0.1-degree cell per request)
+static void handleDetailMapUpload() {
+#if !HAS_FILE_STORAGE
+    return;
+#else
+    HTTPUpload &upload = server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        detailMapUploadOk = false;
+        detailMapUploadBytes = 0;
+        detailMapUploadKey[0] = '\0';
+        if (detailMapUploadFile) detailMapUploadFile.close();
+
+        if (!isLoggedIn() || !detailMapEnsureDir()) return;
+        detailMapResetIfStale();
+
+        char key[11] = {0};
+        if (!detailMapKeyFromFilename(upload.filename.c_str(), key)) return;
+        memcpy(detailMapUploadKey, key, sizeof(detailMapUploadKey));
+
+        String path = nodesDetailMapPath(detailMapUploadKey);
+        if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+        detailMapUploadFile = storageFs().open(path.c_str(), FILE_WRITE);
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!detailMapUploadFile) return;
+        size_t wrote = detailMapUploadFile.write(upload.buf, upload.currentSize);
+        if (wrote != upload.currentSize) {
+            detailMapUploadFile.close();
+            return;
+        }
+        detailMapUploadBytes += wrote;
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_END) {
+        if (!detailMapUploadFile) return;
+        detailMapUploadFile.close();
+        detailMapUploadOk = (detailMapUploadBytes > 0);
+        return;
+    }
+
+    if (detailMapUploadFile) detailMapUploadFile.close();
+#endif
+}
+
+static int removeMapTileTree(const char *path) {
+#if !HAS_FILE_STORAGE
+    (void)path;
+    return 0;
+#else
+    if (!path || !path[0] || !storageFs().exists(path)) return 0;
+    File dir = storageFs().open(path);
+    if (!dir) return 0;
+    if (!dir.isDirectory()) {
+        dir.close();
+        bool isTile = String(path).endsWith(".png");
+        return storageFs().remove(path) && isTile ? 1 : 0;
+    }
+
+    int removed = 0;
+    while (true) {
+        File child = dir.openNextFile();
+        if (!child) break;
+        String childPath = child.name();
+        bool childIsDir = child.isDirectory();
+        child.close();
+        if (!childPath.startsWith("/")) {
+            String fullPath = path;
+            if (!fullPath.endsWith("/")) fullPath += "/";
+            fullPath += childPath;
+            childPath = fullPath;
+        }
+        if (childIsDir) removed += removeMapTileTree(childPath.c_str());
+        else {
+            bool isTile = childPath.endsWith(".png");
+            if (storageFs().remove(childPath.c_str()) && isTile) removed++;
+        }
+    }
+    dir.close();
+    storageFs().rmdir(path);
+    return removed;
+#endif
+}
+
 // POST /clear-maps
-// Deletes every cached state map. Enumerated from kUsStateMaps rather than
-// swept as a directory: this owns exactly the files it writes and has no
-// business deleting whatever else a user keeps on their card. The completion
-// markers go too, so a later cache-version check cannot decide a now-empty
-// directory is a finished download.
+// Deletes the current slippy-tile cache and legacy map files without touching
+// other card content.
 static void handlePostClearMaps() {
 #if !HAS_FILE_STORAGE
     server.send(503, "text/plain", "No storage on this board");
@@ -1854,18 +2142,50 @@ static void handlePostClearMaps() {
         return;
     }
 
-    int removed = 0;
+    nodesMapTileBumpCacheEpoch();
+    int removedState = 0;
+    int removedDetail = 0;
+    int removedTiles = removeMapTileTree(kMapTileCacheRoot);
     for (int i = 0; i < kUsStateMapCount; i++) {
         String png = nodesStateMapPath(kUsStateMaps[i].code);
-        if (storageFs().exists(png.c_str()) && storageFs().remove(png.c_str())) removed++;
+        if (storageFs().exists(png.c_str()) && storageFs().remove(png.c_str())) removedState++;
         String meta = nodesStateMapMetaPath(kUsStateMaps[i].code);
         if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
     }
+
+    if (detailMapEnsureDir()) {
+        File dir = storageFs().open("/camillia/detail_maps");
+        if (dir && dir.isDirectory()) {
+            for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+                String path = f.name();
+                bool isDir = f.isDirectory();
+                const char *nm = f.name();
+                char key[11] = {0};
+                bool isCellPng = (nm && detailMapKeyFromFilename(nm, key));
+                bool owned = !isDir && legacyDetailMapArtifactOwned(nm);
+                f.close();
+                if (!owned) continue;
+                if (!path.startsWith("/")) path = String("/camillia/detail_maps/") + path;
+                if (storageFs().exists(path.c_str()) && storageFs().remove(path.c_str())) {
+                    if (isCellPng) removedDetail++;
+                }
+            }
+            dir.close();
+        } else if (dir) {
+            dir.close();
+        }
+    }
+
     if (storageFs().exists(kStateMapMarkerPath)) storageFs().remove(kStateMapMarkerPath);
     if (storageFs().exists(kStateMapLegacyMarkerPath)) storageFs().remove(kStateMapLegacyMarkerPath);
+    if (storageFs().exists(kDetailMapMarkerPath)) storageFs().remove(kDetailMapMarkerPath);
 
-    char msg[64];
-    snprintf(msg, sizeof(msg), "Cleared %d cached map%s", removed, removed == 1 ? "" : "s");
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "Cleared %d map tile%s, %d legacy state map%s and %d legacy detail cell%s",
+             removedTiles, (removedTiles == 1 ? "" : "s"),
+             removedState, (removedState == 1 ? "" : "s"),
+             removedDetail, (removedDetail == 1 ? "" : "s"));
     redirectHomeWithFlash(msg);
 #endif
 }
@@ -1930,6 +2250,407 @@ static void handleStateMapUploadDone() {
              haveBounds ? "true" : "false");
     stateMapUploadCode[0] = '\0';
     server.send(200, "application/json", out);
+#endif
+}
+
+static void handleDetailMapUploadDone() {
+#if !HAS_FILE_STORAGE
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"no storage on this board\"}");
+#else
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return;
+    }
+    if (!detailMapUploadKey[0]) {
+        server.send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"unknown or missing detail cell key\"}");
+        return;
+    }
+
+    String path = nodesDetailMapPath(detailMapUploadKey);
+    if (!detailMapUploadOk || !nodesFileLooksLikePng(path.c_str())) {
+        if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+        String meta = nodesDetailMapMetaPath(detailMapUploadKey);
+        if (storageFs().exists(meta.c_str())) storageFs().remove(meta.c_str());
+        detailMapUploadKey[0] = '\0';
+        server.send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"upload was not a complete PNG\"}");
+        return;
+    }
+
+    int lat10 = 0, lon10 = 0;
+    if (!nodesDetailMapParseKey(detailMapUploadKey, lat10, lon10)) {
+        if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+        detailMapUploadKey[0] = '\0';
+        server.send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"invalid detail cell key\"}");
+        return;
+    }
+
+    float latMin = 0.0f, latMax = 0.0f, lonMin = 0.0f, lonMax = 0.0f;
+    nodesDetailMapBoundsFromIndex(lat10, lon10, latMin, latMax, lonMin, lonMax);
+
+    int lod = 1;   // legacy/default: streets
+    if (server.hasArg("lod")) {
+        lod = server.arg("lod").toInt();
+        if (lod < 0) lod = 0;
+        if (lod > 2) lod = 2;
+    }
+
+    String metaPath = nodesDetailMapMetaPath(detailMapUploadKey);
+    if (storageFs().exists(metaPath.c_str())) storageFs().remove(metaPath.c_str());
+    File meta = storageFs().open(metaPath.c_str(), FILE_WRITE);
+    if (meta) {
+        meta.printf("%.6f,%.6f,%.6f,%.6f,%d\n", (double)latMin, (double)latMax,
+                    (double)lonMin, (double)lonMax, lod);
+        meta.close();
+    }
+    detailMapWriteVersionMarker();
+
+    char out[196];
+    snprintf(out, sizeof(out),
+             "{\"ok\":true,\"key\":\"%s\",\"bytes\":%u,\"lod\":%d,\"latMin\":%.4f,\"latMax\":%.4f,\"lonMin\":%.4f,\"lonMax\":%.4f}",
+             detailMapUploadKey,
+             (unsigned)detailMapUploadBytes,
+             lod,
+             (double)latMin, (double)latMax, (double)lonMin, (double)lonMax);
+    detailMapUploadKey[0] = '\0';
+    server.send(200, "application/json", out);
+#endif
+}
+
+static constexpr int kMapTileStatusBatchMax = 64;
+static constexpr size_t kMapTileUploadMaxBytes = 256U * 1024U;
+static File mapTileUploadFile;
+static int mapTileUploadZoom = -1;
+static int32_t mapTileUploadX = -1;
+static int32_t mapTileUploadY = -1;
+static bool mapTileUploadOk = false;
+static size_t mapTileUploadBytes = 0;
+static char mapTileUploadPath[96] = {};
+static char mapTileUploadTempPath[104] = {};
+
+// GET /map-tile-status?keys=13_123_456.png,...
+// Status is intentionally plan-scoped and bounded. Returning an entire cache
+// index would grow without limit as users pan online and fill gaps.
+static void handleGetMapTileStatus() {
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"error\":\"unauthorized\"}");
+        return;
+    }
+    if (!server.hasArg("keys")) {
+        server.send(400, "application/json", "{\"error\":\"missing keys\"}");
+        return;
+    }
+
+    String keys = server.arg("keys");
+    if (keys.length() > 1800) {
+        server.send(413, "application/json", "{\"error\":\"status batch too large\"}");
+        return;
+    }
+
+    const bool ready = stateMapStorageReady();
+    char bits[kMapTileStatusBatchMax + 1] = {};
+    int count = 0;
+    int cursor = 0;
+    while (cursor <= (int)keys.length()) {
+        int comma = keys.indexOf(',', cursor);
+        if (comma < 0) comma = (int)keys.length();
+        if (comma == cursor || count >= kMapTileStatusBatchMax) {
+            server.send(400, "application/json", "{\"error\":\"invalid status batch\"}");
+            return;
+        }
+
+        String key = keys.substring(cursor, comma);
+        int zoom = 0;
+        int32_t tileX = 0;
+        int32_t tileY = 0;
+        bool present = false;
+        if (nodesMapTileParseUploadFilename(key.c_str(), zoom, tileX, tileY)) {
+            String path = nodesMapTilePath(zoom, tileX, tileY);
+            if (ready && !path.isEmpty() && storageFs().exists(path.c_str())) {
+                present = nodesMapTileFileValid(path.c_str());
+                if (!present) storageFs().remove(path.c_str());
+            }
+        }
+        bits[count++] = present ? '1' : '0';
+        if (comma >= (int)keys.length()) break;
+        cursor = comma + 1;
+    }
+    bits[count] = '\0';
+
+    char response[160];
+    snprintf(response, sizeof(response),
+             "{\"storage\":%s,\"count\":%d,\"bits\":\"%s\"}",
+             ready ? "true" : "false", count, bits);
+    server.send(200, "application/json", response);
+}
+
+static void resetMapTileUploadState(bool removeTemp) {
+#if HAS_FILE_STORAGE
+    if (mapTileUploadFile) mapTileUploadFile.close();
+    if (removeTemp && mapTileUploadTempPath[0]
+        && storageFs().exists(mapTileUploadTempPath)) {
+        storageFs().remove(mapTileUploadTempPath);
+    }
+#else
+    LV_UNUSED(removeTemp);
+#endif
+    mapTileUploadZoom = -1;
+    mapTileUploadX = -1;
+    mapTileUploadY = -1;
+    mapTileUploadOk = false;
+    mapTileUploadBytes = 0;
+    mapTileUploadPath[0] = '\0';
+    mapTileUploadTempPath[0] = '\0';
+}
+
+static void handleMapTileUpload() {
+#if !HAS_FILE_STORAGE
+    return;
+#else
+    HTTPUpload &upload = server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        resetMapTileUploadState(true);
+        if (!isLoggedIn() || !stateMapStorageReady()) return;
+
+        int zoom = 0;
+        int32_t tileX = 0;
+        int32_t tileY = 0;
+        if (!nodesMapTileParseUploadFilename(upload.filename.c_str(), zoom, tileX, tileY)) return;
+        if (!nodesMapTileEnsureParentDirs(zoom, tileX)) return;
+
+        String path = nodesMapTilePath(zoom, tileX, tileY);
+        String tempPath = nodesMapTileUploadTempPath(zoom, tileX, tileY);
+        if (path.isEmpty() || tempPath.isEmpty()
+            || path.length() >= sizeof(mapTileUploadPath)
+            || tempPath.length() >= sizeof(mapTileUploadTempPath)) {
+            return;
+        }
+        snprintf(mapTileUploadPath, sizeof(mapTileUploadPath), "%s", path.c_str());
+        snprintf(mapTileUploadTempPath, sizeof(mapTileUploadTempPath), "%s", tempPath.c_str());
+        mapTileUploadZoom = zoom;
+        mapTileUploadX = tileX;
+        mapTileUploadY = tileY;
+        if (storageFs().exists(mapTileUploadTempPath)) storageFs().remove(mapTileUploadTempPath);
+        mapTileUploadFile = storageFs().open(mapTileUploadTempPath, FILE_WRITE);
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_WRITE) {
+        if (!mapTileUploadFile) return;
+        if (mapTileUploadBytes + upload.currentSize > kMapTileUploadMaxBytes) {
+            mapTileUploadFile.close();
+            return;
+        }
+        size_t written = mapTileUploadFile.write(upload.buf, upload.currentSize);
+        if (written != upload.currentSize) {
+            mapTileUploadFile.close();
+            return;
+        }
+        mapTileUploadBytes += written;
+        return;
+    }
+
+    if (upload.status == UPLOAD_FILE_END) {
+        if (!mapTileUploadFile) return;
+        mapTileUploadFile.close();
+        mapTileUploadOk = mapTileUploadBytes >= 24;
+        return;
+    }
+
+    resetMapTileUploadState(true);
+#endif
+}
+
+static void handleMapTileUploadDone() {
+#if !HAS_FILE_STORAGE
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"no storage\"}");
+#else
+    if (!isLoggedIn()) {
+        resetMapTileUploadState(true);
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return;
+    }
+    if (!nodesMapTileCoordsValid(mapTileUploadZoom, mapTileUploadX, mapTileUploadY)
+        || !mapTileUploadPath[0] || !mapTileUploadTempPath[0]) {
+        resetMapTileUploadState(true);
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid tile key\"}");
+        return;
+    }
+    if (!mapTileUploadOk || !nodesMapTileFileValid(mapTileUploadTempPath)) {
+        resetMapTileUploadState(true);
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid tile PNG\"}");
+        return;
+    }
+
+    bool alreadyCached = storageFs().exists(mapTileUploadPath)
+                         && nodesMapTileFileValid(mapTileUploadPath);
+    if (alreadyCached) {
+        storageFs().remove(mapTileUploadTempPath);
+    } else {
+        if (storageFs().exists(mapTileUploadPath)) storageFs().remove(mapTileUploadPath);
+        if (!storageFs().rename(mapTileUploadTempPath, mapTileUploadPath)) {
+            resetMapTileUploadState(true);
+            server.send(500, "application/json", "{\"ok\":false,\"error\":\"tile rename failed\"}");
+            return;
+        }
+    }
+
+    char response[192];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"z\":%d,\"x\":%ld,\"y\":%ld,\"bytes\":%u,\"cached\":%s}",
+             mapTileUploadZoom, (long)mapTileUploadX, (long)mapTileUploadY,
+             (unsigned)mapTileUploadBytes, alreadyCached ? "true" : "false");
+    resetMapTileUploadState(false);
+    server.send(200, "application/json", response);
+#endif
+}
+
+static uint8_t mapTileFetchBuffer[1024] = {};
+
+// POST /map-tile-fetch?z=13&x=123&y=456
+// The browser cannot identify itself to the upstream tile service through the
+// operator proxy, so Web Config asks the device to fetch one tile at a time
+// using Camillia's stable application User-Agent.
+static void handlePostMapTileFetch() {
+#if !HAS_FILE_STORAGE
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"no storage\"}");
+#else
+    if (!isLoggedIn()) {
+        server.send(403, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return;
+    }
+    if (!server.hasArg("z") || !server.hasArg("x") || !server.hasArg("y")) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing tile coordinates\"}");
+        return;
+    }
+
+    int zoom = server.arg("z").toInt();
+    int32_t tileX = (int32_t)server.arg("x").toInt();
+    int32_t tileY = (int32_t)server.arg("y").toInt();
+    if (!nodesMapTileCoordsValid(zoom, tileX, tileY)) {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid tile coordinates\"}");
+        return;
+    }
+    if (!stateMapStorageReady() || !nodesMapTileEnsureParentDirs(zoom, tileX)) {
+        server.send(503, "application/json", "{\"ok\":false,\"error\":\"storage unavailable\"}");
+        return;
+    }
+
+    String path = nodesMapTilePath(zoom, tileX, tileY);
+    String tempPath = nodesMapTileUploadTempPath(zoom, tileX, tileY);
+    if (storageFs().exists(path.c_str()) && nodesMapTileFileValid(path.c_str())) {
+        char response[144];
+        snprintf(response, sizeof(response),
+                 "{\"ok\":true,\"cached\":true,\"z\":%d,\"x\":%ld,\"y\":%ld}",
+                 zoom, (long)tileX, (long)tileY);
+        server.send(200, "application/json", response);
+        return;
+    }
+    if (storageFs().exists(path.c_str())) storageFs().remove(path.c_str());
+    if (storageFs().exists(tempPath.c_str())) storageFs().remove(tempPath.c_str());
+
+    char url[192];
+    snprintf(url, sizeof(url), "http://maps.camillia.sumat.org/%d/%ld/%ld.png",
+             zoom, (long)tileX, (long)tileY);
+    WiFiClient client;
+    HTTPClient http;
+    http.setReuse(false);
+    http.setConnectTimeout(5000);
+    http.setTimeout(12000);
+    if (!http.begin(client, url)) {
+        client.stop();
+        server.send(502, "application/json", "{\"ok\":false,\"error\":\"proxy connection failed\"}");
+        return;
+    }
+    char userAgent[112];
+    snprintf(userAgent, sizeof(userAgent),
+             "Camillia-MT/%s (+https://github.com/oumike/camillia-mt)",
+             APP_VERSION);
+    http.addHeader("User-Agent", userAgent);
+    const char *responseHeaders[] = {"x-blocked"};
+    http.collectHeaders(responseHeaders, 1);
+
+    int upstreamCode = http.GET();
+    if (upstreamCode != HTTP_CODE_OK || http.hasHeader("x-blocked")) {
+        http.end();
+        client.stop();
+        server.send(502, "application/json", "{\"ok\":false,\"error\":\"tile service rejected request\"}");
+        return;
+    }
+
+    int remaining = http.getSize();
+    if (remaining > (int)kMapTileUploadMaxBytes) {
+        http.end();
+        client.stop();
+        server.send(502, "application/json", "{\"ok\":false,\"error\":\"tile response too large\"}");
+        return;
+    }
+    File output = storageFs().open(tempPath.c_str(), FILE_WRITE);
+    if (!output) {
+        http.end();
+        client.stop();
+        server.send(503, "application/json", "{\"ok\":false,\"error\":\"tile file open failed\"}");
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    size_t written = 0;
+    bool ok = true;
+    uint32_t idleDeadline = millis() + 12000UL;
+    while (http.connected() && (remaining > 0 || remaining < 0)) {
+        int available = stream->available();
+        if (available <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+        size_t wanted = (size_t)available;
+        if (wanted > sizeof(mapTileFetchBuffer)) wanted = sizeof(mapTileFetchBuffer);
+        if (remaining > 0 && wanted > (size_t)remaining) wanted = (size_t)remaining;
+        if (written + wanted > kMapTileUploadMaxBytes) {
+            ok = false;
+            break;
+        }
+        int read = stream->readBytes(mapTileFetchBuffer, wanted);
+        if (read <= 0) {
+            if ((int32_t)(millis() - idleDeadline) >= 0) break;
+            delay(1);
+            continue;
+        }
+        size_t fileWritten = output.write(mapTileFetchBuffer, (size_t)read);
+        if (fileWritten != (size_t)read) {
+            ok = false;
+            break;
+        }
+        written += fileWritten;
+        if (remaining > 0) remaining -= read;
+        idleDeadline = millis() + 12000UL;
+        if (remaining == 0) break;
+        delay(1);
+    }
+    output.close();
+    http.end();
+    client.stop();
+
+    if (!ok || written < 24 || remaining > 0 || !nodesMapTileFileValid(tempPath.c_str())) {
+        storageFs().remove(tempPath.c_str());
+        server.send(502, "application/json", "{\"ok\":false,\"error\":\"incomplete tile response\"}");
+        return;
+    }
+    if (!storageFs().rename(tempPath.c_str(), path.c_str())) {
+        storageFs().remove(tempPath.c_str());
+        server.send(500, "application/json", "{\"ok\":false,\"error\":\"tile rename failed\"}");
+        return;
+    }
+
+    char response[176];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"cached\":false,\"z\":%d,\"x\":%ld,\"y\":%ld,\"bytes\":%u}",
+             zoom, (long)tileX, (long)tileY, (unsigned)written);
+    server.send(200, "application/json", response);
 #endif
 }
 #endif  // HAS_STATE_MAPS
@@ -3607,29 +4328,52 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
 #if HAS_STATE_MAPS
     // ── Maps Download ─────────────────────────────────────────────
-    // Absent, not disabled, when there is nowhere to put the files: on a board
-    // with no storage there is nothing the reader could do about it, and a
-    // permanently greyed section is worse than one that was never there.
+    // Browser-seeded slippy tiles for offline Locate. The browser downloads one
+    // center tile per positioned node at every zoom from 13 through the chosen
+    // detail ceiling, deduplicates overlaps, and uploads the original PNGs.
     if (stateMapStorageReady()) {
         section(html, false, "Maps Download", false);
         html +=
             "<p style='font-size:.82em;color:#888;margin:.1em 0 .6em'>"
-            "The device shows a node's position on a cached map of the state it "
-            "falls in (Nodes &rarr; Actions &rarr; Locate). It cannot fetch those "
-            "maps itself, so this page downloads them and saves them to the "
-            "card. Only the states your known nodes are actually in get "
-            "downloaded.</p>";
+            "Downloads offline map tiles centered on every positioned node in the database. "
+            "Zoom 13 is always included. Higher detail adds every tile needed for a "
+            "node-centered Locate viewport at each zoom through the selected maximum. "
+            "Offline gaps between those node areas are expected; Locate "
+            "fills and saves missing viewport tiles whenever internet access is available.</p>";
         html +=
             "<div id='mapdl-status' style='font-size:.82em;color:#888;margin:.2em 0 .6em'>"
             "Checking cached maps&hellip;</div>";
         html +=
+            "<div style='display:flex;align-items:center;gap:.45em;margin:.1em 0 .15em'>"
+            "<div id='mapdl-progress-wrap' role='progressbar' aria-label='Map download progress' "
+            "aria-valuemin='0' aria-valuemax='100' aria-valuenow='0' "
+            "style='flex:1 1 auto;height:10px;border:1px solid #2a6f97;border-radius:999px;background:#e6eef4;overflow:hidden;margin:0'>"
+            "<div id='mapdl-progress-bar' style='height:100%;width:0%;background:linear-gradient(90deg,#2a6f97,#4ea3d1);transition:width .2s ease'></div>"
+            "</div>"
+            "<button type='button' id='mapdl-stop' title='Stop current download' aria-label='Stop current download' disabled "
+            "style='min-width:30px;height:24px;line-height:1;padding:0 .45em;background:#c0392b;color:#fff;border:0;border-radius:4px;font-weight:700;opacity:.6;cursor:default'>X</button>"
+            "</div>"
+            "<div id='mapdl-progress-text' style='font-size:.78em;color:#68788a;margin:0 0 .5em'>0%</div>";
+        html +=
+            "<div style='display:flex;flex-direction:column;align-items:flex-start;gap:.45em'>"
+            "<label style='font-size:.82em;color:#888;display:flex;align-items:center;gap:.35em'>"
+            "Detail"
+            "<select id='mapdl-level' style='margin:0'>"
+            "<option value='13'>Roads (zoom 13 only)</option>"
+            "<option value='16' selected>Streets (zooms 13-16)</option>"
+            "<option value='19'>Buildings (zooms 13-19)</option>"
+            "</select></label>"
             "<button type='button' id='mapdl-btn' style='background:#2a6f97' disabled>"
-            "&#128506; Download maps for known nodes</button>";
+            "&#128506; Download offline tiles for known nodes</button></div>"
+            "<div id='mapdl-warn' style='font-size:.8em;color:#9a4f00;margin:.45em 0 .15em;font-weight:600'>"
+            "Detailed plans can take a very long time. Buildings may require up to 42 tile "
+            "downloads per positioned node before overlap is removed. Keep this page open "
+            "and the device connected for the entire run.</div>";
         html +=
             "<p style='font-size:.82em;color:#888;margin:.4em 0 1em'>"
             "Downloading writes to the card over the same SPI bus the radio uses, "
-            "so expect the mesh to miss traffic while it runs. Map tiles come from "
-            "OpenStreetMap.</p>";
+            "so expect the mesh to miss traffic while it runs. Tiles are based on "
+            "OpenStreetMap data.</p>";
         sectionEnd(html, false);
         sendChunk(html);
     }
@@ -3764,17 +4508,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     if (stateMapStorageReady()) {
         html +=
             "<form method='POST' action='/clear-maps'"
-            " onsubmit=\"return confirm('This will delete every cached state map from the card. "
-            "Putting them back means running Maps Download again - the device cannot "
-            "fetch maps on its own. Continue?')\">"
+            " onsubmit=\"return confirm('This will delete every offline map tile and any legacy map files. "
+            "Maps Download can rebuild node-centered coverage, and Locate will refill online gaps. Continue?')\">"
             "<button type='submit' style='background:#c0392b'>"
             "Clear Maps</button>"
             "</form>"
             "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
-            "Deletes the cached state maps that Nodes &rarr; Actions &rarr; Locate draws on. "
-            "Nothing else on the card is touched, and no node or message data is affected. "
-            "This is reversible: <em>Maps Download</em> above puts them back, since maps "
-            "always arrive from this page rather than being fetched by the device.</p>";
+            "Deletes offline slippy tiles plus obsolete state/detail map files. Nothing else on "
+            "the card is touched, and no node or message data is affected. Maps Download rebuilds "
+            "the selected node-centered coverage; online Locate use fills additional gaps.</p>";
     }
 #endif
 
@@ -3841,10 +4583,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<div id='chat-reply-bar' class='chat-reply' style='display:none'>"
             "<span id='chat-reply-text'></span>"
             "<button type='button' class='chat-mini' onclick='chatCancelReply()'>&times;</button></div>";
-    html += "<div class='chat-compose'>"
-            "<input type='text' id='chat-input' maxlength='200' placeholder='Message...' "
-            "onkeydown='if(event.key===\"Enter\"){event.preventDefault();chatSend();}'>"
-            "<button type='button' onclick='chatSend()'>Send</button></div>";
+        html += "<div class='chat-compose'>"
+            "<textarea id='chat-input' rows='3' maxlength='";
+        html += String((unsigned)MESH_TEXT_MAX_LEN);
+        html += "' placeholder='Message...' onkeydown='chatComposerKey(event)' oninput='chatUpdateCount()'></textarea>"
+            "<div class='chat-compose-foot'><span id='chat-count' class='chat-char-count'>0/";
+        html += String((unsigned)MESH_TEXT_MAX_LEN);
+        html += "</span><button type='button' onclick='chatSend()'>Send</button></div></div>";
     html += "</div>";  // #chat-body
 #endif
     html += "</div><div class='tab-panel' id='tab-map'>";
@@ -3905,131 +4650,514 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // the firmware, smallest-box tie-break included: if the two disagreed about
     // which state a node is in, this page would cache a map the device never
     // looks at.
+#if 0
+    // Legacy state/detail composite planner. Kept temporarily while old cache
+    // cleanup ships, but excluded from both firmware and generated pages.
     html +=
         "<script>\n"
         "(function(){\n"
-        "var el=document.getElementById('mapdl-status');\n"
+        "var el=document.getElementById('mapdl-status-legacy');\n"
         "if(!el)return;\n"
         "var btn=document.getElementById('mapdl-btn');\n"
-        "var TILE=256,MAXTILES=64,ST=null,NEED=[];\n"
-        "// Web Mercator pixel coords at zoom z.\n"
+        "var levelSel=document.getElementById('mapdl-level');\n"
+        "var warn=document.getElementById('mapdl-warn');\n"
+        "var progressWrap=document.getElementById('mapdl-progress-wrap');\n"
+        "var progressBar=document.getElementById('mapdl-progress-bar');\n"
+        "var progressText=document.getElementById('mapdl-progress-text');\n"
+        "var stopBtn=document.getElementById('mapdl-stop');\n"
+        "var TILE=256,ST=null,NEED_STATES=[],NEED_DETAILS=[];\n"
+        "var mapRunActive=false,mapRunInterrupted=false,mapRunCancelRequested=false,mapRunStoppedByUser=false;\n"
+        "var STATE_BY_CODE={},DETAIL_BY_KEY={},DETAIL_CACHE={};\n"
+        "var DETAIL_LEVELS={\n"
+        "  roads:{id:'roads',label:'Roads',lod:0,zoomBias:0,maxTiles:96,detailKb:170,tileSec:0.08},\n"
+        "  streets:{id:'streets',label:'Streets',lod:1,zoomBias:1,maxTiles:196,detailKb:240,tileSec:0.11},\n"
+        "  buildings:{id:'buildings',label:'Buildings',lod:2,zoomBias:2,maxTiles:324,detailKb:320,tileSec:0.16}\n"
+        "};\n"
+        "function levelCfg(){\n"
+        "  var v=(levelSel&&levelSel.value)?levelSel.value:'streets';\n"
+        "  return DETAIL_LEVELS[v]||DETAIL_LEVELS.streets;\n"
+        "}\n"
+        "function setProgress(frac,label){\n"
+        "  if(!progressWrap||!progressBar||!progressText)return;\n"
+        "  if(!isFinite(frac))frac=0;\n"
+        "  if(frac<0)frac=0;\n"
+        "  if(frac>1)frac=1;\n"
+        "  var pct=Math.round(frac*100);\n"
+        "  progressWrap.setAttribute('aria-valuenow',String(pct));\n"
+        "  progressBar.style.width=String(pct)+'%';\n"
+        "  progressText.textContent=label?(label+' ('+pct+'%)'):(String(pct)+'%');\n"
+        "}\n"
+        "function setStopEnabled(enabled){\n"
+        "  if(!stopBtn)return;\n"
+        "  stopBtn.disabled=!enabled;\n"
+        "  stopBtn.style.opacity=enabled?'1':'0.6';\n"
+        "  stopBtn.style.cursor=enabled?'pointer':'default';\n"
+        "}\n"
+        "if(stopBtn){\n"
+        "  setStopEnabled(false);\n"
+        "  stopBtn.onclick=function(){\n"
+        "    if(!mapRunActive)return;\n"
+        "    mapRunCancelRequested=true;\n"
+        "    mapRunStoppedByUser=true;\n"
+        "    mapRunInterrupted=true;\n"
+        "    setStopEnabled(false);\n"
+        "    say('Stopping map download...');\n"
+        "  };\n"
+        "}\n"
+        "function netOffline(){\n"
+        "  return (typeof navigator!=='undefined'&&navigator.onLine===false);\n"
+        "}\n"
+        "if(typeof window!=='undefined'&&window.addEventListener){\n"
+        "  window.addEventListener('offline',function(){\n"
+        "    if(mapRunActive)mapRunInterrupted=true;\n"
+        "  });\n"
+        "}\n"
         "function lon2px(lon,z){return (lon+180)/360*TILE*Math.pow(2,z);}\n"
-        "function lat2px(lat,z){var s=Math.sin(lat*Math.PI/180);\n"
-        "  return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*TILE*Math.pow(2,z);}\n"
-        "// Smallest zoom whose tiles already carry at least the detail we keep, so we\n"
-        "// downscale rather than upscale and never fetch more than we can use.\n"
-        "function zoomFor(s,W,H){\n"
-        "  for(var z=2;z<=11;z++){\n"
-        "    var w=lon2px(s.lonMax,z)-lon2px(s.lonMin,z);\n"
-        "    var h=lat2px(s.latMin,z)-lat2px(s.latMax,z);\n"
-        "    if(w>=W&&h>=H){\n"
-        "      var nx=Math.ceil(w/TILE)+1,ny=Math.ceil(h/TILE)+1;\n"
-        "      if(nx*ny>MAXTILES)return z-1<2?2:z-1;\n"
-        "      return z;\n"
-        "    }\n"
+        "function lat2px(lat,z){var s=Math.sin(lat*Math.PI/180);return (0.5-Math.log((1+s)/(1-s))/(4*Math.PI))*TILE*Math.pow(2,z);}\n"
+        "function tileWindow(b,z){\n"
+        "  var px0=lon2px(b.lonMin,z),px1=lon2px(b.lonMax,z);\n"
+        "  var py0=lat2px(b.latMax,z),py1=lat2px(b.latMin,z);\n"
+        "  var tx0=Math.floor(px0/TILE),tx1=Math.floor(px1/TILE);\n"
+        "  var ty0=Math.floor(py0/TILE),ty1=Math.floor(py1/TILE);\n"
+        "  return {z:z,px0:px0,px1:px1,py0:py0,py1:py1,tx0:tx0,tx1:tx1,ty0:ty0,ty1:ty1,tiles:(tx1-tx0+1)*(ty1-ty0+1)};\n"
+        "}\n"
+        "function pickPlan(b,W,H,zoomBias,maxTiles){\n"
+        "  var base=16;\n"
+        "  for(var z=2;z<=16;z++){\n"
+        "    var w=lon2px(b.lonMax,z)-lon2px(b.lonMin,z);\n"
+        "    var h=lat2px(b.latMin,z)-lat2px(b.latMax,z);\n"
+        "    if(w>=W&&h>=H){base=z;break;}\n"
         "  }\n"
-        "  return 11;\n"
+        "  var zSel=base+(zoomBias||0);\n"
+        "  if(zSel<2)zSel=2;\n"
+        "  if(zSel>19)zSel=19;\n"
+        "  var cap=maxTiles||64;\n"
+        "  var plan=tileWindow(b,zSel);\n"
+        "  while(zSel>2&&plan.tiles>cap){zSel--;plan=tileWindow(b,zSel);}\n"
+        "  return plan;\n"
         "}\n"
         "function loadTile(z,x,y){\n"
         "  return new Promise(function(res){\n"
-        "    var img=new Image();\n"
-        "    img.crossOrigin='anonymous';                       // needed to read pixels back\n"
-        "    img.onload=function(){res(img);};\n"
-        "    img.onerror=function(){res(null);};                // a hole beats a failed run\n"
+        "    var img=new Image();img.crossOrigin='anonymous';\n"
+        "    img.onload=function(){res(img);};img.onerror=function(){res(null);};\n"
         "    img.src='https://tile.openstreetmap.org/'+z+'/'+x+'/'+y+'.png';\n"
         "  });\n"
         "}\n"
-        "// Build the Mercator mosaic covering the state's box, then resample it into an\n"
-        "// equirectangular image: the device places its pin with a LINEAR latitude\n"
-        "// mapping, so a Mercator image would sit the marker wrong - by 13px on Alaska.\n"
-        "// Each destination row is drawn from the Mercator rows that actually cover it.\n"
-        "async function buildStatePng(s,W,H,onTile){\n"
-        "  var z=zoomFor(s,W,H);\n"
-        "  var px0=lon2px(s.lonMin,z),px1=lon2px(s.lonMax,z);\n"
-        "  var py0=lat2px(s.latMax,z),py1=lat2px(s.latMin,z);\n"
-        "  var tx0=Math.floor(px0/TILE),tx1=Math.floor(px1/TILE);\n"
-        "  var ty0=Math.floor(py0/TILE),ty1=Math.floor(py1/TILE);\n"
+        "async function buildPng(b,W,H,onTile,opts){\n"
+        "  var plan=pickPlan(b,W,H,opts&&opts.zoomBias,opts&&opts.maxTiles);\n"
+        "  var z=plan.z,px0=plan.px0,px1=plan.px1,py0=plan.py0,py1=plan.py1;\n"
+        "  var tx0=plan.tx0,tx1=plan.tx1,ty0=plan.ty0,ty1=plan.ty1;\n"
         "  var mw=(tx1-tx0+1)*TILE,mh=(ty1-ty0+1)*TILE;\n"
         "  var mos=document.createElement('canvas');mos.width=mw;mos.height=mh;\n"
-        "  var mc=mos.getContext('2d');\n"
-        "  mc.fillStyle='#e8eef7';mc.fillRect(0,0,mw,mh);\n"
-        "  var total=(tx1-tx0+1)*(ty1-ty0+1),done=0;\n"
+        "  var mc=mos.getContext('2d');mc.fillStyle='#e8eef7';mc.fillRect(0,0,mw,mh);\n"
+        "  var total=(tx1-tx0+1)*(ty1-ty0+1),done=0,miss=0;\n"
         "  for(var ty=ty0;ty<=ty1;ty++){\n"
         "    for(var tx=tx0;tx<=tx1;tx++){\n"
+        "      if(mapRunCancelRequested)throw new Error('user-cancel');\n"
         "      var img=await loadTile(z,tx,ty);\n"
-        "      if(img)mc.drawImage(img,(tx-tx0)*TILE,(ty-ty0)*TILE);\n"
+        "      if(mapRunCancelRequested)throw new Error('user-cancel');\n"
+        "      if(img){\n"
+        "        mc.drawImage(img,(tx-tx0)*TILE,(ty-ty0)*TILE);\n"
+        "      }else{\n"
+        "        miss++;\n"
+        "        if(netOffline())throw new Error('offline');\n"
+        "      }\n"
         "      done++;if(onTile)onTile(done,total);\n"
         "    }\n"
         "  }\n"
+        "  if(miss===total)throw new Error('tile-fetch-failed');\n"
         "  var out=document.createElement('canvas');out.width=W;out.height=H;\n"
-        "  var oc=out.getContext('2d');\n"
-        "  oc.imageSmoothingEnabled=true;\n"
+        "  var oc=out.getContext('2d');oc.imageSmoothingEnabled=true;\n"
         "  var sx=px0-tx0*TILE,sw=px1-px0;\n"
         "  for(var dy=0;dy<H;dy++){\n"
-        "    var latT=s.latMax-(s.latMax-s.latMin)*dy/H;\n"
-        "    var latB=s.latMax-(s.latMax-s.latMin)*(dy+1)/H;\n"
+        "    var latT=b.latMax-(b.latMax-b.latMin)*dy/H;\n"
+        "    var latB=b.latMax-(b.latMax-b.latMin)*(dy+1)/H;\n"
         "    var syT=lat2px(latT,z)-ty0*TILE,syB=lat2px(latB,z)-ty0*TILE;\n"
         "    var sh=Math.max(1,syB-syT);\n"
         "    oc.drawImage(mos,sx,syT,sw,sh,0,dy,W,1);\n"
         "  }\n"
         "  return new Promise(function(res){out.toBlob(res,'image/png');});\n"
         "}\n"
-        "function upload(code,blob,s){\n"
-        "  var fd=new FormData();\n"
-        "  fd.append('file',blob,code+'.png');\n"
+        "function uploadState(s,blob){\n"
+        "  var fd=new FormData();fd.append('file',blob,s.code+'.png');\n"
         "  var q='?latMin='+s.latMin+'&latMax='+s.latMax+'&lonMin='+s.lonMin+'&lonMax='+s.lonMax;\n"
         "  return fetch('/state-map-upload'+q,{method:'POST',body:fd}).then(function(r){return r.json();});\n"
         "}\n"
+        "function uploadDetail(c,blob,lod){\n"
+        "  var fd=new FormData();fd.append('file',blob,c.key+'.png');\n"
+        "  return fetch('/detail-map-upload?lod='+encodeURIComponent(lod),{method:'POST',body:fd}).then(function(r){return r.json();});\n"
+        "}\n"
         "function say(t){el.textContent=t;}\n"
-        "async function run(){\n"
-        "  btn.disabled=true;\n"
-        "  var okN=0,failN=0;\n"
-        "  for(var i=0;i<NEED.length;i++){\n"
-        "    var s=NEED[i];\n"
-        "    try{\n"
-        "      var blob=await buildStatePng(s,ST.imageW,ST.imageH,function(d,t){\n"
-        "        say('['+(i+1)+'/'+NEED.length+'] '+s.name+': tile '+d+' of '+t);\n"
-        "      });\n"
-        "      say('['+(i+1)+'/'+NEED.length+'] '+s.name+': uploading '+Math.round(blob.size/1024)+' KB');\n"
-        "      var r=await upload(s.code,blob,s);\n"
-        "      if(r&&r.ok){okN++;}else{failN++;}\n"
-        "    }catch(e){failN++;}\n"
+        "function freshDim(item,w,h){return !!(item&&item.w==w&&item.h==h);}\n"
+        "function detailCacheFresh(key,cfg,w,h){\n"
+        "  var c=DETAIL_CACHE[key];\n"
+        "  if(!c||!freshDim(c,w,h))return false;\n"
+        "  var lod=(typeof c.lod==='number')?c.lod:1;\n"
+        "  return lod===cfg.lod;\n"
+        "}\n"
+        "function cellForPoint(p,cellDeg){\n"
+        "  if(!p||!isFinite(p.lat)||!isFinite(p.lon))return null;\n"
+        "  var lat=p.lat,lon=p.lon;\n"
+        "  if(lat<-90||lat>90)return null;\n"
+        "  if(lat>=90)lat=89.9999;\n"
+        "  lon=((lon+180)%360+360)%360-180;\n"
+        "  if(lon>=180)lon=179.9999;\n"
+        "  var lat10=Math.floor(lat*10),lon10=Math.floor(lon*10);\n"
+        "  if(lat10<-900||lat10>899||lon10<-1800||lon10>1799)return null;\n"
+        "  var key=(lat10<0?'S':'N')+String(Math.abs(lat10)).padStart(4,'0')+\n"
+        "          (lon10<0?'W':'E')+String(Math.abs(lon10)).padStart(4,'0');\n"
+        "  var latMin=lat10/10,lonMin=lon10/10;\n"
+        "  return {key:key,latMin:latMin,latMax:latMin+cellDeg,lonMin:lonMin,lonMax:lonMin+cellDeg};\n"
+        "}\n"
+        "function stateForPoint(p,states){\n"
+        "  var best=null,ba=1e9;\n"
+        "  states.forEach(function(s){\n"
+        "    if(p.lat<s.latMin||p.lat>s.latMax||p.lon<s.lonMin||p.lon>s.lonMax)return;\n"
+        "    var a=(s.latMax-s.latMin)*(s.lonMax-s.lonMin);\n"
+        "    if(!best||a<ba){best=s;ba=a;}\n"
+        "  });\n"
+        "  return best;\n"
+        "}\n"
+        "function formatDuration(sec){\n"
+        "  if(sec<50)return '<1 min';\n"
+        "  var m=Math.round(sec/60);\n"
+        "  if(m<120)return String(m)+' min';\n"
+        "  var h=(m/60).toFixed(1);\n"
+        "  return h+' h';\n"
+        "}\n"
+        "function formatMb(kb){\n"
+        "  var mb=kb/1024;\n"
+        "  return (mb<1?mb.toFixed(1):mb.toFixed(0))+' MB';\n"
+        "}\n"
+        "function estimatePlan(cfg){\n"
+        "  if(!ST)return {sec:0,kb:0,tiles:0};\n"
+        "  var stateTiles=0,detailTiles=0;\n"
+        "  for(var i=0;i<NEED_STATES.length;i++){\n"
+        "    stateTiles+=pickPlan(NEED_STATES[i],ST.imageW,ST.imageH,0,64).tiles;\n"
         "  }\n"
-        "  say('Done. '+okN+' saved'+(failN?', '+failN+' failed':'')+'. Reload to refresh the list.');\n"
+        "  var detailW=(ST.detail&&ST.detail.imageW)||ST.imageW;\n"
+        "  var detailH=(ST.detail&&ST.detail.imageH)||ST.imageH;\n"
+        "  for(var j=0;j<NEED_DETAILS.length;j++){\n"
+        "    detailTiles+=pickPlan(NEED_DETAILS[j],detailW,detailH,cfg.zoomBias,cfg.maxTiles).tiles;\n"
+        "  }\n"
+        "  var kb=NEED_STATES.length*220+NEED_DETAILS.length*cfg.detailKb;\n"
+        "  var sec=stateTiles*0.09+detailTiles*cfg.tileSec+(NEED_STATES.length+NEED_DETAILS.length)*0.4;\n"
+        "  return {sec:sec,kb:kb,tiles:stateTiles+detailTiles};\n"
+        "}\n"
+        "function refreshPlanStatus(prefix){\n"
+        "  if(!ST)return;\n"
+        "  var cfg=levelCfg();\n"
+        "  var stateCodes=Object.keys(STATE_BY_CODE).sort();\n"
+        "  NEED_STATES=stateCodes.filter(function(c){\n"
+        "    var s=STATE_BY_CODE[c];\n"
+        "    return !(s.cached&&freshDim(s,ST.imageW,ST.imageH));\n"
+        "  }).map(function(c){return STATE_BY_CODE[c];});\n"
+        "  var staleStates=stateCodes.filter(function(c){\n"
+        "    var s=STATE_BY_CODE[c];\n"
+        "    return s.cached&&!freshDim(s,ST.imageW,ST.imageH);\n"
+        "  }).length;\n"
+
+        "  var detailKeys=Object.keys(DETAIL_BY_KEY).sort();\n"
+        "  var detailW=(ST.detail&&ST.detail.imageW)||ST.imageW;\n"
+        "  var detailH=(ST.detail&&ST.detail.imageH)||ST.imageH;\n"
+        "  NEED_DETAILS=detailKeys.filter(function(k){\n"
+        "    return !detailCacheFresh(k,cfg,detailW,detailH);\n"
+        "  }).map(function(k){return DETAIL_BY_KEY[k];});\n"
+        "  var staleDetails=detailKeys.filter(function(k){\n"
+        "    var c=DETAIL_CACHE[k];\n"
+        "    if(!c)return false;\n"
+        "    if(!freshDim(c,detailW,detailH))return true;\n"
+        "    var lod=(typeof c.lod==='number')?c.lod:1;\n"
+        "    return lod!==cfg.lod;\n"
+        "  }).length;\n"
+
+        "  var parts=[];\n"
+        "  if(stateCodes.length){\n"
+        "    parts.push(stateCodes.length+' state'+(stateCodes.length==1?'':'s')+' from node positions'+\n"
+        "      (NEED_STATES.length?(' ('+NEED_STATES.length+' pending'+(staleStates?' incl '+staleStates+' refresh':'')+')'):' (cached)'));\n"
+        "  }else{\n"
+        "    parts.push('No US state maps needed from current node positions');\n"
+        "  }\n"
+        "  if(detailKeys.length){\n"
+        "    parts.push(detailKeys.length+' detail cell'+(detailKeys.length==1?'':'s')+' from nodes + your position at '+cfg.label.toLowerCase()+' detail'+\n"
+        "      (NEED_DETAILS.length?(' ('+NEED_DETAILS.length+' pending'+(staleDetails?' incl '+staleDetails+' refresh':'')+')'):' (cached)'));\n"
+        "  }else{\n"
+        "    parts.push('No positioned nodes or local position for detail cells yet');\n"
+        "  }\n"
+        "  var pending=NEED_STATES.length+NEED_DETAILS.length;\n"
+        "  parts.push(pending?pending+' total map item'+(pending==1?'':'s')+' to download.':'All required maps already cached.');\n"
+        "  var status=parts.join('. ');\n"
+        "  say(prefix?prefix+' '+status:status);\n"
+        "  if(!mapRunActive){\n"
+        "    setProgress(pending?0:1,pending?'Ready':'Cached');\n"
+        "    setStopEnabled(false);\n"
+        "  }\n"
+
+        "  if(warn){\n"
+        "    var est=estimatePlan(cfg);\n"
+        "    if(pending){\n"
+        "      var txt='Estimate at '+cfg.label+' detail: about '+formatDuration(est.sec)+', '+formatMb(est.kb)+' on card, and roughly '+est.tiles+' tile fetches.';\n"
+        "      if(cfg.id==='buildings')txt+=' Building-level downloads can take a long time on larger node sets.';\n"
+        "      warn.textContent=txt;\n"
+        "    }else{\n"
+        "      warn.textContent='Estimate at '+cfg.label+' detail: no downloads pending.';\n"
+        "    }\n"
+        "  }\n"
+
+        "  if(btn){\n"
+        "    btn.disabled=!pending;\n"
+        "    btn.title=pending?'Downloads '+NEED_STATES.length+' state and '+NEED_DETAILS.length+' detail map item'+(pending==1?'':'s')+' at '+cfg.label+' detail':'Everything required is already cached at the selected detail';\n"
+        "    btn.onclick=run;\n"
+        "  }\n"
+        "}\n"
+        "async function run(){\n"
+        "  if(!btn||!ST||mapRunActive)return;\n"
+        "  mapRunActive=true;\n"
+        "  mapRunInterrupted=false;\n"
+        "  mapRunCancelRequested=false;\n"
+        "  mapRunStoppedByUser=false;\n"
+        "  var cfg=levelCfg();\n"
+        "  refreshPlanStatus();\n"
+        "  var stateJobs=NEED_STATES.slice(0);\n"
+        "  var detailJobs=NEED_DETAILS.slice(0);\n"
+        "  var total=stateJobs.length+detailJobs.length;\n"
+        "  if(!total){mapRunActive=false;setStopEnabled(false);return;}\n"
+        "  if(netOffline())mapRunInterrupted=true;\n"
+        "  btn.disabled=true;\n"
+        "  if(levelSel)levelSel.disabled=true;\n"
+        "  setStopEnabled(true);\n"
+        "  var okState=0,failState=0,okDetail=0,failDetail=0;\n"
+        "  var detailW=(ST.detail&&ST.detail.imageW)||ST.imageW;\n"
+        "  var detailH=(ST.detail&&ST.detail.imageH)||ST.imageH;\n"
+        "  var totalTiles=0;\n"
+        "  for(var tsi=0;tsi<stateJobs.length;tsi++)totalTiles+=pickPlan(stateJobs[tsi],ST.imageW,ST.imageH,0,64).tiles;\n"
+        "  for(var tdi=0;tdi<detailJobs.length;tdi++)totalTiles+=pickPlan(detailJobs[tdi],detailW,detailH,cfg.zoomBias,cfg.maxTiles).tiles;\n"
+        "  var totalSteps=totalTiles+total;\n"
+        "  if(totalSteps<1)totalSteps=1;\n"
+        "  var doneSteps=0;\n"
+        "  setProgress(0,'Starting');\n"
+        "  for(var i=0;i<stateJobs.length;i++){\n"
+        "    if(mapRunInterrupted||mapRunCancelRequested||netOffline()){mapRunInterrupted=true;break;}\n"
+        "    var s=stateJobs[i];\n"
+        "    var idx=i+1;\n"
+        "    var st=pickPlan(s,ST.imageW,ST.imageH,0,64).tiles;\n"
+        "    if(st<1)st=1;\n"
+        "    try{\n"
+        "      var blob=await buildPng(s,ST.imageW,ST.imageH,function(d,t){var td=d;if(td<0)td=0;if(td>st)td=st;setProgress((doneSteps+td)/totalSteps,'Downloading '+s.name);say('['+idx+'/'+total+'] '+s.name+': tile '+d+' of '+t);},{zoomBias:0,maxTiles:64});\n"
+        "      if(mapRunInterrupted||mapRunCancelRequested||netOffline()){mapRunInterrupted=true;break;}\n"
+        "      doneSteps+=st;\n"
+        "      setProgress(doneSteps/totalSteps,'Uploading '+s.name);\n"
+        "      say('['+idx+'/'+total+'] '+s.name+': uploading '+Math.round(blob.size/1024)+' KB');\n"
+        "      var r=await uploadState(s,blob);\n"
+        "      doneSteps++;\n"
+        "      if(r&&r.ok){okState++;s.cached=true;s.w=ST.imageW;s.h=ST.imageH;setProgress(doneSteps/totalSteps,'Saved '+s.name);}else{failState++;setProgress(doneSteps/totalSteps,'Interrupted on '+s.name);mapRunInterrupted=true;break;}\n"
+        "    }catch(e){\n"
+        "      if(mapRunCancelRequested){mapRunInterrupted=true;mapRunStoppedByUser=true;break;}\n"
+        "      failState++;\n"
+        "      setProgress(doneSteps/totalSteps,'Interrupted on '+s.name);\n"
+        "      mapRunInterrupted=true;\n"
+        "      break;\n"
+        "    }\n"
+        "  }\n"
+        "  for(var j=0;j<detailJobs.length;j++){\n"
+        "    if(mapRunInterrupted||mapRunCancelRequested||netOffline()){mapRunInterrupted=true;break;}\n"
+        "    var c=detailJobs[j];\n"
+        "    var jdx=stateJobs.length+j+1;\n"
+        "    var dt=pickPlan(c,detailW,detailH,cfg.zoomBias,cfg.maxTiles).tiles;\n"
+        "    if(dt<1)dt=1;\n"
+        "    try{\n"
+        "      var dblob=await buildPng(c,detailW,detailH,function(d,t){var td=d;if(td<0)td=0;if(td>dt)td=dt;setProgress((doneSteps+td)/totalSteps,'Downloading '+c.key);say('['+jdx+'/'+total+'] '+c.key+': tile '+d+' of '+t);},{zoomBias:cfg.zoomBias,maxTiles:cfg.maxTiles});\n"
+        "      if(mapRunInterrupted||mapRunCancelRequested||netOffline()){mapRunInterrupted=true;break;}\n"
+        "      doneSteps+=dt;\n"
+        "      setProgress(doneSteps/totalSteps,'Uploading '+c.key);\n"
+        "      say('['+jdx+'/'+total+'] '+c.key+': uploading '+Math.round(dblob.size/1024)+' KB');\n"
+        "      var dr=await uploadDetail(c,dblob,cfg.lod);\n"
+        "      doneSteps++;\n"
+        "      if(dr&&dr.ok){okDetail++;DETAIL_CACHE[c.key]={key:c.key,w:detailW,h:detailH,lod:cfg.lod};setProgress(doneSteps/totalSteps,'Saved '+c.key);}else{failDetail++;setProgress(doneSteps/totalSteps,'Interrupted on '+c.key);mapRunInterrupted=true;break;}\n"
+        "    }catch(e){\n"
+        "      if(mapRunCancelRequested){mapRunInterrupted=true;mapRunStoppedByUser=true;break;}\n"
+        "      failDetail++;\n"
+        "      setProgress(doneSteps/totalSteps,'Interrupted on '+c.key);\n"
+        "      mapRunInterrupted=true;\n"
+        "      break;\n"
+        "    }\n"
+        "  }\n"
+        "  var okN=okState+okDetail,failN=failState+failDetail;\n"
+        "  mapRunActive=false;\n"
         "  btn.disabled=false;\n"
+        "  if(levelSel)levelSel.disabled=false;\n"
+        "  setStopEnabled(false);\n"
+        "  if(mapRunStoppedByUser){\n"
+        "    setProgress(doneSteps/totalSteps,'Stopped');\n"
+        "    refreshPlanStatus('Stopped by user. '+okN+' saved'+(failN?', '+failN+' failed':'')+'. Press Download maps to continue.');\n"
+        "  }else if(mapRunInterrupted){\n"
+        "    setProgress(doneSteps/totalSteps,'Interrupted');\n"
+        "    refreshPlanStatus('Interrupted. '+okN+' saved'+(failN?', '+failN+' failed':'')+'. Reconnect, then press Download maps to continue.');\n"
+        "  }else{\n"
+        "    setProgress(1,'Complete');\n"
+        "    refreshPlanStatus('Done. '+okN+' saved'+(failN?', '+failN+' failed':'')+'.');\n"
+        "  }\n"
         "}\n"
         "fetch('/state-map-status').then(function(r){return r.json();}).then(function(d){\n"
         "  ST=d;\n"
-        "  if(!d||!d.storage){say('No storage detected on the device.');return;}\n"
-        "  var pts=(window.NODE_HEAT_POINTS||[]),need={};\n"
-        "  pts.forEach(function(p){\n"
-        "    var best=null,ba=1e9;\n"
-        "    d.states.forEach(function(s){\n"
-        "      if(p.lat<s.latMin||p.lat>s.latMax||p.lon<s.lonMin||p.lon>s.lonMax)return;\n"
-        "      var a=(s.latMax-s.latMin)*(s.lonMax-s.lonMin);\n"
-        "      if(!best||a<ba){best=s;ba=a;}});\n"
-        "    if(best)need[best.code]=best;});\n"
-        "  // Cached at a different resolution is stale, not finished: the device still\n"
-        "  // draws it, just softly, and re-running the download replaces it in place.\n"
-        "  function fresh(s){return s.cached && s.w==d.imageW && s.h==d.imageH;}\n"
-        "  var codes=Object.keys(need).sort();\n"
-        "  if(!codes.length){say('No known node reports a position inside the United States, so there is nothing to download yet.');return;}\n"
-        "  NEED=codes.filter(function(c){return !fresh(need[c]);}).map(function(c){return need[c];});\n"
-        "  var stale=codes.filter(function(c){return need[c].cached && !fresh(need[c]);}).length;\n"
-        "  say(codes.length+' state'+(codes.length==1?'':'s')+' needed: '+\n"
-        "      codes.map(function(c){\n"
-        "        var s=need[c];\n"
-        "        return s.name+(fresh(s)?' (cached)':s.cached?' (cached at '+s.w+'x'+s.h+', now '+d.imageW+'x'+d.imageH+')':'');\n"
-        "      }).join(', ')+\n"
-        "      '. '+(NEED.length?NEED.length+' to download'+(stale?' ('+stale+' to refresh at the higher resolution)':'')+'.':'All cached.'));\n"
-        "  if(btn){\n"
-        "    btn.disabled=!NEED.length;\n"
-        "    btn.title=NEED.length?'Downloads '+NEED.length+' state map'+(NEED.length==1?'':'s')+' at '+d.imageW+'x'+d.imageH:'Every needed state is already cached at the current resolution';\n"
-        "    btn.onclick=run;\n"
-        "  }\n"
-        "}).catch(function(){say('Could not read the map cache status.');});\n"
+        "  if(!d||!d.storage){say('No storage detected on the device.');if(warn)warn.textContent='';return;}\n"
+        "  var pts=(window.NODE_HEAT_POINTS||[]);\n"
+        "  var me=(window.NODE_ME_POINT||null);\n"
+        "  STATE_BY_CODE={};DETAIL_BY_KEY={};DETAIL_CACHE={};\n"
+        "  pts.forEach(function(p){var s=stateForPoint(p,d.states||[]);if(s)STATE_BY_CODE[s.code]=s;});\n"
+        "  var detail=(d.detail||{});\n"
+        "  var cellDeg=(detail.cellDeg||0.1);\n"
+        "  pts.forEach(function(p){var c=cellForPoint(p,cellDeg);if(c)DETAIL_BY_KEY[c.key]=c;});\n"
+        "  if(me){var mc=cellForPoint(me,cellDeg);if(mc)DETAIL_BY_KEY[mc.key]=mc;}\n"
+        "  (detail.cached||[]).forEach(function(c){if(c&&c.key)DETAIL_CACHE[c.key]=c;});\n"
+        "  if(levelSel)levelSel.onchange=function(){refreshPlanStatus();};\n"
+        "  refreshPlanStatus();\n"
+        "}).catch(function(){say('Could not read map cache status.');setProgress(0,'Unavailable');if(warn)warn.textContent='';});\n"
         "})();\n"
         "</script>";
+#endif
+    sendChunk(html);
+
+    html +=
+        "<script>\n"
+        "(function(){\n"
+        "var statusEl=document.getElementById('mapdl-status');\n"
+        "if(!statusEl)return;\n"
+        "var button=document.getElementById('mapdl-btn');\n"
+        "var level=document.getElementById('mapdl-level');\n"
+        "var warning=document.getElementById('mapdl-warn');\n"
+        "var progressWrap=document.getElementById('mapdl-progress-wrap');\n"
+        "var progressBar=document.getElementById('mapdl-progress-bar');\n"
+        "var progressText=document.getElementById('mapdl-progress-text');\n"
+        "var stopButton=document.getElementById('mapdl-stop');\n"
+        "var active=false,cancelRequested=false,plan=[],pending=[],refreshToken=0;\n"
+        "var ROAD_Z=13,STATUS_BATCH=48,TILE=256,VIEW_W=282,VIEW_H=188;\n"
+        "function say(text){statusEl.textContent=text;}\n"
+        "function setProgress(done,total,label){\n"
+        "  var fraction=total>0?done/total:0;if(fraction<0)fraction=0;if(fraction>1)fraction=1;\n"
+        "  var percent=Math.round(fraction*100);\n"
+        "  progressWrap.setAttribute('aria-valuenow',String(percent));\n"
+        "  progressBar.style.width=String(percent)+'%';\n"
+        "  progressText.textContent=(label?label+' ':'')+'('+percent+'%)';\n"
+        "}\n"
+        "function setStop(enabled){\n"
+        "  stopButton.disabled=!enabled;stopButton.style.opacity=enabled?'1':'0.6';\n"
+        "  stopButton.style.cursor=enabled?'pointer':'default';\n"
+        "}\n"
+        "function selectedMaxZoom(){var value=parseInt(level.value||'16',10);return value===13||value===16||value===19?value:16;}\n"
+        "function tilesForPoint(point,zoom){\n"
+        "  if(!point||!isFinite(point.lat)||!isFinite(point.lon))return [];\n"
+        "  var lat=Number(point.lat),lon=Number(point.lon);\n"
+        "  if((lat===0&&lon===0)||lat<-90||lat>90)return [];\n"
+        "  if(lat>85.05112878)lat=85.05112878;if(lat<-85.05112878)lat=-85.05112878;\n"
+        "  lon=((lon+180)%360+360)%360-180;\n"
+        "  var count=Math.pow(2,zoom),world=TILE*count,worldX=(lon+180)/360*world;\n"
+        "  var sinLat=Math.sin(lat*Math.PI/180);\n"
+        "  var worldY=(0.5-Math.log((1+sinLat)/(1-sinLat))/(4*Math.PI))*world;\n"
+        "  var x0=Math.floor((worldX-VIEW_W/2)/TILE),x1=Math.floor((worldX+VIEW_W/2-0.001)/TILE);\n"
+        "  var y0=Math.floor((worldY-VIEW_H/2)/TILE),y1=Math.floor((worldY+VIEW_H/2-0.001)/TILE);\n"
+        "  var tiles=[];\n"
+        "  for(var rawY=y0;rawY<=y1;rawY++){if(rawY<0||rawY>=count)continue;\n"
+        "    for(var rawX=x0;rawX<=x1;rawX++){var x=((rawX%count)+count)%count;\n"
+        "      tiles.push({z:zoom,x:x,y:rawY,key:zoom+'_'+x+'_'+rawY+'.png',cached:false});\n"
+        "    }\n"
+        "  }\n"
+        "  return tiles;\n"
+        "}\n"
+        "function buildPlan(){\n"
+        "  var points=window.NODE_HEAT_POINTS||[],maxZoom=selectedMaxZoom(),byKey={};\n"
+        "  for(var i=0;i<points.length;i++){\n"
+        "    for(var zoom=ROAD_Z;zoom<=maxZoom;zoom++){\n"
+        "      var tiles=tilesForPoint(points[i],zoom);\n"
+        "      for(var t=0;t<tiles.length;t++)byKey[tiles[t].key]=tiles[t];\n"
+        "    }\n"
+        "  }\n"
+        "  return Object.keys(byKey).map(function(key){return byKey[key];}).sort(function(a,b){\n"
+        "    return a.z-b.z||a.x-b.x||a.y-b.y;\n"
+        "  });\n"
+        "}\n"
+        "async function markCached(tiles){\n"
+        "  var storage=true;\n"
+        "  for(var offset=0;offset<tiles.length;offset+=STATUS_BATCH){\n"
+        "    var batch=tiles.slice(offset,offset+STATUS_BATCH);\n"
+        "    var keys=batch.map(function(tile){return tile.key;}).join(',');\n"
+        "    var response=await fetch('/map-tile-status?keys='+encodeURIComponent(keys),{cache:'no-store'});\n"
+        "    var data=await response.json();\n"
+        "    if(!response.ok||!data)throw new Error((data&&data.error)||'status failed');\n"
+        "    storage=storage&&data.storage!==false;\n"
+        "    var bits=String(data.bits||'');\n"
+        "    for(var i=0;i<batch.length;i++)batch[i].cached=bits.charAt(i)==='1';\n"
+        "  }\n"
+        "  return storage;\n"
+        "}\n"
+        "function durationText(tileCount){\n"
+        "  var minutes=Math.max(1,Math.ceil(tileCount*1.5/60));\n"
+        "  if(minutes<60)return 'at least about '+minutes+' minute'+(minutes===1?'':'s');\n"
+        "  return 'at least about '+(minutes/60).toFixed(1)+' hours';\n"
+        "}\n";
+    sendChunk(html);
+
+    html +=
+        "async function refreshPlan(prefix){\n"
+        "  var token=++refreshToken;button.disabled=true;say('Checking offline tile cache...');\n"
+        "  plan=buildPlan();pending=[];\n"
+        "  if(!plan.length){say('No positioned nodes are available for map downloads.');setProgress(0,1,'No tiles');return;}\n"
+        "  try{\n"
+        "    var storage=await markCached(plan);if(token!==refreshToken)return;\n"
+        "    if(!storage){say('No writable storage is available on the device.');setProgress(0,1,'Unavailable');return;}\n"
+        "    pending=plan.filter(function(tile){return !tile.cached;});\n"
+        "    var cached=plan.length-pending.length,maxZoom=selectedMaxZoom();\n"
+        "    var summary=plan.length+' unique node-centered viewport tile'+(plan.length===1?'':'s')+' through zoom '+maxZoom+\n"
+        "      ': '+cached+' cached, '+pending.length+' pending.';\n"
+        "    say(prefix?prefix+' '+summary:summary);\n"
+        "    setProgress(cached,plan.length,pending.length?'Ready':'Cached');\n"
+        "    if(maxZoom>=19){\n"
+        "      warning.textContent='WARNING: Buildings detail can take a very, very long time. '+pending.length+\n"
+        "        ' pending tile'+(pending.length===1?'':'s')+' may take '+durationText(pending.length)+\n"
+        "        ', and the page must remain open for the entire run.';warning.style.color='#a33a18';\n"
+        "    }else if(maxZoom>=16){\n"
+        "      warning.textContent='Streets detail can take a long time on a large node database. '+pending.length+\n"
+        "        ' tile'+(pending.length===1?'':'s')+' remain; allow '+durationText(pending.length)+'.';warning.style.color='#9a4f00';\n"
+        "    }else{\n"
+        "      warning.textContent='Roads downloads the zoom-13 tiles covering each node-centered Locate viewport after overlap is removed.';warning.style.color='#68788a';\n"
+        "    }\n"
+        "    button.disabled=!pending.length;\n"
+        "  }catch(error){\n"
+        "    if(token!==refreshToken)return;say('Could not read offline tile status: '+error.message);\n"
+        "    setProgress(0,1,'Unavailable');warning.textContent='';\n"
+        "  }\n"
+        "}\n"
+        "async function fetchTile(tile){\n"
+        "  var query='?z='+tile.z+'&x='+tile.x+'&y='+tile.y;\n"
+        "  var response=await fetch('/map-tile-fetch'+query,{method:'POST'});\n"
+        "  var data=null;try{data=await response.json();}catch(ignore){}\n"
+        "  if(!response.ok||!data||!data.ok)throw new Error((data&&data.error)||('HTTP '+response.status));\n"
+        "  return data;\n"
+        "}\n"
+        "async function run(){\n"
+        "  if(active||!pending.length)return;\n"
+        "  var jobs=pending.slice(),maxZoom=selectedMaxZoom();\n"
+        "  if((maxZoom>=19||jobs.length>200)&&!confirm('This plan will download '+jobs.length+\n"
+        "      ' tiles through zoom '+maxZoom+'. Detailed maps can take a very, very long time. Continue?'))return;\n"
+        "  active=true;cancelRequested=false;button.disabled=true;level.disabled=true;setStop(true);\n"
+        "  var saved=0,failed=0;setProgress(0,jobs.length,'Starting');\n"
+        "  for(var i=0;i<jobs.length;i++){\n"
+        "    if(cancelRequested)break;var tile=jobs[i];\n"
+        "    say('['+(i+1)+'/'+jobs.length+'] Downloading zoom '+tile.z+' tile '+tile.x+'/'+tile.y);\n"
+        "    try{await fetchTile(tile);tile.cached=true;saved++;setProgress(i+1,jobs.length,'Saved zoom '+tile.z);}\n"
+        "    catch(error){failed++;setProgress(i,jobs.length,'Interrupted');say('Stopped on '+tile.key+': '+error.message);break;}\n"
+        "  }\n"
+        "  active=false;level.disabled=false;setStop(false);\n"
+        "  var prefix=cancelRequested?'Stopped. '+saved+' saved.':(failed?'Interrupted. '+saved+' saved, '+failed+' failed.':'Complete. '+saved+' saved.');\n"
+        "  await refreshPlan(prefix);\n"
+        "}\n"
+        "stopButton.onclick=function(){if(active){cancelRequested=true;setStop(false);say('Stopping after the current tile...');}};\n"
+        "button.onclick=run;\n"
+        "level.onchange=function(){if(!active)refreshPlan();};\n"
+        "setStop(false);refreshPlan();\n"
+        "})();\n"
+        "</script>";
+    sendChunk(html);
 #endif
 
 
@@ -4660,6 +5788,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "var chatIsDm=false;var chatId='';var chatCursor=-1;var chatLines=[];"
                         "var chatReplyPid=0;var chatPreview={};var chatTimer=null;var chatTargetsTimer=null;"
                         "var chatPollBusy=false;var chatRenderPending=false;var chatTargetsHtml='';"
+                        "function chatMaxLen(){var inp=document.getElementById('chat-input');if(!inp)return 0;var m=parseInt(inp.getAttribute('maxlength')||'0',10);return m>0?m:0;}"
+                        "function chatUpdateCount(){var inp=document.getElementById('chat-input');var c=document.getElementById('chat-count');if(!inp||!c)return;var m=chatMaxLen();c.textContent=String(inp.value.length)+'/'+(m>0?String(m):'?');}"
+                        "function chatComposerKey(ev){if(!ev)return;if((ev.ctrlKey||ev.metaKey)&&ev.key==='Enter'){ev.preventDefault();chatSend();}}"
                         "function chatEsc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}"
                         "function chatTargetChanged(){"
                             "var sel=document.getElementById('chat-target');var v=sel?sel.value:'';"
@@ -4786,13 +5917,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "}"
                         "function chatTapback(pid,idx){chatPost(CHAT_TAPS[idx],pid,1);}"
                         "function chatSend(){"
-                            "var inp=document.getElementById('chat-input');if(!inp)return;var t=inp.value.trim();if(!t)return;"
-                            "chatPost(t,chatReplyPid,0);inp.value='';chatCancelReply();"
+                            "var inp=document.getElementById('chat-input');if(!inp)return;var t=String(inp.value||'').trim();if(!t)return;"
+                            "chatPost(t,chatReplyPid,0);inp.value='';chatUpdateCount();chatCancelReply();"
                         "}"
                         "function chatLiveOn(){var c=document.getElementById('chat-live');return c?c.checked:true;}"
                         "function chatStartTimers(){if(!chatTimer)chatTimer=setInterval(pollChat,2000);if(!chatTargetsTimer)chatTargetsTimer=setInterval(loadChatTargets,5000);}"
                         "function chatStopTimers(){if(chatTimer){clearInterval(chatTimer);chatTimer=null;}if(chatTargetsTimer){clearInterval(chatTargetsTimer);chatTargetsTimer=null;}}"
-                        "function chatBodySync(){var b=document.getElementById('chat-body');if(b)b.style.display=chatLiveOn()?'':'none';}"
+                        "function chatBodySync(){var b=document.getElementById('chat-body');if(b)b.style.display=chatLiveOn()?'':'none';chatUpdateCount();}"
                         "function chatLiveToggle(){chatBodySync();if(chatLiveOn()){loadChatTargets();if(chatId!=='')pollChat();chatStartTimers();}else{chatStopTimers();}}"
                         "function startChatPolling(){chatBodySync();loadChatTargets();if(chatId!=='')pollChat();if(chatLiveOn())chatStartTimers();}"
                         "function stopChatPolling(){chatStopTimers();}"
@@ -6700,6 +7831,10 @@ static void registerCommonRoutes() {
     // has no Utilities tab to put the control on.
     onRoute("/state-map-status",  HTTP_GET,  handleGetStateMapStatus);
     onRoute("/state-map-upload",  HTTP_POST, handleStateMapUploadDone, handleStateMapUpload);
+    onRoute("/detail-map-upload", HTTP_POST, handleDetailMapUploadDone, handleDetailMapUpload);
+    onRoute("/map-tile-status",   HTTP_GET,  handleGetMapTileStatus);
+    onRoute("/map-tile-upload",   HTTP_POST, handleMapTileUploadDone, handleMapTileUpload);
+    onRoute("/map-tile-fetch",    HTTP_POST, handlePostMapTileFetch);
 #endif
     onRoute("/nodes.csv",         HTTP_GET,  handleGetNodesCsv);
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);

@@ -592,10 +592,9 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define MAX_NODES        250
 #endif
 
-// ── State maps ────────────────────────────────────────────────
-// Cached state maps and everything attached to them: the Locate modal, the web
-// config Maps Download section and its upload/status/clear routes, and the
-// LVGL filesystem driver they read through.
+// ── Maps ──────────────────────────────────────────────────────
+// The live Locate canvas, offline z/x/y tile cache, Web Config downloader, and
+// migration cleanup for obsolete state/detail map files.
 //
 // Off on two boards, for the same underlying reason — not enough memory to
 // decode a map — reached from opposite directions:
@@ -603,13 +602,11 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 //   * Cardputer: no PSRAM at all. One map costs ~490 KB transiently, more than
 //     that board's entire LVGL pool. It also serves web config in lite form
 //     only, so the download UI could never be reached there in any case.
-//   * Heltec V4: 2 MB PSRAM shared with everything else, and no card slot —
-//     maps would live in the same internal flash partition as chat history and
-//     config. Revisit if an R8 (8 MB) variant appears; every Heltec-specific
-//     path in the map code is still in place, so this flag is the only thing
-//     that has to change.
+//   * Heltec V4: 2 MB PSRAM shared with everything else. The live RGB565 canvas
+//     plus one decoded 256x256 tile does not leave enough measured headroom.
+//     Revisit if an R8 (8 MB) variant appears.
 //
-// Compiling it out keeps the handlers, the 50-state table and ~5 KB of page
+// Compiling it out keeps the tile worker, canvas, handlers, and downloader
 // JavaScript out of images whose memory budgets are the tightest here.
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_HELTEC_V4_EXPANSION)
 #define HAS_STATE_MAPS 0
