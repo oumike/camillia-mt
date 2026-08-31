@@ -690,6 +690,39 @@ static size_t pbWriteVarint(uint8_t *buf, uint64_t val) {
     return n;
 }
 
+// Appends Data.bitfield (field 9) and returns the new length, or 0 if it would
+// not fit. Written unconditionally, *including when the value is zero*.
+//
+// Meshtastic 2.8 uses the presence of this field to tell a genuine zero-hop
+// broadcast from pre-2.3.0 firmware that never populated hop_start: NodeDB::
+// classifyHopStart() marks a packet with hop_start == 0 and no bitfield
+// MISSING_OR_UNKNOWN, which keeps it out of module processing, the phone, MQTT
+// and rebroadcast. A node with OK-to-MQTT off and a hop limit of 0 -- both
+// legitimate settings here -- would otherwise have every packet it originates
+// silently discarded by every 2.8 node in range.
+//
+// The zero case costs two bytes and must still be emitted. Fixture, so a
+// regression is recognisable from a packet capture without re-deriving it:
+//
+//   tag  = (9 << 3) | 0 (varint) = 0x48
+//   zero = one varint byte       = 0x00
+//
+// so encodePositionRequest() with bitfield 0 must produce exactly
+//
+//   08 03    Data.portnum   = 3 (POSITION_APP)
+//   12 00    Data.payload   = empty Position
+//   18 01    Data.want_response = true
+//   48 00    Data.bitfield  = 0        <-- present, not omitted
+//
+// A build that emits the first six bytes and stops is the bug this exists to
+// prevent. Do not optimise the zero case back out.
+static size_t pbWriteDataBitfield(uint8_t *buf, size_t n, size_t bufLen, uint32_t bitfield) {
+    if (n + 6 > bufLen) return 0;
+    n += pbWriteVarint(buf + n, (9 << 3) | 0);
+    n += pbWriteVarint(buf + n, bitfield);
+    return n;
+}
+
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
                          uint32_t bitfield, uint32_t replyId, uint32_t emoji) {
     size_t n = 0;
@@ -721,11 +754,8 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
         memcpy(buf + n, &emoji, 4);
         n += 4;
     }
-    // field 9 (bitfield), varint — only written when non-zero (e.g. OK_TO_MQTT bit)
-    if (bitfield) {
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     return n;
 }
 
@@ -814,12 +844,8 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
         n += pbWriteVarint(buf + n, (3 << 3) | 0);  // field 3, varint
         n += pbWriteVarint(buf + n, 1);              // true
     }
-    // field 9 (bitfield), varint — include when non-zero (e.g. OK_TO_MQTT)
-    if (bitfield) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     return n;
 }
 
@@ -883,12 +909,8 @@ size_t encodePosition(int32_t latI, int32_t lonI, int32_t alt,
     n += pbWriteVarint(buf + n, p);
     if (n + p > bufLen) return 0;
     memcpy(buf + n, pos, p); n += p;
-    // field 9 (bitfield), varint — include when non-zero (e.g. OK_TO_MQTT)
-    if (bitfield) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     return n;
 }
 
@@ -954,11 +976,8 @@ size_t encodeTelemetryDevice(uint8_t battPct, float voltage,
     memcpy(buf + n, telem, t);
     n += t;
 
-    if (bitfield) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
 
     return n;
 }
@@ -1012,11 +1031,8 @@ size_t encodeTelemetryEnvironment(float temperatureC, float humidityPct, float p
     memcpy(buf + n, telem, t);
     n += t;
 
-    if (bitfield) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
 
     return n;
 }
@@ -1080,17 +1096,14 @@ size_t encodeNeighborInfo(uint32_t nodeId,
     memcpy(buf + n, info, p);
     n += p;
 
-    if (bitfield) {
-        if (n + 6 > bufLen) return 0;
-        n += pbWriteVarint(buf + n, (9 << 3) | 0);
-        n += pbWriteVarint(buf + n, bitfield);
-    }
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
 
     return n;
 }
 
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
-                     uint8_t *buf, size_t bufLen) {
+                     uint8_t *buf, size_t bufLen, uint32_t bitfield) {
     // Inner Routing proto: field 3 (error_reason), varint
     uint8_t inner[4]; size_t innerLen = 0;
     inner[innerLen++] = (3 << 3) | 0;  // field 3, varint
@@ -1111,11 +1124,13 @@ size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReas
     // Data field 6 (request_id), fixed32 — ID of the packet being ACK'd
     buf[n++] = (6 << 3) | 5;  // field 6, wire type 5 (fixed32)
     memcpy(buf + n, &requestId, 4); n += 4;
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     return n;
 }
 
 size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
-                          uint8_t *buf, size_t bufLen) {
+                          uint8_t *buf, size_t bufLen, uint32_t bitfield) {
     // Worst case is 16 bytes (portnum 3, payload tag+len 2, inner 11). Checked
     // up front rather than after the fact: the tags below are written straight
     // into buf.
@@ -1146,10 +1161,13 @@ size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
     n += pbWriteVarint(buf + n, innerLen);
     if (n + innerLen > bufLen) return 0;
     memcpy(buf + n, inner, innerLen); n += innerLen;
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     return n;
 }
 
-size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
+size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse,
+                               uint32_t bitfield) {
     // Empty RouteDiscovery payload is valid for a traceroute request.
     const size_t routePayloadLen = 0;
     size_t n = 0;
@@ -1167,6 +1185,8 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
         n += pbWriteVarint(buf + n, 1);
     }
 
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     if (n > bufLen) return 0;
     return n;
 }
@@ -1174,7 +1194,7 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse) {
 size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
                              const uint8_t *routePayload, size_t routePayloadLen,
                              uint32_t requestId, uint32_t fromNodeId,
-                             float rxSnr) {
+                             float rxSnr, uint32_t bitfield) {
     if (!buf) return 0;
     if (!routePayload) routePayloadLen = 0;
 
@@ -1226,10 +1246,13 @@ size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
     buf[n++] = (6 << 3) | 5;
     memcpy(buf + n, &requestId, 4); n += 4;
 
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
+
     return n;
 }
 
-size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
+size_t encodePositionRequest(uint8_t *buf, size_t bufLen, uint32_t bitfield) {
     // Empty Position payload + want_response=true: peer replies with their Position.
     size_t n = 0;
 
@@ -1245,6 +1268,8 @@ size_t encodePositionRequest(uint8_t *buf, size_t bufLen) {
     n += pbWriteVarint(buf + n, (3 << 3) | 0);
     n += pbWriteVarint(buf + n, 1);
 
+    n = pbWriteDataBitfield(buf, n, bufLen, bitfield);
+    if (n == 0) return 0;
     if (n > bufLen) return 0;
     return n;
 }

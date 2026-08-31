@@ -101,6 +101,21 @@ struct TextMsg {
     uint32_t replyId;
 };
 
+// Cap on our *own* User.long_name, in bytes. Meshtastic 2.8 truncates long_name
+// to 24 bytes before storing or rebroadcasting it, and mesh.options tells
+// clients to enforce 24 in their UI — a longer name is silently clipped on
+// every 2.8 screen it reaches. Enforced at every path that writes our name:
+// onboarding, the web config form, and YAML import.
+//
+// The receive buffers below stay 40 bytes. mesh.options keeps the decode width
+// at 40 so older senders still parse, and peers on older firmware will keep
+// sending long names for a long time.
+//
+// Truncation must land on a UTF-8 boundary, never mid-codepoint — use
+// utf8util::copyTruncate(dst, MESH_LONG_NAME_MAX_BYTES + 1, src), which takes a
+// buffer size rather than a byte count.
+#define MESH_LONG_NAME_MAX_BYTES 24
+
 struct UserInfo {
     char    longName[40];
     char    shortName[5];
@@ -231,8 +246,14 @@ bool decryptPki(const MeshHdr &hdr, const uint8_t *cipher, size_t cipherLen,
                 const uint8_t *senderPubKey, uint8_t *plain, size_t &plainLen);
 
 // ── Protobuf encoder ──────────────────────────────────────────
+// Every encoder below writes Data.bitfield (field 9) unconditionally, including
+// when the value is zero. Meshtastic 2.8 treats a packet with hop_start == 0 and
+// no bitfield as pre-2.3.0 firmware and keeps it out of module processing, the
+// phone, MQTT and rebroadcast — so omitting the field when it is zero makes us
+// invisible to 2.8 nodes. See pbWriteDataBitfield() in mesh_proto.cpp.
+//
 // Encode a TEXT_MESSAGE_APP Data message. Returns encoded length.
-// bitfield: optional Data.bitfield value; bit 0 = OK_TO_MQTT.
+// bitfield: Data.bitfield value; bit 0 = OK_TO_MQTT.
 // replyId: optional Data.reply_id value (message ID being replied to).
 // emoji: optional Data.emoji value (non-zero marks a tapback reaction).
 size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
@@ -301,11 +322,12 @@ size_t encodeNeighborInfo(uint32_t nodeId,
 // requestId = original packet ID; fromNodeId = our nodeId (sets Data.source field).
 // errorReason = Routing.error_reason (0 = ACK success, non-zero = NAK).
 size_t encodeRouting(uint32_t requestId, uint32_t fromNodeId, uint32_t errorReason,
-                     uint8_t *buf, size_t bufLen);
+                     uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // Encode a TRACEROUTE_APP Data message containing an empty RouteDiscovery
 // payload. wantResponse should stay true for request packets.
-size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = true);
+size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = true,
+                               uint32_t bitfield = 0);
 
 // Encode the TRACEROUTE_APP reply a traceroute's destination owes its sender.
 // routePayload is the RouteDiscovery from the request: the hops in it are
@@ -322,11 +344,11 @@ size_t encodeTracerouteRequest(uint8_t *buf, size_t bufLen, bool wantResponse = 
 size_t encodeTracerouteReply(uint8_t *buf, size_t bufLen,
                              const uint8_t *routePayload, size_t routePayloadLen,
                              uint32_t requestId, uint32_t fromNodeId,
-                             float rxSnr);
+                             float rxSnr, uint32_t bitfield = 0);
 
 // Encode a POSITION_APP Data request with an empty payload and want_response=true.
 // Used to ask a specific peer to reply with their current Position.
-size_t encodePositionRequest(uint8_t *buf, size_t bufLen);
+size_t encodePositionRequest(uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // ── Store and Forward (port 65) ───────────────────────────────
 // StoreAndForward.RequestResponse. Router-originated values are < 64, client
@@ -362,7 +384,7 @@ enum StoreForwardRR : uint32_t {
 // windowMinutes = 0 omits the History submessage entirely, which is what a plain
 // CLIENT_PONG or a "use your own default window" CLIENT_HISTORY wants.
 size_t encodeStoreForward(uint32_t rr, uint32_t windowMinutes,
-                          uint8_t *buf, size_t bufLen);
+                          uint8_t *buf, size_t bufLen, uint32_t bitfield = 0);
 
 // ── ServiceEnvelope (MQTT bridge) ─────────────────────────────
 // Meshtastic MQTT does not carry the packed 16-byte on-air header. It publishes

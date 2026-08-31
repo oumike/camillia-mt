@@ -19708,7 +19708,8 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
     if (s_myNodeId != 0 && Radio.isReady()) {
         uint8_t proto[64];
         uint8_t cipher[96];
-        size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true);
+        size_t protoLen = encodeTracerouteRequest(proto, sizeof(proto), true,
+                                                  s_cfg.okToMqtt ? 0x01 : 0);
         if (protoLen > 0) {
             const ChannelKey &ck = CHANNEL_KEYS[0];  // LongFast
             if (encryptPayload(packetId, s_myNodeId, ck.key, ck.keyLen, proto, cipher, protoLen)) {
@@ -19958,7 +19959,7 @@ static void executeNodesActionSelection() {
         uint32_t nodeId = s_nodesActionNodeId;
         closeNodesActionMenu();
         if (Radio.isReady() && s_myNodeId != 0) {
-            (void)Channels.sendPositionRequest(s_myNodeId, nodeId);
+            (void)Channels.sendPositionRequest(s_myNodeId, nodeId, s_cfg.okToMqtt);
         }
         return;
     }
@@ -27905,7 +27906,9 @@ static void renderOnboardingStage() {
                                  s_onboardingShortScratch[0] ? s_onboardingShortScratch
                                                              : derived);
         } else {
-            lv_textarea_set_max_length(s_onboardingInput, sizeof(s_cfg.nodeLong) - 1);
+            // LVGL counts characters, not bytes, so this is a UI hint only; the
+            // byte cap lands in copyTruncate when the field is committed.
+            lv_textarea_set_max_length(s_onboardingInput, MESH_LONG_NAME_MAX_BYTES);
             lv_textarea_set_placeholder_text(s_onboardingInput, "Long name");
             lv_textarea_set_text(s_onboardingInput, s_onboardingLongScratch);
         }
@@ -28106,7 +28109,7 @@ static void onboardingCommitName() {
             onboardingSetStatus("Long name cannot be empty");
             return;
         }
-        utf8util::copyTruncate(s_onboardingLongScratch, sizeof(s_onboardingLongScratch),
+        utf8util::copyTruncate(s_onboardingLongScratch, MESH_LONG_NAME_MAX_BYTES + 1,
                                name.c_str());
         s_onboardingStage = ONBOARD_STAGE_ENTER_SHORT;
         renderOnboardingStage();
@@ -28173,20 +28176,39 @@ static void onboardingPickerBack() {
 // Commit every onboarding selection into the live config, persist it, and
 // reboot so the radio (region/preset), role, and WiFi come up with the choices.
 static void onboardingFinalize() {
-    utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), s_onboardingLongScratch);
+    utf8util::copyTruncate(s_cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, s_onboardingLongScratch);
     utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), s_onboardingShortScratch);
     utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), s_onboardingRegionScratch);
     s_cfg.deviceRole = cfgCoerceClientRole(s_onboardingRoleScratch);
     utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_onboardingWifiSsidScratch);
     utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), s_onboardingWifiPassScratch);
+
+    // Meshtastic 2.8 switches a fresh US install from Long Fast to Long Turbo
+    // when the region is picked (menuHandler::presetForRegionSelection()). The
+    // preset changes the channel name, which feeds both the channel hash and the
+    // frequency-slot hash — so a default 2.8 US node and a Long Fast node are on
+    // different frequencies at different modem settings and cannot hear each
+    // other at all. Mirroring it here is what keeps a new node on the mesh its
+    // neighbours are actually using.
+    //
+    // Only on first run, and only while the preset is still the install default:
+    // a user who deliberately moved off Long Fast keeps their choice, and an
+    // existing configuration is never touched.
+    if (s_firstBoot && s_cfg.modemPreset == PRESET_LONG_FAST &&
+        strcmp(s_cfg.region, "US") == 0) {
+        s_cfg.modemPreset = PRESET_LONG_TURBO;
+        Serial.println("[onboarding] US region: preset defaulted to Long Turbo "
+                       "(Meshtastic 2.8 default)");
+    }
+
     // Re-derive loraFreq/BW/SF/CR from the chosen region + current preset.
     applyPresetParams(s_cfg);
     s_firstBoot = false;
 
     Serial.printf("[onboarding] saved nodeLong=\"%s\" nodeShort=\"%s\" region=\"%s\" "
-                  "role=%u wifi=\"%s\"\n",
+                  "role=%u wifi=\"%s\" preset=\"%s\"\n",
                   s_cfg.nodeLong, s_cfg.nodeShort, s_cfg.region, s_cfg.deviceRole,
-                  s_cfg.wifiSsid);
+                  s_cfg.wifiSsid, kPresets[s_cfg.modemPreset].channelName);
 
     persistConfigToPrefs();
     Serial.println("[onboarding] complete - rebooting");
@@ -33485,7 +33507,8 @@ static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t er
     if (s_myNodeId == 0) return false;
 
     uint8_t proto[64];
-    size_t protoLen = encodeRouting(requestId, s_myNodeId, errorReason, proto, sizeof(proto));
+    size_t protoLen = encodeRouting(requestId, s_myNodeId, errorReason, proto, sizeof(proto),
+                                    s_cfg.okToMqtt ? 0x01 : 0);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0];  // ROUTING replies on primary channel.
@@ -33527,7 +33550,8 @@ static bool sendTracerouteReply(uint32_t toNodeId, uint32_t requestId,
     uint8_t proto[208];
     size_t protoLen = encodeTracerouteReply(proto, sizeof(proto),
                                             routePayload, routePayloadLen,
-                                            requestId, s_myNodeId, rxSnr);
+                                            requestId, s_myNodeId, rxSnr,
+                                            s_cfg.okToMqtt ? 0x01 : 0);
     if (protoLen == 0) return false;
 
     // Reply on the channel the request arrived on: that is the one the sender is
@@ -33645,7 +33669,8 @@ static bool sendStoreForwardTo(uint32_t toNodeId, uint32_t rr, uint32_t windowMi
     if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) chanIdx = 0;
 
     uint8_t proto[48];
-    size_t protoLen = encodeStoreForward(rr, windowMinutes, proto, sizeof(proto));
+    size_t protoLen = encodeStoreForward(rr, windowMinutes, proto, sizeof(proto),
+                                         s_cfg.okToMqtt ? 0x01 : 0);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
@@ -33768,6 +33793,20 @@ static void maybeRebroadcastPacket(const MeshPacket &pkt) {
     if (pkt.hdr.to == s_myNodeId) return;    // we're the endpoint; broadcasts/others relay
     if (pkt.rawLen == 0) return;             // no stored on-air payload to relay
     if (!rebroadcastModeAllows(pkt)) return;
+
+    // Meshtastic 2.8 classifies hop_start < hop_limit as INVALID and drops the
+    // packet before it is even decrypted, so relaying one spends airtime on a
+    // frame every 2.8 node in range refuses. This also catches hop_start == 0,
+    // i.e. pre-2.3.0 firmware that never populated the field — those frames are
+    // dropped by 2.8 too, so carrying them only helps inside a mesh with no 2.8
+    // node in it. Matching upstream is the better trade.
+    const uint8_t hopStart = (uint8_t)((pkt.hdr.flags >> 5) & 0x07);
+    if (hopStart < hopLimit) {
+        debugLogMessages("[fwd] drop (hop_start %u < hop_limit %u) from=%08lx id=%08lx\n",
+                         hopStart, hopLimit,
+                         (unsigned long)pkt.hdr.from, (unsigned long)pkt.hdr.id);
+        return;
+    }
 
     MeshHdr hdr = pkt.hdr;
     hdr.flags = (uint8_t)((pkt.hdr.flags & 0xF8) | ((hopLimit - 1) & 0x07));

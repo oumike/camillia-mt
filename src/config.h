@@ -98,9 +98,13 @@
 // The Mesh Deck has no HardwareModel of its own — it is not in the upstream
 // enum. PRIVATE_HW is the value Meshtastic reserves for exactly this case, so
 // the node advertises "custom hardware" instead of impersonating another board.
-// Allocated upstream for this board, so it can advertise itself honestly
-// rather than falling back to PRIVATE_HW the way the Mesh Deck and M9 do.
-#define MESH_HW_MODEL_SQUARE        137
+// The board Camillia builds as `square` is the Seeed Wio Tracker L2, which
+// Meshtastic 2.8 allocated as HardwareModel SEEED_WIO_TRACKER_L2 = 137. Named
+// after the hardware rather than our build target, the way every other model
+// here is: `square` is only our codename for it, and a constant carrying the
+// codename is what once made this look like an accidental collision with
+// upstream's allocation rather than the same board.
+#define MESH_HW_MODEL_SEEED_WIO_TRACKER_L2  137
 #define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
@@ -114,7 +118,7 @@
 #elif defined(DEVICE_MESH_DECK)
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_SQUARE)
-#define MY_HW_MODEL MESH_HW_MODEL_SQUARE
+#define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
 #elif defined(DEVICE_M9)
 // Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
 // the M9 is a MeshCore device. Advertising one of those, or the T-Deck the

@@ -19,6 +19,26 @@ It still listens the whole time, and still relays other people's traffic — a
 relayed packet carries their identity, not yours. Pressing **Announce** in web
 config does transmit, because that is you asking for it deliberately.
 
+### Which preset your local mesh is on
+
+Setup asks for a region, and the region decides the starting modem preset.
+Picking **US** on a fresh device starts you on **Long Turbo**, not Long Fast.
+Meshtastic 2.8 made the same change, so Long Turbo is what a new US node — from
+any firmware — now comes up on.
+
+This matters more than it sounds. The preset sets the channel name, and the
+channel name feeds both the channel hash and the frequency slot. Two nodes on
+different presets are on **different frequencies at different modem settings**
+and cannot hear each other at all — there is no partial reception to diagnose.
+
+If the mesh near you predates 2.8 it is probably still on Long Fast. Change the
+preset in Config or web config; the region stays as it is. Existing devices are
+never moved by an upgrade — this default applies only to first-time setup.
+
+Your **long name** is capped at 24 bytes here, matching what Meshtastic 2.8
+stores and forwards. A longer name is clipped on other people's screens rather
+than shown in full, so the cap is what you will actually be called.
+
 ## Main screen
 
 The main screen is channel chat. Use it to read traffic, select reply targets, and start compose.

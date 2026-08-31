@@ -165,7 +165,8 @@ static const char *primaryChannelNameForHash() {
 // -1 marks a preset we have no equivalent for.
 static const int8_t kPresetFromMeshtastic[] = {
     PRESET_LONG_FAST,      // 0 LONG_FAST
-    PRESET_LONG_SLOW,      // 1 LONG_SLOW
+    PRESET_LONG_SLOW,      // 1 LONG_SLOW (deprecated in 2.7 upstream, still carried
+                           //   on air with unchanged params, so still translated)
     -1,                    // 2 VERY_LONG_SLOW (deprecated in 2.5, no local equivalent)
     PRESET_MEDIUM_SLOW,    // 3 MEDIUM_SLOW
     PRESET_MEDIUM_FAST,    // 4 MEDIUM_FAST
@@ -173,6 +174,7 @@ static const int8_t kPresetFromMeshtastic[] = {
     PRESET_SHORT_FAST,     // 6 SHORT_FAST
     PRESET_LONG_MODERATE,  // 7 LONG_MODERATE
     PRESET_SHORT_TURBO,    // 8 SHORT_TURBO
+    PRESET_LONG_TURBO,     // 9 LONG_TURBO
 };
 
 int presetFromMeshtastic(uint8_t meshtasticPreset) {
@@ -866,7 +868,7 @@ static bool parseBoolValue(const char *val) {
 
 // ── Defaults ─────────────────────────────────────────────────
 void cfgInitDefaults(RhinoConfig &cfg) {
-    utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), MY_LONG_NAME);
+    utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, MY_LONG_NAME);
     utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), MY_SHORT_NAME);
     cfg.gpsEnabled   = (bool)MY_GPS_ENABLED;
     cfg.latI         = MY_LAT_I;
@@ -1535,7 +1537,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else {
                 // Top-level key-value (Meshtastic CLI format)
                 if      (!strcmp(key, "owner"))
-                    utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), val);
+                    utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, val);
                 else if (!strcmp(key, "owner_short"))
                     utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), val);
                 else if (!strcmp(key, "canned_messages"))
@@ -1622,7 +1624,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.alt = (int32_t)atol(val);
                 } else if (!strcmp(section, "node")) {
                     // Legacy format
-                    if      (!strcmp(key, "long"))  utf8util::copyTruncate(cfg.nodeLong, sizeof(cfg.nodeLong), val);
+                    if      (!strcmp(key, "long"))  utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, val);
                     else if (!strcmp(key, "short")) utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), val);
                 } else if (!strcmp(section, "position")) {
                     // Legacy format: stored as scaled int32 * 1e7

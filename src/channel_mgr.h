@@ -118,7 +118,9 @@ public:
 
     // Send a unicast POSITION_APP request to a peer (empty payload + want_response).
     // Peer should reply with its current Position broadcast.
-    bool sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId);
+    // okToMqtt sets the OK_TO_MQTT bit, as it does for every other outgoing frame.
+    bool sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId,
+                             bool okToMqtt = false);
 
     // Broadcast TELEMETRY_APP device metrics on LongFast.
     bool sendTelemetryDevice(uint32_t myNodeId, bool okToMqtt = false);

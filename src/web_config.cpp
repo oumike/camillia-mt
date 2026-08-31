@@ -3266,8 +3266,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     // ── Node Identity ─────────────────────────────────────────
     section(html, lite, "Node Identity", true);
-    html += "<label>Long Name (max 39 chars)"
-            "<input name='long' type='text' maxlength='39' value='";
+    // maxlength counts UTF-16 code units, not bytes, so it is a UI hint only —
+    // the byte cap is enforced by copyTruncate in the POST handler.
+    html += "<label>Long Name (max 24 bytes)"
+            "<input name='long' type='text' maxlength='24' value='";
     html += gCfg->nodeLong; html += "'></label>";
     html += "<label>Short Name (max 4 chars)"
             "<input name='short' type='text' maxlength='4' value='";
@@ -6421,7 +6423,7 @@ static void handlePostSave() {
     // Node identity
     String lng  = server.arg("long");
     String shrt = server.arg("short");
-    utf8util::copyTruncate(gCfg->nodeLong, sizeof(gCfg->nodeLong), lng.c_str());
+    utf8util::copyTruncate(gCfg->nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, lng.c_str());
     utf8util::copyTruncate(gCfg->nodeShort, sizeof(gCfg->nodeShort), shrt.c_str());
 
     // Web config auth (username is fixed to admin)

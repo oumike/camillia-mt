@@ -912,12 +912,15 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     return ok;
 }
 
-bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId) {
+bool ChannelMgr::sendPositionRequest(uint32_t myNodeId, uint32_t toNodeId,
+                                     bool okToMqtt) {
     if (!Radio.isReady()) return false;
     if (toNodeId == 0 || toNodeId == 0xFFFFFFFF) return false;
 
+    uint32_t bitfield = okToMqtt ? 0x01 : 0;
+
     uint8_t proto[32], cipher[32];
-    size_t protoLen = encodePositionRequest(proto, sizeof(proto));
+    size_t protoLen = encodePositionRequest(proto, sizeof(proto), bitfield);
     if (protoLen == 0) return false;
 
     const ChannelKey &ck = CHANNEL_KEYS[0]; // LongFast
