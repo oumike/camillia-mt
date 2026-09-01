@@ -16,7 +16,6 @@ Supported release file names:
 
 - `camillia-mt-tdeck-vX.Y.Z.bin`
 - `camillia-mt-tdeck-pro-vX.Y.Z.bin`
-- `camillia-mt-tdeck-pro-v1-vX.Y.Z.bin`
 - `camillia-mt-tlora-pager-tft-vX.Y.Z.bin`
 - `camillia-mt-cardputer-cap-vX.Y.Z.bin`
 - `camillia-mt-heltec-vX.Y.Z.bin`
@@ -26,13 +25,7 @@ Supported release file names:
 - `camillia-mt-square-vX.Y.Z.bin`
 
 Each target also publishes an app-only OTA image and detached signature. For
-T-Deck Pro these are:
-
-- `camillia-mt-tdeck-pro-vX.Y.Z-ota.bin` and `.sig` for revision 1.1
-- `camillia-mt-tdeck-pro-v1-vX.Y.Z-ota.bin` and `.sig` for revision 1.0
-
-The firmware chooses the matching slug from `TDECK_PRO_HW_REV`; the two
-revisions cannot install one another's image through the OTA updater.
+T-Deck Pro these are `camillia-mt-tdeck-pro-vX.Y.Z-ota.bin` and its `.sig`.
 
 Then run:
 
@@ -56,7 +49,6 @@ Build only (no flash):
 ```bash
 pio run -e tdeck
 pio run -e tdeck-pro
-pio run -e tdeck-pro-v1
 pio run -e tlora-pager-tft
 pio run -e cardputer-cap
 pio run -e heltec-v4
@@ -75,10 +67,9 @@ pio device monitor
 ### Build and flash with helper script
 
 ```bash
-Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--tdeck-pro-v1] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
+Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
-  --tdeck-pro, -p  Use T-Deck Pro v1.1 environment (tdeck-pro)
-  --tdeck-pro-v1  Use T-Deck Pro v1.0 environment (tdeck-pro-v1)
+  --tdeck-pro, -p  Use T-Deck Pro environment (tdeck-pro)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
   --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap)
   --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft)
@@ -97,7 +88,6 @@ Example usage:
 ```bash
 ./build-upload-monitor.sh --tdeck
 ./build-upload-monitor.sh --tdeck-pro
-./build-upload-monitor.sh --tdeck-pro-v1
 ./build-upload-monitor.sh --cardputer
 ./build-upload-monitor.sh --pager
 ./build-upload-monitor.sh --heltec
@@ -121,7 +111,7 @@ You can also run the script with no flags and pick a device from the prompt.
 ## Notes
 
 - The board must be in download mode to flash. On the T-Deck, hold the trackball button while pressing reset, or let PlatformIO trigger it automatically via USB CDC.
-- T-Deck Pro v1.1 is the `tdeck-pro` target. Use `tdeck-pro-v1` only for revision 1.0 hardware; the e-paper and touch reset pins differ between revisions.
+- T-Deck Pro uses the `tdeck-pro` target.
 - Square uses native USB-CDC and may require its DFU/download-mode gesture before upload.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.

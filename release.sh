@@ -4,7 +4,6 @@ set -e
 RELEASE_ENVS=(
     tdeck
     tdeck-pro
-    tdeck-pro-v1
     tlora-pager-tft
     cardputer-cap
     heltec-v4
@@ -36,19 +35,12 @@ has_env() {
     grep -q "^\[env:${env_name}\]" platformio.ini
 }
 
-release_env_list_contains() {
-    local wanted="$1" env_name
-    for env_name in "${RELEASE_ENVS[@]}"; do
-        [[ "$env_name" == "$wanted" ]] && return 0
-    done
-    return 1
-}
-
 validate_release_targets() {
-    local env_name out_name seen_out_names="|" failed=false
+    local env_name out_name seen_out_names="|" failed=false tdeck_pro_found=false
 
     echo "Release target contract:"
     for env_name in "${RELEASE_ENVS[@]}"; do
+        [[ "$env_name" == "tdeck-pro" ]] && tdeck_pro_found=true
         if ! has_env "$env_name"; then
             echo "  ERROR: release environment '$env_name' is missing from platformio.ini" >&2
             failed=true
@@ -71,17 +63,7 @@ validate_release_targets() {
         printf '  %-20s -> %s\n' "$env_name" "$out_name"
     done
 
-    # These are separate hardware revisions with incompatible reset wiring and
-    # distinct OTA slugs. Keep an explicit invariant so neither can disappear
-    # merely by being removed from RELEASE_ENVS.
-    for env_name in tdeck-pro tdeck-pro-v1; do
-        if ! release_env_list_contains "$env_name"; then
-            echo "  ERROR: required T-Deck Pro target '$env_name' is not in RELEASE_ENVS" >&2
-            failed=true
-        fi
-    done
-    if [[ "$(env_out_name tdeck-pro)" != "tdeck-pro" \
-       || "$(env_out_name tdeck-pro-v1)" != "tdeck-pro-v1" ]]; then
+    if [[ "$tdeck_pro_found" != true || "$(env_out_name tdeck-pro)" != "tdeck-pro" ]]; then
         echo "  ERROR: T-Deck Pro release slugs no longer match the OTA firmware contract" >&2
         failed=true
     fi

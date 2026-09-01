@@ -36,7 +36,7 @@ No additional hardware required.
 ## Supported Devices
 
 - LilyGo T-Deck (`tdeck`): keyboard + trackball + touch input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
-- LilyGo T-Deck Pro v1.1 (`tdeck-pro`) and v1.0 (`tdeck-pro-v1`): e-paper touch UI with a fixed black-on-white, outline-only interface, T-Deck-compatible keyboard shortcuts, microSD config import/export, GPS, and full mesh UI support. Initial port; physical display/touch/radio validation is pending.
+- LilyGo T-Deck Pro (`tdeck-pro`): e-paper touch UI with a fixed black-on-white, outline-only interface, T-Deck-compatible keyboard shortcuts, microSD config import/export, GPS, and full mesh UI support. Initial port; physical display/touch/radio validation is pending.
 - LilyGo T-Lora Pager TFT (`tlora-pager-tft`): keyboard + roller wheel input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
 - M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`): keyboard-driven input/navigation, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
 - Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config); microSD is not enabled in this profile.
@@ -46,7 +46,7 @@ No additional hardware required.
 - Square (`square`): bring-up target with a touch-first 320x240 UI, optional external BLE keyboard, ES8311 sound notifications, GNSS, browser VNC Host/Remote control, and 1-bit SD_MMC storage, including firmware config import/export at `/camillia/config.yaml`. LP5814 brightness, ADS1115 battery, audio, SD, BLE, and Remote support still need hardware verification. It is not published in releases yet.
 
 Notes:
-- All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tdeck-pro`, `tdeck-pro-v1`, `tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`).
+- All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tdeck-pro`, `tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`).
 - Environmental telemetry via BME280/BMP280/AHT20 is available on Heltec V4 expansion builds when a compatible sensor is present.
 
 ## Features
@@ -80,9 +80,9 @@ Releases are cut with [`release.sh`](release.sh), which builds every device
 profile, merges factory images, signs the OTA images, tags the commit, and
 publishes a GitHub release with the `.bin`/`.sig` assets. Debug symbols
 (`.elf`/`.map`) stay in `dist/` on the release machine rather than bloating the
-release by ~35MB per profile. T-Deck Pro v1.1 and v1.0 publish distinct factory
-and OTA images (`tdeck-pro` and `tdeck-pro-v1`); the release script verifies the
-target list and every OTA signature before publication.
+release by ~35MB per profile. T-Deck Pro publishes the `tdeck-pro` factory and
+OTA images; the release script verifies the target list and every OTA signature
+before publication.
 
 Pushing the tag also triggers [the build workflow](.github/workflows/build.yml),
 which compiles every environment from a clean checkout. It is a breakage check,

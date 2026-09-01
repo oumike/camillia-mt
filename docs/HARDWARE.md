@@ -1,8 +1,7 @@
 # Hardware Targets
 
-Camillia has **eight distinct boards** across ten build envs (the two Heltec
-envs select UI orientation, while the two T-Deck Pro envs select hardware
-revision wiring). The comparison table below covers seven of them. All share an
+Camillia has **eight distinct boards** across nine build envs (the two Heltec
+envs select UI orientation). The comparison table below covers seven of them. All share an
 **ESP32-S3** SoC (dual-core Xtensa LX7 @ 240 MHz, 512 KB internal SRAM), the
 `espressif32@7.0.1` / Arduino toolchain, and a **dual-slot OTA** flash layout — two
 3.125 MB app partitions (`app0`/`app1`) + 64 KB NVS + 64 KB coredump
@@ -17,7 +16,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 
 | Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer + LoRa-1262 Cap | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Square |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Build env** | `tdeck` | `tdeck-pro` (v1.1), `tdeck-pro-v1` (v1.0) | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4`, `heltec-v4-vertical` | `m9` | `square` |
+| **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4`, `heltec-v4-vertical` | `m9` | `square` |
 | **MCU** | ESP32-S3FN16R8 | ESP32-S3, 16 MB flash | ESP32-S3 | ESP32-S3FN8 (StampS3) | ESP32-S3R2 | ESP32-S3R8 | ESP32-S3, 16 MB flash + 8 MB octal PSRAM |
 | **PSRAM** | 8 MB octal | 8 MB QSPI | 8 MB (firmware uses quad `qio_qspi` access) | **None** | 2 MB | 8 MB octal | 8 MB octal |
 | **Flash** | 16 MB | 16 MB | 16 MB | 8 MB | 16 MB | 16 MB | 16 MB |
@@ -33,11 +32,8 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Unreleased; public codename `square` |
 
 > **Notes.**
-> - **T-Deck Pro revisions:** v1.0 has no dedicated e-paper reset and uses GPIO45
->   for touch reset; v1.1 uses GPIO16 for e-paper reset and GPIO38 for touch
->   reset. The two build environments keep those images distinct. This initial
->   port follows LilyGo and Meshtastic pin definitions but remains unverified on
->   physical hardware.
+> - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
+>   definitions but remains unverified on physical hardware.
 > - **PSRAM/flash** are taken from the ESP32-S3 part number where the vendor lists it
 >   (`FN16R8` = 16 MB flash + 8 MB octal PSRAM; `FN8` = 8 MB flash, no PSRAM;
 >   `R2` = 2 MB PSRAM). The **Cardputer has no PSRAM**, which is why it carries the

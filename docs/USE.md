@@ -32,7 +32,7 @@ cursor into that channel's messages, scroll to a message to select it, then pres
 ### Shared shortcuts (keyboard builds)
 
 These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
-`tdeck-pro-v1`, `tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`.
+`tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`.
 
 - D opens Direct Messages
 - C opens Config
@@ -74,7 +74,7 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - Compose close behavior: Backspace on an empty compose closes the compose modal
 - Trackball click hold for 2 seconds puts the screen to sleep
 
-### LilyGo T-Deck Pro (tdeck-pro, tdeck-pro-v1)
+### LilyGo T-Deck Pro (tdeck-pro)
 
 - Uses the same letter shortcuts as T-Deck: H opens the channel selector, J/K
   navigate, and D/C/N/L/A open the shared device surfaces.

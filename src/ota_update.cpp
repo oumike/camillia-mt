@@ -328,11 +328,7 @@ const char *otaCurrentDeviceAssetSlug() {
 #if defined(DEVICE_TDECK)
     return "tdeck";
 #elif defined(DEVICE_TDECK_PRO)
-#if TDECK_PRO_HW_REV >= 11
     return "tdeck-pro";
-#else
-    return "tdeck-pro-v1";
-#endif
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     return "tlora-pager-tft";
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)

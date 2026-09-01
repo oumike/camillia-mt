@@ -19,8 +19,6 @@ fi
 # 6) cardputer
 # 7) mesh-deck
 # 8) square
-# The legacy tdeck-pro-v1 image is compile-covered in CI/release but omitted
-# here until a revision 1.0 unit is available for physical upload testing.
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"

@@ -3,14 +3,7 @@
 //
 // Sources:
 //   - LilyGo T-Deck-Pro factory firmware (utilities.h)
-//   - Meshtastic t-deck-pro and t-deck-pro-v1_1 variants
-//
-// Revision 1.1 adds a dedicated e-paper reset on GPIO16 and moves touch reset
-// from GPIO45 to GPIO38. Select the older board with TDECK_PRO_HW_REV=10.
-
-#ifndef TDECK_PRO_HW_REV
-#define TDECK_PRO_HW_REV 11
-#endif
+//   - Meshtastic t-deck-pro-v1_1 variant
 
 // Power and board peripherals.
 #define BOARD_POWERON            -1
@@ -37,15 +30,9 @@
 #define TFT_INVERT             false
 #define TFT_RGB_ORDER          false
 #define EINK_BUSY_PIN            37
-#if TDECK_PRO_HW_REV >= 11
 #define TFT_RST                  16
 #define TFT_BL                   45
 #define TOUCH_RST                38
-#else
-#define TFT_RST                  -1
-#define TFT_BL                   -1
-#define TOUCH_RST                45
-#endif
 
 #define HAS_EINK                  1
 #define EINK_REFRESH_MIN_MS     250
@@ -78,7 +65,7 @@
 #define KB_INT_ACTIVE_LEVEL     LOW
 #define KB_BL                    42
 
-// CST328 on revision 1.0; later revision 1.1 units may report as CST3530.
+// The touch controller may report as CST328 or CST3530.
 #define HAS_TOUCH                 1
 #define TOUCH_SDA                13
 #define TOUCH_SCL                14
