@@ -1832,6 +1832,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.chatStyle = CHAT_STYLE_OUTLINE;
                     else
                         cfg.chatStyle = CHAT_STYLE_CLASSIC;
+                    cfg.chatStyle = cfgCoerceChatStyle(cfg.chatStyle);
                 }
                 else if (!strcmp(key, "chatNameStyle")) {
                     if (isdigit((unsigned char)val[0]))

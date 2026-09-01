@@ -27,6 +27,10 @@
 #endif
 #include "config.h"
 
+#if defined(DEVICE_TDECK_PRO)
+#include "tdeck_pro_display.h"
+#else
+
 #if defined(DEVICE_HELTEC_V4_EXPANSION) && HAS_TOUCH
 #include "chsc6x.h"
 #include "lgfx/v1/Touch.hpp"
@@ -316,3 +320,5 @@ public:
         setPanel(&_panel);
     }
 };
+
+#endif  // DEVICE_TDECK_PRO

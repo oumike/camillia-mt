@@ -31,6 +31,18 @@ static inline bool uiThemeForcesDark(uint8_t theme) {
     return theme == UI_THEME_CAMELLIA_BLACK;
 }
 
+static inline bool cfgChatStyleAllowed(int style) {
+    if (style < CHAT_STYLE_CLASSIC || style > CHAT_STYLE_MAX) return false;
+#if !HAS_CHAT_BUBBLE_STYLE_OPTION
+    if (style == CHAT_STYLE_BUBBLES) return false;
+#endif
+    return true;
+}
+
+static inline uint8_t cfgCoerceChatStyle(int style) {
+    return cfgChatStyleAllowed(style) ? (uint8_t)style : (uint8_t)MY_CHAT_STYLE;
+}
+
 // ── User-built themes ────────────────────────────────────────────────────────
 // A theme is four authored colors plus a light/dark mode; everything else in
 // the running palette is derived from them (see applyUiThemePalette). That is

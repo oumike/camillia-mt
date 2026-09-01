@@ -5,9 +5,9 @@
 // option not set here, so only the deltas from stock live in this file.
 
 #define LV_COLOR_DEPTH 16
-// v9 has no LV_COLOR_16_SWAP. lv_color_t is always 24-bit RGB; the *display*
-// carries the pixel format (RGB565 here, chosen from LV_COLOR_DEPTH), and byte
-// order is the driver's problem — LovyanGFX pushes rgb565_t natively.
+// v9 has no LV_COLOR_16_SWAP. lv_color_t is always 24-bit RGB; the display owns
+// the output format. TFT targets use RGB565, while T-Deck Pro selects I1 at
+// runtime and sends those bits directly to GxEPD2.
 
 // v9 replaced LV_MEM_CUSTOM with a stdlib selector. Built-in keeps the fixed
 // LV_MEM_SIZE pool, which is what the low-memory guards in main_lvgl.cpp

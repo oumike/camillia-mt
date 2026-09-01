@@ -26,6 +26,7 @@
 //
 // Supported devices (one must be defined at compile time):
 //   DEVICE_TDECK                LilyGO T-Deck
+//   DEVICE_TDECK_PRO            LilyGO T-Deck Pro
 //   DEVICE_TLORA_PAGER_TFT      LilyGO T-LoRa Pager TFT
 //   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer + LoRa-1262 Cap
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
@@ -36,6 +37,8 @@
 
 #if defined(DEVICE_TDECK)
 #  include "hw_tdeck.h"
+#elif defined(DEVICE_TDECK_PRO)
+#  include "hw_tdeck_pro.h"
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #  include "hw_tlora_pager.h"
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -49,7 +52,7 @@
 #elif defined(DEVICE_SQUARE)
 #  include "hw_square.h"
 #else
-#  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, \
+#  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
 DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 #endif
@@ -60,7 +63,9 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 
 // ── TFT default rotation ──────────────────────────────────────────────────────
 // Most boards use landscape (rotation=1).  Override per-device where needed.
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
+#if defined(DEVICE_TDECK_PRO)
+#  define TFT_ROTATION_DEFAULT 0
+#elif defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 3
 #elif defined(DEVICE_SQUARE)
 // The panel carries offset_rotation=1. LovyanGFX adds that to this logical
@@ -94,7 +99,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 //
 // This used to be spelled out longhand as the same three-device condition at a
 // dozen call sites, which made adding a board a dozen chances to miss one.
-#if defined(DEVICE_TDECK) || defined(DEVICE_HELTEC_V4_EXPANSION) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_SQUARE)
 #  define UI_CHANNEL_LIST_DROPDOWN 1

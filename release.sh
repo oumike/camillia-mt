@@ -3,6 +3,8 @@ set -e
 
 RELEASE_ENVS=(
     tdeck
+    tdeck-pro
+    tdeck-pro-v1
     tlora-pager-tft
     cardputer-cap
     heltec-v4
@@ -32,6 +34,59 @@ env_out_name() {
 has_env() {
     local env_name="$1"
     grep -q "^\[env:${env_name}\]" platformio.ini
+}
+
+release_env_list_contains() {
+    local wanted="$1" env_name
+    for env_name in "${RELEASE_ENVS[@]}"; do
+        [[ "$env_name" == "$wanted" ]] && return 0
+    done
+    return 1
+}
+
+validate_release_targets() {
+    local env_name out_name seen_out_names="|" failed=false
+
+    echo "Release target contract:"
+    for env_name in "${RELEASE_ENVS[@]}"; do
+        if ! has_env "$env_name"; then
+            echo "  ERROR: release environment '$env_name' is missing from platformio.ini" >&2
+            failed=true
+            continue
+        fi
+
+        out_name="$(env_out_name "$env_name")"
+        if [[ -z "$out_name" ]]; then
+            echo "  ERROR: release environment '$env_name' has no artifact slug" >&2
+            failed=true
+            continue
+        fi
+        case "$seen_out_names" in
+            *"|${out_name}|"*)
+                echo "  ERROR: duplicate release artifact slug '$out_name'" >&2
+                failed=true
+                ;;
+            *) seen_out_names="${seen_out_names}${out_name}|" ;;
+        esac
+        printf '  %-20s -> %s\n' "$env_name" "$out_name"
+    done
+
+    # These are separate hardware revisions with incompatible reset wiring and
+    # distinct OTA slugs. Keep an explicit invariant so neither can disappear
+    # merely by being removed from RELEASE_ENVS.
+    for env_name in tdeck-pro tdeck-pro-v1; do
+        if ! release_env_list_contains "$env_name"; then
+            echo "  ERROR: required T-Deck Pro target '$env_name' is not in RELEASE_ENVS" >&2
+            failed=true
+        fi
+    done
+    if [[ "$(env_out_name tdeck-pro)" != "tdeck-pro" \
+       || "$(env_out_name tdeck-pro-v1)" != "tdeck-pro-v1" ]]; then
+        echo "  ERROR: T-Deck Pro release slugs no longer match the OTA firmware contract" >&2
+        failed=true
+    fi
+
+    [[ "$failed" == false ]]
 }
 
 remote_tag_exists() {
@@ -77,10 +132,11 @@ delete_existing_release_and_tags() {
 ASSUME_YES=false
 NO_CLEAN=false
 APPEND_LAST_NOTES=false
+CHECK_TARGETS_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes] [--no-clean] [--append-last-notes]"
+            echo "Usage: $0 [-y|--yes] [--no-clean] [--append-last-notes] [--check-targets]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
             echo ""
@@ -95,14 +151,24 @@ for arg in "$@"; do
             echo "              Keep RELEASE_NOTES.md content from the previous"
             echo "              release and append this release's generated delta"
             echo "              notes under a new 'Update (vX.Y.Z)' heading."
+            echo "  --check-targets"
+            echo "              Validate release environments and artifact slugs,"
+            echo "              then exit without building or publishing."
             exit 0
             ;;
         -y|--yes) ASSUME_YES=true ;;
         --no-clean) NO_CLEAN=true ;;
         --append-last-notes) APPEND_LAST_NOTES=true ;;
+        --check-targets) CHECK_TARGETS_ONLY=true ;;
         *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
     esac
 done
+
+validate_release_targets
+if [[ "$CHECK_TARGETS_ONLY" == true ]]; then
+    echo "Release target contract OK."
+    exit 0
+fi
 
 # ── Version prompt ────────────────────────────────────────────────────────────
 CURRENT=$(cat VERSION 2>/dev/null | tr -d '\n')
@@ -307,7 +373,7 @@ generate_ai_summary() {
     [[ -n "$log" || -n "$diff" ]] || return 1
 
     prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
-firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Lora Pager TFT, M5Stack
+    firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Deck Pro, T-Lora Pager TFT, M5Stack
 Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Square).
 
 Summarize what changed in release ${TAG} for the people who flash and use it.
@@ -540,11 +606,44 @@ merge_sign_assets() {
     done
 }
 
+verify_release_assets() {
+    local tag="$1" env_name out_name d factory ota sig verify_key
+    verify_key="$GUARD_DIR/ota-signing-public.pem"
+    openssl ec -in "$SIGNING_KEY" -pubout -out "$verify_key" 2>/dev/null
+
+    echo "Verifying release assets..."
+    for env_name in "${RELEASE_ENVS[@]}"; do
+        out_name="$(env_out_name "$env_name")"
+        d=".pio/build/${env_name}"
+        factory="dist/camillia-mt-${out_name}-${tag}.bin"
+        ota="dist/camillia-mt-${out_name}-${tag}-ota.bin"
+        sig="${ota}.sig"
+
+        for asset in "$factory" "$ota" "$sig"; do
+            if [[ ! -s "$asset" ]]; then
+                echo "Error: required release asset is missing or empty: $asset" >&2
+                return 1
+            fi
+        done
+        if ! cmp -s "${d}/firmware.bin" "$ota"; then
+            echo "Error: OTA asset does not match ${env_name}/firmware.bin: $ota" >&2
+            return 1
+        fi
+        if ! openssl dgst -sha256 -verify "$verify_key" -signature "$sig" "$ota" \
+                >/dev/null 2>&1; then
+            echo "Error: OTA signature verification failed: $sig" >&2
+            return 1
+        fi
+        echo "  OK ${env_name}: $(basename "$factory"), $(basename "$ota"), $(basename "$sig")"
+    done
+}
+
 echo ""
 echo "Merging factory images..."
 rm -rf dist
 mkdir -p dist
 merge_sign_assets "$TAG"
+verify_release_assets "$TAG"
 
 ls -lh dist/
 
