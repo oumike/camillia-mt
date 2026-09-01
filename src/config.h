@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_SQUARE)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_SQUARE)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -92,6 +92,7 @@
 // Source: meshtastic/protobufs meshtastic/mesh.proto (HardwareModel enum).
 // Use per-target values so each firmware reports its actual hardware class.
 #define MESH_HW_MODEL_T_DECK        50
+#define MESH_HW_MODEL_T_DECK_PRO   102
 #define MESH_HW_MODEL_T_LORA_PAGER  103
 #define MESH_HW_MODEL_HELTEC_V4     110
 #define MESH_HW_MODEL_M5_CARDPUTER  112
@@ -109,6 +110,8 @@
 
 #if defined(DEVICE_TDECK)
 #define MY_HW_MODEL MESH_HW_MODEL_T_DECK
+#elif defined(DEVICE_TDECK_PRO)
+#define MY_HW_MODEL MESH_HW_MODEL_T_DECK_PRO
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #define MY_HW_MODEL MESH_HW_MODEL_T_LORA_PAGER
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -181,15 +184,32 @@
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
 #define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL, 12=CAMELLIA_BLACK
+#if defined(DEVICE_TDECK_PRO)
+#define MY_UI_MODE          1      // E-paper default: white background, dark text
+#define HAS_UI_THEMES       0
+#define HAS_UI_COLOR_OPTIONS 0
+#else
 #define MY_UI_MODE          0      // 0=DARK, 1=LIGHT
+#define HAS_UI_THEMES       1
+#define HAS_UI_COLOR_OPTIONS 1
+#endif
 
 // Chat rendering style (applied at boot; change requires a reboot)
 #define CHAT_STYLE_CLASSIC  0      // legacy flat colored text lines
 #define CHAT_STYLE_BUBBLES  1      // per-node colored (filled) message bubbles
 #define CHAT_STYLE_OUTLINE  2      // per-node colored outlined bubbles (transparent fill)
 #define CHAT_STYLE_MAX      CHAT_STYLE_OUTLINE
+#if defined(DEVICE_TDECK_PRO)
+#define MY_CHAT_STYLE       CHAT_STYLE_OUTLINE
+#define MY_CHAT_COLORS_EN   0
+#define HAS_CHAT_STYLE_OPTIONS 1
+#define HAS_CHAT_BUBBLE_STYLE_OPTION 0
+#else
 #define MY_CHAT_STYLE       CHAT_STYLE_CLASSIC
 #define MY_CHAT_COLORS_EN   1      // classic mode: per-node text colors
+#define HAS_CHAT_STYLE_OPTIONS 1
+#define HAS_CHAT_BUBBLE_STYLE_OPTION 1
+#endif
 
 // Sender name style shown in chat (channel-chat prefix + bubble name tag)
 #define CHAT_NAME_SHORT     0      // 4-char short name (e.g. "ABCD")
@@ -399,11 +419,11 @@
 #define MY_NOTIFY_LED_COLOR_CHANNEL 2
 #define MY_NOTIFY_LED_COLOR_DM      5
 
-// Blinking the keyboard backlight as a message notification. Two boards have a
+// Blinking the keyboard backlight as a message notification. Three boards have a
 // backlight to blink, and they drive it very differently: the T-Deck's is
-// PWM-owned by the keyboard's own ESP32-C3 and set over I2C, the Pager's is a
-// plain KB_BL GPIO. They also differ in resting state, which is why the Pager
-// only blinks with the screen asleep — see kbBlinkAllowedNow().
+// PWM-owned by the keyboard's own ESP32-C3 and set over I2C; the Pager and
+// T-Deck Pro use a plain KB_BL GPIO. The Pager only blinks while asleep; Pro
+// pulses away from its Alt+B resting state whether the screen is awake or not.
 //
 // Deliberately NOT the M9, which looks like it belongs here and does not. Its
 // keypad LEDs belong to the companion controller, and KB_REG_BACKLIGHT only sets
@@ -412,7 +432,7 @@
 // controller, hw=0x03 fw=0x10): writing 255 lights nothing, and the pattern's
 // closing write of 0 disables the auto-light until the next power cycle. Wiring
 // the M9 up here breaks the keypad light rather than blinking it.
-#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TLORA_PAGER_TFT)
 #define HAS_KB_BLINK 1
 #else
 #define HAS_KB_BLINK 0

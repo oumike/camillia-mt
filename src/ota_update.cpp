@@ -327,6 +327,8 @@ void otaSetNetworkAllowed(bool allowed) {
 const char *otaCurrentDeviceAssetSlug() {
 #if defined(DEVICE_TDECK)
     return "tdeck";
+#elif defined(DEVICE_TDECK_PRO)
+    return "tdeck-pro";
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     return "tlora-pager-tft";
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)

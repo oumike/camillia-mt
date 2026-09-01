@@ -41,6 +41,7 @@
 // 0x91 rather than 0x90: the M9 driver already names raw 0x90 as a value it
 // drops, and reusing the number for a mapped code invites confusing the two.
 #define KEY_BACK_BTN    0x91
+#define KEY_TOGGLE_KB_BACKLIGHT 0x92
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

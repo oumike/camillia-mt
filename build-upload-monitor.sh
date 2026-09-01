@@ -7,6 +7,7 @@ cd "$SCRIPT_DIR"
 
 ENV_NAME="tdeck"
 DEBUG_ENV_NAME="tdeck-debug"
+TDECK_PRO_ENV_NAME="tdeck-pro"
 CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
 HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
@@ -36,6 +37,7 @@ all_envs() {
 env_label() {
 	case "$1" in
 		tdeck)                     echo "LilyGo T-Deck" ;;
+		"$TDECK_PRO_ENV_NAME")     echo "LilyGo T-Deck Pro" ;;
 		"$DEBUG_ENV_NAME")         echo "LilyGo T-Deck (debug)" ;;
 		"$CARDPUTER_ENV_NAME")     echo "M5Stack Cardputer + Cap LoRa/GPS" ;;
 		"$TLORA_ENV_NAME")         echo "LilyGo T-Lora Pager TFT" ;;
@@ -73,6 +75,10 @@ prompt_for_device() {
 	if has_env "tdeck"; then
 		options+=("tdeck")
 		labels+=("LilyGo T-Deck")
+	fi
+	if has_env "$TDECK_PRO_ENV_NAME"; then
+		options+=("$TDECK_PRO_ENV_NAME")
+		labels+=("LilyGo T-Deck Pro")
 	fi
 	if has_env "$CARDPUTER_ENV_NAME"; then
 		options+=("$CARDPUTER_ENV_NAME")
@@ -131,8 +137,9 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|-M] [--m9|-9] [--square] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|-M] [--m9|-9] [--square] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
+	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME)"
@@ -181,6 +188,9 @@ for arg in "$@"; do
 	case "$arg" in
 		--tdeck|-t)
 			select_env_or_exit "tdeck" "Environment 'tdeck' not found in platformio.ini"
+			;;
+		--tdeck-pro|-p)
+			select_env_or_exit "$TDECK_PRO_ENV_NAME" "Environment '$TDECK_PRO_ENV_NAME' not found in platformio.ini"
 			;;
 		--debug|-d)
 			select_env_or_exit "$DEBUG_ENV_NAME" "Debug environment '$DEBUG_ENV_NAME' not found in platformio.ini" "Tip: add [env:$DEBUG_ENV_NAME] or run without --debug."

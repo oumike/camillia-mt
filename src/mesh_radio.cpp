@@ -237,6 +237,12 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
     (void)pagerPrimeLoRaRail(false);
 #endif
 
+#if defined(LORA_POWER_ENABLE_PIN) && (LORA_POWER_ENABLE_PIN >= 0)
+    pinMode(LORA_POWER_ENABLE_PIN, OUTPUT);
+    digitalWrite(LORA_POWER_ENABLE_PIN, LORA_POWER_ENABLE_LEVEL);
+    delay(10);
+#endif
+
     SPI.begin(LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
 
     Serial.printf("[radio] pins: sck=%d miso=%d mosi=%d cs=%d dio1=%d rst=%d busy=%d\n",
@@ -290,6 +296,8 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
             Serial.println("[radio] target=tlora-pager-tft (verify XL9555 LoRa rail: EXPANDS_LORA_EN)");
 #elif defined(DEVICE_TDECK)
             Serial.println("[radio] target=tdeck (expected pins: CS9 DIO1=45 RST17 BUSY13)");
+#elif defined(DEVICE_TDECK_PRO)
+            Serial.println("[radio] target=tdeck-pro (expected pins: CS3 DIO1=5 RST4 BUSY6 EN46)");
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
             Serial.println("[radio] target=cardputer-cap (board IO expander must be enabled before SX1262 init)");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)

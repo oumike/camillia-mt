@@ -12,14 +12,16 @@ fi
 
 # Required test order:
 # 1) tdeck
-# 2) pager
-# 3) heltec
-# 4) heltec-vertical
-# 5) cardputer
-# 6) mesh-deck
-# 7) square
+# 2) tdeck-pro
+# 3) pager
+# 4) heltec
+# 5) heltec-vertical
+# 6) cardputer
+# 7) mesh-deck
+# 8) square
 TARGET_LABELS=(
   "tdeck"
+  "tdeck-pro"
   "pager"
   "heltec"
   "heltec-vertical"
@@ -30,6 +32,7 @@ TARGET_LABELS=(
 
 TARGET_ENVS=(
   "tdeck"
+  "tdeck-pro"
   "tlora-pager-tft"
   "heltec-v4"
   "heltec-v4-vertical"

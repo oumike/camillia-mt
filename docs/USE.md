@@ -51,7 +51,8 @@ cursor into that channel's messages, scroll to a message to select it, then pres
 
 ### Shared shortcuts (keyboard builds)
 
-These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-cap`.
+These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
+`tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`.
 
 - D opens Direct Messages
 - C opens Config
@@ -85,11 +86,37 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
 ### LilyGo T-Deck (tdeck)
 
 - H toggles the channel selector
+- Alt+H returns directly to chat on keyboard-controller firmware with LilyGo's
+  five-byte raw-matrix mode (2025-06-12 or newer)
 - J/K map to Up/Down navigation in lists and chat row selection
 - Trackball Up/Down follows the same Up/Down behavior as J/K
 - Modal close key is Backspace (Esc is also accepted)
 - Compose close behavior: Backspace on an empty compose closes the compose modal
 - Trackball click hold for 2 seconds puts the screen to sleep
+
+### LilyGo T-Deck Pro (tdeck-pro)
+
+- Uses the same letter shortcuts as T-Deck: H opens the channel selector, J/K
+  navigate, and D/C/N/L/A open the shared device surfaces.
+- Shift and Symbol select the printed upper/symbol layers. Alt+E/F/S/X provide
+  Up/Right/Left/Down, Alt+Q sends Esc, Alt+H returns to chat, and Alt+B toggles
+  the keyboard backlight.
+- Modal close and empty-compose behavior match T-Deck: Backspace closes, with
+  Esc also accepted.
+- There is no trackball. Use the keyboard navigation above or the touchscreen.
+- E-paper updates are batched and rate-limited, so visual response is slower
+  than on the TFT devices even though key input is handled immediately.
+- The interface uses one fixed black-on-white **Camillia Paper** palette. Theme
+  and sender-color controls are omitted from the device and Web Config.
+- Channel and direct messages use transparent white-paper backgrounds with
+  black outlines. Chat Type offers Default and Outline; filled Bubble is omitted
+  from both device and Web Config.
+- When the display sleeps, its retained frame shows Camillia, the node name,
+  local time, and date. The time refreshes once per minute.
+- The bottom navigation bar is icon-only; physical keyboard shortcuts still
+  work but are not repeated beside the icons.
+- The expanded channel list matches the channel selector's width. In compose,
+  keyboard hints and the character count occupy separate footer lines.
 
 ### LilyGo T-Lora Pager TFT (tlora-pager-tft)
 
@@ -143,6 +170,13 @@ These apply to all keyboard builds: `tdeck`, `tlora-pager-tft`, and `cardputer-c
   longer closes — past two seconds it is the sleep gesture above)
 - No touch panel and no trackball — the keyboard and d-pad are the only input
 - The keypad has its own backlight, driven by the host
+
+### Attaky Mesh Deck (mesh-deck)
+
+- Alt+H returns directly to chat from Config, filters, nested pickers, and the
+  other device surfaces.
+- Alt is read as a held modifier from the left keyboard expander at row 4,
+  column 2; an ordinary H remains available for the channel selector.
 
 ### Heltec WiFi LoRa 32 V4 + TFT expansion
 
@@ -486,6 +520,10 @@ It applies immediately with no reboot, and travels with config export/import as
 `display: battDisplay:` (`PERCENT` or `VOLTAGE`).
 
 ### Theme
+
+T-Deck Pro is the exception to this section: its e-paper UI always uses the
+black-on-white Camillia Paper palette, so it does not show the Theme action or
+the Web Config theme picker.
 
 The **Theme** action opens a picker rather than cycling. Each theme/mode preset
 gets a row with its name and a three-swatch preview — background, panel, and
@@ -847,7 +885,7 @@ to apply it; re-choosing the current style just closes without a reboot.
 - **Classic** — one flat, colored text line per message. Your sent messages
   gain an `[ACK]` marker just after the timestamp once the message is
   acknowledged, and turn red on failure — in channel chat and Direct Messages
-  alike, on every build. The color separates the two kinds of acknowledgement:
+  alike. On color displays, color separates the two kinds of acknowledgement:
   **green** for an explicit routing ACK (always the case for a DM, which is
   addressed to one node), and the accent color for channel text, which goes
   out as a broadcast that usually settles for a relay confirming it carried
@@ -860,9 +898,14 @@ to apply it; re-choosing the current style just closes without a reboot.
   your sent messages), the sender tag is tinted to match, and the message text
   uses the theme's normal high-contrast color for readability
 
+T-Deck Pro is fixed to Outline mode and renders black text and outlines directly
+on the white Camillia Paper background. ACK and failure state remains visible in
+the text marker and layout rather than color. Its Chat Style selectors are
+omitted from the device and Web Config.
+
 The style applies to both **channel chat and Direct Messages**. The Web Config
-**Chat Style** dropdown offers the same three choices. All three styles are
-available on every build, including the Cardputer.
+**Chat Style** dropdown offers the same three choices on configurable builds.
+All three styles are available on those builds, including the Cardputer.
 
 ### Emoji
 

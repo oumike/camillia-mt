@@ -163,7 +163,7 @@ static inline void expireHeldKeyBestEffort(uint32_t nowMs) {
 } // namespace
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
 namespace {
 constexpr uint8_t TLORA_KB_ADDR = 0x34;
 constexpr uint8_t TLORA_REG_INT_STAT = 0x02;
@@ -189,9 +189,18 @@ constexpr uint8_t TLORA_REG_DEBOUNCE_DIS_2 = 0x2A;
 constexpr uint8_t TLORA_REG_DEBOUNCE_DIS_3 = 0x2B;
 constexpr uint16_t TLORA_MOD_TIMEOUT_MS = 1500;
 constexpr uint16_t TLORA_BKSP_HOLD_MS = 3000;
+#if defined(DEVICE_TDECK_PRO)
+constexpr uint8_t TLORA_KEYNUM_BACKSPACE = 11;
+constexpr uint8_t TLORA_KEY_COUNT = 35;
+#else
 constexpr uint8_t TLORA_KEYNUM_BACKSPACE = 30;
+constexpr uint8_t TLORA_KEY_COUNT = 31;
+#endif
 constexpr uint8_t TLORA_MOD_SHIFT = 0x01;
 constexpr uint8_t TLORA_MOD_SYM = 0x02;
+#if defined(DEVICE_TDECK_PRO)
+constexpr uint8_t TDECK_PRO_MOD_ALT = 0x04;
+#endif
 constexpr int8_t kRotaryDelta[16] = {
     0, -1,  1,  0,
     1,  0,  0, -1,
@@ -221,7 +230,49 @@ static inline uint8_t tloraReadRotaryAB() {
     return (uint8_t)((b << 1) | a);
 }
 
-const char kTloraTapMap[31][3] = {
+#if defined(DEVICE_TDECK_PRO)
+// The Pro has the same visible QWERTY layout as T-Deck, but its TCA8418 sends
+// matrix positions. Printable letters intentionally reach the shared shortcut
+// layer unchanged; Alt adds explicit directional navigation where available.
+const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
+    {'p', 'P', '@'},
+    {'o', 'O', '+'},
+    {'i', 'I', '-'},
+    {'u', 'U', '_'},
+    {'y', 'Y', ')'},
+    {'t', 'T', '('},
+    {'r', 'R', '3'},
+    {'e', 'E', '2'},
+    {'w', 'W', '1'},
+    {'q', 'Q', '#'},
+    {KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE_HOLD},
+    {'l', 'L', '"'},
+    {'k', 'K', '\''},
+    {'j', 'J', ';'},
+    {'h', 'H', ':'},
+    {'g', 'G', '/'},
+    {'f', 'F', '6'},
+    {'d', 'D', '5'},
+    {'s', 'S', '4'},
+    {'a', 'A', '*'},
+    {KEY_ENTER, KEY_ENTER, KEY_ENTER},
+    {'$', '$', '$'},
+    {'m', 'M', '.'},
+    {'n', 'N', ','},
+    {'b', 'B', '!'},
+    {'v', 'V', '?'},
+    {'c', 'C', '9'},
+    {'x', 'X', '8'},
+    {'z', 'Z', '7'},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {' ', ' ', ' '},
+    {KEY_NONE, KEY_NONE, '0'},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+};
+#else
+const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
     {'q', 'Q', '1'},
     {'w', 'W', '2'},
     {'e', 'E', '3'},
@@ -254,6 +305,7 @@ const char kTloraTapMap[31][3] = {
     {KEY_BACKSPACE, KEY_NONE, KEY_ESCAPE},
     {' ', KEY_NONE, KEY_NONE},
 };
+#endif
 
 void tloraWriteReg(uint8_t reg, uint8_t value) {
     Wire.beginTransmission(TLORA_KB_ADDR);
@@ -309,7 +361,24 @@ char tloraTranslateKey(uint8_t keyNum) {
         sTloraModifier = 0;
     }
 
-    // Key numbers are 1-based from TCA8418 event FIFO.
+    // Key numbers are 1-based from the TCA8418 event FIFO.
+#if defined(DEVICE_TDECK_PRO)
+    if (keyNum == 31 || keyNum == 35) {
+        sTloraModifier ^= TLORA_MOD_SHIFT;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+    if (keyNum == 32) {
+        sTloraModifier ^= TLORA_MOD_SYM;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+    if (keyNum == 30) {
+        sTloraModifier ^= TDECK_PRO_MOD_ALT;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+#else
     if (keyNum == 21) {
         sTloraModifier ^= TLORA_MOD_SYM;
         sTloraModifierSetMs = now;
@@ -320,9 +389,25 @@ char tloraTranslateKey(uint8_t keyNum) {
         sTloraModifierSetMs = now;
         return KEY_NONE;
     }
+#endif
 
-    if (keyNum < 1 || keyNum > 31) return KEY_NONE;
+    if (keyNum < 1 || keyNum > TLORA_KEY_COUNT) return KEY_NONE;
     uint8_t idx = keyNum - 1;
+
+#if defined(DEVICE_TDECK_PRO)
+    if (sTloraModifier & TDECK_PRO_MOD_ALT) {
+        char nav = KEY_NONE;
+        if (keyNum == 8) nav = KEY_SCROLL_UP;
+        else if (keyNum == 15) nav = KEY_OPEN_HOME;
+        else if (keyNum == 17) nav = KEY_NEXT_CHAN;
+        else if (keyNum == 19) nav = KEY_PREV_CHAN;
+        else if (keyNum == 25) nav = KEY_TOGGLE_KB_BACKLIGHT;
+        else if (keyNum == 28) nav = KEY_SCROLL_DN;
+        else if (keyNum == 10) nav = KEY_ESCAPE;
+        sTloraModifier = 0;
+        if (nav != KEY_NONE) return nav;
+    }
+#endif
 
     uint8_t mode = 0;
     if (sTloraModifier & TLORA_MOD_SYM) mode = 2;
@@ -443,16 +528,18 @@ static uint8_t s_mdRelCount[2][5] = {};  // consecutive reads backing that relea
 // half at row 3, and leaves seven positions empty.
 #define MESH_DECK_KEYMAP_KNOWN 1
 
-// Shift is a key in the matrix (left half, row 3, col 0), not a modifier line.
+// Shift and Alt are keys in the left matrix, not separate modifier lines.
 #define MD_KEY_SHIFT  0x01
+#define MD_KEY_ALT    0x02
 static const uint8_t kMdShiftHalf = 0, kMdShiftRow = 3, kMdShiftCol = 0;
+static const uint8_t kMdAltHalf = 0, kMdAltRow = 4, kMdAltCol = 2;
 
 static const char kMdKeymapLeft[5][5] = {
     {'1', '2', '3', '4', '5'},
     {'q', 'w', 'e', 'r', 't'},
     {'a', 's', 'd', 'f', 'g'},
     {MD_KEY_SHIFT, 'z', 'x', 'c', 'v'},
-    {KEY_NONE, KEY_TAB, KEY_NONE, ',', ' '},
+    {KEY_NONE, KEY_TAB, MD_KEY_ALT, ',', ' '},
 };
 static const char kMdKeymapRight[5][5] = {
     {'6', '7', '8', '9', '0'},
@@ -622,6 +709,8 @@ static void mdScanAll() {
 static char mdEmitPending() {
     const bool shiftHeld =
         (s_mdStable[kMdShiftHalf][kMdShiftRow] & (1u << kMdShiftCol)) != 0;
+    const bool altHeld =
+        (s_mdStable[kMdAltHalf][kMdAltRow] & (1u << kMdAltCol)) != 0;
 
     for (uint8_t half = 0; half < 2; half++) {
         if (!(half ? s_mdKbRight : s_mdKbLeft).present()) continue;
@@ -640,17 +729,20 @@ static char mdEmitPending() {
                 if (!(downEdges & (1u << c))) continue;
                 s_mdPrev[half][r] |= (uint8_t)(1u << c);
                 const char k = half ? kMdKeymapRight[r][c] : kMdKeymapLeft[r][c];
-#if defined(MESH_DECK_TOUCH_TRACE)
-                // Announce presses on positions the map calls empty. Attaky's
-                // published key list does not say where Fn or the symbol key
-                // sit in the matrix, so this is how their coordinates get
-                // established: press the key, read the row/col, fill it in.
                 if (k == KEY_NONE) {
+#if defined(MESH_DECK_TOUCH_TRACE)
                     Serial.printf("[meshdeck-kb] unmapped: %s half row %u col %u\n",
                                   half ? "RIGHT" : "LEFT", r, c);
-                }
+#else
+                    if (sKeyTrace) {
+                        Serial.printf("[meshdeck-kb] unmapped: %s half row %u col %u\n",
+                                      half ? "RIGHT" : "LEFT", r, c);
+                    }
 #endif
-                if (k == KEY_NONE || k == MD_KEY_SHIFT) continue;   // shift is a state
+                    continue;
+                }
+                if (k == MD_KEY_SHIFT || k == MD_KEY_ALT) continue;
+                if (altHeld && (k == 'h' || k == 'H')) return KEY_OPEN_HOME;
                 if (shiftHeld) return mdApplyShift(k);
                 return k;
             }
@@ -661,6 +753,10 @@ static char mdEmitPending() {
 #endif  // DEVICE_MESH_DECK
 
 #if defined(DEVICE_TDECK)
+static constexpr uint8_t TDECK_KB_MODE_RAW_CMD = 0x03;
+static constexpr uint8_t TDECK_KB_MODE_KEY_CMD = 0x04;
+static bool sTdeckKeyboardRawModeSupported = false;
+
 void tdeckKeyboardSetBacklight(uint8_t duty) {
     // Exactly two bytes, one command per transmission. The stock C3 firmware's
     // onReceive() switch falls through from LILYGO_KB_BRIGHTNESS_CMD into the
@@ -671,6 +767,29 @@ void tdeckKeyboardSetBacklight(uint8_t duty) {
     Wire.write(duty);
     // Return value ignored on purpose — see the boot probe in begin().
     (void)Wire.endTransmission();
+}
+
+static bool tdeckKeyboardAltHeldRaw() {
+    if (!sTdeckKeyboardRawModeSupported) return false;
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_RAW_CMD);
+    if (Wire.endTransmission() != 0) return false;
+
+    uint8_t matrix[5] = {};
+    const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
+    uint8_t readCount = 0;
+    while (Wire.available() && readCount < sizeof(matrix)) {
+        matrix[readCount++] = (uint8_t)Wire.read();
+    }
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_KEY_CMD);
+    (void)Wire.endTransmission();
+
+    // LilyGo raw reports five column bytes with row bits. Alt is C0/R4.
+    return count == sizeof(matrix) && readCount == sizeof(matrix)
+           && (matrix[0] & (1u << 4)) != 0;
 }
 #endif
 
@@ -732,7 +851,7 @@ void TDeckKeyboard::begin() {
     return;
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     Wire.begin(KB_SDA, KB_SCL, 100000UL);
     Wire.setClock(400000UL);
     delay(30);
@@ -788,6 +907,20 @@ void TDeckKeyboard::begin() {
     Wire.write((uint8_t)0x01);          // LILYGO_KB_BRIGHTNESS_CMD
     Wire.write((uint8_t)0x00);          // start dark, matching the C3's own boot duty
     Serial.printf("[kb-bl] brightness probe ack=%d\n", (int)Wire.endTransmission());
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_RAW_CMD);
+    const bool rawCommandOk = (Wire.endTransmission() == 0);
+    const uint8_t rawCount = rawCommandOk
+                                 ? Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)5)
+                                 : 0;
+    while (Wire.available()) (void)Wire.read();
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_KEY_CMD);
+    (void)Wire.endTransmission();
+    sTdeckKeyboardRawModeSupported = rawCommandOk && rawCount == 5;
+    Serial.printf("[kb] T-Deck raw matrix mode=%s\n",
+                  sTdeckKeyboardRawModeSupported ? "available" : "unavailable");
 #endif
 #endif
 
@@ -972,7 +1105,7 @@ char TDeckKeyboard::readKey() {
     pumpCardputerKeys();
     if (_cardputerCount == 0) return KEY_NONE;
     return dequeueCardputerKey();
-#elif defined(DEVICE_TLORA_PAGER_TFT)
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     static uint32_t lastIdleProbeMs = 0;
     uint32_t now = millis();
 #if (KB_INT >= 0)
@@ -1109,6 +1242,11 @@ char TDeckKeyboard::readKey() {
     lastKeyHitMs = now;
 #endif
     char mapped = mapKey(raw);
+#if defined(DEVICE_TDECK)
+    if ((mapped == 'h' || mapped == 'H') && tdeckKeyboardAltHeldRaw()) {
+        mapped = KEY_OPEN_HOME;
+    }
+#endif
     if (sKeyTrace) {
         Serial.printf("[kb] raw=0x%02X -> mapped=0x%02X%s\n",
                       raw, (uint8_t)mapped,
@@ -1400,7 +1538,7 @@ void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = t
 // events, so it is the only build that can answer this; elsewhere callers get
 // a best-effort heuristic keyed from recent keyboard activity.
 char keyboardHeldKey() {
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     return sTloraHeldKey;
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
@@ -1420,7 +1558,7 @@ char keyboardHeldKey() {
 }
 
 uint32_t keyboardHeldMs() {
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
     return millis() - sTloraHeldSinceMs;
 #elif !HAS_KEYBOARD

@@ -2899,7 +2899,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         return;
     }
     String html;
+#if HAS_UI_THEMES
     uint8_t themePreset = themePresetFromConfig(*gCfg);
+#endif
     // Zero in lite mode: the node loops below accumulate tens of KB of options
     // and detail panels, which AP mode has no room for and lite never shows.
     int totalNodes = lite ? 0 : Nodes.count();
@@ -3760,12 +3762,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='1'"; if ( gCfg->invertScroll) html += " selected"; html += ">On</option>"
             "</select></label></div>";
 #endif
+#if HAS_CHAT_STYLE_OPTIONS
     html += "<div class='row2'>";
+#if defined(DEVICE_TDECK_PRO)
+    html += "<label>Chat Type<select name='chat_style'>"
+            "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Default</option>";
+#else
     html += "<label>Chat Style<select name='chat_style'>"
-            "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>"
-            "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>"
-            "<option value='2'"; if (gCfg->chatStyle == CHAT_STYLE_OUTLINE) html += " selected"; html += ">Outline</option>"
+            "<option value='0'"; if (gCfg->chatStyle == CHAT_STYLE_CLASSIC) html += " selected"; html += ">Classic</option>";
+#endif
+#if HAS_CHAT_BUBBLE_STYLE_OPTION
+    html += "<option value='1'"; if (gCfg->chatStyle == CHAT_STYLE_BUBBLES) html += " selected"; html += ">Bubbles</option>";
+#endif
+    html += "<option value='2'"; if (gCfg->chatStyle == CHAT_STYLE_OUTLINE) html += " selected"; html += ">Outline</option>"
             "</select></label></div>";
+#endif
     html += "<div class='row2'>";
     html += "<label>Chat Names<select name='chat_names'>"
             "<option value='0'"; if (gCfg->chatNameStyle == CHAT_NAME_SHORT) html += " selected"; html += ">Short (ABCD)</option>"
@@ -3800,6 +3811,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             sendFlash(kFontModal);
         }
     }
+#if HAS_UI_THEMES
     if (lite) {
         // Plain select instead of the swatch grid: the grid is ~7 KB of JS plus
         // its own stylesheet, and it only exists to preview colors lite doesn't use.
@@ -3867,6 +3879,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         sendChunk(html);
         sendFlash(kThemePicker);
     }
+#endif
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -4590,6 +4603,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         sendChunk(html);
     }
 
+#if HAS_UI_COLOR_OPTIONS
     // Above the Danger Zone rather than inside it: it changes nothing but which
     // palette entry each node draws in, and nothing about it needs a confirm.
     section(html, false, "Chat Colors", false);
@@ -4603,6 +4617,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "for another arrangement. Messages are not touched.</p>";
     sectionEnd(html, false);
     sendChunk(html);
+#endif
 
     // Directly above the Danger Zone, which is where Clear Messages lives:
     // someone reading that button is exactly the person who wants this first.
@@ -6646,12 +6661,13 @@ static void handlePostSave() {
         gCfg->battDisplayMode =
             (uint8_t)constrain(server.arg("batt_display").toInt(), 0, BATT_DISPLAY_MAX);
     }
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+#if HAS_CHAT_STYLE_OPTIONS && !defined(DEVICE_CARDPUTER_LORA_HAT)
     if (server.hasArg("chat_style")) {
         long cs = server.arg("chat_style").toInt();
-        if (cs < 0 || cs > CHAT_STYLE_MAX) cs = CHAT_STYLE_CLASSIC;
-        gCfg->chatStyle = (uint8_t)cs;
+        gCfg->chatStyle = cfgCoerceChatStyle((int)cs);
     }
+#elif !HAS_CHAT_STYLE_OPTIONS
+    gCfg->chatStyle = CHAT_STYLE_OUTLINE;
 #endif
     if (server.hasArg("chat_names")) {
         long cn = server.arg("chat_names").toInt();
@@ -6746,6 +6762,7 @@ static void handlePostSave() {
     if (server.hasArg("chat_space")) {
         gCfg->chatSpacing = (uint8_t)constrain(server.arg("chat_space").toInt(), 0, 2);
     }
+#if HAS_UI_THEMES
     if (server.hasArg("ui_theme_preset")) {
         // kThemePresetTotal, not kThemePresetCount: the custom slots live past
         // the built-ins, and clamping to the old bound would quietly rewrite
@@ -6760,6 +6777,10 @@ static void handlePostSave() {
         gCfg->uiMode  = (uint8_t)(server.arg("ui_mode").toInt() != 0 ? UI_MODE_LIGHT : UI_MODE_DARK);
         if (uiThemeForcesDark(gCfg->uiTheme)) gCfg->uiMode = UI_MODE_DARK;
     }
+#else
+    gCfg->uiTheme = MY_UI_THEME;
+    gCfg->uiMode = UI_MODE_LIGHT;
+#endif
 
     // Power
     gCfg->isPowerSaving = server.arg("pwr_saving").toInt() != 0;
@@ -8065,8 +8086,10 @@ static void registerCommonRoutes() {
     onRoute("/save",              HTTP_POST, handlePostSave);
     onRoute("/set-debug-monitor", HTTP_POST, handlePostSetDebugMonitor);
     onRoute("/live-data",         HTTP_GET,  handleGetLiveData);
+#if HAS_UI_THEMES
     onRoute("/theme-save",        HTTP_POST, handlePostThemeSave);
     onRoute("/theme-delete",      HTTP_POST, handlePostThemeDelete);
+#endif
 #if HAS_VNC_HOST
     onRoute("/vnc-status",        HTTP_GET,  handleGetVncStatus);
     onRoute("/vnc-toggle",        HTTP_POST, handlePostVncToggle);
@@ -8099,7 +8122,9 @@ static void registerCommonRoutes() {
     onRoute("/messages.csv",      HTTP_GET,  handleGetMessagesCsv);
     onRoute("/export",            HTTP_GET,  handleGetExport);
     onRoute("/import",            HTTP_POST, handleImportDone, handleImportUpload);
+#if HAS_UI_COLOR_OPTIONS
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
+#endif
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
     onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);

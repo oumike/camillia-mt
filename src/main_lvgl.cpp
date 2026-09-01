@@ -151,7 +151,7 @@ static inline float notifyVolumeScale() {
     return (float)cfgCoerceVolume((int)s_cfg.volumePct) / (float)MY_VOLUME_PCT;
 }
 
-static lgfx::LGFX_Device &displayDev() {
+static auto &displayDev() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     return M5Cardputer.Display;
 #else
@@ -182,11 +182,9 @@ static constexpr uint16_t kDrawBufLines = 24;
 static constexpr uint16_t kDrawBufLines = 40;
 #endif
 // Allocated at UI init (heap_caps, internal RAM) rather than a static array so
-// the OTA worker path can complete without it ever being reserved.
-// LVGL v9 decouples lv_color_t (always 24-bit RGB) from the render buffer's
-// pixel format, so the buffer is typed by the display's format — RGB565 — and
-// sized in bytes, not in lv_color_t units.
-static uint16_t *s_drawBufMem = nullptr;
+// the OTA worker path can complete without it ever being reserved. Kept byte-
+// typed because TFT builds render RGB565 while T-Deck Pro renders native I1.
+static uint8_t *s_drawBufMem = nullptr;
 static lv_display_t *s_lvDisplay = nullptr;
 #if defined(DEVICE_TDECK)
 static uint16_t *s_screenshotCaptureFrame = nullptr;
@@ -220,6 +218,14 @@ static lv_obj_t *s_chatNewMsgLabel = nullptr;
 static lv_obj_t *s_chatActBtn = nullptr;
 static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
+#if defined(DEVICE_TDECK_PRO)
+static lv_obj_t *s_tdeckProSleepOverlay = nullptr;
+static lv_obj_t *s_tdeckProSleepTitle = nullptr;
+static lv_obj_t *s_tdeckProSleepNode = nullptr;
+static lv_obj_t *s_tdeckProSleepTime = nullptr;
+static lv_obj_t *s_tdeckProSleepDate = nullptr;
+static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
+#endif
 // Right-hand cluster of the bottom bar on builds where the nav buttons share it
 // with the GPS/WiFi/DM icons. nullptr everywhere else.
 static lv_obj_t *s_chatStatusBox = nullptr;
@@ -1339,6 +1345,12 @@ static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
+#elif defined(DEVICE_TDECK_PRO)
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = true;
+static constexpr bool kModalCloseUsesEscape = false;
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
+static constexpr int kMainScreenChannelBtnHeight = 22;
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -1361,11 +1373,12 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // size on every board. Fonts below 10 px aren't compiled in, so Small clamps at
 // montserrat_10; 18 px is the largest compiled face, so Extra Large clamps there.
 //
-// The Cardputer and the Pager opt out of this entirely and name their four sizes
+// The Cardputer, Pager, and T-Deck Pro opt out of this entirely and name their four sizes
 // outright — see explicitChatFont() below for why a relative ladder could not
 // give them what they needed.
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
-// These two boards name their four sizes outright instead of deriving them.
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
+    || defined(DEVICE_TDECK_PRO)
+// These boards name their four sizes outright instead of deriving them.
 //
 // The shared ladder is relative: Medium is whatever base the caller passes and
 // Small is one step below it, which ties the whole range to a single anchor. On
@@ -1379,6 +1392,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // same font (kMainScreenFont and kChannelChatFont are equal on both), so there
 // is no second anchor for it to be relative to.
 static const lv_font_t *explicitChatFont() {
+#if defined(DEVICE_TDECK_PRO)
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:  return &lv_font_montserrat_12;
         case FONT_SIZE_LARGE:  return &lv_font_montserrat_16;
@@ -1386,11 +1400,21 @@ static const lv_font_t *explicitChatFont() {
         case FONT_SIZE_MEDIUM:
         default:               return &lv_font_montserrat_14;
     }
+#else
+    switch (s_cfg.fontSize) {
+        case FONT_SIZE_SMALL:  return &lv_font_montserrat_12;
+        case FONT_SIZE_LARGE:  return &lv_font_montserrat_16;
+        case FONT_SIZE_XLARGE: return &lv_font_montserrat_18;
+        case FONT_SIZE_MEDIUM:
+        default:               return &lv_font_montserrat_14;
+    }
+#endif
 }
 #endif
 
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
-#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
+    || defined(DEVICE_TDECK_PRO)
     (void)base;
     return explicitChatFont();
 #else
@@ -1762,6 +1786,14 @@ static void emojiPickerActivate(int idx);
 static const char *chatStripPrefix(const char *line);
 static void chatInsertAckMarker(char *line, size_t lineCap, const char *marker);
 static void chatBubbleBeginRender(lv_obj_t *list);
+static inline void stylePaperMessageRow(lv_obj_t *row) {
+#if defined(DEVICE_TDECK_PRO)
+    if (!row) return;
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+#else
+    LV_UNUSED(row);
+#endif
+}
 static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                            const char *metaTag, const char *nameTag,
                            const char *body,
@@ -1780,18 +1812,31 @@ static constexpr bool kModalRowDescriptions = false;
 static constexpr bool kModalRowDescriptions = true;
 #endif
 
-// Chat style helpers. The three styles form a cycle for the CFG toggle:
-// Classic -> Bubbles -> Outline -> Classic. Both bubble styles share the bubble
-// renderer; only CLASSIC uses the flat-line path.
+// Chat style helpers. Filled Bubble can be omitted by a board while Default
+// and Outline retain their renderer meanings.
 static const char *chatStyleName(uint8_t style) {
     switch (style) {
         case CHAT_STYLE_BUBBLES: return "Bubbles";
         case CHAT_STYLE_OUTLINE: return "Outline";
-        default:                 return "Classic";
+        default:
+#if defined(DEVICE_TDECK_PRO)
+            return "Default";
+#else
+            return "Classic";
+#endif
     }
 }
 static inline bool chatStyleUsesBubbles(uint8_t style) {
     return style == CHAT_STYLE_BUBBLES || style == CHAT_STYLE_OUTLINE;
+}
+static int chatStyleStepSelection(int current, int delta) {
+    if (delta == 0) return current;
+    int next = current + (delta < 0 ? -1 : 1);
+    while (next >= CHAT_STYLE_CLASSIC && next <= CHAT_STYLE_MAX
+           && !cfgChatStyleAllowed(next)) {
+        next += (delta < 0 ? -1 : 1);
+    }
+    return cfgChatStyleAllowed(next) ? next : current;
 }
 static const char *chatNameStyleName(uint8_t style) {
     return (style == CHAT_NAME_LONG) ? "Long" : "Short";
@@ -2515,6 +2560,14 @@ static constexpr UiThemePresetLite kUiThemePresets[] = {
         rgb565(0x00, 0x00, 0x00), rgb565(0x00, 0x00, 0x00), rgb565(0x0A, 0x0A, 0x0A), rgb565(0xFF, 0xFF, 0xFF),
         "Camillia Black"},
 };
+
+#if !HAS_UI_THEMES
+static constexpr UiThemePresetLite kPaperTheme = {
+    UI_THEME_CAMELLIA, UI_MODE_LIGHT,
+    0xFFFF, 0xFFFF, 0xFFFF, 0x0000,
+    "Camillia Paper",
+};
+#endif
 
 static constexpr int kUiThemePresetCount =
     (int)(sizeof(kUiThemePresets) / sizeof(kUiThemePresets[0]));
@@ -3313,8 +3366,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     // Above the sound branches for the same reason as the Mesh Deck LED: each of
     // them returns early when the alert tone is off, and a silent device is
     // exactly when a visual cue matters. Called for every message; it decides
-    // for itself whether to blink, and only does so with the screen off — where
-    // it is the only notification these boards have.
+    // for itself whether the current board permits a pulse while awake.
     kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
@@ -3519,6 +3571,29 @@ static void persistMessageAlertSetting() { markConfigDirty(); }
 static void persistSplashMelodySetting() { markConfigDirty(); }
 
 static void applyUiThemePalette() {
+#if !HAS_UI_THEMES
+    // Preserve the config fields for blob compatibility, but this build has one
+    // semantic palette: the inverse of Camillia Black for reflective paper.
+    s_cfg.uiTheme = MY_UI_THEME;
+    s_cfg.uiMode = UI_MODE_LIGHT;
+    s_cfg.chatStyle = cfgCoerceChatStyle(s_cfg.chatStyle);
+    s_cfg.chatColorsEnabled = false;
+    s_cfg.userMsgColor = 0xFF;
+    constexpr uint16_t white = 0xFFFF;
+    constexpr uint16_t black = 0x0000;
+    s_ui = {
+        white, white, white, white, white, white,
+        black, black, white, black, black, white, black,
+        black, black, black, black, white, black,
+        black, black, black, black, black,
+        black, black, black,
+        white, white, white, black, black, black, black, black
+    };
+    s_appliedUiTheme = s_cfg.uiTheme;
+    s_appliedUiMode = s_cfg.uiMode;
+    return;
+#endif
+
     // A custom theme selected from a slot that has since been emptied — deleted
     // in web config while it was live, or a config restored without it — has no
     // colors to read. Fall back before anything dereferences it.
@@ -4151,7 +4226,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
             break;
         case CFG_ACTION_CHAT_STYLE:
+#if defined(DEVICE_TDECK_PRO)
+            snprintf(buf, bufLen, "Chat Type: %s", chatStyleName(s_cfg.chatStyle));
+#else
             snprintf(buf, bufLen, "Chat Style: %s", chatStyleName(s_cfg.chatStyle));
+#endif
             break;
         case CFG_ACTION_CHAT_NAMES:
             snprintf(buf, bufLen, "Chat Names: %s", chatNameStyleName(s_cfg.chatNameStyle));
@@ -4583,6 +4662,10 @@ static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) 
     if (line2 && line2[0]) {
         displayDev().drawString(line2, 8, y);
     }
+#if defined(DEVICE_TDECK_PRO)
+    lcd.requestRefresh();
+    lcd.serviceRefresh();
+#endif
 }
 
 static void otaWorkerDrawProgress(const char *title,
@@ -4644,6 +4727,10 @@ static void otaWorkerDrawProgress(const char *title,
         displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
         displayDev().drawString(detail, 8, 126);
     }
+#if defined(DEVICE_TDECK_PRO)
+    lcd.requestRefresh();
+    lcd.serviceRefresh();
+#endif
 }
 
 static bool otaWorkerEnsureWifiConnected() {
@@ -4991,8 +5078,13 @@ static bool runOtaWorkerModeIfRequested() {
 #endif
 }
 
+#if defined(DEVICE_TDECK_PRO)
+static bool s_tdeckProKeyboardBacklightEnabled = true;
+#endif
+
 static void setPagerKeyboardBacklight(bool on) {
-#if defined(DEVICE_TLORA_PAGER_TFT) && defined(KB_BL) && (KB_BL >= 0)
+#if (defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)) \
+    && defined(KB_BL) && (KB_BL >= 0)
     digitalWrite(KB_BL, on ? HIGH : LOW);
 #else
     LV_UNUSED(on);
@@ -5302,6 +5394,10 @@ static void probeTouchController() {
 // display this would silently break it, so it is gated on the same policy flag.
 static void setTouchSleep(bool asleep) {
 #if HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
+#if defined(DEVICE_TDECK_PRO)
+    // CST328/CST3530 stays available as a wake source on this board profile.
+    (void)asleep;
+#else
     lgfx::ITouch *t = displayDev().touch();
     if (!t) return;
 #if defined(DEVICE_TDECK)
@@ -5318,6 +5414,7 @@ static void setTouchSleep(bool asleep) {
     if (asleep) t->sleep();
     else        t->wakeup();
 #endif
+#endif
 #else
     LV_UNUSED(asleep);
 #endif
@@ -5329,6 +5426,111 @@ static void applyBrightness() {
     displayDev().setBrightness(cfgBrightnessDuty(s_cfg.brightness));
 }
 
+#if defined(DEVICE_TDECK_PRO)
+static uint32_t tdeckProSleepClockMinuteKey() {
+    const time_t now = time(nullptr);
+    if (now >= kClockSetEpoch) return (uint32_t)(now / 60);
+    return 0x80000000u | (millis() / 60000UL);
+}
+
+static void updateTdeckProSleepClock() {
+    if (!s_tdeckProSleepNode || !s_tdeckProSleepTime || !s_tdeckProSleepDate) return;
+
+    const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
+    lv_label_set_text(s_tdeckProSleepNode, nodeName);
+
+    char timeText[8] = "--:--";
+    char dateText[24] = "Date unavailable";
+    const time_t now = time(nullptr);
+    if (now >= kClockSetEpoch) {
+        struct tm localTime;
+        localtime_r(&now, &localTime);
+        strftime(timeText, sizeof(timeText), "%H:%M", &localTime);
+        strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
+    }
+    lv_label_set_text(s_tdeckProSleepTime, timeText);
+    lv_label_set_text(s_tdeckProSleepDate, dateText);
+    s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
+                                   ? (uint32_t)(now / 60)
+                                   : (0x80000000u | (millis() / 60000UL));
+}
+
+static void showTdeckProSleepClock() {
+    if (!s_rootScreen) return;
+    if (s_tdeckProSleepOverlay && lv_obj_is_valid(s_tdeckProSleepOverlay)) {
+        lv_obj_del(s_tdeckProSleepOverlay);
+    }
+
+    s_tdeckProSleepOverlay = lv_obj_create(s_rootScreen);
+    lv_obj_remove_style_all(s_tdeckProSleepOverlay);
+    lv_obj_set_size(s_tdeckProSleepOverlay, lv_pct(100), lv_pct(100));
+    lv_obj_align(s_tdeckProSleepOverlay, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_tdeckProSleepOverlay, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_bg_opa(s_tdeckProSleepOverlay, LV_OPA_COVER, 0);
+
+    s_tdeckProSleepTitle = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_width(s_tdeckProSleepTitle, lv_pct(92));
+    lv_obj_set_style_text_font(s_tdeckProSleepTitle, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepTitle, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepTitle, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(s_tdeckProSleepTitle, "Camillia");
+    lv_obj_align(s_tdeckProSleepTitle, LV_ALIGN_CENTER, 0, -96);
+
+    s_tdeckProSleepNode = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_width(s_tdeckProSleepNode, lv_pct(92));
+    lv_obj_set_style_text_font(s_tdeckProSleepNode, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepNode, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_CENTER, 0, -58);
+
+    s_tdeckProSleepTime = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_style_text_font(s_tdeckProSleepTime, &lv_font_montserrat_40, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepTime, lv_color_make(0, 0, 0), 0);
+    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_CENTER, 0, -4);
+
+    s_tdeckProSleepDate = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_width(s_tdeckProSleepDate, lv_pct(92));
+    lv_obj_set_style_text_font(s_tdeckProSleepDate, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepDate, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepDate, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_tdeckProSleepDate, LV_ALIGN_CENTER, 0, 48);
+
+    updateTdeckProSleepClock();
+    lv_obj_move_foreground(s_tdeckProSleepOverlay);
+    lv_obj_invalidate(s_tdeckProSleepOverlay);
+    lv_refr_now(s_lvDisplay);
+    lcd.requestRefresh(true);
+    lcd.serviceRefresh(true);
+}
+
+static void hideTdeckProSleepClock() {
+    if (s_tdeckProSleepOverlay && lv_obj_is_valid(s_tdeckProSleepOverlay)) {
+        lv_obj_del(s_tdeckProSleepOverlay);
+    }
+    s_tdeckProSleepOverlay = nullptr;
+    s_tdeckProSleepTitle = nullptr;
+    s_tdeckProSleepNode = nullptr;
+    s_tdeckProSleepTime = nullptr;
+    s_tdeckProSleepDate = nullptr;
+    s_tdeckProSleepMinuteKey = UINT32_MAX;
+    if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
+}
+
+static void serviceTdeckProSleepClock() {
+    if (!s_screenAsleep || !s_tdeckProSleepOverlay) return;
+    if (tdeckProSleepClockMinuteKey() == s_tdeckProSleepMinuteKey) return;
+
+    lcd.wakeup(false);
+    updateTdeckProSleepClock();
+    lv_obj_invalidate(s_tdeckProSleepOverlay);
+    lv_refr_now(s_lvDisplay);
+    lcd.serviceRefresh(true);
+    lcd.sleep();
+}
+#endif
+
 static void sleepScreen(const char *reason) {
     if (s_screenAsleep) return;
 
@@ -5337,6 +5539,9 @@ static void sleepScreen(const char *reason) {
     // fully powered and self-refreshing an image nobody can see. It drives the
     // panel's brightness directly rather than going through
     // LGFX_Device::setBrightness(), so the cached duty survives for wakeup().
+#if defined(DEVICE_TDECK_PRO)
+    showTdeckProSleepClock();
+#endif
     displayDev().sleep();
     setTouchSleep(true);
     setPagerKeyboardBacklight(false);
@@ -5610,7 +5815,7 @@ static char meshDeckReadDpadKey() {
 // ── Keyboard-backlight notification blink ────────────────────────────────────
 // Neither of these boards has a notification LED, so a message arriving with the
 // screen off left no trace at all. The keyboard backlight is the light they do
-// have, and screen-off is the only state it blinks in — see kbBlinkAllowedNow().
+// have. T-Deck Pro also pulses while awake; see kbBlinkAllowedNow().
 //
 // Shape and timing follow the Mesh Deck's RGB LED above deliberately: arm on
 // arrival, re-arm every second while anything stays unread, and never block —
@@ -5632,18 +5837,32 @@ static uint8_t  s_kbBlinkPhasesLeft = 0;
 static uint32_t s_kbBlinkNextMs = 0;
 static uint32_t s_kbBlinkPatternStartMs = 0;
 static bool     s_kbBlinkLit = false;
+static uint32_t s_kbBlinkActivityAnchorMs = 0;
+static bool     s_kbBlinkDismissedByActivity = true;
 
-// Whether the backlight is ours to pulse right now: only with the screen off.
-// Awake, the chat updates in front of you and the alert tone still plays, so the
-// blink would be noise — and on the Pager it could not be a bright pulse anyway,
-// because wakeScreen() has already lit the keyboard.
-static bool kbBlinkAllowedNow() { return s_screenAsleep; }
+static bool kbBlinkRestingLit() {
+#if defined(DEVICE_TDECK_PRO)
+    return !s_screenAsleep && s_tdeckProKeyboardBacklightEnabled;
+#else
+    return false;
+#endif
+}
+
+// Pro supports an explicit Alt+B resting state, so pulse away from that state
+// even while awake. The other boards retain their screen-off-only behavior.
+static bool kbBlinkAllowedNow() {
+#if defined(DEVICE_TDECK_PRO)
+    return true;
+#else
+    return s_screenAsleep;
+#endif
+}
 
 static void kbBlinkSetLit(bool lit) {
     s_kbBlinkLit = lit;
 #if defined(DEVICE_TDECK)
     tdeckKeyboardSetBacklight(lit ? kKbBlinkDuty : 0);
-#elif defined(DEVICE_TLORA_PAGER_TFT)
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     setPagerKeyboardBacklight(lit);
 #else
     LV_UNUSED(lit);
@@ -5672,6 +5891,7 @@ static uint8_t kbBlinkCount(bool isDm) {
 
 static void kbBlinkStartPattern(bool isDm) {
     if (!s_cfg.kbBlinkEnabled || !kbBlinkAllowedNow()) return;
+    if (s_kbBlinkPhasesLeft == 0) s_kbBlinkLit = kbBlinkRestingLit();
     s_kbBlinkPhasesLeft = (uint8_t)(kbBlinkCount(isDm) * 2);
     s_kbBlinkNextMs = 0;                             // fire on the next service
     s_kbBlinkPatternStartMs = millis();
@@ -5679,6 +5899,8 @@ static void kbBlinkStartPattern(bool isDm) {
 
 // Called for every new message, channel or DM.
 static void kbBlinkNotify(bool isDm) {
+    s_kbBlinkActivityAnchorMs = s_lastActivityMs;
+    s_kbBlinkDismissedByActivity = false;
     kbBlinkStartPattern(isDm);
 }
 
@@ -5687,16 +5909,16 @@ static void kbBlinkNotify(bool isDm) {
 // being switched off mid-blink — without this the light would stay stuck in
 // whichever half of a blink it was in.
 //
-// Who "puts it back" differs. On the T-Deck nothing else drives this backlight,
-// so this code owns it and rests it dark. On the Pager KB_BL belongs to
-// sleepScreen()/wakeScreen(); by the time a pattern is interrupted there the
-// screen state has already written the pin, and a trailing write from here would
-// either fight it or black out a keyboard the user is about to type on.
+// Who "puts it back" differs. T-Deck rests dark, T-Deck Pro restores the Alt+B
+// state, and Pager leaves the pin to sleepScreen()/wakeScreen().
 static void kbBlinkRelease(bool forceDark) {
     s_kbBlinkPhasesLeft = 0;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     LV_UNUSED(forceDark);
     s_kbBlinkLit = false;
+#elif defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(forceDark);
+    kbBlinkSetLit(kbBlinkRestingLit());
 #else
     if (s_kbBlinkLit || forceDark) kbBlinkSetLit(false);
 #endif
@@ -5713,9 +5935,22 @@ static bool kbBlinkBusy() { return s_kbBlinkPhasesLeft != 0; }
 
 static void serviceKbBlink() {
     if (!s_cfg.kbBlinkEnabled) {
+#if defined(DEVICE_TDECK_PRO)
+        if (s_kbBlinkPhasesLeft != 0 || s_kbBlinkLit != kbBlinkRestingLit()) {
+            kbBlinkApplySetting();
+        }
+#else
         if (s_kbBlinkPhasesLeft != 0 || s_kbBlinkLit) kbBlinkApplySetting();
+#endif
         return;
     }
+
+    if (!s_kbBlinkDismissedByActivity
+        && s_lastActivityMs != s_kbBlinkActivityAnchorMs) {
+        s_kbBlinkDismissedByActivity = true;
+        kbBlinkRelease(false);
+    }
+    if (s_kbBlinkDismissedByActivity) return;
 
     if (!kbBlinkAllowedNow()) {
         // Screen just woke mid-pattern. On the T-Deck that leaves a lit keyboard
@@ -5733,7 +5968,7 @@ static void serviceKbBlink() {
         // the messages clears the flags and the reminder simply stops.
         //
         // The timeout is checked only here, in the idle branch, so a pattern
-        // already running always finishes and leaves the backlight dark.
+        // already running always finishes and restores the resting state.
         if (!kbBlinkHasUnread()) return;
         if (!lightNotifyWindowOpen()) return;
         if ((uint32_t)(now - s_kbBlinkPatternStartMs) < kKbBlinkRepeatMs) return;
@@ -5746,11 +5981,28 @@ static void serviceKbBlink() {
     s_kbBlinkNextMs = now + (s_kbBlinkLit ? kKbBlinkOnMs : kKbBlinkOffMs);
     s_kbBlinkPhasesLeft--;
 
-    if (s_kbBlinkPhasesLeft == 0 && s_kbBlinkLit) {
-        kbBlinkSetLit(false);                        // always end dark
+    if (s_kbBlinkPhasesLeft == 0) {
+#if defined(DEVICE_TDECK_PRO)
+        kbBlinkSetLit(kbBlinkRestingLit());
+#elif !defined(DEVICE_TLORA_PAGER_TFT)
+        if (s_kbBlinkLit) kbBlinkSetLit(false);
+#endif
     }
 }
 #endif  // HAS_KB_BLINK
+
+#if defined(DEVICE_TDECK_PRO)
+static void toggleTdeckProKeyboardBacklight() {
+    s_tdeckProKeyboardBacklightEnabled = !s_tdeckProKeyboardBacklightEnabled;
+#if HAS_KB_BLINK
+    kbBlinkRelease(false);
+#else
+    setPagerKeyboardBacklight(!s_screenAsleep && s_tdeckProKeyboardBacklightEnabled);
+#endif
+    Serial.printf("[kb-bl] T-Deck Pro %s\n",
+                  s_tdeckProKeyboardBacklightEnabled ? "on" : "off");
+}
+#endif
 
 static void wakeScreen() {
     if (!s_screenAsleep) {
@@ -5761,6 +6013,10 @@ static void wakeScreen() {
     // Full clock first: the repaint that follows on this same loop pass should
     // run at speed.
     applyCpuMhz(kCpuMhzActive);
+
+#if defined(DEVICE_TDECK_PRO)
+    hideTdeckProSleepClock();
+#endif
 
     // SLPOUT, then straight back to a dark backlight — wakeup() restores the
     // brightness LGFX cached, which would expose the stale frame the controller
@@ -5779,8 +6035,12 @@ static void wakeScreen() {
     s_backlightPendingOn = true;
     s_preSleepDimmed = false;
 
-    setPagerKeyboardBacklight(true);
     s_screenAsleep = false;
+#if defined(DEVICE_TDECK_PRO) && HAS_KB_BLINK
+    kbBlinkRelease(false);
+#else
+    setPagerKeyboardBacklight(true);
+#endif
     s_lastActivityMs = millis();
 
     // Force repaint after wake so stale text/colors are not shown.
@@ -6632,7 +6892,7 @@ static void loadConfigFromPrefs() {
     ro = prefs.getUChar("dispUnits", 0xFF);
     if (ro != 0xFF) s_cfg.displayUnits = ro;
     ro = prefs.getUChar("chatStyle", 0xFF);
-    if (ro != 0xFF && ro <= CHAT_STYLE_MAX) s_cfg.chatStyle = ro;
+    if (ro != 0xFF) s_cfg.chatStyle = cfgCoerceChatStyle(ro);
     ro = prefs.getUChar("chatNameSty", 0xFF);
     if (ro != 0xFF && ro <= CHAT_NAME_MAX) s_cfg.chatNameStyle = ro;
     if (prefs.isKey("chatColors")) s_cfg.chatColorsEnabled = prefs.getBool("chatColors");
@@ -7446,12 +7706,18 @@ static void refreshEmojiPickerSelection() {
         lv_obj_t *cell = lv_obj_get_child(grid, i);
         if (!cell) continue;
         const bool sel = (i == s_emojiPickerSelection);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cell, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(cell, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_opa(cell, sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
         lv_obj_set_style_bg_color(cell, light ? lv_color_hex(0xC7D8F5)
                                               : lv_color_hex(0x2A4E8F), 0);
         lv_obj_set_style_border_width(cell, sel ? 2 : 0, 0);
         lv_obj_set_style_border_color(cell, light ? lv_color_hex(0x3A5F9E)
                                                   : lv_color_hex(0x9BC0FF), 0);
+    #endif
         if (sel) lv_obj_scroll_to_view(cell, LV_ANIM_OFF);
     }
 }
@@ -7842,6 +8108,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
+#elif defined(DEVICE_TDECK_PRO)
+    const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
+    const lv_coord_t composeInputPadTop = 1;
+    const lv_coord_t composeModalBottomPad = 2;
+    const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
     const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
@@ -8016,6 +8288,9 @@ static void openComposePrompt(uint32_t replyPacketId,
     int modalH = isReply ? 100 : 76;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     modalH = isReply ? 138 : 116;
+#elif defined(DEVICE_TDECK_PRO)
+    // Two footer rows: character count above, keyboard hints below.
+    modalH = isReply ? 142 : 120;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     modalH = isReply ? 126 : 104;
 #elif defined(DEVICE_MESH_DECK)
@@ -8052,6 +8327,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
     lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_composeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+#if defined(DEVICE_TDECK_PRO)
+    const lv_coord_t composeFooterLineH = lv_font_get_line_height(composeBodyFont);
+    lv_obj_set_style_pad_bottom(
+        s_composeModal,
+        (lv_coord_t)(composeFooterLineH * 2 + composeModalBottomPad), 0);
+#endif
 
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -8085,7 +8366,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
@@ -8123,7 +8404,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     // composeInputH is the FLOOR now, not the exact height. It used to be both:
     // min and max were pinned to it, so the centre band grew to take the slack
@@ -8146,7 +8427,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(s_composeInput, 1, 0);
     lv_obj_set_style_pad_left(s_composeInput, 3, 0);
     lv_obj_set_style_pad_right(s_composeInput, 3, 0);
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) \
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) \
     || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     // Wrap instead of scrolling sideways. The min/max height above pins the box
     // to its fixed number of lines, so a longer message scrolls inside it
@@ -8192,10 +8473,16 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_set_width(hint, modalW - 8);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
+#elif defined(DEVICE_TDECK_PRO)
+    // Give the keyboard legend its own lower footer line. The count sits one
+    // line above, so neither can overwrite the other as the count grows.
+    lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_width(hint, modalW - 8);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
 #endif
 
-    // Live "x of 200" countdown overlaid at the very bottom-right, sharing the
-    // bottom line with the hint legend (which is left-aligned).
+    // Live "x of 200" countdown. Most builds share the hint line; T-Deck Pro
+    // reserves the line above it so the two labels cannot overlap.
     s_composeCharCount = lv_label_create(s_composeModal);
     lv_obj_add_flag(s_composeCharCount, LV_OBJ_FLAG_IGNORE_LAYOUT);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -8209,6 +8496,9 @@ static void openComposePrompt(uint32_t replyPacketId,
     // Flush with the legend's line rather than lifted off it: the legend is the
     // last item in the column, so its box already ends at the content bottom.
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
+#elif defined(DEVICE_TDECK_PRO)
+    lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4,
+                 -(composeModalBottomPad + composeFooterLineH));
 #else
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, -composeModalBottomPad);
 #endif
@@ -8347,9 +8637,13 @@ static void initCfgActions() {
     // compact config layouts (notably the Pager's split action/info screen).
     // All builds get the full set — the Cardputer's bubble/outline styles render
     // fine on its 240x135 panel.
+#if HAS_CHAT_STYLE_OPTIONS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_STYLE;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
+#if HAS_UI_COLOR_OPTIONS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
+#endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
@@ -8368,8 +8662,12 @@ static void initCfgActions() {
     #if HAS_NAV_BAR_TOGGLE
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
     #endif
+#if HAS_UI_THEMES
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
+#endif
+#if HAS_UI_COLOR_OPTIONS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
+#endif
     // Sound settings sit with the other presentation options rather than down
     // among the mesh/module actions.
     #if HAS_VOLUME_CONTROL
@@ -8432,7 +8730,9 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
     // Sits with the maintenance actions, directly above Clear Messages: it is
     // the mildest of the "undo something about the stored chat" group.
+#if HAS_UI_COLOR_OPTIONS
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
     // Mildest first: keeping the pinned contacts is the common case, and the
     // total wipe sits between it and Factory Reset.
@@ -8583,6 +8883,17 @@ static lv_color_t cfgContrastColorFor565(uint16_t c) {
 // dress a freshly built one.
 static void cfgStyleRow(lv_obj_t *row, int i, bool disabled, bool selected) {
     if (!row) return;
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(i);
+    lv_obj_set_style_text_color(row, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_opa(row, disabled ? LV_OPA_50 : LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+    lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_outline_width(row, 0, 0);
+    lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
+    return;
+#endif
     const lv_color_t selectionOutlineColor = cfgContrastColorFor565(s_ui.selectBg);
     const lv_color_t selectionBgColor = lvColorFrom565(s_ui.selectBg);
     const lv_color_t selectionTextColor = cfgContrastColorFor565(s_ui.selectBg);
@@ -8709,10 +9020,10 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_12;
     const int cfgPadTop = 3;
     const int cfgPadBottom = 3;
-#elif defined(DEVICE_TDECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
-    const int cfgPadTop = 3;
-    const int cfgPadBottom = 3;
+    const int cfgPadTop = 4;
+    const int cfgPadBottom = 4;
 #elif defined(DEVICE_MESH_DECK)
     // Same 320x240 panel as the T-Deck but smaller glass, so it takes the
     // T-Deck's row font and a little more height on top: rows here are tapped as
@@ -8921,9 +9232,16 @@ static void refreshCfgWifiPickerModal() {
         lv_obj_set_style_pad_top(row, 4, 0);
         lv_obj_set_style_pad_bottom(row, 4, 0);
         lv_obj_set_style_radius(row, 3, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, i == s_cfgWifiSelection ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_text_color(row, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(row, lv_color_hex((i & 1) ? 0x123266 : 0x0F2A5C), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
         lv_obj_set_style_border_width(row, 0, 0);
+    #endif
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, rowText);
 
@@ -8931,6 +9249,9 @@ static void refreshCfgWifiPickerModal() {
         lv_obj_add_event_cb(row, onCfgWifiRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         if (i == s_cfgWifiSelection) {
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+#else
             lv_obj_set_style_bg_color(row, lvColorFrom565(s_ui.selectBg), 0);
             lv_obj_set_style_bg_opa(row, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80, 0);
             lv_obj_set_style_border_width(row, 1, 0);
@@ -8941,6 +9262,7 @@ static void refreshCfgWifiPickerModal() {
                                             : lv_color_hex(0xFFFFFF),
                                         0);
             lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+#endif
         }
     }
 }
@@ -8982,7 +9304,7 @@ static void applyCfgWifiSelection(int idx) {
     if (s_webCfgEnabled && webCfgRunning()) {
         webCfgEnd();
         webCfgPushActiveCreds();
-#if HAS_FILE_STORAGE
+#if HAS_FILE_STORAGE && !defined(DEVICE_TDECK_PRO)
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -9268,15 +9590,30 @@ static void openCfgWifiDeleteConfirm() {
     auto makeDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
                          lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
+    #if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(bgColor);
+        lv_obj_remove_style_all(btn);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 78, 0);
         lv_obj_set_style_radius(btn, 4, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+    #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    #endif
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
@@ -9596,7 +9933,11 @@ static void openCfgBrightnessModal() {
     s_cfgBrightValue = lv_label_create(s_cfgBrightModal);
     lv_obj_set_width(s_cfgBrightValue, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgBrightValue, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_cfgBrightValue, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_cfgBrightValue, lv_color_hex(0xFFFFFF), 0);
+#endif
     lv_obj_set_style_text_align(s_cfgBrightValue, LV_TEXT_ALIGN_CENTER, 0);
 
     s_cfgBrightSlider = lv_slider_create(s_cfgBrightModal);
@@ -9912,7 +10253,11 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     s_cfgSliderValue = lv_label_create(s_cfgSliderModal);
     lv_obj_set_width(s_cfgSliderValue, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgSliderValue, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_cfgSliderValue, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_cfgSliderValue, lv_color_hex(0xFFFFFF), 0);
+#endif
     lv_obj_set_style_text_align(s_cfgSliderValue, LV_TEXT_ALIGN_CENTER, 0);
 
     s_cfgSliderCtl = lv_slider_create(s_cfgSliderModal);
@@ -10307,7 +10652,11 @@ static void openCfgBattCalModal() {
     s_cfgBattCalValue = lv_label_create(s_cfgBattCalModal);
     lv_obj_set_width(s_cfgBattCalValue, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgBattCalValue, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_cfgBattCalValue, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_cfgBattCalValue, lv_color_hex(0xFFFFFF), 0);
+#endif
     lv_obj_set_style_text_align(s_cfgBattCalValue, LV_TEXT_ALIGN_CENTER, 0);
 
     s_cfgBattCalDetail = lv_label_create(s_cfgBattCalModal);
@@ -10378,6 +10727,18 @@ static void closeChatStyleModal() {
 
 static void refreshChatStyleSelection() {
     if (!s_chatStyleModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
+        lv_obj_t *row = s_chatStyleRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_chatStyleSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -10396,7 +10757,7 @@ static void refreshChatStyleSelection() {
 }
 
 static void applyChatStyleSelection(int style) {
-    if (style < 0 || style > CHAT_STYLE_MAX) return;
+    if (!cfgChatStyleAllowed(style)) return;
     const bool changed = ((uint8_t)style != s_cfg.chatStyle);
     s_cfg.chatStyle = (uint8_t)style;
     if (changed) {
@@ -10409,8 +10770,13 @@ static void applyChatStyleSelection(int style) {
         s_lastRenderedCount = -1;
         refreshChatView(true);
     }
+#if defined(DEVICE_TDECK_PRO)
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Type: %s%s",
+             chatStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+#else
     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Chat Style: %s%s",
              chatStyleName((uint8_t)style), changed ? "" : " (unchanged)");
+#endif
     closeChatStyleModal();
     refreshCfgModal();
 }
@@ -10429,7 +10795,7 @@ static void onChatStyleBackdropPressed(lv_event_t *e) {
 
 static void openChatStyleModal() {
     if (!s_rootScreen || s_chatStyleModal || s_chatStyleBackdrop) return;
-    s_chatStyleSelection = (s_cfg.chatStyle <= CHAT_STYLE_MAX) ? s_cfg.chatStyle : 0;
+    s_chatStyleSelection = cfgCoerceChatStyle(s_cfg.chatStyle);
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -10457,10 +10823,15 @@ static void openChatStyleModal() {
     lv_obj_add_flag(s_chatStyleModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_chatStyleModal, LV_DIR_VER);
     lv_obj_add_flag(s_chatStyleModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_chatStyleModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_chatStyleModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_chatStyleModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_chatStyleModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_chatStyleModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_chatStyleModal, 1, 0);
-    lv_obj_set_style_border_color(s_chatStyleModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_chatStyleModal, 8, 0);
     lv_obj_set_style_pad_row(s_chatStyleModal, 6, 0);
     lv_obj_set_flex_flow(s_chatStyleModal, LV_FLEX_FLOW_COLUMN);
@@ -10471,14 +10842,26 @@ static void openChatStyleModal() {
     lv_obj_t *title = lv_label_create(s_chatStyleModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_label_set_text(title, "Chat Type");
+#else
     lv_label_set_text(title, "Chat Style");
+#endif
 
     lv_obj_t *hint = lv_label_create(s_chatStyleModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#endif
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(hint,
 #if UI_TOUCH_ONLY_PROFILE
@@ -10489,15 +10872,30 @@ static void openChatStyleModal() {
     );
 
     static const char *kStyleDesc[CHAT_STYLE_MAX + 1] = {
+#if defined(DEVICE_TDECK_PRO)
+        "Flat black text lines",
+        "",
+        "Outlined messages",
+#else
         "Flat colored text lines",
         "Filled color bubbles",
         "Outlined color bubbles",
+#endif
     };
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+#else
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
 
     for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
+        if (!cfgChatStyleAllowed(i)) continue;
         lv_obj_t *row = lv_btn_create(s_chatStyleModal);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
         s_chatStyleRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
@@ -10518,7 +10916,11 @@ static void openChatStyleModal() {
             lv_obj_t *desc = lv_label_create(row);
             lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(desc, rowTextColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
             lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
             lv_label_set_text(desc, kStyleDesc[i]);
         }
     }
@@ -10863,6 +11265,18 @@ static void closeChatNameModal() {
 
 static void refreshChatNameSelection() {
     if (!s_chatNameModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i <= CHAT_NAME_MAX; i++) {
+        lv_obj_t *row = s_chatNameRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_chatNameSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -10979,6 +11393,10 @@ static void openChatNameModal() {
 
     for (int i = 0; i <= CHAT_NAME_MAX; i++) {
         lv_obj_t *row = lv_btn_create(s_chatNameModal);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
         s_chatNameRows[i] = row;
         lv_obj_set_width(row, lv_pct(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
@@ -10999,7 +11417,11 @@ static void openChatNameModal() {
             lv_obj_t *desc = lv_label_create(row);
             lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
             lv_obj_set_style_text_color(desc, rowTextColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
             lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
             lv_label_set_text(desc, kNameDesc[i]);
         }
     }
@@ -11024,6 +11446,18 @@ static void closeFontSizeModal() {
 
 static void refreshFontSizeSelection() {
     if (!s_fontSizeModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i <= FONT_SIZE_MAX; i++) {
+        lv_obj_t *row = s_fontSizeRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_fontSizeSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -11106,10 +11540,15 @@ static void openFontSizeModal() {
     lv_obj_add_flag(s_fontSizeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(s_fontSizeModal, LV_DIR_VER);
     lv_obj_add_flag(s_fontSizeModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_fontSizeModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_fontSizeModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_fontSizeModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_fontSizeModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_fontSizeModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_fontSizeModal, 1, 0);
-    lv_obj_set_style_border_color(s_fontSizeModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_fontSizeModal, 8, 0);
     lv_obj_set_style_pad_row(s_fontSizeModal, 6, 0);
     lv_obj_set_flex_flow(s_fontSizeModal, LV_FLEX_FLOW_COLUMN);
@@ -11120,14 +11559,22 @@ static void openFontSizeModal() {
     lv_obj_t *title = lv_label_create(s_fontSizeModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Font Size");
 
     lv_obj_t *hint = lv_label_create(s_fontSizeModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#endif
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
     lv_label_set_text(hint, "Tap a size to apply");
@@ -11140,8 +11587,12 @@ static void openFontSizeModal() {
     // are ~half the modal width and the spelled-out form wraps to two lines on
     // the narrowest board.
     static const char *kSizeLabel[FONT_SIZE_MAX + 1] = { "Small", "Medium", "Large", "X-Large" };
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+#else
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
 
     // Wrapping row container: four ~half-width buttons fall into two rows of
     // two. A stacked list of four described rows overflows the 135 px-tall
@@ -11159,6 +11610,10 @@ static void openFontSizeModal() {
 
     for (int i = 0; i <= FONT_SIZE_MAX; i++) {
         lv_obj_t *row = lv_btn_create(grid);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
         s_fontSizeRows[i] = row;
         lv_obj_set_width(row, lv_pct(46));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
@@ -11795,6 +12250,18 @@ static void refreshChanCfgLabels() {
 
 static void refreshChanCfgSelection() {
     if (!s_chanCfgModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *row = s_chanCfgRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_chanCfgSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -11902,6 +12369,10 @@ static void openChanCfgModal() {
         if (i >= MESH_CHANNELS) continue;
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_chanCfgRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
@@ -11954,11 +12425,13 @@ static void closeChanEditModal() {
 
 static void refreshChanEditRows() {
     if (!s_chanEditModal) return;
+#if !defined(DEVICE_TDECK_PRO)
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
     const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
     const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+#endif
 
     char encText[24];
     chanEncLabel(s_chanEditKey, s_chanEditKeyLen, encText, sizeof(encText));
@@ -11967,10 +12440,16 @@ static void refreshChanEditRows() {
         lv_obj_t *row = s_chanEditRows[i];
         if (!row) continue;
         const bool sel = (i == s_chanEditSelection);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
         lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
         lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
         lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+    #endif
         // Recursive: with the rows in a grid the scrollable object is the modal,
         // two levels up.
         if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
@@ -12156,6 +12635,10 @@ static void openChanEditModal(int slot) {
         if (i >= CHAN_EDIT_ROW_COUNT) continue;
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_chanEditRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         // Label and value share one line: stacked, the rows plus the header ran
@@ -12191,7 +12674,11 @@ static void openChanEditModal(int slot) {
         lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(val, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(val, rowTextColor, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_opa(val, LV_OPA_COVER, 0);
+    #else
         lv_obj_set_style_text_opa(val, LV_OPA_80, 0);
+    #endif
         lv_obj_set_style_text_align(val, LV_TEXT_ALIGN_RIGHT, 0);
         lv_label_set_text(val, "");
     }
@@ -12240,8 +12727,8 @@ static void onChanTextCancelPressed(lv_event_t *e) {
 }
 #endif
 
-#if defined(DEVICE_TDECK)
-// Base64 keys are '='-padded, and the T-Deck's BB Q10 keyboard has no '=' key or
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
+// Base64 keys are '='-padded, and neither T-Deck keyboard has an '=' key or
 // shortcut — every other board can type one. Tapping this inserts it at the
 // cursor, so a key can also be repaired mid-string, not just padded at the end.
 static void onChanTextEqualsPressed(lv_event_t *e) {
@@ -12398,7 +12885,7 @@ static void openChanTextModal(int field) {
     }
 #endif
 
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
     // Key field only: the name field has no use for a character the keyboard
     // can't produce.
     if (!editingName) {
@@ -12631,11 +13118,13 @@ static void closeTimeCfgModal() {
 
 static void refreshTimeCfgRows() {
     if (!s_timeCfgModal) return;
+#if !defined(DEVICE_TDECK_PRO)
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
     const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
     const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+#endif
 
     // Automatic mode drops the whole date line, and the two time cells from the
     // line below — but not that line itself, which carries Save. Flex skips
@@ -12663,10 +13152,16 @@ static void refreshTimeCfgRows() {
         if (!timeCfgRowVisible(i)) continue;   // hidden, or inside a hidden line
 
         const bool sel = (i == s_timeCfgSelection);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
         lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
         lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
         lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+    #endif
         // Recursive: the date and time cells sit inside a grid, one level below
         // the modal that actually scrolls.
         if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
@@ -12787,6 +13282,10 @@ static void openTimeCfgModal() {
     // a third of the Cardputer's width fits "Month 07" on a single line.
     auto makeCell = [&](lv_obj_t *parent, int i, int widthPct) {
         lv_obj_t *cell = lv_btn_create(parent);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(cell);
+        lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+#endif
         s_timeCfgRows[i] = cell;
         lv_obj_set_width(cell, lv_pct(widthPct));
         lv_obj_set_height(cell, kChanModalRowH);
@@ -13511,9 +14010,16 @@ static void refreshCfgWifiScanModal(bool runScan) {
         lv_obj_set_style_pad_top(row, 4, 0);
         lv_obj_set_style_pad_bottom(row, 4, 0);
         lv_obj_set_style_radius(row, 3, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, i == s_cfgWifiScanSelection ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_text_color(row, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(row, lv_color_hex((i & 1) ? 0x123266 : 0x0F2A5C), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_40, 0);
         lv_obj_set_style_border_width(row, 0, 0);
+    #endif
         lv_label_set_long_mode(row, LV_LABEL_LONG_DOT);
         lv_label_set_text(row, rowText);
 
@@ -13521,6 +14027,9 @@ static void refreshCfgWifiScanModal(bool runScan) {
         lv_obj_add_event_cb(row, onCfgWifiScanRowPressed, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         if (i == s_cfgWifiScanSelection) {
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+#else
             lv_obj_set_style_bg_color(row, lvColorFrom565(s_ui.selectBg), 0);
             lv_obj_set_style_bg_opa(row, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_80, 0);
             lv_obj_set_style_border_width(row, 1, 0);
@@ -13531,6 +14040,7 @@ static void refreshCfgWifiScanModal(bool runScan) {
                                             : lv_color_hex(0xFFFFFF),
                                         0);
             lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+#endif
         }
     }
 }
@@ -14652,8 +15162,8 @@ static void openNodeInfoModal() {
     lv_obj_set_style_text_font(hint, bodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_pad_top(hint, 3, 0);
-#if defined(DEVICE_TDECK)
-    // T-Deck has no dedicated Up/Down keys; J/K and the trackball drive scroll.
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
+    // T-Deck keyboards have no dedicated Up/Down keys; J/K drive scroll.
     lv_label_set_text_fmt(hint, "J/K = Scroll   %s = Close", modalCloseKeyLabel());
 #else
     lv_label_set_text_fmt(hint,
@@ -14791,13 +15301,21 @@ static lv_obj_t *makeSysStatsColumn(lv_obj_t *parent, const char *header,
     lv_obj_t *head = lv_label_create(col);
     lv_obj_set_width(head, lv_pct(100));
     lv_obj_set_style_text_font(head, headFont, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(head, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(head, lv_color_hex(0x6BF0DC), 0);
+#endif
     lv_label_set_text(head, header);
 
     lv_obj_t *body = lv_label_create(col);
     lv_obj_set_width(body, lv_pct(100));
     lv_obj_set_style_text_font(body, bodyFont, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(body, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(body, lv_color_hex(0xD9F7F0), 0);
+#endif
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body, "");
     return body;
@@ -14824,10 +15342,15 @@ static void openSysStatsModal() {
     lv_obj_align(s_sysStatsModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_sysStatsModal, LV_OBJ_FLAG_SCROLLABLE);
     // Distinct teal accent so the hidden screen reads as "not a normal modal".
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_sysStatsModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_sysStatsModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_sysStatsModal, lv_color_hex(0x0B1E45), 0);
+    lv_obj_set_style_border_color(s_sysStatsModal, lv_color_hex(0x39E0C8), 0);
+#endif
     lv_obj_set_style_bg_opa(s_sysStatsModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_sysStatsModal, 1, 0);
-    lv_obj_set_style_border_color(s_sysStatsModal, lv_color_hex(0x39E0C8), 0);
     lv_obj_set_style_pad_all(s_sysStatsModal, 6, 0);
     lv_obj_set_style_pad_row(s_sysStatsModal, 4, 0);
     lv_obj_set_flex_flow(s_sysStatsModal, LV_FLEX_FLOW_COLUMN);
@@ -14836,7 +15359,11 @@ static void openSysStatsModal() {
     lv_obj_t *title = lv_label_create(s_sysStatsModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(title, lv_color_hex(0x6BF0DC), 0);
+#endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "System Stats");
 
@@ -14872,7 +15399,11 @@ static void openSysStatsModal() {
         s_sysStatsCols[0] = lv_label_create(panel);
         lv_obj_set_width(s_sysStatsCols[0], lv_pct(100));
         lv_obj_set_style_text_font(s_sysStatsCols[0], bodyFont, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_sysStatsCols[0], lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(s_sysStatsCols[0], lv_color_hex(0xD9F7F0), 0);
+    #endif
         lv_label_set_long_mode(s_sysStatsCols[0], LV_LABEL_LONG_WRAP);
         lv_label_set_text(s_sysStatsCols[0], "");
         s_sysStatsCols[1] = nullptr;
@@ -14890,7 +15421,11 @@ static void openSysStatsModal() {
     lv_obj_t *hint = lv_label_create(s_sysStatsModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(hint, lv_color_hex(0x7FD8CC), 0);
+#endif
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text_fmt(hint, "Any key / %s = Close", modalCloseKeyLabel());
 #endif
@@ -14983,7 +15518,11 @@ static lv_color_t chatPanelBackgroundColor() {
 // black theme that alpha is a liability rather than a look: anything that ever
 // sits behind it would tint the "black", so it covers instead.
 static lv_opa_t chatPanelBackgroundOpa() {
+#if defined(DEVICE_TDECK_PRO)
+    return LV_OPA_TRANSP;
+#else
     return (s_cfg.uiTheme == UI_THEME_CAMELLIA_BLACK) ? LV_OPA_COVER : LV_OPA_60;
+#endif
 }
 
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
@@ -15084,6 +15623,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 
     for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
         lv_obj_t *btn = lv_btn_create(bar);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(btn);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+#endif
         lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_height(btn, lv_pct(100));
         lv_obj_set_style_radius(btn, 4, 0);
@@ -15091,6 +15634,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
         const bool isActive = (activeTarget == kItems[i].target);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, isActive ? 2 : 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(
             btn,
             (s_cfg.uiMode == UI_MODE_LIGHT) ? navBgColor
@@ -15101,6 +15649,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_style_border_color(btn,
                                       isActive ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x335D9D),
                                       0);
+    #endif
 
         lv_obj_add_event_cb(btn,
                             onHeltecBottomNavPressed,
@@ -15129,7 +15678,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_style_text_color(label, navTextColor, 0);
         lv_label_set_text(label, kItems[i].icon);
 
-#if !UI_TOUCH_ONLY_PROFILE
+#if !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
         // Dimmer than the icon and a size down: it labels the button rather
         // than being the button, the same relationship the key hints it
         // replaced had with the text around them.
@@ -15242,10 +15791,16 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
                  -(padInset + borderInset),
                  padInset + borderInset);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bar, 1, 0);
+    lv_obj_set_style_border_color(bar, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(bar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(bar, LV_OPA_60, 0);
     lv_obj_set_style_border_width(bar, 1, 0);
     lv_obj_set_style_border_color(bar, lv_color_hex(0x335D9D), 0);
+#endif
 
     populateHeltecBottomNav(bar, activeTarget);
 
@@ -15614,6 +16169,10 @@ static inline uint16_t userMessageAccentColor565() {
 }
 
 static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(dl);
+    return TFT_BLACK;
+#else
     LiveTrafficClass cls = classifyLiveTraffic(dl);
     switch (cls) {
         case LIVE_TRAFFIC_ERROR:   return TFT_RED;
@@ -15637,9 +16196,14 @@ static uint16_t liveLineTrafficColor(const DisplayLine &dl) {
     }
 
     return (dl.color == TFT_DARKGREY) ? TFT_WHITE : dl.color;
+#endif
 }
 
 static lv_color_t liveLineBgColor(const DisplayLine &dl) {
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(dl);
+    return lv_color_make(255, 255, 255);
+#else
     LiveTrafficClass cls = classifyLiveTraffic(dl);
     switch (cls) {
         case LIVE_TRAFFIC_ERROR:    return lv_color_hex(0x4A1D1D);
@@ -15661,18 +16225,27 @@ static lv_color_t liveLineBgColor(const DisplayLine &dl) {
         default:
             return lv_color_hex(0x10254A);
     }
+#endif
 }
 
 static lv_color_t liveListBackdropColor() {
+#if defined(DEVICE_TDECK_PRO)
+    return lv_color_make(255, 255, 255);
+#else
     if (s_cfg.uiMode == UI_MODE_LIGHT) {
         // Keep live-log canvas dark in light mode for text readability.
         return lv_color_make(0x0F, 0x2A, 0x5C);
     }
     return lv_color_hex(0x0F2A5C);
+#endif
 }
 
 static lv_opa_t liveListBackdropOpa() {
+#if defined(DEVICE_TDECK_PRO)
+    return LV_OPA_COVER;
+#else
     return (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_COVER : LV_OPA_50;
+#endif
 }
 
 static lv_color_t tftColorToLv(uint16_t c) {
@@ -18749,7 +19322,7 @@ static void refreshNodesListRows() {
         return;
     }
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     const lv_font_t *nodesListFont = emojiFont(&lv_font_montserrat_12);
     const int nodesListRowH = 28;
 #else
@@ -18822,6 +19395,10 @@ static void refreshNodesListRows() {
             Serial.println("[nodes] list row allocation failed");
             break;
         }
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_width(row, lv_pct(96));
         lv_obj_set_height(row, nodesListRowH);
         lv_obj_set_style_radius(row, 4, 0);
@@ -18892,6 +19469,14 @@ static void refreshNodesListSelection() {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
         bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
+#if defined(DEVICE_TDECK_PRO)
+        const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_outline_width(row, 0, 0);
+        lv_obj_set_style_outline_opa(row, LV_OPA_TRANSP, 0);
+#else
         lv_color_t rowTextColor = lv_color_hex(0xE8F1FF);
         if (s_cfg.uiMode != UI_MODE_LIGHT) {
             // Dark themes: keep node names brighter for better list readability.
@@ -18903,6 +19488,7 @@ static void refreshNodesListSelection() {
         lv_obj_set_style_border_color(row,
                                       selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
                                       0);
+    #endif
         lv_obj_set_style_text_color(row, rowTextColor, 0);
 
         lv_obj_t *rowLabel = lv_obj_get_child(row, 0);
@@ -18919,6 +19505,12 @@ static void refreshNodesPanelFocusStyles() {
     if (!lvObjValid(s_nodesInfoPanel) || !lvObjValid(s_nodesListPanel)) return;
     const bool infoFocused = s_nodesInfoFocused;
 
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(s_nodesListPanel, infoFocused ? 1 : 2, 0);
+    lv_obj_set_style_border_color(s_nodesListPanel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_border_width(s_nodesInfoPanel, infoFocused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_nodesInfoPanel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_border_width(s_nodesListPanel, infoFocused ? 1 : 2, 0);
     lv_obj_set_style_border_color(
         s_nodesListPanel,
@@ -18928,6 +19520,7 @@ static void refreshNodesPanelFocusStyles() {
     lv_obj_set_style_border_color(
         s_nodesInfoPanel,
         infoFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D), 0);
+#endif
 }
 
 // Writes one section's two labels. `keys` and `vals` are newline-separated and
@@ -19742,6 +20335,24 @@ static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut) {
 }
 
 static void refreshNodesActionMenuSelection() {
+#if defined(DEVICE_TDECK_PRO)
+    const int count = activeActionCount();
+    for (int i = 0; i < count; i++) {
+        lv_obj_t *row = s_nodesActionRows[i];
+        if (!row) continue;
+        const bool disabled = nodesActionRowDisabled(i);
+        const bool selected = (i == s_nodesActionSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (lv_obj_t *lbl = lv_obj_get_child(row, 0)) {
+            lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+            lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
+            lv_obj_set_style_text_decor(
+                lbl, disabled ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE, 0);
+        }
+    }
+#else
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -19773,6 +20384,7 @@ static void refreshNodesActionMenuSelection() {
             lv_obj_set_style_text_color(lbl, disabled ? disabledText : enabledText, 0);
         }
     }
+#endif
 }
 
 static void closeNodesActionMenu() {
@@ -20039,10 +20651,15 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     lv_obj_set_style_max_height(s_nodesActionModal, modalMaxH, 0);
     lv_obj_align(s_nodesActionModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_nodesActionModal, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_nodesActionModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_nodesActionModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_nodesActionModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_nodesActionModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_nodesActionModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_nodesActionModal, 1, 0);
-    lv_obj_set_style_border_color(s_nodesActionModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_nodesActionModal, 4, 0);
     lv_obj_set_style_pad_row(s_nodesActionModal, 4, 0);
     lv_obj_set_flex_flow(s_nodesActionModal, LV_FLEX_FLOW_COLUMN);
@@ -20052,8 +20669,13 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 
     lv_obj_t *title = lv_label_create(s_nodesActionModal);
     lv_obj_set_width(title, lv_pct(100));
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     // Name the node. On the Nodes screen the highlighted row already says who
     // this is about, but opened from chat the list is not on screen at all —
@@ -20138,9 +20760,13 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Del(e)te",
     };
     #endif
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
+#else
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                     ? lv_color_hex(0x13233D)
                                     : lv_color_hex(0xD9E8FF);
+#endif
 
     // ── Tapback strip (message mode only) ───────────────────────────────────
     // A single row of glyph cells above the action grid: six curated reactions
@@ -20167,6 +20793,10 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 
         for (int i = 0; i <= kMsgActionMoreIdx; i++) {
             lv_obj_t *cell = lv_btn_create(tapRow);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_remove_style_all(cell);
+            lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+#endif
             s_nodesActionRows[i] = cell;
             lv_obj_set_flex_grow(cell, 1);
             lv_obj_set_height(cell, 28);
@@ -20224,6 +20854,10 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         }
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_nodesActionRows[i] = row;
         // pct(49) leaves a small gutter for pad_column between the two columns.
         lv_obj_set_width(row, lv_pct(49));
@@ -20307,12 +20941,18 @@ static void refreshChannelActionsModal() {
     lv_label_set_text(s_channelActionsMuteLabel, muted ? "Un(m)ute" : "(M)ute");
 #endif
 
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(s_channelActionsMuteBtn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_channelActionsMuteBtn, 1, 0);
+    lv_obj_set_style_border_color(s_channelActionsMuteBtn, lv_color_make(0, 0, 0), 0);
+#else
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t activeBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     // Muted state gets a warmer tint so the toggle reads at a glance.
     const lv_color_t mutedBg  = isLight ? lv_color_hex(0xF3E0C4) : lv_color_hex(0x6E4A18);
     lv_obj_set_style_bg_color(s_channelActionsMuteBtn, muted ? mutedBg : activeBg, 0);
     lv_obj_set_style_bg_opa(s_channelActionsMuteBtn, LV_OPA_COVER, 0);
+#endif
 
     if (!s_channelActionsShareLabel || !s_channelActionsShareBtn) return;
     // The per-channel flag, not channelSharesLocation(): the button has to keep
@@ -20333,10 +20973,16 @@ static void refreshChannelActionsModal() {
     // Sharing is the state worth spotting at a glance, so it takes the
     // emphasised tint — but only when it is actually in effect: sharing the
     // global switch is suppressing is not the "on" state.
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(s_channelActionsShareBtn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_channelActionsShareBtn, 1, 0);
+    lv_obj_set_style_border_color(s_channelActionsShareBtn, lv_color_make(0, 0, 0), 0);
+#else
     const lv_color_t shareBg = isLight ? lv_color_hex(0xCFE9D6) : lv_color_hex(0x1F5A35);
     lv_obj_set_style_bg_color(s_channelActionsShareBtn,
                               (share && s_cfg.shareLocation) ? shareBg : activeBg, 0);
     lv_obj_set_style_bg_opa(s_channelActionsShareBtn, LV_OPA_COVER, 0);
+#endif
 }
 
 static void toggleActiveChannelMute() {
@@ -20433,6 +21079,10 @@ static void openChannelActionsModal() {
                           (chName && chName[0]) ? chName : "(unnamed)");
 
     lv_obj_t *btn = lv_btn_create(s_channelActionsModal);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_remove_style_all(btn);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+#endif
     s_channelActionsMuteBtn = btn;
     lv_obj_set_width(btn, lv_pct(100));
     lv_obj_set_height(btn, btnH);
@@ -20449,6 +21099,10 @@ static void openChannelActionsModal() {
     lv_obj_center(lbl);
 
     lv_obj_t *shareBtn = lv_btn_create(s_channelActionsModal);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_remove_style_all(shareBtn);
+    lv_obj_add_flag(shareBtn, LV_OBJ_FLAG_CLICKABLE);
+#endif
     s_channelActionsShareBtn = shareBtn;
     lv_obj_set_width(shareBtn, lv_pct(100));
     lv_obj_set_height(shareBtn, btnH);
@@ -20591,9 +21245,14 @@ static void refreshLiveView(bool force) {
             }
         }
 
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_text_color(msg, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(msg, liveLineBgColor(*dl), 0);
         lv_obj_set_style_bg_opa(msg, (lineColor == TFT_RED) ? LV_OPA_60 : LV_OPA_40, 0);
         lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
+    #endif
 
         char rendered[128];
         formatLiveLineText(*dl, rendered, sizeof(rendered));
@@ -20603,7 +21262,11 @@ static void refreshLiveView(bool force) {
     if (rowCount == 0) {
         lv_obj_t *empty = lv_label_create(s_liveList);
         lv_obj_set_style_text_font(empty, liveBodyFont, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(empty, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(empty, lv_color_hex(0xD9E8FF), 0);
+    #endif
         // Naming the filter matters here: an empty screen under a filter looks
         // exactly like a dead radio, and the difference is one word.
         if (s_liveClearFlashUntilMs != 0) {
@@ -20706,10 +21369,15 @@ static void openLiveModal() {
     lv_obj_set_size(s_liveModal, modalW, modalH);
     lv_obj_align(s_liveModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_liveModal, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_liveModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_liveModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_liveModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_liveModal, 1, 0);
-    lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_liveModal, 4, 0);
     lv_obj_set_style_pad_row(s_liveModal, 4, 0);
     lv_obj_set_flex_flow(s_liveModal, LV_FLEX_FLOW_COLUMN);
@@ -20719,10 +21387,15 @@ static void openLiveModal() {
     lv_obj_set_width(header, lv_pct(100));
     lv_obj_set_height(header, 26);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(header, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
     lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+#endif
+    lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_pad_left(header, 4, 0);
     lv_obj_set_style_pad_right(header, 4, 0);
     lv_obj_set_style_pad_top(header, 1, 0);
@@ -20730,7 +21403,11 @@ static void openLiveModal() {
 
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
     lv_label_set_text(title, "LIVE");
     lv_obj_center(title);
 
@@ -20747,14 +21424,24 @@ static void openLiveModal() {
         lv_obj_set_style_pad_top(btn, 1, 0);
         lv_obj_set_style_pad_bottom(btn, 1, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x16386F), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_border_color(btn, lv_color_hex(0x335D9D), 0);
+    #endif
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xD9E8FF), 0);
+    #endif
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
@@ -20774,7 +21461,11 @@ static void openLiveModal() {
     // it would just be decoration.
     s_liveFilterHeaderLabel = lv_label_create(header);
     lv_obj_set_style_text_font(s_liveFilterHeaderLabel, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_liveFilterHeaderLabel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_liveFilterHeaderLabel, lv_color_hex(0xA7C7FF), 0);
+#endif
     lv_obj_align(s_liveFilterHeaderLabel, LV_ALIGN_RIGHT_MID, 0, 0);
 #endif
     refreshLiveFilterHeader();
@@ -20788,13 +21479,22 @@ static void openLiveModal() {
     lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
     lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
     lv_obj_set_style_border_width(s_liveList, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_color(s_liveList, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
+#endif
     lv_obj_set_style_pad_all(s_liveList, 0, 0);
     lv_obj_set_style_pad_right(s_liveList, 4, 0);
     lv_obj_set_style_pad_row(s_liveList, 1, 0);
     lv_obj_set_style_width(s_liveList, 2, LV_PART_SCROLLBAR);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_liveList, lv_color_make(0, 0, 0), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(s_liveList, LV_OPA_COVER, LV_PART_SCROLLBAR);
+#else
     lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(s_liveList, LV_OPA_70, LV_PART_SCROLLBAR);
+#endif
     lv_obj_set_style_radius(s_liveList, 2, LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(s_liveList, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_liveList, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -20832,6 +21532,17 @@ static void openLiveModal() {
 
 // ── Live Tools modal ─────────────────────────────────────────────────────────
 static void refreshLiveToolsSelection() {
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+        lv_obj_t *row = s_liveToolsRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_liveToolsSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -20989,6 +21700,10 @@ static void openLiveToolsModal() {
         if (i >= LIVE_TOOL_COUNT) continue;
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_liveToolsRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
@@ -21040,6 +21755,18 @@ static void openLiveToolsModal() {
 
 // ── Live filter picker ───────────────────────────────────────────────────────
 static void refreshLiveFilterSelection() {
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < LIVE_FILTER_COUNT; i++) {
+        lv_obj_t *row = s_liveFilterRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_liveFilterSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -21196,6 +21923,10 @@ static void openLiveFilterModal() {
         if (i >= LIVE_FILTER_COUNT) continue;
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_liveFilterRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
@@ -21307,6 +22038,36 @@ static lv_obj_t *makeChartRow(lv_obj_t *parent) {
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     return row;
 }
+
+#if defined(DEVICE_TDECK_PRO)
+static void styleTdeckProChartSeries(lv_event_t *e) {
+    lv_draw_task_t *task = lv_event_get_draw_task(e);
+    if (!task || lv_draw_task_get_type(task) != LV_DRAW_TASK_TYPE_LINE) return;
+    lv_draw_dsc_base_t *base =
+        (lv_draw_dsc_base_t *)lv_draw_task_get_draw_dsc(task);
+    if (!base || base->part != LV_PART_ITEMS) return;
+
+    lv_draw_line_dsc_t *line =
+        (lv_draw_line_dsc_t *)lv_draw_task_get_draw_dsc(task);
+    line->color = lv_color_make(0, 0, 0);
+    line->width = (base->id1 == 0) ? 2 : 1;
+    line->dash_width = (base->id1 == 0) ? 0 : 4;
+    line->dash_gap = (base->id1 == 0) ? 0 : 3;
+}
+
+static void applyTdeckProChartStyle(lv_obj_t *chart) {
+    lv_obj_set_style_bg_color(chart, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(chart, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_line_color(chart, lv_color_make(0, 0, 0), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(chart, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_line_width(chart, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_dash_width(chart, 1, LV_PART_MAIN);
+    lv_obj_set_style_line_dash_gap(chart, 3, LV_PART_MAIN);
+    lv_obj_add_event_cb(chart, styleTdeckProChartSeries, LV_EVENT_DRAW_TASK_ADDED, nullptr);
+    lv_obj_add_flag(chart, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
+}
+#endif
 
 static void refreshChUtilChart(bool force) {
     if (!s_chUtilChartModal || !s_chUtilChart) return;
@@ -21451,14 +22212,26 @@ static void openChUtilChartModal() {
     lv_obj_set_style_border_width(s_chUtilChart, 1, 0);
     lv_obj_set_style_line_color(s_chUtilChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
     lv_obj_set_style_line_opa(s_chUtilChart, LV_OPA_40, LV_PART_MAIN);
+#if defined(DEVICE_TDECK_PRO)
+    applyTdeckProChartStyle(s_chUtilChart);
+#endif
     syncChartScalePads(yScale, s_chUtilChart);
 
+#if defined(DEVICE_TDECK_PRO)
+    s_chUtilSeries = lv_chart_add_series(s_chUtilChart,
+                                         lv_color_make(0, 0, 0),
+                                         LV_CHART_AXIS_PRIMARY_Y);
+    s_airUtilSeries = lv_chart_add_series(s_chUtilChart,
+                                          lv_color_make(0, 0, 0),
+                                          LV_CHART_AXIS_PRIMARY_Y);
+#else
     s_chUtilSeries = lv_chart_add_series(s_chUtilChart,
                                          lv_color_hex(0x4FD1C5),
                                          LV_CHART_AXIS_PRIMARY_Y);
     s_airUtilSeries = lv_chart_add_series(s_chUtilChart,
                                           lv_color_hex(0xF6AD55),
                                           LV_CHART_AXIS_PRIMARY_Y);
+#endif
     if (s_chUtilSeries) lv_chart_set_all_value(s_chUtilChart, s_chUtilSeries, LV_CHART_POINT_NONE);
     if (s_airUtilSeries) lv_chart_set_all_value(s_chUtilChart, s_airUtilSeries, LV_CHART_POINT_NONE);
 
@@ -21474,7 +22247,11 @@ static void openChUtilChartModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_label_set_text(hint, "Bksp=Back  solid=ChUtil  dash=AirTx");
+#else
     lv_label_set_text_fmt(hint, "%s = Back   teal=ChUtil  orange=AirTx", modalCloseKeyLabel());
+#endif
 #endif
 
     s_chUtilRenderedSeq = 0;
@@ -21634,18 +22411,30 @@ static void openSnrRssiChartModal() {
     lv_obj_set_style_border_width(s_snrChart, 1, 0);
     lv_obj_set_style_line_color(s_snrChart, lv_color_hex(0x335D9D), LV_PART_MAIN);
     lv_obj_set_style_line_opa(s_snrChart, LV_OPA_40, LV_PART_MAIN);
+#if defined(DEVICE_TDECK_PRO)
+    applyTdeckProChartStyle(s_snrChart);
+#endif
 
     lv_obj_t *rssiScale = makeChartYScale(chartRow, LV_SCALE_MODE_VERTICAL_RIGHT,
                                           40, -130, -30, kRssiYLabels);
     syncChartScalePads(snrScale, s_snrChart);
     syncChartScalePads(rssiScale, s_snrChart);
 
+#if defined(DEVICE_TDECK_PRO)
+    s_snrSeries = lv_chart_add_series(s_snrChart,
+                                      lv_color_make(0, 0, 0),
+                                      LV_CHART_AXIS_PRIMARY_Y);
+    s_rssiSeries = lv_chart_add_series(s_snrChart,
+                                       lv_color_make(0, 0, 0),
+                                       LV_CHART_AXIS_SECONDARY_Y);
+#else
     s_snrSeries = lv_chart_add_series(s_snrChart,
                                       lv_color_hex(0x68D391),
                                       LV_CHART_AXIS_PRIMARY_Y);
     s_rssiSeries = lv_chart_add_series(s_snrChart,
                                        lv_color_hex(0xF687B3),
                                        LV_CHART_AXIS_SECONDARY_Y);
+#endif
     if (s_snrSeries) lv_chart_set_all_value(s_snrChart, s_snrSeries, LV_CHART_POINT_NONE);
     if (s_rssiSeries) lv_chart_set_all_value(s_snrChart, s_rssiSeries, LV_CHART_POINT_NONE);
 
@@ -21663,7 +22452,11 @@ static void openSnrRssiChartModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_label_set_text(hint, "Bksp=Back  solid=SNR  dash=RSSI");
+#else
     lv_label_set_text_fmt(hint, "%s = Back   green=SNR  pink=RSSI", modalCloseKeyLabel());
+#endif
 #endif
 
     s_snrRenderedSeq = 0;
@@ -21742,7 +22535,12 @@ static lv_obj_t *beaconsMakeLabel(lv_obj_t *parent, const lv_font_t *font,
     lv_obj_t *lbl = lv_label_create(parent);
     lv_obj_set_width(lbl, lv_pct(100));
     lv_obj_set_style_text_font(lbl, font, 0);
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(color);
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(lbl, lv_color_hex(color), 0);
+#endif
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_label_set_text(lbl, text);
     return lbl;
@@ -21782,10 +22580,15 @@ static void beaconsBuildList() {
         lv_obj_set_width(card, lv_pct(100));
         lv_obj_set_height(card, LV_SIZE_CONTENT);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(card, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(card, lv_color_hex(0x16386F), 0);
         lv_obj_set_style_bg_opa(card, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(card, 1, 0);
         lv_obj_set_style_border_color(card, lv_color_hex(0x335D9D), 0);
+    #endif
+        lv_obj_set_style_border_width(card, 1, 0);
         lv_obj_set_style_radius(card, 4, 0);
         lv_obj_set_style_pad_all(card, 4, 0);
         lv_obj_set_style_pad_row(card, 1, 0);
@@ -21986,7 +22789,11 @@ static void openBeaconsModal() {
     s_beaconsStatusLabel = lv_label_create(s_beaconsModal);
     lv_obj_set_width(s_beaconsStatusLabel, lv_pct(100));
     lv_obj_set_style_text_font(s_beaconsStatusLabel, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_beaconsStatusLabel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_beaconsStatusLabel, lv_color_hex(0xB8D4FF), 0);
+#endif
     lv_obj_set_style_text_align(s_beaconsStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_beaconsStatusLabel, "-");
 
@@ -22211,10 +23018,15 @@ static void mqttMonitorBuildList() {
         lv_obj_set_width(row, lv_pct(kMqttMonCellPct));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(row, lv_color_hex(0x16386F), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_50, 0);
-        lv_obj_set_style_border_width(row, 1, 0);
         lv_obj_set_style_border_color(row, lv_color_hex(0x335D9D), 0);
+    #endif
+        lv_obj_set_style_border_width(row, 1, 0);
         lv_obj_set_style_radius(row, 4, 0);
         lv_obj_set_style_pad_all(row, 3, 0);
         lv_obj_set_style_pad_column(row, 4, 0);
@@ -22235,7 +23047,11 @@ static void mqttMonitorBuildList() {
         lv_obj_t *count = lv_label_create(row);
         lv_obj_set_width(count, kMqttMonCountW);
         lv_obj_set_style_text_font(count, kBeaconsBodyFont, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(count, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(count, lv_color_hex(kBeaconsTitleColor), 0);
+    #endif
         lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_RIGHT, 0);
         lv_label_set_long_mode(count, LV_LABEL_LONG_CLIP);
         lv_label_set_text(count, countText);
@@ -22431,7 +23247,11 @@ static void openMqttMonitorModal() {
     s_mqttMonStatusLabel = lv_label_create(s_mqttMonModal);
     lv_obj_set_width(s_mqttMonStatusLabel, lv_pct(100));
     lv_obj_set_style_text_font(s_mqttMonStatusLabel, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_mqttMonStatusLabel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_mqttMonStatusLabel, lv_color_hex(0xB8D4FF), 0);
+#endif
     lv_obj_set_style_text_align(s_mqttMonStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_mqttMonStatusLabel, "-");
 
@@ -22622,7 +23442,11 @@ static void openMqttConfirmModal(int chan) {
     lv_obj_t *chanLbl = lv_label_create(s_mqttConfirmModal);
     lv_obj_set_width(chanLbl, lv_pct(100));
     lv_obj_set_style_text_font(chanLbl, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(chanLbl, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(chanLbl, lv_color_hex(0xFFC98A), 0);
+#endif
     lv_obj_set_style_text_align(chanLbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(chanLbl, line);
 
@@ -22690,6 +23514,18 @@ static void onMqttSendBackdropPressed(lv_event_t *e) {
 }
 
 static void refreshMqttSendSelection() {
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        lv_obj_t *row = s_mqttSendRows[i];
+        if (!row) continue;
+        const bool selected = (i == s_mqttSendSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (selected) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
     const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
     const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
     const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
@@ -22806,6 +23642,10 @@ static void openMqttSendModal() {
         if (i >= MESH_CHANNELS) continue;
 
         lv_obj_t *row = lv_btn_create(grid);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         s_mqttSendRows[i] = row;
         lv_obj_set_width(row, lv_pct(kChanModalCellPct));
         lv_obj_set_height(row, kChanModalRowH);
@@ -22886,9 +23726,13 @@ static lv_obj_t *discoveryMakeLabel(lv_obj_t *parent, const char *text, bool hea
     lv_obj_t *lbl = lv_label_create(parent);
     lv_obj_set_width(lbl, lv_pct(100));
     lv_obj_set_style_text_font(lbl, header ? kDiscoveryHeaderFont : kDiscoveryBodyFont, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(lbl,
                                 header ? lv_color_hex(kDiscoveryHeaderColor)
                                        : lv_color_hex(kDiscoveryBodyColor), 0);
+#endif
     // A little air above a heading, none above the rows it introduces, so the
     // groups read as blocks rather than as one continuous list.
     lv_obj_set_style_pad_top(lbl, header ? 4 : 0, 0);
@@ -23474,10 +24318,15 @@ static void openDiscoveryModal() {
     lv_obj_set_size(s_discoveryModal, modalW, modalH);
     lv_obj_align(s_discoveryModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_discoveryModal, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_discoveryModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_discoveryModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_discoveryModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_discoveryModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_discoveryModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_discoveryModal, 1, 0);
-    lv_obj_set_style_border_color(s_discoveryModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_discoveryModal, 4, 0);
     lv_obj_set_style_pad_row(s_discoveryModal, 4, 0);
     lv_obj_set_flex_flow(s_discoveryModal, LV_FLEX_FLOW_COLUMN);
@@ -23488,10 +24337,15 @@ static void openDiscoveryModal() {
     lv_obj_set_width(header, lv_pct(100));
     lv_obj_set_height(header, 26);
     lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(header, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(header, lv_color_hex(0x123266), 0);
     lv_obj_set_style_bg_opa(header, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
+#endif
+    lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_pad_left(header, 4, 0);
     lv_obj_set_style_pad_right(header, 4, 0);
     lv_obj_set_style_pad_top(header, 1, 0);
@@ -23499,7 +24353,11 @@ static void openDiscoveryModal() {
 
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(title, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
+#endif
     lv_label_set_text(title, "Discovery");
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
@@ -23549,7 +24407,11 @@ static void openDiscoveryModal() {
     s_discoveryStatusLabel = lv_label_create(s_discoveryModal);
     lv_obj_set_width(s_discoveryStatusLabel, lv_pct(100));
     lv_obj_set_style_text_font(s_discoveryStatusLabel, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_discoveryStatusLabel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_discoveryStatusLabel, lv_color_hex(0xB8D4FF), 0);
+#endif
     lv_obj_set_style_text_align(s_discoveryStatusLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_discoveryStatusLabel, s_discoveryStatus[0] ? s_discoveryStatus : "-");
 
@@ -23559,10 +24421,16 @@ static void openDiscoveryModal() {
     lv_obj_add_flag(s_discoveryList, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_discoveryList);
     lv_obj_set_scrollbar_mode(s_discoveryList, LV_SCROLLBAR_MODE_AUTO);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_discoveryList, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_bg_opa(s_discoveryList, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_discoveryList, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_discoveryList, lv_color_hex(0x123266), 0);
     lv_obj_set_style_bg_opa(s_discoveryList, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(s_discoveryList, 1, 0);
     lv_obj_set_style_border_color(s_discoveryList, lv_color_hex(0x335D9D), 0);
+#endif
+    lv_obj_set_style_border_width(s_discoveryList, 1, 0);
     lv_obj_set_style_pad_all(s_discoveryList, 3, 0);
     lv_obj_set_style_width(s_discoveryList, 2, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(s_discoveryList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
@@ -23612,7 +24480,11 @@ static void openDiscoveryModal() {
     lv_obj_t *hint = lv_label_create(s_discoveryModal);
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(hint, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
+#endif
 #if HAS_SD_CARD
     lv_label_set_text_fmt(hint, "W = Sweep   C = Clear   S = Save   %s = Back",
                           modalCloseKeyLabel());
@@ -23872,15 +24744,30 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     auto makeDmDelBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
                            lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
+    #if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(bgColor);
+        lv_obj_remove_style_all(btn);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 78, 0);
         lv_obj_set_style_radius(btn, 4, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+    #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    #endif
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
@@ -23944,6 +24831,12 @@ static void refreshDmPanelFocusStyles() {
     if (!s_dmConvPanel || !s_dmMsgPanel) return;
 
     bool msgFocused = s_dmMsgPanelFocused && (s_dmSelection > 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_border_width(s_dmConvPanel, msgFocused ? 1 : 2, 0);
+    lv_obj_set_style_border_color(s_dmConvPanel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_border_width(s_dmMsgPanel, msgFocused ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_dmMsgPanel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_border_width(s_dmConvPanel, msgFocused ? 1 : 2, 0);
     lv_obj_set_style_border_color(
         s_dmConvPanel,
@@ -23955,6 +24848,7 @@ static void refreshDmPanelFocusStyles() {
         s_dmMsgPanel,
         msgFocused ? lv_color_hex(0x90B4FF) : lv_color_hex(0x335D9D),
         0);
+    #endif
 }
 
 static void onDmConversationPressed(lv_event_t *e) {
@@ -24073,6 +24967,11 @@ static void refreshDmNodePickerSelection() {
         lv_obj_t *row = s_dmNodePickerRows[i];
         if (!row) continue;
         bool selected = (s_dmNodePickerRenderedIdx[i] == s_dmNodeSelection);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    #else
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_border_color(row,
                                       selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
@@ -24081,6 +24980,7 @@ static void refreshDmNodePickerSelection() {
                                   selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
                                   0);
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
+    #endif
     }
 }
 
@@ -24311,6 +25211,10 @@ static void refreshDmNodePicker(bool force) {
             Serial.println("[dm] node picker row allocation failed");
             break;
         }
+        #if defined(DEVICE_TDECK_PRO)
+            lv_obj_remove_style_all(row);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        #endif
         lv_obj_set_width(row, lv_pct(97));
         lv_obj_set_height(row, 22);
         lv_obj_set_style_radius(row, 4, 0);
@@ -24318,6 +25222,11 @@ static void refreshDmNodePicker(bool force) {
         lv_obj_set_style_pad_right(row, 3, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
         lv_obj_set_style_pad_bottom(row, 1, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    #else
         lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
         lv_obj_set_style_border_color(row,
                                       selected ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
@@ -24326,6 +25235,7 @@ static void refreshDmNodePicker(bool force) {
                                   selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
                                   0);
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
+#endif
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmNodePressed, LV_EVENT_PRESSED, (void *)(intptr_t)i);
 #if UI_TOUCH_ONLY_PROFILE
@@ -24522,8 +25432,12 @@ static void refreshDmModal(bool force) {
         force = true;
     }
 
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t dmPanelTextColor = lv_color_make(0, 0, 0);
+#else
     const lv_color_t dmPanelTextColor =
         (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF);
+#endif
     const uint16_t dmMessageBaseColor =
         (s_cfg.uiMode == UI_MODE_LIGHT) ? rgb565(0x1B, 0x24, 0x3D) : TFT_WHITE;
 
@@ -24606,6 +25520,10 @@ static void refreshDmModal(bool force) {
     {
         bool selectedRow = (s_dmSelection == 0);
         lv_obj_t *row = lv_btn_create(s_dmConvList);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_width(row, lv_pct(97));
         lv_obj_set_height(row, dmListRowH);
         lv_obj_set_style_radius(row, 4, 0);
@@ -24613,6 +25531,11 @@ static void refreshDmModal(bool force) {
         lv_obj_set_style_pad_right(row, 3, 0);
         lv_obj_set_style_pad_top(row, 1, 0);
         lv_obj_set_style_pad_bottom(row, 1, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_border_width(row, selectedRow ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    #else
         lv_obj_set_style_border_width(row, selectedRow ? 2 : 1, 0);
         lv_obj_set_style_border_color(row,
                                       selectedRow ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
@@ -24621,6 +25544,7 @@ static void refreshDmModal(bool force) {
                                   selectedRow ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
                                   0);
         lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
+#endif
         lv_obj_set_style_shadow_width(row, 0, 0);
         lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)0);
 #if UI_TOUCH_ONLY_PROFILE
@@ -24658,6 +25582,10 @@ static void refreshDmModal(bool force) {
             int rowIdx = i + 1;
             bool selectedRow = (rowIdx == s_dmSelection);
             lv_obj_t *row = lv_btn_create(s_dmConvList);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_remove_style_all(row);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
             s_dmConvRows[i] = row;
             lv_obj_set_width(row, lv_pct(97));
             lv_obj_set_height(row, dmListRowH);
@@ -24666,6 +25594,11 @@ static void refreshDmModal(bool force) {
             lv_obj_set_style_pad_right(row, 3, 0);
             lv_obj_set_style_pad_top(row, 1, 0);
             lv_obj_set_style_pad_bottom(row, 1, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_border_width(row, selectedRow ? 2 : 0, 0);
+            lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+#else
             lv_obj_set_style_border_width(row, selectedRow ? 2 : 1, 0);
             lv_obj_set_style_border_color(row,
                                           selectedRow ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C),
@@ -24674,6 +25607,7 @@ static void refreshDmModal(bool force) {
                                       selectedRow ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266),
                                       0);
             lv_obj_set_style_bg_opa(row, selectedRow ? LV_OPA_70 : LV_OPA_40, 0);
+#endif
             lv_obj_set_style_shadow_width(row, 0, 0);
             lv_obj_add_event_cb(row, onDmConversationPressed, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
             lv_obj_add_event_cb(row, onDmConversationPressState, LV_EVENT_PRESSED, (void *)(intptr_t)rowIdx);
@@ -24818,9 +25752,15 @@ static void refreshDmModal(bool force) {
             if (s_cfg.uiMode == UI_MODE_LIGHT && lineColor == TFT_WHITE) {
                 lineColor = dmMessageBaseColor;
             }
+#if defined(DEVICE_TDECK_PRO)
+            lineColor = TFT_BLACK;
+#endif
 
             lv_obj_set_style_text_color(msg, tftColorToLv(lineColor), 0);
+            stylePaperMessageRow(msg);
+#if !defined(DEVICE_TDECK_PRO)
             lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+#endif
             if (ackSuffix) {
                 char acked[DM_LINE_LEN + 8];
                 snprintf(acked, sizeof(acked), "%s", dl->text);
@@ -25178,9 +26118,18 @@ static void openNodesModal() {
     // values ellipsized down to nothing. This is what the M9 renders on the same
     // 320x240 panel the T-Deck has, and it is the size the tables were laid out
     // against. The Cardputer, on its own layout, was already using it.
+#if defined(DEVICE_TDECK_PRO)
+    const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_12);
+#else
     const lv_font_t *nodesDetailFont = emojiFont(&lv_font_montserrat_10);
+#endif
 
 #if NODES_LAYOUT_WIDE
+#if defined(DEVICE_TDECK_PRO)
+    // Portrait paper: stack the list over details so both use the full width.
+    int listW = contentW;
+    int detailW = contentW;
+#else
     // The list is on the left now and carries long names, so it gets a real
     // share of the width instead of the ~22-24% strip it had when it only ever
     // showed a four-character short name. The detail panel keeps the remainder
@@ -25195,6 +26144,7 @@ static void openNodesModal() {
     if (listW < 60) listW = 60;
     int detailW = contentW - listW - contentGap;
     if (detailW < 60) detailW = 60;
+#endif
 #else
     // Cardputer: unchanged from before the wide layout — a narrow list of short
     // names on the right, details taking the rest on the left.
@@ -25266,8 +26216,13 @@ static void openNodesModal() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_pad_row(content, contentGap, 0);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+#else
     lv_obj_set_style_pad_column(content, contentGap, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
+#endif
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
 #if NODES_LAYOUT_WIDE
@@ -25278,7 +26233,11 @@ static void openNodesModal() {
     lv_obj_t *listPanel = lv_obj_create(content);
     s_nodesListPanel = listPanel;
     lv_obj_set_width(listPanel, listW);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_height(listPanel, 92);
+#else
     lv_obj_set_height(listPanel, lv_pct(100));
+#endif
     lv_obj_clear_flag(listPanel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(listPanel, lv_color_hex(0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(listPanel, LV_OPA_40, 0);
@@ -25313,7 +26272,11 @@ static void openNodesModal() {
     lv_obj_t *infoPanel = lv_obj_create(content);
     s_nodesInfoPanel = infoPanel;
     lv_obj_set_width(infoPanel, detailW);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_flex_grow(infoPanel, 1);
+#else
     lv_obj_set_height(infoPanel, lv_pct(100));
+#endif
     lv_obj_add_flag(infoPanel, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(infoPanel);
     lv_obj_set_scrollbar_mode(infoPanel, LV_SCROLLBAR_MODE_AUTO);
@@ -25383,7 +26346,11 @@ static void openNodesModal() {
         lv_obj_set_style_text_font(hdr, nodesDetailFont, 0);
         // Amber against the pale-blue body, the same split Discovery and Beacons
         // use for a heading.
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(hdr, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(hdr, lv_color_hex(0xFFC98A), 0);
+    #endif
         lv_obj_set_style_border_color(hdr, lv_color_hex(0x335D9D), 0);
         lv_obj_set_style_border_side(hdr, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_border_width(hdr, 1, 0);
@@ -25405,7 +26372,11 @@ static void openNodesModal() {
         s_nodesSectionKeys[i] = lv_label_create(table);
         lv_obj_set_width(s_nodesSectionKeys[i], nodesKeyColW);
         lv_obj_set_style_text_font(s_nodesSectionKeys[i], nodesDetailFont, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(s_nodesSectionKeys[i], lv_color_hex(0x9FBEEA), 0);
+    #endif
         lv_label_set_long_mode(s_nodesSectionKeys[i], LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_nodesSectionKeys[i], "");
 
@@ -25897,7 +26868,7 @@ static void openCfgModal() {
     lv_obj_t *title = lv_label_create(header);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 #else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
@@ -25913,7 +26884,7 @@ static void openCfgModal() {
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
-#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_14, 0);
 #else
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
@@ -26023,7 +26994,7 @@ static void openCfgModal() {
     lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_pad_top(hint, 0, 0);
     lv_obj_set_style_pad_bottom(hint, 0, 0);
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
@@ -26120,7 +27091,7 @@ static void performCfgAction(int actionId) {
                 webCfgSetForceAp(wifiForceApMode());
 
                 webCfgPushActiveCreds();
-#if HAS_FILE_STORAGE
+#if HAS_FILE_STORAGE && !defined(DEVICE_TDECK_PRO)
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
                 bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -26949,15 +27920,31 @@ static void openCfgConfirmModal(int actionId) {
                              lv_color_t txtColor,
                              lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
+    #if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(bgColor);
+        LV_UNUSED(txtColor);
+        lv_obj_remove_style_all(btn);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_height(btn, 36);
         lv_obj_set_style_min_width(btn, 84, 0);
         lv_obj_set_style_radius(btn, 4, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+    #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(lbl, txtColor, 0);
+    #endif
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
@@ -27106,15 +28093,30 @@ static void openOtaUpdatePrompt() {
     auto makeOtaBtn = [](lv_obj_t *parent, const char *text, uint32_t bgColor,
                          lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
+    #if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(bgColor);
+        lv_obj_remove_style_all(btn);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_height(btn, 32);
         lv_obj_set_style_min_width(btn, 80, 0);
         lv_obj_set_style_radius(btn, 4, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
+    #endif
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    #endif
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
@@ -27400,15 +28402,30 @@ static void openLegacyMapPrompt() {
     auto makeButton = [](lv_obj_t *parent, const char *text, uint32_t color,
                          lv_event_cb_t callback) {
         lv_obj_t *button = lv_btn_create(parent);
+    #if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(color);
+        lv_obj_remove_style_all(button);
+        lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    #endif
         lv_obj_set_height(button, 32);
         lv_obj_set_style_min_width(button, 86, 0);
         lv_obj_set_style_radius(button, 4, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(button, 1, 0);
+        lv_obj_set_style_border_color(button, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(button, lv_color_hex(color), 0);
+    #endif
         lv_obj_set_style_shadow_width(button, 0, 0);
         lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *label = lv_label_create(button);
         lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(label, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+    #endif
         lv_label_set_text(label, text);
         lv_obj_center(label);
     };
@@ -27475,6 +28492,28 @@ static void onboardingSetStatus(const char *msg) {
     if (!s_onboardingStatus) return;
     lv_label_set_text(s_onboardingStatus, msg ? msg : "");
 }
+
+#if defined(DEVICE_TDECK_PRO)
+static void styleOnboardingPaperTree(lv_obj_t *parent) {
+    if (!parent) return;
+    const uint32_t childCount = lv_obj_get_child_count(parent);
+    for (uint32_t i = 0; i < childCount; i++) {
+        lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
+        if (!child) continue;
+        lv_obj_set_style_text_color(child, lv_color_make(0, 0, 0), 0);
+        if (lv_obj_check_type(child, &lv_button_class)) {
+            lv_obj_set_style_bg_opa(child, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_bg_opa(child, LV_OPA_TRANSP, LV_STATE_PRESSED);
+            lv_obj_set_style_border_width(child, 2, 0);
+            lv_obj_set_style_border_width(child, 2, LV_STATE_PRESSED);
+            lv_obj_set_style_border_color(child, lv_color_make(0, 0, 0), 0);
+            lv_obj_set_style_border_color(child, lv_color_make(0, 0, 0), LV_STATE_PRESSED);
+            lv_obj_set_style_shadow_width(child, 0, 0);
+        }
+        styleOnboardingPaperTree(child);
+    }
+}
+#endif
 
 // Roles offered during onboarding. Only client roles are supported by this
 // firmware (see cfgCoerceClientRole); values are the canonical Meshtastic enum
@@ -27892,10 +28931,15 @@ static void renderOnboardingStage() {
         lv_obj_set_height(s_onboardingInput, onboardingInputH);
         lv_obj_set_style_text_font(s_onboardingInput, onboardingInputFont, 0);
         lv_obj_set_style_text_color(s_onboardingInput, lv_color_hex(0xE8F1FF), 0);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(s_onboardingInput, lv_color_make(255, 255, 255), 0);
+        lv_obj_set_style_border_color(s_onboardingInput, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_bg_color(s_onboardingInput, lv_color_hex(0x102B61), 0);
+        lv_obj_set_style_border_color(s_onboardingInput, lv_color_hex(0x4C76BA), 0);
+    #endif
         lv_obj_set_style_bg_opa(s_onboardingInput, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_onboardingInput, 1, 0);
-        lv_obj_set_style_border_color(s_onboardingInput, lv_color_hex(0x4C76BA), 0);
         lv_textarea_set_one_line(s_onboardingInput, true);
         if (isShortStage) {
             char derived[sizeof(s_cfg.nodeShort)];
@@ -27987,6 +29031,10 @@ static void renderOnboardingStage() {
                             LV_EVENT_READY, nullptr);
 #endif
     }
+
+#if defined(DEVICE_TDECK_PRO)
+    styleOnboardingPaperTree(s_onboardingModal);
+#endif
 }
 
 static void openOnboardingModal() {
@@ -28027,10 +29075,15 @@ static void openOnboardingModal() {
     lv_obj_align(s_onboardingModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_onboardingModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_onboardingModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_onboardingModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_onboardingModal, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_onboardingModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_onboardingModal, lv_color_hex(0x5C86C6), 0);
+#endif
     lv_obj_set_style_bg_opa(s_onboardingModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_onboardingModal, 1, 0);
-    lv_obj_set_style_border_color(s_onboardingModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_onboardingModal, 10, 0);
     lv_obj_set_style_pad_row(s_onboardingModal, 8, 0);
     lv_obj_set_flex_flow(s_onboardingModal, LV_FLEX_FLOW_COLUMN);
@@ -28218,12 +29271,15 @@ static void onboardingFinalize() {
     ESP.restart();
 }
 
-#if defined(DEVICE_M9)
-static bool prepareM9GlobalNavigation() {
+#if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_MESH_DECK)
+static bool prepareGlobalNavigation() {
     // Onboarding owns the whole input surface until identity and region exist.
     if (s_onboardingModal) return false;
 #if HAS_STATE_MAPS
-    if (s_legacyMapPromptModal) return false;
+    // Home is an escape hatch, not consent to delete files. Treat it as Keep,
+    // record that choice, and continue closing the remaining surfaces.
+    if (s_legacyMapPromptModal) keepLegacyMapFiles();
 #endif
 
     if (s_otaPromptModal) otaPromptDecline();
@@ -28249,6 +29305,7 @@ static bool prepareM9GlobalNavigation() {
     closeChatNameModal();
     closeFontSizeModal();
     closeChanCfgModal();
+    closeNodesActionMenu();
     closeLiveModal();
     closeNodesModal();
     closeLegendModal();
@@ -28258,9 +29315,11 @@ static bool prepareM9GlobalNavigation() {
     if (s_composeModal) closeComposePrompt();
     return true;
 }
+#endif
 
+#if defined(DEVICE_M9)
 static void openM9DirectMessagesShortcut() {
-    if (!prepareM9GlobalNavigation()) return;
+    if (!prepareGlobalNavigation()) return;
     if (s_dmModal && lvObjAlive(s_dmModal)) {
         closeDmNodePicker();
         lv_obj_move_foreground(s_dmModal);
@@ -28271,26 +29330,26 @@ static void openM9DirectMessagesShortcut() {
 }
 
 static void openM9HomeShortcut() {
-    if (!prepareM9GlobalNavigation()) return;
+    if (!prepareGlobalNavigation()) return;
     closeDmModal();
     setActiveChannel(0);
 }
 
 static void openM9LiveShortcut() {
-    if (!prepareM9GlobalNavigation()) return;
+    if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openLiveModal();
 }
 
 static void openM9NodesShortcut() {
-    if (!prepareM9GlobalNavigation()) return;
+    if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openNodesModal();
 }
 
 #if FEATURE_DISCOVERY
 static void openM9DiscoveryShortcut() {
-    if (!prepareM9GlobalNavigation()) return;
+    if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openDiscoveryModal();
 }
@@ -28324,6 +29383,13 @@ static bool handleM9GlobalNavigationKey(char key) {
     }
 #endif
     return false;
+}
+#endif
+
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
+static void openKeyboardHomeShortcut() {
+    if (!prepareGlobalNavigation()) return;
+    closeDmModal();
 }
 #endif
 
@@ -28441,6 +29507,19 @@ static void pumpKeyboardInput() {
             return;
         }
         s_lastActivityMs = millis();
+
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
+    if (k == KEY_OPEN_HOME) {
+            openKeyboardHomeShortcut();
+        continue;
+    }
+#endif
+#if defined(DEVICE_TDECK_PRO)
+        if (k == KEY_TOGGLE_KB_BACKLIGHT) {
+            toggleTdeckProKeyboardBacklight();
+            continue;
+        }
+#endif
 
 #if defined(DEVICE_M9)
     if (handleM9GlobalNavigationKey(k)) continue;
@@ -28894,9 +29973,7 @@ static void pumpKeyboardInput() {
             if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
             else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
             if (delta != 0) {
-                int next = s_chatStyleSelection + delta;
-                if (next < 0) next = 0;
-                if (next > CHAT_STYLE_MAX) next = CHAT_STYLE_MAX;
+                int next = chatStyleStepSelection(s_chatStyleSelection, delta);
                 if (next != s_chatStyleSelection) {
                     s_chatStyleSelection = next;
                     refreshChatStyleSelection();
@@ -29609,7 +30686,7 @@ static void pumpKeyboardInput() {
             // them into channel keys further down, but the tray is handled
             // first), and ';' / '.' have already become KEY_SCROLL_UP/DN.
             int delta = 0;
-#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TLORA_PAGER_TFT)
             if (navFromJk && k == KEY_SCROLL_UP)       delta = -1;
             else if (navFromJk && k == KEY_SCROLL_DN)  delta = 1;
             else if (k == KEY_SCROLL_UP)               delta = -s_emojiPickerCols;
@@ -29800,7 +30877,7 @@ static void pumpKeyboardInput() {
             // list it falls through to the close handling below. It keeps the
             // selection now that delete lives on D behind its own prompt —
             // there is no longer an armed state a stray Backspace could trip.
-#if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TLORA_PAGER_TFT)
             if ((k == KEY_BACKSPACE || k == KEY_BACKSPACE_HOLD) && s_dmMsgPanelFocused) {
                 s_dmMsgPanelFocused = false;
                 refreshDmPanelFocusStyles();
@@ -30779,10 +31856,10 @@ static void pumpKeyboardInput() {
                 }
             }
 
-#if defined(DEVICE_TDECK)
-            // T-Deck has no scroll wheel, so j/k (and trackball scroll, which
-            // shares KEY_SCROLL_UP/DN) both activate and drive the chat cursor
-            // directly, rather than switching channels like the Pager's wheel.
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
+            // T-Deck-family boards have no scroll wheel, so j/k (plus the
+            // original T-Deck's trackball) activate and drive the chat cursor
+            // directly instead of switching channels like the Pager's wheel.
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 if (!s_pagerChatCursorMode) {
                     s_pagerChatCursorMode = true;
@@ -31402,7 +32479,7 @@ static void startWebConfigAuto() {
     if (webCfgRunning()) return;
     webCfgSetForceAp(wifiForceApMode());
     webCfgPushActiveCreds();
-#if HAS_FILE_STORAGE
+#if HAS_FILE_STORAGE && !defined(DEVICE_TDECK_PRO)
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
 #else
     bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
@@ -31700,9 +32777,24 @@ static void bootTimeNtpSync() {
 static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
+#if defined(DEVICE_TDECK_PRO)
+    // Indexed LVGL buffers begin with two lv_color32_t palette entries. The I1
+    // pixels after them are MSB-first, 0=black/1=white, exactly GxEPD2's native
+    // bitmap representation. I1 invalidation is byte-aligned by LVGL.
+    constexpr size_t kI1PaletteBytes = 2u * sizeof(lv_color32_t);
+    const size_t sourceStride = ((size_t)w + 7u) / 8u;
+    if (!lcd.pushI1(area->x1, area->y1, w, h,
+                    px_map + kI1PaletteBytes, sourceStride)) {
+        Serial.printf("[eink] rejected I1 flush area=(%ld,%ld)-(%ld,%ld)\n",
+                      (long)area->x1, (long)area->y1,
+                      (long)area->x2, (long)area->y2);
+    }
+    if (lv_display_flush_is_last(disp)) lcd.requestRefresh();
+#else
     // v9 hands over a raw byte buffer in the display's colour format (RGB565).
     uint16_t *pixels = (uint16_t *)px_map;
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
+#endif
 #if HAS_VNC_HOST
     vncHostCaptureFlush(area->x1, area->y1, w, h, pixels);
 #endif
@@ -31942,6 +33034,10 @@ static void bootSplashStatusPaint() {
     const int msgW = displayDev().textWidth(s_splashStatusMsg);
     displayDev().drawString(line, s_splashStatusX + max(0, (s_splashStatusW - msgW) / 2),
                             s_splashStatusY);
+#if defined(DEVICE_TDECK_PRO)
+    lcd.requestRefresh();
+    lcd.serviceRefresh();
+#endif
 }
 
 static void bootSplashStatus(const char *msg) {
@@ -31987,14 +33083,24 @@ static void drawBootSplash() {
         return (uint16_t)((r << 11) | (g << 5) | b);
     };
 
-    // Splash is intentionally fixed to Camillia Dark, independent of UI theme selection.
+    // Color displays use the fixed Camillia Dark splash. The e-paper build uses
+    // its equally fixed inverse paper palette.
+#if HAS_UI_THEMES
     const UiThemePresetLite &splashPreset = kUiThemePresets[0]; // Camillia Dark
+#else
+    const UiThemePresetLite &splashPreset = kPaperTheme;
+#endif
     const uint16_t splashBgMain = splashPreset.bgMain;
     const uint16_t splashPanelBg = splashPreset.panelBg;
     const uint16_t splashPanelAlt = splashPreset.panelAlt;
     const uint16_t splashAccent = splashPreset.accent;
+#if HAS_UI_THEMES
     const uint16_t splashTextMain = rgb565(0xF3, 0xF6, 0xFA);
     const uint16_t splashTextDim = rgb565(0xB7, 0xC0, 0xCC);
+#else
+    const uint16_t splashTextMain = TFT_BLACK;
+    const uint16_t splashTextDim = TFT_BLACK;
+#endif
 
     const uint16_t bgTop = blend565(splashBgMain, splashPanelBg, 96);
     const uint16_t bgBottom = splashBgMain;
@@ -32116,6 +33222,33 @@ static void drawBootSplash() {
         const int leafInnerYLeft = scaled(30.0f, 1);
         const int leafInnerYRight = scaled(31.0f, 1);
         const int leafInnerR = scaled(6.0f, 1);
+
+#if defined(DEVICE_TDECK_PRO)
+        const uint16_t ink = TFT_BLACK;
+        for (int i = 0; i < 10; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
+            int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
+            displayDev().drawCircle(px, py, (i & 1) ? petalOuterR1 : petalOuterR0, ink);
+        }
+        for (int i = 0; i < 8; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
+            int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
+            displayDev().drawCircle(px, py, petalMidR, ink);
+        }
+        for (int i = 0; i < 5; i++) {
+            float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
+            int px = cx + (int)lroundf((float)petalInnerOrbitX * cosf(a));
+            int py = cy + (int)lroundf((float)petalInnerOrbitY * sinf(a));
+            displayDev().drawCircle(px, py, petalInnerR, ink);
+        }
+        displayDev().drawCircle(cx, cy, centerR, ink);
+        displayDev().drawRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, ink);
+        displayDev().drawCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, ink);
+        displayDev().drawCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, ink);
+        return;
+#endif
 
         for (int i = 0; i < 10; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
@@ -32299,6 +33432,11 @@ static void drawBootSplash() {
     s_splashStatusOn = true;
 #endif
 
+#if defined(DEVICE_TDECK_PRO)
+    lcd.requestRefresh(true);
+    lcd.serviceRefresh(true);
+#endif
+
     // Held, then left on screen. Everything between here and buildUi() — WiFi
     // association, NTP, web config start, the node and channel stores, radio
     // and GPS bring-up — is seconds of work with nothing to show, and this used
@@ -32398,6 +33536,10 @@ static void refreshChannelGlow(bool force) {
 
         bool active = (i == s_activeChannel);
         bool animate = s_channelNeedsAttention[i] && !active;
+    #if defined(DEVICE_TDECK_PRO)
+        // E-paper has no glow animation; the trailing star still marks unread.
+        animate = false;
+    #endif
         // Any board with the overlay dropdown needs the cursor drawn — without
         // it the list opens with nothing highlighted, so up/down move an
         // invisible selection and the list looks inert even though it isn't.
@@ -32471,6 +33613,15 @@ static void refreshChannelGlow(bool force) {
         // unless the shape actually moved or the pulse advanced.
         if (stateSame && pulseSame) continue;
 
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, (active || dropdownCursor) ? 2 : 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_outline_width(btn, 0, 0);
+        lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+    #else
         if (pulsing) {
             lv_obj_set_style_border_width(btn, 2, 0);
             lv_obj_set_style_border_color(btn, lv_color_hex(0x8EEBFF), 0);
@@ -32501,6 +33652,7 @@ static void refreshChannelGlow(bool force) {
                 lv_obj_set_style_outline_opa(btn, LV_OPA_70, 0);
             }
         }
+#endif
     }
 
     if (s_channelSelectorBtn) {
@@ -32508,7 +33660,16 @@ static void refreshChannelGlow(bool force) {
 #if UI_CHANNEL_LIST_DROPDOWN
         selectorShouldGlow = anyUnread && !isChannelDropdownVisible();
 #endif
-    #if defined(DEVICE_CARDPUTER_LORA_HAT)
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
+        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_outline_width(s_channelSelectorBtn, 0, 0);
+        lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
+    #else
+        #if defined(DEVICE_CARDPUTER_LORA_HAT)
         const bool selectorNavCursor = (!s_cardputerMainChatPanelFocused
                         && !s_pagerChatCursorMode
                         && !isChannelDropdownVisible()
@@ -32603,6 +33764,7 @@ static void refreshChannelGlow(bool force) {
             lv_obj_set_style_shadow_width(s_channelSelectorBtn, 4, 0);
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, lightMode ? LV_OPA_20 : LV_OPA_30, 0);
         }
+#endif
     }
 }
 
@@ -32618,6 +33780,13 @@ static void applyChannelButtonTheme() {
         if (!btn) continue;
 
         bool active = (i == s_activeChannel);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_outline_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+    #else
         lv_obj_set_style_bg_color(
             btn,
             (s_cfg.uiMode == UI_MODE_LIGHT)
@@ -32627,19 +33796,31 @@ static void applyChannelButtonTheme() {
         lv_obj_set_style_bg_opa(btn, active ? LV_OPA_90 : LV_OPA_60, 0);
         lv_obj_set_style_border_width(btn, active ? 2 : 1, 0);
         lv_obj_set_style_border_color(btn, active ? lv_color_hex(0x90B4FF) : lv_color_hex(0x2B4D8C), 0);
+#endif
 
         lv_obj_t *lbl = s_channelLabels[i];
         if (lbl) {
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
             lv_obj_set_style_text_color(
                 lbl,
                 active
                     ? (s_cfg.uiMode == UI_MODE_DARK ? lv_color_hex(0x0B1E44) : lv_color_hex(0xD9E8FF))
                     : lv_color_hex(0xD9E8FF),
                 0);
+#endif
         }
     }
 
     if (s_channelSelectorBtn) {
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
+        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+#else
         const bool lightMode = (s_cfg.uiMode == UI_MODE_LIGHT);
         const lv_color_t selectorBaseBorder =
             lvColorFrom565(blend565(s_ui.panelAlt, s_ui.accent, lightMode ? 96 : 120));
@@ -32662,6 +33843,7 @@ static void applyChannelButtonTheme() {
         lv_obj_set_style_shadow_spread(s_channelSelectorBtn, 1, 0);
         lv_obj_set_style_shadow_width(s_channelSelectorBtn, 4, 0);
         lv_obj_set_style_shadow_opa(s_channelSelectorBtn, lightMode ? LV_OPA_20 : LV_OPA_30, 0);
+    #endif
     }
     if (s_channelSelectorLabel) {
         lv_obj_set_style_text_color(
@@ -32686,7 +33868,7 @@ static void setActiveChannel(int channelIdx) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cardputerMainChatPanelFocused = false;
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_M9)
     s_cardputerDropdownSelection = channelIdx;
 #endif
     clearSelectedMsgContext();
@@ -32731,7 +33913,7 @@ static void refreshChannelSelectorLabel() {
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     if (isChannelDropdownVisible()
         && s_cardputerDropdownSelection >= 0
@@ -32750,7 +33932,7 @@ static void refreshChannelSelectorLabel() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = useCompactVerticalHeltecSelector();
@@ -32866,7 +34048,7 @@ static void setChannelDropdownVisible(bool visible) {
     if (visible) {
         lv_obj_clear_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_channelList);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
         if (s_cardputerDropdownSelection < 0 || s_cardputerDropdownSelection >= MESH_CHANNELS) {
             s_cardputerDropdownSelection = s_activeChannel;
@@ -32878,7 +34060,7 @@ static void setChannelDropdownVisible(bool visible) {
 #endif
     } else {
         lv_obj_add_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
         s_cardputerDropdownSelection = -1;
 #endif
@@ -32961,7 +34143,12 @@ static void fitChannelDropdownToButtonContent() {
     }
     if (maxLabelW <= 0) return;
 
-#if defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK_PRO)
+    const lv_coord_t listPadLeft = 2;
+    const lv_coord_t listPadRight = 2;
+    const lv_coord_t buttonTextPad = 4;
+    const lv_coord_t scrollbarGutter = 0;
+#elif defined(DEVICE_MESH_DECK)
     // Tighter than the shared values below, and deliberately so: 2+2 panel pad,
     // 4 of gutter and 2+2 inside the row spend 12 px between the panel edge and
     // the text — the same 12 px the selector button spends on its own 6 px side
@@ -32983,7 +34170,16 @@ static void fitChannelDropdownToButtonContent() {
 
     lv_coord_t dropdownW = listPadLeft + buttonW + scrollbarGutter + listPadRight;
 
-#if defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK_PRO)
+    // The open list is the selector button extended downward. Match the outer
+    // width exactly and give each row the remaining width inside the margins.
+    lv_coord_t selectorW = s_channelSelectorFixedBtnW;
+    if (selectorW <= 0 && s_channelSelectorBtn) selectorW = lv_obj_get_width(s_channelSelectorBtn);
+    if (selectorW > 0) {
+        dropdownW = selectorW;
+        buttonW = dropdownW - listPadLeft - listPadRight;
+    }
+#elif defined(DEVICE_MESH_DECK)
     // Take the selector button's width outright when it is the larger of the
     // two: the list is that button opening downward, so anything short of its
     // edges reads as a separate panel. The selector sizes itself once from the
@@ -33185,6 +34381,12 @@ static void layoutHeaderInlineItems() {
         }
     }
 
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_align_to(s_chatHeaderTime, s_channelSelectorBtn,
+                    LV_ALIGN_OUT_RIGHT_MID, 8, headerTextYOffset);
+    return;
+#endif
+
     // Keep time centered between selector button and battery info.
     lv_obj_update_layout(s_chatHeaderBar);
     lv_area_t selectorArea;
@@ -33261,20 +34463,28 @@ static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
         } else {
             lv_label_set_text(gpsLabel, LV_SYMBOL_GPS);
         }
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(gpsLabel, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(
             gpsLabel,
             (gpsEnabled && gpsFix) ? headerGoodGreenColor() : headerGpsBadColor(), 0);
+    #endif
     }
 
     if (wifiLabel) {
         const bool wifiOffOrDisconnected = (!wifiApMode && !wifiConnected);
         lv_label_set_text(wifiLabel, wifiApMode ? LV_SYMBOL_UPLOAD : LV_SYMBOL_WIFI);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(wifiLabel, lv_color_make(0, 0, 0), 0);
+    #else
         lv_obj_set_style_text_color(
             wifiLabel,
             wifiApMode ? lv_color_hex(0xF4D35E)
-                       : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B)
-                                                : headerGoodGreenColor()),
+                   : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B)
+                            : headerGoodGreenColor()),
             0);
+    #endif
         lv_obj_set_style_text_decor(
             wifiLabel,
             wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
@@ -33351,7 +34561,15 @@ static void refreshHeaderStatus(bool force) {
                                || (s_chatStatusBox && gpsParent == s_chatStatusBox);
     if (gpsParent && gpsParent == wifiParent) {
         if (packFromRight) {
+#if defined(DEVICE_TDECK_PRO)
+            if (gpsParent == s_chatShortcutBar && !bottomNavEnabled()) {
+                lv_obj_align(s_chatHeaderGps, LV_ALIGN_BOTTOM_RIGHT, -4, -1);
+            } else {
+                lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
+            }
+#else
             lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
+#endif
             lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
         } else {
             lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
@@ -35418,7 +36636,9 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     lv_obj_set_flex_flow(rowW, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(rowW, isMe ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    stylePaperMessageRow(rowW);
 
+#if !defined(DEVICE_TDECK_PRO)
     uint16_t bg565;
     if (s_cfg.chatColorsEnabled) {
         bg565 = isMe ? userMessageAccentColor565()
@@ -35444,6 +36664,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
                 break;
         }
     }
+#endif
     lv_obj_t *b = lv_obj_create(rowW);
     lv_obj_remove_style_all(b);
     lv_obj_set_width(b, LV_SIZE_CONTENT);
@@ -35458,12 +36679,26 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
     // Outlined (OUTLINE): transparent fill + a colored border carrying the
     // node/ack color, with the body in the theme's readable text color and the
     // sender/state tag tinted in the node color.
+#if defined(DEVICE_TDECK_PRO)
+    const bool outline = true;
+    const int borderW = 1;
+#else
     const bool outline = (s_cfg.chatStyle == CHAT_STYLE_OUTLINE);
     const int borderW = outline ? ((s_cfg.uiMode == UI_MODE_LIGHT) ? 2 : 1) : 0;
+#endif
     const lv_font_t *bubbleFont = scaledChatFont(kChannelChatFont);
     const lv_coord_t bubbleMaxW = chatBubbleLabelMaxWidth(borderW);
     lv_color_t tagColor;   // sender name + ME/ME(SENT) tag
     lv_color_t bodyColor;  // message text
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(outline);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(b, borderW, 0);
+    lv_obj_set_style_border_color(b, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
+    tagColor = lv_color_make(0, 0, 0);
+    bodyColor = lv_color_make(0, 0, 0);
+#else
     if (outline) {
         lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(b, borderW, 0);
@@ -35484,6 +36719,7 @@ static void chatMakeBubble(lv_obj_t *list, uint32_t sender, bool isMe,
         tagColor  = bubbleTextColor(bg565);
         bodyColor = tagColor;
     }
+#endif
 
     const char *stateTag = nullptr;
     if (isMe) {
@@ -35655,7 +36891,8 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
 
         chatMakeBubble(s_chatList, sender, isMe, metaBuf, nameTag, body,
                        rows[i]->ack,
-                       replyPacketId, isSelected, lastMsgObj, selectedMsgObj,
+                       replyPacketId, isSelected,
+                       lastMsgObj, selectedMsgObj,
                        onChatMessagePressed);
         if (anchorHere && lastMsgObj) *anchorObj = *lastMsgObj;
     }
@@ -35934,7 +37171,10 @@ static void refreshChatView(bool force) {
                 if (anchorHere) anchorObj = msg;
                 lv_obj_set_width(msg, lv_pct(100));
                 lv_obj_set_style_text_font(msg, scaledChatFont(kChannelChatFont), 0);
+                stylePaperMessageRow(msg);
+#if !defined(DEVICE_TDECK_PRO)
                 lv_obj_set_style_bg_opa(msg, LV_OPA_TRANSP, 0);
+#endif
 #if defined(DEVICE_TDECK) || defined(DEVICE_M9)
                 lv_obj_set_style_pad_left(msg, 1, 0);
                 lv_obj_set_style_pad_right(msg, 0, 0);
@@ -35986,6 +37226,9 @@ static void refreshChatView(bool force) {
                             break;
                     }
                 }
+#if defined(DEVICE_TDECK_PRO)
+                textColor565 = TFT_BLACK;
+#endif
 
                 lv_obj_set_style_text_color(msg, tftColorToLv(textColor565), 0);
                 if (ackSuffix) {
@@ -36002,8 +37245,14 @@ static void refreshChatView(bool force) {
                     isSelected = (strcmp(rows[i]->text, s_selectedMsgText) == 0);
                 }
                 if (isSelected) {
+#if defined(DEVICE_TDECK_PRO)
+                    lv_obj_set_style_outline_width(msg, 2, 0);
+                    lv_obj_set_style_outline_color(msg, lv_color_make(0, 0, 0), 0);
+                    lv_obj_set_style_outline_opa(msg, LV_OPA_COVER, 0);
+#else
                     lv_obj_set_style_bg_color(msg, lv_color_hex(0x2A4E8F), 0);
                     lv_obj_set_style_bg_opa(msg, LV_OPA_70, 0);
+#endif
                     selectedMsgObj = msg;
                 }
 
@@ -36112,9 +37361,9 @@ static void buildUi() {
 // Full-width chat, no side panel: these boards put channels in the overlay
 // dropdown (UI_CHANNEL_LIST_DROPDOWN) instead of an anchored list, so reserving
 // a column for one leaves an empty strip down the side.
-#if defined(DEVICE_TDECK) || UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || UI_TOUCH_ONLY_PROFILE || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const int panelMargin = 6;
     const int chatGap = 6;
 #if HAS_NAV_BAR_TOGGLE
@@ -36123,7 +37372,11 @@ static void buildUi() {
     // pixels come out of the message list, which is what chatH measures. With
     // the bar off it is the old 14 again, so the screen is the one that shipped
     // before the bar down to the pixel.
+#if defined(DEVICE_TDECK_PRO)
+    const int chatLegendH = bottomNavEnabled() ? kBottomNavHeight : 30;
+#else
     const int chatLegendH = bottomNavEnabled() ? kBottomNavHeight : 14;
+#endif
 #else
     const int chatLegendH = 14;
 #endif
@@ -36219,6 +37472,11 @@ static void buildUi() {
     lv_obj_set_size(s_chatHeaderBar, chatW, chatHeaderH);
     lv_obj_align(s_chatHeaderBar, LV_ALIGN_TOP_LEFT, chatX, panelMargin);
     lv_obj_clear_flag(s_chatHeaderBar, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(s_chatHeaderBar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_chatHeaderBar, kChatHeaderBorderW, 0);
+    lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(
         s_chatHeaderBar,
         (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
@@ -36226,6 +37484,7 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
     lv_obj_set_style_border_width(s_chatHeaderBar, kChatHeaderBorderW, 0);
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
+#endif
     lv_obj_set_style_pad_all(s_chatHeaderBar, kChatHeaderPad, 0);
 
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
@@ -36233,6 +37492,8 @@ static void buildUi() {
     // Cardputer keeps the original clock size to fit its narrow header.
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *clockTextFont = headerTextFont;
+#elif defined(DEVICE_TDECK_PRO)
+    const lv_font_t *clockTextFont = &lv_font_montserrat_12;
 #else
     const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
 #endif
@@ -36263,7 +37524,7 @@ static void buildUi() {
 // T-Deck presentation. It also buys the label the 14 px the caret reserved,
 // which matters more here than on the T-Deck — same 320x240 pixels, smaller
 // glass, so channel names have less room to be legible in.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     const bool showSelectorCaret = false;
 #elif UI_TOUCH_ONLY_PROFILE
     const bool showSelectorCaret = compactHeltecSelector;
@@ -36280,13 +37541,17 @@ static void buildUi() {
 #endif
 
     const lv_font_t *selectorTextFont = headerTextFont;
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
     selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif UI_TOUCH_ONLY_PROFILE
     if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
 #endif
 
     s_channelSelectorBtn = lv_btn_create(s_chatHeaderBar);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_remove_style_all(s_channelSelectorBtn);
+    lv_obj_add_flag(s_channelSelectorBtn, LV_OBJ_FLAG_CLICKABLE);
+#endif
     lv_obj_set_size(s_channelSelectorBtn, selectorBtnW, selectorBtnH);
     lv_obj_align(s_channelSelectorBtn, LV_ALIGN_LEFT_MID, selectorBtnOffsetX, 0);
     lv_obj_set_style_radius(s_channelSelectorBtn, 6, 0);
@@ -36414,6 +37679,11 @@ static void buildUi() {
     lv_obj_set_size(s_chatPanel, chatW, chatH);
     lv_obj_align(s_chatPanel, LV_ALIGN_TOP_LEFT, chatX, chatY);
     lv_obj_clear_flag(s_chatPanel, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(s_chatPanel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_chatPanel, 1, 0);
+    lv_obj_set_style_border_color(s_chatPanel, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(
         s_chatPanel,
         chatPanelBackgroundColor(),
@@ -36421,6 +37691,7 @@ static void buildUi() {
     lv_obj_set_style_bg_opa(s_chatPanel, chatPanelBackgroundOpa(), 0);
     lv_obj_set_style_border_width(s_chatPanel, 1, 0);
     lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
+#endif
     lv_obj_set_style_pad_all(s_chatPanel, 4, 0);
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_style_pad_row(s_chatPanel, 4, 0);
@@ -36463,7 +37734,7 @@ static void buildUi() {
     // Same size as the selector button's own label, so the open list reads as
     // that button unfolded rather than as a smaller menu below it.
     channelNavFont = &lv_font_montserrat_14;
-#elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_M9)
     channelNavFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif UI_TOUCH_ONLY_PROFILE
     if (!useCompactVerticalHeltecSelector()) channelNavFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
@@ -36493,7 +37764,7 @@ static void buildUi() {
 
         s_channelList = lv_obj_create(screen);
         lv_obj_set_size(s_channelList, dropdownW, dropdownH);
-#if defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK_PRO)
         // Same left edge as the button above it, for the same reason. The
         // selector sits inside the header bar, so its left edge is the header's
         // own border and padding further in than the bar itself.
@@ -36508,11 +37779,21 @@ static void buildUi() {
         lv_obj_add_flag(s_channelList,
                         (lv_obj_flag_t)(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_HIDDEN));
         setupVScroll(s_channelList);
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_OFF);
+    #else
         lv_obj_set_scrollbar_mode(s_channelList, LV_SCROLLBAR_MODE_AUTO);
+    #endif
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(s_channelList, lv_color_make(255, 255, 255), 0);
+        lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(s_channelList, 0, 0);
+    #else
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
         lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(s_channelList, 1, 0);
         lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
+    #endif
         lv_obj_set_style_radius(s_channelList, 6, 0);
         lv_obj_set_style_pad_all(s_channelList, 4, 0);
         lv_obj_set_style_pad_row(s_channelList, 4, 0);
@@ -36622,10 +37903,16 @@ static void buildUi() {
     lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
 #endif
     lv_obj_clear_flag(s_chatShortcutBar, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_chatShortcutBar, 1, 0);
+    lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_chatShortcutBar, 1, 0);
     lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_hex(0x335D9D), 0);
+#endif
     lv_obj_set_style_pad_left(s_chatShortcutBar, 4, 0);
     lv_obj_set_style_pad_right(s_chatShortcutBar, 4, 0);
     lv_obj_set_style_pad_top(s_chatShortcutBar, 0, 0);
@@ -36657,36 +37944,62 @@ static void buildUi() {
 #endif
 #if !UI_TOUCH_ONLY_PROFILE
     s_chatShortcutText = lv_label_create(s_chatShortcutBar);
+#if defined(DEVICE_TDECK_PRO)
+    lv_coord_t legendTextW = chatW - 8;
+#else
     const lv_coord_t bottomStatusReserve = (chatLegendH >= 14) ? 74 : 62;
     lv_coord_t legendTextW = chatW - bottomStatusReserve;
     if (legendTextW < 40) legendTextW = chatW;
+#endif
     lv_obj_set_width(s_chatShortcutText, legendTextW);
     lv_obj_set_style_text_font(s_chatShortcutText, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_chatShortcutText, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_CLIP);
+    lv_obj_align(s_chatShortcutText, LV_ALIGN_TOP_MID, 0, 1);
+#else
     lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(s_chatShortcutText, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
+#endif
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(s_chatShortcutText, "C(h)annels   (A)ctions");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
     lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive   (A)ctions");
+#elif defined(DEVICE_TDECK_PRO)
+    lv_label_set_text(s_chatShortcutText, "C:Cfg H:Ch D:DM N:Node L:Live A:Act");
 #else
     lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   (L)ive   (A)ct");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
     lv_obj_set_style_text_font(s_chatHeaderGps, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_make(0, 0, 0), 0);
+    lv_obj_align(s_chatHeaderGps, LV_ALIGN_BOTTOM_RIGHT, -4, -1);
+#else
     lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
     lv_obj_align(s_chatHeaderGps, LV_ALIGN_RIGHT_MID, -4, 0);
+#endif
 
     s_chatHeaderWifi = lv_label_create(s_chatShortcutBar);
     lv_obj_set_style_text_font(s_chatHeaderWifi, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+#endif
     lv_obj_align_to(s_chatHeaderWifi, s_chatHeaderGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 
     s_chatDmAlert = lv_label_create(s_chatShortcutBar);
     lv_obj_set_style_text_font(s_chatDmAlert, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_chatDmAlert, lv_color_make(0, 0, 0), 0);
+#else
     lv_obj_set_style_text_color(s_chatDmAlert, lv_color_hex(0xF4D35E), 0);
+#endif
     lv_label_set_text(s_chatDmAlert, LV_SYMBOL_ENVELOPE);
     lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
     lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
@@ -36698,6 +38011,10 @@ static void buildUi() {
     for (int i = 0; i < MESH_CHANNELS; i++) {
 #if UI_CHANNEL_LIST_DROPDOWN
         lv_obj_t *btn = lv_btn_create(s_channelList ? s_channelList : screen);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_remove_style_all(btn);
+    lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+#endif
         s_channelBtns[i] = btn;
         lv_obj_set_width(btn, lv_pct(100));
         lv_obj_set_height(btn, max(channelNavBtnH, 20));
@@ -36914,9 +38231,15 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     } else if (s_channelBtns[0]) {
         lv_obj_t *panel = lv_obj_get_parent(s_channelBtns[0]);
         if (panel) {
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_bg_color(panel, lv_color_make(255, 255, 255), 0);
+            lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(panel, 0, 0);
+#else
             lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E285B), 0);
             lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
             lv_obj_set_style_border_color(panel, lv_color_hex(0x335D9D), 0);
+#endif
         }
     }
 
@@ -36929,8 +38252,14 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
         lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
     }
     if (s_channelSelectorBtn) {
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
+        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_bg_color(s_channelSelectorBtn, lv_color_hex(0x102750), 0);
         lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
+#endif
     }
     if (s_channelSelectorLabel) {
         lv_obj_set_style_text_color(
@@ -36946,21 +38275,50 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
     }
 
     if (s_chatHeaderBar) {
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_chatHeaderBar, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_bg_color(
             s_chatHeaderBar,
             (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
             0);
         lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
         lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
+#endif
     }
-    if (s_chatHeaderTime) lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
-    if (s_chatHeaderGps) lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
-    if (s_chatHeaderBattText) lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
+        if (s_chatHeaderTime) {
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
+    #endif
+        }
+        if (s_chatHeaderGps) {
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
+    #endif
+        }
+        if (s_chatHeaderBattText) {
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
+    #endif
+        }
     if (s_chatHeaderBattBar) {
         lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x274A84), 0);
         lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), 0);
     }
-    if (s_chatHeaderWifi) lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+        if (s_chatHeaderWifi) {
+    #if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_make(0, 0, 0), 0);
+    #else
+        lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
+    #endif
+        }
 
     if (s_chatPanel) {
         lv_obj_set_style_bg_color(
@@ -36982,17 +38340,31 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
         lv_obj_set_style_border_color(s_chatActBtn, lv_color_hex(0x335D9D), 0);
     }
     if (s_chatShortcutBar) {
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
         lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_hex(0x335D9D), 0);
+#endif
     }
     if (s_chatShortcutText) {
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(s_chatShortcutText, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
+#endif
     }
 
     if (s_liveModal) {
         if (lv_obj_is_valid(s_liveModal) && lv_obj_get_disp(s_liveModal) != nullptr) {
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_bg_color(s_liveModal, lv_color_make(255, 255, 255), 0);
+            lv_obj_set_style_border_color(s_liveModal, lv_color_make(0, 0, 0), 0);
+#else
             lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
             lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
+#endif
         } else {
             s_liveModal = nullptr;
         }
@@ -37005,7 +38377,11 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
             && lv_obj_get_parent(s_liveList) == s_liveModal) {
             lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
             lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_border_color(s_liveList, lv_color_make(0, 0, 0), 0);
+#else
             lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
+#endif
             lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
             refreshLiveView(true);
         } else {
@@ -37073,6 +38449,9 @@ static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
 }
 
 static void processPendingThemeRebuild() {
+#if defined(DEVICE_TDECK_PRO)
+    if (s_screenAsleep) return;
+#endif
 #if HAS_NAV_BAR_TOGGLE
     if (s_navRebuildPending) {
         const bool reopenCfg = s_navRebuildReopenCfg;
@@ -37608,24 +38987,61 @@ void setup() {
     // never allocated during a firmware update — leaving the full contiguous
     // internal heap for the TLS handshake. Prefer internal RAM (fast to render
     // and flush); fall back to PSRAM, then a minimal buffer, rather than crash.
+#if defined(DEVICE_TDECK_PRO)
+    // I1 stores 8 pixels per byte and prefixes the pixel map with two 32-bit
+    // palette entries. A complete frame is only 9,608 bytes, so render full-
+    // screen: every e-paper commit receives one coherent native bitmap.
+    constexpr size_t kI1PaletteBytes = 2u * sizeof(lv_color32_t);
+    constexpr size_t kI1StrideBytes = ((size_t)LCD_W + 7u) / 8u;
+    constexpr size_t kDrawBufBytes = kI1PaletteBytes + kI1StrideBytes * (size_t)LCD_H;
+    size_t drawBufBytes = kDrawBufBytes;
+    s_drawBufMem = (uint8_t *)heap_caps_malloc(drawBufBytes,
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_drawBufMem) {
+        Serial.println("[lvgl] I1 draw buffer internal alloc failed; trying PSRAM");
+        s_drawBufMem = (uint8_t *)heap_caps_malloc(drawBufBytes,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (s_drawBufMem) {
+        lv_color32_t *palette = (lv_color32_t *)s_drawBufMem;
+        palette[0] = lv_color_to_32(lv_color_make(0, 0, 0), LV_OPA_COVER);
+        palette[1] = lv_color_to_32(lv_color_make(255, 255, 255), LV_OPA_COVER);
+        memset(s_drawBufMem + kI1PaletteBytes, 0xFF, drawBufBytes - kI1PaletteBytes);
+    }
+#else
     constexpr size_t kBytesPerPx = 2;   // LV_COLOR_FORMAT_RGB565
     const size_t kDrawBufPx = (size_t)kMaxHorRes * (size_t)kDrawBufLines;
-    s_drawBufMem = (uint16_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
-                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_drawBufMem = (uint8_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     size_t drawBufPx = kDrawBufPx;
     if (!s_drawBufMem) {
         Serial.println("[lvgl] draw buffer internal alloc failed; trying PSRAM");
-        s_drawBufMem = (uint16_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
-                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_drawBufMem = (uint8_t *)heap_caps_malloc(kDrawBufPx * kBytesPerPx,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (!s_drawBufMem) {
         // Last resort: a small internal buffer keeps the UI alive (stripey but
         // functional) instead of a null-buffer crash.
         drawBufPx = (size_t)kMaxHorRes * 8u;
-        s_drawBufMem = (uint16_t *)heap_caps_malloc(drawBufPx * kBytesPerPx,
-                                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        s_drawBufMem = (uint8_t *)heap_caps_malloc(drawBufPx * kBytesPerPx,
+                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         Serial.printf("[lvgl] FATAL-ish: fell back to %u-line draw buffer\n",
                       (unsigned)(drawBufPx / kMaxHorRes));
+    }
+    const size_t drawBufBytes = drawBufPx * kBytesPerPx;
+#endif
+
+    if (!s_drawBufMem) {
+        Serial.println("[lvgl] FATAL: display draw buffer allocation failed");
+        displayDev().fillScreen(TFT_WHITE);
+        displayDev().setTextColor(TFT_BLACK, TFT_WHITE);
+        displayDev().setFont(&fonts::DejaVu12);
+        displayDev().drawString("Display memory error", 8, 16);
+#if defined(DEVICE_TDECK_PRO)
+        lcd.requestRefresh(true);
+        lcd.serviceRefresh(true);
+#endif
+        while (true) delay(1000);
     }
 
     int32_t dispW = displayDev().width();
@@ -37637,16 +39053,38 @@ void setup() {
                       (long)dispW, (long)dispH);
     }
     s_lvDisplay = lv_display_create(dispW, dispH);
+    if (!s_lvDisplay) {
+        Serial.println("[lvgl] FATAL: display allocation failed");
+        displayDev().fillScreen(TFT_WHITE);
+        displayDev().setTextColor(TFT_BLACK, TFT_WHITE);
+        displayDev().setFont(&fonts::DejaVu12);
+        displayDev().drawString("Display init error", 8, 16);
+#if defined(DEVICE_TDECK_PRO)
+        lcd.requestRefresh(true);
+        lcd.serviceRefresh(true);
+#endif
+        while (true) delay(1000);
+    }
 #if HAS_VNC_HOST
     vncHostInit((uint16_t)dispW, (uint16_t)dispH);
 #endif
+#if defined(DEVICE_TDECK_PRO)
+    lv_display_set_color_format(s_lvDisplay, LV_COLOR_FORMAT_I1);
+#else
     lv_display_set_color_format(s_lvDisplay, LV_COLOR_FORMAT_RGB565);
+#endif
     lv_display_set_flush_cb(s_lvDisplay, lvglFlush);
+#if defined(DEVICE_TDECK_PRO)
+    lv_display_set_buffers(s_lvDisplay, s_drawBufMem, nullptr,
+                           (uint32_t)drawBufBytes,
+                           LV_DISPLAY_RENDER_MODE_FULL);
+#else
     // Single buffer, partial render mode — same stripe-at-a-time flushing the
     // v8 lv_disp_draw_buf_t gave us. Note buf_size is in BYTES in v9.
     lv_display_set_buffers(s_lvDisplay, s_drawBufMem, nullptr,
-                           (uint32_t)(drawBufPx * kBytesPerPx),
+                           (uint32_t)drawBufBytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
 
 #if HAS_TOUCH
     lv_indev_t *touchIndev = lv_indev_create();
@@ -38230,7 +39668,11 @@ void loop() {
     nodeArchiveFlush();
 
     now = millis();
-    if (!s_screenAsleep && s_cfg.screenOnSecs > 0) {
+    if (!s_screenAsleep && s_cfg.screenOnSecs > 0
+#if defined(DEVICE_TDECK_PRO) && HAS_KB_BLINK
+        && !kbBlinkBusy()
+#endif
+    ) {
         const uint32_t idleMs    = (uint32_t)(now - s_lastActivityMs);
         const uint32_t timeoutMs = (uint32_t)s_cfg.screenOnSecs * 1000UL;
         if (idleMs > timeoutMs) {
@@ -38259,6 +39701,9 @@ void loop() {
     }
 
     if (s_screenAsleep) {
+#if defined(DEVICE_TDECK_PRO)
+        serviceTdeckProSleepClock();
+#endif
         // The touch poll normally rides on LVGL's indev timer, which no longer
         // runs here — without this, a tap could not wake the display.
         serviceTouchWakeWhileAsleep();
@@ -38336,6 +39781,9 @@ void loop() {
     }
 #endif
     LOOP_PHASE("lvgl", lv_timer_handler());
+#if defined(DEVICE_TDECK_PRO)
+    LOOP_PHASE("eink", lcd.serviceRefresh());
+#endif
     serviceBacklightWake();
 
     // Whole-iteration cost, and the periodic report. Placed before the delay so

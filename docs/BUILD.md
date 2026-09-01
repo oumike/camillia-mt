@@ -15,6 +15,7 @@ Download your device image and `flash.sh` from the [Releases](https://github.com
 Supported release file names:
 
 - `camillia-mt-tdeck-vX.Y.Z.bin`
+- `camillia-mt-tdeck-pro-vX.Y.Z.bin`
 - `camillia-mt-tlora-pager-tft-vX.Y.Z.bin`
 - `camillia-mt-cardputer-cap-vX.Y.Z.bin`
 - `camillia-mt-heltec-vX.Y.Z.bin`
@@ -23,10 +24,13 @@ Supported release file names:
 - `camillia-mt-m9-vX.Y.Z.bin`
 - `camillia-mt-square-vX.Y.Z.bin`
 
+Each target also publishes an app-only OTA image and detached signature. For
+T-Deck Pro these are `camillia-mt-tdeck-pro-vX.Y.Z-ota.bin` and its `.sig`.
+
 Then run:
 
 ```bash
-./flash.sh camillia-mt-vX.Y.Z.bin [port]
+./flash.sh camillia-mt-<device>-vX.Y.Z.bin [port]
 ```
 
 Port defaults to `/dev/ttyUSB0`. On macOS use `/dev/cu.usbmodem*`.
@@ -44,6 +48,7 @@ Build only (no flash):
 
 ```bash
 pio run -e tdeck
+pio run -e tdeck-pro
 pio run -e tlora-pager-tft
 pio run -e cardputer-cap
 pio run -e heltec-v4
@@ -62,8 +67,9 @@ pio device monitor
 ### Build and flash with helper script
 
 ```bash
-Usage: ./build-upload-monitor.sh [--tdeck|-t] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
+Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
+  --tdeck-pro, -p  Use T-Deck Pro environment (tdeck-pro)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
   --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment (cardputer-cap)
   --pager, -P   Use T-Lora Pager TFT environment (tlora-pager-tft)
@@ -81,6 +87,7 @@ Example usage:
 
 ```bash
 ./build-upload-monitor.sh --tdeck
+./build-upload-monitor.sh --tdeck-pro
 ./build-upload-monitor.sh --cardputer
 ./build-upload-monitor.sh --pager
 ./build-upload-monitor.sh --heltec
@@ -104,6 +111,7 @@ You can also run the script with no flags and pick a device from the prompt.
 ## Notes
 
 - The board must be in download mode to flash. On the T-Deck, hold the trackball button while pressing reset, or let PlatformIO trigger it automatically via USB CDC.
+- T-Deck Pro uses the `tdeck-pro` target.
 - Square uses native USB-CDC and may require its DFU/download-mode gesture before upload.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.

@@ -6,16 +6,18 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Map settings page now has a "Map download debug" panel that records each tile attempt and its result, with a one-click "Copy report" button for sharing when downloads misbehave.
-- Failed tile downloads now report why they failed - which stage broke, the upstream response, bytes received, and timings - instead of a bare error.
+- LilyGo T-Deck Pro is now supported (`tdeck-pro`): full mesh UI on the 3.1 e-paper screen, TCA8418 keyboard, CST328/CST3530 touch, SX1262 radio, GPS, microSD config import/export, and BQ25896 battery reporting. This is an initial port and has not yet been validated on physical hardware.
+- T-Deck Pro: the sleep screen keeps a retained e-paper frame showing Camillia, the node name, local time, and date, refreshed once a minute.
+- T-Deck Pro: Alt+B toggles the keyboard backlight, and the backlight pulses for new messages whether the screen is awake or asleep.
+- T-Deck Pro: Alt+E/F/S/X give Up/Right/Left/Down, Alt+Q sends Esc, and Alt+H returns to chat, with the same H/J/K/D/C/N/L/A shortcuts as the T-Deck.
+- Releases now publish T-Deck Pro factory and OTA images with detached signatures.
 
 Changed
-- Map tile downloads retry each tile up to three times and keep going past a failed tile, rather than stopping the whole run at the first error.
-- If a tile download appears to fail but was actually written to the device, the page now re-checks storage and counts it as saved instead of reporting a failure.
-- After five tiles in a row can't be confirmed, the download pauses and says so, keeping every tile already saved.
-- Offline map status is checked in much smaller batches, so the check is far less likely to time out over a weak Wi-Fi link.
-- The map download summary now reads in plain terms - tiles "stored on the device" and "remaining" instead of cache jargon - and confirms explicitly when everything at the chosen zoom is already stored.
+- T-Deck: Alt+H now jumps straight back to chat from any screen, on keyboard-controller firmware dated 2025-06-12 or newer.
+- Attaky Mesh Deck: Alt+H returns directly to chat from Config, filters, and nested pickers; plain H still opens the channel selector.
+- T-Deck Pro uses one fixed black-on-white Camillia Paper interface, so the Theme, sender-color, and filled-Bubble chat options are hidden on the device and in Web Config; Chat Type offers Default and Outline.
+- T-Deck Pro screen updates are batched and rate-limited to suit e-paper, so redraws lag the TFT devices even though keys register immediately.
+- Every release build is now signature-verified against its published OTA image before the release goes out.
 
 Fixed
-- The web config page no longer renders as garbled text or stray tag fragments when Wi-Fi is slow; page data is now written to the connection in a way that can't desynchronize the browser mid-page.
-- Closing or navigating away from the config page while it is still loading now ends the transfer immediately instead of leaving the device building a page nobody is reading.)CAMNOTES";
+- Importing a config that names a chat style the board does not offer now falls back to that board's default style instead of applying an unsupported one.)CAMNOTES";

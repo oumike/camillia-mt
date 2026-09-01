@@ -42,6 +42,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate release target contract
+        run: ./release.sh --check-targets
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -53,6 +56,7 @@ jobs:
       - name: Build firmware (verify all environments compile)
         run: |
           pio run -e tdeck
+          pio run -e tdeck-pro
           pio run -e tlora-pager-tft
           pio run -e cardputer-cap
           pio run -e heltec-v4

@@ -88,7 +88,7 @@ static float batteryReadSquareAdsVolts() {
 } // namespace
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
 namespace {
 constexpr uint8_t kBq25896Addr = 0x6B;
 constexpr uint8_t kBqRegAdcControl = 0x02;
@@ -460,7 +460,7 @@ void batteryInitAdc() {
     sHeltecSenseLevel = (BATT_SENSE_ENABLE_LEVEL == LOW) ? LOW : HIGH;
     sHeltecSenseLocked = false;
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     bqEnsureWire();
     if (bqProbePresent() && bqStartConversion()) {
         // First conversion is in flight; batteryRefreshFilter() below will not
@@ -487,7 +487,7 @@ static float batteryReadVoltageHw() {
 #if (BATT_ADC_PIN < 0)
 #if defined(DEVICE_SQUARE)
     return batteryReadSquareAdsVolts();
-#elif defined(DEVICE_TLORA_PAGER_TFT)
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     return batteryReadPagerBqVolts();
 #elif defined(DEVICE_MESH_DECK)
     return batteryReadMeshDeckVolts();
@@ -608,7 +608,7 @@ void batteryDebugSnapshot(char *out, size_t outLen) {
     const float filtered = sBatteryFilter.initialized ? sBatteryFilter.filteredVoltage : 0.0f;
     const int shown = sBatteryFilter.initialized ? (int)sBatteryFilter.displayPct : -1;
 
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     // Raw register included deliberately: bit 7 is THERM_STAT, so a value that
     // looks 128 too high is a masking problem, not a bad battery. 20 mV per LSB
     // means the voltage can only ever be 2304 + 20n mV.
