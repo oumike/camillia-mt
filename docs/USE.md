@@ -1148,6 +1148,23 @@ Two things worth knowing:
   other nodes: the hop budget travels in every packet's header and relays honour
   whatever number they receive.
 
+### Traffic this node no longer relays
+
+A packet whose header claims it has travelled *more* hops than it started with
+is malformed, and Meshtastic 2.8 throws it away before decrypting it. Camillia
+now drops the same packets instead of relaying them, so no airtime is spent
+carrying a frame every 2.8 node in range will refuse.
+
+One case in that rule is worth naming: firmware older than Meshtastic 2.3.0
+never filled the field in at all, so its packets look the same and are dropped
+too. If you are the only relay for a very old node, it loses you as a hop. That
+is deliberate — 2.8 refuses those frames regardless, so relaying them only
+reaches nodes in a mesh with no 2.8 node anywhere in it.
+
+Dropped frames are logged under `[fwd]` with the sender and packet ID, so this
+shows up as a line in the debug monitor rather than as traffic that quietly
+stops moving.
+
 ### Custom LoRa modem settings
 
 The **Modem Preset** dropdown in Web Config's LoRa section has a **Custom** entry

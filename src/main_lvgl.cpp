@@ -6816,7 +6816,19 @@ static void loadConfigFromPrefs() {
 
     String nodeLong = getStringIfKey("nodeLong");
     if (nodeLong.length()) {
-        utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), nodeLong.c_str());
+        // Clamped on the way in, not just at the input paths. A name saved by an
+        // older build can be up to 39 bytes, and the input caps added for 2.8
+        // only govern new edits — without this, an upgrading user keeps a name
+        // we then announce and every 2.8 node clips to 24 bytes on display.
+        // Upstream truncates to 24 "before storing or rebroadcasting", so doing
+        // it at the store boundary is the same rule, not a stricter one.
+        utf8util::copyTruncate(s_cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1,
+                               nodeLong.c_str());
+        if (strcmp(s_cfg.nodeLong, nodeLong.c_str()) != 0) {
+            Serial.printf("[cfg] long name truncated to %d bytes for Meshtastic 2.8: "
+                          "\"%s\" -> \"%s\"\n",
+                          MESH_LONG_NAME_MAX_BYTES, nodeLong.c_str(), s_cfg.nodeLong);
+        }
     }
     String nodeShort = getStringIfKey("nodeShort");
     if (nodeShort.length()) {

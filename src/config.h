@@ -95,10 +95,6 @@
 #define MESH_HW_MODEL_T_DECK_PRO   102
 #define MESH_HW_MODEL_T_LORA_PAGER  103
 #define MESH_HW_MODEL_HELTEC_V4     110
-#define MESH_HW_MODEL_M5_CARDPUTER  112
-// The Mesh Deck has no HardwareModel of its own — it is not in the upstream
-// enum. PRIVATE_HW is the value Meshtastic reserves for exactly this case, so
-// the node advertises "custom hardware" instead of impersonating another board.
 // The board Camillia builds as `square` is the Seeed Wio Tracker L2, which
 // Meshtastic 2.8 allocated as HardwareModel SEEED_WIO_TRACKER_L2 = 137. Named
 // after the hardware rather than our build target, the way every other model
@@ -106,6 +102,10 @@
 // codename is what once made this look like an accidental collision with
 // upstream's allocation rather than the same board.
 #define MESH_HW_MODEL_SEEED_WIO_TRACKER_L2  137
+// PRIVATE_HW is what Meshtastic reserves for hardware with no enum value of its
+// own, so a node advertises "custom hardware" rather than impersonating another
+// board. Three targets use it — the Mesh Deck, the M9 and the Cardputer — each
+// for its own reason, given at the #elif that selects it.
 #define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
@@ -115,10 +115,19 @@
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 #define MY_HW_MODEL MESH_HW_MODEL_T_LORA_PAGER
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
-#define MY_HW_MODEL MESH_HW_MODEL_M5_CARDPUTER
+// Not 112. That value looks like it belongs here and does not: protobufs commit
+// d4d1508 (2025-09-15, PR #776) allocated 112 as M5STACK_CARDPUTER_ADV, and it
+// was unassigned before that — it has never meant the plain Cardputer. This
+// target is the original M5Stack Cardputer on a StampS3 (8 MB flash, no PSRAM);
+// the Adv is different hardware. Upstream has no value for the plain Cardputer
+// at all, so PRIVATE_HW is the honest answer, exactly as for the Mesh Deck and
+// the M9. Take a real ID only if one is ever allocated.
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
 #elif defined(DEVICE_MESH_DECK)
+// The Mesh Deck has no HardwareModel of its own — it is not in the upstream
+// enum at all, which is exactly the case PRIVATE_HW exists for.
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_SQUARE)
 #define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
