@@ -41,6 +41,13 @@ struct NodeEntry {
     uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
     uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths
+    // Meshtastic 2.8 XEdDSA. Set once a packet from this node carries a
+    // signature that verifies against the public key we hold for it, and never
+    // cleared while the entry lives: it records "this node has proved it holds
+    // the private key for the key we have", which stays true afterwards.
+    // RAM only, like everything else down here — a claim about what we saw this
+    // session, not a fact worth carrying across a reboot on someone's say-so.
+    bool     xeddsaVerified;
 };
 
 #if FEATURE_DISCOVERY

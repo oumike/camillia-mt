@@ -17,6 +17,7 @@
 #include "live_util.h"
 #include "live_feed.h"
 #include "mesh_proto.h"
+#include "xeddsa.h"
 #include "mesh_radio.h"
 #include "mqtt_bridge.h"
 #include "node_db.h"
@@ -1905,6 +1906,37 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
 // Message Actions: the same modal with the tapback/Reply rows, acting on a chat
 // message. Falls back to the node menu when there is no packet id.
 static void openMessageActionMenu(uint32_t packetId, uint32_t senderNodeId);
+// Check a Data.xeddsa_signature against the sender's stored public key and
+// record the outcome on the node.
+//
+// Verification is advisory here: an unsigned or unverifiable packet is handled
+// exactly as before. Meshtastic's own default receive policy is COMPATIBLE,
+// which accepts unsigned traffic, and we do not have the signing half yet — so
+// treating a failed check as a reason to drop would punish the majority of the
+// mesh for a feature almost nobody is using. What it buys today is the ability
+// to say a node has proved it holds the key we have for it.
+static void notePacketSignature(MeshPacket &pkt, const uint8_t *signature,
+                                const uint8_t *payload, size_t payloadLen) {
+    if (!signature) return;
+    NodeEntry *n = Nodes.find(pkt.hdr.from);
+    if (!n || !n->hasPubKey) return;
+    // Already proved; the crypto is cheap but not free, and the answer cannot
+    // change while the entry holds the same key.
+    if (n->xeddsaVerified) return;
+
+    if (xeddsaVerify(n->pubKey, pkt.hdr.from, pkt.hdr.id, pkt.portnum,
+                     payload, payloadLen, signature)) {
+        n->xeddsaVerified = true;
+        Serial.printf("[xeddsa] verified signature from !%08lx port=%lu\n",
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+    } else {
+        // Worth a line: a signature that does not verify means either the key
+        // we hold is not theirs any more, or something is impersonating them.
+        Serial.printf("[xeddsa] signature FAILED from !%08lx port=%lu\n",
+                      (unsigned long)pkt.hdr.from, (unsigned long)pkt.portnum);
+    }
+}
+
 static void closeNodesActionMenu();
 static void refreshNodesActionMenuSelection();
 static void executeNodesActionSelection();
@@ -7324,6 +7356,10 @@ static void initPkiIdentity() {
     prefs.end();
 }
 
+// The node ID we last announced under, when it differs from the current one.
+// Only non-zero after nodeIdFromPubKey is toggled; see remapping in setup().
+static uint32_t s_prevNodeId = 0;
+
 static void deriveNodeId() {
     uint32_t baseNodeId = 0;
     Preferences prefs;
@@ -7341,7 +7377,31 @@ static void deriveNodeId() {
         prefs.end();
     }
 
-    s_myNodeId = (s_cfg.nodeIdOverride != 0) ? s_cfg.nodeIdOverride : baseNodeId;
+    // Moved ahead of the derivation, which used to close this function. The
+    // 2.8-style ID is a hash of the public key, so the key has to exist before
+    // the ID can be computed from it. Everything else here is unaffected —
+    // initPkiIdentity() never read s_myNodeId.
+    initPkiIdentity();
+
+    if (s_cfg.nodeIdOverride != 0) {
+        // An explicit number outranks both derivations. Someone who typed an ID
+        // wants that ID.
+        s_myNodeId = s_cfg.nodeIdOverride;
+    } else if (s_cfg.nodeIdFromPubKey) {
+        // Meshtastic 2.8: my_node_num = crc32(public_key). Matching it is what
+        // lets a 2.8 node verify a first-contact NodeInfo from us, because that
+        // check recomputes this hash over the key in the packet and compares it
+        // to the sender ID.
+        const uint32_t derived = meshCrc32(myPubKey, 32);
+        // A hash can land on zero or on the broadcast address. Both are
+        // reserved, and falling back keeps us addressable rather than invisible.
+        s_myNodeId = (derived == 0 || derived == 0xFFFFFFFFu) ? baseNodeId : derived;
+        if (s_myNodeId != derived) {
+            Serial.println("[lvgl] pubkey-derived node ID was reserved; kept MAC-derived ID");
+        }
+    } else {
+        s_myNodeId = baseNodeId;
+    }
 
     if (s_myNodeId == 0) {
         uint8_t mac[6] = {};
@@ -7353,8 +7413,24 @@ static void deriveNodeId() {
         }
     }
 
-    Serial.printf("[lvgl] Node ID: !%08x\n", s_myNodeId);
-    initPkiIdentity();
+    // Remember the ID we previously announced under, so chat history written by
+    // the old identity can still be recognised as ours. Stored rather than
+    // recomputed because the old value is unrecoverable once the setting moves:
+    // the MAC-derived ID cannot be derived back out of a public key.
+    if (prefs.begin("camillia", false)) {
+        const uint32_t announced = prefs.getUInt("lastNodeId", 0);
+        if (announced != 0 && announced != s_myNodeId) {
+            s_prevNodeId = announced;
+            Serial.printf("[lvgl] node ID changed !%08x -> !%08x; peers will see a new node\n",
+                          announced, s_myNodeId);
+        }
+        if (announced != s_myNodeId) prefs.putUInt("lastNodeId", s_myNodeId);
+        prefs.end();
+    }
+
+    Serial.printf("[lvgl] Node ID: !%08x%s\n", s_myNodeId,
+                  s_cfg.nodeIdOverride ? " (override)"
+                                       : (s_cfg.nodeIdFromPubKey ? " (from public key)" : ""));
 }
 
 static void recomputeChannelHashes() {
@@ -19688,8 +19764,15 @@ static void refreshNodesDetails() {
     char chan[16];
     if (n.chanIdx >= 0) snprintf(chan, sizeof(chan), "%d", n.chanIdx);
     else                snprintf(chan, sizeof(chan), "n/a");
-    snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s", heard, snr, hops, chan);
-    nodesSetSection(NODES_SEC_LINK, "Last heard\nSNR\nHops\nChannel", vals);
+    // Three states, not two. "no" and "not seen yet" are different claims: the
+    // mesh is almost entirely unsigned traffic today, so an unsigned node is
+    // the ordinary case and should not read as a failed check.
+    const char *signedStr;
+    if (n.xeddsaVerified)   signedStr = "yes";
+    else if (n.hasPubKey)   signedStr = "not seen";
+    else                    signedStr = "no key";
+    snprintf(vals, sizeof(vals), "%s\n%s\n%s\n%s\n%s", heard, snr, hops, chan, signedStr);
+    nodesSetSection(NODES_SEC_LINK, "Last heard\nSNR\nHops\nChannel\nSigned", vals);
 
     // ── Position ──
     // Every field is emitted even when unknown, here and below: a section that
@@ -35112,10 +35195,13 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 pkt.chanIdx = -2;
                 const uint8_t *payPtr = nullptr;
                 size_t payLen = 0;
+                const uint8_t *sig = nullptr;
                 decodeData(plain, plainLen, pkt.portnum, payPtr, payLen,
                            pkt.requestId, pkt.wantResponse,
                            &pkt.dataDest, &pkt.hasDataDest,
-                           &pkt.dataSource, &pkt.hasDataSource);
+                           &pkt.dataSource, &pkt.hasDataSource,
+                           &sig);
+                notePacketSignature(pkt, sig, payPtr, payLen);
                 if (payPtr && payLen <= sizeof(pkt.payload)) {
                     memcpy(pkt.payload, payPtr, payLen);
                     pkt.payloadLen = payLen;
@@ -35857,10 +35943,15 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
         pkt.decrypted = (pkt.chanIdx >= 0);
         if (pkt.decrypted) {
             const uint8_t *payPtr; size_t payLen;
+            const uint8_t *sig = nullptr;
             decodeData(plain, cipherLen, pkt.portnum, payPtr, payLen,
                        pkt.requestId, pkt.wantResponse,
                        &pkt.dataDest, &pkt.hasDataDest,
-                       &pkt.dataSource, &pkt.hasDataSource);
+                       &pkt.dataSource, &pkt.hasDataSource,
+                       &sig);
+            // Before the payload is copied out: the signature covers the
+            // payload as it arrived, and both pointers are into `plain`.
+            notePacketSignature(pkt, sig, payPtr, payLen);
             if (payPtr && payLen <= sizeof(pkt.payload)) {
                 memcpy(pkt.payload, payPtr, payLen);
                 pkt.payloadLen = payLen;
@@ -35882,6 +35973,36 @@ static bool announceDue(uint32_t nowMs, uint32_t nextMs, uint32_t intervalS) {
     if (intervalS == 0) return false;
     if (nextMs == 0) return true;
     return (int32_t)(nowMs - nextMs) >= 0;
+}
+
+// ── Stationary position cadence ───────────────────────────────
+// Meshtastic 2.8 turns position dedup on by default: a receiver drops a repeat
+// position that lands in the same ~90 m cell within 5 hours
+// (installTrafficManagementDefaults(), 19-bit grid). Upstream also halved its
+// own stationary broadcast floor to 6 h. On our 30-minute default a node
+// sitting on a desk therefore spends airtime on eleven of every twelve position
+// broadcasts, each one discarded downstream without a trace.
+//
+// So a position that has not left its cell since the last one we sent is
+// deferred to the floor below rather than repeated on the configured interval.
+// Movement is what re-arms the normal cadence: the first fix outside the cell
+// sends immediately. The configured interval still wins when it is *longer*
+// than the floor — this only ever slows a stationary node down, and a user who
+// asked for 12 hours keeps 12 hours.
+#define POSITION_DEDUP_PRECISION_BITS 19
+#define POSITION_STATIONARY_MIN_S     (6UL * 3600UL)
+
+static bool     s_lastPosSentValid = false;
+static int32_t  s_lastPosSentLatI  = 0;
+static int32_t  s_lastPosSentLonI  = 0;
+
+// Same truncation applyPositionPrecision() uses, at the dedup grid's width, so
+// "same cell" here means the same cell the receiver will compute.
+static bool positionWithinDedupCell(int32_t latI, int32_t lonI) {
+    if (!s_lastPosSentValid) return false;
+    const uint32_t keep = (uint32_t)0xFFFFFFFFu << (32 - POSITION_DEDUP_PRECISION_BITS);
+    return ((uint32_t)latI & keep) == ((uint32_t)s_lastPosSentLatI & keep) &&
+           ((uint32_t)lonI & keep) == ((uint32_t)s_lastPosSentLonI & keep);
 }
 
 static void scheduleAnnounceNext(uint32_t &nextMs, uint8_t &fails,
@@ -35986,6 +36107,19 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
         int32_t lonI = 0;
         int32_t altM = 0;
         if (resolveAnnouncePosition(latI, lonI, altM)) {
+            // Still in the cell a receiver would dedup us into, so the packet
+            // would be discarded on arrival. Defer rather than spend the
+            // airtime. An explicit Announce press is exempt, as everywhere else
+            // here: the user asked, and 2.8 drops it silently at the far end
+            // rather than reporting anything, so a press that looked like it did
+            // nothing would be indistinguishable from a fault.
+            if (!forceAnnounce && positionWithinDedupCell(latI, lonI) &&
+                s_cfg.posIntervalS < POSITION_STATIONARY_MIN_S) {
+                scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs,
+                                     POSITION_STATIONARY_MIN_S);
+                return;
+            }
+
             // One announce, one packet per sharing channel. Reschedule as soon as
             // any of them made it out: a retry resends to all of them, so letting
             // a single failed channel force one would keep re-announcing to the
@@ -35999,6 +36133,14 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                                           s_cfg.positionPrecision)) sent++;
             }
             if (sent > 0 || attempted == 0) {
+                // Anchor the cell to what actually went out, not to the fix we
+                // read: anchoring on a failed send would start the stationary
+                // timer against a position no one received.
+                if (sent > 0) {
+                    s_lastPosSentValid = true;
+                    s_lastPosSentLatI  = latI;
+                    s_lastPosSentLonI  = lonI;
+                }
                 scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
             } else {
                 scheduleAnnounceRetry(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
@@ -36285,11 +36427,18 @@ static void serviceMapReport(uint32_t nowMs) {
 
     int32_t latI = 0, lonI = 0, altM = 0;
     if (resolveAnnouncePosition(latI, lonI, altM)) {
-        // Coarsened by the same transform and to the same precision as the
-        // position we broadcast on RF. A map report that was more precise than
-        // what the operator agreed to put on the air would be a leak, and the
-        // one place that decision is expressed is positionPrecision.
-        const uint8_t bits = positionPrecisionCoerce(s_cfg.positionPrecision);
+        // Coarsened by the same transform as the RF position, and never finer
+        // than the public ceiling. A map report goes to a public map whatever
+        // the channel key is, so unlike the RF clamp this one is unconditional:
+        // upstream constrains its map precision to 12..15 and rejects anything
+        // outside that (MQTT.cpp), where the 15 is the same ceiling D2 applies
+        // on air. Only ever coarsens — a user who asked for less precision than
+        // 15 keeps it, because raising it toward the ceiling would publish more
+        // than they agreed to, not less.
+        uint8_t bits = positionPrecisionCoerce(s_cfg.positionPrecision);
+        if (bits > MESH_MAX_POSITION_PRECISION_PUBLIC) {
+            bits = MESH_MAX_POSITION_PRECISION_PUBLIC;
+        }
         applyPositionPrecision(latI, lonI, bits);
         info.hasPosition       = true;
         info.latI              = latI;
@@ -39198,6 +39347,9 @@ void setup() {
     bootSplashStatus("Messages");
     DMs.init();
     Ignored.init();
+    // Before init(), which loads persisted history itself. Set unconditionally:
+    // it is a no-op unless the node ID actually moved.
+    Channels.setSenderRemap(s_prevNodeId, s_myNodeId);
     Channels.init();
     Channels.beginPersistence();
     Channels.loadPersisted();

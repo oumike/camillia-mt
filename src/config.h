@@ -73,15 +73,40 @@
 #define MY_LORA_RX_BOOST 1
 
 // Narrowest bandwidth this board's radio can actually produce, as a Meshtastic
-// bandwidth code (see loraBwFromCode(): 31 means 31.25 kHz, 62 means 62.5 kHz).
-// The LR1121 has no sub-GHz LoRa bandwidth below 62.5 kHz, so on that variant
-// 31.25 is removed from every UI rather than accepted into config and then
-// rejected by setBandwidth() at reconfigure time — a silently dead radio is a
-// far worse outcome than an option that was never offered.
+// bandwidth code (see loraBwFromCode(): 16 means 15.6 kHz, 31 means 31.25 kHz,
+// 62 means 62.5 kHz). Anything narrower than this is removed from every UI
+// rather than accepted into config and then rejected by setBandwidth() at
+// reconfigure time — a silently dead radio is a far worse outcome than an
+// option that was never offered.
+//
+// Two separate limits are in play:
+//
+//   * The LR1121 has no sub-GHz LoRa bandwidth below 62.5 kHz at all.
+//   * 15.6 kHz — Meshtastic 2.8's Tiny presets — needs an SX126x *and* a real
+//     TCXO. At that bandwidth the frequency error of a plain crystal is a large
+//     fraction of the channel, so a crystal-clocked board would tune up and
+//     hear nothing. MESH_TCXO_V is 0 on exactly those boards (the Mesh Deck's
+//     Ra-01SH is crystal-clocked), which is why the test is written against it
+//     rather than against a list of board macros that would need editing every
+//     time one is added. The LR1110 on the M9 is excluded for the radio reason,
+//     not the clock one — it has a TCXO and still is not an SX126x.
+//
+// MESH_TCXO_V is a float, and the preprocessor has no float arithmetic, so the
+// crystal-clocked boards are named here instead of tested. config_io.cpp carries
+// a static_assert that this flag and MESH_TCXO_V agree, so adding a board with
+// no TCXO and forgetting this line fails the build rather than the radio.
+#if defined(DEVICE_MESH_DECK)
+#  define MESH_RADIO_HAS_TCXO 0
+#else
+#  define MESH_RADIO_HAS_TCXO 1
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
 #  define LORA_BW_CODE_MIN 62
-#else
+#elif defined(DEVICE_M9) || !MESH_RADIO_HAS_TCXO
 #  define LORA_BW_CODE_MIN 31
+#else
+#  define LORA_BW_CODE_MIN 16
 #endif
 
 // ── Node identity (change to your callsign/name) ─────────────
@@ -163,6 +188,31 @@
 // Master switch for putting our coordinates on the mesh. On by default: every
 // build before this setting existed broadcast position, and a device that
 // silently stopped after an update would be the surprise, not the reverse.
+//
+// Meshtastic 2.8 went the other way and made position and telemetry opt-in: a
+// version-gated migration zeroes position precision on every public channel,
+// clears all five telemetry broadcast flags, and stops map reports carrying a
+// location. We deliberately do not follow it, and the reasoning is worth
+// recording because "we never got round to it" and "we decided not to" look
+// identical from the outside.
+//
+// What the upstream defaults are protecting against is a node beaconing an
+// exact position on a channel anyone can decrypt. That specific harm is now
+// handled directly: an outgoing position on a publicly-decryptable channel is
+// capped at ~700 m whatever this setting says, and the MQTT map report is
+// capped the same way regardless of channel (see MESH_MAX_POSITION_PRECISION_
+// PUBLIC and channelKeyIsPublic()). With the leak closed at the point of
+// transmission, switching the feature off by default would cost a handheld
+// messenger the thing people carry it for.
+//
+// Three deliberate divergences follow from that, all one-line changes if the
+// judgement ever shifts:
+//   * position sharing stays on, where upstream disables it on public channels
+//     (upstream sets precision 0, i.e. sends nothing; we send ~700 m);
+//   * device telemetry stays on — it carries battery and channel utilisation,
+//     no location;
+//   * map reports still include a location, coarsened, where upstream keeps
+//     only anonymous presence.
 #define MY_SHARE_LOCATION   1
 // How much of our coordinates actually goes on the air, in bits kept per
 // coordinate (Meshtastic's position_precision). 32 = exact. Defaults to exact

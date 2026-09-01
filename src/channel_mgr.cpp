@@ -452,6 +452,16 @@ void ChannelMgr::flushPersistence() {
     }
 }
 
+void ChannelMgr::setSenderRemap(uint32_t fromNodeId, uint32_t toNodeId) {
+    if (fromNodeId == 0 || toNodeId == 0 || fromNodeId == toNodeId) {
+        _remapFromNodeId = 0;
+        _remapToNodeId = 0;
+        return;
+    }
+    _remapFromNodeId = fromNodeId;
+    _remapToNodeId = toNodeId;
+}
+
 void ChannelMgr::loadPersisted() {
 #if HAS_FILE_STORAGE
     if (!_persistReady) return;
@@ -588,6 +598,13 @@ void ChannelMgr::loadPersisted() {
                 if (sep5) {
                     *sep5 = '\0';
                     senderNodeId = (uint32_t)strtoul(afterEpoch, nullptr, 16);
+                    // Rewritten on the way in rather than by editing the log:
+                    // the next save writes the whole channel back out anyway, so
+                    // the file heals itself without a migration pass that could
+                    // fail halfway and leave history half-attributed.
+                    if (_remapFromNodeId && senderNodeId == _remapFromNodeId) {
+                        senderNodeId = _remapToNodeId;
+                    }
                     text = sep5 + 1;
                 } else {
                     text = afterEpoch;
@@ -866,6 +883,17 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
     if (!Radio.isReady()) return false;
     if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) return false;
 
+    // Cap the precision before anything reads it. A channel anyone can decrypt
+    // is a channel anyone can read a position off, so an exact fix on one is
+    // public broadcast of where you are; Meshtastic 2.8 enforces the same
+    // ceiling and no setting there can raise it either. Deliberately a clamp
+    // and not a default: a user who set 32 keeps 32 on a channel with a real
+    // key, and only loses it where the key protects nobody.
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    if (precisionBits > MESH_MAX_POSITION_PRECISION_PUBLIC && channelKeyIsPublic(ck)) {
+        precisionBits = MESH_MAX_POSITION_PRECISION_PUBLIC;
+    }
+
     // Coarsened here rather than at the caller: this is the only path a
     // position takes onto the air, so it is the only place that cannot be
     // bypassed by a new caller forgetting to obfuscate. latI/lonI are by value,
@@ -879,7 +907,6 @@ bool ChannelMgr::sendPosition(uint32_t myNodeId, int32_t latI, int32_t lonI, int
                                      precisionBits);
     if (protoLen == 0) return false;
 
-    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
     uint32_t packetId = nextMeshPacketId();
     if (!encryptPayload(packetId, myNodeId, ck.key, ck.keyLen,
                         proto, cipher, protoLen)) return false;

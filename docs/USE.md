@@ -19,6 +19,21 @@ It still listens the whole time, and still relays other people's traffic — a
 relayed packet carries their identity, not yours. Pressing **Announce** in web
 config does transmit, because that is you asking for it deliberately.
 
+### New modem presets
+
+Meshtastic 2.7 and 2.8 added seven presets, and all of them are now here: **Lite
+Fast** and **Lite Slow** (125 kHz), **Narrow Fast** and **Narrow Slow**
+(62.5 kHz), **Tiny Fast** and **Tiny Slow** (15.6 kHz), and **Medium Turbo**
+(500 kHz). They matter mostly for hearing a mesh that has already moved to one —
+a preset you cannot select is a mesh you cannot join.
+
+The Tiny pair is offered only on hardware that can actually produce 15.6 kHz,
+which needs an SX1262 and a temperature-compensated oscillator. That rules out
+the Attaky Mesh Deck, whose radio runs from a plain crystal, and the Elecrow
+ThinkNode M9, whose LR1110 does not go that narrow. On those boards the options
+are absent rather than present and broken; importing a config that names one
+falls back to Long Fast.
+
 ### Which preset your local mesh is on
 
 Setup asks for a region, and the region decides the starting modem preset.
@@ -467,6 +482,52 @@ a firmware update never starts obfuscating a position on its own.
 One difference from stock Meshtastic: theirs is a per-channel setting, so a node
 can be exact on a private channel and coarse on a public one. Ours is one
 device-wide value applied to every channel this node shares position on.
+
+There is one exception, and it only ever makes the position coarser. On a
+channel **anyone can decrypt** — no key at all, or one of the published default
+keys every stock device ships with — the transmitted precision is capped at
+about 700 m however this setting is set. An exact position on such a channel is
+not shared with a group; it is broadcast to anyone in range with any radio, and
+no key is protecting it. Meshtastic 2.8 applies the same ceiling and no setting
+there can raise it either. Set a real key on the channel and your chosen
+precision applies in full.
+
+The same ceiling applies to the MQTT map report, whatever the channel key is,
+because the map itself is public.
+
+### Why sharing is still on by default
+
+Meshtastic 2.8 changed its defaults so that a new or upgraded node shares no
+position and broadcasts no telemetry until you turn them on. Camillia has not
+followed, and that is a decision rather than an oversight.
+
+The problem those defaults exist to solve is a node beaconing an exact position
+on a channel anyone can decrypt. Camillia closes that at the point of
+transmission instead: the position is capped at about 700 m on any such channel,
+and on the public map report, however the precision is set. With the leak shut,
+switching sharing off by default would cost you the feature without buying much
+back.
+
+So, concretely, against a stock 2.8 node: Camillia still shares position (at
+~700 m on public channels, at your chosen precision on keyed ones), still sends
+device telemetry — battery and channel utilisation, never location — and still
+puts a coarsened location in its map report where 2.8 sends anonymous presence
+only. Each of those is a switch you can turn off, under Position and Telemetry
+in web config.
+
+### How often your position goes out
+
+**Position Broadcast Interval** sets the cadence, but a node that has not moved
+sends less often than that on purpose. From 2.8 onward receivers discard a
+repeat position that lands within about 90 m of the last one they have from you,
+for up to five hours — the packet is transmitted, received, and thrown away. So
+while your position stays inside that radius the interval stretches to six
+hours, matching the floor upstream uses for a stationary node.
+
+Moving out of that radius restores the normal interval immediately; the first
+fix somewhere new is sent on the spot rather than waiting. Pressing **Announce**
+always transmits regardless. If you have set an interval longer than six hours,
+that is left alone — this only slows a stationary node down, never speeds one up.
 
 ### MQTT map reporting
 
@@ -1148,6 +1209,28 @@ Two things worth knowing:
   other nodes: the hop budget travels in every packet's header and relays honour
   whatever number they receive.
 
+### Signed packets
+
+Meshtastic 2.8 can sign a packet with the same identity key it already uses for
+direct messages, so a receiver can tell that a packet genuinely came from the
+node it claims to. Camillia checks those signatures when they arrive.
+
+The node detail panel gains a **Signed** row with three states. **yes** means a
+packet from that node carried a signature that verified against the key we hold
+for it — that node has proved it holds the matching private key. **not seen**
+means we have their key but no signed packet yet, which is the ordinary case
+today: almost nothing on the mesh signs. **no key** means we have not learned
+their public key at all, so there is nothing to check against.
+
+Nothing is rejected for being unsigned, and nothing is rejected for failing.
+Meshtastic's own default accepts unsigned traffic, and dropping packets on a
+failed check would punish the whole mesh for a feature barely in use. A failed
+check is logged rather than acted on — it means either the key we hold is stale
+or something is claiming to be that node.
+
+Camillia does not sign its own packets yet. That needs a signing primitive the
+cryptography library here does not provide, and is tracked separately.
+
 ### Traffic this node no longer relays
 
 A packet whose header claims it has travelled *more* hops than it started with
@@ -1164,6 +1247,41 @@ reaches nodes in a mesh with no 2.8 node anywhere in it.
 Dropped frames are logged under `[fwd]` with the sender and packet ID, so this
 shows up as a line in the debug monitor rather than as traffic that quietly
 stops moving.
+
+### Frequency slots corrected in six regions
+
+Your region and preset decide a frequency, by dividing the band into slots and
+hashing the channel name to pick one. The slot count was being rounded down
+where the band is not a whole number of channels wide; Meshtastic rounds to
+nearest. Ours now does too.
+
+Where the two disagreed, Camillia was tuning somewhere no stock Meshtastic node
+was listening. Correcting it means **your node may move to a different frequency
+on upgrade** — onto the one the rest of the mesh has been using all along.
+
+Six regions are affected, and only at some presets: **ANZ 433**, **UA 433**,
+**UA 868**, **PH 433**, **PH 868** and **KZ 433**. Everywhere else — US, EU 868,
+CN, JP, ANZ, KR, TW, IN, NZ, TH, MY, SG, KZ 863, NP, BR and LORA 24 — the two
+methods already agreed at every preset, so nothing moves.
+
+The one to watch is **PH 868 on Long Fast**, the default preset, which moves from
+868.125 MHz to 869.375 MHz. If you run a Camillia-only mesh in one of the six,
+upgrade every node together: an upgraded node and a non-upgraded one will be on
+different frequencies and will not hear each other.
+
+### Two new regions
+
+**EU 866** (865.6–867.6 MHz) and **EU Narrow 868** (869.4–869.65 MHz) are
+selectable in Config and web config. They are the first regions that space and
+pad their slots rather than packing them edge to edge: EU 866 gives four
+channels at 865.7, 866.3, 866.9 and 867.5 MHz, and EU Narrow 868 is a single
+pinned slot rather than a hashed one.
+
+The amateur-radio regions Meshtastic 2.8 added at 2 m, 70 cm and 125 cm are
+deliberately **not** offered. They are licensed-only, and the firmware has no
+concept of a licensed operator to gate them behind — no call sign, and no
+restriction on relaying between licensed and unlicensed users. Listing them
+would be handing you a menu entry that transmits unlicensed on an amateur band.
 
 ### Custom LoRa modem settings
 

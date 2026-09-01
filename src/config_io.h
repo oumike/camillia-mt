@@ -147,6 +147,13 @@ struct RhinoConfig {
     char     nodeLong[40];
     char     nodeShort[5];
     uint32_t nodeIdOverride;  // 0 = derive from MAC; non-zero = use this as myNodeId
+    // Derive the node ID from the public key the way Meshtastic 2.8 does
+    // (crc32 of the 32-byte Curve25519 public key) instead of from the WiFi MAC.
+    // Off by default and never flipped by an upgrade: the ID is our identity on
+    // the mesh, so changing it makes every peer see a brand-new node.
+    // nodeIdOverride still wins over this — an explicit number is an explicit
+    // number.
+    bool     nodeIdFromPubKey;
     bool    gpsEnabled;           // use hardware GPS when available
     int32_t latI, lonI, alt;      // manual / last-known position (fallback)
     float   loraFreq, loraBw;

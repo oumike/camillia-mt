@@ -1,7 +1,13 @@
 #pragma once
 #include <stdint.h>
 
-// Meshtastic modem presets (Config_LoRaConfig_ModemPreset ordering).
+// Our own modem-preset ordering. NOT Meshtastic's — the two are related only
+// through kPresetFromMeshtastic/presetToMeshtastic in config_io.cpp, and casting
+// between them is always a bug.
+//
+// Values 0..8 are load-bearing: modemPreset is persisted to NVS as this index,
+// so an existing config decodes against them. New presets are therefore
+// appended rather than slotted into a tidier order.
 enum ModemPreset : uint8_t {
     PRESET_LONG_FAST     = 0,
     PRESET_LONG_MODERATE = 1,
@@ -12,7 +18,16 @@ enum ModemPreset : uint8_t {
     PRESET_SHORT_FAST    = 6,
     PRESET_SHORT_SLOW    = 7,
     PRESET_SHORT_TURBO   = 8,
-    PRESET_COUNT         = 9
+    // Appended for Meshtastic 2.7/2.8. Lite and Narrow arrived in 2.7; Tiny and
+    // Medium Turbo in 2.8.
+    PRESET_LITE_FAST     = 9,
+    PRESET_LITE_SLOW     = 10,
+    PRESET_NARROW_FAST   = 11,
+    PRESET_NARROW_SLOW   = 12,
+    PRESET_TINY_FAST     = 13,
+    PRESET_TINY_SLOW     = 14,
+    PRESET_MEDIUM_TURBO  = 15,
+    PRESET_COUNT         = 16
 };
 
 struct PresetParams {
@@ -26,14 +41,40 @@ struct PresetParams {
 // Per-region band edges (MHz) and hardware-capped TX power ceiling (dBm).
 // Meshtastic derives the operating frequency from these via a name-hashed
 // channel slot, so we store the band rather than a single fixed frequency.
+// spacing/padding are Meshtastic 2.7's region profiles, in MHz. Both are zero
+// for every classic region, which is why the slot arithmetic could ignore them
+// until now:
+//
+//   freqSlotWidth = spacing + 2*padding + bw
+//   numFreqSlots  = round((freqEnd - freqStart + spacing) / freqSlotWidth)
+//   freq          = freqStart + bw/2 + padding + slot * freqSlotWidth
+//
+// spacing is a gap between slots and before the first one; padding is a guard
+// band inside each slot at both ends. PROFILE_LITE uses both to fit four
+// 400 kHz-separated channels into EU_866; PROFILE_NARROW uses padding alone to
+// widen a 62.5 kHz slot to the raster its band expects.
+//
+// overrideSlot pins the slot rather than hashing for it: 0 means hash the
+// channel name (every classic region), and a value above 0 is a 1-based slot
+// number the region always uses. Upstream also has -1 for "hash the preset
+// name"; no region we carry uses it, so it is not implemented here.
 struct RegionPlan {
     const char *code;
-    float       freqStart;  // MHz
-    float       freqEnd;    // MHz
-    uint8_t     power;      // dBm
+    float       freqStart;    // MHz
+    float       freqEnd;      // MHz
+    uint8_t     power;        // dBm
+    float       spacing;      // MHz, gap between slots (0 for continuous spectrum)
+    float       padding;      // MHz, guard at each end of a slot
+    uint8_t     overrideSlot; // 1-based pinned slot; 0 = hash the channel name
 };
 
 extern const PresetParams kPresets[PRESET_COUNT];
+
+// Whether this board's radio can actually run a preset. The Tiny presets sit at
+// 15.6 kHz, which needs both a TCXO and an SX126x; a board failing either would
+// take the setting, reconfigure, and go silent. Offering a preset that cannot
+// work is worse than never listing it — see LORA_BW_CODE_MIN in config.h.
+bool presetUsableOnThisRadio(uint8_t preset);
 extern const RegionPlan   kRegions[];
 extern const uint8_t      kRegionCount;
 
@@ -86,6 +127,10 @@ extern const uint8_t  kBwCodeCount;
 // Actual bandwidth in kHz for a Meshtastic bandwidth code, or 0 if this board's
 // radio does not support it.
 float    loraBwFromCode(uint16_t code);
+
+// Inverse of loraBwFromCode: kHz -> Meshtastic bandwidth code. Answers for any
+// radio, not only the one fitted here.
+uint16_t loraBwToCode(float kHz);
 
 // Nearest supported bandwidth code, for values arriving from YAML, an HTTP form
 // or a config blob written by a build with a different radio.

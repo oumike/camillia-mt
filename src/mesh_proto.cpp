@@ -6,6 +6,7 @@
 #include "mbedtls/sha256.h"
 #include <Curve25519.h>
 #include <esp_random.h>
+#include "xeddsa.h"
 
 // ── PSK expansion ─────────────────────────────────────────────
 // Meshtastic DEFAULT_KEY = kDkBase[0..14] + PSK_byte.
@@ -18,6 +19,59 @@ static const uint8_t kDkBase[15] = {
 void expandPsk(uint8_t psk, uint8_t out[16]) {
     memcpy(out, kDkBase, 15);
     out[15] = psk;
+}
+
+// CRC-32 (IEEE 802.3): reflected, polynomial 0xEDB88320, initial 0xFFFFFFFF,
+// final complement — byte for byte what Meshtastic gets from crc32Buffer() in
+// the ErriezCRC32 library it links, and identical to zlib's crc32().
+//
+// Written out rather than borrowed from esp_rom_crc32_le(), whose seed and
+// inversion conventions differ from Erriez's and would be easy to get subtly
+// wrong. It runs once at boot over 32 bytes, so the bitwise form costs nothing
+// and is checkable by eye against the reference.
+//
+// Exactness matters here in a way it usually does not: this value becomes our
+// node number, and a 2.8 node decides whether to trust a first-contact NodeInfo
+// by recomputing crc32 over the sender's public key and comparing. One bit out
+// and the check fails for every peer, silently.
+uint32_t meshCrc32(const void *buf, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint8_t *p = (const uint8_t *)buf;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; b++) {
+            const uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
+bool channelKeyIsPublic(const ChannelKey &ck) {
+    // Mirrors upstream channelFileUsesPublicKey() (mesh/Channels.cpp), mapped
+    // onto how we store keys. Upstream's psk.size cases are 0 (absent), 1 (an
+    // index into the defaultpsk family) and 16 (an expanded key); ours are the
+    // same, because resolveMeshKey() expands a 1-byte PSK at point of use and
+    // leaves everything else alone.
+    //
+    //   keyLen 0  — no encryption at all, so anyone within earshot reads it.
+    //   keyLen 1  — a defaultpsk index. The whole family is published, and
+    //               index 0x00 disables encryption outright.
+    //   keyLen 16 — public when it is a member of that family, which is what
+    //               the first 15 bytes identify: the family varies only in its
+    //               last byte, which is why upstream compares sizeof-1 and why
+    //               kDkBase is 15 bytes rather than 16.
+    //
+    // A 32-byte key, or any 16-byte key that is not a default variant, is a key
+    // someone chose. Not our business to coarsen.
+    //
+    // Upstream additionally resolves an unset SECONDARY channel against the
+    // PRIMARY's key. That case cannot arise here: every ChannelKey carries its
+    // own key rather than inheriting one.
+    if (ck.keyLen == 0) return true;
+    if (ck.keyLen == 1) return true;
+    if (ck.keyLen == 16) return memcmp(ck.key, kDkBase, 15) == 0;
+    return false;
 }
 
 static void resolveMeshKey(const uint8_t *key, uint8_t keyLen,
@@ -136,12 +190,14 @@ bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
                 uint32_t &requestId, bool &wantResponse,
                 uint32_t *destNode, bool *hasDestNode,
-                uint32_t *sourceNode, bool *hasSourceNode) {
+                uint32_t *sourceNode, bool *hasSourceNode,
+                const uint8_t **signature) {
     portnum = 0; payPtr = nullptr; payLen = 0; requestId = 0; wantResponse = false;
     if (destNode) *destNode = 0;
     if (sourceNode) *sourceNode = 0;
     if (hasDestNode) *hasDestNode = false;
     if (hasSourceNode) *hasSourceNode = false;
+    if (signature) *signature = nullptr;
     size_t i = 0;
     while (i < len) {
         uint64_t tag; i = pbReadVarint(buf, len, i, tag); if (!i) break;
@@ -161,6 +217,9 @@ bool decodeData(const uint8_t *buf, size_t len,
         } else if (wtype == 2) {
             uint64_t sz; i = pbReadVarint(buf, len, i, sz); if (!i) break;
             if (field == 2) { payPtr = buf + i; payLen = (size_t)sz; }
+            else if (field == 10 && signature && sz == XEDDSA_SIGNATURE_BYTES) {
+                *signature = buf + i;
+            }
             i += sz;
         } else if (wtype == 5) {
             // fixed32 — fields 4=dest, 5=source, 6=request_id, 7=reply_id, 8=emoji
@@ -1558,6 +1617,10 @@ const char *portnumName(uint32_t p) {
         case TELEMETRY_APP:     return "TELEMETRY";
         case TRACEROUTE_APP:    return "TRACEROUTE";
         case NEIGHBORINFO_APP:  return "NEIGHBORINFO";
+        case STORE_FORWARD_APP: return "STORE_FORWARD";
+        case MAP_REPORT_APP:    return "MAP_REPORT";
+        case MESH_BEACON_APP:   return "MESH_BEACON";
+        case LORA_OTA_APP:      return "LORA_OTA";
         default:                return "UNKNOWN";
     }
 }

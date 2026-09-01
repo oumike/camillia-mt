@@ -10,6 +10,7 @@
 #include <Wire.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -25,38 +26,75 @@ const PresetParams kPresets[PRESET_COUNT] = {
     {"Short Fast",    "ShortFast",   250.0f,  7, 5},
     {"Short Slow",    "ShortSlow",   250.0f,  8, 5},
     {"Short Turbo",   "ShortTurbo",  500.0f,  7, 5},
+    // Meshtastic 2.7/2.8 additions. Parameters and channel names are taken from
+    // modemPresetToParams() and getModemPresetDisplayName() at protobufs
+    // 7b2464c / firmware 7239fe8. The channel name is not cosmetic: it feeds
+    // both the channel hash and the frequency-slot hash, so a byte that differs
+    // from upstream puts us on a different frequency talking to nobody.
+    {"Lite Fast",     "LiteFast",    125.0f,  9, 5},
+    {"Lite Slow",     "LiteSlow",    125.0f, 10, 5},
+    {"Narrow Fast",   "NarrowFast",   62.5f,  7, 6},
+    {"Narrow Slow",   "NarrowSlow",   62.5f,  8, 6},
+    // 15.6 kHz. Note the asymmetry with the other Fast/Slow pairs: upstream
+    // gives TinyFast CR 4/5 and TinySlow CR 4/6, not a shared rate.
+    {"Tiny Fast",     "TinyFast",     15.6f,  7, 5},
+    {"Tiny Slow",     "TinySlow",     15.6f,  8, 6},
+    {"Medium Turbo",  "MediumTurbo", 500.0f,  9, 5},
 };
+
+// Keeps LORA_BW_CODE_MIN's board list honest: MESH_RADIO_HAS_TCXO is what the
+// preprocessor can branch on, MESH_TCXO_V is the value the radio is actually
+// brought up with, and a board added to one but not the other would silently
+// offer 15.6 kHz on a crystal.
+static_assert((MESH_TCXO_V > 0.0f) == (MESH_RADIO_HAS_TCXO != 0),
+              "MESH_RADIO_HAS_TCXO disagrees with MESH_TCXO_V for this board");
+
+bool presetUsableOnThisRadio(uint8_t preset) {
+    if (preset >= PRESET_COUNT) return false;
+    // Compared as codes rather than kHz so this asks exactly the question
+    // LORA_BW_CODE_MIN answers, and stays in step if a radio ever moves.
+    return loraBwToCode(kPresets[preset].bw) >= LORA_BW_CODE_MIN;
+}
 
 // Band edges (freqStart, freqEnd in MHz) mirror Meshtastic's RegionInfo table;
 // power is the SX1262 hardware-capped TX ceiling (dBm), <= the regulatory limit.
 const RegionPlan kRegions[] = {
-    //  code       freqStart  freqEnd   power
-    {"US",      902.0f,   928.0f,   22},
-    {"EU_433",  433.0f,   434.0f,   10},
-    {"EU_868",  869.4f,   869.65f,  22},
-    {"CN",      470.0f,   510.0f,   19},
-    {"JP",      920.5f,   923.5f,   13},
-    {"ANZ",     915.0f,   928.0f,   22},
-    {"ANZ_433", 433.05f,  434.79f,  14},
-    {"RU",      868.7f,   869.2f,   20},
-    {"KR",      920.0f,   923.0f,   22},
-    {"TW",      920.0f,   925.0f,   22},
-    {"IN",      865.0f,   867.0f,   22},
-    {"NZ_865",  864.0f,   868.0f,   22},
-    {"TH",      920.0f,   925.0f,   16},
-    {"UA_433",  433.0f,   434.7f,   10},
-    {"UA_868",  868.0f,   868.6f,   14},
-    {"MY_433",  433.0f,   435.0f,   20},
-    {"MY_919",  919.0f,   924.0f,   22},
-    {"SG_923",  917.0f,   925.0f,   20},
-    {"PH_433",  433.0f,   434.7f,   10},
-    {"PH_868",  868.0f,   869.4f,   14},
-    {"PH_915",  915.0f,   918.0f,   22},
-    {"KZ_433",  433.075f, 434.775f, 10},
-    {"KZ_863",  863.0f,   868.0f,   22},
-    {"NP_865",  865.0f,   868.0f,   22},
-    {"BR_902",  902.0f,   907.5f,   22},
-    {"LORA_24", 2400.0f,  2483.5f,  10},
+    //  code         start       end        pwr  spacing  padding  slot
+    {"US",       902.0f,     928.0f,    22,  0.0f,    0.0f,    0},
+    {"EU_433",   433.0f,     434.0f,    10,  0.0f,    0.0f,    0},
+    {"EU_868",   869.4f,     869.65f,   22,  0.0f,    0.0f,    0},
+    {"CN",       470.0f,     510.0f,    19,  0.0f,    0.0f,    0},
+    {"JP",       920.5f,     923.5f,    13,  0.0f,    0.0f,    0},
+    {"ANZ",      915.0f,     928.0f,    22,  0.0f,    0.0f,    0},
+    {"ANZ_433",  433.05f,    434.79f,   14,  0.0f,    0.0f,    0},
+    {"RU",       868.7f,     869.2f,    20,  0.0f,    0.0f,    0},
+    {"KR",       920.0f,     923.0f,    22,  0.0f,    0.0f,    0},
+    {"TW",       920.0f,     925.0f,    22,  0.0f,    0.0f,    0},
+    {"IN",       865.0f,     867.0f,    22,  0.0f,    0.0f,    0},
+    {"NZ_865",   864.0f,     868.0f,    22,  0.0f,    0.0f,    0},
+    {"TH",       920.0f,     925.0f,    16,  0.0f,    0.0f,    0},
+    {"UA_433",   433.0f,     434.7f,    10,  0.0f,    0.0f,    0},
+    {"UA_868",   868.0f,     868.6f,    14,  0.0f,    0.0f,    0},
+    {"MY_433",   433.0f,     435.0f,    20,  0.0f,    0.0f,    0},
+    {"MY_919",   919.0f,     924.0f,    22,  0.0f,    0.0f,    0},
+    {"SG_923",   917.0f,     925.0f,    20,  0.0f,    0.0f,    0},
+    {"PH_433",   433.0f,     434.7f,    10,  0.0f,    0.0f,    0},
+    {"PH_868",   868.0f,     869.4f,    14,  0.0f,    0.0f,    0},
+    {"PH_915",   915.0f,     918.0f,    22,  0.0f,    0.0f,    0},
+    {"KZ_433",   433.075f,   434.775f,  10,  0.0f,    0.0f,    0},
+    {"KZ_863",   863.0f,     868.0f,    22,  0.0f,    0.0f,    0},
+    {"NP_865",   865.0f,     868.0f,    22,  0.0f,    0.0f,    0},
+    {"BR_902",   902.0f,     907.5f,    22,  0.0f,    0.0f,    0},
+    {"LORA_24",  2400.0f,    2483.5f,   10,  0.0f,    0.0f,    0},
+    // Meshtastic 2.7 additions, and the first regions whose slot arithmetic
+    // uses spacing/padding at all — see RegionPlan.
+    //
+    // EU_866 is upstream's PROFILE_LITE: 400 kHz spacing plus 37.5 kHz padding
+    // around a 125 kHz Lite preset, giving four channels at 865.7 / 866.3 /
+    // 866.9 / 867.5 MHz. EU_N_868 is PROFILE_NARROW and pins slot 1 instead of
+    // hashing — its band is 250 kHz wide, so there is exactly one place to be.
+    {"EU_866",   865.6f,     867.6f,    22,  0.4f,    0.0375f, 0},
+    {"EU_N_868", 869.4f,     869.65f,   22,  0.0f,    0.0104f, 1},
 };
 const uint8_t kRegionCount = (uint8_t)(sizeof(kRegions) / sizeof(kRegions[0]));
 
@@ -68,9 +106,14 @@ uint8_t presetFromName(const char *name) {
     return PRESET_LONG_FAST;
 }
 
-// Meshtastic bandwidth codes this board's radio can produce. 31 (31.25 kHz) is
-// absent on the LR1121 pager variant — see LORA_BW_CODE_MIN in config.h.
+// Meshtastic bandwidth codes this board's radio can produce, ascending. The two
+// narrowest are conditional: 16 (15.6 kHz, the Tiny presets) needs a TCXO and an
+// SX126x, and 31 (31.25 kHz) is absent on the LR1121 pager variant. Both are
+// decided by LORA_BW_CODE_MIN in config.h.
 const uint16_t kBwCodes[] = {
+#if LORA_BW_CODE_MIN <= 16
+    16,
+#endif
 #if LORA_BW_CODE_MIN <= 31
     31,
 #endif
@@ -81,12 +124,26 @@ const uint8_t kBwCodeCount = (uint8_t)(sizeof(kBwCodes) / sizeof(kBwCodes[0]));
 float loraBwFromCode(uint16_t code) {
     for (uint8_t i = 0; i < kBwCodeCount; i++) {
         if (kBwCodes[i] != code) continue;
-        // The two shorthand codes; the rest are already the literal kHz.
+        // The three shorthand codes; the rest are already the literal kHz.
+        if (code == 16) return 15.6f;
         if (code == 31) return 31.25f;
         if (code == 62) return 62.5f;
         return (float)code;
     }
     return 0.0f;
+}
+
+// Inverse of loraBwFromCode, and the same mapping as upstream's bwKHzToCode():
+// a bandwidth that is not a whole number of kHz has a code that is not its
+// value. Ranges rather than equality because these arrive as floats — 15.6 in
+// particular is not representable exactly, and upstream reads 15.5..15.7 as 16.
+// Independent of kBwCodes, so it answers for any radio, not just this board's;
+// presetUsableOnThisRadio() is what narrows it to what is fitted here.
+uint16_t loraBwToCode(float kHz) {
+    if (kHz > 15.5f  && kHz < 15.7f)  return 16;
+    if (kHz > 31.1f  && kHz < 31.4f)  return 31;
+    if (kHz > 62.4f  && kHz < 62.6f)  return 62;
+    return (uint16_t)(kHz + 0.5f);
 }
 
 uint16_t loraCoerceBwCode(uint16_t code) {
@@ -121,10 +178,24 @@ static const RegionPlan *regionLookup(const char *code) {
     return nullptr;
 }
 
+// Width of one slot, including whatever guard the region's profile requires.
+static float regionSlotWidthMhz(const RegionPlan &r, float bwKhz) {
+    return r.spacing + (r.padding * 2.0f) + (bwKhz / 1000.0f);
+}
+
 uint32_t regionSlotCount(const char *code, float bwKhz) {
     const RegionPlan *r = regionLookup(code);
     if (!r || bwKhz <= 0.0f) return 0;
-    uint32_t numChannels = (uint32_t)((r->freqEnd - r->freqStart) / (bwKhz / 1000.0f));
+    const float slotWidth = regionSlotWidthMhz(*r, bwKhz);
+    if (slotWidth <= 0.0f) return 0;
+    // roundf, not truncation. Upstream rounds, and the two agree for every
+    // classic region at the bandwidths we used to support — which is why this
+    // went unnoticed. They stop agreeing at 15.6 kHz: US spans 26 MHz, so the
+    // quotient is 1666.67 and the choice is between 1666 slots and 1667. The
+    // count is the modulus for the channel-name hash, so picking the wrong one
+    // puts us on a different frequency from every stock node in the region.
+    uint32_t numChannels =
+        (uint32_t)lroundf((r->freqEnd - r->freqStart + r->spacing) / slotWidth);
     return numChannels == 0 ? 1 : numChannels;
 }
 
@@ -133,13 +204,24 @@ float regionSlotFreqNum(const char *code, float bwKhz, uint32_t slot) {
     uint32_t numChannels = regionSlotCount(code, bwKhz);
     if (!r || numChannels == 0) return MESH_FREQ;
     if (slot >= numChannels) slot = numChannels - 1;
-    float bwMhz = bwKhz / 1000.0f;
-    return r->freqStart + (bwMhz / 2.0f) + (slot * bwMhz);
+    // Centre of the slot: the band edge, plus half a bandwidth to reach the
+    // middle of the first channel, plus the profile's leading guard. Slots are
+    // then spaced by the full slot width, not by the bandwidth — for a padded
+    // profile those differ, and using the bandwidth would let the spacing drift
+    // further out of step with every slot.
+    return r->freqStart + (bwKhz / 2000.0f) + r->padding +
+           ((float)slot * regionSlotWidthMhz(*r, bwKhz));
 }
 
 float regionSlotFreq(const char *code, float bwKhz, const char *channelName) {
     uint32_t numChannels = regionSlotCount(code, bwKhz);
     if (numChannels == 0) return MESH_FREQ;
+    // A region that pins a slot uses it instead of the hash. overrideSlot is
+    // 1-based, matching upstream's channel_num, so it converts here.
+    const RegionPlan *r = regionLookup(code);
+    if (r && r->overrideSlot > 0) {
+        return regionSlotFreqNum(code, bwKhz, (uint32_t)r->overrideSlot - 1);
+    }
     return regionSlotFreqNum(code, bwKhz, meshNameHash(channelName) % numChannels);
 }
 
@@ -175,6 +257,13 @@ static const int8_t kPresetFromMeshtastic[] = {
     PRESET_LONG_MODERATE,  // 7 LONG_MODERATE
     PRESET_SHORT_TURBO,    // 8 SHORT_TURBO
     PRESET_LONG_TURBO,     // 9 LONG_TURBO
+    PRESET_LITE_FAST,      // 10 LITE_FAST     (2.7)
+    PRESET_LITE_SLOW,      // 11 LITE_SLOW     (2.7)
+    PRESET_NARROW_FAST,    // 12 NARROW_FAST   (2.7)
+    PRESET_NARROW_SLOW,    // 13 NARROW_SLOW   (2.7)
+    PRESET_TINY_FAST,      // 14 TINY_FAST     (2.8)
+    PRESET_TINY_SLOW,      // 15 TINY_SLOW     (2.8)
+    PRESET_MEDIUM_TURBO,   // 16 MEDIUM_TURBO  (2.8)
 };
 
 int presetFromMeshtastic(uint8_t meshtasticPreset) {
@@ -213,6 +302,25 @@ static const char *const kRegionFromMeshtastic[] = {
     "KZ_863",   // 24
     "NP_865",   // 25
     "BR_902",   // 26
+    // 27/28 are the ITU 2 m ham regions, 33-37 the rest of the ham block. They
+    // are deliberately absent: upstream marks them licensed_only, prompts for a
+    // call sign and blocks relaying between licensed and unlicensed users, and
+    // we have no concept of a licensed operator. Shipping them without that gate
+    // would hand someone a menu entry that transmits unlicensed on 2 m. nullptr
+    // means an inbound region code we simply do not adopt, which is the same
+    // thing regionCodeFromMeshtastic() already returns for anything past the end.
+    nullptr,    // 27 ITU1_2M    (ham, licensed only)
+    nullptr,    // 28 ITU2_2M    (ham, licensed only; renamed from ITU23_2M)
+    "EU_866",   // 29
+    // 30 and 31 are enum reservations upstream with no band table behind them.
+    nullptr,    // 30 EU_874     (reserved upstream, no band)
+    nullptr,    // 31 EU_917     (reserved upstream, no band)
+    "EU_N_868", // 32
+    nullptr,    // 33 ITU3_2M    (ham, licensed only)
+    nullptr,    // 34 ITU1_70CM  (ham, licensed only)
+    nullptr,    // 35 ITU2_70CM  (ham, licensed only)
+    nullptr,    // 36 ITU3_70CM  (ham, licensed only)
+    nullptr,    // 37 ITU2_125CM (ham, licensed only)
 };
 
 const char *regionCodeFromMeshtastic(uint8_t meshtasticRegion) {
@@ -240,6 +348,14 @@ uint8_t regionCodeToMeshtastic(const char *code) {
 
 void applyPresetParams(RhinoConfig &cfg) {
     if (cfg.modemPreset >= PRESET_COUNT) cfg.modemPreset = PRESET_LONG_FAST;
+    // A preset this radio cannot produce reaches here from a YAML export taken
+    // off a board that could — the Tiny presets on anything without a TCXO and
+    // an SX126x. The UI never offers them there, but import is not the UI.
+    // Falling back to the default is the same choice loraCoerceBwCode() makes
+    // for a custom bandwidth, and beats reconfiguring the radio into silence.
+    if (!presetUsableOnThisRadio(cfg.modemPreset)) {
+        cfg.modemPreset = PRESET_LONG_FAST;
+    }
 
     if (!cfg.loraUsePreset) {
         // Custom modem settings. Everything is coerced back into range here
@@ -870,6 +986,7 @@ static bool parseBoolValue(const char *val) {
 void cfgInitDefaults(RhinoConfig &cfg) {
     utf8util::copyTruncate(cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, MY_LONG_NAME);
     utf8util::copyTruncate(cfg.nodeShort, sizeof(cfg.nodeShort), MY_SHORT_NAME);
+    cfg.nodeIdFromPubKey = false;
     cfg.gpsEnabled   = (bool)MY_GPS_ENABLED;
     cfg.latI         = MY_LAT_I;
     cfg.lonI         = MY_LON_I;
@@ -1372,6 +1489,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     snprintf(tmp, sizeof(tmp), "    encryptionEnabled: %s\n", cfg.mqttEncryption ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    mapReportingEnabled: %s\n", cfg.mqttMapReport ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ok_to_mqtt: %s\n", cfg.okToMqtt ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    node_id_from_pubkey: %s\n", cfg.nodeIdFromPubKey ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    ignore_mqtt: %s\n", cfg.ignoreMqtt ? "true" : "false"); out += tmp;
     out += "  telemetry:\n";
     snprintf(tmp, sizeof(tmp), "    deviceTelemetryEnabled: %s\n", cfg.telDeviceEnabled ? "true" : "false"); out += tmp;
@@ -1900,6 +2018,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "root"))               strncpy(cfg.mqttRoot,    val, sizeof(cfg.mqttRoot)    - 1);
                 else if (!strcmp(key, "username"))           strncpy(cfg.mqttUser,    val, sizeof(cfg.mqttUser)    - 1);
                 else if (!strcmp(key, "ok_to_mqtt"))         cfg.okToMqtt     = parseBoolValue(val);
+                else if (!strcmp(key, "node_id_from_pubkey")) cfg.nodeIdFromPubKey = parseBoolValue(val);
                 else if (!strcmp(key, "ignore_mqtt"))        cfg.ignoreMqtt   = parseBoolValue(val);
             } else if (!strcmp(section, "module_config") && !strcmp(subsection, "telemetry")) {
                 if      (!strcmp(key, "deviceTelemetryEnabled"))        cfg.telDeviceEnabled   = (!strcmp(val,"true"));

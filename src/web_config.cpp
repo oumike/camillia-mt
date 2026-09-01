@@ -752,6 +752,8 @@ static const char kRegionOptions[] =
         "<option value='US'>US (902&ndash;928 MHz)</option>"
         "<option value='EU_433'>EU 433 (433&ndash;434 MHz)</option>"
         "<option value='EU_868'>EU 868 (869.4&ndash;869.65 MHz)</option>"
+        "<option value='EU_866'>EU 866 (865.6&ndash;867.6 MHz)</option>"
+        "<option value='EU_N_868'>EU Narrow 868 (869.4&ndash;869.65 MHz)</option>"
         "<option value='CN'>CN (470&ndash;510 MHz)</option>"
         "<option value='JP'>JP (920.5&ndash;923.5 MHz)</option>"
         "<option value='ANZ'>ANZ (915&ndash;928 MHz)</option>"
@@ -786,6 +788,18 @@ static const char kPresetOptions[] =
         "<option value='Short Fast'>Short Fast</option>"
         "<option value='Short Slow'>Short Slow</option>"
         "<option value='Short Turbo'>Short Turbo</option>"
+        "<option value='Medium Turbo'>Medium Turbo</option>"
+        "<option value='Lite Fast'>Lite Fast</option>"
+        "<option value='Lite Slow'>Lite Slow</option>"
+        "<option value='Narrow Fast'>Narrow Fast</option>"
+        "<option value='Narrow Slow'>Narrow Slow</option>"
+#if LORA_BW_CODE_MIN <= 16
+        // 15.6 kHz. Listed only where the radio can produce it — see
+        // LORA_BW_CODE_MIN. Selecting one elsewhere would reconfigure the radio
+        // into silence.
+        "<option value='Tiny Fast'>Tiny Fast</option>"
+        "<option value='Tiny Slow'>Tiny Slow</option>"
+#endif
         "<option value='Custom'>Custom&hellip;</option>";
 
 // Custom modem settings. One constant serves both pages: the full page hides
@@ -800,6 +814,9 @@ static const char kPresetOptions[] =
 static const char kCustomLoraFields[] =
         "<div id='cust-blk'>"
         "<div class='row2'><label>Bandwidth<select name='cbw' id='sel-cbw' onchange='applyPreset()'>"
+#if LORA_BW_CODE_MIN <= 16
+        "<option value='16'>15.6 kHz</option>"
+#endif
 #if LORA_BW_CODE_MIN <= 31
         "<option value='31'>31.25 kHz</option>"
 #endif
@@ -943,6 +960,10 @@ static const char kPresetJs[] =
         "<script>"
         // Region band edges {start,end MHz, power dBm} — mirror kRegions.
         "var R={'US':{s:902,e:928,p:22},'EU_433':{s:433,e:434,p:10},'EU_868':{s:869.4,e:869.65,p:22},"
+        // sp = spacing, pd = padding, os = pinned 1-based slot. Absent on every
+        // classic region and read as 0 there, which is what they all use.
+        "'EU_866':{s:865.6,e:867.6,p:22,sp:0.4,pd:0.0375},"
+        "'EU_N_868':{s:869.4,e:869.65,p:22,pd:0.0104,os:1},"
         "'CN':{s:470,e:510,p:19},'JP':{s:920.5,e:923.5,p:13},'ANZ':{s:915,e:928,p:22},'ANZ_433':{s:433.05,e:434.79,p:14},"
         "'RU':{s:868.7,e:869.2,p:20},'KR':{s:920,e:923,p:22},'TW':{s:920,e:925,p:22},'IN':{s:865,e:867,p:22},"
         "'NZ_865':{s:864,e:868,p:22},'TH':{s:920,e:925,p:16},'UA_433':{s:433,e:434.7,p:10},'UA_868':{s:868,e:868.6,p:14},"
@@ -953,11 +974,22 @@ static const char kPresetJs[] =
         "var P={'Long Fast':{bw:250,sf:11,cr:5,cn:'LongFast'},'Long Moderate':{bw:125,sf:11,cr:8,cn:'LongMod'},"
         "'Long Slow':{bw:125,sf:12,cr:8,cn:'LongSlow'},'Long Turbo':{bw:500,sf:11,cr:8,cn:'LongTurbo'},"
         "'Medium Fast':{bw:250,sf:9,cr:5,cn:'MediumFast'},'Medium Slow':{bw:250,sf:10,cr:5,cn:'MediumSlow'},"
-        "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'}};"
+        "'Short Fast':{bw:250,sf:7,cr:5,cn:'ShortFast'},'Short Slow':{bw:250,sf:8,cr:5,cn:'ShortSlow'},'Short Turbo':{bw:500,sf:7,cr:5,cn:'ShortTurbo'},"
+        "'Medium Turbo':{bw:500,sf:9,cr:5,cn:'MediumTurbo'},"
+        "'Lite Fast':{bw:125,sf:9,cr:5,cn:'LiteFast'},'Lite Slow':{bw:125,sf:10,cr:5,cn:'LiteSlow'},"
+        "'Narrow Fast':{bw:62.5,sf:7,cr:6,cn:'NarrowFast'},'Narrow Slow':{bw:62.5,sf:8,cr:6,cn:'NarrowSlow'},"
+        // Kept in the table on every board even where the options are hidden:
+        // this drives the readout, and a config imported from a board that does
+        // have the radio should still render rather than blank the panel.
+        "'Tiny Fast':{bw:15.6,sf:7,cr:5,cn:'TinyFast'},'Tiny Slow':{bw:15.6,sf:8,cr:6,cn:'TinySlow'}};"
         // djb2 hash + Meshtastic frequency-slot calc, matching regionSlotFreq().
         "function djb2(t){var h=5381;for(var i=0;i<t.length;i++)h=((h*33)+t.charCodeAt(i))>>>0;return h;}"
-        "function nSlot(r,p){var n=Math.floor((r.e-r.s)/(p.bw/1000));return n<1?1:n;}"
-        "function slotN(r,p,i){var bw=p.bw/1000;var n=nSlot(r,p);if(i>=n)i=n-1;return r.s+bw/2+i*bw;}"
+        // Mirrors regionSlotCount()/regionSlotFreqNum(). Math.round, not floor: the
+        // readout has to name the frequency the radio will actually tune, and the
+        // two disagree wherever the band is not a whole number of channels wide.
+        "function sw(r,p){return (r.sp||0)+2*(r.pd||0)+p.bw/1000;}"
+        "function nSlot(r,p){var n=Math.round((r.e-r.s+(r.sp||0))/sw(r,p));return n<1?1:n;}"
+        "function slotN(r,p,i){var n=nSlot(r,p);if(i>=n)i=n-1;return r.s+p.bw/2000+(r.pd||0)+i*sw(r,p);}"
         // Primary channel name, which is what a custom slot-0 setup hashes.
         // Saving with Custom selected renames a still-default channel 0 to
         // "Custom" (syncPrimaryChannelName), so a preset name in that field is
@@ -976,13 +1008,13 @@ static const char kPresetJs[] =
           "var p,slot=0;"
           "if(cust){"
             "var c=+document.getElementById('sel-cbw').value;"
-            "p={bw:c==31?31.25:c==62?62.5:c,sf:+document.getElementById('sel-csf').value,"
+            "p={bw:c==16?15.6:c==31?31.25:c==62?62.5:c,sf:+document.getElementById('sel-csf').value,"
               "cr:+document.getElementById('sel-ccr').value,cn:cn0()};"
             "slot=+document.getElementById('in-cslot').value||0;"
           "}else p=P[pv];"
           "if(!r||!p)return;"
           "var n=nSlot(r,p);"
-          "var si=slot>0?(slot>n?n:slot):(djb2(p.cn)%n)+1;"
+          "var si=slot>0?(slot>n?n:slot):(r.os?r.os:(djb2(p.cn)%n)+1);"
           "var f=slotN(r,p,si-1);"
           "document.getElementById('d-freq').textContent=f.toFixed(3)+' MHz'"
             "+(cust?' (slot '+si+' of '+n+')':'');"
@@ -3279,6 +3311,25 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Node ID override (developer option — hidden for end users)
     // snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)gCfg->nodeIdOverride);
     // html += "<label>Node ID Override ...";
+    //
+    // The pubkey derivation below is offered where the override is not, because
+    // it is the one Meshtastic 2.8 uses and there is a reason to want it. It is
+    // still a change of identity, so the label says so rather than leaving the
+    // consequence to be discovered.
+    if (!lite) {
+        // Marker so the POST handler can apply this checkbox (an unchecked box
+        // submits nothing) only when the control was actually on the page.
+        html += "<input type='hidden' name='nodeid_present' value='1'>";
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+                "<input type='checkbox' name='nodeid_pubkey' value='1'";
+        if (gCfg->nodeIdFromPubKey) html += " checked";
+        html += "> Derive node ID from public key (Meshtastic 2.8 style)</label>";
+        html += "<p class='gps-hint'>Changes this node's address on the mesh. Other "
+                "nodes will see a new node and keep the old one until it ages "
+                "out, and direct messages people already have with you stay "
+                "attached to the old address. Your own chat history is carried "
+                "across. Reboot to apply.</p>";
+    }
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -6440,6 +6491,12 @@ static void handlePostSave() {
     String shrt = server.arg("short");
     utf8util::copyTruncate(gCfg->nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, lng.c_str());
     utf8util::copyTruncate(gCfg->nodeShort, sizeof(gCfg->nodeShort), shrt.c_str());
+    // Lite never renders this control, and an unchecked checkbox sends nothing —
+    // so applying it unconditionally would switch the setting off for anyone who
+    // saved from the lite page. Gated on the marker the full page emits.
+    if (server.hasArg("nodeid_present")) {
+        gCfg->nodeIdFromPubKey = (server.arg("nodeid_pubkey") == "1");
+    }
 
     // Web config auth (username is fixed to admin)
     // Unchecked checkboxes are not submitted, so absence means "disabled".

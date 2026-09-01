@@ -67,6 +67,10 @@ enum PortNum : uint32_t {
     TRACEROUTE_APP   = 70,   // traceroute (not ACK)
     MAP_REPORT_APP   = 73,   // MQTT-only self-description; never sent over LoRa
     MESH_BEACON_APP  = 37,   // Meshtastic 2.7 MeshBeacon: cross-mesh advertisement
+    LORA_OTA_APP     = 79,   // Meshtastic 2.8: signed firmware updates carried over
+                             //   LoRa as binary ota-common frames. Named so the
+                             //   traffic is legible in the log; we neither send
+                             //   nor act on it.
 };
 
 // ── Decoded incoming packet ───────────────────────────────────
@@ -192,7 +196,13 @@ bool decodeData(const uint8_t *buf, size_t len,
                 uint32_t &portnum, const uint8_t *&payPtr, size_t &payLen,
                 uint32_t &requestId, bool &wantResponse,
                 uint32_t *destNode = nullptr, bool *hasDestNode = nullptr,
-                uint32_t *sourceNode = nullptr, bool *hasSourceNode = nullptr);
+                uint32_t *sourceNode = nullptr, bool *hasSourceNode = nullptr,
+                // Data.xeddsa_signature (field 10), Meshtastic 2.8. Points into
+                // buf when present, so it lives exactly as long as buf does.
+                // Set only for a full 64-byte signature: 2.8 emits 0 or 64 and
+                // treats anything between as malformed, so a short one is not
+                // something to half-accept.
+                const uint8_t **signature = nullptr);
 
 bool decodeUser(const uint8_t *buf, size_t len, UserInfo &out);
 bool decodePosition(const uint8_t *buf, size_t len, PositionInfo &out);
@@ -202,6 +212,23 @@ bool decodeNeighborInfo(const uint8_t *buf, size_t len, NeighborInfoPayload &out
 // ── PSK expansion ─────────────────────────────────────────────
 // Expand a 1-byte PSK to the 16-byte Meshtastic DEFAULT_KEY variant.
 void    expandPsk(uint8_t psk, uint8_t out[16]);
+
+// CRC-32 (IEEE 802.3), matching Meshtastic's crc32Buffer(). Used for the 2.8
+// node-number derivation, where the value has to agree with what a peer
+// computes over the same public key.
+uint32_t meshCrc32(const void *buf, size_t len);
+
+// Whether this channel's traffic is decryptable by anyone — no key, or a key
+// from the published defaultpsk family. Used to cap outgoing position precision.
+bool    channelKeyIsPublic(const ChannelKey &ck);
+
+// Ceiling on position precision for a publicly-decryptable channel: ~700 m at
+// the latitude cell, which stays roughly constant worldwide. Meshtastic 2.8
+// enforces this as a hard cap no setting can raise (MAX_POSITION_PRECISION_
+// PUBLIC_KEY in mesh/PositionPrecision.h) and uses the same 15 for the MQTT
+// map-report ceiling. A precision already at or below it is left alone — this
+// only ever coarsens.
+#define MESH_MAX_POSITION_PRECISION_PUBLIC 15
 
 // Compute the on-air channel hash (XOR of name bytes ^ XOR of expanded key bytes).
 uint8_t computeChannelHash(const char *name, const uint8_t *key, uint8_t keyLen);

@@ -151,6 +151,14 @@ public:
     void beginPersistence();
     void loadPersisted();
 
+    // Treat chat history written under a previous node ID as still ours. Set
+    // before loadPersisted() when the node ID has changed (see B2 / the
+    // nodeIdFromPubKey setting): without it, our own past messages stop being
+    // recognised as our own — they lose their sender identity and the message
+    // action menu starts offering node actions on a stale ID that is us.
+    // A no-op when either argument is zero.
+    void setSenderRemap(uint32_t fromNodeId, uint32_t toNodeId);
+
     // Writes are debounced: a change marks its channel dirty, and the snapshot
     // is written once the channel has been quiet for kPersistQuietMs or has been
     // dirty for kPersistMaxAgeMs, whichever comes first. Call every loop pass.
@@ -185,6 +193,10 @@ private:
     // and anything above MESH_CHANNELS is never written to storage.
     uint32_t   _dirtySinceMs[MESH_CHANNELS] = {0};
     uint32_t   _dirtyTouchedMs[MESH_CHANNELS] = {0};
+    // Sender-ID rewrite applied while loading persisted history; see
+    // setSenderRemap(). Zero means no remapping.
+    uint32_t   _remapFromNodeId = 0;
+    uint32_t   _remapToNodeId = 0;
 
     void _wordWrap(int chanIdx, const char *prefix, const char *text,
                    uint16_t color, uint32_t packetId, bool trackAck,
