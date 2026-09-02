@@ -115,13 +115,22 @@ ASSUME_YES=false
 NO_CLEAN=false
 APPEND_LAST_NOTES=false
 CHECK_TARGETS_ONLY=false
+ALPHA=false
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes] [--no-clean] [--append-last-notes] [--check-targets]"
+            echo "Usage: $0 [-y|--yes] [--alpha] [--no-clean] [--append-last-notes] [--check-targets]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
             echo ""
+            echo "  --alpha     Cut an ALPHA release instead: tags"
+            echo "              v<version>-alpha.<n> and publishes it as a GitHub"
+            echo "              *prerelease*, which is what keeps it off the"
+            echo "              stable channel. Only devices set to the Alpha"
+            echo "              release channel are offered it. With -y the alpha"
+            echo "              counter is bumped (v1.2.3-alpha.4 ->"
+            echo "              v1.2.3-alpha.5); from a stable tag it starts a"
+            echo "              new series at -alpha.1 on the next patch."
             echo "  -y, --yes   Bump the patch level of the latest tag without"
             echo "              prompting (v3.6.5 -> v3.6.6) and accept the AI"
             echo "              release notes."
@@ -139,6 +148,7 @@ for arg in "$@"; do
             exit 0
             ;;
         -y|--yes) ASSUME_YES=true ;;
+        --alpha) ALPHA=true ;;
         --no-clean) NO_CLEAN=true ;;
         --append-last-notes) APPEND_LAST_NOTES=true ;;
         --check-targets) CHECK_TARGETS_ONLY=true ;;
@@ -159,11 +169,88 @@ echo "Current version: ${CURRENT:-unknown}"
 echo "Latest git tag:  $PREV_TAG"
 echo ""
 
-if [[ "$ASSUME_YES" == true ]]; then
+# Newest tag matching a glob, in version order, restricted to well-formed tags.
+# The filter matters: this repo's tag list contains malformed entries (vv3.2.4)
+# that would otherwise be picked up and bumped into a wrong version.
+latest_tag_matching() {
+    local glob="$1" filter="$2"
+    # Filter first, then sort with sort -V rather than git's --sort=-v:refname.
+    # Two reasons: git ranks the malformed tags in this repo's history (vv3.2.4)
+    # above every real one, and sort -V is what the alpha counter was verified
+    # against — it orders -alpha.10 after -alpha.9, where a lexical sort would
+    # not.
+    git tag --list "$glob" | grep -E "$filter" | sort -V | tail -1
+}
+
+# True when $1 >= $2 as versions.
+version_ge() {
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
+}
+
+if [[ "$ALPHA" == true ]]; then
+    # Alphas are numbered per stable version: vX.Y.Z-alpha.N, where X.Y.Z is the
+    # release the series is heading towards — so the alphas leading to v4.7.8
+    # are v4.7.8-alpha.1, -alpha.2, and so on, and they sort below the finished
+    # v4.7.8 both for git and for the device's own version comparison.
+    PREV_ALPHA_TAG="$(latest_tag_matching 'v*-alpha.*' '^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$')"
+    PREV_STABLE_TAG="$(latest_tag_matching 'v*' '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+    echo "Latest alpha tag:  ${PREV_ALPHA_TAG:-none}"
+    echo "Latest stable tag: ${PREV_STABLE_TAG:-none}"
+    echo ""
+
+    ALPHA_BASE=""
+    ALPHA_NUM=0
+    if [[ "$PREV_ALPHA_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$ ]]; then
+        ALPHA_BASE="${BASH_REMATCH[1]}"
+        ALPHA_NUM="${BASH_REMATCH[2]}"
+    fi
+    NEXT_STABLE_BASE=""
+    if [[ "$PREV_STABLE_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        NEXT_STABLE_BASE="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$(( BASH_REMATCH[3] + 1 ))"
+    fi
+
+    if [[ "$ASSUME_YES" == true ]]; then
+        # Continue the existing series only while it is still ahead of what has
+        # shipped. Once a stable release catches up or passes it, bumping the old
+        # counter would publish an alpha *behind* stable — which every device on
+        # the alpha channel would then refuse as "not newer", leaving the channel
+        # silently dead.
+        if [[ -n "$ALPHA_BASE" ]] \
+           && { [[ -z "$NEXT_STABLE_BASE" ]] || version_ge "$ALPHA_BASE" "$NEXT_STABLE_BASE"; }; then
+            VERSION="${ALPHA_BASE}-alpha.$(( ALPHA_NUM + 1 ))"
+            echo "Auto-bumped $PREV_ALPHA_TAG -> v$VERSION"
+        elif [[ -n "$NEXT_STABLE_BASE" ]]; then
+            VERSION="${NEXT_STABLE_BASE}-alpha.1"
+            echo "Starting a new alpha series after $PREV_STABLE_TAG -> v$VERSION"
+        else
+            echo "Cannot auto-bump: no vMAJOR.MINOR.PATCH tag to base an alpha on." >&2
+            echo "Re-run without -y and enter the version explicitly." >&2
+            exit 1
+        fi
+    else
+        read -rp "New alpha version (e.g. 4.7.8-alpha.1, or 4.7.8 for -alpha.1): " VERSION
+        # A bare version means "start that version's alpha series".
+        if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            VERSION="${VERSION}-alpha.1"
+            echo "Using v$VERSION"
+        fi
+    fi
+
+    if [[ -n "$VERSION" && ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+        echo "Alpha version must look like 4.7.8-alpha.1 (got '$VERSION')." >&2
+        echo "The device only treats a tag as a prerelease when it carries a" >&2
+        echo "'-' suffix, so this shape is what keeps it off the stable channel." >&2
+        exit 1
+    fi
+elif [[ "$ASSUME_YES" == true ]]; then
     # Derived from the latest tag, not the VERSION file: the tag is what was
     # actually published, and VERSION has been seen lagging behind it.
     # Deliberately strict — the tag list contains malformed entries (vv3.2.4),
     # and silently "fixing" one of those would publish a wrong version.
+    #
+    # An alpha tag fails this on purpose: after a run of alphas the most recent
+    # tag is one of them, and there is no safe way to guess which stable version
+    # was meant. Pass the version explicitly instead.
     if [[ "$PREV_TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
         VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$(( BASH_REMATCH[3] + 1 ))"
         echo "Auto-bumped $PREV_TAG -> v$VERSION"
@@ -531,7 +618,11 @@ echo "Build successful."
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
 GUARD_STAGED=true
 git add -A
-git commit -m "Release $TAG"
+if [[ "$ALPHA" == true ]]; then
+    git commit -m "Alpha release $TAG"
+else
+    git commit -m "Release $TAG"
+fi
 
 # Point of no return. VERSION and the notes are part of a commit now, so the
 # pre-release copies are no longer the ones that should win.
@@ -637,14 +728,28 @@ ls -lh dist/
 # artifacts. See .github/workflows/build.yml.
 echo ""
 echo "Creating GitHub release $TAG..."
+# --prerelease is what separates the channels, and it is not cosmetic: GitHub
+# excludes prereleases from /releases/latest, which is the endpoint the stable
+# OTA route reads. Drop this flag and every stable device is offered the alpha
+# on its next check.
+RELEASE_FLAGS=()
+if [[ "$ALPHA" == true ]]; then
+    RELEASE_FLAGS+=( --prerelease )
+fi
 gh release create "$TAG" \
     --title "$TAG" \
+    "${RELEASE_FLAGS[@]}" \
     "${NOTES_ARGS[@]}" \
     dist/*.bin \
     dist/*.sig
 
 echo ""
-echo "Release $TAG published."
+if [[ "$ALPHA" == true ]]; then
+    echo "Alpha release $TAG published (prerelease)."
+    echo "Only devices with Release Channel = Alpha will be offered it."
+else
+    echo "Release $TAG published."
+fi
 gh release view "$TAG" --json url -q .url
 
 # RELEASE_NOTES.md is deliberately left in place: it is committed with the

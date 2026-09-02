@@ -13,12 +13,16 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/md.h"
 #include "ota_signing_pubkey.h"
+#include "config_io.h"   // OTA_CHANNEL_* release channels
 
 #ifndef APP_VERSION
 #define APP_VERSION "unknown"
 #endif
 
 static volatile uint32_t g_otaNetworkGate = 0;
+// Stable unless a caller says otherwise, so a build that never wires the
+// setting through behaves exactly as it did before channels existed.
+static volatile uint8_t  g_otaChannel = OTA_CHANNEL_STABLE;
 static constexpr uint32_t kOtaNetworkGateMagic = 0x4F544131UL; // "OTA1"
 
 // Hardcoded OTA proxy base — intentionally NOT user-configurable, so the update
@@ -170,20 +174,60 @@ static int parseNextVersionNumber(const char *s, int &idx) {
     return val;
 }
 
+static bool isPrereleaseTag(const char *tag);
+
+// Compares the numeric components, then breaks a tie the SemVer way: a
+// prerelease sorts *below* the release it leads to, so v4.7.8-alpha.3 < v4.7.8.
+//
+// That tail matters to a device on the alpha channel. Without it the numeric
+// scan reads v4.7.8-alpha.3 as "4.7.8.3" and the finished v4.7.8 as "4.7.8.0",
+// making the stable release look older — so a tester who had run every alpha of
+// a version would be stranded on the last one and never offered the real thing.
 static int compareVersionTags(const char *a, const char *b) {
     if (!a) a = "";
     if (!b) b = "";
     int ia = 0;
     int ib = 0;
 
-    while (true) {
-        int va = parseNextVersionNumber(a, ia);
-        int vb = parseNextVersionNumber(b, ib);
+    const bool aPre = isPrereleaseTag(a);
+    const bool bPre = isPrereleaseTag(b);
+    // Only the components before the '-' are the version proper; the digits
+    // inside "alpha.3" are the prerelease counter and are compared separately.
+    const char *aDash = strchr(a, '-');
+    const char *bDash = strchr(b, '-');
+    const int aLimit = aDash ? (int)(aDash - a) : (int)strlen(a);
+    const int bLimit = bDash ? (int)(bDash - b) : (int)strlen(b);
 
-        if (va < 0 && vb < 0) return 0;
+    while (true) {
+        int va = (ia < aLimit) ? parseNextVersionNumber(a, ia) : -1;
+        int vb = (ib < bLimit) ? parseNextVersionNumber(b, ib) : -1;
+        if (va >= 0 && ia > aLimit) va = -1;   // ran past the '-'
+        if (vb >= 0 && ib > bLimit) vb = -1;
+
+        if (va < 0 && vb < 0) break;
         if (va < 0) va = 0;
         if (vb < 0) vb = 0;
 
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+    }
+
+    // Same release numbers. A prerelease loses to the finished release.
+    if (aPre && !bPre) return -1;
+    if (!aPre && bPre) return 1;
+    if (!aPre && !bPre) return 0;
+
+    // Both prereleases of the same version: compare their counters
+    // ("alpha.3" vs "alpha.10") numerically, which is how release.sh numbers
+    // them. A tag with no digits after the dash counts as 0.
+    int ja = aDash ? (int)(aDash - a) + 1 : 0;
+    int jb = bDash ? (int)(bDash - b) + 1 : 0;
+    while (true) {
+        int va = aDash ? parseNextVersionNumber(a, ja) : -1;
+        int vb = bDash ? parseNextVersionNumber(b, jb) : -1;
+        if (va < 0 && vb < 0) return 0;
+        if (va < 0) va = 0;
+        if (vb < 0) vb = 0;
         if (va < vb) return -1;
         if (va > vb) return 1;
     }
@@ -202,9 +246,18 @@ static bool isPrereleaseTag(const char *tag) {
     return false;
 }
 
-// The proxy relays GitHub's "latest release" API over plain HTTP, so the same
-// tag_name parser works. There are no HTTPS fallbacks: this firmware has no TLS.
-// /releases/latest excludes prereleases, so alpha builds never surface here.
+// The proxy relays GitHub's release API over plain HTTP, so the same tag_name
+// parser works for both channels. There are no HTTPS fallbacks: this firmware
+// has no TLS.
+//
+// Two routes, because GitHub's own /releases/latest deliberately excludes
+// prereleases and so can never answer for alpha:
+//   /firmware/latest        -> newest published release   (stable channel)
+//   /firmware/latest-alpha  -> newest release INCLUDING prereleases (alpha)
+// Both must return release JSON carrying a "tag_name". The alpha route is the
+// proxy's job to provide; a proxy that does not serve it fails the check with
+// an HTTP error rather than quietly falling back to stable, which would install
+// the wrong channel's build.
 static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     tagOut = "";
     errOut = "";
@@ -215,7 +268,8 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     }
 
     char url[160];
-    snprintf(url, sizeof(url), "%s/firmware/latest", s_otaBaseUrl);
+    snprintf(url, sizeof(url), "%s/firmware/%s", s_otaBaseUrl,
+             (g_otaChannel == OTA_CHANNEL_ALPHA) ? "latest-alpha" : "latest");
     String body, err;
     if (httpGetString(url, body, err, true, nullptr, nullptr,
                       "application/vnd.github+json")
@@ -324,6 +378,21 @@ void otaSetNetworkAllowed(bool allowed) {
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
 }
 
+void otaSetChannel(uint8_t channel) {
+    // Clamped rather than trusted: this arrives from stored config and an
+    // unknown value must fall back to stable, never to "some other channel".
+    const uint8_t next = (channel == OTA_CHANNEL_ALPHA) ? OTA_CHANNEL_ALPHA
+                                                        : OTA_CHANNEL_STABLE;
+    if (next == g_otaChannel) return;
+    g_otaChannel = next;
+    Serial.printf("[ota] release channel=%s\n",
+                  (next == OTA_CHANNEL_ALPHA) ? "alpha" : "stable");
+}
+
+uint8_t otaCurrentChannel() {
+    return g_otaChannel;
+}
+
 const char *otaCurrentDeviceAssetSlug() {
 #if defined(DEVICE_TDECK)
     return "tdeck";
@@ -387,10 +456,12 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
         return false;
     }
 
-    if (isPrereleaseTag(out.latestTag)) {
-        // Never auto-update onto an alpha/prerelease. /releases/latest already
-        // excludes prereleases, but the release-page and raw-VERSION fallbacks
-        // could theoretically surface one, so guard here too.
+    if (isPrereleaseTag(out.latestTag) && g_otaChannel != OTA_CHANNEL_ALPHA) {
+        // Never auto-update a stable-channel device onto a prerelease.
+        // /releases/latest already excludes them, but the release-page and
+        // raw-VERSION fallbacks could theoretically surface one, so guard here
+        // too. On the alpha channel a prerelease is the point, so it falls
+        // through to the ordinary newer-than-current comparison below.
         Serial.printf("[ota] ignoring prerelease tag: %s\n", out.latestTag);
         out.updateAvailable = false;
     } else if (kTreatLatestAsUpdateForTesting) {
@@ -473,9 +544,11 @@ bool otaInstallLatestRelease(const char *tag,
         copyStringToBuf(tagBuf, sizeof(tagBuf), latestTag.c_str());
     }
 
-    // Hard stop: never install a prerelease (alpha) build via the update path,
-    // regardless of how the tag was supplied.
-    if (isPrereleaseTag(tagBuf)) {
+    // Hard stop on the stable channel: never install a prerelease build,
+    // regardless of how the tag was supplied. A device opted in to alpha is
+    // asking for exactly these builds, so it is allowed through — the image is
+    // still signature-checked against the baked-in key like any other.
+    if (isPrereleaseTag(tagBuf) && g_otaChannel != OTA_CHANNEL_ALPHA) {
         return setErr(errOut, errLen, "Refusing to install prerelease (alpha) build");
     }
 

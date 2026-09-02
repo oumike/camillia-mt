@@ -370,6 +370,11 @@
 // it. Opt-out: the check is a single plain-HTTP GET and costs nothing when
 // there is no update, so it is on by default.
 #define MY_OTA_AUTOCHECK    1
+// Which release channel the update check follows. Stable takes only published
+// releases; Alpha also takes prereleases, which are cut from a working branch
+// and are expected to be rougher. Stable by default — an alpha channel is
+// something a tester opts into, never somewhere a device lands on its own.
+#define MY_OTA_CHANNEL      OTA_CHANNEL_STABLE
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 // Auto-favorite threshold, in meters. One round unit in whichever system the

@@ -4268,6 +4268,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
                 "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
                 "</select></label>";
+
+        html += "<label>Release Channel<select name='ota_channel'>"
+                "<option value='0'";
+        if (gCfg->otaChannel != OTA_CHANNEL_ALPHA) html += " selected";
+        html += ">Stable</option>"
+                "<option value='1'";
+        if (gCfg->otaChannel == OTA_CHANNEL_ALPHA) html += " selected";
+        html += ">Alpha</option>"
+                "</select></label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "<b>Stable</b> installs published releases only. <b>Alpha</b> also "
+                "takes prerelease builds cut from a development branch — earlier "
+                "access, and rougher. Alpha images are signed and verified exactly "
+                "like stable ones; what changes is how well tested they are. "
+                "Switching back to Stable leaves the device on its current alpha "
+                "build until a stable release with a higher version number "
+                "appears.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -6892,6 +6909,13 @@ static void handlePostSave() {
 
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
+    }
+    if (server.hasArg("ota_channel")) {
+        // Anything that is not an explicit Alpha is Stable, so a malformed or
+        // injected value cannot opt a device into prerelease builds.
+        gCfg->otaChannel = (server.arg("ota_channel").toInt() == OTA_CHANNEL_ALPHA)
+                               ? OTA_CHANNEL_ALPHA : OTA_CHANNEL_STABLE;
+        otaSetChannel(gCfg->otaChannel);
     }
     if (server.hasArg("snf_router_id")) {
         // Blank, "none" or unparseable all come back 0, which is "unset" — the

@@ -2514,6 +2514,7 @@ enum CfgActionId {
     #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
+    CFG_ACTION_OTA_CHANNEL,
     CFG_ACTION_RELEASE_NOTES,
     CFG_ACTION_TIME_DATE,
     CFG_ACTION_CHANNEL_CFG,
@@ -4402,6 +4403,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             } else {
                 snprintf(buf, bufLen, "Firmware Update Check");
             }
+            break;
+        case CFG_ACTION_OTA_CHANNEL:
+            snprintf(buf, bufLen, "Release Channel: %s",
+                     cfgOtaChannelName(s_cfg.otaChannel));
             break;
         case CFG_ACTION_RELEASE_NOTES:
             snprintf(buf, bufLen, "Release Notes");
@@ -8914,6 +8919,12 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
+#endif
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Directly under the update action it governs: it decides what that check
+    // will find. Absent on the Cardputer for the same reason the update row is
+    // — a channel setting for an update path that does not exist is inert.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_CHANNEL;
 #endif
     // Sits under the update entry it describes. Present on every board — the
     // notes are baked into the image, so this needs neither OTA nor WiFi, and
@@ -27845,6 +27856,21 @@ static void performCfgAction(int actionId) {
                      s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
             break;
 
+        case CFG_ACTION_OTA_CHANNEL:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_CHANNEL");
+            showActionPopup = false;   // row already reads Stable/Alpha
+            s_cfg.otaChannel = (s_cfg.otaChannel == OTA_CHANNEL_ALPHA)
+                                   ? OTA_CHANNEL_STABLE : OTA_CHANNEL_ALPHA;
+            otaSetChannel(s_cfg.otaChannel);
+            // A check already armed against the other channel would install the
+            // wrong build, so it is dropped and has to be re-run.
+            s_cfgOtaInstallArmed = false;
+            s_cfgOtaLatestTag[0] = '\0';
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Release Channel: %s",
+                     cfgOtaChannelName(s_cfg.otaChannel));
+            break;
+
         case CFG_ACTION_UNITS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
             showActionPopup = false;   // row already reads Imperial/Metric
@@ -34971,6 +34997,9 @@ static void loadConfigFromSd() {
     // first web save would see a change against 0xFF and rebuild for nothing.
     s_appliedFontSize = (uint8_t)constrain((int)s_cfg.fontSize, 0, FONT_SIZE_MAX);
     myDeviceRole = s_cfg.deviceRole;
+    // Only meaningful once the stored value is in s_cfg — set from setup(), it
+    // would latch the compiled default and never see what the user chose.
+    otaSetChannel(s_cfg.otaChannel);
 }
 
 static void loadConfigForOtaWorker() {
@@ -34978,6 +35007,9 @@ static void loadConfigForOtaWorker() {
     myDeviceRole = s_cfg.deviceRole;
     loadConfigFromPrefs();
     myDeviceRole = s_cfg.deviceRole;
+    // This boot is the one that downloads and installs, so it above all has to
+    // resolve the same channel the user picked in the UI.
+    otaSetChannel(s_cfg.otaChannel);
 }
 
 static void refreshHeaderTime(bool force) {
@@ -40174,6 +40206,10 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     // The gate is what keeps OTA networking out of normal operation; open it
     // only for the duration of this one request.
     otaSetNetworkAllowed(true);
+    // Re-asserted here rather than trusted from boot: a config import can change
+    // the channel without a reboot, and this is the last point before the check
+    // where the stored value is authoritative.
+    otaSetChannel(s_cfg.otaChannel);
     OtaCheckResult check = {};
     const bool ok = otaCheckLatestRelease(check) && check.ok;
     otaSetNetworkAllowed(false);

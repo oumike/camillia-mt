@@ -1085,6 +1085,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.snfClientEnabled   = MY_SNF_CLIENT_EN;
     cfg.snfRouterNodeId    = MY_SNF_ROUTER_ID;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
+    cfg.otaChannel          = MY_OTA_CHANNEL;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     cfg.volumePct           = MY_VOLUME_PCT;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
@@ -1242,6 +1243,10 @@ bool sdBegin() {
 }
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────
+const char *cfgOtaChannelName(uint8_t channel) {
+    return (channel == OTA_CHANNEL_ALPHA) ? "Alpha" : "Stable";
+}
+
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
     char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
@@ -1293,6 +1298,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "\n";
     if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
     snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    otaChannel: %s\n", cfgOtaChannelName(cfg.otaChannel)); out += tmp;
     // security — the Curve25519 identity keypair, so a backup can restore the
     // same node identity after a reflash or NVS wipe. Without it a restored
     // device comes up as a new identity: peers' stored public key no longer
@@ -1842,6 +1848,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     cfg.nodeInfoIntervalS = (uint32_t)atol(val);
                 else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
                 else if (!strcmp(key, "otaAutoCheck")) cfg.otaAutoCheckEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "otaChannel")) {
+                    // Accepts the name this writes out, and a bare number so a
+                    // hand-edited file is not a trap. Anything else is Stable:
+                    // an unreadable channel must not silently opt a device in.
+                    if (!strcasecmp(val, "ALPHA") || !strcmp(val, "1"))
+                        cfg.otaChannel = OTA_CHANNEL_ALPHA;
+                    else
+                        cfg.otaChannel = OTA_CHANNEL_STABLE;
+                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "shareLocation"))
                     cfg.shareLocation = parseBoolValue(val);
