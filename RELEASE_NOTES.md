@@ -1,6 +1,7 @@
 ### New
 - Release Channel setting (Stable or Alpha) in device Settings and the web config page — Stable installs published releases only, Alpha also takes prerelease builds for earlier access to in-progress work. A device flashed with an alpha image follows the Alpha channel automatically until a channel is picked by hand.
 - Switching from Alpha back to Stable offers the newest stable release even though it is numerically older than the alpha you are running, so returning to the stable track no longer needs a USB reflash.
+- T-Deck Pro: the sleep clock now shows the battery level at the top of the screen, padded in from the edge, in the same percent-or-voltage format as the chat header. It is redrawn with the clock's minute tick, so it costs no extra e-paper refreshes.
 - T-Deck Pro: the sleep clock now shows unread messages under the date — new DM count and how many channels have activity — updating a few seconds after things settle so a burst of messages doesn't repaint the e-paper repeatedly.
 
 ### Changed

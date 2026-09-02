@@ -224,6 +224,7 @@ static lv_obj_t *s_tdeckProSleepTitle = nullptr;
 static lv_obj_t *s_tdeckProSleepNode = nullptr;
 static lv_obj_t *s_tdeckProSleepTime = nullptr;
 static lv_obj_t *s_tdeckProSleepDate = nullptr;
+static lv_obj_t *s_tdeckProSleepBattery = nullptr;
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
 static lv_obj_t *s_tdeckProSleepUnread = nullptr;
 // Unread state the overlay is currently showing, plus the coalescing timer that
@@ -5605,6 +5606,26 @@ static void tdeckProSleepUnreadText(char *out, size_t outLen) {
     }
 }
 
+// Battery symbol plus the reading in whichever format the battery indicator is
+// configured for, so a glance at the sleeping panel says the same thing the
+// chat header does rather than contradicting it.
+static void tdeckProSleepBatteryText(char *out, size_t outLen) {
+    const uint8_t pct = batteryReadPercent();
+    const char *icon = LV_SYMBOL_BATTERY_EMPTY;
+    if (pct >= 90)      icon = LV_SYMBOL_BATTERY_FULL;
+    else if (pct >= 70) icon = LV_SYMBOL_BATTERY_3;
+    else if (pct >= 45) icon = LV_SYMBOL_BATTERY_2;
+    else if (pct >= 20) icon = LV_SYMBOL_BATTERY_1;
+
+    if (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE) {
+        // snprintf rather than LVGL's printf: LV_SPRINTF_USE_FLOAT is off in
+        // this build, so "%.2fV" would reach the panel as a literal "fV".
+        snprintf(out, outLen, "%s %.2fV", icon, (double)batteryReadVoltage());
+    } else {
+        snprintf(out, outLen, "%s %u%%", icon, (unsigned)pct);
+    }
+}
+
 static void updateTdeckProSleepClock() {
     if (!s_tdeckProSleepNode || !s_tdeckProSleepTime || !s_tdeckProSleepDate) return;
 
@@ -5630,6 +5651,16 @@ static void updateTdeckProSleepClock() {
         s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
     }
 
+    // Redrawn with whatever else brought us here rather than on a refresh of
+    // its own: a percent point is never worth waking the panel for, and the
+    // minute tick already repaints this overlay often enough to keep the
+    // reading current.
+    if (s_tdeckProSleepBattery && lv_obj_is_valid(s_tdeckProSleepBattery)) {
+        char battText[24];
+        tdeckProSleepBatteryText(battText, sizeof(battText));
+        lv_label_set_text(s_tdeckProSleepBattery, battText);
+    }
+
     s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
                                    ? (uint32_t)(now / 60)
                                    : (0x80000000u | (millis() / 60000UL));
@@ -5648,6 +5679,15 @@ static void showTdeckProSleepClock() {
     lv_obj_clear_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_tdeckProSleepOverlay, lv_color_make(255, 255, 255), 0);
     lv_obj_set_style_bg_opa(s_tdeckProSleepOverlay, LV_OPA_COVER, 0);
+
+    // Top of the screen, padded down from the edge: the panel bezel sits close
+    // enough to the first row of pixels that a label flush against it is hard
+    // to read.
+    s_tdeckProSleepBattery = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_style_text_font(s_tdeckProSleepBattery, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepBattery, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepBattery, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_tdeckProSleepBattery, LV_ALIGN_TOP_MID, 0, 12);
 
     s_tdeckProSleepTitle = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_width(s_tdeckProSleepTitle, lv_pct(92));
@@ -5705,6 +5745,7 @@ static void hideTdeckProSleepClock() {
     s_tdeckProSleepNode = nullptr;
     s_tdeckProSleepTime = nullptr;
     s_tdeckProSleepDate = nullptr;
+    s_tdeckProSleepBattery = nullptr;
     s_tdeckProSleepUnread = nullptr;
     s_tdeckProSleepMinuteKey = UINT32_MAX;
     s_tdeckProSleepUnreadKey = UINT32_MAX;
