@@ -421,6 +421,155 @@ char tloraTranslateKey(uint8_t keyNum) {
     return mapped;
 }
 
+// ── Keystroke queue ─────────────────────────────────────────────────────────
+// The TCA8418's event FIFO is ten entries deep and every keystroke costs two of
+// them — a press and a release — so the controller can hold five keys and no
+// more. On the e-paper build that is nowhere near enough: a GDEQ031T10 partial
+// update parks loop() for about 700 ms and a full one for 1.1 s, and a fast
+// typist overruns the FIFO well inside a single refresh. What does not fit is
+// discarded by the controller, which is a letter gone for good — the missing
+// characters people see when they type quickly.
+//
+// So every poll empties the whole hardware FIFO into this queue, and the poll
+// itself also runs from inside the refresh's busy wait (see
+// keyboardServiceDuringBlockingWork). The controller is then never the thing
+// holding a keystroke: what was typed is remembered here, and the UI reads it
+// at its own pace while the panel catches up.
+constexpr uint8_t TLORA_QUEUE_SIZE = 64;
+char     sTloraQueue[TLORA_QUEUE_SIZE] = {0};
+uint8_t  sTloraQueueHead = 0;    // next slot to write
+uint8_t  sTloraQueueTail = 0;    // next slot to read
+uint8_t  sTloraQueueCount = 0;
+uint32_t sTloraLastKeyMs = 0;    // when the controller last reported a press
+
+void tloraQueuePush(char key) {
+    if (key == KEY_NONE) return;
+    // A full queue is sixty-four unread keys, which the UI cannot fall behind by
+    // unless something upstream has stalled outright. Drop the newest rather
+    // than the oldest: losing the tail of a burst is recoverable by typing the
+    // rest, whereas dropping from the head reorders what was already typed.
+    if (sTloraQueueCount >= TLORA_QUEUE_SIZE) return;
+    sTloraQueue[sTloraQueueHead] = key;
+    sTloraQueueHead = (uint8_t)((sTloraQueueHead + 1u) % TLORA_QUEUE_SIZE);
+    sTloraQueueCount++;
+}
+
+char tloraQueuePop() {
+    if (sTloraQueueCount == 0) return KEY_NONE;
+    const char key = sTloraQueue[sTloraQueueTail];
+    sTloraQueueTail = (uint8_t)((sTloraQueueTail + 1u) % TLORA_QUEUE_SIZE);
+    sTloraQueueCount--;
+    return key;
+}
+
+// Empties the controller's FIFO into the queue above. Touches nothing but I2C,
+// the modifier state machine and the queue, which is what makes it safe to call
+// from the middle of a panel refresh.
+void tloraDrainController() {
+    const uint32_t now = millis();
+
+    // Bounded rather than "until empty": a controller answering with a stuck
+    // count would otherwise spin here forever. Four sweeps is forty events,
+    // far more than one poll can legitimately find waiting.
+    for (uint8_t sweep = 0; sweep < 4; sweep++) {
+        const uint8_t count = tloraReadReg(TLORA_REG_KEY_LCK_EC) & 0x0F;
+
+        // K_INT latches on the first key event and stays latched until it is
+        // written back, so never acknowledging it pinned KB_INT low for the
+        // rest of the session and made the line useless as a "something is
+        // waiting" signal — every poll had to hit I2C to find out. It is
+        // acknowledged here, *before* the events below are popped, so a key
+        // struck mid-drain re-asserts it instead of being acknowledged unseen;
+        // the next sweep then finds that event and takes it.
+        tloraWriteReg(TLORA_REG_INT_STAT, 0x03);
+        if (count == 0) break;
+
+        for (uint8_t i = 0; i < count; i++) {
+            // KEY_EVENT_A is the FIFO head and pops on read; the registers above
+            // it are a passive view of the queue. Reading A+i therefore skips an
+            // event per iteration and strands it in the FIFO, which is how a
+            // modifier release ends up arriving after the keypress it was meant
+            // to modify.
+            uint8_t ev = tloraReadReg(TLORA_REG_KEY_EVENT_A);
+            if (ev == 0) break;
+            bool pressed = (ev & 0x80) != 0;
+            uint8_t keyNum = ev & 0x7F;
+
+            // Every press counts as typing activity, modifiers included, so the
+            // e-paper build can tell a burst is still in flight even when the
+            // key that just arrived maps to nothing on its own.
+            if (pressed) sTloraLastKeyMs = now;
+
+            if (keyNum == TLORA_KEYNUM_BACKSPACE) {
+                if (pressed) {
+                    if (!sTloraBackspaceDown) {
+                        sTloraBackspaceDown = true;
+                        sTloraBackspaceHoldSent = false;
+                        sTloraBackspaceDownMs = now;
+                    }
+
+                    // Pager shortcut: Symbol + Backspace closes compose/panels
+                    // using the same path as long-hold backspace, but instantly.
+                    if (sTloraModifier & TLORA_MOD_SYM) {
+                        sTloraModifier = 0;
+                        sTloraBackspaceHoldSent = true;
+                        tloraQueuePush(KEY_BACKSPACE_HOLD);
+                        continue;
+                    }
+                } else {
+                    sTloraBackspaceDown = false;
+                    sTloraBackspaceHoldSent = false;
+                }
+            }
+
+            // Releases must never reach tloraTranslateKey(): it drives the
+            // one-shot modifier state machine, so re-mapping a release toggles
+            // shift/sym back on (or clears a modifier the press already
+            // consumed) and the modifier bleeds into a second keypress.
+            if (!pressed) {
+                if (keyNum == sTloraHeldKeyNum) {
+                    sTloraHeldKey = KEY_NONE;
+                    sTloraHeldKeyNum = 0;
+                    sTloraHeldSinceMs = 0;
+                }
+                continue;
+            }
+
+            char mapped = tloraTranslateKey(keyNum);
+
+            // Track whatever is currently held so callers can offer
+            // hold-to-repeat. The controller reports one press event and then
+            // nothing until release, so a held key is invisible without this;
+            // the backspace-hold path above already relies on the same
+            // press/release pairing.
+            if (mapped != KEY_NONE && keyNum != sTloraHeldKeyNum) {
+                sTloraHeldKey = mapped;
+                sTloraHeldKeyNum = keyNum;
+                sTloraHeldSinceMs = now;
+            }
+
+            tloraQueuePush(mapped);
+        }
+    }
+}
+
+// Rate-gated controller poll, shared by readKey() and the panel busy wait so
+// both entry points pace the controller identically. KB_INT is asserted
+// whenever the FIFO holds something, which makes the timed probe below a
+// backstop for the one narrow window the interrupt cannot cover: an event that
+// lands between a drain's last read and its acknowledgement.
+void tloraPollController(uint32_t now) {
+    static uint32_t lastPollMs = 0;
+#if (KB_INT >= 0)
+    if (digitalRead(KB_INT) != KB_INT_ACTIVE_LEVEL
+        && (uint32_t)(now - lastPollMs) < 120) {
+        return;
+    }
+#endif
+    lastPollMs = now;
+    tloraDrainController();
+}
+
 char tloraReadMappedKey() {
     uint32_t now = millis();
     if (sTloraBackspaceDown && !sTloraBackspaceHoldSent
@@ -429,71 +578,12 @@ char tloraReadMappedKey() {
         return KEY_BACKSPACE_HOLD;
     }
 
-    uint8_t count = tloraReadReg(TLORA_REG_KEY_LCK_EC) & 0x0F;
-    if (count == 0) return KEY_NONE;
-
-    for (uint8_t i = 0; i < count; i++) {
-        // KEY_EVENT_A is the FIFO head and pops on read; the registers above it
-        // are a passive view of the queue. Reading A+i therefore skips an event
-        // per iteration and strands it in the FIFO, which is how a modifier
-        // release ends up arriving after the keypress it was meant to modify.
-        uint8_t ev = tloraReadReg(TLORA_REG_KEY_EVENT_A);
-        if (ev == 0) break;
-        bool pressed = (ev & 0x80) != 0;
-        uint8_t keyNum = ev & 0x7F;
-
-        if (keyNum == TLORA_KEYNUM_BACKSPACE) {
-            if (pressed) {
-                if (!sTloraBackspaceDown) {
-                    sTloraBackspaceDown = true;
-                    sTloraBackspaceHoldSent = false;
-                    sTloraBackspaceDownMs = now;
-                }
-
-                // Pager shortcut: Symbol + Backspace closes compose/panels
-                // using the same path as long-hold backspace, but instantly.
-                if (sTloraModifier & TLORA_MOD_SYM) {
-                    sTloraModifier = 0;
-                    sTloraBackspaceHoldSent = true;
-                    return KEY_BACKSPACE_HOLD;
-                }
-            } else {
-                sTloraBackspaceDown = false;
-                sTloraBackspaceHoldSent = false;
-            }
-        }
-
-        // Releases must never reach tloraTranslateKey(): it drives the one-shot
-        // modifier state machine, so re-mapping a release toggles shift/sym back
-        // on (or clears a modifier the press already consumed) and the modifier
-        // bleeds into a second keypress.
-        if (!pressed) {
-            if (keyNum == sTloraHeldKeyNum) {
-                sTloraHeldKey = KEY_NONE;
-                sTloraHeldKeyNum = 0;
-                sTloraHeldSinceMs = 0;
-            }
-            continue;
-        }
-
-        char mapped = tloraTranslateKey(keyNum);
-
-        // Track whatever is currently held so callers can offer hold-to-repeat.
-        // The controller reports one press event and then nothing until release,
-        // so a held key is invisible without this; the backspace-hold path above
-        // already relies on the same press/release pairing.
-        if (mapped != KEY_NONE && keyNum != sTloraHeldKeyNum) {
-            sTloraHeldKey = mapped;
-            sTloraHeldKeyNum = keyNum;
-            sTloraHeldSinceMs = now;
-        }
-
-        if (mapped != KEY_NONE) {
-            return mapped;
-        }
-    }
-
-    return KEY_NONE;
+    // Only talk to the controller once the queue has run dry. pumpKeyboardInput()
+    // calls this up to eight times a pass, and with the queue fed both from here
+    // and from the busy wait, an I2C round trip per call would be pure overhead
+    // for keys already in hand.
+    if (sTloraQueueCount == 0) tloraPollController(now);
+    return tloraQueuePop();
 }
 } // namespace
 #endif
@@ -1106,15 +1196,8 @@ char TDeckKeyboard::readKey() {
     if (_cardputerCount == 0) return KEY_NONE;
     return dequeueCardputerKey();
 #elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
-    static uint32_t lastIdleProbeMs = 0;
-    uint32_t now = millis();
-#if (KB_INT >= 0)
-    bool irqActive = (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL);
-    if (!irqActive) {
-        if (now - lastIdleProbeMs < 120) return KEY_NONE;
-        lastIdleProbeMs = now;
-    }
-#endif
+    // The IRQ gate and the idle probe live in tloraPollController() now, so the
+    // panel busy wait reaches them too and one poll cadence covers both callers.
     return tloraReadMappedKey();
 #elif !HAS_KEYBOARD
     return KEY_NONE;
@@ -1533,6 +1616,49 @@ void IRAM_ATTR TDeckKeyboard::_isrPagerRotary() {
 }
 #endif
 void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = true; }
+
+// Keeps the keyboard controller drained while the caller is blocked on
+// something long. The e-paper build calls this from inside the panel's busy
+// wait, where loop() is parked for the better part of a second and the
+// controller's ten-event FIFO overflows silently if nobody empties it.
+//
+// It paces itself because GxEPD2 calls it from a spin loop with no delay of its
+// own: on the passes where it does not poll it hands back the millisecond that
+// wait would otherwise have slept, so this costs no more CPU than the wait did.
+void keyboardServiceDuringBlockingWork() {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    static uint32_t lastServiceMs = 0;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastServiceMs) < 4) {
+        delay(1);
+        return;
+    }
+    lastServiceMs = now;
+    tloraPollController(now);
+#else
+    delay(1);
+#endif
+}
+
+// Keys taken off the controller but not yet handed to the UI, and when the
+// controller last reported a press (0 if it never has). Together they say
+// whether a typing burst is still in flight, which the e-paper build uses to
+// decide whether this is a good moment to spend ~700 ms repainting the panel.
+uint8_t keyboardPendingKeys() {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    return sTloraQueueCount;
+#else
+    return 0;
+#endif
+}
+
+uint32_t keyboardLastKeyMs() {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    return sTloraLastKeyMs;
+#else
+    return 0;
+#endif
+}
 
 // Held-key reporting. Only the Pager's controller gives us press *and* release
 // events, so it is the only build that can answer this; elsewhere callers get
