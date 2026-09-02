@@ -225,6 +225,12 @@ static lv_obj_t *s_tdeckProSleepNode = nullptr;
 static lv_obj_t *s_tdeckProSleepTime = nullptr;
 static lv_obj_t *s_tdeckProSleepDate = nullptr;
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
+static lv_obj_t *s_tdeckProSleepUnread = nullptr;
+// Unread state the overlay is currently showing, plus the coalescing timer that
+// decides when a change is worth a panel refresh. See serviceTdeckProSleepClock.
+static uint32_t s_tdeckProSleepUnreadKey = UINT32_MAX;
+static uint32_t s_tdeckProSleepUnreadPendingKey = UINT32_MAX;
+static uint32_t s_tdeckProSleepUnreadChangedMs = 0;
 #endif
 // Right-hand cluster of the bottom bar on builds where the nav buttons share it
 // with the GPS/WiFi/DM icons. nullptr everywhere else.
@@ -5561,6 +5567,44 @@ static uint32_t tdeckProSleepClockMinuteKey() {
     return 0x80000000u | (millis() / 60000UL);
 }
 
+// Everything unread, folded into one value. Used both to render the notifier
+// and to decide whether the sleeping panel needs repainting, so the two can
+// never disagree about what is currently on screen.
+static uint32_t tdeckProSleepUnreadKey() {
+    uint32_t chanMask = 0;
+    for (int i = 0; i < MESH_CHANNELS && i < 24; i++) {
+        if (s_channelNeedsAttention[i]) chanMask |= (1u << i);
+    }
+    int dm = DMs.unreadMessageCount();
+    if (dm < 0)   dm = 0;
+    if (dm > 255) dm = 255;   // saturates; the text says "255+" past this
+    return ((uint32_t)dm << 24) | chanMask;
+}
+
+// Renders that into the line under the date. Empty when nothing is unread, so
+// a quiet device shows the clock exactly as it did before.
+static void tdeckProSleepUnreadText(char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    out[0] = '\0';
+
+    int chans = 0;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) chans++;
+    }
+    const int dm = DMs.unreadMessageCount();
+
+    if (dm > 0 && chans > 0) {
+        snprintf(out, outLen, "%d new %s  -  %d %s",
+                 dm, (dm == 1) ? "DM" : "DMs",
+                 chans, (chans == 1) ? "channel" : "channels");
+    } else if (dm > 0) {
+        snprintf(out, outLen, "%d new %s", dm, (dm == 1) ? "DM" : "DMs");
+    } else if (chans > 0) {
+        snprintf(out, outLen, "New messages in %d %s",
+                 chans, (chans == 1) ? "channel" : "channels");
+    }
+}
+
 static void updateTdeckProSleepClock() {
     if (!s_tdeckProSleepNode || !s_tdeckProSleepTime || !s_tdeckProSleepDate) return;
 
@@ -5578,6 +5622,14 @@ static void updateTdeckProSleepClock() {
     }
     lv_label_set_text(s_tdeckProSleepTime, timeText);
     lv_label_set_text(s_tdeckProSleepDate, dateText);
+
+    if (s_tdeckProSleepUnread && lv_obj_is_valid(s_tdeckProSleepUnread)) {
+        char unreadText[48];
+        tdeckProSleepUnreadText(unreadText, sizeof(unreadText));
+        lv_label_set_text(s_tdeckProSleepUnread, unreadText);
+        s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
+    }
+
     s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
                                    ? (uint32_t)(now / 60)
                                    : (0x80000000u | (millis() / 60000UL));
@@ -5625,6 +5677,17 @@ static void showTdeckProSleepClock() {
     lv_obj_set_style_text_align(s_tdeckProSleepDate, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_tdeckProSleepDate, LV_ALIGN_CENTER, 0, 48);
 
+    // Under the date. Plain text with no border: the label is present even when
+    // nothing is unread, so any persistent decoration draws an empty box on an
+    // otherwise quiet screensaver.
+    s_tdeckProSleepUnread = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_width(s_tdeckProSleepUnread, lv_pct(92));
+    lv_obj_set_style_text_font(s_tdeckProSleepUnread, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepUnread, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepUnread, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_tdeckProSleepUnread, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_tdeckProSleepUnread, LV_ALIGN_CENTER, 0, 82);
+
     updateTdeckProSleepClock();
     lv_obj_move_foreground(s_tdeckProSleepOverlay);
     lv_obj_invalidate(s_tdeckProSleepOverlay);
@@ -5642,13 +5705,37 @@ static void hideTdeckProSleepClock() {
     s_tdeckProSleepNode = nullptr;
     s_tdeckProSleepTime = nullptr;
     s_tdeckProSleepDate = nullptr;
+    s_tdeckProSleepUnread = nullptr;
     s_tdeckProSleepMinuteKey = UINT32_MAX;
+    s_tdeckProSleepUnreadKey = UINT32_MAX;
+    s_tdeckProSleepUnreadPendingKey = UINT32_MAX;
+    s_tdeckProSleepUnreadChangedMs = 0;
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
 }
 
+// How long the unread state must hold still before the panel is repainted for
+// it. A busy channel can land several messages in a few seconds, and each
+// repaint parks loop() for the better part of a second and costs real battery
+// on a device that is meant to be asleep -- so a burst collapses into one
+// refresh showing the final count rather than one per message.
+static constexpr uint32_t kTdeckProSleepUnreadQuietMs = 3000;
+
 static void serviceTdeckProSleepClock() {
     if (!s_screenAsleep || !s_tdeckProSleepOverlay) return;
-    if (tdeckProSleepClockMinuteKey() == s_tdeckProSleepMinuteKey) return;
+
+    const uint32_t nowMs = millis();
+    const uint32_t unreadNow = tdeckProSleepUnreadKey();
+    if (unreadNow != s_tdeckProSleepUnreadPendingKey) {
+        s_tdeckProSleepUnreadPendingKey = unreadNow;
+        s_tdeckProSleepUnreadChangedMs = nowMs;
+    }
+    // Settled on something other than what the overlay is showing.
+    const bool unreadDue =
+        (unreadNow != s_tdeckProSleepUnreadKey)
+        && ((uint32_t)(nowMs - s_tdeckProSleepUnreadChangedMs) >= kTdeckProSleepUnreadQuietMs);
+
+    const bool minuteDue = (tdeckProSleepClockMinuteKey() != s_tdeckProSleepMinuteKey);
+    if (!minuteDue && !unreadDue) return;
 
     lcd.wakeup(false);
     updateTdeckProSleepClock();
@@ -29743,7 +29830,7 @@ static void onboardingFinalize() {
 }
 
 #if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
-    || defined(DEVICE_MESH_DECK)
+    || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT)
 static bool prepareGlobalNavigation() {
     // Onboarding owns the whole input surface until identity and region exist.
     if (s_onboardingModal) return false;
@@ -29857,7 +29944,8 @@ static bool handleM9GlobalNavigationKey(char key) {
 }
 #endif
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_TLORA_PAGER_TFT)
 static void openKeyboardHomeShortcut() {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
@@ -30017,7 +30105,8 @@ static void pumpKeyboardInput() {
         }
         s_lastActivityMs = millis();
 
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_TLORA_PAGER_TFT)
     if (k == KEY_OPEN_HOME) {
             openKeyboardHomeShortcut();
         continue;

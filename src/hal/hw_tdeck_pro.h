@@ -75,8 +75,22 @@
 #define TOUCH_I2C_FREQ       400000
 #define TOUCH_POLL_ENABLED        1
 
-#define SCREEN_WAKE_FROM_KEYBOARD 1
-#define SCREEN_WAKE_FROM_TOUCH    1
+// Screen wake policy: the side button is the only way back.
+//
+// It is already the lock button -- a press while awake sleeps the panel to the
+// clock overlay -- so making it the only thing that wakes keeps one button
+// responsible for both halves of the same gesture. With a bare keyboard and a
+// touch panel both facing outward, anything else meant a bag or a sleeve could
+// wake an e-paper device and sit there redrawing.
+//
+// Keys are still drained while asleep so the controller's FIFO cannot back up;
+// they simply do not wake it. VNC input remains exempt (see the wake gate in
+// main_lvgl.cpp): a keystroke from a remote viewer was typed by someone already
+// looking at the screen. The button reaches the wake path through
+// pollUserButton(), which does not consult these flags, and stays a light-sleep
+// wake source via USER_BUTTON_PIN in kNapWakeLines.
+#define SCREEN_WAKE_FROM_KEYBOARD 0
+#define SCREEN_WAKE_FROM_TOUCH    0
 
 // The Pro has no trackball. Keyboard shortcuts and touch provide navigation.
 #define HAS_TRACKBALL             0

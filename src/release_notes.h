@@ -6,17 +6,11 @@
 // Release Notes entry in the config screen. Empty when no notes were
 // available at build time (a plain dev build, typically).
 static const char RELEASE_NOTES_TEXT[] = R"CAMNOTES(New
-- Config screen has a new "Node Name" entry for editing your long and short name on the device; saving broadcasts the new name to the mesh right away instead of waiting for the next scheduled node info. Leaving the short name blank fills it in from the long name.
+- Release Channel setting (Stable or Alpha) in device Settings and the web config page - Stable installs published releases only, Alpha also takes prerelease builds for earlier access to in-progress work. A device flashed with an alpha image follows the Alpha channel automatically until a channel is picked by hand.
+- Switching from Alpha back to Stable offers the newest stable release even though it is numerically older than the alpha you are running, so returning to the stable track no longer needs a USB reflash.
+- T-Deck Pro: the sleep clock now shows unread messages under the date - new DM count and how many channels have activity - updating a few seconds after things settle so a burst of messages doesn't repaint the e-paper repeatedly.
 
 Changed
-- T-Deck Pro: the e-paper screen now waits for a brief pause in your typing before repainting, so a line appears complete instead of the panel committing halfway through a word. If you keep typing without a break, it refreshes anyway about once a second.
-- T-Deck Pro: the firmware update screen is now a single static black-on-white "Firmware updating..." notice with a reminder to keep the device powered, rather than a progress bar - a percentage that costs most of a second to redraw would slow the download itself.
-
-Fixed
-- T-Deck Pro and T-Lora Pager TFT: characters no longer go missing when you type quickly. Keystrokes are now collected and held while the display is busy, instead of being discarded by the keyboard controller.
-- T-Deck Pro: firmware updates started from the menu no longer leave the screen frozen on the config page for the whole install with no indication anything is happening, and the interface redraws cleanly if you return to it.
-
-Update (v4.7.7)
-Changed
-- Square: tapping the screen no longer wakes it - use the buttons to wake the display, so sleeves, pockets and curious cats stop lighting up the panel.
-- Square: the touch panel is no longer polled while the screen is off, trimming standby power draw, and touch stays fully responsive after waking.)CAMNOTES";
+- T-Deck Pro: the screen now wakes only from the side button. Keys and touches no longer wake it, so the device can't be woken in a bag or pocket; the side button still both sleeps and wakes the panel, and remote VNC input still wakes as before.
+- T-Lora Pager TFT: Sym+Backspace now jumps straight back to the chat screen, closing every open panel and filter at once, instead of dismissing one panel per press.
+- T-Lora Pager TFT: the Alt-key global navigation shortcuts already available on the T-Deck keyboards now work here too.)CAMNOTES";
