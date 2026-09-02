@@ -282,6 +282,127 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     return false;
 }
 
+// Finds the newest prerelease in the release listing, without ever holding the
+// listing in RAM.
+//
+// The alpha channel is a track, not just "earliest access": it lands on the
+// newest -alpha.N even when a finished release outranks it. GitHub has no
+// "latest prerelease" endpoint and no way to filter the listing, so the choice
+// has to be made here.
+//
+// Streaming matters. One release object is ~43 KB because of its assets array,
+// and the listing is several of those -- far past what this device can buffer.
+// What makes it cheap anyway is GitHub's field order: tag_name and prerelease
+// both appear near the top of each object, before assets. So each release costs
+// a few hundred bytes to classify, and the scan stops at the first prerelease
+// rather than reading to the end.
+//
+// Only two literals are matched, and a short tail is carried between reads so a
+// token split across a chunk boundary is still seen.
+static bool fetchLatestPrereleaseTag(String &tagOut, String &errOut) {
+    tagOut = "";
+    errOut = "";
+
+    if (WiFi.status() != WL_CONNECTED) {
+        errOut = "WiFi not connected";
+        return false;
+    }
+
+    char url[192];
+    snprintf(url, sizeof(url), "%s/firmware/latest-alpha", s_otaBaseUrl);
+
+    preferExternalHeapForOta();
+    WiFiClient plainClient;
+    HTTPClient http;
+    if (!http.begin(plainClient, url)) {
+        errOut = "alpha request start failed";
+        return false;
+    }
+    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+    http.addHeader("User-Agent", "camillia-mt-ota");
+    http.addHeader("Accept", "application/vnd.github+json");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        errOut = String("alpha HTTP ") + String(code);
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    if (!stream) {
+        errOut = "alpha stream unavailable";
+        http.end();
+        return false;
+    }
+
+    static const char kTagKey[] = "\"tag_name\":\"";
+    static const char kPreKey[] = "\"prerelease\":true";
+    // Long enough to span either literal plus a whole tag value across a split.
+    constexpr size_t kCarry = 96;
+    // Hard ceiling so a listing with no prerelease in it cannot read forever.
+    constexpr size_t kMaxScanBytes = 512UL * 1024UL;
+
+    String window;
+    String lastTag;
+    size_t scanned = 0;
+    bool found = false;
+    uint32_t lastDataMs = millis();
+
+    while (http.connected() && scanned < kMaxScanBytes) {
+        const size_t avail = stream->available();
+        if (avail == 0) {
+            if (millis() - lastDataMs > kReleaseCheckTimeoutMs) break;
+            delay(5);
+            continue;
+        }
+        char buf[256];
+        const size_t want = (avail > sizeof(buf)) ? sizeof(buf) : avail;
+        const int n = stream->readBytes((uint8_t *)buf, want);
+        if (n <= 0) continue;
+        lastDataMs = millis();
+        scanned += (size_t)n;
+        window.concat(buf, (size_t)n);
+
+        // Consume every complete token currently in the window. tag_name always
+        // precedes prerelease within an object, so the tag standing when the
+        // prerelease flag is seen is that object's tag.
+        while (true) {
+            const int tagPos = window.indexOf(kTagKey);
+            const int prePos = window.indexOf(kPreKey);
+            if (tagPos < 0 && prePos < 0) break;
+
+            if (prePos >= 0 && (tagPos < 0 || prePos < tagPos)) {
+                if (lastTag.length()) {
+                    tagOut = lastTag;
+                    found = true;
+                }
+                window.remove(0, prePos + (int)strlen(kPreKey));
+                if (found) break;
+                continue;
+            }
+
+            const int valStart = tagPos + (int)strlen(kTagKey);
+            const int valEnd = window.indexOf('"', valStart);
+            if (valEnd < 0) break;   // value still incomplete; wait for more
+            lastTag = window.substring(valStart, valEnd);
+            window.remove(0, valEnd + 1);
+        }
+        if (found) break;
+
+        if (window.length() > kCarry) {
+            window.remove(0, window.length() - kCarry);
+        }
+    }
+
+    http.end();
+
+    if (found && tagOut.length()) return true;
+    errOut = scanned ? String("no prerelease found") : String("no alpha response");
+    return false;
+}
+
 // Proxy layout: {base}/firmware/<tag>/<asset>
 static void buildAssetUrl(const char *tag, char *outUrl, size_t outLen) {
     if (!outUrl || outLen == 0) return;
@@ -457,9 +578,13 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
         return false;
     }
 
+    const uint8_t channelSel = otaResolveChannel(g_otaChannel);
     String latestTag;
     String err;
-    if (!fetchLatestReleaseTag(latestTag, err)) {
+    const bool gotTag = (channelSel == OTA_CHANNEL_ALPHA)
+                            ? fetchLatestPrereleaseTag(latestTag, err)
+                            : fetchLatestReleaseTag(latestTag, err);
+    if (!gotTag) {
         out.ok = false;
         copyStringToBuf(out.error, sizeof(out.error), err.c_str());
         return false;
@@ -475,7 +600,22 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
         return false;
     }
 
-    const uint8_t channel = otaResolveChannel(g_otaChannel);
+    const uint8_t channel = channelSel;
+    if (channel == OTA_CHANNEL_ALPHA) {
+        // The alpha channel is a track, so "is it newer" is the wrong question:
+        // once a finished release ships it outranks every alpha of that version,
+        // and a version test would strand an opted-in tester on stable forever.
+        // Anything that is not already the newest alpha is therefore offered,
+        // including a step back onto the track from a higher stable build.
+        out.updateAvailable = (strcmp(APP_VERSION, out.latestTag) != 0);
+        if (!out.updateAvailable) {
+            Serial.printf("[ota] already on the newest alpha (%s)\n", out.latestTag);
+        } else {
+            Serial.printf("[ota] alpha channel: %s -> %s\n", APP_VERSION, out.latestTag);
+        }
+        out.ok = true;
+        return true;
+    }
     if (isPrereleaseTag(out.latestTag) && channel != OTA_CHANNEL_ALPHA) {
         // Never auto-update a stable-channel device onto a prerelease.
         // /releases/latest already excludes them, but the release-page and
@@ -574,7 +714,12 @@ bool otaInstallLatestRelease(const char *tag,
     } else {
         String latestTag;
         String err;
-        if (!fetchLatestReleaseTag(latestTag, err)) {
+        // Same source the check used, or the install would resolve "latest" on
+        // the other channel and fetch a build the user was never offered.
+        const bool gotTag = (otaResolveChannel(g_otaChannel) == OTA_CHANNEL_ALPHA)
+                                ? fetchLatestPrereleaseTag(latestTag, err)
+                                : fetchLatestReleaseTag(latestTag, err);
+        if (!gotTag) {
             return setErr(errOut, errLen, err.c_str());
         }
         copyStringToBuf(tagBuf, sizeof(tagBuf), latestTag.c_str());

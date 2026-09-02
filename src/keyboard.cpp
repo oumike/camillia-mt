@@ -302,6 +302,9 @@ const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
     {'n', 'N', ','},
     {'m', 'M', '.'},
     {KEY_NONE, KEY_NONE, KEY_NONE},
+    // The Sym column here is unreachable: Sym+Backspace is intercepted in
+    // tloraPollController() before this table is consulted. Left as it was
+    // rather than made to look like it decides anything.
     {KEY_BACKSPACE, KEY_NONE, KEY_ESCAPE},
     {' ', KEY_NONE, KEY_NONE},
 };
@@ -508,12 +511,30 @@ void tloraDrainController() {
                         sTloraBackspaceDownMs = now;
                     }
 
-                    // Pager shortcut: Symbol + Backspace closes compose/panels
-                    // using the same path as long-hold backspace, but instantly.
+                    // Pager shortcut: Symbol + Backspace goes straight home to
+                    // the chat screen, the same thing Alt+H does on the T-Deck
+                    // keyboards.
+                    //
+                    // It used to queue KEY_BACKSPACE_HOLD, which is a close-one-
+                    // panel gesture: from a filtered list it retired the filter
+                    // and stopped there, so getting out took several presses.
+                    // KEY_OPEN_HOME tears down every modal and filter in one go,
+                    // which is what "home" is for.
+                    //
+                    // sTloraBackspaceHoldSent is still set so the hold timer
+                    // below does not fire a second event for this same press.
+                    //
+                    // Pager only. This block is shared with the T-Deck Pro,
+                    // whose Sym+Backspace stays the close-one-panel gesture it
+                    // has always been.
                     if (sTloraModifier & TLORA_MOD_SYM) {
                         sTloraModifier = 0;
                         sTloraBackspaceHoldSent = true;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+                        tloraQueuePush(KEY_OPEN_HOME);
+#else
                         tloraQueuePush(KEY_BACKSPACE_HOLD);
+#endif
                         continue;
                     }
                 } else {
