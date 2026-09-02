@@ -66,6 +66,19 @@ bool     keyboardKeyTrace();
 char     keyboardHeldKey();
 uint32_t keyboardHeldMs();
 
+// Drains the keyboard controller without returning anything, for callers that
+// are already blocked on work long enough for the controller's own FIFO to
+// overflow. The e-paper build calls this throughout a panel refresh, which
+// parks loop() for the better part of a second. Paces itself internally and
+// sleeps 1 ms on the passes it skips, so it is safe to call from a spin loop.
+void     keyboardServiceDuringBlockingWork();
+
+// Keys read off the controller but not yet handed to the UI, and when the
+// controller last reported a press (0 if it never has). Together they say
+// whether a typing burst is still in flight.
+uint8_t  keyboardPendingKeys();
+uint32_t keyboardLastKeyMs();
+
 #if defined(DEVICE_TDECK)
 // Sets the T-Deck keyboard backlight (0 = off, 255 = full). The LEDs belong to
 // the keyboard's own ESP32-C3, so this is an I2C command to it rather than a

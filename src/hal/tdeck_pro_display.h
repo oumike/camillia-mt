@@ -11,6 +11,18 @@
 extern volatile bool g_tdeckProTouchIrq;
 void IRAM_ATTR tdeckProTouchInterrupt();
 
+// Work that cannot wait out a panel refresh. GxEPD2 spins on the BUSY line for
+// ~700 ms on a partial update and ~1.1 s on a full one, and for that whole
+// stretch loop() is doing nothing at all — long enough for the keyboard
+// controller's ten-event FIFO to fill and start dropping keys. The refresh
+// therefore calls this hook throughout the wait instead of sleeping through it.
+//
+// A hook rather than a direct call so the panel driver keeps knowing nothing
+// about the keyboard; main installs it once both are up. Null until then, and
+// the trampoline below falls back to the 1 ms sleep GxEPD2 would have done.
+inline void (*g_einkBusyHook)() = nullptr;
+inline void einkSetBusyHook(void (*hook)()) { g_einkBusyHook = hook; }
+
 // GxEPD2 drives the exact GDEQ031T10/UC8253 panel. The LovyanGFX sprite is used
 // only by direct boot/OTA drawing before LVGL starts; the running UI supplies
 // native I1 pixels through pushI1(), with no RGB-to-monochrome conversion.
@@ -63,6 +75,7 @@ public:
         _epd.init(115200, true, 2, false, SPI,
                   SPISettings(TFT_SPI_WRITE_HZ, MSBFIRST, SPI_MODE0));
         _epd.setRotation(TFT_ROTATION_DEFAULT);
+        _epd.epd2.setBusyCallback(&LGFX_TDeck::busyCallback);
 
 #if TFT_BL >= 0
         ledcSetup(TFT_BL_PWM_CH, TFT_BL_FREQ, 8);
@@ -144,6 +157,23 @@ public:
         _fullRefreshPending = _fullRefreshPending || full;
     }
 
+    // Puts whatever is currently on the LovyanGFX canvas onto the panel, now.
+    //
+    // Once LVGL has flushed a frame, serviceRefresh() takes its pixels from the
+    // native I1 path and stops reading the canvas at all — which quietly turned
+    // every direct draw into a no-op for the rest of the session. Anything that
+    // needs to take the panel over while the UI is up goes through here: it
+    // hands the canvas back to the monochrome conversion and forces the update
+    // rather than waiting out EINK_REFRESH_MIN_MS.
+    //
+    // The takeover is not sticky. The next LVGL flush calls pushI1() and the I1
+    // path goes live again, so the UI resumes on its own with no teardown.
+    void refreshFromCanvas(bool full = true) {
+        _lvglI1Active = false;
+        requestRefresh(full);
+        serviceRefresh(true);
+    }
+
     bool pushI1(int32_t x, int32_t y, int32_t w, int32_t h,
                 const uint8_t *pixels, size_t sourceStride) {
         if (!_mono || !pixels || w <= 0 || h <= 0) return false;
@@ -201,6 +231,11 @@ public:
     }
 
 private:
+    static void busyCallback(const void *) {
+        if (g_einkBusyHook) g_einkBusyHook();
+        else delay(1);
+    }
+
     static constexpr size_t kMonoBytes =
         ((size_t)TFT_PANEL_WIDTH * (size_t)TFT_PANEL_HEIGHT) / 8u;
     static constexpr uint8_t kFullRefreshEvery = 10;

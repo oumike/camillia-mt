@@ -328,6 +328,18 @@ static lv_obj_t *s_cfgWifiPassInput = nullptr;
 static lv_obj_t *s_cfgWifiPassKeyboard = nullptr;
 static lv_obj_t *s_cfgWifiPassStatus = nullptr;
 static bool s_cfgWifiPickerOnboardingMode = false;
+// Node identity editor, opened from the Config screen. Both names live in one
+// modal because they are one setting: a short name is only ever chosen against
+// the long name it abbreviates, and the mesh learns the pair together.
+static lv_obj_t *s_cfgNodeNameBackdrop = nullptr;
+static lv_obj_t *s_cfgNodeNameModal = nullptr;
+static lv_obj_t *s_cfgNodeNameLongInput = nullptr;
+static lv_obj_t *s_cfgNodeNameShortInput = nullptr;
+static lv_obj_t *s_cfgNodeNameKeyboard = nullptr;
+static lv_obj_t *s_cfgNodeNameStatus = nullptr;
+// Which field the hardware keyboard types into: 0 = long name, 1 = short name.
+// Boards with a touch panel set it from the field that was tapped.
+static int s_cfgNodeNameFocus = 0;
 // Yes/No confirmation dialog layered over the CFG modal for destructive actions.
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
@@ -1629,6 +1641,8 @@ static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
 static void openCfgColorPickerModal();
+static void openCfgNodeNameModal();
+static void closeCfgNodeNameModal();
 static void openCfgBrightnessModal();
 static void openCfgScreenTimeoutModal();
 static const char *screenTimeoutName(uint32_t secs);
@@ -2443,6 +2457,7 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
+    CFG_ACTION_NODE_NAME,
 #if HAS_VNC_HOST
     CFG_ACTION_VNC_HOST,
 #endif
@@ -4235,6 +4250,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Location Precision: %s",
                      positionPrecisionLabel(s_cfg.positionPrecision));
             break;
+        case CFG_ACTION_NODE_NAME:
+            snprintf(buf, bufLen, "Node Name: %s (%s)",
+                     s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : "unset",
+                     s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----");
+            break;
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "Export Config");
             break;
@@ -4679,8 +4699,93 @@ static bool consumeOtaWorkerModeOnce() {
 
 static bool s_otaWorkerUiReady = true;
 
+// The title every install-phase draw carries. Named rather than repeated as a
+// literal because the e-paper path below matches on it to decide which state is
+// the long one, and a typo in either place would silently stop matching.
+static const char kOtaInstallTitle[] = "Installing update";
+
+#if defined(DEVICE_TDECK_PRO)
+// ── The Pro's OTA screen ────────────────────────────────────────────────────
+// The shared drawing below does not work on this board, for two separate
+// reasons. It paints white text on a flooded black screen, which on e-paper
+// means driving every pixel to black — slow, and the inverse of the
+// black-on-white the rest of this build uses. And once LVGL has flushed a
+// frame, serviceRefresh() ignores the canvas entirely (see refreshFromCanvas),
+// so a UI-triggered update drew its whole progress sequence into a buffer
+// nobody read: the panel just held the config screen until the device rebooted.
+//
+// The replacement is deliberately static. A GDEQ031T10 update blocks for about
+// 700 ms, so the 180 ms progress-bar cadence would have the panel refreshing
+// through the entire download instead of downloading — and a percentage that
+// costs two thirds of a second to show is worse than no percentage at all. One
+// screen goes up when the install starts and stays up, untouched, until the
+// device reboots into the new firmware.
+static char s_otaProShownHeadline[48] = {};
+
+static void otaProDrawScreen(const char *headline, const char *detail) {
+    if (!s_otaWorkerUiReady) return;
+
+    displayDev().fillScreen(TFT_WHITE);
+    displayDev().setTextColor(TFT_BLACK, TFT_WHITE);
+    displayDev().setTextSize(1);
+
+    const int w = (int)displayDev().width();
+    auto centred = [w](const char *text) {
+        const int textW = (int)displayDev().textWidth(text);
+        return (w > textW) ? ((w - textW) / 2) : 4;
+    };
+
+    int y = 128;   // roughly centred on the 320-tall panel, headline first
+    if (headline && headline[0]) {
+        displayDev().setFont(&fonts::DejaVu18);
+        displayDev().drawString(headline, centred(headline), y);
+        y += 36;
+    }
+
+    displayDev().setFont(&fonts::DejaVu12);
+    if (detail && detail[0]) {
+        displayDev().drawString(detail, centred(detail), y);
+        y += 26;
+    }
+
+    // The screen stands still for minutes with no progress indication of any
+    // kind, which is exactly when someone decides the device has hung and pulls
+    // the power — mid-flash, the one moment it must not happen.
+    const char *warn = "Keep the device powered.";
+    displayDev().drawString(warn, centred(warn), y);
+
+    lcd.refreshFromCanvas(true);
+}
+
+// Repaints only when the state actually changes. Progress ticks all arrive
+// under the same headline, so they collapse into the single paint that started
+// the install; `detail` is ignored for that decision because it moves
+// constantly during a transfer ("Starting download...", "Downloading...") and
+// says nothing the static screen does not already say.
+static void otaProShowState(const char *headline, const char *detail) {
+    if (!headline) headline = "";
+    if (strncmp(s_otaProShownHeadline, headline, sizeof(s_otaProShownHeadline) - 1) == 0) {
+        return;
+    }
+    snprintf(s_otaProShownHeadline, sizeof(s_otaProShownHeadline), "%s", headline);
+    otaProDrawScreen(headline, detail);
+}
+
+// Install is the state worth spelling out: it is the only one that lasts
+// minutes, and it is the one the panel is really there to explain. Every other
+// state keeps the caller's own wording, which is already short enough to fit.
+static const char *otaProHeadlineFor(const char *title) {
+    if (title && strcmp(title, kOtaInstallTitle) == 0) return "Firmware updating...";
+    return (title && title[0]) ? title : "Firmware updating...";
+}
+#endif
+
 static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) {
     if (!s_otaWorkerUiReady) return;
+#if defined(DEVICE_TDECK_PRO)
+    otaProShowState(otaProHeadlineFor(line1), line2);
+    return;
+#else
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
     displayDev().setTextSize(1);
@@ -4694,9 +4799,6 @@ static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) 
     if (line2 && line2[0]) {
         displayDev().drawString(line2, 8, y);
     }
-#if defined(DEVICE_TDECK_PRO)
-    lcd.requestRefresh();
-    lcd.serviceRefresh();
 #endif
 }
 
@@ -4706,6 +4808,15 @@ static void otaWorkerDrawProgress(const char *title,
                                   size_t total,
                                   bool stalled) {
     if (!s_otaWorkerUiReady) return;
+#if defined(DEVICE_TDECK_PRO)
+    // Byte counts, percentages and the stall flag are all dropped here: none of
+    // them can be shown without a 700 ms panel refresh per update.
+    (void)written;
+    (void)total;
+    (void)stalled;
+    otaProShowState(otaProHeadlineFor(title), detail);
+    return;
+#else
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextSize(1);
     displayDev().setFont(&fonts::DejaVu12);
@@ -4759,9 +4870,6 @@ static void otaWorkerDrawProgress(const char *title,
         displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
         displayDev().drawString(detail, 8, 126);
     }
-#if defined(DEVICE_TDECK_PRO)
-    lcd.requestRefresh();
-    lcd.serviceRefresh();
 #endif
 }
 
@@ -4961,6 +5069,13 @@ static bool runOtaWorkerModeIfRequested() {
 
     otaSetNetworkAllowed(true);
 
+#if defined(DEVICE_TDECK_PRO)
+    // Forget what the panel showed last time: a second attempt in the same
+    // session would otherwise dedupe against the previous run's screen and
+    // paint nothing at all.
+    s_otaProShownHeadline[0] = '\0';
+#endif
+
     Serial.printf("[ota-worker] one-shot mode requested (rtc=%d nvs=%d)\n",
                   rtcRequested ? 1 : 0,
                   nvsRequested ? 1 : 0);
@@ -5015,7 +5130,7 @@ static bool runOtaWorkerModeIfRequested() {
         return true;
     }
 
-    otaWorkerDrawStatus("Installing update", check.latestTag[0] ? check.latestTag : "latest");
+    otaWorkerDrawStatus(kOtaInstallTitle, check.latestTag[0] ? check.latestTag : "latest");
     static volatile size_t s_otaWorkerBytesWritten = 0;
     static volatile size_t s_otaWorkerBytesTotal = 0;
     static volatile uint32_t s_otaWorkerLastProgressMs = 0;
@@ -5033,7 +5148,7 @@ static bool runOtaWorkerModeIfRequested() {
         const bool stalled = (s_otaWorkerLastProgressMs != 0)
                           && ((uint32_t)(now - s_otaWorkerLastProgressMs) > 3000UL);
         if ((uint32_t)(now - s_otaWorkerLastDrawMs) >= 180UL || stalled) {
-            otaWorkerDrawProgress("Installing update",
+            otaWorkerDrawProgress(kOtaInstallTitle,
                                   stalled ? "No progress for 3s..." : "Downloading...",
                                   written,
                                   total,
@@ -5047,7 +5162,7 @@ static bool runOtaWorkerModeIfRequested() {
     s_otaWorkerLastAdvancedBytes = 0;
     s_otaWorkerLastProgressMs = millis();
     s_otaWorkerLastDrawMs = 0;
-    otaWorkerDrawProgress("Installing update",
+    otaWorkerDrawProgress(kOtaInstallTitle,
                           "Starting download...",
                           0,
                           0,
@@ -5060,7 +5175,7 @@ static bool runOtaWorkerModeIfRequested() {
                                              onOtaProgress);
     if (!installOk && otaWorkerErrIsTlsLowMem(err)) {
         Serial.println("[ota-worker] low-mem TLS on install; retrying after WiFi recycle");
-        otaWorkerDrawProgress("Installing update",
+        otaWorkerDrawProgress(kOtaInstallTitle,
                               "Retrying download...",
                               (size_t)s_otaWorkerBytesWritten,
                               (size_t)s_otaWorkerBytesTotal,
@@ -5432,7 +5547,7 @@ static void setTouchSleep(bool asleep) {
 #else
     lgfx::ITouch *t = displayDev().touch();
     if (!t) return;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_SQUARE)
     // Deliberately do NOT issue the GT911 deep-sleep (0x8040=0x05) here. The
     // T-Deck has no touch reset line, and at least one panel revision (the unit
     // that latches I2C address 0x5D) never resumes coordinate scanning from an
@@ -5440,6 +5555,11 @@ static void setTouchSleep(bool asleep) {
     // reports no touches. Skipping the command leaves the GT911 in its own
     // low-power idle scanning, which recovers cleanly and costs only a little
     // current while the screen is off. Nothing to wake.
+    //
+    // Square is the same trap by a different route: its INT and RST both hang
+    // off the PCA9555 rather than a GPIO, so cfg.pin_int is -1 and LovyanGFX
+    // has no line to pulse to bring the controller back. Sleeping it would be
+    // one-way.
     (void)t;
     (void)asleep;
 #else
@@ -8698,6 +8818,10 @@ static void sendComposeMessage() {
 
 static void initCfgActions() {
     s_cfgActionCount = 0;
+    // First row: it is this node's identity — the one setting every other node
+    // on the mesh sees — and after onboarding this screen is the only place it
+    // can be changed without the web form.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NODE_NAME;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
@@ -14904,6 +15028,327 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
     refreshCfgWifiPickerModal();
 }
 
+// ── Node name editor ─────────────────────────────────────────────────────────
+// The long and short name in one modal, because they are one setting: a short
+// name is only ever picked against the long name it abbreviates. Nothing
+// reaches s_cfg until Save, so an abandoned edit leaves the identity the rest
+// of the mesh knows untouched.
+static void onboardingDeriveShortFromLong(const char *longName, char *shortOut, size_t shortLen);
+
+static void closeCfgNodeNameModal() {
+    if (lvObjValid(s_cfgNodeNameBackdrop)) {
+        lv_obj_del(s_cfgNodeNameBackdrop);
+    } else if (lvObjValid(s_cfgNodeNameModal)) {
+        lv_obj_del(s_cfgNodeNameModal);
+    }
+    s_cfgNodeNameBackdrop   = nullptr;
+    s_cfgNodeNameModal      = nullptr;
+    s_cfgNodeNameLongInput  = nullptr;
+    s_cfgNodeNameShortInput = nullptr;
+    s_cfgNodeNameKeyboard   = nullptr;
+    s_cfgNodeNameStatus     = nullptr;
+    s_cfgNodeNameFocus      = 0;
+}
+
+static void cfgNodeNameSetStatus(const char *msg) {
+    if (!lvObjValid(s_cfgNodeNameStatus)) return;
+    lv_label_set_text(s_cfgNodeNameStatus, msg ? msg : "");
+}
+
+static lv_obj_t *cfgNodeNameFocusedInput() {
+    return (s_cfgNodeNameFocus == 1) ? s_cfgNodeNameShortInput : s_cfgNodeNameLongInput;
+}
+
+// Paints the focus border and, on the touch-only builds, points the on-screen
+// keyboard at the field that is taking characters. Two fields is one more than
+// every other text modal here has, so which one is live has to be visible.
+static void refreshCfgNodeNameFocus() {
+    if (!s_cfgNodeNameLongInput || !s_cfgNodeNameShortInput) return;
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t focusBorder = lv_color_make(0, 0, 0);
+    const lv_color_t idleBorder  = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t focusBorder = lv_color_hex(0x9CC2FF);
+    const lv_color_t idleBorder  = lv_color_hex(0x4C76BA);
+#endif
+    lv_obj_t *focused = cfgNodeNameFocusedInput();
+    lv_obj_t *fields[2] = {s_cfgNodeNameLongInput, s_cfgNodeNameShortInput};
+    for (int i = 0; i < 2; i++) {
+        const bool sel = (fields[i] == focused);
+        lv_obj_set_style_border_width(fields[i], sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(fields[i], sel ? focusBorder : idleBorder, 0);
+    }
+    if (s_cfgNodeNameKeyboard) lv_keyboard_set_textarea(s_cfgNodeNameKeyboard, focused);
+}
+
+static void cfgNodeNameSetFocus(int which) {
+    s_cfgNodeNameFocus = (which == 1) ? 1 : 0;
+    refreshCfgNodeNameFocus();
+}
+
+// Commit both fields. Rejects an empty long name the way onboarding does, and
+// fills an empty short name from the long one rather than rejecting it, since
+// one can always be derived.
+static void cfgNodeNameSave() {
+    if (!s_cfgNodeNameLongInput || !s_cfgNodeNameShortInput) return;
+
+    const char *typedLong  = lv_textarea_get_text(s_cfgNodeNameLongInput);
+    const char *typedShort = lv_textarea_get_text(s_cfgNodeNameShortInput);
+    String longName  = typedLong  ? String(typedLong)  : String();
+    String shortName = typedShort ? String(typedShort) : String();
+    longName.trim();
+    shortName.trim();
+
+    if (longName.length() == 0) {
+        cfgNodeNameSetStatus("Long name cannot be empty");
+        cfgNodeNameSetFocus(0);
+        return;
+    }
+
+    char newLong[sizeof(s_cfg.nodeLong)];
+    char newShort[sizeof(s_cfg.nodeShort)];
+    utf8util::copyTruncate(newLong, sizeof(newLong), longName.c_str());
+    if (shortName.length() == 0) {
+        onboardingDeriveShortFromLong(newLong, newShort, sizeof(newShort));
+    } else {
+        utf8util::copyTruncate(newShort, sizeof(newShort), shortName.c_str());
+    }
+
+    const bool changed = (strcmp(newLong, s_cfg.nodeLong) != 0)
+                         || (strcmp(newShort, s_cfg.nodeShort) != 0);
+    if (changed) {
+        utf8util::copyTruncate(s_cfg.nodeLong,  sizeof(s_cfg.nodeLong),  newLong);
+        utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), newShort);
+        persistConfigToPrefs();
+        // The mesh only learns a name from a NODEINFO, and the next scheduled
+        // one can be an hour out — so the rename would look like it had not
+        // taken anywhere but on this screen. No reboot: nothing else in the
+        // radio configuration moved.
+        webCfgQueueAnnounce();
+        Serial.printf("[cfg] node name set to \"%s\" (%s); NODEINFO queued\n",
+                      s_cfg.nodeLong, s_cfg.nodeShort);
+    }
+
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Node Name: %s (%s)%s",
+             s_cfg.nodeLong, s_cfg.nodeShort, changed ? "" : " (unchanged)");
+    closeCfgNodeNameModal();
+    refreshCfgModal();
+}
+
+static void cfgNodeNameCancel() {
+    closeCfgNodeNameModal();
+    refreshCfgModal();
+}
+
+static void onCfgNodeNameFieldPressed(lv_event_t *e) {
+    cfgNodeNameSetFocus((int)(intptr_t)lv_event_get_user_data(e));
+}
+
+static void onCfgNodeNameBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_cfgNodeNameBackdrop) return;
+    cfgNodeNameCancel();
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+static void onCfgNodeNameSavePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgNodeNameSave();
+}
+
+static void onCfgNodeNameClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgNodeNameCancel();
+}
+#endif
+
+static void openCfgNodeNameModal() {
+    if (!s_rootScreen || s_cfgNodeNameModal || s_cfgNodeNameBackdrop) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 320) modalW = 320;
+#if defined(DEVICE_SQUARE)
+    modalW = w;
+#endif
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t modalBg      = lv_color_make(255, 255, 255);
+    const lv_color_t modalBorder  = lv_color_make(0, 0, 0);
+    const lv_color_t titleColor   = lv_color_make(0, 0, 0);
+    const lv_color_t captionColor = lv_color_make(0, 0, 0);
+    const lv_color_t inputBg      = lv_color_make(255, 255, 255);
+    const lv_color_t inputText    = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t modalBg      = lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder  = lv_color_hex(0x5C86C6);
+    const lv_color_t titleColor   = lv_color_hex(0xD9E8FF);
+    const lv_color_t captionColor = lv_color_hex(0xA7C7FF);
+    const lv_color_t inputBg      = lv_color_hex(0x102B61);
+    const lv_color_t inputText    = lv_color_hex(0xE8F1FF);
+#endif
+
+    s_cfgNodeNameBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgNodeNameBackdrop, w, h);
+    lv_obj_align(s_cfgNodeNameBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgNodeNameBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgNodeNameBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgNodeNameBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgNodeNameBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_cfgNodeNameBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgNodeNameBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgNodeNameBackdrop, onCfgNodeNameBackdropPressed,
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_cfgNodeNameModal = lv_obj_create(s_cfgNodeNameBackdrop);
+    lv_obj_set_size(s_cfgNodeNameModal,
+                    modalW,
+#if UI_TOUCH_ONLY_PROFILE
+                    h - 18
+#else
+                    LV_SIZE_CONTENT
+#endif
+    );
+    lv_obj_align(s_cfgNodeNameModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgNodeNameModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_cfgNodeNameModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_cfgNodeNameModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgNodeNameModal, 1, 0);
+    lv_obj_set_style_border_color(s_cfgNodeNameModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_cfgNodeNameModal, 8, 0);
+#if defined(DEVICE_SQUARE)
+    lv_obj_set_style_pad_left(s_cfgNodeNameModal, 2, 0);
+    lv_obj_set_style_pad_right(s_cfgNodeNameModal, 2, 0);
+#endif
+    lv_obj_set_style_pad_row(s_cfgNodeNameModal, 6, 0);
+    lv_obj_set_flex_flow(s_cfgNodeNameModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgNodeNameModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_move_foreground(s_cfgNodeNameBackdrop);
+
+    lv_obj_t *title = lv_label_create(s_cfgNodeNameModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Node Name");
+
+    // Side by side rather than stacked: it keeps the whole editor inside one
+    // screen on the 135-line panels, and the two fields are read together
+    // anyway — the short name is an abbreviation of what is to its left.
+    lv_obj_t *fieldRow = lv_obj_create(s_cfgNodeNameModal);
+    lv_obj_set_width(fieldRow, lv_pct(100));
+    lv_obj_set_height(fieldRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(fieldRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(fieldRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(fieldRow, 0, 0);
+    lv_obj_set_style_pad_all(fieldRow, 0, 0);
+    lv_obj_set_style_pad_column(fieldRow, 6, 0);
+    lv_obj_set_flex_flow(fieldRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(fieldRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    auto makeField = [&](const char *caption, int grow, size_t maxLen,
+                         const char *value, int which) {
+        lv_obj_t *col = lv_obj_create(fieldRow);
+        lv_obj_set_flex_grow(col, grow);
+        lv_obj_set_height(col, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(col, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(col, 0, 0);
+        lv_obj_set_style_pad_all(col, 0, 0);
+        lv_obj_set_style_pad_row(col, 2, 0);
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+
+        lv_obj_t *cap = lv_label_create(col);
+        lv_obj_set_width(cap, lv_pct(100));
+        lv_obj_set_style_text_font(cap, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(cap, captionColor, 0);
+        lv_label_set_text(cap, caption);
+
+        lv_obj_t *ta = lv_textarea_create(col);
+        if (!ta) return (lv_obj_t *)nullptr;
+        lv_obj_set_width(ta, lv_pct(100));
+        lv_obj_set_height(ta, 36);
+        lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(ta, inputText, 0);
+        lv_obj_set_style_bg_color(ta, inputBg, 0);
+        lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(ta, 1, 0);
+        lv_obj_set_style_pad_all(ta, 4, 0);
+        lv_textarea_set_one_line(ta, true);
+        lv_textarea_set_max_length(ta, (uint32_t)maxLen);
+        lv_textarea_set_placeholder_text(ta, caption);
+        lv_textarea_set_text(ta, value ? value : "");
+        lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST);
+        lv_obj_add_event_cb(ta, onCfgNodeNameFieldPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)which);
+        return ta;
+    };
+
+    s_cfgNodeNameLongInput  = makeField("Long name", 3, sizeof(s_cfg.nodeLong) - 1,
+                                        s_cfg.nodeLong, 0);
+    s_cfgNodeNameShortInput = makeField("Short", 1, sizeof(s_cfg.nodeShort) - 1,
+                                        s_cfg.nodeShort, 1);
+    if (!s_cfgNodeNameLongInput || !s_cfgNodeNameShortInput) {
+        logLvglMemDiag("node name modal aborted (low LVGL mem)");
+        closeCfgNodeNameModal();
+        return;
+    }
+
+    s_cfgNodeNameStatus = lv_label_create(s_cfgNodeNameModal);
+    lv_obj_set_width(s_cfgNodeNameStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgNodeNameStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgNodeNameStatus, captionColor, 0);
+    lv_obj_set_style_text_align(s_cfgNodeNameStatus, LV_TEXT_ALIGN_LEFT, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(s_cfgNodeNameStatus, "Tap a field to edit, then Save");
+#else
+    lv_label_set_text_fmt(s_cfgNodeNameStatus, "Enter=Save  Tab=Field  %s=Erase/Back",
+                          modalCloseKeyLabel());
+#endif
+
+#if UI_TOUCH_ONLY_PROFILE
+    lv_obj_t *btnRow = lv_obj_create(s_cfgNodeNameModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, 30);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 4, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *closeBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(closeBtn, 1);
+    lv_obj_set_height(closeBtn, lv_pct(100));
+    lv_obj_add_event_cb(closeBtn, onCfgNodeNameClosePressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *closeLbl = lv_label_create(closeBtn);
+    lv_obj_set_style_text_font(closeLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(closeLbl, "Close");
+    lv_obj_center(closeLbl);
+
+    lv_obj_t *saveBtn = lv_btn_create(btnRow);
+    lv_obj_set_flex_grow(saveBtn, 1);
+    lv_obj_set_height(saveBtn, lv_pct(100));
+    lv_obj_add_event_cb(saveBtn, onCfgNodeNameSavePressed, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *saveLbl = lv_label_create(saveBtn);
+    lv_obj_set_style_text_font(saveLbl, &lv_font_montserrat_10, 0);
+    lv_label_set_text(saveLbl, "Save");
+    lv_obj_center(saveLbl);
+
+    s_cfgNodeNameKeyboard = lv_keyboard_create(s_cfgNodeNameModal);
+    configureOnScreenKeyboard(s_cfgNodeNameKeyboard);
+#endif
+
+    cfgNodeNameSetFocus(0);
+}
+
 static void closeCfgModal() {
     // This screen may have been carrying a copy of the nav bar, and its status
     // icons go with it.
@@ -14927,6 +15372,7 @@ static void closeCfgModal() {
     s_cfgFilterLen = 0;
     s_cfgFilter[0] = '\0';
     closeCfgWifiPickerModal();
+    closeCfgNodeNameModal();
 #if HAS_BLE_KEYBOARD
     closeCfgBleKbdModal();
 #endif
@@ -27427,6 +27873,12 @@ static void performCfgAction(int actionId) {
             openChatNameModal();    // pick directly; applies live, no reboot
             break;
 
+        case CFG_ACTION_NODE_NAME:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NODE_NAME");
+            showActionPopup = false;   // the modal reports what it saved
+            openCfgNodeNameModal();
+            break;
+
         case CFG_ACTION_CHAT_COLORS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
             showActionPopup = false;   // row already reads On/Off; applies live
@@ -27773,6 +28225,14 @@ static void performCfgAction(int actionId) {
             if (runOtaWorkerModeIfRequested()) {
                 // Only reached when the update did not install -- a successful
                 // one restarts inside the call and never comes back here.
+#if defined(DEVICE_TDECK_PRO)
+                // The OTA screen painted straight to the canvas, so LVGL's idea
+                // of the panel and the panel itself have diverged. Repaint the
+                // whole UI and clear in one full refresh, rather than letting
+                // the next partial diff itself against a frame LVGL never drew.
+                lv_obj_invalidate(lv_screen_active());
+                lcd.requestRefresh(true);
+#endif
 #if HAS_BLE_KEYBOARD
                 if (bleKbdWasOn) bleKeyboardSetEnabled(true);
 #endif
@@ -29488,6 +29948,44 @@ static void openKeyboardHomeShortcut() {
 }
 #endif
 
+#if defined(DEVICE_TDECK_PRO)
+// Whether now is a good moment to repaint the e-paper panel.
+//
+// A partial update parks loop() for ~700 ms and a full one for ~1.1 s, and the
+// middle of a typing burst is the worst possible moment to start one: the panel
+// commits a half-finished line, and every key struck while it paints has to wait
+// out the rest of the cycle before the UI can even look at it. So the refresh
+// waits for a short gap in typing and then paints the finished line in one go.
+//
+// The wait is bounded. After kEinkTypingHoldMaxMs of unbroken typing the panel
+// refreshes regardless, so someone typing continuously watches the text arrive
+// in chunks rather than watching a frozen screen. Nothing is lost either way:
+// keys are applied to the text field as they arrive, and the panel is always
+// catching up to the current state rather than replaying an old one.
+static constexpr uint32_t kEinkTypingQuietMs   = 140;
+static constexpr uint32_t kEinkTypingHoldMaxMs = 1200;
+static uint32_t s_einkTypingHoldSinceMs = 0;
+
+static bool einkRefreshDueNow() {
+    const uint32_t lastKeyMs = keyboardLastKeyMs();
+    if (lastKeyMs == 0) return true;   // nothing has ever been typed
+
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastKeyMs) >= kEinkTypingQuietMs
+        && keyboardPendingKeys() == 0) {
+        s_einkTypingHoldSinceMs = 0;
+        return true;
+    }
+
+    if (s_einkTypingHoldSinceMs == 0) s_einkTypingHoldSinceMs = now;
+    if ((uint32_t)(now - s_einkTypingHoldSinceMs) >= kEinkTypingHoldMaxMs) {
+        s_einkTypingHoldSinceMs = now;   // start the next chunk's budget
+        return true;
+    }
+    return false;
+}
+#endif
+
 static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
@@ -29628,6 +30126,7 @@ static void pumpKeyboardInput() {
         bool typingContext = (s_composeModal && !s_emojiPickerModal)
                              || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || s_cfgWifiPassModal
+                             || s_cfgNodeNameModal
                              || s_chanTextModal
                              // Only once the theme filter is armed. Before that
                              // j/k must stay navigation, which is the whole
@@ -30342,6 +30841,53 @@ static void pumpKeyboardInput() {
             if (next != s_fontSizeSelection) {
                 s_fontSizeSelection = next;
                 refreshFontSizeSelection();
+            }
+            continue;
+        }
+
+        if (s_cfgNodeNameModal) {
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                cfgNodeNameSave();
+                continue;
+            }
+            // Tab is the field switch people reach for; the wheel and arrows do
+            // it too, since two boards here have no Tab key worth pressing.
+            if (k == KEY_TAB || k == KEY_SCROLL_UP || k == KEY_SCROLL_DN
+                || k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+                cfgNodeNameSetFocus(s_cfgNodeNameFocus == 0 ? 1 : 0);
+                continue;
+            }
+            if (isBackspaceKey(k)) {
+                // A hold (or the M9's dedicated Back button) leaves outright;
+                // the key itself erases, and on an empty field steps back —
+                // short to long, long out of the modal — which is the same
+                // Erase/Back rule the channel name field follows.
+                if (k != KEY_BACKSPACE) {
+                    cfgNodeNameCancel();
+                    continue;
+                }
+                lv_obj_t *field = cfgNodeNameFocusedInput();
+                const char *cur = field ? lv_textarea_get_text(field) : nullptr;
+                if (cur && cur[0]) {
+                    lv_textarea_delete_char(field);
+                } else if (s_cfgNodeNameFocus == 1) {
+                    cfgNodeNameSetFocus(0);
+                } else {
+                    cfgNodeNameCancel();
+                }
+                continue;
+            }
+            if (isModalCloseKey(k)) {
+                cfgNodeNameCancel();
+                continue;
+            }
+            if (k >= 0x20 && k < 0x7F) {
+                lv_obj_t *field = cfgNodeNameFocusedInput();
+                if (field) {
+                    char one[2] = {k, '\0'};
+                    lv_textarea_add_text(field, one);
+                }
+                continue;
             }
             continue;
         }
@@ -39105,6 +39651,12 @@ void setup() {
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
     displayDev().fillScreen(TFT_BLACK);
     s_keyboard.begin();
+#if defined(DEVICE_TDECK_PRO)
+    // Installed the moment both ends exist: from here on, every second the
+    // panel spends refreshing is also a second the keyboard controller is being
+    // emptied, instead of a second it spends overflowing.
+    einkSetBusyHook(keyboardServiceDuringBlockingWork);
+#endif
 #endif
 #if defined(DEVICE_TDECK) && HAS_TOUCH && !SCREEN_WAKE_FROM_TOUCH
     probeTouchController();   // one-shot: identify the touch controller at boot
@@ -39946,7 +40498,7 @@ void loop() {
 #endif
     LOOP_PHASE("lvgl", lv_timer_handler());
 #if defined(DEVICE_TDECK_PRO)
-    LOOP_PHASE("eink", lcd.serviceRefresh());
+    if (einkRefreshDueNow()) LOOP_PHASE("eink", lcd.serviceRefresh());
 #endif
     serviceBacklightWake();
 

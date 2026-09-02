@@ -154,6 +154,14 @@
 #define TOUCH_POLL_ENABLED         1
 #endif
 
+// ── Screen wake policy ──────────────────────────────────────────────────────
+// A tap does not wake the panel here; the buttons below are the wake gesture.
+// This board spends its life face-up on a desk with a bare glass front and no
+// keyboard to press by accident, so touch-to-wake is mostly pockets, sleeves
+// and cats. It also drops the I2C touch poll that would otherwise run for the
+// whole time the screen is off.
+#define SCREEN_WAKE_FROM_TOUCH     0
+
 // ── LoRa — SX1262 ───────────────────────────────────────────────────────────
 // Exactly the shape mesh_radio.cpp already drives: TCXO on DIO3 at 1.8 V,
 // DIO2 as the RF switch, and no external FEM to sequence.
