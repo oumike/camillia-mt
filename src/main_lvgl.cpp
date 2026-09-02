@@ -12147,6 +12147,8 @@ struct BeaconOffer {
     bool     channelHasPsk;
     int      preset;            // our PRESET_* index, or -1 when not offered/unmappable
     char     region[12];        // "" when not offered
+    int8_t   chanIdx;           // channel it arrived on, for legacy-split pairing
+    bool     textPaired;        // message came from a split TEXT_MESSAGE, not the beacon
 };
 
 static BeaconOffer s_beaconOffers[kBeaconOfferMax] = {};
@@ -12155,11 +12157,50 @@ static int         s_beaconOfferCount = 0;
 // "same list, one of them just repeated" without hashing the whole table.
 static uint32_t    s_beaconOfferSeq = 0;
 
+// Meshtastic's FLAG_LEGACY_SPLIT sender option splits a beacon in two: a
+// MESH_BEACON_APP carrying the offer with no text, then a plain TEXT_MESSAGE_APP
+// carrying the text, both on the same channel. The flag lives in the *sender's*
+// module config and never travels on air, so there is nothing in the packet to
+// key off -- the split is only visible as an offer that arrived without words,
+// followed by words that arrived without an offer.
+//
+// This reunites them: a text from a node whose most recent beacon came in
+// text-less, on the same channel and within the window, is stored as that
+// beacon's message. The chat row is left alone; the text was broadcast to the
+// channel and stays a message like any other. Only the Beacons view gains
+// anything, which is why a wrong guess here is cheap.
+//
+// Deliberately narrow, because this is a heuristic and not a protocol:
+//   - only an offer that has no text of its own is ever filled in,
+//   - only from the same sender on the same channel,
+//   - only within kBeaconSplitPairMs of that beacon,
+//   - and only the first such text; a second one does not overwrite it.
+static constexpr uint32_t kBeaconSplitPairMs = 30000;
+
+static void beaconOfferPairSplitText(uint32_t from, int chanIdx, const char *text) {
+    if (!text || !text[0]) return;
+    for (int i = 0; i < s_beaconOfferCount; i++) {
+        BeaconOffer &o = s_beaconOffers[i];
+        if (o.sender != from) continue;
+        if (o.chanIdx != (int8_t)chanIdx) return;   // same node, other channel
+        if (o.message[0]) return;                   // already has words
+        const uint32_t nowMs = millis();
+        if ((uint32_t)(nowMs - o.rxMs) > kBeaconSplitPairMs) return;
+        utf8util::copyTruncate(o.message, sizeof(o.message), text);
+        o.textPaired = true;
+        s_beaconOfferSeq++;                          // repaint the Beacons list
+        debugLogMessages("[beacon] paired split text from=!%08lx chan=%d \"%.40s\"\n",
+                         (unsigned long)from, chanIdx, o.message);
+        return;
+    }
+}
+
+
 // Newest first, one entry per sender: a beacon repeats on an interval and the
 // latest one is the only one worth keeping. The repeat itself is not thrown
 // away though — the count and the first-heard stamp survive the overwrite, and
 // together they are what lets the screen say how often this sender beacons.
-static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b) {
+static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, int chanIdx) {
     int slot = -1;
     for (int i = 0; i < s_beaconOfferCount; i++) {
         if (s_beaconOffers[i].sender == pkt.hdr.from) { slot = i; break; }
@@ -12175,10 +12216,20 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b) 
     for (int i = slot; i > 0; i--) s_beaconOffers[i] = s_beaconOffers[i - 1];
     BeaconOffer &o = s_beaconOffers[0];
 
+    // Carried across the memset below. A sender running Meshtastic's
+    // FLAG_LEGACY_SPLIT emits the offer and the text as two packets, so a repeat
+    // beacon from that node has no message in it -- clearing the slot outright
+    // would drop text we had already paired to this offer, and the advert would
+    // go blank on the second beacon.
+    char prevMessage[sizeof(o.message)];
+    utf8util::copyTruncate(prevMessage, sizeof(prevMessage), o.message);
+    const bool prevPaired = repeat && o.textPaired;
+
     memset(&o, 0, sizeof(o));
     o.sender  = pkt.hdr.from;
     o.rxMs    = pkt.rxMs;
     o.firstMs = firstMs;
+    o.chanIdx = (int8_t)chanIdx;
     o.hits    = (hits < 0xFFFFu) ? (uint16_t)(hits + 1) : hits;
     o.snr     = pkt.snr;
     o.rssi    = pkt.rssi;
@@ -12192,7 +12243,16 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b) 
             o.hasHops = true;
         }
     }
-    utf8util::copyTruncate(o.message, sizeof(o.message), b.message);
+    if (b.message[0]) {
+        // A combined beacon carries its own text and always wins.
+        utf8util::copyTruncate(o.message, sizeof(o.message), b.message);
+        o.textPaired = false;
+    } else if (prevPaired && prevMessage[0]) {
+        // Offer-only repeat from a legacy-split sender: keep the text we paired
+        // to the previous one rather than blanking the advert.
+        utf8util::copyTruncate(o.message, sizeof(o.message), prevMessage);
+        o.textPaired = true;
+    }
     o.hasChannel = b.hasOfferChannel;
     if (b.hasOfferChannel) {
         utf8util::copyTruncate(o.channelName, sizeof(o.channelName), b.offerChannelName);
@@ -35952,6 +36012,15 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 bool isDirectToMe = (pkt.hdr.to == s_myNodeId)
                                  || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
 
+                // A broadcast may be the text half of a legacy-split beacon.
+                // Checked before the ignore test and before any display work,
+                // because this only annotates the stored offer -- the message
+                // itself carries on to the chat exactly as it would have.
+                // Direct messages are excluded: a beacon is always a broadcast.
+                if (!isDirectToMe && s_cfg.meshBeaconListen) {
+                    beaconOfferPairSplitText(pkt.hdr.from, chanIdx, textBuf);
+                }
+
                 // Suppress chat/DM display for user-ignored senders. We still
                 // ACK direct-to-me messages so the sender's radio stops
                 // retrying, and NodeDB/Live traffic summaries still get the
@@ -36442,7 +36511,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             // arrived did arrive.
             MeshBeaconPayload b = {};
             if (s_cfg.meshBeaconListen && decodeMeshBeacon(pkt.payload, pkt.payloadLen, b)) {
-                beaconOfferStore(pkt, b);
+                beaconOfferStore(pkt, b, chanIdx);
                 debugLogMessages("[beacon] from=!%08lx msg=\"%.40s\" chan=%s preset=%u region=%u\n",
                                  (unsigned long)pkt.hdr.from, b.message,
                                  b.hasOfferChannel ? b.offerChannelName : "-",
