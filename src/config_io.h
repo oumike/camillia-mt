@@ -683,9 +683,17 @@ bool cfgSavedWifiActivate(const char *ssid);                    // make it confi
 // Stable follows published releases only. Alpha additionally accepts GitHub
 // prereleases (tags carrying a SemVer suffix, e.g. v4.7.8-alpha.1), which is
 // what release.sh --alpha publishes.
+//
+// AUTO is zero, and that is deliberate on two counts. It is what an upgrading
+// device reads out of the old blob padding this field occupies, and it is what
+// a freshly flashed device has never overwritten -- so in both cases the
+// channel is derived from the build that is actually running rather than
+// assumed. Flash an alpha image and the device says Alpha, because it is; pick
+// a channel by hand and that choice is stored explicitly and never re-derived.
 enum : uint8_t {
-    OTA_CHANNEL_STABLE = 0,
-    OTA_CHANNEL_ALPHA  = 1,
+    OTA_CHANNEL_AUTO   = 0,
+    OTA_CHANNEL_STABLE = 1,
+    OTA_CHANNEL_ALPHA  = 2,
 };
 #define OTA_CHANNEL_MAX OTA_CHANNEL_ALPHA
 

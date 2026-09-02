@@ -22,7 +22,7 @@
 static volatile uint32_t g_otaNetworkGate = 0;
 // Stable unless a caller says otherwise, so a build that never wires the
 // setting through behaves exactly as it did before channels existed.
-static volatile uint8_t  g_otaChannel = OTA_CHANNEL_STABLE;
+static volatile uint8_t  g_otaChannel = OTA_CHANNEL_AUTO;
 static constexpr uint32_t kOtaNetworkGateMagic = 0x4F544131UL; // "OTA1"
 
 // Hardcoded OTA proxy base — intentionally NOT user-configurable, so the update
@@ -269,7 +269,8 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
 
     char url[160];
     snprintf(url, sizeof(url), "%s/firmware/%s", s_otaBaseUrl,
-             (g_otaChannel == OTA_CHANNEL_ALPHA) ? "latest-alpha" : "latest");
+             (otaResolveChannel(g_otaChannel) == OTA_CHANNEL_ALPHA) ? "latest-alpha"
+                                                                    : "latest");
     String body, err;
     if (httpGetString(url, body, err, true, nullptr, nullptr,
                       "application/vnd.github+json")
@@ -378,15 +379,33 @@ void otaSetNetworkAllowed(bool allowed) {
     Serial.printf("[tls-guard] gate=%s\n", allowed ? "on" : "off");
 }
 
+bool otaRunningPrerelease() {
+    return isPrereleaseTag(APP_VERSION);
+}
+
+uint8_t otaResolveChannel(uint8_t storedChannel) {
+    if (storedChannel == OTA_CHANNEL_ALPHA)  return OTA_CHANNEL_ALPHA;
+    if (storedChannel == OTA_CHANNEL_STABLE) return OTA_CHANNEL_STABLE;
+    // AUTO, or anything unrecognised: follow the build that is running. A
+    // device flashed with an alpha image is on the alpha track whether or not
+    // anyone ever opened the settings screen.
+    return otaRunningPrerelease() ? OTA_CHANNEL_ALPHA : OTA_CHANNEL_STABLE;
+}
+
 void otaSetChannel(uint8_t channel) {
-    // Clamped rather than trusted: this arrives from stored config and an
-    // unknown value must fall back to stable, never to "some other channel".
-    const uint8_t next = (channel == OTA_CHANNEL_ALPHA) ? OTA_CHANNEL_ALPHA
-                                                        : OTA_CHANNEL_STABLE;
+    // Stored raw so an explicit choice stays distinguishable from AUTO;
+    // anything unrecognised collapses to AUTO rather than to a channel the
+    // user never picked.
+    uint8_t next = channel;
+    if (next != OTA_CHANNEL_STABLE && next != OTA_CHANNEL_ALPHA) {
+        next = OTA_CHANNEL_AUTO;
+    }
     if (next == g_otaChannel) return;
     g_otaChannel = next;
-    Serial.printf("[ota] release channel=%s\n",
-                  (next == OTA_CHANNEL_ALPHA) ? "alpha" : "stable");
+    const uint8_t resolved = otaResolveChannel(next);
+    Serial.printf("[ota] release channel=%s%s\n",
+                  (resolved == OTA_CHANNEL_ALPHA) ? "alpha" : "stable",
+                  (next == OTA_CHANNEL_AUTO) ? " (auto, from running build)" : "");
 }
 
 uint8_t otaCurrentChannel() {
@@ -456,7 +475,8 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
         return false;
     }
 
-    if (isPrereleaseTag(out.latestTag) && g_otaChannel != OTA_CHANNEL_ALPHA) {
+    const uint8_t channel = otaResolveChannel(g_otaChannel);
+    if (isPrereleaseTag(out.latestTag) && channel != OTA_CHANNEL_ALPHA) {
         // Never auto-update a stable-channel device onto a prerelease.
         // /releases/latest already excludes them, but the release-page and
         // raw-VERSION fallbacks could theoretically surface one, so guard here
@@ -466,6 +486,22 @@ bool otaCheckLatestRelease(OtaCheckResult &out) {
         out.updateAvailable = false;
     } else if (kTreatLatestAsUpdateForTesting) {
         out.updateAvailable = true;
+    } else if (channel == OTA_CHANNEL_STABLE && otaRunningPrerelease()
+               && !isPrereleaseTag(out.latestTag)) {
+        // Leaving the alpha track. The running alpha is numerically *ahead* of
+        // the stable it came from -- v4.7.8-alpha.1 against v4.7.7 -- so the
+        // ordinary "is it newer" test says up-to-date and strands the device on
+        // a prerelease it has explicitly opted out of, with no way back short
+        // of a USB reflash.
+        //
+        // Switching to Stable is therefore treated as "return to the stable
+        // track", and the newest stable release is offered whether or not it
+        // sorts above what is running. That is a deliberate downgrade, which is
+        // exactly what the user asked for by changing the channel.
+        out.updateAvailable = true;
+        Serial.printf("[ota] on stable channel while running prerelease %s;"
+                      " offering return to %s\n",
+                      APP_VERSION, out.latestTag);
     } else {
         out.updateAvailable = (compareVersionTags(APP_VERSION, out.latestTag) < 0);
     }
@@ -548,7 +584,7 @@ bool otaInstallLatestRelease(const char *tag,
     // regardless of how the tag was supplied. A device opted in to alpha is
     // asking for exactly these builds, so it is allowed through — the image is
     // still signature-checked against the baked-in key like any other.
-    if (isPrereleaseTag(tagBuf) && g_otaChannel != OTA_CHANNEL_ALPHA) {
+    if (isPrereleaseTag(tagBuf) && otaResolveChannel(g_otaChannel) != OTA_CHANNEL_ALPHA) {
         return setErr(errOut, errLen, "Refusing to install prerelease (alpha) build");
     }
 

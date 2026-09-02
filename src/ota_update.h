@@ -23,6 +23,18 @@ void otaSetNetworkAllowed(bool allowed);
 void otaSetChannel(uint8_t channel);
 uint8_t otaCurrentChannel();
 
+// True when the firmware currently running is itself a prerelease build, i.e.
+// APP_VERSION carries a SemVer suffix. This is what OTA_CHANNEL_AUTO resolves
+// against, and what lets a device flashed with an alpha image report the
+// channel it is actually on.
+bool otaRunningPrerelease();
+
+// Resolves OTA_CHANNEL_AUTO to a concrete OTA_CHANNEL_STABLE/_ALPHA using the
+// running build; passes an explicit channel through unchanged. UI should render
+// this rather than the stored value, so what the row says matches what the
+// update check will actually do.
+uint8_t otaResolveChannel(uint8_t storedChannel);
+
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 

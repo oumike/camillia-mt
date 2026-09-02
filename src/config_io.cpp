@@ -1244,7 +1244,11 @@ bool sdBegin() {
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────
 const char *cfgOtaChannelName(uint8_t channel) {
-    return (channel == OTA_CHANNEL_ALPHA) ? "Alpha" : "Stable";
+    switch (channel) {
+        case OTA_CHANNEL_ALPHA:  return "Alpha";
+        case OTA_CHANNEL_STABLE: return "Stable";
+        default:                 return "Auto";
+    }
 }
 
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
@@ -1849,13 +1853,17 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "tzdef")) strncpy(cfg.tzDef, val, sizeof(cfg.tzDef) - 1);
                 else if (!strcmp(key, "otaAutoCheck")) cfg.otaAutoCheckEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "otaChannel")) {
-                    // Accepts the name this writes out, and a bare number so a
-                    // hand-edited file is not a trap. Anything else is Stable:
-                    // an unreadable channel must not silently opt a device in.
-                    if (!strcasecmp(val, "ALPHA") || !strcmp(val, "1"))
+                    // Accepts the names this writes out. Anything unrecognised
+                    // becomes AUTO rather than a concrete channel: an
+                    // unreadable value must not silently opt a device into
+                    // prereleases, nor pin it to stable against the build it is
+                    // actually running.
+                    if (!strcasecmp(val, "ALPHA"))
                         cfg.otaChannel = OTA_CHANNEL_ALPHA;
-                    else
+                    else if (!strcasecmp(val, "STABLE"))
                         cfg.otaChannel = OTA_CHANNEL_STABLE;
+                    else
+                        cfg.otaChannel = OTA_CHANNEL_AUTO;
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "shareLocation"))

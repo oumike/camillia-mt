@@ -4405,8 +4405,11 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             }
             break;
         case CFG_ACTION_OTA_CHANNEL:
+            // Resolved, not stored: an untouched device shows the channel its
+            // running build puts it on, which is the thing the update check
+            // will actually follow.
             snprintf(buf, bufLen, "Release Channel: %s",
-                     cfgOtaChannelName(s_cfg.otaChannel));
+                     cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)));
             break;
         case CFG_ACTION_RELEASE_NOTES:
             snprintf(buf, bufLen, "Release Notes");
@@ -27859,8 +27862,12 @@ static void performCfgAction(int actionId) {
         case CFG_ACTION_OTA_CHANNEL:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_CHANNEL");
             showActionPopup = false;   // row already reads Stable/Alpha
-            s_cfg.otaChannel = (s_cfg.otaChannel == OTA_CHANNEL_ALPHA)
-                                   ? OTA_CHANNEL_STABLE : OTA_CHANNEL_ALPHA;
+            // Toggle against what the row shows, and always store an explicit
+            // choice -- picking a channel by hand must stop the auto-derivation
+            // from overriding it on the next boot.
+            s_cfg.otaChannel =
+                (otaResolveChannel(s_cfg.otaChannel) == OTA_CHANNEL_ALPHA)
+                    ? OTA_CHANNEL_STABLE : OTA_CHANNEL_ALPHA;
             otaSetChannel(s_cfg.otaChannel);
             // A check already armed against the other channel would install the
             // wrong build, so it is dropped and has to be re-run.
@@ -27868,7 +27875,7 @@ static void performCfgAction(int actionId) {
             s_cfgOtaLatestTag[0] = '\0';
             persistConfigToPrefs();
             snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Release Channel: %s",
-                     cfgOtaChannelName(s_cfg.otaChannel));
+                     cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)));
             break;
 
         case CFG_ACTION_UNITS:
