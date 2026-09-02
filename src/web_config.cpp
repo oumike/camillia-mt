@@ -4215,6 +4215,26 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "<option value='1'"; if ( gCfg->otaAutoCheckEnabled) html += " selected"; html += ">Yes</option>"
                 "<option value='0'"; if (!gCfg->otaAutoCheckEnabled) html += " selected"; html += ">No</option>"
                 "</select></label>";
+
+        // Selected from the RESOLVED channel, so a device flashed with an alpha
+        // image shows Alpha rather than the stored AUTO reading as Stable.
+        const uint8_t otaChannelNow = otaResolveChannel(gCfg->otaChannel);
+        html += "<label>Release Channel<select name='ota_channel'>"
+                "<option value='1'";
+        if (otaChannelNow != OTA_CHANNEL_ALPHA) html += " selected";
+        html += ">Stable</option>"
+                "<option value='2'";
+        if (otaChannelNow == OTA_CHANNEL_ALPHA) html += " selected";
+        html += ">Alpha</option>"
+                "</select></label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "<b>Stable</b> installs published releases only. <b>Alpha</b> also "
+                "takes prerelease builds cut from a development branch — earlier "
+                "access, and rougher. Alpha images are signed and verified exactly "
+                "like stable ones; what changes is how well tested they are. "
+                "Switching back to Stable offers the newest stable release even "
+                "though it is numerically older than the alpha you are running, "
+                "so returning to the stable track never needs a USB reflash.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -6833,6 +6853,15 @@ static void handlePostSave() {
 
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
+    }
+    if (server.hasArg("ota_channel")) {
+        // Anything that is not an explicit Alpha is Stable, so a malformed or
+        // injected value cannot opt a device into prerelease builds. Submitting
+        // the form always stores an explicit channel, never AUTO -- the user
+        // has now chosen, so the running build must stop deciding for them.
+        gCfg->otaChannel = (server.arg("ota_channel").toInt() == OTA_CHANNEL_ALPHA)
+                               ? OTA_CHANNEL_ALPHA : OTA_CHANNEL_STABLE;
+        otaSetChannel(gCfg->otaChannel);
     }
     if (server.hasArg("snf_router_id")) {
         // Blank, "none" or unparseable all come back 0, which is "unset" — the

@@ -439,10 +439,19 @@ struct RhinoConfig {
     // reads its compiled default. Defaults on, which is what every T-Deck that
     // took the firmware introducing the bar already sees.
     bool     navBarEnabled;
-    // For whoever appends next: navBarEnabled is one byte at the end of a
-    // 4-aligned struct, so the stored blob carries three bytes past it that the
-    // load memcpy's straight over anything placed there.
-    uint8_t  _reservedPad11[3];
+    // Release channel the OTA check follows: OTA_CHANNEL_STABLE or _ALPHA.
+    //
+    // Placed in what used to be _reservedPad11, which the note below warned is
+    // copied over by an older blob's trailing padding rather than keeping its
+    // compiled default. That is safe for exactly this field and no other: the
+    // config struct lives in static storage, so those padding bytes are zero,
+    // and zero is OTA_CHANNEL_STABLE — the value an upgrading device should
+    // have. A field whose correct upgrade default is non-zero cannot go here.
+    uint8_t  otaChannel;
+    // For whoever appends next: the two bytes below are the remainder of that
+    // same padding and carry the same caveat — an upgraded device reads zeros
+    // there, not your compiled default.
+    uint8_t  _reservedPad12[2];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -662,6 +671,27 @@ void cfgSavedWifiCommit();   // persist after a batch of Clear/Add
 bool cfgSavedWifiRemember(const char *ssid, const char *pass);  // add or update
 bool cfgSavedWifiRemove(const char *ssid);                      // forget one
 bool cfgSavedWifiActivate(const char *ssid);                    // make it configured
+
+// ── OTA release channels ────────────────────────────────────────────────────
+// Stable follows published releases only. Alpha additionally accepts GitHub
+// prereleases (tags carrying a SemVer suffix, e.g. v4.7.8-alpha.1), which is
+// what release.sh --alpha publishes.
+//
+// AUTO is zero, and that is deliberate on two counts. It is what an upgrading
+// device reads out of the old blob padding this field occupies, and it is what
+// a freshly flashed device has never overwritten -- so in both cases the
+// channel is derived from the build that is actually running rather than
+// assumed. Flash an alpha image and the device says Alpha, because it is; pick
+// a channel by hand and that choice is stored explicitly and never re-derived.
+enum : uint8_t {
+    OTA_CHANNEL_AUTO   = 0,
+    OTA_CHANNEL_STABLE = 1,
+    OTA_CHANNEL_ALPHA  = 2,
+};
+#define OTA_CHANNEL_MAX OTA_CHANNEL_ALPHA
+
+// Human-readable channel name for UI rows and the YAML dump.
+const char *cfgOtaChannelName(uint8_t channel);
 
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 
