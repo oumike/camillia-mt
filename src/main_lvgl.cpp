@@ -5515,7 +5515,7 @@ static void setTouchSleep(bool asleep) {
 #else
     lgfx::ITouch *t = displayDev().touch();
     if (!t) return;
-#if defined(DEVICE_TDECK)
+#if defined(DEVICE_TDECK) || defined(DEVICE_SQUARE)
     // Deliberately do NOT issue the GT911 deep-sleep (0x8040=0x05) here. The
     // T-Deck has no touch reset line, and at least one panel revision (the unit
     // that latches I2C address 0x5D) never resumes coordinate scanning from an
@@ -5523,6 +5523,11 @@ static void setTouchSleep(bool asleep) {
     // reports no touches. Skipping the command leaves the GT911 in its own
     // low-power idle scanning, which recovers cleanly and costs only a little
     // current while the screen is off. Nothing to wake.
+    //
+    // Square is the same trap by a different route: its INT and RST both hang
+    // off the PCA9555 rather than a GPIO, so cfg.pin_int is -1 and LovyanGFX
+    // has no line to pulse to bring the controller back. Sleeping it would be
+    // one-way.
     (void)t;
     (void)asleep;
 #else
