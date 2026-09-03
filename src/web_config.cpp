@@ -4042,7 +4042,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_LIGHT_NOTIFY
     // One field for whichever light the board has: the notification LED and the
     // keyboard backlight never coexist, and the question is the same either way.
-    html += "<label>Light Timeout<select name='light_timeout'>";
+    html += "<label>Notification Light Timeout<select name='light_timeout'>";
     for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
         snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
                  (unsigned)kNotifyLightTimeouts[i].secs,
@@ -4713,6 +4713,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // in front of Factory Reset.
     html +=
         "<details><summary style='color:#c0392b'>Danger Zone</summary>"
+        "<form method='POST' action='/reboot'"
+        " onsubmit=\"return confirm('This will restart the device. Continue?')\">"
+        "<button type='submit' style='background:#c0392b'>"
+        "Reboot Device</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>"
+        "Restarts the firmware. Nothing is erased and no settings change &mdash; "
+        "messages, nodes and configuration are all kept. The device is "
+        "unreachable for a few seconds while it comes back.</p>"
         "<form method='POST' action='/clear-messages'"
         " onsubmit=\"return confirm('This will clear all stored channel and DM messages. Continue?')\">"
         "<button type='submit' style='background:#c0392b'>"
@@ -7521,6 +7530,25 @@ static void handleGetScreenshot() {
 
 // ── Clear Messages ───────────────────────────────────────────
 
+// ── Reboot ────────────────────────────────────────────────────
+//
+// Nothing is erased and nothing is written: this is the "turn it off and on
+// again" button for a device that is across the room or on a mast. It goes
+// through scheduleReboot() like every other restarting action here, so the
+// redirect is actually delivered before the radio drops -- calling
+// ESP.restart() inline would kill the connection mid-response and leave the
+// browser showing a network error instead of a confirmation.
+//
+// The 900 ms matches the destructive handlers. Persistence is flushed by the
+// reboot path itself, so a queued transcript snapshot is not lost.
+static void handlePostReboot() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    Serial.println("[web] reboot requested from Danger Zone");
+    scheduleReboot(900);
+    redirectHomeWithFlash("Rebooting now. This page will not respond until the "
+                          "device is back.");
+}
+
 static void handlePostClearMessages() {
     if (!isLoggedIn()) { redirect("/login"); return; }
     Channels.clearAllMessages(true);
@@ -8211,6 +8239,7 @@ static void registerCommonRoutes() {
 #if HAS_UI_COLOR_OPTIONS
     onRoute("/reset-chat-colors", HTTP_POST, handlePostResetChatColors);
 #endif
+    onRoute("/reboot",            HTTP_POST, handlePostReboot);
     onRoute("/clear-messages",    HTTP_POST, handlePostClearMessages);
     onRoute("/wifi-add",          HTTP_POST, handlePostWifiAdd);
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);

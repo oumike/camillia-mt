@@ -583,6 +583,7 @@ const char *positionPrecisionLabel(uint8_t bits) {
 // Order is presentation only — everything looks values up rather than indices,
 // so this can be rearranged without touching what any stored setting means.
 const NotifyLightTimeoutOption kNotifyLightTimeouts[] = {
+    {    5, "5 sec"  },
     {   30, "30 sec" },
     {   60, "1 min"  },
     {  300, "5 min"  },
@@ -602,8 +603,8 @@ const char *notifyLightTimeoutName(uint16_t secs) {
 uint16_t cfgCoerceNotifyLightTimeout(long secs) {
     if (secs <= 0) return 0;   // only an exact 0 (or nonsense) means "never"
     // Nearest listed value. Never (0) is skipped by value, not by index, so the
-    // table above stays free to be reordered: a stray 5 should become 30
-    // seconds, not switch the reminder off entirely.
+    // table above stays free to be reordered: a stray 3 should become the
+    // shortest real timeout, not switch the reminder off entirely.
     uint16_t best = 0;
     long bestDelta = -1;
     for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
@@ -1113,7 +1114,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
 // ── SD init ──────────────────────────────────────────────────
 bool sdCardMounted() { return sdReady || storageMounted(); }
 
-bool sdBegin() {
+static bool sdBeginProbe() {
     if (storageMounted()) {
         sdReady = true;
         return true;
@@ -1231,15 +1232,105 @@ bool sdBegin() {
         (void)tryMountWithProfile(profile, -1);
     }
 #else
-    sdReady = SD.begin(SD_CS, SPI, 4000000);
-    if (!sdReady) sdReady = SD.begin(SD_CS, SPI, 1000000);
+    // Three rungs, ending at 400 kHz. The SD specification runs card
+    // initialisation (CMD0/CMD8/ACMD41) in the 100-400 kHz identification mode
+    // and only then negotiates a faster clock; the Arduino SD library uses the
+    // frequency given here for that phase too. Plenty of cards tolerate being
+    // initialised at 4 MHz, which is why this worked for so long -- but a card
+    // that does not simply never answers, and the mount fails with FatFs
+    // FR_NOT_READY, which is indistinguishable from an empty slot.
+    //
+    // 400 kHz is the same bottom rung the Pager ladder above already has. It
+    // costs nothing when the fast attempt succeeds, because it is only reached
+    // after the faster ones fail.
+    static const uint32_t kSdSpeeds[] = { 4000000UL, 1000000UL, 400000UL };
+    uint32_t mountedAt = 0;
+    for (size_t i = 0; i < sizeof(kSdSpeeds) / sizeof(kSdSpeeds[0]); i++) {
+        if (SD.begin(SD_CS, SPI, kSdSpeeds[i])) {
+            sdReady = true;
+            mountedAt = kSdSpeeds[i];
+            break;
+        }
+    }
 #endif
 
+#if defined(DEVICE_TLORA_PAGER_TFT)
     Serial.printf("[sd] %s cs=%d sck=%d miso=%d mosi=%d\n",
                   sdReady ? "mounted" : "not found",
                   SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+#else
+    // Naming the speeds matters in a bug report: "not found" after three rungs
+    // down to 400 kHz says the card never answered at any clock, which points at
+    // an empty slot or a dead card rather than at a timing problem still worth
+    // chasing.
+    if (sdReady) {
+        Serial.printf("[sd] mounted at %lu Hz cs=%d sck=%d miso=%d mosi=%d\n",
+                      (unsigned long)mountedAt,
+                      SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+    } else {
+        Serial.printf("[sd] not found (tried 4M/1M/400k) cs=%d sck=%d miso=%d mosi=%d\n",
+                      SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
+    }
+#endif
     return sdReady;
 #endif
+}
+
+// ── SD probe damping ──────────────────────────────────────────
+// sdBeginProbe() re-runs the whole mount sequence every time it is called and
+// caches only success, so on a board with no card each call is two ~1 s f_mount
+// attempts that block whatever is calling it. Several independent subsystems
+// call sdBegin() -- the node archive, DM history, the map FS driver (an LVGL
+// callback), config export/import, the web server -- so an absent card cost
+// that repeatedly, and in one field report it stalled the main loop for ~2 s
+// out of every 10 for the entire uptime.
+//
+// Consecutive failures now back off 2s, 5s, 15s, 30s, 60s (capped). A call
+// inside the current window returns the cached failure without touching the
+// bus. The early windows stay short on purpose: a card that needs a moment to
+// settle after boot is still found, it is only the endless hammering that is
+// damped.
+//
+// Success clears the backoff, and so does sdForceRescan() -- which is what a
+// user-initiated action calls, because "I just inserted a card" is exactly the
+// case a cooldown must not swallow.
+static uint8_t  sdFailStreak  = 0;
+static uint32_t sdFailUntilMs = 0;
+static bool     sdFailArmed   = false;
+
+void sdForceRescan() {
+    sdFailStreak  = 0;
+    sdFailUntilMs = 0;
+    sdFailArmed   = false;
+}
+
+bool sdBegin(bool force) {
+    if (force) sdForceRescan();
+
+    // Already mounted is always cheap and always right.
+    if (storageMounted()) {
+        sdFailArmed = false;
+        return sdBeginProbe();
+    }
+
+    if (sdFailArmed && (int32_t)(millis() - sdFailUntilMs) < 0) {
+        return false;
+    }
+
+    if (sdBeginProbe()) {
+        sdForceRescan();
+        return true;
+    }
+
+    static const uint32_t kBackoffMs[] = { 2000, 5000, 15000, 30000, 60000 };
+    static constexpr uint8_t kBackoffCount =
+        (uint8_t)(sizeof(kBackoffMs) / sizeof(kBackoffMs[0]));
+    const uint8_t idx = (sdFailStreak < kBackoffCount) ? sdFailStreak
+                                                       : (uint8_t)(kBackoffCount - 1);
+    sdFailUntilMs = millis() + kBackoffMs[idx];
+    sdFailArmed = true;
+    if (sdFailStreak < 0xFF) sdFailStreak++;
+    return false;
 }
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────

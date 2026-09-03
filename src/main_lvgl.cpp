@@ -227,6 +227,7 @@ static lv_obj_t *s_tdeckProSleepTime = nullptr;
 static lv_obj_t *s_tdeckProSleepDate = nullptr;
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
 static lv_obj_t *s_tdeckProSleepUnread = nullptr;
+static lv_obj_t *s_tdeckProSleepBatt = nullptr;
 // Unread state the overlay is currently showing, plus the coalescing timer that
 // decides when a change is worth a panel refresh. See serviceTdeckProSleepClock.
 static uint32_t s_tdeckProSleepUnreadKey = UINT32_MAX;
@@ -4393,7 +4394,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         #endif
         #if HAS_LIGHT_NOTIFY
         case CFG_ACTION_NOTIFY_LIGHT_TIMEOUT:
-            snprintf(buf, bufLen, "Light Timeout: %s",
+            snprintf(buf, bufLen, "Notification Light Timeout: %s",
                      notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
             break;
         #endif
@@ -5662,6 +5663,28 @@ static void updateTdeckProSleepClock() {
         s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
     }
 
+    // Read here rather than on its own timer, so the battery costs no extra
+    // panel refresh: this function only runs when the minute rolls over (or on
+    // an unread change that is already repainting), and on e-paper a refresh is
+    // ~1 s of parked loop() and real battery. A charge level that is one minute
+    // stale on a sleeping device is not worth a redraw of its own.
+    //
+    // Follows the Battery Display setting for the same reason the header does —
+    // someone who chose voltage wants voltage everywhere, not just awake.
+    if (s_tdeckProSleepBatt && lv_obj_is_valid(s_tdeckProSleepBatt)) {
+        char battText[16];
+        if (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE) {
+            // snprintf, not lv_label_set_text_fmt: LVGL's printf has no float
+            // support in this build, so "%.2fV" would reach the panel literally.
+            snprintf(battText, sizeof(battText), "%.2fV",
+                     (double)batteryReadVoltage());
+        } else {
+            snprintf(battText, sizeof(battText), "%u%%",
+                     (unsigned)batteryReadPercent());
+        }
+        lv_label_set_text(s_tdeckProSleepBatt, battText);
+    }
+
     s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
                                    ? (uint32_t)(now / 60)
                                    : (0x80000000u | (millis() / 60000UL));
@@ -5720,6 +5743,16 @@ static void showTdeckProSleepClock() {
     lv_label_set_long_mode(s_tdeckProSleepUnread, LV_LABEL_LONG_DOT);
     lv_obj_align(s_tdeckProSleepUnread, LV_ALIGN_CENTER, 0, 82);
 
+    // Bottom of the stack, under the date and the unread line. Deliberately the
+    // smallest text on the screen: it is a glance-value, and on a panel with no
+    // colour the only way to rank information is size.
+    s_tdeckProSleepBatt = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_width(s_tdeckProSleepBatt, lv_pct(92));
+    lv_obj_set_style_text_font(s_tdeckProSleepBatt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepBatt, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepBatt, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_tdeckProSleepBatt, LV_ALIGN_CENTER, 0, 112);
+
     updateTdeckProSleepClock();
     lv_obj_move_foreground(s_tdeckProSleepOverlay);
     lv_obj_invalidate(s_tdeckProSleepOverlay);
@@ -5738,6 +5771,7 @@ static void hideTdeckProSleepClock() {
     s_tdeckProSleepTime = nullptr;
     s_tdeckProSleepDate = nullptr;
     s_tdeckProSleepUnread = nullptr;
+    s_tdeckProSleepBatt = nullptr;
     s_tdeckProSleepMinuteKey = UINT32_MAX;
     s_tdeckProSleepUnreadKey = UINT32_MAX;
     s_tdeckProSleepUnreadPendingKey = UINT32_MAX;
@@ -10653,7 +10687,7 @@ static void openCfgPosPrecModal() {
 }
 
 #if HAS_LIGHT_NOTIFY
-// ── Light timeout ────────────────────────────────────────────────────────────
+// ── Notification light timeout ───────────────────────────────────────────────
 
 static const char *cfgLightTimeoutLabelFor(int idx) {
     if (idx < 0 || idx >= kNotifyLightTimeoutCount) idx = 0;
@@ -10679,11 +10713,11 @@ static void openCfgLightTimeoutModal() {
         if (kNotifyLightTimeouts[i].secs == s_cfg.notifyLightTimeoutS) { startIdx = i; break; }
     }
     static const CfgSliderPicker kSpec = {
-        "Light Timeout",
+        "Notification Light Timeout",
         kNotifyLightTimeoutCount,
         cfgLightTimeoutLabelFor,
         cfgLightTimeoutApply,
-        "30 sec",
+        "5 sec",
         "until read",
     };
     openCfgSliderModal(&kSpec, startIdx);
@@ -27950,6 +27984,9 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_EXPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec EXPORT");
+            // The user picked this from a menu; if they just inserted a card,
+            // the failed-probe cooldown must not be what tells them there isn't one.
+            sdForceRescan();
             bool ok = cfgExport(s_cfg);
             snprintf(s_cfgStatus, sizeof(s_cfgStatus),
                      ok ? "Exported to /camillia/config.yaml" : "Export FAILED (no SD?)");
@@ -27957,6 +27994,7 @@ static void performCfgAction(int actionId) {
 
         case CFG_ACTION_IMPORT: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec IMPORT");
+            sdForceRescan();   // same reason as Export above
             bool ok = cfgImport(s_cfg);
             if (ok) {
                 onWebCfgSaved();
@@ -29190,7 +29228,30 @@ static void serviceLegacyMapMigrationPrompt(uint32_t nowMs) {
     }
 #if HAS_FILE_STORAGE
     if (!sdBegin()) {
-        s_legacyMapMigrationNextCheckMs = nowMs + 10000UL;
+        // Bounded, because sdBegin() does not cache a failure: every retry
+        // re-runs the whole mount sequence, which on a card-less device is two
+        // ~1 s f_mount attempts that block the main loop. Retrying at a fixed
+        // 10 s interval therefore cost a ~2 s stall every 10 s for the entire
+        // uptime, forever, on any SD-capable board with no card in it. In the
+        // field that showed up as a recurring `map:migrate=2031ms` in the loop
+        // report and an endless stream of "[sd] not found".
+        //
+        // A few spaced attempts still cover a card that is slow to settle after
+        // boot; past that this gives up for the rest of the boot. Legacy map
+        // migration is a one-time upgrade concern, so deferring it to the next
+        // reboot costs a user who has a card nothing, and hands a user who does
+        // not have one their main loop back.
+        static constexpr int kLegacyMapProbeMax = 3;
+        static int sProbes = 0;
+        if (++sProbes >= kLegacyMapProbeMax) {
+            s_legacyMapMigrationChecked = true;
+            Serial.printf("[map] no storage after %d probes; skipping the legacy "
+                          "map check for this boot\n", sProbes);
+            return;
+        }
+        // 10 s, then 20 s. Doubling keeps the total stall bounded at ~6 s
+        // rather than growing with uptime.
+        s_legacyMapMigrationNextCheckMs = nowMs + (10000UL << (sProbes - 1));
         return;
     }
 #endif
@@ -40169,7 +40230,7 @@ void setup() {
         openOnboardingModal();
     }
 #endif
-    Serial.printf("[lvgl-poc] started (%dx%d)\\n", displayDev().width(), displayDev().height());
+    Serial.printf("[lvgl-poc] started (%dx%d)\n", displayDev().width(), displayDev().height());
     // Repeat of the boot-time report. The early copy runs before USB CDC has
     // enumerated, so on these boards it is never seen; by here the host is
     // attached and this is the first output a serial monitor reliably catches.
