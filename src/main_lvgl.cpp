@@ -11,8 +11,8 @@
 #include "config_io.h"
 #include "hal/display.h"
 #include "hal/xl9555.h"
-#if defined(DEVICE_SQUARE)
-#include "hal/square_io.h"
+#if defined(DEVICE_WIO_TRACKER_L2)
+#include "hal/wio_tracker_l2_io.h"
 #endif
 #include "live_util.h"
 #include "live_feed.h"
@@ -65,10 +65,10 @@
 #include "state_maps.h"
 #include "map_tiles.h"
 #include <Curve25519.h>
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
 #include <AudioBoard.h>
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2)
 #include <driver/i2s.h>
 #endif
 #include <esp_sleep.h>
@@ -2032,8 +2032,8 @@ static void bootSplashTick();
 static void bootSplashStatusEnd();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
-#if defined(DEVICE_SQUARE)
-static bool serviceSquareWakeButton(uint32_t nowMs);
+#if defined(DEVICE_WIO_TRACKER_L2)
+static bool serviceWioTrackerL2WakeButton(uint32_t nowMs);
 #endif
 #if defined(DEVICE_MESH_DECK)
 // Defined further down with the expander code; called from triggerMessageAlert()
@@ -2718,7 +2718,7 @@ static uint16_t notifyLedColorPreview565(uint8_t color) {
 }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
 namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
@@ -2743,9 +2743,9 @@ static inline void pagerAudioApplyVolume(uint8_t volume) {
 static int sPagerExpAddr = -2;  // -2 = not yet probed
 #endif
 static void pagerAudioSetAmp(bool on) {
-#if defined(DEVICE_SQUARE)
-    if (!squareIoSetAudioPaPower(on)) {
-        Serial.printf("[audio] square PA %s failed\n", on ? "on" : "off");
+#if defined(DEVICE_WIO_TRACKER_L2)
+    if (!wioTrackerL2IoSetAudioPaPower(on)) {
+        Serial.printf("[audio] Wio Tracker L2 PA %s failed\n", on ? "on" : "off");
     }
 #else
     if (sPagerExpAddr == -2) sPagerExpAddr = xl9555FindAddr();
@@ -3393,7 +3393,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
 
     switch (s_cfg.msgAlertSound) {
@@ -3471,7 +3471,7 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 // back up. Plays the default pattern whatever the alert style is set to — the
 // slider is about level, not about which sound.
 static void playVolumePreviewTone() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
     pagerAudioPlayAlertPattern();
 #elif defined(DEVICE_TDECK)
     tdeckPlayAlertPattern();
@@ -3493,7 +3493,7 @@ static void playSplashStartupRiff() {
     };
     static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
@@ -5530,7 +5530,7 @@ static void setTouchSleep(bool asleep) {
 #else
     lgfx::ITouch *t = displayDev().touch();
     if (!t) return;
-#if defined(DEVICE_TDECK) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2)
     // Deliberately do NOT issue the GT911 deep-sleep (0x8040=0x05) here. The
     // T-Deck has no touch reset line, and at least one panel revision (the unit
     // that latches I2C address 0x5D) never resumes coordinate scanning from an
@@ -5539,10 +5539,10 @@ static void setTouchSleep(bool asleep) {
     // low-power idle scanning, which recovers cleanly and costs only a little
     // current while the screen is off. Nothing to wake.
     //
-    // Square is the same trap by a different route: its INT and RST both hang
-    // off the PCA9555 rather than a GPIO, so cfg.pin_int is -1 and LovyanGFX
-    // has no line to pulse to bring the controller back. Sleeping it would be
-    // one-way.
+    // The Wio Tracker L2 is the same trap by a different route: its INT and
+    // RST both hang off the PCA9555 rather than a GPIO, so cfg.pin_int is -1
+    // and LovyanGFX has no line to pulse to bring the controller back.
+    // Sleeping it would be one-way.
     (void)t;
     (void)asleep;
 #else
@@ -6301,7 +6301,7 @@ static void wakeScreen() {
     s_lastBattPct = 255;
     s_lastBattCentiV = 0xFFFF;
     s_lastGpsSats = 255;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     // Panel_NV3031B::setSleep(false) performs a software reset and reruns the
     // controller init sequence, so panel RAM no longer contains a valid frame.
     // Cache invalidation above only refreshes objects whose data changed; mark
@@ -6316,7 +6316,7 @@ static void wakeScreen() {
 // defers the backlight to the next full pass rather than losing it.
 static void serviceBacklightWake() {
     if (!s_backlightPendingOn) return;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     // LVGL's flush is synchronous today, but wait on the panel bus explicitly
     // before exposing the freshly rebuilt frame if that implementation changes.
     displayDev().waitDMA();
@@ -6372,8 +6372,8 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
     return false;
 }
 
-#if defined(DEVICE_SQUARE)
-static bool serviceSquareWakeButton(uint32_t nowMs) {
+#if defined(DEVICE_WIO_TRACKER_L2)
+static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     static bool rawPressed = false;
     static bool stablePressed = false;
     static bool sleepTriggered = false;
@@ -6387,7 +6387,7 @@ static bool serviceSquareWakeButton(uint32_t nowMs) {
     nextReadMs = nowMs + 15;
 
     bool pressed = false;
-    if (!squareIoReadWakeButton(pressed)) return false;
+    if (!wioTrackerL2IoReadWakeButton(pressed)) return false;
 
     if (pressed != rawPressed) {
         rawPressed = pressed;
@@ -6408,14 +6408,14 @@ static bool serviceSquareWakeButton(uint32_t nowMs) {
     if (s_screenAsleep) {
         wakeScreen();
         sleepTriggered = true;
-        Serial.println("[screen] square Wake button");
+        Serial.println("[screen] Wio Tracker L2 Wake button");
         return true;
     }
     s_lastActivityMs = nowMs;
     if (holdStartMs != 0
         && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
         sleepTriggered = true;
-        sleepScreen("Square Wake button hold");
+        sleepScreen("Wio Tracker L2 Wake button hold");
         return true;
     }
     return false;
@@ -8324,10 +8324,10 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     if (!keyboard) return;
     lv_obj_set_width(keyboard, lv_pct(100));
     lv_obj_set_flex_grow(keyboard, 1);
-#if defined(DEVICE_SQUARE)
-    // Text entry owns the screen on Square. Remove keyboard chrome and keep
-    // only a one-pixel key gap so the narrow QWERTY rows spend their width on
-    // tap targets rather than nested modal/theme padding.
+#if defined(DEVICE_WIO_TRACKER_L2)
+    // Text entry owns the screen on the Wio Tracker L2. Remove keyboard chrome
+    // and keep only a one-pixel key gap so the narrow QWERTY rows spend their
+    // width on tap targets rather than nested modal/theme padding.
     lv_obj_set_style_border_width(keyboard, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(keyboard, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_column(keyboard, 1, LV_PART_MAIN);
@@ -8413,7 +8413,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     s_composeChannelIdx = s_activeChannel;
 
 #if UI_TOUCH_ONLY_PROFILE
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     int modalW = lv_disp_get_hor_res(NULL);
 #else
     int modalW = lv_disp_get_hor_res(NULL) - 8;
@@ -8432,7 +8432,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_border_width(s_composeModal, 1, 0);
     lv_obj_set_style_border_color(s_composeModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_composeModal, 4, 0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_composeModal, 2, 0);
     lv_obj_set_style_pad_right(s_composeModal, 2, 0);
 #endif
@@ -13048,7 +13048,7 @@ static void openChanTextModal(int field) {
     int modalW = w - 24;
     if (modalW < 170) modalW = w - 8;
     if (modalW > 320) modalW = 320;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     modalW = w;
 #endif
 
@@ -13079,7 +13079,7 @@ static void openChanTextModal(int field) {
     lv_obj_set_style_border_width(s_chanTextModal, 1, 0);
     lv_obj_set_style_border_color(s_chanTextModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_chanTextModal, 8, 0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_chanTextModal, 2, 0);
     lv_obj_set_style_pad_right(s_chanTextModal, 2, 0);
 #endif
@@ -14459,7 +14459,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     int modalW = w - 24;
     if (modalW < 170) modalW = w - 8;
     if (modalW > 320) modalW = 320;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     modalW = w;
 #endif
 
@@ -14490,7 +14490,7 @@ static void openCfgWifiPassModal(int scanIdx) {
     lv_obj_set_style_border_width(s_cfgWifiPassModal, 1, 0);
     lv_obj_set_style_border_color(s_cfgWifiPassModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_cfgWifiPassModal, 8, 0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_cfgWifiPassModal, 2, 0);
     lv_obj_set_style_pad_right(s_cfgWifiPassModal, 2, 0);
 #endif
@@ -15216,7 +15216,7 @@ static void openCfgNodeNameModal() {
     int modalW = w - 24;
     if (modalW < 170) modalW = w - 8;
     if (modalW > 320) modalW = 320;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     modalW = w;
 #endif
 
@@ -15264,7 +15264,7 @@ static void openCfgNodeNameModal() {
     lv_obj_set_style_border_width(s_cfgNodeNameModal, 1, 0);
     lv_obj_set_style_border_color(s_cfgNodeNameModal, modalBorder, 0);
     lv_obj_set_style_pad_all(s_cfgNodeNameModal, 8, 0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_cfgNodeNameModal, 2, 0);
     lv_obj_set_style_pad_right(s_cfgNodeNameModal, 2, 0);
 #endif
@@ -17256,7 +17256,7 @@ static void openNodesFilterDialog() {
     lv_obj_set_style_border_width(s_nodesFilterDialog, 1, 0);
     lv_obj_set_style_border_color(s_nodesFilterDialog, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_nodesFilterDialog, 4, 0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_nodesFilterDialog, 2, 0);
     lv_obj_set_style_pad_right(s_nodesFilterDialog, 2, 0);
 #endif
@@ -29209,7 +29209,7 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
     modalH = screenH - 20;
     if (modalH < 140) modalH = screenH - 4;
 
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     modalW = screenW;
 #endif
 
@@ -29262,7 +29262,7 @@ static void renderOnboardingStage() {
     lv_obj_set_style_pad_all(s_onboardingModal,
                              compactImportStage ? 6 : (compactOnboarding ? 8 : 10),
                              0);
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_onboardingModal, 2, 0);
     lv_obj_set_style_pad_right(s_onboardingModal, 2, 0);
 #endif
@@ -39623,9 +39623,9 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL, 100000UL);
     meshDeckReleaseTouchReset();
 #endif
-#if defined(DEVICE_SQUARE)
-    if (!squareIoBegin()) {
-        Serial.println("[square-io] initialization failed; display may remain unavailable");
+#if defined(DEVICE_WIO_TRACKER_L2)
+    if (!wioTrackerL2IoBegin()) {
+        Serial.println("[wio-l2-io] initialization failed; display may remain unavailable");
     }
 #endif
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
@@ -40074,7 +40074,7 @@ static const NapWakeLine kNapWakeLines[] = {
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
     { DISPLAY_TOGGLE_BUTTON_PIN, (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL) == HIGH },
 #endif
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     { EXPANDER_INT, false }, // PCA9555 wake-button interrupt (active low)
 #endif
 };
@@ -40205,8 +40205,8 @@ void loop() {
         delay(5);
         return;
     }
-#if defined(DEVICE_SQUARE)
-    if (serviceSquareWakeButton(now)) {
+#if defined(DEVICE_WIO_TRACKER_L2)
+    if (serviceWioTrackerL2WakeButton(now)) {
         delay(5);
         return;
     }

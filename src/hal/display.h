@@ -10,12 +10,12 @@
 // Display panel selection:
 //   DEVICE_HELTEC_V4_EXPANSION  → Panel_HeltecV4Tft (ST7789 + custom gamma)
 //   DEVICE_TLORA_PAGER_TFT      → Panel_ST7796
-//   DEVICE_SQUARE               → Panel_NV3031B (quad-SPI)
+//   DEVICE_WIO_TRACKER_L2               → Panel_NV3031B (quad-SPI)
 //   All others                   → Panel_ST7789
 //
 // Touch controller selection:
 //   DEVICE_HELTEC_V4_EXPANSION  → Touch_Heltec_CHSC6X  (custom LGFX wrapper)
-//   DEVICE_TDECK / DEVICE_SQUARE → lgfx::Touch_GT911
+//   DEVICE_TDECK / DEVICE_WIO_TRACKER_L2 → lgfx::Touch_GT911
 //   All others                  → no touch
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -48,17 +48,17 @@ protected:
 using DisplayPanel = Panel_HeltecV4Tft;
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 using DisplayPanel = lgfx::Panel_ST7796;
-#elif defined(DEVICE_SQUARE)
-// Only in LovyanGFX 1.2.27+, which is why [env:square] pins that version in its
-// own libdeps copy while the other display envs stay on 1.1.x.
+#elif defined(DEVICE_WIO_TRACKER_L2)
+// Only in LovyanGFX 1.2.27+, which is why [env:wio-tracker-l2] pins that
+// version in its own libdeps copy while the other display envs stay on 1.1.x.
 #include <lgfx/v1/panel/Panel_NV3031B.hpp>
 using DisplayPanel = lgfx::Panel_NV3031B;
 #else
 using DisplayPanel = lgfx::Panel_ST7789;
 #endif
 
-#if defined(DEVICE_SQUARE)
-class Light_SquareLP5814 : public lgfx::v1::ILight {
+#if defined(DEVICE_WIO_TRACKER_L2)
+class Light_WioTrackerL2LP5814 : public lgfx::v1::ILight {
 public:
     struct config_t {
         uint8_t brightness = TFT_BRIGHTNESS_DEFAULT;
@@ -70,7 +70,7 @@ public:
     bool init(uint8_t brightness) override {
         Wire.beginTransmission(LP5814_ADDR);
         if (Wire.endTransmission() != 0) {
-            Serial.printf("[square-light] LP5814 not found at 0x%02X\n", LP5814_ADDR);
+            Serial.printf("[wio-l2-light] LP5814 not found at 0x%02X\n", LP5814_ADDR);
             return false;
         }
 
@@ -106,7 +106,7 @@ private:
         Wire.write(value);
         const uint8_t error = Wire.endTransmission();
         if (error != 0) {
-            Serial.printf("[square-light] LP5814 write reg 0x%02X failed: %u\n",
+            Serial.printf("[wio-l2-light] LP5814 write reg 0x%02X failed: %u\n",
                           reg, (unsigned)error);
             return false;
         }
@@ -181,8 +181,8 @@ private:
 class LGFX_TDeck : public lgfx::LGFX_Device {
     DisplayPanel _panel;
     lgfx::Bus_SPI      _bus;
-#if defined(DEVICE_SQUARE)
-    Light_SquareLP5814 _light;
+#if defined(DEVICE_WIO_TRACKER_L2)
+    Light_WioTrackerL2LP5814 _light;
 #else
     lgfx::Light_PWM    _light;
 #endif
@@ -195,7 +195,7 @@ class LGFX_TDeck : public lgfx::LGFX_Device {
 #endif
 
 public:
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
     bool init_impl(bool use_reset, bool use_clear) override {
         (void)_light.init(_light.config().brightness);
         const bool result = LGFX_Device::init_impl(use_reset, use_clear);
@@ -214,7 +214,7 @@ public:
             cfg.freq_read  = TFT_SPI_READ_HZ;
             cfg.use_lock   = true;
             cfg.pin_sclk   = TFT_SPI_SCK;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
             // Quad-SPI. 1.2.27 drives quad through this same Bus_SPI class --
             // setting pin_io0..pin_io3 is what selects it, there is no separate
             // bus type. There is no DC line on a QSPI panel: command/data is
@@ -245,7 +245,7 @@ public:
             cfg.pin_rst      = TFT_RST;
             cfg.panel_width  = TFT_PANEL_WIDTH;
             cfg.panel_height = TFT_PANEL_HEIGHT;
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
             cfg.pin_busy     = -1;
             cfg.memory_width = TFT_PANEL_WIDTH;
             cfg.memory_height = TFT_PANEL_HEIGHT;
@@ -276,7 +276,7 @@ public:
             _panel.config(cfg);
         }
         {
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
             auto cfg        = _light.config();
             cfg.brightness  = TFT_BRIGHTNESS_DEFAULT;
             _light.config(cfg);

@@ -10,7 +10,7 @@ RELEASE_ENVS=(
     heltec-v4-vertical
     mesh-deck
     m9
-    square
+    wio-tracker-l2
 )
 
 # Lookups are functions rather than associative arrays so the script runs on
@@ -443,7 +443,7 @@ generate_ai_summary() {
 
     prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
     firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Deck Pro, T-Lora Pager TFT, M5Stack
-Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Square).
+Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Seeed Wio Tracker L2).
 
 Summarize what changed in release ${TAG} for the people who flash and use it.
 

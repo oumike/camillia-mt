@@ -4,8 +4,8 @@
 #if HAS_SD_CARD && !(defined(HAS_SD_MMC) && HAS_SD_MMC)
 #include <SPI.h>
 #endif
-#if defined(DEVICE_SQUARE)
-#include "hal/square_io.h"
+#if defined(DEVICE_WIO_TRACKER_L2)
+#include "hal/wio_tracker_l2_io.h"
 #endif
 
 namespace {
@@ -38,8 +38,8 @@ bool storageBegin() {
     if (sMounted) return true;
 
 #if defined(HAS_SD_MMC) && HAS_SD_MMC
-#if defined(DEVICE_SQUARE)
-    if (!squareIoReady() || !squareIoSetSdPower(true)) {
+#if defined(DEVICE_WIO_TRACKER_L2)
+    if (!wioTrackerL2IoReady() || !wioTrackerL2IoSetSdPower(true)) {
         Serial.println("[sd] SD_MMC power enable failed");
         return false;
     }
@@ -48,8 +48,8 @@ bool storageBegin() {
     if (!SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0)) {
         Serial.printf("[sd] SD_MMC pin setup failed clk=%d cmd=%d d0=%d\n",
                       SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
-#if defined(DEVICE_SQUARE)
-        (void)squareIoSetSdPower(false);
+#if defined(DEVICE_WIO_TRACKER_L2)
+        (void)wioTrackerL2IoSetSdPower(false);
 #endif
         return false;
     }
@@ -66,8 +66,8 @@ bool storageBegin() {
     } else {
         Serial.printf("[sd] SD_MMC not found clk=%d cmd=%d d0=%d\n",
                       SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
-#if defined(DEVICE_SQUARE)
-        (void)squareIoSetSdPower(false);
+#if defined(DEVICE_WIO_TRACKER_L2)
+        (void)wioTrackerL2IoSetSdPower(false);
 #endif
     }
 #elif HAS_SD_CARD

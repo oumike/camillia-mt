@@ -1,6 +1,11 @@
-# Handoff — `square` build target (issue #56)
+# Handoff — `wio-tracker-l2` build target (issue #56)
 
 Working notes for whoever picks this up next. Written 2026-08-26.
+
+This target was developed under the codename `square` while the hardware was
+unreleased. Seeed now sells it as the **Wio Tracker L2**, and the env, macros,
+filenames and release artifacts were renamed to match; older commits, issue #56
+comments and the `backups/` manifests still say `square`.
 
 **Read this first, then issue #56.** Several of #56's open questions are already
 answered below; re-deriving them is wasted effort.
@@ -12,30 +17,30 @@ below. The work remains uncommitted.
 
 Completed in this continuation:
 
-- Added `src/hal/square_io.{h,cpp}` on top of the existing XL9555-compatible
-  driver, compiled only in `[env:square]`.
+- Added `src/hal/wio_tracker_l2_io.{h,cpp}` on top of the existing XL9555-compatible
+  driver, compiled only in `[env:wio-tracker-l2]`.
 - Expander boot now starts I2C at SDA 47 / SCL 48, reads the fixed address
   `0x21`, stages output latches before direction changes, follows the upstream
   LCD/touch/GNSS reset sequence, drives LCD control bit 4 high after reset, and
   logs the resulting shadows.
-- Added named Square controls for LCD/touch resets and LCD, Grove, GNSS, LED,
+- Added named Wio Tracker L2 controls for LCD/touch resets and LCD, Grove, GNSS, LED,
   USB OTG, audio PA, SD and battery-sense power.
 - Routed GNSS power/reset through expander bits 13/9 for start, disable and
-  re-enable. Square now actually probes the swapped UART pair as §2 says.
-- Added `UI_TOUCH_ONLY_PROFILE` for Heltec + Square. The 155 touch-only UI
+  re-enable. Wio Tracker L2 now actually probes the swapped UART pair as §2 says.
+- Added `UI_TOUCH_ONLY_PROFILE` for Heltec + Wio Tracker L2. The 155 touch-only UI
   conditions in `main_lvgl.cpp` now use it; Heltec memory, sensor rollback,
   storage exclusion, onboarding, vertical and compact-selector conditions stay
   device-specific. `keyboard.cpp` now uses `HAS_KEYBOARD` rather than Heltec
   identity for no-keyboard behavior.
-- Enabled the existing VNC Host/browser Remote feature for Square. It uses the
+- Enabled the existing VNC Host/browser Remote feature for Wio Tracker L2. It uses the
   board's 8 MB PSRAM for the 320x240 RGB565 frame copy. BLE remains explicitly
   disabled; Remote keyboard/pointer input is provided through VNC instead.
 - Made LovyanGFX source drift and partial patch states fatal in
   `tools/patch_lgfx_dmadesc.py`; the fresh-checkout "library not fetched yet"
   retry remains non-fatal.
-- Added `--square`, the interactive build menu entry, hardware-test array entry
-  and CI build. `release.sh` now builds and publishes Square firmware assets.
-- Updated README and build/hardware docs using only the public `square`
+- Added `--wio-tracker-l2`, the interactive build menu entry, hardware-test array entry
+  and CI build. `release.sh` now builds and publishes Wio Tracker L2 firmware assets.
+- Updated README and build/hardware docs using only the public `wio-tracker-l2`
   codename and marked it as a bring-up target with no release artifact.
 - Researched the user-supplied upstream Meshtastic branch. It resolves the
   former hardware-reference blockers without needing a private schematic:
@@ -49,10 +54,10 @@ Completed in this continuation:
   - native USB upload uses the 1200-bps touch reset and waits for re-enumeration.
 - Implemented the LP5814 `ILight`, post-GT911 I2C recovery, ADS1115 battery
   path, corrected GNSS direction/reset polarity and upstream upload behavior.
-- Set Square's logical display rotation to 0. With the sourced panel offset of
+- Set Wio Tracker L2's logical display rotation to 0. With the sourced panel offset of
   1, LovyanGFX resolves this to internal rotation 1 (320x240), rotating the UI
   left 90 degrees from the previous internal rotation 2.
-- All five reachable Square textarea flows share a full-width on-screen keyboard
+- All five reachable Wio Tracker L2 textarea flows share a full-width on-screen keyboard
   layout. The target also supports an optional external BLE keyboard through
   `HAS_BLE_KEYBOARD`, with NimBLE 1.x and `ble_keyboard.cpp`; it remains off by
   default and uses the existing Web Config mutual-exclusion safeguards.
@@ -60,15 +65,15 @@ Completed in this continuation:
   wakes immediately, while a two-second hold when awake shuts the screen off.
 - Enabled the card as a one-bit SD_MMC backend on CLK 2 / CMD 3 / D0 1. Mounting
   powers expander bit 14, calls `SD_MMC.setPins()`, and uses `/sdcard` without
-  format-on-failure. Square now uses `partitions.csv`; app slots and NVS remain
+  format-on-failure. Wio Tracker L2 now uses `partitions.csv`; app slots and NVS remain
   at the same offsets as the former LittleFS table.
-- All existing SD feature gates are active for Square: firmware config
+- All existing SD feature gates are active for Wio Tracker L2: firmware config
   Export/Import at `/camillia/config.yaml`, first-boot import detection,
   channel/DM persistence, node archive, state maps, discovery snapshots and web
   storage operations.
 - Fixed wake artifacts caused by `Panel_NV3031B::setSleep(false)`: LovyanGFX
   software-resets and reinitializes this controller on wake, which invalidates
-  panel RAM. Square now invalidates the entire LVGL screen while the LP5814 is
+  panel RAM. Wio Tracker L2 now invalidates the entire LVGL screen while the LP5814 is
   dark, flushes the rebuilt frame, waits for the panel bus, then restores
   brightness.
 
@@ -89,21 +94,18 @@ voltage against a meter, and test touch corners/radio/GNSS/SD/audio.
 
 ---
 
-## 0. Confidentiality — read before writing anything public
+## 0. Confidentiality — mostly lifted
 
-The `square` hardware is unreleased and its identity is under embargo, so:
+The embargo this section used to describe is over: Seeed sells the board as the
+Wio Tracker L2, so the product name and vendor may appear in the repo, commits
+and issue comments. The codename `square` is retired.
 
-- **Use the codename `square` everywhere.** Env, macros, filenames, artifacts,
-  commit messages, issue comments, docs.
-- The product name, vendor and the user's tester status must not appear in the
-  repo, in commits, or in GitHub comments. **This repo is public** (`oumike/camillia-mt`).
-- Issue #56 already discloses the pin map, panel part number and expander bit
-  map — that was the user's own considered call. Do not widen it.
-- Ask the user if you need the identity for a technical reason; do not infer it
-  into a file.
+Two things did not change:
 
-`backups/` is gitignored (it holds a flash dump of the vendor's pre-release
-firmware plus a node identity key). Keep it that way.
+- The user's tester status is still theirs to disclose, not this repo's.
+- `backups/` stays gitignored. It holds a flash dump of the vendor's
+  pre-release firmware plus a node identity key — neither belongs in a public
+  repo (`oumike/camillia-mt`) whatever the product's status.
 
 ---
 
@@ -112,20 +114,20 @@ firmware plus a node identity key). Keep it that way.
 **HEAD is `50fb913` "Release v4.6.0"** — that commit contains the completed BLE
 keyboard feature (issue #40), which is *done and committed*. See §5.
 
-**The `square` port is in progress and uncommitted.** Working tree:
+**The `wio-tracker-l2` port is in progress and uncommitted.** Working tree:
 
 ```
- M platformio.ini      # [env:square]
- M src/config.h        # DEVICE_SQUARE guard, MESH_HW_MODEL_SQUARE 137
+ M platformio.ini      # [env:wio-tracker-l2]
+ M src/config.h        # DEVICE_WIO_TRACKER_L2 guard, MESH_HW_MODEL_SEEED_WIO_TRACKER_L2 137
  M src/hal/board.h     # include branch + capability macros
  M src/hal/display.h   # Panel_NV3031B + quad-SPI bus branch
-?? boards/square.json
-?? src/hal/hw_square.h # 260 lines, full pin map
+?? boards/wio-tracker-l2.json
+?? src/hal/hw_wio_tracker_l2.h # 260 lines, full pin map
 ```
 
-**All 8 targets build clean** (`pio run`), `square` included:
-`square` = 84.4% flash (2,764,617 / 3,276,800), 44.6% RAM. Most headroom of any
-board at that checkpoint. This result predates Square's later NimBLE and ES8311
+**All 8 targets build clean** (`pio run`), `wio-tracker-l2` included:
+`wio-tracker-l2` = 84.4% flash (2,764,617 / 3,276,800), 44.6% RAM. Most headroom of any
+board at that checkpoint. This result predates Wio Tracker L2's later NimBLE and ES8311
 dependencies; no post-audio PlatformIO build has been run in this continuation.
 
 That satisfies the first acceptance criterion on #56. Nothing has been run on
@@ -153,7 +155,7 @@ assumed.
   The ticket's worry about version drift does not bite at this version.
   Note the script *warns* but does not fail the build on drift — #56 asks for it
   to fail loudly. Still outstanding if you want that hardened.
-- Per-env libdeps isolation works as expected: `[env:square]` pins
+- Per-env libdeps isolation works as expected: `[env:wio-tracker-l2]` pins
   `lovyan03/LovyanGFX@1.2.27`, the other six envs stay on `^1.1.16`, and all
   eight build.
 
@@ -167,7 +169,7 @@ assumed.
 
 The upstream GPS setup passes its variant macros directly to
 `HardwareSerial::begin(..., rx, tx)`, establishing MCU-side RX 18 / TX 17.
-`hw_square.h` now starts with that pair and retains the reversed probe as a
+`hw_wio_tracker_l2.h` now starts with that pair and retains the reversed probe as a
 fallback.
 
 ### SD decision — settled, see the comment posted on #56
@@ -177,7 +179,7 @@ SDIO is three compile-time branches in one file. `SD_MMC.setPins(clk, cmd, d0)`
 exists in Arduino core 2.0.17 (`libraries/SD_MMC/src/SD_MMC.h:51`) and `begin()`
 takes a `mode1bit` flag, so the board's non-default 1-bit pins are supported.
 
-The expander dependency is now implemented, so Square uses `HAS_SD_CARD 1` and
+The expander dependency is now implemented, so Wio Tracker L2 uses `HAS_SD_CARD 1` and
 the one-bit SD_MMC backend. Mounting enables power on bit 14 before configuring
 CLK 2 / CMD 3 / D0 1.
 
@@ -218,7 +220,7 @@ register-compatible with PCA9555/TCA9555 (its own header says so), the register
 map is identical, and the implementation is generic — it talks to the global
 `Wire` with no pager-specific assumptions.
 
-`square_io.cpp` uses the fixed address and shadowed output/config bytes. The
+`wio_tracker_l2_io.cpp` uses the fixed address and shadowed output/config bytes. The
 source-backed bring-up state is:
 
 | Bit | Name | Boot state |
@@ -242,7 +244,7 @@ source-backed bring-up state is:
 
 ### ADS1115 battery — implemented, needs meter comparison
 
-The Square environment pins `Adafruit ADS1X15@2.6.2`. The reader uses AIN0,
+The Wio Tracker L2 environment pins `Adafruit ADS1X15@2.6.2`. The reader uses AIN0,
 `GAIN_TWO`, three samples and the 2:1 divider, with a 30-second hardware cache.
 Bit 15 is enabled only around probe/read activity. Validate at low, mid and full
 charge; the upstream gain clips nominal inputs above 2.048 V (4.096 V after the
@@ -250,17 +252,17 @@ charge; the upstream gain clips nominal inputs above 2.048 V (4.096 V after the
 
 ### Touch UI profile — implemented, needs device walk
 
-Square now shares `UI_TOUCH_ONLY_PROFILE` with Heltec while hardware-specific,
+Wio Tracker L2 now shares `UI_TOUCH_ONLY_PROFILE` with Heltec while hardware-specific,
 vertical, compact-selector and low-memory paths stay separate.
 
 ### Scripts and docs — implemented
 
-Square is in local selection, the hardware-test list and CI, but intentionally
+Wio Tracker L2 is in local selection, the hardware-test list and CI, but intentionally
 not in `RELEASE_ENVS`.
 
 ### ES8311 notification audio — implemented, needs hardware verification
 
-Square shares the Pager's click-suppressed 44.1 kHz ES8311 tone engine. The
+Wio Tracker L2 shares the Pager's click-suppressed 44.1 kHz ES8311 tone engine. The
 codec stays muted and PA bit 12 stays off while idle; playback powers the amp,
 waits the upstream 250 ms settle time, primes silence, then unmutes. Message
 sound styles, volume preview and splash melody use the existing settings. The
@@ -270,7 +272,7 @@ ES7243E microphone remains out of scope.
 
 ## 5. Context: BLE keyboard (issue #40) — done, committed in v4.6.0
 
-Originally shipped on the two Heltec envs. Square now opts into the same
+Originally shipped on the two Heltec envs. Wio Tracker L2 now opts into the same
 `HAS_BLE_KEYBOARD` gate, NimBLE dependency and `ble_keyboard.cpp` source path;
 its hardware coexistence remains to be verified.
 
@@ -295,13 +297,13 @@ PSRAM size — `esptool.py --port ... flash_id` prints both:
 
 | MAC | PSRAM | What it is |
 | --- | --- | --- |
-| `68:ee:8f:51:8f:68` | 8 MB | the **square** board, running vendor Meshtastic 2.7.25 |
+| `68:ee:8f:51:8f:68` | 8 MB | the **Wio Tracker L2**, running vendor Meshtastic 2.7.25 |
 | `90:70:69:85:5f:94` | 2 MB | the **Heltec** Camillia board, node `!69855f94` |
 
 ### Backups
 
 - `backups/68ee8f518f68-20260826-085855/` — **complete, verified** full-flash
-  backup of the square board's vendor firmware. All six files match their
+  backup of the Wio Tracker L2 board's vendor firmware. All six files match their
   MANIFEST sha256; bootloader/partition-table/app magics valid; flash is
   unencrypted so a byte-for-byte restore reproduces it exactly. **Take this
   seriously — it is the only way back to the vendor firmware.**
@@ -312,9 +314,9 @@ PSRAM size — `esptool.py --port ... flash_id` prints both:
 ### Two traps in `backup.sh`
 
 1. **Restore does not check the MAC.** It checks flash size and demands a typed
-   `RESTORE`, but both boards are 16 MB ESP32-S3, so restoring the square
-   backup onto the Heltec would succeed and overwrite its node identity. Worth
-   adding a MANIFEST-MAC guard mirroring the existing flash-size check.
+   `RESTORE`, but both boards are 16 MB ESP32-S3, so restoring the Wio Tracker
+   L2 backup onto the Heltec would succeed and overwrite its node identity.
+   Worth adding a MANIFEST-MAC guard mirroring the existing flash-size check.
 2. **It exits 0 even when a device fails** ("Backed up: 0 failed: 1", exit code
    0). Anything scripting it will not notice.
 
@@ -333,7 +335,7 @@ first. The user's monitor is currently **stopped** — restart with
   `0 >= 0` → true.** Omitting a `BOARD_*` macro therefore *enables* the block
   and fails confusingly at C++ level. Every board header defines
   `BOARD_VEXT_ENABLE` / `BOARD_VEXT_ON_LEVEL`, using `-1`/`HIGH` when absent.
-  `hw_square.h` now does too. Same trap likely lurks for other `>= 0` guards.
+  `hw_wio_tracker_l2.h` now does too. Same trap likely lurks for other `>= 0` guards.
 - **Do not `pgrep -f platformio` inside a wait loop** — the loop's own command
   line contains the string, so it matches itself and never exits. Use
   `pgrep -f "penv/bin/pio"`.
@@ -349,7 +351,7 @@ first. The user's monitor is currently **stopped** — restart with
 ## 8. Verification commands
 
 ```bash
-pio run -e square              # this target
+pio run -e wio-tracker-l2              # this target
 pio run                        # all 8 — do this before any commit touching
                                # config.h / board.h / display.h / storage.*
 ```

@@ -13,77 +13,77 @@
 #define BATT_CAL 1.0f
 #endif
 
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
 #include <Adafruit_ADS1X15.h>
-#include "hal/square_io.h"
+#include "hal/wio_tracker_l2_io.h"
 namespace {
-constexpr uint32_t kSquareAdsRetryBackoffMs = 15000UL;
-constexpr uint32_t kSquareAdsReadIntervalMs = 30000UL;
-constexpr uint8_t kSquareAdsSampleCount = 3;
+constexpr uint32_t kWioTrackerL2AdsRetryBackoffMs = 15000UL;
+constexpr uint32_t kWioTrackerL2AdsReadIntervalMs = 30000UL;
+constexpr uint8_t kWioTrackerL2AdsSampleCount = 3;
 
-Adafruit_ADS1115 sSquareAds;
-bool sSquareAdsReady = false;
-bool sSquareAdsReadDone = false;
-uint32_t sSquareAdsNextProbeMs = 0;
-uint32_t sSquareAdsLastReadMs = 0;
-float sSquareAdsCachedVolts = 0.0f;
+Adafruit_ADS1115 sWioTrackerL2Ads;
+bool sWioTrackerL2AdsReady = false;
+bool sWioTrackerL2AdsReadDone = false;
+uint32_t sWioTrackerL2AdsNextProbeMs = 0;
+uint32_t sWioTrackerL2AdsLastReadMs = 0;
+float sWioTrackerL2AdsCachedVolts = 0.0f;
 
-static bool squareAdsEnsureReady() {
-    if (sSquareAdsReady) return true;
+static bool wioTrackerL2AdsEnsureReady() {
+    if (sWioTrackerL2AdsReady) return true;
 
     const uint32_t nowMs = millis();
-    if (sSquareAdsNextProbeMs != 0
-        && (int32_t)(nowMs - sSquareAdsNextProbeMs) < 0) {
+    if (sWioTrackerL2AdsNextProbeMs != 0
+        && (int32_t)(nowMs - sWioTrackerL2AdsNextProbeMs) < 0) {
         return false;
     }
-    if (!squareIoReady() || !squareIoSetBatterySense(true)) {
-        sSquareAdsNextProbeMs = nowMs + kSquareAdsRetryBackoffMs;
+    if (!wioTrackerL2IoReady() || !wioTrackerL2IoSetBatterySense(true)) {
+        sWioTrackerL2AdsNextProbeMs = nowMs + kWioTrackerL2AdsRetryBackoffMs;
         return false;
     }
 
     delay(10);
-    if (!sSquareAds.begin(ADS1115_ADDR, &Wire)) {
-        (void)squareIoSetBatterySense(false);
-        sSquareAdsNextProbeMs = nowMs + kSquareAdsRetryBackoffMs;
-        Serial.printf("[batt] square ADS1115 not found at 0x%02X\n", ADS1115_ADDR);
+    if (!sWioTrackerL2Ads.begin(ADS1115_ADDR, &Wire)) {
+        (void)wioTrackerL2IoSetBatterySense(false);
+        sWioTrackerL2AdsNextProbeMs = nowMs + kWioTrackerL2AdsRetryBackoffMs;
+        Serial.printf("[batt] Wio Tracker L2 ADS1115 not found at 0x%02X\n", ADS1115_ADDR);
         return false;
     }
 
-    sSquareAds.setGain(GAIN_TWO);
-    sSquareAdsReady = true;
-    sSquareAdsNextProbeMs = 0;
-    (void)squareIoSetBatterySense(false);
-    Serial.printf("[batt] square ADS1115 ready addr=0x%02X channel=%u divider=%.2f\n",
+    sWioTrackerL2Ads.setGain(GAIN_TWO);
+    sWioTrackerL2AdsReady = true;
+    sWioTrackerL2AdsNextProbeMs = 0;
+    (void)wioTrackerL2IoSetBatterySense(false);
+    Serial.printf("[batt] Wio Tracker L2 ADS1115 ready addr=0x%02X channel=%u divider=%.2f\n",
                   ADS1115_ADDR, (unsigned)ADS1115_BATT_CHANNEL, (double)BATT_DIV);
     return true;
 }
 
-static float batteryReadSquareAdsVolts() {
+static float batteryReadWioTrackerL2AdsVolts() {
     const uint32_t nowMs = millis();
-    if (sSquareAdsReadDone
-        && (uint32_t)(nowMs - sSquareAdsLastReadMs) < kSquareAdsReadIntervalMs) {
-        return sSquareAdsCachedVolts;
+    if (sWioTrackerL2AdsReadDone
+        && (uint32_t)(nowMs - sWioTrackerL2AdsLastReadMs) < kWioTrackerL2AdsReadIntervalMs) {
+        return sWioTrackerL2AdsCachedVolts;
     }
-    if (!squareAdsEnsureReady() || !squareIoSetBatterySense(true)) {
-        return sSquareAdsCachedVolts;
+    if (!wioTrackerL2AdsEnsureReady() || !wioTrackerL2IoSetBatterySense(true)) {
+        return sWioTrackerL2AdsCachedVolts;
     }
 
     delay(10);
     float voltsSum = 0.0f;
     uint8_t validSamples = 0;
-    for (uint8_t sample = 0; sample < kSquareAdsSampleCount; sample++) {
-        const int16_t raw = sSquareAds.readADC_SingleEnded(ADS1115_BATT_CHANNEL);
+    for (uint8_t sample = 0; sample < kWioTrackerL2AdsSampleCount; sample++) {
+        const int16_t raw = sWioTrackerL2Ads.readADC_SingleEnded(ADS1115_BATT_CHANNEL);
         if (raw <= 0) continue;
-        voltsSum += sSquareAds.computeVolts(raw);
+        voltsSum += sWioTrackerL2Ads.computeVolts(raw);
         validSamples++;
     }
-    (void)squareIoSetBatterySense(false);
+    (void)wioTrackerL2IoSetBatterySense(false);
 
-    if (validSamples == 0) return sSquareAdsCachedVolts;
-    sSquareAdsCachedVolts = (voltsSum / validSamples) * BATT_DIV * BATT_CAL;
-    sSquareAdsLastReadMs = nowMs;
-    sSquareAdsReadDone = true;
-    return sSquareAdsCachedVolts;
+    if (validSamples == 0) return sWioTrackerL2AdsCachedVolts;
+    sWioTrackerL2AdsCachedVolts = (voltsSum / validSamples) * BATT_DIV * BATT_CAL;
+    sWioTrackerL2AdsLastReadMs = nowMs;
+    sWioTrackerL2AdsReadDone = true;
+    return sWioTrackerL2AdsCachedVolts;
 }
 } // namespace
 #endif
@@ -473,8 +473,8 @@ void batteryInitAdc() {
         bqMarkUnavailable(millis());
     }
 #endif
-#if defined(DEVICE_SQUARE)
-    (void)squareAdsEnsureReady();
+#if defined(DEVICE_WIO_TRACKER_L2)
+    (void)wioTrackerL2AdsEnsureReady();
 #endif
 
     batteryResetFilter();
@@ -485,8 +485,8 @@ void batteryInitAdc() {
 // gauge, or divider-scaled ADC.
 static float batteryReadVoltageHw() {
 #if (BATT_ADC_PIN < 0)
-#if defined(DEVICE_SQUARE)
-    return batteryReadSquareAdsVolts();
+#if defined(DEVICE_WIO_TRACKER_L2)
+    return batteryReadWioTrackerL2AdsVolts();
 #elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     return batteryReadPagerBqVolts();
 #elif defined(DEVICE_MESH_DECK)

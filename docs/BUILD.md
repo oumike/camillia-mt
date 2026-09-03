@@ -22,7 +22,7 @@ Supported release file names:
 - `camillia-mt-heltec-vertical-vX.Y.Z.bin`
 - `camillia-mt-mesh-deck-vX.Y.Z.bin`
 - `camillia-mt-m9-vX.Y.Z.bin`
-- `camillia-mt-square-vX.Y.Z.bin`
+- `camillia-mt-wio-tracker-l2-vX.Y.Z.bin`
 
 Each target also publishes an app-only OTA image and detached signature. For
 T-Deck Pro these are `camillia-mt-tdeck-pro-vX.Y.Z-ota.bin` and its `.sig`.
@@ -55,7 +55,7 @@ pio run -e heltec-v4
 pio run -e heltec-v4-vertical
 pio run -e mesh-deck
 pio run -e m9
-pio run -e square
+pio run -e wio-tracker-l2
 ```
 
 Open serial monitor without rebuilding:
@@ -67,7 +67,7 @@ pio device monitor
 ### Build and flash with helper script
 
 ```bash
-Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--square] [--erase|-E]
+Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|--attaky|-M] [--m9|-9] [--wio-tracker-l2] [--erase|-E]
   --tdeck, -t  Use T-Deck environment (tdeck)
   --tdeck-pro, -p  Use T-Deck Pro environment (tdeck-pro)
   --debug, -d   Use debug PlatformIO environment (tdeck-debug)
@@ -77,7 +77,7 @@ Usage: ./build-upload-monitor.sh [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--c
   --heltec-vertical, --vertical, -V  Use vertical Heltec env (heltec-v4-vertical)
   --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment (mesh-deck)
   --m9, -9      Use Elecrow ThinkNode M9 environment (m9)
-  --square      Use Square environment (square)
+  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment (wio-tracker-l2)
                 If neither is provided, you'll be prompted to choose a device.
   --erase, -E   Erase flash before clean build/upload
                 M9 uses the combined upload_erase target.
@@ -93,7 +93,7 @@ Example usage:
 ./build-upload-monitor.sh --heltec
 ./build-upload-monitor.sh --vertical
 ./build-upload-monitor.sh --m9
-./build-upload-monitor.sh --square
+./build-upload-monitor.sh --wio-tracker-l2
 ```
 
 You can also run the script with no flags and pick a device from the prompt.
@@ -104,7 +104,7 @@ You can also run the script with no flags and pick a device from the prompt.
 |---|---|
 | Platform | espressif32 7.0.1 |
 | Framework | Arduino |
-| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots; Square uses the standard table and stores files on SD_MMC |
+| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots; the Wio Tracker L2 uses the standard table and stores files on SD_MMC |
 | PSRAM | enabled (OPI; none on Cardputer) |
 | Upload speed | 115200 |
 
@@ -112,7 +112,7 @@ You can also run the script with no flags and pick a device from the prompt.
 
 - The board must be in download mode to flash. On the T-Deck, hold the trackball button while pressing reset, or let PlatformIO trigger it automatically via USB CDC.
 - T-Deck Pro uses the `tdeck-pro` target.
-- Square uses native USB-CDC and may require its DFU/download-mode gesture before upload.
+- The Wio Tracker L2 uses native USB-CDC and may require its DFU/download-mode gesture before upload.
 - `-DARDUINO_USB_CDC_ON_BOOT=1` routes `Serial` over USB, no UART adapter needed.
 - After flashing, the device boots directly into the firmware.
 

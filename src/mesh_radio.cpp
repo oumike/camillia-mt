@@ -302,8 +302,8 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
             Serial.println("[radio] target=cardputer-cap (board IO expander must be enabled before SX1262 init)");
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
             Serial.println("[radio] target=heltec-v4 (verify board power and radio wiring)");
-#elif defined(DEVICE_SQUARE)
-            Serial.printf("[radio] target=square (expected pins: CS%d DIO1=%d RST%d BUSY%d)\n",
+#elif defined(DEVICE_WIO_TRACKER_L2)
+            Serial.printf("[radio] target=wio-tracker-l2 (expected pins: CS%d DIO1=%d RST%d BUSY%d)\n",
                           LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
 #endif
         }

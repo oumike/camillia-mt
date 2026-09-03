@@ -14,7 +14,7 @@ HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 TLORA_ENV_NAME="tlora-pager-tft"
 ATTAKY_ENV_NAME="mesh-deck"
 M9_ENV_NAME="m9"
-SQUARE_ENV_NAME="square"
+WIO_TRACKER_L2_ENV_NAME="wio-tracker-l2"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 FULLCLEAN=false
@@ -45,7 +45,7 @@ env_label() {
 		"$HELTEC_VERTICAL_ENV_NAME") echo "Heltec V4 Expansion Kit (Vertical UI)" ;;
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
-		"$SQUARE_ENV_NAME")        echo "Square" ;;
+		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;
 		*)                         echo "$1" ;;
 	esac
 }
@@ -104,9 +104,9 @@ prompt_for_device() {
 		options+=("$M9_ENV_NAME")
 		labels+=("Elecrow ThinkNode M9")
 	fi
-	if has_env "$SQUARE_ENV_NAME"; then
-		options+=("$SQUARE_ENV_NAME")
-		labels+=("Square")
+	if has_env "$WIO_TRACKER_L2_ENV_NAME"; then
+		options+=("$WIO_TRACKER_L2_ENV_NAME")
+		labels+=("Seeed Wio Tracker L2")
 	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
@@ -137,7 +137,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|-M] [--m9|-9] [--square] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
@@ -147,7 +147,7 @@ show_usage() {
 	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
 	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
 	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
-	echo "  --square      Use Square environment ($SQUARE_ENV_NAME)"
+	echo "  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment ($WIO_TRACKER_L2_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "                M9 uses the combined upload_erase target."
@@ -222,8 +222,8 @@ for arg in "$@"; do
 		--m9|-9)
 			select_env_or_exit "$M9_ENV_NAME" "Environment '$M9_ENV_NAME' not found in platformio.ini"
 			;;
-		--square)
-			select_env_or_exit "$SQUARE_ENV_NAME" "Environment '$SQUARE_ENV_NAME' not found in platformio.ini"
+		--wio-tracker-l2)
+			select_env_or_exit "$WIO_TRACKER_L2_ENV_NAME" "Environment '$WIO_TRACKER_L2_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage

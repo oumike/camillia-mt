@@ -63,7 +63,7 @@ jobs:
           pio run -e heltec-v4-vertical
           pio run -e mesh-deck
           pio run -e m9
-          pio run -e square
+          pio run -e wio-tracker-l2
 
       # Debug symbols are deliberately not archived here. CI's build is not
       # byte-identical to the release.sh-built, signed binaries that actually

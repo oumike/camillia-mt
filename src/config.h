@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_SQUARE)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -28,7 +28,7 @@
 #  define DEVICE_UI_VERTICAL 0
 #endif
 
-#if defined(DEVICE_SQUARE)
+#if defined(DEVICE_WIO_TRACKER_L2)
 #  define HAS_ENV_SENSOR_TELEMETRY 0
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #  define HAS_ENV_SENSOR_TELEMETRY 1
@@ -99,9 +99,10 @@
 // The Mesh Deck has no HardwareModel of its own — it is not in the upstream
 // enum. PRIVATE_HW is the value Meshtastic reserves for exactly this case, so
 // the node advertises "custom hardware" instead of impersonating another board.
-// Allocated upstream for this board, so it can advertise itself honestly
-// rather than falling back to PRIVATE_HW the way the Mesh Deck and M9 do.
-#define MESH_HW_MODEL_SQUARE        137
+// Allocated upstream for the Seeed Wio Tracker L2, so it can advertise itself
+// honestly rather than falling back to PRIVATE_HW the way the Mesh Deck and M9
+// do.
+#define MESH_HW_MODEL_SEEED_WIO_TRACKER_L2  137
 #define MESH_HW_MODEL_PRIVATE_HW    255
 
 #if defined(DEVICE_TDECK)
@@ -116,8 +117,8 @@
 #define MY_HW_MODEL MESH_HW_MODEL_HELTEC_V4
 #elif defined(DEVICE_MESH_DECK)
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
-#elif defined(DEVICE_SQUARE)
-#define MY_HW_MODEL MESH_HW_MODEL_SQUARE
+#elif defined(DEVICE_WIO_TRACKER_L2)
+#define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
 #elif defined(DEVICE_M9)
 // Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
 // the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
@@ -345,9 +346,10 @@
 #define MY_SPLASH_MELODY_ENABLED 1
 
 // Notification volume, percent. Scales the tone amplitude on boards that
-// synthesize audio (Pager/Square/T-Deck I2S, Cardputer speaker). Boards that alert
-// through a plain piezo buzzer have no amplitude control, so the setting is
-// hidden there rather than shown doing nothing. Same 10% steps as brightness.
+// synthesize audio (Pager/Wio Tracker L2/T-Deck I2S, Cardputer speaker).
+// Boards that alert through a plain piezo buzzer have no amplitude control, so
+// the setting is hidden there rather than shown doing nothing. Same 10% steps
+// as brightness.
 #define VOLUME_PCT_MIN   0
 #define VOLUME_PCT_MAX   100
 #define VOLUME_PCT_STEP  10
@@ -359,7 +361,7 @@
 // Deck has neither — BOARD_BUZZER is -1 and no I2S/codec path is wired — so
 // every tone call there compiles to nothing, and the alert-sound, splash-melody
 // and volume settings were UI for hardware that does not exist.
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_SQUARE) \
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || (BOARD_BUZZER >= 0)
 #define HAS_AUDIO_ALERTS 1
 #else

@@ -14,9 +14,9 @@ Specs are cross-checked against the manufacturers' sites (see [Sources](#sources
 and reconciled with each board's build config in [platformio.ini](../platformio.ini)
 and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 
-| Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer + LoRa-1262 Cap | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Square |
+| Spec | T-Deck | T-Deck Pro | T-LoRa Pager | Cardputer + LoRa-1262 Cap | Heltec V4 (expansion) | Elecrow ThinkNode M9 | Seeed Wio Tracker L2 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4`, `heltec-v4-vertical` | `m9` | `square` |
+| **Build env** | `tdeck` | `tdeck-pro` | `tlora-pager-tft` | `cardputer-cap` | `heltec-v4`, `heltec-v4-vertical` | `m9` | `wio-tracker-l2` |
 | **MCU** | ESP32-S3FN16R8 | ESP32-S3, 16 MB flash | ESP32-S3 | ESP32-S3FN8 (StampS3) | ESP32-S3R2 | ESP32-S3R8 | ESP32-S3, 16 MB flash + 8 MB octal PSRAM |
 | **PSRAM** | 8 MB octal | 8 MB QSPI | 8 MB (firmware uses quad `qio_qspi` access) | **None** | 2 MB | 8 MB octal | 8 MB octal |
 | **Flash** | 16 MB | 16 MB | 16 MB | 8 MB | 16 MB | 16 MB | 16 MB |
@@ -29,7 +29,7 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **Onboard sensors / extras** | Microphone | BHI260AP IMU, light sensor, vibration motor, optional LTE modem (not yet used) | BHI260AP IMU + AI sensor, ST25R3916 NFC, RTC (onboard; not yet used by Camillia) | Microphone (via M5Unified) | BME280 / BMP280 / AHT20 — auto-detected over I²C (temp/humidity/pressure) | PCF8563 RTC, QMI8658 IMU, QMC6309 compass (peripheral I²C; not yet used by Camillia), keypad backlight | PCA9555-gated LCD, GNSS, SD, Grove, USB OTG and audio rails |
 | **microSD** | Yes (shared LoRa SPI) | Yes (shared e-paper/LoRa SPI) | Yes (shared SPI) | Yes (shared LoRa SPI) | No — a 9.5 MB LittleFS partition in flash holds the same files (`partitions_16mb_fs.csv`) | Yes (shared LoRa SPI) | Yes — 1-bit SD_MMC on CLK 2 / CMD 3 / D0 1, powered by PCA9555 bit 14 |
 | **Sensor / GPIO headroom** | Minimal — one SPI bus shared by LoRa/TFT/SD, I²C runs keyboard/touch/trackball, UART is GPS; `USER_BUTTON_PIN = -1` | Minimal — SPI is shared by e-paper/LoRa/SD and I²C by keyboard/touch/power sensors | Minimal — most rails are XL9555-managed | Grove port available (may be claimed by the LoRa/GPS cap) | **Most headers exposed** — best candidate for add-on sensors (e.g. the Detection Sensor module) | Minimal — one SPI bus shared by LoRa/TFT/SD, two I²C buses already claimed, UART is GPS | Switched Grove rail available; shared I²C bus is already heavily used |
-| **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Unreleased; public codename `square` |
+| **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Seeed Studio Wio Tracker L2 |
 
 > **Notes.**
 > - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
@@ -45,11 +45,10 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 >   has varied across production batches.
 > - **Heltec display:** the base V4 board ships a 0.96″ OLED that Camillia does not
 >   use; the `heltec-v4` profiles target the ST7789 320×240 **TFT expansion**.
-> - **Square bring-up:** the environment compiles, but no hardware subsystem is
+> - **Wio Tracker L2 bring-up:** the environment compiles, but no hardware subsystem is
 >   considered verified without serial-log or measured evidence. LP5814 and
->   ADS1115 support now follows the upstream reference; SD_MMC is enabled in
->   one-bit mode, and the target stays out of release artifacts until hardware
->   checks pass.
+>   ADS1115 support now follows the upstream reference, and SD_MMC is enabled
+>   in one-bit mode.
 > - **M9 radio:** the LR1110 is the one radio here that is not an SX126x, and the
 >   differences reach the firmware — no DIO2-as-RF-switch, no current-limit or
 >   RX-boost setters, `setIrqAction()` in place of `setDio1Action()`, and an
@@ -116,7 +115,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | Heltec V4 (expansion) | [`src/hal/hw_heltec_v4.h`](../src/hal/hw_heltec_v4.h) |
 | Attaky Mesh Deck | [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h) |
 | Elecrow ThinkNode M9 | [`src/hal/hw_m9.h`](../src/hal/hw_m9.h) |
-| Square | [`src/hal/hw_square.h`](../src/hal/hw_square.h) |
+| Seeed Wio Tracker L2 | [`src/hal/hw_wio_tracker_l2.h`](../src/hal/hw_wio_tracker_l2.h) |
 
 ## Sources
 
@@ -130,5 +129,5 @@ Manufacturer spec pages used to verify the table above:
 - M5Stack Cardputer — <https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3>
 - Heltec WiFi LoRa 32 V4 — <https://heltec.org/project/wifi-lora-32-v4/> and <https://wiki.heltec.org/docs/devices/open-source-hardware/esp32-series/lora-32/wifi-lora-32-v4/>
 - Elecrow ThinkNode M9 — <https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html>. The pin map itself came from the M9 V1.0 schematic rather than this page.
-- Square — unreleased vendor reference firmware and device-ui configuration;
+- Seeed Wio Tracker L2 — vendor reference firmware and device-ui configuration;
 	the public pin and peripheral map is recorded in [issue #56](https://github.com/oumike/camillia-mt/issues/56).
