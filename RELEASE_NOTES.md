@@ -1,10 +1,10 @@
 ### New
 - T-Deck Pro: the sleep clock now shows the battery level under the date and unread lines, in percent or volts according to the Battery Display setting, updating with the clock so it costs no extra e-paper refresh.
-- The web interface Danger Zone now has a Reboot Device button — it restarts the firmware with a confirmation prompt and keeps all messages, nodes and settings.
+- The web interface Danger Zone now has a Reboot Device button — it restarts the firmware behind a confirmation prompt and keeps all messages, nodes and settings.
 - The notification light timeout can now be set to 5 seconds, below the previous shortest setting.
 
 ### Changed
-- The board previously known only by its codename "Square" is now identified as the Seeed Wio Tracker L2 throughout the firmware, docs, and downloads.
+- The board previously known only by its codename "Square" is now identified as the Seeed Wio Tracker L2 throughout the firmware, docs and downloads.
 - Wio Tracker L2 release downloads are now named `camillia-mt-wio-tracker-l2-vX.Y.Z.bin` instead of `camillia-mt-square-vX.Y.Z.bin`.
 - Wio Tracker L2: over-the-air updates now look for the renamed firmware file, so a device still running an older "square" build needs one manual flash of this release before OTA updates resume.
 - Building from source for the Wio Tracker L2 now uses `--wio-tracker-l2` (environment `wio-tracker-l2`) in place of the old `--square` flag, and the device picker lists it as "Seeed Wio Tracker L2".
