@@ -112,7 +112,7 @@ directories never produce a prompt.
 ## Supported boards
 
 Live Locate is available on the map-capable PSRAM builds, including T-Deck,
-T-LoRa Pager, Square, Mesh Deck, and M9.
+T-LoRa Pager, Wio Tracker L2, Mesh Deck, and M9.
 
 It is compiled out completely on:
 

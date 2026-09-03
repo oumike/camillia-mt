@@ -1,6 +1,6 @@
 #pragma once
 // ════════════════════════════════════════════════════════════════════════════
-// hal/hw_square.h — Hardware pin definitions for the "square" board
+// hal/hw_wio_tracker_l2.h — Pin definitions for the Seeed Wio Tracker L2
 //
 // ESP32-S3, 16 MB flash, 8 MB octal PSRAM. A touch-first handheld with no
 // physical keyboard, so the UI follows the Heltec TFT profile: on-screen
@@ -79,8 +79,9 @@
 // QSPI transaction itself — and it runs in SPI mode 3.
 //
 // Panel_NV3031B does not exist in LovyanGFX 1.1.16, which the other six display
-// environments pin. It appears in 1.2.27, so [env:square] pins that version in
-// its own libdeps copy and the other boards are untouched. See issue #56.
+// environments pin. It appears in 1.2.27, so [env:wio-tracker-l2] pins that
+// version in its own libdeps copy and the other boards are untouched. See
+// issue #56.
 #define TFT_SPI_HOST          SPI3_HOST
 #define TFT_SPI_SCK               42
 #define TFT_QSPI_IO0              41
@@ -132,8 +133,8 @@
 #define LP5814_REG_LED0_PWM       0x18
 #define LP5814_LED_DC_VALUE        200
 
-// Kept for shared code that names PWM-backlight fields. The Square display
-// path uses its LP5814 ILight implementation instead.
+// Kept for shared code that names PWM-backlight fields. The Wio Tracker L2
+// display path uses its LP5814 ILight implementation instead.
 #define TFT_BL_INVERT          false
 #define TFT_BL_FREQ            44100
 #define TFT_BL_PWM_CH              7
@@ -235,7 +236,8 @@
 
 // ── Buttons ─────────────────────────────────────────────────────────────────
 // GPIO 0 is the only button directly on the MCU. The active-low top Wake button
-// is expander bit 0; square_io reads it after GPIO45 signals an input change.
+// is expander bit 0; wio_tracker_l2_io reads it after GPIO45 signals an input
+// change.
 // A press wakes the display and a two-second hold while awake turns it off.
 #define USER_BUTTON_PIN            0
 #define USER_BUTTON_ACTIVE_LEVEL   LOW

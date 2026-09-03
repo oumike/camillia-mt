@@ -18,7 +18,7 @@ fi
 # 5) heltec-vertical
 # 6) cardputer
 # 7) mesh-deck
-# 8) square
+# 8) wio-tracker-l2
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"
@@ -27,7 +27,7 @@ TARGET_LABELS=(
   "heltec-vertical"
   "cardputer"
   "mesh-deck"
-  "square"
+  "wio-tracker-l2"
 )
 
 TARGET_ENVS=(
@@ -38,7 +38,7 @@ TARGET_ENVS=(
   "heltec-v4-vertical"
   "cardputer-cap"
   "mesh-deck"
-  "square"
+  "wio-tracker-l2"
 )
 
 has_env() {

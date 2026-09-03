@@ -546,8 +546,8 @@ const char *otaCurrentDeviceAssetSlug() {
     return "mesh-deck";
 #elif defined(DEVICE_M9)
     return "m9";
-#elif defined(DEVICE_SQUARE)
-    return "square";
+#elif defined(DEVICE_WIO_TRACKER_L2)
+    return "wio-tracker-l2";
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
   #if defined(DEVICE_UI_VERTICAL) && (DEVICE_UI_VERTICAL)
     return "heltec-vertical";

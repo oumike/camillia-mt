@@ -1,7 +1,7 @@
 # Bluetooth Keyboards
 
 > **Status: implemented on the keyboard-less Heltec builds** (`heltec-v4`,
-> `heltec-v4-vertical`) **and `square`**. These boards use an on-screen keyboard,
+> `heltec-v4-vertical`) **and `wio-tracker-l2`**. These boards use an on-screen keyboard,
 > so an external one adds a second text-input path. Every other build is
 > unchanged and cannot pair a keyboard. Nothing in the
 > implementation is board-specific — the `HAS_BLE_KEYBOARD` macro in
@@ -16,7 +16,7 @@
 Classic keyboard cannot be made to work by any firmware change.
 
 Every board Camillia supports — T-Deck, T-LoRa Pager, Cardputer, Heltec V3/V4,
-Attaky Mesh Deck, Elecrow ThinkNode M9, and Square — is built on an **ESP32-S3**, and the S3
+Attaky Mesh Deck, Elecrow ThinkNode M9, and Seeed Wio Tracker L2 — is built on an **ESP32-S3**, and the S3
 has no Bluetooth Classic (BR/EDR) radio at all. Only the original ESP32 in
 Espressif's lineup has one. BLE and Classic are separate protocols on shared
 spectrum: a BLE-only device and a Classic-only device
@@ -123,7 +123,7 @@ a BLE scanner before relying on any of these.**
   published sources whether it presents as BLE HID to a non-Apple host, and Apple
   peripherals carry extra pairing behavior. Scan it yourself before assuming.
 
-## Pairing one (Heltec and Square builds)
+## Pairing one (Heltec and Wio Tracker L2 builds)
 
 Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
 

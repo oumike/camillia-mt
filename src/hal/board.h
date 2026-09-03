@@ -32,7 +32,7 @@
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
 //   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
 //   DEVICE_M9                   Elecrow ThinkNode M9 (LR1110, no touch)
-//   DEVICE_SQUARE               Square (QSPI NV3031B, expander-gated rails)
+//   DEVICE_WIO_TRACKER_L2       Seeed Wio Tracker L2 (NV3031B, gated rails)
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -49,12 +49,12 @@
 #  include "hw_mesh_deck.h"
 #elif defined(DEVICE_M9)
 #  include "hw_m9.h"
-#elif defined(DEVICE_SQUARE)
-#  include "hw_square.h"
+#elif defined(DEVICE_WIO_TRACKER_L2)
+#  include "hw_wio_tracker_l2.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
-DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
+DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #endif
 
 #ifndef KB_INT_ACTIVE_LEVEL
@@ -67,7 +67,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 #  define TFT_ROTATION_DEFAULT 0
 #elif defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 3
-#elif defined(DEVICE_SQUARE)
+#elif defined(DEVICE_WIO_TRACKER_L2)
 // The panel carries offset_rotation=1. LovyanGFX adds that to this logical
 // rotation, so 0 produces internal rotation 1: 320x240, rotated left 90 degrees
 // from the previous internal rotation 2. Keep the sourced panel/touch offsets.
@@ -101,7 +101,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_SQUARE)
+    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
@@ -111,7 +111,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // Boards with touch input but no built-in keyboard use tap-first controls,
 // an on-screen keyboard and the roomier 320x240 touch layout. Keep this
 // separate from hardware-specific Heltec paths such as CHSC6X and VEXT.
-#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
 #  define UI_TOUCH_ONLY_PROFILE 1
 #else
 #  define UI_TOUCH_ONLY_PROFILE 0
@@ -142,8 +142,9 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // stream needs a routable address.
 //
 // This stays an explicit allowlist rather than a test of BOARD_HAS_PSRAM so a
-// new board opts in deliberately. Square has the same 320x240 / 8 MB PSRAM
-// shape as the existing hosts and exposes the browser Remote controls.
+// new board opts in deliberately. The Wio Tracker L2 has the same 320x240 /
+// 8 MB PSRAM shape as the existing hosts and exposes the browser Remote
+// controls.
 //
 // The Heltec entry covers both its environments — heltec-v4 and the vertical
 // variant share DEVICE_HELTEC_V4_EXPANSION and differ only in rotation, which
@@ -154,7 +155,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // three files, which is twenty-six chances to miss one when a board joins.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_SQUARE)
+    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0
@@ -174,7 +175,7 @@ DEVICE_MESH_DECK, DEVICE_M9, DEVICE_SQUARE"
 // board-specific — this macro plus a build_src_filter entry is the entire gate
 // — but the NimBLE stack costs 30-40 KB of internal DRAM while it is running,
 // so BLE remains an explicit per-board opt-in.
-#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_SQUARE)
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
 #  define HAS_BLE_KEYBOARD 1
 #else
 #  define HAS_BLE_KEYBOARD 0

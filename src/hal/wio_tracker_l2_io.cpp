@@ -1,9 +1,9 @@
-#include "square_io.h"
+#include "wio_tracker_l2_io.h"
 
 #include <Arduino.h>
 #include <Wire.h>
 
-#include "hw_square.h"
+#include "hw_wio_tracker_l2.h"
 #include "xl9555.h"
 
 namespace {
@@ -40,15 +40,15 @@ bool setOutput(uint8_t bit, bool high) {
 
 } // namespace
 
-bool squareIoBegin() {
+bool wioTrackerL2IoBegin() {
     s_ready = false;
     pinMode(EXPANDER_INT, INPUT_PULLUP);
     Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_FREQ);
 
-    Serial.printf("[square-io] i2c sda=%d scl=%d freq=%u expander=0x%02X\n",
+    Serial.printf("[wio-l2-io] i2c sda=%d scl=%d freq=%u expander=0x%02X\n",
                   BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_FREQ, EXPANDER_ADDR);
     if (!xl9555ReadAll(EXPANDER_ADDR, s_out0, s_out1, s_cfg0, s_cfg1)) {
-        Serial.println("[square-io] expander read failed");
+        Serial.println("[wio-l2-io] expander read failed");
         return false;
     }
 
@@ -71,42 +71,42 @@ bool squareIoBegin() {
     stageOutput(EXP_BIT_BATT_SENSE_EN, false);
 
     if (!writeState()) {
-        Serial.println("[square-io] safe-state write failed");
+        Serial.println("[wio-l2-io] safe-state write failed");
         return false;
     }
 
     delay(10);
     stageOutput(EXP_BIT_GNSS_RST, false);
     if (!writeState()) {
-        Serial.println("[square-io] GNSS reset release failed");
+        Serial.println("[wio-l2-io] GNSS reset release failed");
         return false;
     }
 
     delay(40);
     stageOutput(EXP_BIT_LCD_RST, false);
     if (!writeState()) {
-        Serial.println("[square-io] LCD reset assertion failed");
+        Serial.println("[wio-l2-io] LCD reset assertion failed");
         return false;
     }
 
     delay(10);
     stageOutput(EXP_BIT_LCD_RST, true);
     if (!writeState()) {
-        Serial.println("[square-io] LCD reset release failed");
+        Serial.println("[wio-l2-io] LCD reset release failed");
         return false;
     }
 
     delay(500);
     stageOutput(EXP_BIT_LCD_CS, true);
     if (!writeState()) {
-        Serial.println("[square-io] LCD control release failed");
+        Serial.println("[wio-l2-io] LCD control release failed");
         return false;
     }
 
     delay(10);
     stageOutput(EXP_BIT_TOUCH_RST, true);
     if (!writeState()) {
-        Serial.println("[square-io] touch reset release failed");
+        Serial.println("[wio-l2-io] touch reset release failed");
         return false;
     }
 
@@ -114,16 +114,16 @@ bool squareIoBegin() {
     s_ready = true;
     uint8_t input0 = 0xFF;
     (void)xl9555ReadReg(EXPANDER_ADDR, XL9555_REG_IN0, input0);
-    Serial.printf("[square-io] ready out0=0x%02X out1=0x%02X cfg0=0x%02X cfg1=0x%02X\n",
+    Serial.printf("[wio-l2-io] ready out0=0x%02X out1=0x%02X cfg0=0x%02X cfg1=0x%02X\n",
                   s_out0, s_out1, s_cfg0, s_cfg1);
     return true;
 }
 
-bool squareIoReady() {
+bool wioTrackerL2IoReady() {
     return s_ready;
 }
 
-bool squareIoReadWakeButton(bool &pressed) {
+bool wioTrackerL2IoReadWakeButton(bool &pressed) {
     pressed = false;
     if (!s_ready) return false;
 
@@ -133,46 +133,46 @@ bool squareIoReadWakeButton(bool &pressed) {
     return true;
 }
 
-bool squareIoSetLcdPower(bool enabled) {
+bool wioTrackerL2IoSetLcdPower(bool enabled) {
     return setOutput(EXP_BIT_LCD_POWER, enabled);
 }
 
-bool squareIoSetLcdResetReleased(bool released) {
+bool wioTrackerL2IoSetLcdResetReleased(bool released) {
     return setOutput(EXP_BIT_LCD_RST, released);
 }
 
-bool squareIoSetTouchResetReleased(bool released) {
+bool wioTrackerL2IoSetTouchResetReleased(bool released) {
     return setOutput(EXP_BIT_TOUCH_RST, released);
 }
 
-bool squareIoSetGrovePower(bool enabled) {
+bool wioTrackerL2IoSetGrovePower(bool enabled) {
     return setOutput(EXP_BIT_GROVE_POWER, enabled);
 }
 
-bool squareIoSetGnssPower(bool enabled) {
+bool wioTrackerL2IoSetGnssPower(bool enabled) {
     return setOutput(EXP_BIT_GNSS_POWER, enabled);
 }
 
-bool squareIoSetGnssResetReleased(bool released) {
+bool wioTrackerL2IoSetGnssResetReleased(bool released) {
     return setOutput(EXP_BIT_GNSS_RST, !released);
 }
 
-bool squareIoSetUserLed(bool enabled) {
+bool wioTrackerL2IoSetUserLed(bool enabled) {
     return setOutput(EXP_BIT_USER_LED, enabled);
 }
 
-bool squareIoSetUsbOtg(bool enabled) {
+bool wioTrackerL2IoSetUsbOtg(bool enabled) {
     return setOutput(EXP_BIT_USB_OTG_EN, enabled);
 }
 
-bool squareIoSetAudioPaPower(bool enabled) {
+bool wioTrackerL2IoSetAudioPaPower(bool enabled) {
     return setOutput(EXP_BIT_AUDIO_PA_POWER, enabled);
 }
 
-bool squareIoSetSdPower(bool enabled) {
+bool wioTrackerL2IoSetSdPower(bool enabled) {
     return setOutput(EXP_BIT_SD_POWER, enabled);
 }
 
-bool squareIoSetBatterySense(bool enabled) {
+bool wioTrackerL2IoSetBatterySense(bool enabled) {
     return setOutput(EXP_BIT_BATT_SENSE_EN, enabled);
 }
