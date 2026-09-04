@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "storage.h"
 #include <nvs.h>
+#include <esp_heap_caps.h>
 #include <time.h>
 
 NodeDB Nodes;
@@ -473,6 +474,39 @@ void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
              pubHex);
 }
 
+// Reader half of nodeCsvQuote(). See node_db.h for the contract.
+const char *nodeCsvParseField(const char *p, char *out, size_t outLen) {
+    if (out && outLen > 0) out[0] = '\0';
+    if (!p) return nullptr;
+
+    size_t o = 0;
+    const size_t cap = (out && outLen > 0) ? outLen - 1 : 0;
+
+    if (*p == '"') {
+        p++;
+        while (*p) {
+            if (*p == '"') {
+                // A doubled quote is one literal quote; a lone one ends the
+                // field. This is the only place the two can be told apart.
+                if (p[1] == '"') { if (o < cap) out[o++] = '"'; p += 2; continue; }
+                p++;
+                break;
+            }
+            if (o < cap) out[o++] = *p;
+            p++;
+        }
+    } else {
+        while (*p && *p != ',') {
+            if (o < cap) out[o++] = *p;
+            p++;
+        }
+    }
+
+    if (out && outLen > 0) out[o] = '\0';
+    if (*p == ',') return p + 1;
+    return nullptr;   // last field on the line
+}
+
 // ── Evicted-node archive ─────────────────────────────────────────────────────
 // See the contract in node_db.h. Eviction runs on the packet path, so it only
 // memcpys the doomed record into this ring; nodeArchiveFlush() does the SD I/O
@@ -593,6 +627,356 @@ void nodeArchiveFlush() {
     f.close();
 }
 
+// ── Archived-node index ──────────────────────────────────────────────────────
+// See the contract in node_db.h.
+
+// Allocated on first use rather than declared as an array: at the PSRAM cap this
+// is ~30 KB, which must come out of external RAM. Kept once allocated — the
+// alternative is re-taking a 30 KB block every time the Nodes screen opens.
+static ArchivedNode *s_archIndex = nullptr;
+static int  s_archIndexCount = 0;
+static bool s_archIndexTruncated = false;
+
+static bool archIndexEnsure() {
+    if (s_archIndex) return true;
+    const size_t bytes = sizeof(ArchivedNode) * NODE_ARCHIVE_INDEX_MAX;
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+    s_archIndex = (ArchivedNode *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    // Fallback covers the boards with no PSRAM, where the cap is small enough to
+    // come out of internal heap. A failure here is not an error: the screen just
+    // shows the live half, which is what it did before archived rows existed.
+    if (!s_archIndex) s_archIndex = (ArchivedNode *)malloc(bytes);
+    if (!s_archIndex) Serial.println("[nodedb] archive index alloc failed - live nodes only");
+    return s_archIndex != nullptr;
+}
+
+// A record is nodeCsvFormatEntry()'s 512-byte budget plus this writer's
+// archivedEpoch column, so a line never exceeds the archive writer's own 544.
+static const size_t kArchScanLineMax = 576;
+static const size_t kArchScanChunk   = 512;
+// Hard ceiling on how much of the file one scan reads, independent of how many
+// entries it accepts. The index cap alone does not bound the work: rows skipped
+// as duplicates or as currently-live keep the scan going, so an archive holding
+// ten thousand re-evictions of the same handful of nodes would be read end to
+// end. This is what keeps opening the screen cheap on a pathological file.
+//
+// Scaled with the index: filling 512 entries needs far more of the file in hand
+// than filling 24, and a budget that stopped first would put the "+" back on a
+// count this is meant to make exact.
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+static const size_t kArchScanMaxBytes = 512 * 1024;
+#else
+static const size_t kArchScanMaxBytes = 64 * 1024;
+#endif
+
+// Returns false to stop the scan.
+typedef bool (*ArchiveLineFn)(const char *line, void *ctx);
+
+// Walks the archive newest-line-first. The file is append-ordered, so reading
+// it backwards is reading it newest-first, and stopping early costs only the
+// chunks actually read -- which is the whole point: the file has no upper size.
+//
+// completedOut reports whether the scan reached the start of the file rather
+// than being stopped by fn.
+static bool archiveScanTail(ArchiveLineFn fn, void *ctx, bool *completedOut) {
+    if (completedOut) *completedOut = false;
+    // sdCardMounted() reads cached state. Deliberately not sdBegin(): probing
+    // for a card that is not there is slow (the pager walks several bus
+    // profiles), and this runs from a screen-open path.
+    if (!sdCardMounted()) return false;
+    if (!storageFs().exists(kArchivePath)) return false;
+
+    File f = storageFs().open(kArchivePath, FILE_READ);
+    if (!f) return false;
+
+    size_t pos = (size_t)f.size();
+    if (pos == 0) { f.close(); if (completedOut) *completedOut = true; return true; }
+
+    // One transient allocation rather than statics: this is ~1.6 KB that would
+    // otherwise sit in DRAM for the life of the device to serve a screen the
+    // user opens occasionally, and it is too much to put on the loop stack.
+    char *buf = (char *)malloc(kArchScanChunk + 2 * kArchScanLineMax);
+    if (!buf) { f.close(); return false; }
+    char *chunk = buf;
+    char *tail  = buf + kArchScanChunk;                     // head of a line continuing before pos
+    char *line  = buf + kArchScanChunk + kArchScanLineMax;  // assembled line
+    size_t tailLen = 0;
+    size_t bytesRead = 0;
+    bool stopped = false;
+
+    while (pos > 0 && !stopped) {
+        if (bytesRead >= kArchScanMaxBytes) { stopped = true; break; }
+        const size_t n = (pos >= kArchScanChunk) ? kArchScanChunk : pos;
+        pos -= n;
+        bytesRead += n;
+        if (!f.seek(pos)) break;
+        if (f.read((uint8_t *)chunk, n) != n) break;
+
+        int end = (int)n;   // exclusive end of the not-yet-consumed part of chunk
+        for (int i = (int)n - 1; i >= 0; i--) {
+            if (chunk[i] != '\n') continue;
+            const size_t segLen = (size_t)(end - (i + 1));
+            if (segLen + tailLen < kArchScanLineMax) {
+                memcpy(line, chunk + i + 1, segLen);
+                memcpy(line + segLen, tail, tailLen);
+                size_t len = segLen + tailLen;
+                while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n')) len--;
+                line[len] = '\0';
+                if (len > 0 && !fn(line, ctx)) stopped = true;
+            }
+            tailLen = 0;
+            end = i;
+            if (stopped) break;
+        }
+        if (stopped) break;
+
+        if ((size_t)end + tailLen < kArchScanLineMax) {
+            memmove(tail + end, tail, tailLen);
+            memcpy(tail, chunk, (size_t)end);
+            tailLen += (size_t)end;
+        } else {
+            tailLen = 0;   // a line longer than any this writer produces: drop it
+        }
+    }
+
+    // Whatever is left in `tail` once pos reaches 0 is the file's first line.
+    // Emitted rather than assumed to be the header: archiveParseIndexRow()
+    // rejects the header on its own (the id column will not parse as hex), and
+    // dropping it here unconditionally would instead silently lose the oldest
+    // record of any file that has no header row.
+    if (!stopped && tailLen > 0) {
+        memcpy(line, tail, tailLen);
+        size_t len = tailLen;
+        while (len > 0 && (line[len - 1] == '\r' || line[len - 1] == '\n')) len--;
+        line[len] = '\0';
+        if (len > 0) fn(line, ctx);
+    }
+    free(buf);
+    f.close();
+    if (completedOut) *completedOut = !stopped;
+    return true;
+}
+
+// upsert() seeds every new entry with names derived from its id -- longName
+// "!%08x", shortName "%04X" -- and only a real NODEINFO replaces them. hasName
+// is what tells the two apart in RAM, but the CSV schema has no column for it,
+// so a record read back cannot distinguish "named Fred" from "never announced".
+//
+// Reconstructing the placeholder and comparing is exact, needs no new column,
+// and stays correct for archives written by earlier firmware. Without it the
+// Nodes screen showed a bare hex id where a name belongs -- for most archived
+// nodes, since the least-recently-heard entries eviction picks are precisely the
+// ones that never sent a NODEINFO.
+static bool archiveNameIsPlaceholder(const char *name, uint32_t nodeId, bool isLongName) {
+    if (!name || !name[0]) return false;
+    char ph[48];
+    if (isLongName) snprintf(ph, sizeof(ph), "!%08x", (unsigned)nodeId);
+    else            snprintf(ph, sizeof(ph), "%04X", (unsigned)(nodeId & 0xFFFF));
+    return strcmp(name, ph) == 0;
+}
+
+// Fields 0-4 of an archive row: archivedEpoch, lastHeardEpoch, nodeId,
+// shortName, longName. Rejects the header line, which fails the id parse.
+static bool archiveParseIndexRow(const char *line, ArchivedNode &out) {
+    memset(&out, 0, sizeof(out));
+    char fld[64];
+    const char *p = line;
+
+    p = nodeCsvParseField(p, fld, sizeof(fld));
+    if (!p) return false;
+    out.archivedEpoch = strtol(fld, nullptr, 10);
+
+    p = nodeCsvParseField(p, fld, sizeof(fld));
+    if (!p) return false;
+    out.lastHeardEpoch = strtol(fld, nullptr, 10);
+
+    p = nodeCsvParseField(p, fld, sizeof(fld));
+    if (!p) return false;
+    out.nodeId = (uint32_t)strtoul((fld[0] == '!') ? fld + 1 : fld, nullptr, 16);
+    if (out.nodeId == 0) return false;   // junk, or the header row
+
+    p = nodeCsvParseField(p, out.shortName, sizeof(out.shortName));
+    if (!p) return false;
+    nodeCsvParseField(p, out.longName, sizeof(out.longName));
+
+    // Cleared rather than kept, because this struct exists to be displayed: an
+    // empty field is what makes a row fall through to the next real name, and
+    // finally to the id only when the node genuinely never announced one.
+    if (archiveNameIsPlaceholder(out.longName, out.nodeId, true))   out.longName[0] = '\0';
+    if (archiveNameIsPlaceholder(out.shortName, out.nodeId, false)) out.shortName[0] = '\0';
+    return true;
+}
+
+// The whole row, back into a NodeEntry. Mirrors nodeCsvFormatEntry() field for
+// field; the two must be edited together.
+static bool archiveParseFullRow(const char *line, NodeEntry &out, long *archivedEpochOut) {
+    memset(&out, 0, sizeof(out));
+    char fld[80];
+    const char *p = line;
+
+    auto next = [&](void) -> bool {
+        if (!p) { fld[0] = '\0'; return false; }
+        p = nodeCsvParseField(p, fld, sizeof(fld));
+        return true;
+    };
+
+    if (!next()) return false;
+    if (archivedEpochOut) *archivedEpochOut = strtol(fld, nullptr, 10);
+
+    if (!next()) return false;
+    const long lastHeardEpoch = strtol(fld, nullptr, 10);
+
+    if (!next()) return false;
+    out.nodeId = (uint32_t)strtoul((fld[0] == '!') ? fld + 1 : fld, nullptr, 16);
+    if (out.nodeId == 0) return false;
+
+    if (!p) return false;
+    p = nodeCsvParseField(p, out.shortName, sizeof(out.shortName));
+    if (!p) return false;
+    p = nodeCsvParseField(p, out.longName, sizeof(out.longName));
+
+    if (!next()) return false; out.hops         = (uint8_t)strtoul(fld, nullptr, 10);
+    if (!next()) return false; out.snr          = strtof(fld, nullptr);
+    if (!next()) return false; out.latI         = (int32_t)strtol(fld, nullptr, 10);
+    if (!next()) return false; out.lonI         = (int32_t)strtol(fld, nullptr, 10);
+    if (!next()) return false; out.alt          = (int32_t)strtol(fld, nullptr, 10);
+    if (!next()) return false; out.battPct      = strtof(fld, nullptr);
+    if (!next()) return false; out.voltage      = strtof(fld, nullptr);
+    if (!next()) return false; out.chUtil       = strtof(fld, nullptr);
+    if (!next()) return false; out.airUtil      = strtof(fld, nullptr);
+    if (!next()) return false; out.temperatureC = strtof(fld, nullptr);
+    if (!next()) return false; out.humidityPct  = strtof(fld, nullptr);
+    if (!next()) return false; out.pressureHpa  = strtof(fld, nullptr);
+    if (!next()) return false; out.chanIdx      = (int)strtol(fld, nullptr, 10);
+    if (!next()) return false; out.favorite     = (strtol(fld, nullptr, 10) != 0);
+    if (!next()) return false; out.hasPosition  = (strtol(fld, nullptr, 10) != 0);
+    if (!next()) return false; out.hasTelemetry = (strtol(fld, nullptr, 10) != 0);
+    next();   // pubKey is the last field, so this returns null -- expected
+    if (strlen(fld) == 64) {
+        bool ok = true;
+        for (int i = 0; i < 32 && ok; i++) {
+            char byteHex[3] = { fld[i * 2], fld[i * 2 + 1], '\0' };
+            char *endp = nullptr;
+            unsigned long v = strtoul(byteHex, &endp, 16);
+            if (endp != byteHex + 2) { ok = false; break; }
+            out.pubKey[i] = (uint8_t)v;
+        }
+        out.hasPubKey = ok;
+        if (!ok) memset(out.pubKey, 0, sizeof(out.pubKey));
+    }
+
+    // Not columns in the schema, so they are inferred rather than read.
+    //
+    // The placeholder strings are deliberately left in place here, unlike in the
+    // index above: this NodeEntry goes back into the live table on restore, and
+    // upsert() would have put exactly those there. Only the claim is corrected,
+    // so a restored node that never announced still reads as unnamed and the
+    // first real NODEINFO replaces the placeholder as usual.
+    out.hasName = (out.longName[0] != '\0')
+                  && !archiveNameIsPlaceholder(out.longName, out.nodeId, true);
+    if (out.hasTelemetry) {
+        out.hasDeviceTelemetry = (out.voltage != 0.0f || out.battPct != 0.0f
+                                  || out.chUtil != 0.0f || out.airUtil != 0.0f);
+        out.hasEnvironmentTelemetry = (out.temperatureC != 0.0f || out.humidityPct != 0.0f
+                                       || out.pressureHpa != 0.0f);
+    }
+    // hops survives, but hasHops does not: the schema has no column for it, and
+    // guessing true would tell Discovery this is a confirmed direct neighbor.
+
+    // Put lastHeardMs back on the millis() timeline so a restored node sorts by
+    // real recency instead of landing at the bottom. Only possible with a set
+    // clock and a stamp that is neither in the future nor older than uptime.
+    const time_t nowEpoch = time(nullptr);
+    if (lastHeardEpoch > 0 && nowEpoch > 1700000000 && (long)nowEpoch >= lastHeardEpoch) {
+        const unsigned long ageMs = (unsigned long)((long)nowEpoch - lastHeardEpoch) * 1000UL;
+        const uint32_t nowMs = millis();
+        out.lastHeardMs = (ageMs < nowMs) ? (uint32_t)(nowMs - ageMs) : 1;
+    }
+    return true;
+}
+
+static bool archiveIndexRowFn(const char *line, void *) {
+    if (!s_archIndex) return false;
+    ArchivedNode a;
+    if (!archiveParseIndexRow(line, a)) return true;   // junk or header: keep going
+    // Came back since it was archived -- it belongs to the live list, not here.
+    if (Nodes.find(a.nodeId)) return true;
+    // Newest-first means the first record seen for an id is the one to keep, so
+    // repeated evictions of the same node collapse to one row.
+    for (int i = 0; i < s_archIndexCount; i++) {
+        if (s_archIndex[i].nodeId == a.nodeId) return true;
+    }
+    s_archIndex[s_archIndexCount++] = a;
+    return s_archIndexCount < NODE_ARCHIVE_INDEX_MAX;
+}
+
+void nodeArchiveIndexClear() {
+    s_archIndexCount = 0;
+    s_archIndexTruncated = false;
+}
+
+bool nodeArchiveIndexBuild() {
+    nodeArchiveIndexClear();
+    if (!archIndexEnsure()) return false;
+    bool completed = false;
+    if (!archiveScanTail(archiveIndexRowFn, nullptr, &completed)) {
+        nodeArchiveIndexClear();
+        return false;
+    }
+    // Stopped short only ever means the cap was reached with file left to read.
+    s_archIndexTruncated = !completed;
+    return true;
+}
+
+int  nodeArchiveIndexCount() { return s_archIndexCount; }
+bool nodeArchiveIndexTruncated() { return s_archIndexTruncated; }
+
+const ArchivedNode *nodeArchiveIndexAt(int i) {
+    if (!s_archIndex || i < 0 || i >= s_archIndexCount) return nullptr;
+    return &s_archIndex[i];
+}
+
+namespace {
+struct ArchiveLoadCtx {
+    uint32_t   wantId;
+    NodeEntry *out;
+    long      *archivedEpoch;
+    bool       found;
+};
+}
+
+static bool archiveLoadRowFn(const char *line, void *ctxv) {
+    ArchiveLoadCtx *c = (ArchiveLoadCtx *)ctxv;
+    ArchivedNode a;
+    if (!archiveParseIndexRow(line, a)) return true;
+    if (a.nodeId != c->wantId) return true;
+    c->found = archiveParseFullRow(line, *c->out, c->archivedEpoch);
+    return !c->found;   // first (newest) match wins
+}
+
+bool nodeArchiveLoadFull(uint32_t nodeId, NodeEntry &out, long *archivedEpochOut) {
+    if (nodeId == 0) return false;
+    ArchiveLoadCtx ctx = { nodeId, &out, archivedEpochOut, false };
+    if (!archiveScanTail(archiveLoadRowFn, &ctx, nullptr)) return false;
+    return ctx.found;
+}
+
+bool nodeArchiveClear() {
+    // Queue first, and unconditionally: these are evictions from the table that
+    // is being wiped, so they must not survive to be written back. Not counted
+    // as dropped — nothing was lost, it was deleted on purpose.
+    s_archCount = 0;
+    s_archHead = s_archTail = 0;
+    nodeArchiveIndexClear();
+
+    if (!sdCardMounted()) return false;
+    if (!storageFs().exists(kArchivePath)) return true;   // already gone
+    const bool removed = storageFs().remove(kArchivePath);
+    Serial.printf("[nodedb] archive clear: %s\n", removed ? "removed" : "REMOVE FAILED");
+    return removed;
+}
+
 #else   // !HAS_SD_CARD
 
 // Boards with no SD slot do not expose the removable-card archive, so the
@@ -605,6 +989,14 @@ uint32_t nodeArchiveDropped() { return 0; }
 bool     nodeArchiveSlotExists() { return false; }
 bool     nodeArchiveAvailable() { return false; }
 const char *nodeArchiveFilePath() { return nullptr; }
+
+bool nodeArchiveIndexBuild() { return false; }
+void nodeArchiveIndexClear() {}
+int  nodeArchiveIndexCount() { return 0; }
+bool nodeArchiveIndexTruncated() { return false; }
+const ArchivedNode *nodeArchiveIndexAt(int) { return nullptr; }
+bool nodeArchiveLoadFull(uint32_t, NodeEntry &, long *) { return false; }
+bool nodeArchiveClear() { return false; }
 
 #endif  // HAS_SD_CARD
 
@@ -886,6 +1278,14 @@ void NodeDB::updateTelemetry(uint32_t nodeId, const TelemetryInfo &t) {
         _save(nodeId);
         e->lastPersistMs = now;
     }
+}
+
+bool NodeDB::persist(uint32_t nodeId) {
+    NodeEntry *e = find(nodeId);
+    if (!e || !e->nodeId) return false;
+    _save(nodeId);
+    e->lastPersistMs = millis();
+    return true;
 }
 
 bool NodeDB::setFavorite(uint32_t nodeId, bool favorite) {

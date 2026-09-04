@@ -42,6 +42,9 @@
 // drops, and reusing the number for a mapped code invites confusing the two.
 #define KEY_BACK_BTN    0x91
 #define KEY_TOGGLE_KB_BACKLIGHT 0x92
+// Alt+C. No dedicated button raises this — the M9's controller resolves Alt
+// itself and never reports the combination, so this one is keyboard-only.
+#define KEY_OPEN_CONFIG 0x93
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

@@ -180,6 +180,30 @@ static bool bqKickWatchdog() {
     return bqWriteReg(kBqRegWatchdogRst, (uint8_t)(reg | 0x40));
 }
 
+// REG0B bits 7:5 are VBUS_STAT: 0 = no input, anything else is an adapter of
+// some kind. That is the question the low-battery path asks -- not "is it
+// charging", which is also false on a full battery with USB in.
+constexpr uint8_t kBqRegStatus = 0x0B;
+static bool bqExternalPowerPresent(bool &known) {
+    known = false;
+    if (!sBqPresent) return false;   // never probed, or the bus is not answering
+    uint8_t reg = 0;
+    if (!bqReadReg(kBqRegStatus, reg)) return false;
+    known = true;
+    return ((reg >> 5) & 0x07) != 0;
+}
+
+// REG09 bit 5, BATFET_DIS: opens the battery FET, which is a true disconnect
+// rather than a low-power mode. The charger brings it back when USB is
+// plugged in, which is exactly the recovery path a flat device needs.
+constexpr uint8_t kBqRegBatfet = 0x09;
+static bool bqBatfetDisable() {
+    if (!sBqPresent) return false;
+    uint8_t reg = 0;
+    if (!bqReadReg(kBqRegBatfet, reg)) return false;
+    return bqWriteReg(kBqRegBatfet, (uint8_t)(reg | 0x20));
+}
+
 static float batteryReadPagerBqVolts() {
     bqEnsureWire();
     uint32_t nowMs = millis();
@@ -254,7 +278,12 @@ namespace {
 // the ESP-IDF adc_oneshot driver during M5Cardputer.begin(). Reading that same pin
 // with Arduino's legacy analogRead returns 0 once the oneshot driver owns ADC1, so
 // defer to M5Unified's calibrated reading (millivolts, already divider-scaled).
+static bool sCardputerM5Ready = false;
 static float batteryReadCardputerVolts() {
+    // Reading M5.Power before M5Cardputer.begin() would be reading through an
+    // uninitialised driver. "Unknown" is the honest answer and the safe one:
+    // the low-battery boot gate treats it as "no reading" and carries on.
+    if (!sCardputerM5Ready) return 0.0f;
     int mv = M5.Power.getBatteryVoltage();
     if (mv <= 0) return 0.0f;
     return mv / 1000.0f;
@@ -570,6 +599,56 @@ float batteryReadVoltage() {
 
 float batteryReadVoltageUntrimmed() {
     return batteryReadVoltageHw();
+}
+
+void batteryNoteM5Ready() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    sCardputerM5Ready = true;
+    // The gate's samples were all "unknown", so the filter is still empty;
+    // prime it now that there is something to read.
+    batteryResetFilter();
+#endif
+}
+
+float batteryReadVoltageNow() {
+    // Raw and trimmed, deliberately not the EMA: the filter eases toward new
+    // values over several samples, and a gate that has three samples to work
+    // with would be reading mostly the value it started from.
+    return batteryReadVoltageRaw();
+}
+
+bool batteryExternalPowerPresent(bool *known) {
+    bool haveAnswer = false;
+    bool present = false;
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    present = bqExternalPowerPresent(haveAnswer);
+#elif defined(DEVICE_CARDPUTER_LORA_HAT)
+    // M5Unified reports a tri-state; "unknown" must stay unknown rather than
+    // collapsing to "not charging".
+    const auto st = M5.Power.isCharging();
+    if (st != m5::Power_Class::is_charging_t::charge_unknown) {
+        haveAnswer = true;
+        present = (st == m5::Power_Class::is_charging_t::is_charging);
+    }
+#endif
+    if (known) *known = haveAnswer;
+    return present;
+}
+
+bool batteryHardwarePowerOffSupported() {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    return sBqPresent;
+#else
+    return false;
+#endif
+}
+
+bool batteryHardwarePowerOff() {
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+    return bqBatfetDisable();
+#else
+    return false;
+#endif
 }
 
 void batterySetCalibrationTrim(int trimPermille) {

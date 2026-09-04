@@ -1,7 +1,30 @@
 #include <Arduino.h>
 #include "keyboard.h"
+#include "battery_util.h"
 #if HAS_BLE_KEYBOARD
 #include "ble_keyboard.h"
+#endif
+
+// ── Alt+letter navigation chords ─────────────────────────────────────────────
+// The keyboards that expose Alt as a modifier of its own — separate from Shift
+// and Symbol, so binding it costs no printable character — share this table, so
+// a chord that works on one of them works on all of them. Boards whose Alt is
+// the symbol layer, or whose controller resolves Alt before we see it, cannot
+// use these at all; see docs/USE.md for which is which.
+//
+// KEY_NONE means "not a chord", which for a driver whose Alt state costs a bus
+// transaction is also the answer to "do I need to go and look?".
+#if defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
+static char altNavShortcut(char k) {
+    switch (k) {
+        case 'h': case 'H': return KEY_OPEN_HOME;
+        case 'd': case 'D': return KEY_OPEN_DMS;
+        case 'n': case 'N': return KEY_OPEN_NODES;
+        case 'l': case 'L': return KEY_OPEN_LIVE;
+        case 'c': case 'C': return KEY_OPEN_CONFIG;
+        default:            return KEY_NONE;
+    }
+}
 #endif
 
 #if defined(M9_KB_NEEDS_USB_PAD_RELEASE)
@@ -400,8 +423,16 @@ char tloraTranslateKey(uint8_t keyNum) {
 #if defined(DEVICE_TDECK_PRO)
     if (sTloraModifier & TDECK_PRO_MOD_ALT) {
         char nav = KEY_NONE;
+        // By key number, not by letter: this keyboard reports position and the
+        // tap map above turns it into a character, so the chord has to be
+        // resolved before that. Numbers are kTloraTapMap indices + 1 --
+        // 15='h', 18='d', 24='n', 12='l', 27='c'.
         if (keyNum == 8) nav = KEY_SCROLL_UP;
         else if (keyNum == 15) nav = KEY_OPEN_HOME;
+        else if (keyNum == 18) nav = KEY_OPEN_DMS;
+        else if (keyNum == 24) nav = KEY_OPEN_NODES;
+        else if (keyNum == 12) nav = KEY_OPEN_LIVE;
+        else if (keyNum == 27) nav = KEY_OPEN_CONFIG;
         else if (keyNum == 17) nav = KEY_NEXT_CHAN;
         else if (keyNum == 19) nav = KEY_PREV_CHAN;
         else if (keyNum == 25) nav = KEY_TOGGLE_KB_BACKLIGHT;
@@ -853,7 +884,10 @@ static char mdEmitPending() {
                     continue;
                 }
                 if (k == MD_KEY_SHIFT || k == MD_KEY_ALT) continue;
-                if (altHeld && (k == 'h' || k == 'H')) return KEY_OPEN_HOME;
+                if (altHeld) {
+                    const char nav = altNavShortcut(k);
+                    if (nav != KEY_NONE) return nav;
+                }
                 if (shiftHeld) return mdApplyShift(k);
                 return k;
             }
@@ -959,6 +993,9 @@ void TDeckKeyboard::begin() {
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     M5Cardputer.begin(true);
+    // M5Unified owns this board's battery ADC, so nothing may read it before
+    // here — including the low-battery boot gate, which runs earlier by design.
+    batteryNoteM5Ready();
     return;
 #endif
 
@@ -1347,9 +1384,11 @@ char TDeckKeyboard::readKey() {
 #endif
     char mapped = mapKey(raw);
 #if defined(DEVICE_TDECK)
-    if ((mapped == 'h' || mapped == 'H') && tdeckKeyboardAltHeldRaw()) {
-        mapped = KEY_OPEN_HOME;
-    }
+    // Order matters: altNavShortcut() first, so the I2C raw-matrix read below
+    // only happens for the five letters that could be a chord. Probing on every
+    // keystroke would put a bus round-trip in the middle of typing.
+    const char altNav = altNavShortcut(mapped);
+    if (altNav != KEY_NONE && tdeckKeyboardAltHeldRaw()) mapped = altNav;
 #endif
     if (sKeyTrace) {
         Serial.printf("[kb] raw=0x%02X -> mapped=0x%02X%s\n",
@@ -1535,6 +1574,14 @@ void TDeckKeyboard::pumpCardputerKeys() {
                 case '/': enqueueCardputerKey(KEY_NEXT_CHAN); continue;
                 default: break;
             }
+        }
+
+        // Alt is its own modifier here: the library resolves Fn and Shift into
+        // `word` but leaves Alt out of it, so the letter still arrives as itself
+        // and binding these costs no character.
+        if (status.alt) {
+            const char nav = altNavShortcut(key);
+            if (nav != KEY_NONE) { enqueueCardputerKey(nav); continue; }
         }
 
         enqueueCardputerKey(key);
