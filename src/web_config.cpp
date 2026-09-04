@@ -4287,7 +4287,10 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "like stable ones; what changes is how well tested they are. "
                 "Switching back to Stable offers the newest stable release even "
                 "though it is numerically older than the alpha you are running, "
-                "so returning to the stable track never needs a USB reflash.</p>";
+                "so returning to the stable track never needs a USB reflash. "
+                "Changing the channel here reboots the device and checks the new "
+                "channel on the way back up, whatever the setting above says; "
+                "any update it finds is offered on the device's own screen.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -4328,6 +4331,35 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             html += nodeArchiveFilePath();
             html += "</code> so its details are preserved after it leaves the "
                     "live list.";
+        }
+        html += "</p>";
+
+        // Companion to the box above: whether the archive is also *shown*. Same
+        // availability rule, and the same reason for it -- an unchecked checkbox
+        // is not submitted, so saving from a card-less device must not be read
+        // as the user turning this off.
+        html += "<label style='display:flex;align-items:center;gap:.5em'>"
+                "<input type='checkbox' name='node_archive_show' value='1'";
+        if (gCfg->nodeArchiveShow) html += " checked";
+        if (!canArch) html += " disabled";
+        html += " style='width:auto;margin:0'>"
+                "<span>Show archived nodes on the Nodes screen</span></label>";
+
+        html += "<p style='font-size:.82em;color:#888;margin:.3em 0 .6em'>";
+        if (!slot) {
+            html += "Unavailable: this board has no SD card slot.";
+        } else if (!canArch) {
+            html += "Unavailable: no SD card detected.";
+        } else {
+            html += "Lists the most recently archived nodes below the live ones, "
+                    "dimmed and marked <code>~</code>, and counts them in the "
+                    "header total. They are history, "
+                    "not reachable peers: messaging, favoriting and traceroute stay "
+                    "disabled until a node is restored to the live list. Only the "
+                    "newest ";
+            html += String(NODE_ARCHIVE_INDEX_MAX);
+            html += " are listed, so the screen opens at the same speed however "
+                    "large the archive has grown.";
         }
         html += "</p>";
 
@@ -6769,6 +6801,7 @@ static void handlePostSave() {
     // silently clear a preference the user set while a card was present.
     if (nodeArchiveSlotExists() && nodeArchiveAvailable()) {
         gCfg->nodeArchiveEnabled = server.hasArg("node_archive");
+        gCfg->nodeArchiveShow    = server.hasArg("node_archive_show");
     }
     gCfg->autoFavoriteEnabled = server.hasArg("autofav");
     if (server.hasArg("autofav_range")) {
@@ -6927,9 +6960,23 @@ static void handlePostSave() {
         // injected value cannot opt a device into prerelease builds. Submitting
         // the form always stores an explicit channel, never AUTO -- the user
         // has now chosen, so the running build must stop deciding for them.
+        const uint8_t resolvedBefore = otaResolveChannel(cfgBefore.otaChannel);
         gCfg->otaChannel = (server.arg("ota_channel").toInt() == OTA_CHANNEL_ALPHA)
                                ? OTA_CHANNEL_ALPHA : OTA_CHANNEL_STABLE;
         otaSetChannel(gCfg->otaChannel);
+        // Compared resolved, not stored: the form always writes an explicit
+        // value, so AUTO on an alpha build submitting as Alpha is a change to
+        // the stored setting but not to the channel updates come from. Saving
+        // the page without touching the dropdown must not check for nothing.
+        if (otaResolveChannel(gCfg->otaChannel) != resolvedBefore) {
+            // Not checked here. Saving this form reboots (see the bottom of
+            // this handler), and a synchronous release check run underneath the
+            // live web server is a request nobody answers -- the same reason
+            // the announce paths hold off while a browser is waiting. Left as a
+            // one-shot for the next boot instead, where it runs with the server
+            // down and reports on the device's own screen.
+            otaRequestBootCheckOnce();
+        }
     }
     if (server.hasArg("snf_router_id")) {
         // Blank, "none" or unparseable all come back 0, which is "unset" — the
@@ -7638,6 +7685,11 @@ static void handlePostSnfRequest() {
 static void clearNodeDbFilesOnSd() {
 #if HAS_FILE_STORAGE
     if (!sdBegin()) return;
+
+    // Matches the device's Clear Nodes (All): the evicted-node archive is part
+    // of the node database, so a whole-table wipe takes it too. The
+    // keep-favorites path below does not call this at all.
+    nodeArchiveClear();
 
     const char *nodeFiles[] = {
         "/camillia/nodes.db",

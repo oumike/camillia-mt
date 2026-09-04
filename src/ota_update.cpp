@@ -3,6 +3,7 @@
 #include "config.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
@@ -531,6 +532,29 @@ void otaSetChannel(uint8_t channel) {
 
 uint8_t otaCurrentChannel() {
     return g_otaChannel;
+}
+
+// NVS keys are limited to 15 characters on ESP32.
+static const char kOtaBootCheckPrefNs[]  = "camillia";
+static const char kOtaBootCheckPrefKey[] = "otaCheckOnce1";
+
+void otaRequestBootCheckOnce() {
+    Preferences p;
+    if (!p.begin(kOtaBootCheckPrefNs, false)) return;
+    p.putBool(kOtaBootCheckPrefKey, true);
+    p.end();
+    Serial.println("[ota] release check requested for the next boot");
+}
+
+bool otaConsumeBootCheckOnce() {
+    Preferences p;
+    if (!p.begin(kOtaBootCheckPrefNs, false)) return false;
+    const bool run = p.getBool(kOtaBootCheckPrefKey, false);
+    // Cleared on the way out whether or not the check goes on to succeed: this
+    // is "the user asked once", not a retry queue.
+    if (run) p.putBool(kOtaBootCheckPrefKey, false);
+    p.end();
+    return run;
 }
 
 const char *otaCurrentDeviceAssetSlug() {

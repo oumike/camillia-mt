@@ -24,6 +24,7 @@
 #include "dm_mgr.h"
 #include "ignore_list.h"
 #include "battery_util.h"
+#include "power_mgr.h"
 #include "emoji_font.h"
 #include "env_sensor.h"
 #include "gps.h"
@@ -359,10 +360,36 @@ static lv_obj_t *s_legacyMapPromptStatus = nullptr;
 static bool s_legacyMapMigrationChecked = false;
 static uint32_t s_legacyMapMigrationNextCheckMs = 0;
 #endif
-static bool s_otaAutoCheckDone = false;     // one check attempt per boot
+static bool s_otaAutoCheckDone = false;     // one automatic check attempt per boot
 // Settle delay after the station associates, before the release check fires.
 static constexpr uint32_t kOtaAutoCheckSettleMs = 8000;
 static char s_otaAutoCheckTag[48] = {};     // release tag the prompt is offering
+// An explicit "check now", raised by a release-channel switch. Serviced by the
+// same loop routine as the boot check, but outside its policy: it runs whether
+// or not the boot check has been spent and whether or not the on-boot
+// preference is set, because the user has just asked for it by hand.
+static bool s_otaCheckRequested = false;
+static uint32_t s_otaCheckRequestedDueMs = 0;
+// How the release-channel row reports a check: " - checking...", then the
+// outcome. The row rather than a popup, because openCfgActionMessageModal() is
+// dismissed by *any* key (see the s_cfgActionMsgModal arm of the key pump), and
+// a check blocks loop() for as long as the HTTP request takes -- so keys
+// pressed at what looks like a frozen device drain the moment it resumes and
+// can take the popup with them. The row keeps saying it until something else
+// changes it.
+static char s_otaCheckRowNote[48] = "";
+// A request cannot run while a dialog is up. Rather than sit pending for the
+// rest of the boot with the row stuck on "checking...", it gives up after this.
+static uint32_t s_otaCheckDeadlineMs = 0;
+static constexpr uint32_t kOtaCheckRequestLifetimeMs = 30000;
+// The station is already associated when a request arrives, so this only has to
+// swallow a rapid double-toggle -- nothing like the boot path's 8 s DNS settle.
+// Every request re-arms it, so Stable -> Alpha -> Stable inside the window is
+// one check, against the channel the user actually landed on.
+static constexpr uint32_t kOtaManualCheckSettleMs = 1000;
+// Set from NVS at boot when the web-config save requested a check before
+// rebooting. Lets the boot check run even with "Check for Updates on Boot" off.
+static bool s_otaBootCheckForced = false;
 static int s_cfgConfirmPendingAction = -1;
 // Readable action-result popup over CFG; replaces truncated header notices.
 static lv_obj_t *s_cfgActionMsgBackdrop = nullptr;
@@ -700,6 +727,10 @@ enum DestructiveConfirmAction : uint8_t {
     DESTRUCTIVE_CONFIRM_DM_DELETE,
     DESTRUCTIVE_CONFIRM_LIVE_CLEAR,
     DESTRUCTIVE_CONFIRM_NODE_DELETE,
+    // Not destructive to the node it names, but it can evict another to make
+    // room, which is exactly the kind of side effect this prompt exists to say
+    // out loud before it happens.
+    DESTRUCTIVE_CONFIRM_NODE_RESTORE,
 };
 static DestructiveConfirmAction s_destructiveConfirmAction = DESTRUCTIVE_CONFIRM_NONE;
 // Render window, mirroring the Nodes screen (s_nodesRenderStart and friends).
@@ -860,7 +891,33 @@ static constexpr int kNodesMaxRenderedRows =
 static int s_nodesRenderStart = 0;
 // Aliases s_nodeSnapshotIds — see the note at its definition above.
 static uint32_t (&s_nodesSnapshotIds)[MAX_NODES] = s_nodeSnapshotIds;
-static int s_nodesFilteredIdx[MAX_NODES] = {};
+// ── Combined live + archived row space ───────────────────────────────────────
+// The Nodes screen addresses two lists through one index:
+//
+//   0 .. s_nodesSnapshotCount-1                  live, s_nodesSnapshotIds[i]
+//   s_nodesSnapshotCount .. +s_nodesArchivedCount  archived, nodeArchiveIndexAt(i - base)
+//
+// Archived rows are not copied into a snapshot of their own: node_db's index is
+// itself built at snapshot time and does not move until the next build, so it
+// already *is* the frozen list. That also keeps the DM picker's aliasing of
+// s_nodeSnapshotIds untouched — this screen adds a second range, it does not
+// grow the shared buffer.
+//
+// Live first, then archived, rather than interleaved: the two are different
+// kinds of thing, and the timestamps that would order them mean different
+// things on each side (last heard vs. when the record was written).
+static int s_nodesArchivedCount = 0;
+// The full record behind the *selected* archived row. The index deliberately
+// does not carry position, telemetry or the public key — 250 of those would not
+// fit — so the details panel re-reads them from the card. Cached by id because
+// refreshNodesDetails() runs on every repaint, and re-reading the card on each
+// one is exactly the per-refresh SD access this screen must not do: the bus is
+// shared with the LoRa radio. One read per newly selected archived node.
+static NodeEntry s_nodesArchDetail = {};
+static uint32_t  s_nodesArchDetailId = 0;
+static bool      s_nodesArchDetailValid = false;
+static constexpr int kNodesRowMax = MAX_NODES + NODE_ARCHIVE_INDEX_MAX;
+static int s_nodesFilteredIdx[kNodesRowMax] = {};
 static int s_nodesSnapshotCount = 0;
 static int s_nodesFilteredCount = 0;
 static int s_nodesSelected = -1;
@@ -1105,14 +1162,6 @@ static int s_lastRenderedLiveCount = -1;
 static int s_lastRenderedLiveScrollOff = -1;
 static int s_cfgSelection = 0;
 static int s_cfgActionCount = 0;
-// Sized well above the longest build's action list (initCfgActions appends
-// without a bounds check, so headroom here is the only thing standing between
-// a new entry and a silent stack-adjacent write).
-// 30 entries on the fullest build as of Battery Calibration, so 32 was one
-// addition away from being the bug this comment warns about. There are now 38
-// append sites in total — fewer than that on any one build, since several are
-// mutually exclusive by board, but 40 no longer looked like headroom.
-static int s_cfgActions[56] = {};
 static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
@@ -1976,6 +2025,12 @@ static void tracerouteProgressRenderRoutes(const MeshPacket &pkt);
 static bool sendTracerouteToNode(uint32_t toNodeId, uint32_t *packetIdOut = nullptr);
 static bool nodesSnapshotContains(uint32_t nodeId);
 static const NodeEntry *currentNodesSelection();
+// Archived half of the Nodes list — see the combined row space note above.
+static int nodesRowCountTotal();
+static const ArchivedNode *nodesArchivedAt(int snapshotIdx);
+static uint32_t nodesRowNodeId(int snapshotIdx);
+static const ArchivedNode *currentNodesArchivedSelection();
+static void nodesArchivedDetailInvalidate();
 static void refreshNodesMap(const NodeEntry *node);
 #if HAS_NODE_LOCATE
 static void openNodeLocateModal(uint32_t nodeId);
@@ -2009,6 +2064,8 @@ static void persistConfigToPrefs();
 static void markConfigDirty();
 static void flushConfigIfDirty();
 static void flushPersistentState();   // config + debounced transcripts, before reboot
+// Installed at the end of setup(); defined beside the loop service it drives.
+static void powerInstallHooks();
 static void persistWebCfgEnabled();
 #if HAS_VNC_HOST
 static void persistVncEnabled();
@@ -2035,7 +2092,7 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
                                int &markerX, int &markerY,
                                int detailLodTarget = 1);
 static void sdRmDirRecursive(const char *path);
-static void clearNodeDbOnSd();
+static bool clearNodeDbOnSd();
 
 // Store-and-Forward client. Defined down with the mesh TX helpers; the CFG
 // screen needs them ~22k lines earlier to label and run its "Request S&F Replay"
@@ -2527,10 +2584,25 @@ enum CfgActionId {
     CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_RESET_CHAT_COLORS,
     CFG_ACTION_CLEAR_MSGS,
+    CFG_ACTION_ARCHIVE_NODES,
+    CFG_ACTION_SHOW_ARCHIVED,
     CFG_ACTION_CLEAR_NODES_KEEP_FAVS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
+    // Sizes s_cfgActions. Not an action — keep it last.
+    CFG_ACTION__COUNT,
 };
+
+// Sized by the enum rather than by a hand-picked number. initCfgActions()
+// appends without a bounds check, and every previous size here was headroom
+// guessed against a count that kept growing — the comment this replaces was
+// already stale by fourteen entries.
+//
+// The enum is a genuine upper bound, not a generous one: each action is
+// appended at most once, and most are behind a board #if, so no build can
+// reach even this. Adding an action now grows the array with it, which is the
+// property the old number could not have.
+static int s_cfgActions[CFG_ACTION__COUNT] = {};
 
 struct UiThemePresetLite {
     uint8_t theme;
@@ -4415,8 +4487,14 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             // Resolved, not stored: an untouched device shows the channel its
             // running build puts it on, which is the thing the update check
             // will actually follow.
-            snprintf(buf, bufLen, "Release Channel: %s",
-                     cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)));
+            //
+            // The check a switch kicks off blocks the loop for as long as the
+            // HTTP request takes, so the row says one is running before it
+            // starts. Without it the UI just stops for up to 12 seconds with
+            // nothing on screen accounting for it.
+            snprintf(buf, bufLen, "Release Channel: %s%s",
+                     cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)),
+                     s_otaCheckRowNote);
             break;
         case CFG_ACTION_RELEASE_NOTES:
             snprintf(buf, bufLen, "Release Notes");
@@ -4430,6 +4508,23 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             break;
         case CFG_ACTION_CLEAR_MSGS:
             snprintf(buf, bufLen, "Clear Messages");
+            break;
+        case CFG_ACTION_ARCHIVE_NODES:
+            // Same "(no card)" caveat as the row below, for the same reason:
+            // with nothing to write to, an evicted node is simply dropped, and
+            // the row is the only place that can keep saying so.
+            snprintf(buf, bufLen, "Archive Dropped Nodes: %s%s",
+                     s_cfg.nodeArchiveEnabled ? "On" : "Off",
+                     (s_cfg.nodeArchiveEnabled && !nodeArchiveAvailable()) ? " (no card)" : "");
+            break;
+        case CFG_ACTION_SHOW_ARCHIVED:
+            // The card state is part of the label rather than a popup on the
+            // toggle: switching this on with no card in the slot does nothing
+            // visible on the Nodes screen, and the row is the only place that
+            // can keep saying why.
+            snprintf(buf, bufLen, "Show Archived Nodes: %s%s",
+                     s_cfg.nodeArchiveShow ? "On" : "Off",
+                     (s_cfg.nodeArchiveShow && !nodeArchiveAvailable()) ? " (no card)" : "");
             break;
         case CFG_ACTION_CLEAR_NODES_KEEP_FAVS:
             snprintf(buf, bufLen, "Clear Nodes (Keep Favorites)");
@@ -4710,6 +4805,40 @@ static bool consumeOtaWorkerModeOnce() {
     }
     p.end();
     return run;
+}
+
+// The gates a release check cannot get past no matter who asked for it, as
+// opposed to the boot check's own policy (once per boot, and only if the user
+// wants one). Returns null when a check can proceed, otherwise a reason short
+// enough to drop straight into s_cfgStatus.
+static const char *otaCheckBlockedReason() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Unreachable in practice -- the row that calls this is not built on the
+    // Cardputer -- but performCfgAction() still compiles the case, so it needs
+    // an answer that matches the rest of the build's OTA story.
+    return "OTA disabled on Cardputer build";
+#else
+    // A third-party installer's layout keeps another firmware in the slot an
+    // update would land in, so there is nothing worth checking for.
+    if (!otaLayoutSupportsUpdate()) return "OTA needs the factory image (flash layout)";
+    if (!s_cfg.wifiEnabled) return "Update check needs WiFi on";
+    // Also the AP/web-config case: the station is not associated there, so
+    // there is no route to the release proxy.
+    if (WiFi.status() != WL_CONNECTED) return "Update check needs WiFi connected";
+    return nullptr;
+#endif
+}
+
+// Asks the loop service for a release check. Deliberately does not run one
+// here: otaCheckLatestRelease() is a synchronous HTTP GET with a 12 s timeout,
+// so calling it from a keypress handler would freeze the UI before anything
+// explaining the freeze had been painted. Requesting while one is already
+// pending re-arms the settle window rather than queueing a second check.
+static void otaRequestCheckNow() {
+    s_otaCheckRequested = true;
+    s_otaCheckRequestedDueMs = millis() + kOtaManualCheckSettleMs;
+    s_otaCheckDeadlineMs = millis() + kOtaCheckRequestLifetimeMs;
+    utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), " - checking...");
 }
 
 static bool s_otaWorkerUiReady = true;
@@ -5028,7 +5157,17 @@ static void wifiPromoteConnectedNetwork() {
     refreshCfgWifiPickerModal();   // no-op unless the picker is open
 }
 
+// Set by the low-battery load shed. A runtime hold rather than a config change:
+// s_cfg.wifiEnabled is the user's setting, and clearing it would be picked up by
+// the next unrelated markConfigDirty() and written to NVS — silently turning
+// their Wi-Fi off for good because the battery once ran low. Cleared by a
+// reboot, which is what happens after a charge.
+static bool s_powerWifiHold = false;
+
 static void serviceWifiStation(uint32_t now) {
+    // Ahead of the web-config check: the shed stops that too, and this must not
+    // let the station come back up underneath it.
+    if (s_powerWifiHold) return;
     // Web config owns the radio while it's up: webCfgBegin() sets up STA (or an
     // AP fallback when the saved station won't connect) and webCfgEnd() tears it
     // down. Kicking a station reconnect here mid-session flips WiFi.mode() to
@@ -9102,6 +9241,14 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
+#if HAS_SD_CARD
+    // Heads the node-list group, in the order the two settings depend on each
+    // other: keep the evicted nodes, then show them. Only on boards with a slot
+    // — the archive both govern is written to the card, so elsewhere these
+    // would toggle settings with nothing behind them.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
+#endif
     // Mildest first: keeping the pinned contacts is the common case, and the
     // total wipe sits between it and Factory Reset.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
@@ -17200,6 +17347,11 @@ static void closeNodesModal() {
     s_nodesList = nullptr;
     s_nodesListRowCount = 0;
     s_nodesSnapshotCount = 0;
+    // The index is the archived half's snapshot, so it is dropped with the rest
+    // of the frozen list rather than left to be re-shown on the next open.
+    s_nodesArchivedCount = 0;
+    nodeArchiveIndexClear();
+    nodesArchivedDetailInvalidate();
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
@@ -17255,8 +17407,59 @@ static bool nodesShortNameDisplayable(const char *shortName) {
     return hasNonAscii && codepoints > 0;
 }
 
+// Total rows in the combined space. Every bound in this screen is against this,
+// not s_nodesSnapshotCount, which is only the live half.
+static int nodesRowCountTotal() {
+    return s_nodesSnapshotCount + s_nodesArchivedCount;
+}
+
+// The archived record behind a combined index, or null for a live row.
+static const ArchivedNode *nodesArchivedAt(int snapshotIdx) {
+    if (snapshotIdx < s_nodesSnapshotCount) return nullptr;
+    const int slot = snapshotIdx - s_nodesSnapshotCount;
+    if (slot < 0 || slot >= s_nodesArchivedCount) return nullptr;
+    return nodeArchiveIndexAt(slot);
+}
+
+// Node id for either half. 0 when the index is out of range.
+static uint32_t nodesRowNodeId(int snapshotIdx) {
+    if (snapshotIdx < 0) return 0;
+    if (snapshotIdx < s_nodesSnapshotCount) return s_nodesSnapshotIds[snapshotIdx];
+    const ArchivedNode *a = nodesArchivedAt(snapshotIdx);
+    return a ? a->nodeId : 0;
+}
+
+// Full archived record for one id, read from the card at most once per id.
+// Returns null when there is no card, the row is gone, or the record will not
+// parse — callers fall back to what the index alone can show.
+static const NodeEntry *nodesArchivedDetail(uint32_t nodeId) {
+    if (nodeId == 0) return nullptr;
+    if (s_nodesArchDetailValid && s_nodesArchDetailId == nodeId) return &s_nodesArchDetail;
+    // Negative results are cached too (Valid stays false but the id is claimed
+    // below), so a record that will not parse is not re-read on every repaint.
+    if (s_nodesArchDetailId == nodeId) return nullptr;
+
+    s_nodesArchDetailId = nodeId;
+    s_nodesArchDetailValid = nodeArchiveLoadFull(nodeId, s_nodesArchDetail);
+    return s_nodesArchDetailValid ? &s_nodesArchDetail : nullptr;
+}
+
+static void nodesArchivedDetailInvalidate() {
+    s_nodesArchDetailId = 0;
+    s_nodesArchDetailValid = false;
+}
+
+// Whether the archived half should be built and shown at all. Three separate
+// conditions, deliberately: the board may have no slot (compile-time), the slot
+// may be empty right now (a card can be pulled between one open and the next),
+// and the user may simply want a live-mesh view.
+static bool nodesArchiveVisible() {
+    return nodeArchiveSlotExists() && nodeArchiveAvailable() && s_cfg.nodeArchiveShow;
+}
+
 static void snapshotNodesForModal() {
     s_nodesSnapshotCount = 0;
+    s_nodesArchivedCount = 0;
     s_nodesFilteredCount = 0;
     s_nodesSelected = -1;
     s_nodesFilterOpen = false;
@@ -17274,6 +17477,23 @@ static void snapshotNodesForModal() {
         if (!nodesShortNameDisplayable(n->shortName)) continue;
         if (nodesSnapshotContains(n->nodeId)) continue;
         s_nodesSnapshotIds[s_nodesSnapshotCount++] = n->nodeId;
+    }
+
+    // The one place the archive is read for the list. Deliberately here and not
+    // in a refresh path: this touches the SD card, which shares the SPI bus with
+    // the LoRa radio and would otherwise stall both the radio and LVGL on every
+    // keypress. Built after the live half above, because the index skips ids
+    // that are currently live and needs the table settled to tell.
+    //
+    // A card that has gone away since the last open simply yields nothing, and
+    // the screen is the live-only one it has always been.
+    nodeArchiveIndexClear();
+    nodesArchivedDetailInvalidate();
+    if (nodesArchiveVisible() && nodeArchiveIndexBuild()) {
+        s_nodesArchivedCount = nodeArchiveIndexCount();
+        if (s_nodesArchivedCount > NODE_ARCHIVE_INDEX_MAX) {
+            s_nodesArchivedCount = NODE_ARCHIVE_INDEX_MAX;
+        }
     }
 
     nodesApplyFilter();
@@ -17316,11 +17536,16 @@ static lv_obj_t *selectedNodesRowObj() {
 static void nodesApplyFilter() {
     s_nodesFilteredCount = 0;
 
-    for (int i = 0; i < s_nodesSnapshotCount && s_nodesFilteredCount < MAX_NODES; i++) {
-        const uint32_t nodeId = s_nodesSnapshotIds[i];
-        // Resolved live; null if the node was evicted since the snapshot, in
-        // which case only its id is still matchable.
-        const NodeEntry *n = Nodes.find(nodeId);
+    const int rows = nodesRowCountTotal();
+    for (int i = 0; i < rows && s_nodesFilteredCount < kNodesRowMax; i++) {
+        const uint32_t nodeId = nodesRowNodeId(i);
+        // Live rows resolve against the table and are null if the node was
+        // evicted since the snapshot, in which case only the id is matchable.
+        // Archived rows carry their own names, which is the whole reason the
+        // index stores them: matching on id alone would make the archived half
+        // unsearchable by the name the user actually knows.
+        const NodeEntry *n = (i < s_nodesSnapshotCount) ? Nodes.find(nodeId) : nullptr;
+        const ArchivedNode *a = nodesArchivedAt(i);
         bool match = true;
 
         if (s_nodesFilterOpen && s_nodesFilterLen > 0) {
@@ -17328,7 +17553,9 @@ static void nodesApplyFilter() {
             snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
             match = dmNodePickerContainsNoCase(nodeIdText, s_nodesFilter)
                  || (n && dmNodePickerContainsNoCase(n->longName, s_nodesFilter))
-                 || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter));
+                 || (n && dmNodePickerContainsNoCase(n->shortName, s_nodesFilter))
+                 || (a && dmNodePickerContainsNoCase(a->longName, s_nodesFilter))
+                 || (a && dmNodePickerContainsNoCase(a->shortName, s_nodesFilter));
         }
 
         if (match) {
@@ -18590,14 +18817,29 @@ static int nodesMapRenderTiles(float lat, float lon, int x0, int y0, int w, int 
 #endif
 }
 
-static const NodeEntry *currentNodesSelection() {
+// The combined index the highlight is on, or -1.
+static int currentNodesRowIndex() {
     if (s_nodesFilteredCount <= 0 || s_nodesSelected < 0 || s_nodesSelected >= s_nodesFilteredCount) {
-        return nullptr;
+        return -1;
     }
-    int snapshotIdx = s_nodesFilteredIdx[s_nodesSelected];
+    const int snapshotIdx = s_nodesFilteredIdx[s_nodesSelected];
+    if (snapshotIdx < 0 || snapshotIdx >= nodesRowCountTotal()) return -1;
+    return snapshotIdx;
+}
+
+static const NodeEntry *currentNodesSelection() {
+    const int snapshotIdx = currentNodesRowIndex();
     if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) return nullptr;
     // Resolved live against NodeDB; null if evicted since the snapshot.
     return Nodes.find(s_nodesSnapshotIds[snapshotIdx]);
+}
+
+// The archived record under the highlight, or null when the row is a live one.
+// Its existence is what every "this is history, not a peer" branch keys off, so
+// that a live row and an archived row can never both answer for the same
+// selection.
+static const ArchivedNode *currentNodesArchivedSelection() {
+    return nodesArchivedAt(currentNodesRowIndex());
 }
 
 static void refreshNodesMap(const NodeEntry *node) {
@@ -19995,9 +20237,16 @@ static void sdRmDirRecursive(const char *path) {
 #endif
 }
 
-static void clearNodeDbOnSd() {
+// Returns true when the evicted-node archive was cleared along with the legacy
+// snapshots. False means there was nothing to clear or no card to clear it from,
+// which callers use only to word their status line — never as a failure.
+static bool clearNodeDbOnSd() {
 #if HAS_FILE_STORAGE
-    if (!sdBegin()) return;
+    if (!sdBegin()) return false;
+    // The archive is this firmware's only live node file on the card, so it goes
+    // with the whole-table wipe. Deliberately not part of the keep-favorites
+    // path: that one leaves SD alone entirely (see its note).
+    const bool archiveCleared = nodeArchiveClear();
 
     const char *nodeFiles[] = {
         "/camillia/nodes.db",
@@ -20015,6 +20264,9 @@ static void clearNodeDbOnSd() {
     if (storageFs().exists("/camillia/nodes")) {
         sdRmDirRecursive("/camillia/nodes");
     }
+    return archiveCleared;
+#else
+    return false;
 #endif
 }
 
@@ -20081,19 +20333,26 @@ static void refreshNodesListRows() {
 #endif
 
     if (s_nodesTitleLabel) {
-        int nodeCount = s_nodesSnapshotCount;
+        // One total: live plus archived, which is the number of nodes this
+        // device knows about. With the archived half hidden it is the live count
+        // and the title is exactly what it always was.
+        const int nodeCount = nodesRowCountTotal();
+        // The one qualifier kept. The index caps how far back the archive scan
+        // reaches, so when it filled before the start of the file this is a
+        // floor rather than a total — and the real figure would need exactly the
+        // full read the cap exists to avoid. Nothing archived, nothing to
+        // qualify.
+        const char *more = (s_nodesArchivedCount > 0 && nodeArchiveIndexTruncated()) ? "+" : "";
+        char titleText[80];
         if (s_nodesFilterOpen) {
             // Brackets appear as soon as the filter is armed (even empty) so the
             // user has a visual cue that filtering is on; text fills in as typed.
-            char titleText[64];
-            snprintf(titleText, sizeof(titleText), "NODES [%s] (%d)",
-                     s_nodesFilter, nodeCount);
-            lv_label_set_text(s_nodesTitleLabel, titleText);
+            snprintf(titleText, sizeof(titleText), "NODES [%s] (%d%s)",
+                     s_nodesFilter, nodeCount, more);
         } else {
-            char titleText[32];
-            snprintf(titleText, sizeof(titleText), "NODES (%d)", nodeCount);
-            lv_label_set_text(s_nodesTitleLabel, titleText);
+            snprintf(titleText, sizeof(titleText), "NODES (%d%s)", nodeCount, more);
         }
+        lv_label_set_text(s_nodesTitleLabel, titleText);
     }
 
     refreshNodesHint();
@@ -20131,12 +20390,13 @@ static void refreshNodesListRows() {
 
         int rowIdx = renderStart + listIdx;
         int snapshotIdx = s_nodesFilteredIdx[rowIdx];
-        if (snapshotIdx < 0 || snapshotIdx >= s_nodesSnapshotCount) continue;
+        if (snapshotIdx < 0 || snapshotIdx >= nodesRowCountTotal()) continue;
         // Resolve live. If the node was evicted while this modal was open we
         // still emit the row (from its id) so rows stay 1:1 with the filtered
         // list — dropping one here would desync selection and row indices.
-        const uint32_t nodeId = s_nodesSnapshotIds[snapshotIdx];
-        const NodeEntry *n = Nodes.find(nodeId);
+        const ArchivedNode *arch = nodesArchivedAt(snapshotIdx);
+        const uint32_t nodeId = nodesRowNodeId(snapshotIdx);
+        const NodeEntry *n = arch ? nullptr : Nodes.find(nodeId);
         char nodeIdText[12];
         snprintf(nodeIdText, sizeof(nodeIdText), "!%08lX", (unsigned long)nodeId);
 
@@ -20189,16 +20449,28 @@ static void refreshNodesListRows() {
             if (n->hasName && n->longName[0])  rowName = n->longName;
             else if (n->shortName[0])          rowName = n->shortName;
             else                               rowName = "----";
+        } else if (arch) {
+            // The names the archive preserved. Without them an archived row is
+            // a bare hex id, which is the thing that made the file useless as a
+            // screen in the first place.
+            if (arch->longName[0])       rowName = arch->longName;
+            else if (arch->shortName[0]) rowName = arch->shortName;
         }
 #else
         // Cardputer: short names, centered, in a column too narrow for more.
         lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
-        const char *rowName = !n ? nodeIdText : (n->shortName[0] ? n->shortName : "----");
+        const char *rowName = nodeIdText;
+        if (n)          rowName = n->shortName[0] ? n->shortName : "----";
+        else if (arch)  rowName = arch->shortName[0] ? arch->shortName : arch->longName;
+        if (!rowName || !rowName[0]) rowName = nodeIdText;
 #endif
         char rowText[56];
+        // '~' for archived, '*' for favorite. Distinct glyphs on purpose: they
+        // mark opposite things (a node pinned into the table, and one that has
+        // already fallen out of it) and must not be mistaken for each other.
         snprintf(rowText, sizeof(rowText), "%s%s",
-                 (n && n->favorite) ? "* " : "", rowName);
+                 arch ? "~ " : ((n && n->favorite) ? "* " : ""), rowName);
         setLabelTextEmojiSafe(lbl, rowText);
 #if NODES_LAYOUT_WIDE
         lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
@@ -20219,6 +20491,16 @@ static void refreshNodesListSelection() {
         lv_obj_t *row = s_nodesListRows[i];
         if (!row) continue;
         bool selected = (s_nodesRenderedFilteredIdx[i] == s_nodesSelected);
+        // Archived rows are dimmed: they are a record of nodes that have left
+        // the table, and should not read as part of the live mesh at a glance.
+        // Resolved back through the filtered index the row was built from.
+        bool archivedRow = false;
+        {
+            const int filteredIdx = s_nodesRenderedFilteredIdx[i];
+            if (filteredIdx >= 0 && filteredIdx < s_nodesFilteredCount) {
+                archivedRow = (nodesArchivedAt(s_nodesFilteredIdx[filteredIdx]) != nullptr);
+            }
+        }
 #if defined(DEVICE_TDECK_PRO)
         const lv_color_t rowTextColor = lv_color_make(0, 0, 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
@@ -20231,6 +20513,11 @@ static void refreshNodesListSelection() {
         if (s_cfg.uiMode != UI_MODE_LIGHT) {
             // Dark themes: keep node names brighter for better list readability.
             rowTextColor = selected ? lv_color_hex(0xFFFFFF) : lv_color_hex(0xF2F8FF);
+        }
+        if (archivedRow) {
+            // Still legible when highlighted — the cursor has to be followable
+            // across the boundary between the two halves.
+            rowTextColor = selected ? lv_color_hex(0xC8D6EC) : lv_color_hex(0x8FA6C8);
         }
         lv_obj_set_style_bg_color(row, selected ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x123266), 0);
         lv_obj_set_style_bg_opa(row, selected ? LV_OPA_70 : LV_OPA_40, 0);
@@ -20306,6 +20593,64 @@ static void refreshNodesDetails() {
     }
 
     const NodeEntry *selectedNode = currentNodesSelection();
+    const ArchivedNode *selectedArchived =
+        selectedNode ? nullptr : currentNodesArchivedSelection();
+    if (selectedArchived) {
+        // Archived nodes get the plain wrapped panel rather than the four
+        // aligned sections: most of what those sections show is live state
+        // (SNR, hops, telemetry age) that a record on a card cannot have, and
+        // rendering them mostly-empty would read as a node with no data rather
+        // than a node that is no longer here.
+        //
+        // The full record is on the card, not in the index — it is fetched
+        // below only because the user has selected this row, which is the one
+        // moment the extra read is worth it.
+        nodesShowSections(false);
+        lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
+
+        char when[32] = "unknown date";
+        if (selectedArchived->archivedEpoch > 0) {
+            const time_t t = (time_t)selectedArchived->archivedEpoch;
+            struct tm tmv;
+            if (localtime_r(&t, &tmv)) strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tmv);
+        }
+        char heardWhen[32] = "unknown";
+        if (selectedArchived->lastHeardEpoch > 0) {
+            const time_t t = (time_t)selectedArchived->lastHeardEpoch;
+            struct tm tmv;
+            if (localtime_r(&t, &tmv)) strftime(heardWhen, sizeof(heardWhen), "%Y-%m-%d %H:%M", &tmv);
+        }
+
+        const NodeEntry *full = nodesArchivedDetail(selectedArchived->nodeId);
+
+        char pos[80];
+        if (full && full->hasPosition && (full->latI != 0 || full->lonI != 0)) {
+            snprintf(pos, sizeof(pos), "Lat: %.5f\nLon: %.5f\nAlt: %ld m",
+                     (double)((float)full->latI / 10000000.0f),
+                     (double)((float)full->lonI / 10000000.0f),
+                     (long)full->alt);
+        } else {
+            snprintf(pos, sizeof(pos), "No position recorded");
+        }
+
+        char body[420];
+        snprintf(body, sizeof(body),
+                 "ARCHIVED %s\n\n"
+                 "%s\nShort: %s\nID: !%08lX\n\n"
+                 "Last heard: %s\n%s\n\n"
+                 "%s"
+                 "Not on the live list. Restore it to message,\n"
+                 "favorite or trace it.",
+                 when,
+                 selectedArchived->longName[0] ? selectedArchived->longName : "(no name)",
+                 selectedArchived->shortName[0] ? selectedArchived->shortName : "n/a",
+                 (unsigned long)selectedArchived->nodeId,
+                 heardWhen,
+                 pos,
+                 (full && full->hasPubKey) ? "Public key preserved\n\n" : "");
+        setLabelTextEmojiSafe(s_nodesDetail, body);
+        return;
+    }
     if (!selectedNode) {
         lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_nodesDetail, "No nodes seen yet.");
@@ -21666,6 +22011,15 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 // highlighted list row.
 static void openNodesActionMenu() {
     if (!s_nodesModal) return;
+    // An archived row has no live peer, so every entry in the node menu —
+    // traceroute, DM, favorite, request info — would be inert. It gets the one
+    // action that applies instead, rather than a menu of things that silently
+    // do nothing.
+    const ArchivedNode *archived = currentNodesArchivedSelection();
+    if (archived) {
+        openDestructiveConfirm(DESTRUCTIVE_CONFIRM_NODE_RESTORE, archived->nodeId);
+        return;
+    }
     const NodeEntry *selected = currentNodesSelection();
     if (!selected || selected->nodeId == 0) return;
     openNodesActionMenuFor(selected->nodeId);
@@ -25328,6 +25682,51 @@ static void dmDeleteConfirmAccept() {
         refreshLiveView(true);
         return;
     }
+    if (action == DESTRUCTIVE_CONFIRM_NODE_RESTORE) {
+        if (nodeId == 0) return;
+        // Re-read rather than trusting the index: the index holds names and
+        // dates only, and what makes a restore worth doing is the position and
+        // the public key, which are expensive to reacquire from the mesh.
+        NodeEntry rec = {};
+        if (!nodeArchiveLoadFull(nodeId, rec)) {
+            openCfgActionMessageModal("Restore failed: the archived record could not be read.");
+            return;
+        }
+        // May evict — and that eviction is archived by the same path any other
+        // one is, so nothing is lost by restoring into a full table.
+        NodeEntry *live = Nodes.upsert(nodeId);
+        if (!live) {
+            openCfgActionMessageModal(
+                "Restore failed: every slot is favorited, so there is no room. "
+                "Unfavorite a node and try again.");
+            return;
+        }
+        *live = rec;
+        live->nodeId = nodeId;   // upsert() owns the slot's identity
+        Nodes.markRankingDirty();
+        // upsert() saved the blank record it created; this saves what we just
+        // put in it.
+        Nodes.persist(nodeId);
+
+        if (s_nodesModal) {
+            // Re-snapshot: the node has moved from the archived half to the
+            // live one, and on a full table something else has moved the other
+            // way. Both halves have to be rebuilt for the list to be true.
+            snapshotNodesForModal();
+            // Land the cursor back on the node that was just restored, wherever
+            // it sorted to, rather than on whatever happens to sit at the old
+            // index now.
+            s_nodesSelected = 0;
+            for (int i = 0; i < s_nodesFilteredCount; i++) {
+                if (nodesRowNodeId(s_nodesFilteredIdx[i]) == nodeId) { s_nodesSelected = i; break; }
+            }
+            nodesClampRenderWindow();
+            refreshNodesListRows();
+            refreshNodesListSelection();
+            refreshNodesDetails();
+        }
+        return;
+    }
     if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE) {
         if (nodeId == 0) return;
         const bool gone = Nodes.remove(nodeId);
@@ -25397,6 +25796,7 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
     if (!s_rootScreen || action == DESTRUCTIVE_CONFIRM_NONE) return;
     if (action == DESTRUCTIVE_CONFIRM_DM_DELETE && nodeId == 0) return;
     if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE && nodeId == 0) return;
+    if (action == DESTRUCTIVE_CONFIRM_NODE_RESTORE && nodeId == 0) return;
     if (action == DESTRUCTIVE_CONFIRM_LIVE_CLEAR
         && (!s_liveModal || Channels.get(CHAN_LIVE).count <= 0)) return;
     if (s_dmDelModal || s_dmDelBackdrop) return;
@@ -25414,6 +25814,22 @@ static void openDestructiveConfirm(DestructiveConfirmAction action, uint32_t nod
             snprintf(bodyText, sizeof(bodyText),
                      "All live traffic will be erased, including lines hidden by the filter");
         }
+    } else if (action == DESTRUCTIVE_CONFIRM_NODE_RESTORE) {
+        // Named from the archive index, not nodesActionTitleLabel(): the node is
+        // by definition not in the table, so that helper would only have the
+        // hex id to offer and the prompt would not say who this is.
+        const ArchivedNode *a = currentNodesArchivedSelection();
+        const char *who = "This node";
+        if (a && a->nodeId == nodeId) {
+            if (a->longName[0])       who = a->longName;
+            else if (a->shortName[0]) who = a->shortName;
+        }
+        snprintf(titleText, sizeof(titleText), "Restore node?");
+        // The eviction is the part worth warning about: putting one node back
+        // into a full table takes another one out.
+        snprintf(bodyText, sizeof(bodyText),
+                 "%s returns to the live list.\nIf it is full, the oldest "
+                 "non-favorite is archived to make room.", who);
     } else if (action == DESTRUCTIVE_CONFIRM_NODE_DELETE) {
         char who[48];
         nodesActionTitleLabel(nodeId, who, sizeof(who));
@@ -27578,8 +27994,12 @@ static void openCfgModal() {
     initCfgActions();
     s_cfgSelection = 0;
     s_cfgStatus[0] = '\0';
-    s_cfgOtaInstallArmed = false;
-    s_cfgOtaLatestTag[0] = '\0';
+    // The armed tag is deliberately *not* cleared here. It is set by a release
+    // check that succeeded this boot, and the whole point of arming it is that
+    // the Firmware Update row then reads "Install <tag>" -- clearing it on open
+    // would make that label unreachable for the boot check, which finds its
+    // update long before anyone opens Config. It is dropped where it actually
+    // goes stale: a channel switch, and the update action itself.
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
     s_cfgLastActivateMs = 0;
@@ -28076,12 +28496,38 @@ static void performCfgAction(int actionId) {
                     ? OTA_CHANNEL_STABLE : OTA_CHANNEL_ALPHA;
             otaSetChannel(s_cfg.otaChannel);
             // A check already armed against the other channel would install the
-            // wrong build, so it is dropped and has to be re-run.
+            // wrong build, so it is dropped and re-run below.
             s_cfgOtaInstallArmed = false;
             s_cfgOtaLatestTag[0] = '\0';
             persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Release Channel: %s",
-                     cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel)));
+            {
+                // The toggle always flips the *resolved* channel, so there is
+                // no "changed to what it already was" case to filter here --
+                // unlike the web form, which can write an explicit value equal
+                // to what AUTO already resolved to.
+                //
+                // Reported now rather than left to the service: the reasons a
+                // check cannot run are all knowable at this point, and saying
+                // so immediately beats a row that reads "checking..." for a
+                // second and then gives up.
+                s_otaCheckRowNote[0] = '\0';   // last check answered for the old channel
+                const char *why = otaCheckBlockedReason();
+                const char *chanName = cfgOtaChannelName(otaResolveChannel(s_cfg.otaChannel));
+                // Unconditional, not behind s_cfgDebugLog: this is the one line
+                // that says whether a switch asked for a check and, if not, why.
+                Serial.printf("[ota-check] channel switched to %s; %s\n",
+                              chanName, why ? why : "check requested");
+                if (why) {
+                    utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
+                                           " - check unavailable");
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", why);
+                    openCfgActionMessageModal(s_cfgStatus);
+                } else {
+                    otaRequestCheckNow();
+                    snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                             "Release Channel: %s - checking...", chanName);
+                }
+            }
             break;
 
         case CFG_ACTION_UNITS:
@@ -28542,16 +28988,48 @@ static void performCfgAction(int actionId) {
             break;
         }
 
-        case CFG_ACTION_CLEAR_NODES:
+        case CFG_ACTION_ARCHIVE_NODES:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ARCHIVE_NODES");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.nodeArchiveEnabled = !s_cfg.nodeArchiveEnabled;
+            persistConfigToPrefs();
+            // node_db is told by the main loop, which mirrors this every pass
+            // (see the nodeArchiveSetEnabled call there) -- so nothing to push
+            // from here, and no SD access on a config keypress.
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Archive Dropped Nodes: %s",
+                     s_cfg.nodeArchiveEnabled ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_SHOW_ARCHIVED:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SHOW_ARCHIVED");
+            showActionPopup = false;   // row already reads On/Off
+            s_cfg.nodeArchiveShow = !s_cfg.nodeArchiveShow;
+            persistConfigToPrefs();
+            // Nothing is read here: the archived half comes off the card when
+            // the Nodes screen takes its snapshot, so this takes effect the next
+            // time that screen is opened. Deliberately so -- touching the card
+            // from a config keypress is the SPI contention with the radio that
+            // the snapshot-time rule exists to avoid.
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Show Archived Nodes: %s",
+                     s_cfg.nodeArchiveShow ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_CLEAR_NODES: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLEAR_NODES");
             Nodes.clearPersisted();
-            clearNodeDbOnSd();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Node DB cleared - rebooting...");
+            // Reported separately rather than assumed: with no card in the slot
+            // the archive is still out there on a card somewhere, and claiming
+            // to have cleared it would be a lie the user acts on.
+            const bool archiveCleared = clearNodeDbOnSd();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                     archiveCleared ? "Nodes and SD archive cleared - rebooting..."
+                                    : "Node DB cleared - rebooting...");
             refreshCfgModal();
             delay(1000);
             flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             break;
+        }
 
         case CFG_ACTION_FACTORY_RESET:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec FACTORY_RESET");
@@ -30088,8 +30566,16 @@ static void onboardingFinalize() {
     ESP.restart();
 }
 
-#if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
-    || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT)
+// Boards with a global-navigation gesture: the M9's dedicated buttons, and the
+// Alt+letter chords on every keyboard that exposes Alt as a modifier of its own
+// (see altNavShortcut() in keyboard.cpp). Boards outside this set have no way to
+// raise one, so the whole mechanism compiles out.
+#define HAS_GLOBAL_NAV_SHORTCUTS \
+    (defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) \
+     || defined(DEVICE_MESH_DECK) || defined(DEVICE_TLORA_PAGER_TFT) \
+     || defined(DEVICE_CARDPUTER_LORA_HAT))
+
+#if HAS_GLOBAL_NAV_SHORTCUTS
 static bool prepareGlobalNavigation() {
     // Onboarding owns the whole input surface until identity and region exist.
     if (s_onboardingModal) return false;
@@ -30134,10 +30620,20 @@ static bool prepareGlobalNavigation() {
 }
 #endif
 
-#if defined(DEVICE_M9)
-static void openM9DirectMessagesShortcut() {
+#if HAS_GLOBAL_NAV_SHORTCUTS
+// ── Global navigation shortcuts ──────────────────────────────────────────────
+// One destination each, reachable from anywhere: prepareGlobalNavigation()
+// above tears down every modal, picker, filter and staged preview first, so
+// these do not care what was on screen when the key arrived.
+//
+// Shared by the M9's dedicated buttons and the Alt+letter chords on the
+// keyboard boards. Same destinations either way — a shortcut that behaved
+// differently depending on which hardware raised it would be two features.
+static void openNavDirectMessagesShortcut() {
     if (!prepareGlobalNavigation()) return;
     if (s_dmModal && lvObjAlive(s_dmModal)) {
+        // Already there: drop back to the conversation list rather than
+        // reopening, which would discard the list state for no reason.
         closeDmNodePicker();
         lv_obj_move_foreground(s_dmModal);
         refreshDmModal(true);
@@ -30146,22 +30642,32 @@ static void openM9DirectMessagesShortcut() {
     openDmModal();
 }
 
-static void openM9HomeShortcut() {
-    if (!prepareGlobalNavigation()) return;
-    closeDmModal();
-    setActiveChannel(0);
-}
-
-static void openM9LiveShortcut() {
+static void openNavLiveShortcut() {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openLiveModal();
 }
 
-static void openM9NodesShortcut() {
+static void openNavNodesShortcut() {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openNodesModal();
+}
+
+static void openNavConfigShortcut() {
+    if (!prepareGlobalNavigation()) return;
+    closeDmModal();
+    // prepareGlobalNavigation() closes Config on its way through, so this
+    // reopens it clean. That also makes Alt+C from inside a Config sub-picker
+    // a way back to the top of Config rather than a no-op.
+    openCfgModal();
+}
+
+#if defined(DEVICE_M9)
+static void openM9HomeShortcut() {
+    if (!prepareGlobalNavigation()) return;
+    closeDmModal();
+    setActiveChannel(0);
 }
 
 #if FEATURE_DISCOVERY
@@ -30171,26 +30677,20 @@ static void openM9DiscoveryShortcut() {
     openDiscoveryModal();
 }
 #endif
+#endif  // DEVICE_M9
 
-static bool handleM9GlobalNavigationKey(char key) {
+// Returns true when the key was a navigation shortcut and has been acted on.
+static bool handleGlobalNavigationKey(char key) {
+#if defined(DEVICE_M9)
     if (key == KEY_SLEEP_SCREEN) {
         sleepScreen("M9 d-pad centre hold");
         return true;
     }
-    if (key == KEY_OPEN_DMS) {
-        openM9DirectMessagesShortcut();
-        return true;
-    }
+    // M9 only: its Home button returns to the first channel as well as to the
+    // chat screen. The keyboard boards' Alt+H is the plain "close everything"
+    // gesture and is handled before this, so it keeps the channel you were on.
     if (key == KEY_OPEN_HOME) {
         openM9HomeShortcut();
-        return true;
-    }
-    if (key == KEY_OPEN_LIVE) {
-        openM9LiveShortcut();
-        return true;
-    }
-    if (key == KEY_OPEN_NODES) {
-        openM9NodesShortcut();
         return true;
     }
 #if FEATURE_DISCOVERY
@@ -30199,9 +30699,26 @@ static bool handleM9GlobalNavigationKey(char key) {
         return true;
     }
 #endif
+#endif
+    if (key == KEY_OPEN_DMS) {
+        openNavDirectMessagesShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_LIVE) {
+        openNavLiveShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_NODES) {
+        openNavNodesShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_CONFIG) {
+        openNavConfigShortcut();
+        return true;
+    }
     return false;
 }
-#endif
+#endif  // HAS_GLOBAL_NAV_SHORTCUTS
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_TLORA_PAGER_TFT)
@@ -30378,8 +30895,13 @@ static void pumpKeyboardInput() {
         }
 #endif
 
-#if defined(DEVICE_M9)
-    if (handleM9GlobalNavigationKey(k)) continue;
+        // Ahead of every modal's own key handling, which is what makes these
+        // work from anywhere: a filter that swallows letters, a picker, or a
+        // text field would otherwise consume the letter half of the chord. The
+        // driver has already resolved Alt, so what arrives here is a
+        // destination, never something that could be typed.
+#if HAS_GLOBAL_NAV_SHORTCUTS
+        if (handleGlobalNavigationKey(k)) continue;
 #endif
 
         // Every modal that feeds keys into a textarea belongs here. Anything
@@ -32122,8 +32644,12 @@ static void pumpKeyboardInput() {
                 // Enter hands the keys to the details; the Pager's wheel click
                 // toggles, matching how it swaps panels on Config and DM.
                 const bool wantFocus = (k == KEY_ROLLER) ? !s_nodesInfoFocused : true;
-                if (wantFocus != s_nodesInfoFocused
-                    && (!wantFocus || currentNodesSelection() != nullptr)) {
+                // Archived rows count as something to focus: their panel holds
+                // the record's names, dates and position, which is the whole
+                // reason for showing them.
+                const bool haveSelection = (currentNodesSelection() != nullptr
+                                            || currentNodesArchivedSelection() != nullptr);
+                if (wantFocus != s_nodesInfoFocused && (!wantFocus || haveSelection)) {
                     s_nodesInfoFocused = wantFocus;
                     refreshNodesPanelFocusStyles();
                     refreshNodesHint();
@@ -35238,6 +35764,14 @@ static void loadConfigFromSd() {
     // Only meaningful once the stored value is in s_cfg — set from setup(), it
     // would latch the compiled default and never see what the user chose.
     otaSetChannel(s_cfg.otaChannel);
+    // Saving the web config form reboots, so a channel switch made from the
+    // browser leaves its "check now" behind in NVS for this boot to pick up.
+    // Consumed here and not in loadConfigForOtaWorker(): the worker boot exists
+    // to install, and has no UI to report a check on.
+    s_otaBootCheckForced = otaConsumeBootCheckOnce();
+    if (s_otaBootCheckForced) {
+        Serial.println("[ota-check] release check forced by a web-config channel switch");
+    }
 }
 
 static void loadConfigForOtaWorker() {
@@ -39858,6 +40392,12 @@ void setup() {
             (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
 
+    // Before the display, radio, Wi-Fi and GPS come up, because that current
+    // step is exactly what drags a nearly-flat cell under the brownout detector
+    // — the decision has to be made ahead of the load, not after it. Also
+    // carries the brownout-loop backstop. Does not return if it trips.
+    powerMgrBootGate();
+
     // Explicitly disable OTA-only TLS networking on every boot before any
     // runtime subsystems start. OTA worker flow enables it only when needed.
     otaSetNetworkAllowed(false);
@@ -40305,6 +40845,18 @@ void setup() {
     // of chat buffers and Wi-Fi keeps enough DRAM to serve pages.
     if (!(skipWebAutoStartOnce || otaWorkerHandled)) startWebConfigAuto();
 #endif
+
+    // Last, once every subsystem the hooks touch actually exists. The boot gate
+    // above runs without them on purpose: nothing is initialised that early, so
+    // there is nothing to flush or shut down.
+    powerInstallHooks();
+    if (powerMgrConsumeLowBatteryBootNotice()) {
+        // The previous session ended by itself. Say so — a device that switched
+        // off on its own and says nothing about it reads as a fault.
+        Serial.println("[power] previous shutdown was low battery");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                 "Device switched off last time: battery empty");
+    }
 }
 
 // ── Light-sleep power management (opt-in via isPowerSaving) ───────────────────
@@ -40413,11 +40965,83 @@ static bool enterLightNap() {
     return true;
 }
 
-// Boot update check. Runs at most once per boot, and only once WiFi has been up
-// long enough to be usable — a check fired the instant the station associates
-// tends to hit DNS before it is ready. Failures are not retried: an offline or
-// unreachable device should not spend the rest of its uptime probing, and the
-// next reboot will try again.
+// ── Low-battery hooks ────────────────────────────────────────────────────────
+// power_mgr owns the decision; these are the machinery it drives. Kept here
+// rather than inside that module so it stays free of the UI, the radio and the
+// storage layer.
+
+static void powerHookFlushPersistence() {
+    // The clean shutdown path that has never existed. A brownout loses whatever
+    // the debounced writers are still holding; this is what makes a low-battery
+    // stop lose no more than a deliberate reboot would.
+    flushPersistentState();
+    flushConfigIfDirty();
+}
+
+static void powerHookShedLoads() {
+    // Ordered by how much each one costs and how little it is missed. The LoRa
+    // radio is deliberately left receiving: a node that is still listening is
+    // still useful to the mesh, and silencing it is the last thing worth doing.
+    //
+    // Nothing here writes to config. These are emergency measures for this run
+    // down, not settings the user chose — a charge and a reboot restore exactly
+    // what they had.
+    s_powerWifiHold = true;
+    if (webCfgRunning()) {
+        Serial.println("[power] stopping web config");
+        webCfgEnd();
+    }
+    if (WiFi.getMode() != WIFI_OFF) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+    }
+    if (gpsIsEnabled()) gpsSetEnabled(false);
+    displayDev().setBrightness(cfgBrightnessDuty(BRIGHTNESS_PCT_MIN));
+}
+
+static void powerHookPrepareForOff() {
+    displayDev().setBrightness(0);
+}
+
+static void powerHookShowMessage(const char *msg) {
+    Serial.printf("[power] %s\n", msg ? msg : "");
+}
+
+static void powerHookTierChanged(PowerBatteryTier tier) {
+    const char *label = (tier == POWER_TIER_WARN)     ? "Battery low"
+                      : (tier == POWER_TIER_CRITICAL) ? "Battery critical - shedding load"
+                      : (tier == POWER_TIER_CUTOFF)   ? "Battery empty"
+                                                      : nullptr;
+    if (!label) return;
+    if (s_rootScreen) openCfgActionMessageModal(label);
+}
+
+static void powerInstallHooks() {
+    PowerMgrHooks hooks;
+    hooks.flushPersistence = powerHookFlushPersistence;
+    hooks.shedLoads        = powerHookShedLoads;
+    hooks.prepareForOff    = powerHookPrepareForOff;
+    hooks.showMessage      = powerHookShowMessage;
+    hooks.tierChanged      = powerHookTierChanged;
+    powerMgrSetHooks(hooks);
+}
+
+// Release check service. Two callers share it:
+//
+//   * The boot check — at most once per boot, only if the user wants one, and
+//     only once WiFi has been up long enough to be usable (a check fired the
+//     instant the station associates tends to hit DNS before it is ready).
+//     Failures are not retried: an offline device should not spend the rest of
+//     its uptime probing, and the next reboot will try again.
+//
+//   * An explicit request from a release-channel switch (s_otaCheckRequested).
+//     That one ignores both halves of the boot policy — the per-boot latch and
+//     the on-boot preference — because the user has just asked by hand. The
+//     hard gates below still apply to it.
+//
+// It lives in the loop rather than in the keypress handler because the check is
+// a synchronous HTTP request with a 12 s timeout; running it from input would
+// freeze the UI before the row saying "checking..." had been painted.
 static uint32_t s_otaAutoCheckDueMs = 0;
 static void serviceOtaAutoCheck(uint32_t nowMs) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -40425,32 +41049,83 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     // nothing to offer.
     LV_UNUSED(nowMs);
 #else
-    if (s_otaAutoCheckDone || !s_cfg.otaAutoCheckEnabled) return;
+    const bool manual = s_otaCheckRequested;
+    // Cleared with the boot attempt it belongs to, so a web-config channel
+    // switch buys exactly one forced check rather than one per reconnect.
+    const bool wantBoot = !s_otaAutoCheckDone
+                          && (s_cfg.otaAutoCheckEnabled || s_otaBootCheckForced);
+    if (!manual && !wantBoot) return;
+
+    // Reports a reason to the Config screen and drops the request. Only ever
+    // used for an explicit one: the boot check answers to the serial log.
+    auto abandonManual = [&](const char *why) {
+        s_otaCheckRequested = false;
+        utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
+                               " - check unavailable");
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s", why);
+        Serial.printf("[ota-check] requested check dropped: %s\n", why);
+        if (s_cfgModal) {
+            refreshCfgModal();
+            openCfgActionMessageModal(s_cfgStatus);
+        }
+    };
+
     // Nothing to offer on a layout that cannot accept the update anyway.
     if (!otaLayoutSupportsUpdate()) {
         s_otaAutoCheckDone = true;
-        Serial.println("[ota-check] skipped: flash layout cannot accept OTA updates");
+        s_otaBootCheckForced = false;
+        if (manual) abandonManual("OTA needs the factory image (flash layout)");
+        else Serial.println("[ota-check] skipped: flash layout cannot accept OTA updates");
         return;
     }
     if (!s_cfg.wifiEnabled || WiFi.status() != WL_CONNECTED) {
         s_otaAutoCheckDueMs = 0;    // restart the settle timer on reconnect
+        // The request was raised with WiFi up, so getting here means it dropped
+        // in the settle window. Say so rather than leaving the row spinning.
+        if (manual) {
+            abandonManual(s_cfg.wifiEnabled ? "Update check needs WiFi connected"
+                                            : "Update check needs WiFi on");
+        }
         return;
     }
     // Don't interrupt onboarding or an open dialog — and don't burn the single
     // per-boot attempt before there is a screen to show the answer on.
-    if (!s_rootScreen || s_onboardingModal || s_cfgConfirmModal || s_otaPromptModal) return;
+    bool gated = (!s_rootScreen || s_onboardingModal || s_cfgConfirmModal || s_otaPromptModal);
 #if HAS_STATE_MAPS
-    if (s_legacyMapPromptModal) return;
+    if (s_legacyMapPromptModal) gated = true;
 #endif
-
-    if (s_otaAutoCheckDueMs == 0) {
-        s_otaAutoCheckDueMs = nowMs + kOtaAutoCheckSettleMs;
+    if (gated) {
+        // The boot check simply waits. An explicit one gives up eventually:
+        // leaving it pending would strand the row on "checking..." for the rest
+        // of the boot with nothing ever coming back to replace it.
+        if (manual && (int32_t)(nowMs - s_otaCheckDeadlineMs) >= 0) {
+            abandonManual("Update check skipped (a dialog was open)");
+        }
         return;
     }
-    if ((int32_t)(nowMs - s_otaAutoCheckDueMs) < 0) return;
 
-    s_otaAutoCheckDone = true;
-    Serial.println("[ota-check] checking for a newer release");
+    if (manual) {
+        // Armed by otaRequestCheckNow(), and re-armed by every further request,
+        // so a burst of toggles collapses into one check against the channel
+        // the user stopped on.
+        if ((int32_t)(nowMs - s_otaCheckRequestedDueMs) < 0) return;
+        s_otaCheckRequested = false;
+        // A check the user asked for serves the boot check's purpose too, so a
+        // switch made in the first few seconds of uptime does not then get a
+        // second prompt when the boot check's settle timer comes due.
+        s_otaAutoCheckDone = true;
+        s_otaBootCheckForced = false;
+    } else {
+        if (s_otaAutoCheckDueMs == 0) {
+            s_otaAutoCheckDueMs = nowMs + kOtaAutoCheckSettleMs;
+            return;
+        }
+        if ((int32_t)(nowMs - s_otaAutoCheckDueMs) < 0) return;
+        s_otaAutoCheckDone = true;
+        s_otaBootCheckForced = false;
+    }
+    Serial.printf("[ota-check] checking for a newer release (%s)\n",
+                  manual ? "requested" : "boot");
 
     // The gate is what keeps OTA networking out of normal operation; open it
     // only for the duration of this one request.
@@ -40465,16 +41140,53 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
 
     if (!ok) {
         Serial.printf("[ota-check] failed: %s\n", check.error[0] ? check.error : "unknown");
+        if (manual) {
+            utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
+                                   " - check failed");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Update check failed: %s",
+                     check.error[0] ? check.error : "unknown error");
+            // The row carries the short version; the popup carries the reason,
+            // which is too long for a list row and worth reading once.
+            if (s_cfgModal) {
+                refreshCfgModal();
+                openCfgActionMessageModal(s_cfgStatus);
+            }
+        }
         return;
     }
     if (!check.updateAvailable) {
         Serial.printf("[ota-check] up to date (%s)\n",
                       check.latestTag[0] ? check.latestTag : APP_VERSION);
+        if (manual) {
+            utf8util::copyTruncate(s_otaCheckRowNote, sizeof(s_otaCheckRowNote),
+                                   " - up to date");
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Up to date (%s)",
+                     check.latestTag[0] ? check.latestTag : APP_VERSION);
+            if (s_cfgModal) {
+                refreshCfgModal();
+                openCfgActionMessageModal(s_cfgStatus);
+            }
+        }
         return;
     }
 
     utf8util::copyTruncate(s_otaAutoCheckTag, sizeof(s_otaAutoCheckTag), check.latestTag);
+    // Arms the Firmware Update row to read "Install <tag>". Declining the prompt
+    // below therefore leaves the offer standing in Config rather than losing it
+    // until the next reboot.
+    utf8util::copyTruncate(s_cfgOtaLatestTag, sizeof(s_cfgOtaLatestTag), check.latestTag);
+    s_cfgOtaInstallArmed = true;
+    if (manual) {
+        snprintf(s_otaCheckRowNote, sizeof(s_otaCheckRowNote), " - %s available",
+                 check.latestTag);
+    }
     Serial.printf("[ota-check] update available: %s -> %s\n", APP_VERSION, s_otaAutoCheckTag);
+    // Repaints the Firmware Update row behind the prompt, so declining leaves
+    // "Install <tag>" on screen rather than the pre-check label -- and the
+    // channel row saying which build the check turned up.
+    if (s_cfgModal) refreshCfgModal();
+    // Same prompt as the boot check: one path for "we found you an update",
+    // whether the user asked for the check or the device did.
     openOtaUpdatePrompt();
 #endif
 }
@@ -40594,6 +41306,7 @@ void loop() {
 #if HAS_STATE_MAPS
     LOOP_PHASE("map:migrate", serviceLegacyMapMigrationPrompt(now));
 #endif
+    LOOP_PHASE("power", powerMgrService(now));
     LOOP_PHASE("otacheck", serviceOtaAutoCheck(now));
     LOOP_PHASE("mqtt", mqttBridgeLoop(now));
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }

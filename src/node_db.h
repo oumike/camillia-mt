@@ -162,6 +162,12 @@ public:
     void updateTelemetry(uint32_t nodeId, const TelemetryInfo &t);
     bool setFavorite(uint32_t nodeId, bool favorite);
 
+    // Write one node's current fields to NVS now. upsert() persists the *blank*
+    // record it creates, so a caller that fills the entry in afterwards — the
+    // archive restore path — needs this or the restored name, position and key
+    // live only until the next reboot. False when the table does not have it.
+    bool persist(uint32_t nodeId);
+
 private:
     NodeEntry _nodes[MAX_NODES];
     int       _count = 0;
@@ -215,3 +221,83 @@ const char *nodeArchiveFilePath();  // null when the board has no SD slot
 // the export prepends source) add them in front of these.
 const char *nodeCsvHeader();
 void        nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen);
+
+// Reader half of the schema above, kept beside the writer so the two cannot
+// drift. Copies one CSV field starting at `p` into `out`, unwrapping the quoting
+// nodeCsvQuote() applies (surrounding quotes stripped, doubled quotes collapsed
+// to one). Returns a pointer to the first character of the next field, or null
+// when `p` was the last field on the line. A null/empty `p` yields an empty
+// field and null. Names routinely contain commas, so splitting on ',' without
+// this shreds them.
+const char *nodeCsvParseField(const char *p, char *out, size_t outLen);
+
+// ── Archived-node index ──────────────────────────────────────────────────────
+// A bounded, newest-first view of the eviction archive, for screens that want
+// to show evicted nodes alongside live ones. Only the fields a list row and its
+// filter need — a full NodeEntry is ~3x the size, and the file has no upper
+// bound on how many records it holds.
+struct ArchivedNode {
+    uint32_t nodeId;
+    char     shortName[5];
+    char     longName[40];
+    long     lastHeardEpoch;   // 0 = clock was unset when the node was last heard
+    long     archivedEpoch;    // 0 = clock was unset when the record was written
+};
+
+// Index capacity. The archive file is unbounded, so this is what makes reading
+// it affordable: the scan walks backwards from the end and stops here.
+//
+// Keyed on PSRAM, not on MAX_NODES, because external RAM is what decides how
+// much of the archive can be held: at ~60 bytes an entry, 512 of them is ~30 KB,
+// which is nothing in PSRAM and impossible without it. Every board but the
+// Cardputer has it — and the Cardputer is also the one with the smallest node
+// table and the least DRAM to spare, so the small window belongs exactly there.
+//
+// Sized to cover a whole realistic archive rather than a recent window, so the
+// header count is a real total and the list shows every row behind it. The cap
+// is a backstop against a pathological file, not the normal case.
+#if defined(BOARD_HAS_PSRAM) && BOARD_HAS_PSRAM
+#define NODE_ARCHIVE_INDEX_MAX 512
+#else
+#define NODE_ARCHIVE_INDEX_MAX 24
+#endif
+
+// Rebuild the index from the card. One bounded pass, reading the file backwards
+// in fixed chunks so cost follows NODE_ARCHIVE_INDEX_MAX rather than file size.
+// Because the file is append-ordered, backwards *is* newest-first, so the result
+// needs no sort.
+//
+// Skips ids that are currently live in the table (a node that came back is not
+// archived any more) and ids already indexed (first seen wins, which reading
+// backwards makes "most recently archived wins") — so repeated evictions of the
+// same node collapse to one entry.
+//
+// Returns false, leaving the index empty, when archiving is off, the board has
+// no slot, no card is mounted, or the file does not exist. Callers treat that as
+// "no archived nodes", not as an error. Does SD I/O: call it when a screen takes
+// its snapshot, never on a refresh path -- SD shares the SPI bus with the radio.
+bool nodeArchiveIndexBuild();
+void nodeArchiveIndexClear();
+int  nodeArchiveIndexCount();
+// True when the index filled before the scan reached the start of the file, so
+// there may be older records it does not list. Deliberately "may": counting them
+// would need exactly the full read the cap exists to avoid, so callers can say
+// "at least this many" and never a total.
+bool nodeArchiveIndexTruncated();
+const ArchivedNode *nodeArchiveIndexAt(int i);
+
+// Re-parse one archived record into a full NodeEntry, for the moment a user
+// opens or restores it. Searches newest-first and takes the first match, the
+// same record the index describes. Does SD I/O; false when unavailable or not
+// found. archivedEpochOut is optional.
+bool nodeArchiveLoadFull(uint32_t nodeId, NodeEntry &out, long *archivedEpochOut = nullptr);
+
+// Delete the archive file, drop the in-RAM index, and discard anything still
+// queued for writing. Returns true when the archive is gone afterwards —
+// including the case where there was no file to begin with — and false when the
+// board has no slot, no card is mounted, or the remove failed.
+//
+// Discarding the queue is the part that is easy to miss: those records were
+// evicted from the very table being wiped, and leaving them would have the next
+// nodeArchiveFlush() recreate the file from nodes the user just deleted.
+bool nodeArchiveClear();

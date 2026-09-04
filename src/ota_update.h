@@ -35,6 +35,14 @@ bool otaRunningPrerelease();
 // update check will actually do.
 uint8_t otaResolveChannel(uint8_t storedChannel);
 
+// One-shot "run a release check on the next boot" request, stored in NVS so it
+// outlives the reboot the web-config save performs. Honoured regardless of the
+// "Check for Updates on Boot" preference: a user who has just switched channel
+// from the browser is asking for a check, whatever their boot-time setting
+// says. Consumed exactly once, by the boot that finds it set.
+void otaRequestBootCheckOnce();
+bool otaConsumeBootCheckOnce();
+
 // Device-specific release artifact slug (for example: tdeck, cardputer-cap).
 const char *otaCurrentDeviceAssetSlug();
 

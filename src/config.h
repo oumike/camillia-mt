@@ -721,6 +721,67 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #define BATT_SENSE_ENABLE_LEVEL  LOW
 #endif
 
+// ── Low-battery protection ────────────────────────────────────
+// Thresholds are volts *under load*, because that is what can actually be
+// measured on a running device: a cell reads lower while the radio transmits
+// and the backlight is up than it does at rest, and every one of these numbers
+// is compared against a sample taken in that state.
+//
+// BATT_VMIN above is NOT a protection threshold and never was — it is the
+// bottom of the display curve, which already floors at 3.70 V -> 0%. "0% on
+// screen" is therefore nowhere near empty, and BATT_CUTOFF_V is the number that
+// actually decides when the device turns itself off.
+//
+// A board that ships a different pack chemistry overrides these in its
+// hal/hw_*.h; they are only defaults.
+#ifndef BATT_WARN_V
+#define BATT_WARN_V      3.45f   // banner; stop starting expensive work
+#endif
+#ifndef BATT_CRITICAL_V
+#define BATT_CRITICAL_V  3.35f   // shed load to buy receive time
+#endif
+#ifndef BATT_CUTOFF_V
+#define BATT_CUTOFF_V    3.25f   // flush state and turn off
+#endif
+// Climb back this far above a threshold before leaving its tier, so a device on
+// charge does not oscillate and a transmit sag does not toggle the UI.
+#ifndef BATT_RECOVER_HYST_V
+#define BATT_RECOVER_HYST_V 0.10f
+#endif
+// The boot gate deliberately trips lower than the runtime cutoff. It runs
+// before the config blob is loaded, so the user's per-unit calibration trim is
+// not applied yet and the reading can be off by a few percent. Refusing to boot
+// a healthy device is much worse than booting a flat one for the couple of
+// seconds it takes the (trimmed, debounced) runtime monitor to catch it, so the
+// error is deliberately spent in that direction.
+#ifndef BATT_BOOT_GATE_V
+#define BATT_BOOT_GATE_V (BATT_CUTOFF_V - 0.10f)
+#endif
+
+// Whether this build can tell that external power is present. Where it cannot,
+// the code says "unknown" rather than guessing — see powerMgrChargerPresent().
+#ifndef POWER_HAS_CHARGER_SENSE
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT)
+#define POWER_HAS_CHARGER_SENSE 1
+#else
+#define POWER_HAS_CHARGER_SENSE 0
+#endif
+#endif
+
+// Whether the cell can be measured at all. Without a reading there is nothing
+// to protect against, and a cutoff driven by an invented number would be worse
+// than no cutoff — so the whole path compiles out.
+#ifndef HAS_BATTERY_SENSE
+#if (BATT_ADC_PIN >= 0) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+    || defined(DEVICE_WIO_TRACKER_L2)
+#define HAS_BATTERY_SENSE 1
+#else
+#define HAS_BATTERY_SENSE 0
+#endif
+#endif
+
 // ── Timing ───────────────────────────────────────────────────
 #define CURSOR_BLINK_MS   500
 // How long a unicast waits for a routing ACK before it is shown as failed.

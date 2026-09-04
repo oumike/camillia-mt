@@ -455,10 +455,23 @@ struct RhinoConfig {
     // and zero is OTA_CHANNEL_STABLE — the value an upgrading device should
     // have. A field whose correct upgrade default is non-zero cannot go here.
     uint8_t  otaChannel;
-    // For whoever appends next: the two bytes below are the remainder of that
-    // same padding and carry the same caveat — an upgraded device reads zeros
+    // Show SD-archived (evicted) nodes on the Nodes screen, below the live ones.
+    // Separate from nodeArchiveEnabled because the two are different questions:
+    // whether to keep the history at all, and whether the node list is a
+    // live-mesh view or a record of everything ever heard. Ignored where the
+    // board has no SD slot, or no card is in it.
+    //
+    // Off by default, on a fresh device and an upgraded one alike.
+    //
+    // Placed in what used to be _reservedPad12 under the same rule otaChannel
+    // above documents: an upgrading device reads zero here, not the compiled
+    // default. Zero is "off", which is the wanted default, so the two agree —
+    // a field whose default were On could not go here.
+    bool     nodeArchiveShow;
+    // For whoever appends next: the byte below is the remainder of that same
+    // padding and carries the same caveat — an upgraded device reads zero
     // there, not your compiled default.
-    uint8_t  _reservedPad12[2];
+    uint8_t  _reservedPad12[1];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

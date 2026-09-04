@@ -1088,6 +1088,11 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.otaChannel          = MY_OTA_CHANNEL;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
+    // Off regardless of whether archiving is on. The Nodes screen is a live-mesh
+    // view by default on a fresh device exactly as it is on an upgraded one --
+    // which also keeps this independent of any board that defines
+    // MY_NODE_ARCHIVE_EN as 1.
+    cfg.nodeArchiveShow    = false;
     cfg.volumePct           = MY_VOLUME_PCT;
     cfg.autoFavoriteEnabled = MY_AUTOFAV_ENABLED;
     // After cfg.displayUnits above, which decides which round value this is.
@@ -1562,6 +1567,7 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // nodes
     out += "nodes:\n";
     snprintf(tmp, sizeof(tmp), "  archiveEvicted: %s\n", cfg.nodeArchiveEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "  showArchived: %s\n", cfg.nodeArchiveShow ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "  autoFavorite: %s\n", cfg.autoFavoriteEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "  autoFavoriteRangeM: %lu\n", (unsigned long)cfg.autoFavoriteRangeM); out += tmp;
     // module_config
@@ -1663,6 +1669,7 @@ static bool s_importRestoredKeys = false;
 // keeps older or hand-edited files working too.
 static void parseNodesSectionKey(RhinoConfig &cfg, const char *key, const char *val) {
     if      (!strcmp(key, "archiveEvicted"))     cfg.nodeArchiveEnabled  = parseBoolValue(val);
+    else if (!strcmp(key, "showArchived"))       cfg.nodeArchiveShow     = parseBoolValue(val);
     else if (!strcmp(key, "autoFavorite"))       cfg.autoFavoriteEnabled = parseBoolValue(val);
     else if (!strcmp(key, "autoFavoriteRangeM")) cfg.autoFavoriteRangeM  = (uint32_t)atol(val);
 }
