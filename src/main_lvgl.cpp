@@ -7606,7 +7606,9 @@ static void initPkiIdentity() {
 }
 
 // The node ID we last announced under, when it differs from the current one.
-// Only non-zero after nodeIdFromPubKey is toggled; see remapping in setup().
+// Non-zero once the ID has moved — nodeIdFromPubKey toggled, an override typed,
+// or a restored config carrying a different identity key. Loaded from prefs by
+// deriveNodeId() and consumed by setSenderRemap() in setup().
 static uint32_t s_prevNodeId = 0;
 
 static void deriveNodeId() {
@@ -7666,14 +7668,33 @@ static void deriveNodeId() {
     // the old identity can still be recognised as ours. Stored rather than
     // recomputed because the old value is unrecoverable once the setting moves:
     // the MAC-derived ID cannot be derived back out of a public key.
+    //
+    // Kept in prefs rather than in RAM, because the call that *detects* the
+    // move is usually not the one the remap hangs off. Saving from web config
+    // runs deriveNodeId() from onWebCfgSaved() and then reboots, while the only
+    // setSenderRemap() call is in setup(): recording the move in RAM alone left
+    // it in a call with no consumer downstream, and the reboot then read a
+    // lastNodeId that had already been advanced and saw no move at all. The one
+    // store that does need migrating therefore never got it, on the only path
+    // that exposes the setting.
+    //
+    // It also has to outlive the boot that heals the history. loadPersisted()
+    // rewrites the sender on the way in and leaves the file to the next save,
+    // so a channel that receives nothing is never written back and still holds
+    // the old ID several boots later. Re-applying a mapping whose source ID no
+    // longer appears costs one comparison per loaded line, so it stays rather
+    // than being cleared on first use. The exposure that buys is a peer who
+    // later turns up using the ID we left, whose messages would read as ours;
+    // that is the same window the one-shot version had, held open.
     if (prefs.begin("camillia", false)) {
         const uint32_t announced = prefs.getUInt("lastNodeId", 0);
         if (announced != 0 && announced != s_myNodeId) {
-            s_prevNodeId = announced;
+            prefs.putUInt("prevNodeId", announced);
             Serial.printf("[lvgl] node ID changed !%08x -> !%08x; peers will see a new node\n",
                           announced, s_myNodeId);
         }
         if (announced != s_myNodeId) prefs.putUInt("lastNodeId", s_myNodeId);
+        s_prevNodeId = prefs.getUInt("prevNodeId", 0);
         prefs.end();
     }
 
@@ -40158,7 +40179,9 @@ void setup() {
     DMs.init();
     Ignored.init();
     // Before init(), which loads persisted history itself. Set unconditionally:
-    // it is a no-op unless the node ID actually moved.
+    // it is a no-op unless the node ID actually moved. The move it replays may
+    // have been recorded on an earlier boot — deriveNodeId() persists it, so a
+    // change made from web config (which reboots) is still seen here.
     Channels.setSenderRemap(s_prevNodeId, s_myNodeId);
     Channels.init();
     Channels.beginPersistence();
