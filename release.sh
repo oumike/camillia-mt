@@ -119,14 +119,19 @@ ALPHA=false
 VERSION_ARG=""
 NOTES_ONLY=false
 USE_COMMITTED_NOTES=false
+BUILD_LOCAL=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             echo "Usage: $0 [-y|--yes] [--alpha] [--version V] [--no-clean]"
             echo "          [--append-last-notes] [--check-targets] [--notes-only]"
-            echo "          [--use-committed-notes]"
+            echo "          [--use-committed-notes] [--build-local]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
+            echo ""
+            echo "  Releases normally run on GitHub Actions. Building and"
+            echo "  publishing from this machine needs --build-local; without"
+            echo "  it the script explains the workflow route and stops."
             echo ""
             echo "  --alpha     Cut an ALPHA release instead: tags"
             echo "              v<version>-alpha.<n> and publishes it as a GitHub"
@@ -163,6 +168,11 @@ while [[ $# -gt 0 ]]; do
             echo "              tagged or published, and VERSION is left alone."
             echo "              Commit the notes and let the GitHub release"
             echo "              workflow cut the release from them."
+            echo "  --build-local"
+            echo "              Build, sign and publish from this machine"
+            echo "              instead of dispatching the GitHub workflow."
+            echo "              Required for any run that builds; a run on"
+            echo "              GitHub Actions is allowed without it."
             echo "  --use-committed-notes"
             echo "              Publish RELEASE_NOTES.md exactly as it stands"
             echo "              instead of generating a summary. This is how an"
@@ -177,6 +187,7 @@ while [[ $# -gt 0 ]]; do
         --check-targets) CHECK_TARGETS_ONLY=true ;;
         --notes-only) NOTES_ONLY=true ;;
         --use-committed-notes) USE_COMMITTED_NOTES=true ;;
+        --build-local) BUILD_LOCAL=true ;;
         --version)
             if [[ -z "${2:-}" ]]; then
                 echo "--version requires a value (e.g. --version 4.9.0)" >&2
@@ -194,6 +205,34 @@ done
 if [[ "$NOTES_ONLY" == true && "$USE_COMMITTED_NOTES" == true ]]; then
     echo "--notes-only writes the notes; --use-committed-notes reuses them." >&2
     echo "They are the two halves of the same flow, not a combination." >&2
+    exit 1
+fi
+
+# ── Local releases are opt-in ────────────────────────────────────────────────
+# Releases are cut by .github/workflows/release.yml. A run that builds has to
+# say so explicitly, so that a bare `./release.sh` cannot quietly publish from
+# whatever happens to be in the working tree.
+#
+# GITHUB_ACTIONS is what exempts the workflow. It could pass --build-local
+# instead, but on a runner that flag would be a lie — nothing about it is local
+# — and a future reader deserves the YAML to mean what it says.
+if [[ "$NOTES_ONLY" != true && "$CHECK_TARGETS_ONLY" != true \
+      && "$BUILD_LOCAL" != true && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+    echo "Refusing to build and publish from this machine without --build-local." >&2
+    echo "" >&2
+    echo "Releases are cut by the GitHub workflow. The usual route:" >&2
+    echo "" >&2
+    if [[ "$ALPHA" == true ]]; then
+        echo "  ./release.sh --notes-only --alpha -y" >&2
+    else
+        echo "  ./release.sh --notes-only -y" >&2
+    fi
+    echo "  git add RELEASE_NOTES.md && git commit -m 'Release notes' && git push" >&2
+    echo "  gh workflow run release.yml -f channel=... -f version=..." >&2
+    echo "" >&2
+    echo "(--notes-only prints the exact dispatch line for the version it picks.)" >&2
+    echo "" >&2
+    echo "To build and publish here anyway, pass --build-local." >&2
     exit 1
 fi
 
