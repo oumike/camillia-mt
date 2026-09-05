@@ -76,56 +76,50 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 
 ## Releases
 
-Releases are cut by [the release workflow](.github/workflows/release.yml), run
-manually from the Actions tab. It builds every device profile, merges factory
-images, signs the OTA images, tags the commit, and publishes a GitHub release
-with the `.bin`/`.sig` assets. Debug symbols (`.elf`) are uploaded as a
-`debug-symbols-<tag>` workflow artifact rather than bloating the release by
-~35MB per profile. T-Deck Pro publishes the `tdeck-pro` factory and OTA images;
-the release script verifies the target list and every OTA signature before
-publication.
-
-Release notes are written and reviewed on your machine, then carried to the
-release in `RELEASE_NOTES.md` — which has to be committed anyway, since the
-build bakes it into the firmware so the device shows the same text that gets
-published.
+`./release.sh` cuts a release without compiling anything on your machine. It
+works out the version, drafts the release notes and shows them to you, commits
+them, pushes, and dispatches [the release
+workflow](.github/workflows/release.yml) — which builds every device profile on
+GitHub, merges the factory images, signs the OTA images and publishes the
+`.bin`/`.sig` assets.
 
 ```bash
-./release.sh --notes-only -y          # draft, review and edit the notes
-git add RELEASE_NOTES.md && git commit -m "Release notes for v4.9.0" && git push
-gh workflow run release.yml -f channel=stable -f version=4.9.0
+./release.sh                    # stable, prompts for the version
+./release.sh --alpha -y         # next alpha in the current series
+./release.sh --version 4.9.0    # exactly this version
 ```
 
-`--notes-only` builds nothing, publishes nothing, and leaves `VERSION` alone —
-it only writes the notes and prints the exact `gh workflow run` line to follow
-it with. Pass that version to the workflow; left blank it derives its own, and
-the notes would then be published under a different tag.
+It confirms before committing, and warns about any uncommitted changes first —
+GitHub builds what you push, not what is in your working tree.
 
-The workflow's `notes` input defaults to `committed`, which publishes that file
-verbatim. Setting it to `generate` has the workflow write the notes itself,
-unreviewed, and requires an `ANTHROPIC_API_KEY` secret.
+The notes are reviewed before anything is dispatched (`[Y]es / [e]dit / [n]o`).
+Be aware that `-y` accepts them unread as well as picking the version; pass
+`--version` instead to skip the version prompt but keep the review.
+`RELEASE_NOTES.md` is committed rather than handed to the workflow, because the
+build bakes it into the firmware so the device shows the same text the release
+publishes. The workflow's `notes` input defaults to `committed` and publishes
+that file verbatim; `generate` has the workflow write them itself, unreviewed,
+and needs an `ANTHROPIC_API_KEY` secret.
 
-Signing uses the `OTA_SIGNING_KEY` secret on the `release` environment; the
+Signing uses the `OTA_SIGNING_KEY` secret on the `release` environment. The
 workflow refuses to publish if that key does not match the public key baked into
 `src/ota_signing_pubkey.h`, since a mismatch would lock out every device in the
-field.
+field. T-Deck Pro publishes the `tdeck-pro` factory and OTA images; the release
+script verifies the target list and every OTA signature before publication.
+Debug symbols (`.elf`) are uploaded as a `debug-symbols-<tag>` workflow artifact
+rather than bloating the release by ~35MB per profile.
 
-[`release.sh`](release.sh) is what the workflow runs. It can still cut a release
-entirely on your machine, but that is now opt-in: without `--build-local` it
-refuses to build and prints the workflow route instead, so a bare `./release.sh`
-can never quietly publish from an unverified working tree. A local release needs
-`ota_signing_key.pem` present.
+Other modes:
 
 ```bash
-./release.sh --notes-only -y                # draft notes, build nothing
-./release.sh --check-targets                # validate release/OTA slugs
-./release.sh --build-local                  # full local release, prompts for a version
-./release.sh --build-local --alpha -y       # local alpha, next in the series
-./release.sh --build-local --version 4.9.0  # local release of exactly this version
+./release.sh --notes-only       # draft notes only — no commit, no dispatch
+./release.sh --check-targets    # validate release/OTA slugs, build nothing
+./release.sh --build-local      # build, sign and publish from this machine
 ```
 
-A run on GitHub Actions is exempt from `--build-local` — on a runner the flag
-would be a lie, so the workflow is recognised by `GITHUB_ACTIONS` instead.
+`--build-local` needs the full toolchain and `ota_signing_key.pem` present. The
+workflow's own run uses that mode, recognised by `GITHUB_ACTIONS` rather than
+the flag — on a runner the name would be a lie.
 
 [The build workflow](.github/workflows/build.yml) compiles every environment
 from a clean checkout on pushes and PRs. It is a breakage check on ordinary
