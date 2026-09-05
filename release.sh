@@ -126,12 +126,13 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [-y|--yes] [--alpha] [--version V] [--no-clean]"
             echo "          [--append-last-notes] [--check-targets] [--notes-only]"
             echo "          [--use-committed-notes] [--build-local]"
-            echo "  Cuts a stable release: builds all envs, signs OTA images,"
-            echo "  tags v<version>, and publishes a GitHub release."
+            echo "  Cuts a release on GitHub. Works out the version, writes"
+            echo "  and reviews the release notes, commits them, pushes, and"
+            echo "  dispatches the release workflow — which builds every"
+            echo "  environment, signs the OTA images and publishes. Nothing"
+            echo "  is compiled on this machine, and no toolchain is needed."
             echo ""
-            echo "  Releases normally run on GitHub Actions. Building and"
-            echo "  publishing from this machine needs --build-local; without"
-            echo "  it the script explains the workflow route and stops."
+            echo "  --build-local does all of it here instead."
             echo ""
             echo "  --alpha     Cut an ALPHA release instead: tags"
             echo "              v<version>-alpha.<n> and publishes it as a GitHub"
@@ -163,16 +164,14 @@ while [[ $# -gt 0 ]]; do
             echo "              Validate release environments and artifact slugs,"
             echo "              then exit without building or publishing."
             echo "  --notes-only"
-            echo "              Write and review RELEASE_NOTES.md for the next"
-            echo "              release, then stop. Nothing is built, committed,"
-            echo "              tagged or published, and VERSION is left alone."
-            echo "              Commit the notes and let the GitHub release"
-            echo "              workflow cut the release from them."
+            echo "              Write and review RELEASE_NOTES.md, then stop"
+            echo "              short of committing or dispatching. Use it to"
+            echo "              draft notes without starting a release."
             echo "  --build-local"
             echo "              Build, sign and publish from this machine"
             echo "              instead of dispatching the GitHub workflow."
-            echo "              Required for any run that builds; a run on"
-            echo "              GitHub Actions is allowed without it."
+            echo "              Needs the full toolchain and the signing key."
+            echo "              The workflow's own run is in this mode."
             echo "  --use-committed-notes"
             echo "              Publish RELEASE_NOTES.md exactly as it stands"
             echo "              instead of generating a summary. This is how an"
@@ -208,32 +207,21 @@ if [[ "$NOTES_ONLY" == true && "$USE_COMMITTED_NOTES" == true ]]; then
     exit 1
 fi
 
-# ── Local releases are opt-in ────────────────────────────────────────────────
-# Releases are cut by .github/workflows/release.yml. A run that builds has to
-# say so explicitly, so that a bare `./release.sh` cannot quietly publish from
-# whatever happens to be in the working tree.
+# ── Where does this release happen? ──────────────────────────────────────────
+# By default this script builds nothing. It works out the version, writes and
+# reviews the notes, commits them, and dispatches
+# .github/workflows/release.yml — which builds and signs on GitHub, where the
+# signing key lives. --build-local restores the old behaviour of doing all of
+# it here.
 #
-# GITHUB_ACTIONS is what exempts the workflow. It could pass --build-local
-# instead, but on a runner that flag would be a lie — nothing about it is local
-# — and a future reader deserves the YAML to mean what it says.
+# GITHUB_ACTIONS is what puts the workflow's own run into building mode. It
+# could pass --build-local instead, but on a runner that flag would be a lie —
+# nothing about it is local — and a future reader deserves the YAML to mean
+# what it says.
+REMOTE=false
 if [[ "$NOTES_ONLY" != true && "$CHECK_TARGETS_ONLY" != true \
       && "$BUILD_LOCAL" != true && "${GITHUB_ACTIONS:-}" != "true" ]]; then
-    echo "Refusing to build and publish from this machine without --build-local." >&2
-    echo "" >&2
-    echo "Releases are cut by the GitHub workflow. The usual route:" >&2
-    echo "" >&2
-    if [[ "$ALPHA" == true ]]; then
-        echo "  ./release.sh --notes-only --alpha -y" >&2
-    else
-        echo "  ./release.sh --notes-only -y" >&2
-    fi
-    echo "  git add RELEASE_NOTES.md && git commit -m 'Release notes' && git push" >&2
-    echo "  gh workflow run release.yml -f channel=... -f version=..." >&2
-    echo "" >&2
-    echo "(--notes-only prints the exact dispatch line for the version it picks.)" >&2
-    echo "" >&2
-    echo "To build and publish here anyway, pass --build-local." >&2
-    exit 1
+    REMOTE=true
 fi
 
 validate_release_targets
@@ -368,33 +356,39 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 1
 fi
 
-BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
-    -name boot_app0.bin 2>/dev/null | head -1)
-if [[ -z "$BOOT_APP0" ]]; then
-    echo "Error: boot_app0.bin not found in PlatformIO packages." >&2
-    echo "Run 'pio run' at least once to download the framework." >&2
-    exit 1
-fi
-
-# PlatformIO installs itself into a private venv on a workstation, but a CI
-# runner gets it on PATH from `pip install platformio`. Prefer the venv copy
-# where it exists so a machine with both keeps using the one it always used.
-if [[ -x "$HOME/.platformio/penv/bin/pio" ]]; then
-    PIO="$HOME/.platformio/penv/bin/pio"
-elif command -v pio >/dev/null 2>&1; then
-    PIO="pio"
+if [[ "$REMOTE" == true || "$NOTES_ONLY" == true ]]; then
+    # Neither mode compiles anything here, so a missing toolchain is not a
+    # reason to refuse — this can run on a machine that has never built.
+    BOOT_APP0=""; PIO=""; ESPTOOL=""
 else
-    echo "Error: platformio not found. Run: pip install platformio" >&2
-    exit 1
-fi
+    BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions \
+        -name boot_app0.bin 2>/dev/null | head -1)
+    if [[ -z "$BOOT_APP0" ]]; then
+        echo "Error: boot_app0.bin not found in PlatformIO packages." >&2
+        echo "Run 'pio run' at least once to download the framework." >&2
+        exit 1
+    fi
 
-if python -m esptool version >/dev/null 2>&1; then
-    ESPTOOL="python -m esptool"
-elif command -v esptool.py >/dev/null 2>&1; then
-    ESPTOOL="esptool.py"
-else
-    echo "Error: esptool not found. Run: pip install esptool" >&2
-    exit 1
+    # PlatformIO installs itself into a private venv on a workstation, but a CI
+    # runner gets it on PATH from `pip install platformio`. Prefer the venv copy
+    # where it exists so a machine with both keeps using the one it always used.
+    if [[ -x "$HOME/.platformio/penv/bin/pio" ]]; then
+        PIO="$HOME/.platformio/penv/bin/pio"
+    elif command -v pio >/dev/null 2>&1; then
+        PIO="pio"
+    else
+        echo "Error: platformio not found. Run: pip install platformio" >&2
+        exit 1
+    fi
+
+    if python -m esptool version >/dev/null 2>&1; then
+        ESPTOOL="python -m esptool"
+    elif command -v esptool.py >/dev/null 2>&1; then
+        ESPTOOL="esptool.py"
+    else
+        echo "Error: esptool not found. Run: pip install esptool" >&2
+        exit 1
+    fi
 fi
 
 # ── Recreating an existing release? ──────────────────────────────────────────
@@ -477,7 +471,7 @@ guard_snapshot
 # ── Update VERSION file ───────────────────────────────────────────────────────
 # Skipped for --notes-only: that run is not cutting the release, and the job
 # that does will write this itself.
-if [[ "$NOTES_ONLY" != true ]]; then
+if [[ "$NOTES_ONLY" != true && "$REMOTE" != true ]]; then
     echo "$TAG" > VERSION
     echo "Updated VERSION to $TAG"
 fi
@@ -664,7 +658,7 @@ else
                 write_placeholder_notes
                 echo "Notes file is empty — using GitHub's generated notes only."
             fi
-        elif [[ "$NOTES_ONLY" == true ]]; then
+        elif [[ "$NOTES_ONLY" == true || "$REMOTE" == true ]]; then
             # Nothing to hand to GitHub, and the failure guard restores the file
             # on the way out — so a rejected draft costs nothing.
             echo "Discarded. RELEASE_NOTES.md left as it was." >&2
@@ -673,7 +667,7 @@ else
             write_placeholder_notes
             echo "Discarded — using GitHub's generated notes only."
         fi
-    elif [[ "$NOTES_ONLY" == true ]]; then
+    elif [[ "$NOTES_ONLY" == true || "$REMOTE" == true ]]; then
         echo "Could not generate release notes (no ANTHROPIC_API_KEY and no usable" >&2
         echo "'claude' CLI, or the request failed). RELEASE_NOTES.md left as it was." >&2
         exit 1
@@ -684,13 +678,16 @@ else
     fi
 fi
 
-if [[ "$NOTES_ONLY" == true ]]; then
-    # Stop here: the release itself happens on GitHub. RELEASE_NOTES.md is the
-    # only thing this run produces, and committing it is not an extra step —
-    # the build bakes that file into the firmware (tools/gen_release_notes.py)
-    # so the device shows the same text the release publishes.
-    GUARD_ARMED=false
+if [[ "$NOTES_ONLY" == true || "$REMOTE" == true ]]; then
+    # Neither mode builds. RELEASE_NOTES.md is the only thing produced here, and
+    # committing it is not an extra step for CI's benefit — the build bakes that
+    # file into the firmware (tools/gen_release_notes.py) so the device shows the
+    # same text the release publishes.
     if [[ "$ALPHA" == true ]]; then NOTES_CHANNEL=alpha; else NOTES_CHANNEL=stable; fi
+fi
+
+if [[ "$NOTES_ONLY" == true ]]; then
+    GUARD_ARMED=false
     echo ""
     echo "Release notes for $TAG written to $NOTES_FILE. Nothing built or published."
     echo ""
@@ -701,6 +698,83 @@ if [[ "$NOTES_ONLY" == true ]]; then
     echo ""
     echo "Pass that version to the workflow. Left blank it derives its own, and"
     echo "these notes would then be published under a different tag."
+    exit 0
+fi
+
+if [[ "$REMOTE" == true ]]; then
+    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    if [[ "$BRANCH" == "HEAD" ]]; then
+        echo "Detached HEAD — check out a branch before releasing." >&2
+        exit 1
+    fi
+
+    # GitHub builds what gets pushed, not what is sitting in the working tree.
+    # A local-only edit would silently be left out of the release, which is a
+    # failure mode the --build-local path simply cannot have.
+    DIRTY="$(git status --porcelain --untracked-files=no \
+             | grep -v "[[:space:]]${NOTES_FILE}$" || true)"
+
+    echo ""
+    echo "Ready to release $TAG on GitHub:"
+    echo "  branch:   $BRANCH"
+    echo "  channel:  $NOTES_CHANNEL"
+    echo "  notes:    $NOTES_FILE, published verbatim"
+    if [[ -n "$DIRTY" ]]; then
+        echo ""
+        echo "  !! Uncommitted changes that will NOT be in this release:"
+        printf '%s\n' "$DIRTY" | sed 's/^/     /'
+    fi
+    echo ""
+
+    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
+        read -rp "Commit the notes, push $BRANCH and dispatch? [y/N]: " ans || ans="n"
+        case "${ans:-n}" in
+            y|Y|yes|Yes) ;;
+            *) echo "Aborted. RELEASE_NOTES.md will be restored." >&2; exit 1 ;;
+        esac
+    fi
+
+    git add -- "$NOTES_FILE"
+    if git diff --cached --quiet -- "$NOTES_FILE"; then
+        echo "Release notes unchanged — nothing to commit."
+    else
+        git commit -m "Release notes for $TAG"
+    fi
+
+    # Past this point the notes are committed, so the pre-run copy is no longer
+    # the one that should win.
+    GUARD_ARMED=false
+
+    git push || git push -u origin "$BRANCH"
+
+    # Note the newest run before dispatching so the one we report is definitely
+    # ours and not the previous release's.
+    PREV_RUN=$(gh run list --workflow=release.yml --limit 1 \
+               --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+
+    gh workflow run release.yml --ref "$BRANCH" \
+        -f channel="$NOTES_CHANNEL" \
+        -f version="$VERSION" \
+        -f notes=committed
+
+    echo ""
+    echo "Dispatched $TAG ($NOTES_CHANNEL) on $BRANCH. Waiting for the run..."
+    RUN_ID=""
+    for _ in $(seq 1 15); do
+        sleep 2
+        RUN_ID=$(gh run list --workflow=release.yml --limit 1 \
+                 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+        [[ -n "$RUN_ID" && "$RUN_ID" != "$PREV_RUN" ]] && break
+        RUN_ID=""
+    done
+
+    if [[ -n "$RUN_ID" ]]; then
+        gh run view "$RUN_ID" --json url -q .url
+        echo ""
+        echo "Follow it with:  gh run watch $RUN_ID"
+    else
+        echo "Run not visible yet. Check: gh run list --workflow=release.yml"
+    fi
     exit 0
 fi
 
