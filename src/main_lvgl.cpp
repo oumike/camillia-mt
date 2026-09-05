@@ -1218,6 +1218,7 @@ enum HeltecNavTarget : uint8_t {
     HELTEC_NAV_DM,
     HELTEC_NAV_NODES,
     HELTEC_NAV_LIVE,
+    HELTEC_NAV_TOOLS,
     HELTEC_NAV_ACTIONS,
     HELTEC_NAV_LEGEND,
     // Not a screen of its own: chat is what is left when everything stacked on
@@ -12141,7 +12142,8 @@ static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
 // (Cardputer has neither Discovery nor MQTT, leaving it SNR/RSSI and ChUtil in
 // the left column with Beacons alone in the right.)
 enum LiveTool : uint8_t {
-    LIVE_TOOL_SNR = 0,
+    LIVE_TOOL_LIVE = 0,
+    LIVE_TOOL_SNR,
     LIVE_TOOL_CHUTIL,
 #if FEATURE_DISCOVERY
     LIVE_TOOL_DISCOVERY,
@@ -12157,7 +12159,7 @@ static constexpr int kLiveToolRowsPerCol =
 
 // Keeps the letter keys in step with the "(S)NR/RSSI" style labels below.
 static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
-    'S', 'U',
+    'L', 'S', 'U',
 #if FEATURE_DISCOVERY
     'D',
 #endif
@@ -12212,7 +12214,7 @@ static constexpr int kLiveFilterRowsPerCol =
 static lv_obj_t *s_liveToolsBackdrop = nullptr;
 static lv_obj_t *s_liveToolsModal    = nullptr;
 static lv_obj_t *s_liveToolsRows[LIVE_TOOL_COUNT] = {};
-static int       s_liveToolsSelection = LIVE_TOOL_SNR;
+static int       s_liveToolsSelection = LIVE_TOOL_LIVE;
 
 // ── MeshBeacon offers (port 37) ──────────────────────────────────────────────
 // Beacons from other meshes: a node over there retuned its radio to our config
@@ -16204,6 +16206,10 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_liveModal) closeLiveModal();
             else openLiveModal();
             break;
+        case HELTEC_NAV_TOOLS:
+            if (s_liveToolsModal) closeLiveToolsModal();
+            else openLiveToolsModal();
+            break;
         case HELTEC_NAV_ACTIONS:
             if (s_channelActionsModal) closeChannelActionsModal();
             else openChannelActionsModal();
@@ -16221,6 +16227,7 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             // Every one is checked rather than just the active screen's own:
             // Home is on the bar of all of them, and whichever is on top is the
             // only one the tap can be coming from anyway.
+            if (s_liveToolsModal) closeLiveToolsModal();
             if (s_nodesActionModal) closeNodesActionMenu();
             if (s_channelActionsModal) closeChannelActionsModal();
             if (s_legendModal) closeLegendModal();
@@ -16301,6 +16308,32 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
     const bool navEmojiReady = (navEmojiFont != navIconFont);
     const char *const kContactIcon = "\U0001F464";  // bust in silhouette
+    // Tools took Live's place on the bar, and LVGL's symbol set has no wrench —
+    // the same gap the contact icon works around, so it takes the same emoji
+    // fallback. LV_SYMBOL_BARS stands in when the emoji face failed to load;
+    // LV_SYMBOL_SETTINGS would have read as a second Config button.
+    const char *const kToolsIcon = "\U0001F527";    // wrench
+
+    // DM's icon is board-dependent, and only because of how the T-Deck Pro
+    // draws. Its panel is 1-bit (the I1 flush path in the display driver), so
+    // LVGL thresholds every glyph to pure black or white with nothing in
+    // between. LV_SYMBOL_ENVELOPE is FontAwesome's *solid* envelope whose flap
+    // is a pair of thin light strokes — they threshold away and the whole glyph
+    // floods to a filled rectangle, which is what it looked like on the device.
+    //
+    // Noto Emoji is line art, so it survives the same treatment: the speech
+    // balloon keeps its outline, its tail and all three dots from 12 px through
+    // 16 px. It also says the right thing for a conversation list. Every other
+    // board anti-aliases, where the envelope renders correctly and is the more
+    // conventional icon, so they keep it.
+#if defined(DEVICE_TDECK_PRO)
+    const bool navDmIsEmoji = navEmojiReady;
+    const char *const kDmIcon =
+        navEmojiReady ? "\U0001F4AC" : LV_SYMBOL_ENVELOPE;  // speech balloon
+#else
+    const bool navDmIsEmoji = false;
+    const char *const kDmIcon = LV_SYMBOL_ENVELOPE;
+#endif
     // Icons rather than words. Six buttons of text across 240 px meant either
     // an abbreviation per board ("Config" on the wide one, "Cfg" on the tall
     // one) or a 10 px label with nothing left over; a glyph is the same size on
@@ -16320,6 +16353,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     //
     // HELTEC_NAV_ACTIONS itself stays: that button routes through
     // onHeltecBottomNavPressed() below, so the open/close behaviour is shared.
+    //
+    // No Live entry either, for the same reason it is still in the enum: Tools
+    // sits in that slot now and carries Live as its first row, so the feed is
+    // one tap further away rather than gone.
     // Home, then the three screens that carry content, then the two that do
     // not. Config used to sit second, which put the settings screen under the
     // thumb of anyone reaching for Home and split the reading destinations
@@ -16327,11 +16364,12 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // rather than in passing.
     const NavItem kItems[] = {
         {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false, nullptr},
-        {LV_SYMBOL_ENVELOPE, HELTEC_NAV_DM,     false, "(D)"},
+        {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji, "(D)"},
         // The node roster, and the packet feed coming in over the air.
         {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
                              HELTEC_NAV_NODES,  navEmojiReady, "(N)"},
-        {LV_SYMBOL_WIFI,     HELTEC_NAV_LIVE,   false, "(L)"},
+        {navEmojiReady ? kToolsIcon : LV_SYMBOL_BARS,
+                             HELTEC_NAV_TOOLS,  navEmojiReady, "(L)"},
         {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
         {"?",                HELTEC_NAV_LEGEND, false, nullptr},
     };
@@ -17002,7 +17040,7 @@ static void closeLiveToolsModal() {
     s_liveToolsBackdrop = nullptr;
     s_liveToolsModal = nullptr;
     memset(s_liveToolsRows, 0, sizeof(s_liveToolsRows));
-    s_liveToolsSelection = LIVE_TOOL_SNR;      // first enabled tool
+    s_liveToolsSelection = LIVE_TOOL_LIVE;     // first enabled tool
 }
 
 static void closeLiveFilterModal() {
@@ -22390,8 +22428,9 @@ static void openLiveModal() {
         lv_obj_center(lbl);
         return btn;
     };
-    makeLiveHeaderBtn(header, "Tools", 52, LV_ALIGN_LEFT_MID,
-                      [](lv_event_t *e) { LV_UNUSED(e); openLiveToolsModal(); });
+    // No Tools button here. Tools is the screen you arrive from now, and it
+    // carries a Live row of its own — a button back to it would only be a way
+    // of going in a circle.
     // Touch build: the header chip is the control, since there is no F key.
     // Size it before right-aligning so its long active-filter label stays
     // anchored to the far edge instead of growing back toward the center.
@@ -22516,13 +22555,19 @@ static bool liveToolEnabled(int tool) {
     return true;
 }
 
-// Opening a tool drops Tools rather than stacking it underneath: backing out of
-// one then lands on Live, which is where the charts have always returned to.
+// Opening a tool drops Tools rather than stacking it underneath, so backing out
+// of a chart lands on whatever Tools was opened over: Live when it was opened
+// from there, the chat screen when it was reached from the nav bar or L.
 static void liveToolsActivate(int tool) {
     if (tool < 0 || tool >= LIVE_TOOL_COUNT) return;
     if (!liveToolEnabled(tool)) return;
     closeLiveToolsModal();
     switch (tool) {
+        // Live is a destination like any other tool, so it closes Tools on
+        // the way in exactly as the charts do. openLiveModal() no-ops when the
+        // feed is already up, which is what makes this safe when Tools was
+        // opened from Live in the first place.
+        case LIVE_TOOL_LIVE:      openLiveModal();         break;
         case LIVE_TOOL_SNR:       openSnrRssiChartModal(); break;
         case LIVE_TOOL_CHUTIL:    openChUtilChartModal();  break;
 #if FEATURE_DISCOVERY
@@ -22546,10 +22591,14 @@ static void onLiveToolsBackdropPressed(lv_event_t *e) {
 }
 
 static void openLiveToolsModal() {
-    if (!s_rootScreen || !s_liveModal) return;
+    // Deliberately no s_liveModal requirement any more. Tools is its own
+    // destination now — the nav bar and the L key come straight here — and every
+    // surface it opens already stands alone, needing nothing but the root
+    // screen. Live went from being the way in to being the first row.
+    if (!s_rootScreen) return;
     if (s_liveToolsModal) closeLiveToolsModal();
 
-    s_liveToolsSelection = LIVE_TOOL_SNR;
+    s_liveToolsSelection = LIVE_TOOL_LIVE;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -22593,7 +22642,7 @@ static void openLiveToolsModal() {
 
 #if UI_TOUCH_ONLY_PROFILE
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
-        "SNR/RSSI", "ChUtil",
+        "Live", "SNR/RSSI", "ChUtil",
 #if FEATURE_DISCOVERY
         "Discovery",
 #endif
@@ -22611,7 +22660,7 @@ static void openLiveToolsModal() {
     lv_label_set_text_fmt(hint, "Move  Enter=Open  %s=Back", modalCloseKeyLabel());
 
     static const char *kToolLabels[LIVE_TOOL_COUNT] = {
-        "(S)NR/RSSI", "Ch(U)til",
+        "(L)ive", "(S)NR/RSSI", "Ch(U)til",
 #if FEATURE_DISCOVERY
         "(D)iscovery",
 #endif
@@ -27721,7 +27770,7 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
-        "(L) Live (C clears log)\n"
+        "(L) Tools (Live, charts)\n"
         "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
@@ -27732,7 +27781,7 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
-        "(L) Live (C clears log)\n"
+        "(L) Tools (Live, charts)\n"
         "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
@@ -27783,7 +27832,7 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
-        "(L) Live (C clears log)\n"
+        "(L) Tools (Live, charts)\n"
         "(E) Emoji\n"
         "(H) Help\n"
         "(Space) Compose/Reply\n"
@@ -30454,10 +30503,10 @@ static void openNavDirectMessagesShortcut() {
     openDmModal();
 }
 
-static void openNavLiveShortcut() {
+static void openNavToolsShortcut() {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
-    openLiveModal();
+    openLiveToolsModal();
 }
 
 static void openNavNodesShortcut() {
@@ -30516,8 +30565,8 @@ static bool handleGlobalNavigationKey(char key) {
         openNavDirectMessagesShortcut();
         return true;
     }
-    if (key == KEY_OPEN_LIVE) {
-        openNavLiveShortcut();
+    if (key == KEY_OPEN_TOOLS) {
+        openNavToolsShortcut();
         return true;
     }
     if (key == KEY_OPEN_NODES) {
@@ -31751,6 +31800,63 @@ static void pumpKeyboardInput() {
         }
 #endif
 
+        // Ahead of Config/DM/Nodes/Live, all of which end their block with an
+        // unconditional continue and would otherwise eat every key while Tools
+        // sat on top of them. That could not happen while Tools was reachable
+        // only from Live — Live is handled after this — but the nav bar now
+        // opens Tools over any of them.
+        //
+        // Still safe to sit above the tool surfaces further down: activating a
+        // tool closes Tools first, so the two are never up together.
+        if (s_liveToolsModal) {
+            if (isModalCloseKey(k)) {
+                closeLiveToolsModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                liveToolsActivate(s_liveToolsSelection);
+                continue;
+            }
+            // The letters in the row labels jump straight to their tool.
+            {
+                bool handled = false;
+                for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
+                    const char shortcut = kLiveToolShortcuts[i];
+                    if (k != shortcut && k != (char)(shortcut - 'A' + 'a')) continue;
+                    // A disabled row's letter is inert rather than a silent
+                    // selection move: its label already says why.
+                    if (!liveToolEnabled(i)) { handled = true; break; }
+                    s_liveToolsSelection = i;
+                    liveToolsActivate(i);
+                    handled = true;
+                    break;
+                }
+                if (handled) continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            // Tools fill column-major, so a step of one is already a vertical
+            // move and left/right hops the column, as in the channel editor.
+            if (delta == 0 && kChanModalCols > 1) {
+                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
+                    delta = -kLiveToolRowsPerCol;
+                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
+                    delta = kLiveToolRowsPerCol;
+                }
+            }
+            if (delta != 0) {
+                int next = s_liveToolsSelection + delta;
+                if (next < 0) next = 0;
+                if (next >= LIVE_TOOL_COUNT) next = LIVE_TOOL_COUNT - 1;
+                if (next != s_liveToolsSelection) {
+                    s_liveToolsSelection = next;
+                    refreshLiveToolsSelection();
+                }
+            }
+            continue;
+        }
+
         if (s_cfgModal) {
             if (s_cfgDebugLog) {
                 char actionText[80];
@@ -32693,57 +32799,6 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // Below the tool surfaces, above Live: a tool opened from here keeps the
-        // keys while it is up, and Tools keeps them while it is the topmost one.
-        if (s_liveToolsModal) {
-            if (isModalCloseKey(k)) {
-                closeLiveToolsModal();
-                continue;
-            }
-            if (k == KEY_ENTER || k == KEY_ROLLER) {
-                liveToolsActivate(s_liveToolsSelection);
-                continue;
-            }
-            // The letters in the row labels jump straight to their tool.
-            {
-                bool handled = false;
-                for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-                    const char shortcut = kLiveToolShortcuts[i];
-                    if (k != shortcut && k != (char)(shortcut - 'A' + 'a')) continue;
-                    // A disabled row's letter is inert rather than a silent
-                    // selection move: its label already says why.
-                    if (!liveToolEnabled(i)) { handled = true; break; }
-                    s_liveToolsSelection = i;
-                    liveToolsActivate(i);
-                    handled = true;
-                    break;
-                }
-                if (handled) continue;
-            }
-            int delta = 0;
-            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
-            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
-            // Tools fill column-major, so a step of one is already a vertical
-            // move and left/right hops the column, as in the channel editor.
-            if (delta == 0 && kChanModalCols > 1) {
-                if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {
-                    delta = -kLiveToolRowsPerCol;
-                } else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_DN) {
-                    delta = kLiveToolRowsPerCol;
-                }
-            }
-            if (delta != 0) {
-                int next = s_liveToolsSelection + delta;
-                if (next < 0) next = 0;
-                if (next >= LIVE_TOOL_COUNT) next = LIVE_TOOL_COUNT - 1;
-                if (next != s_liveToolsSelection) {
-                    s_liveToolsSelection = next;
-                    refreshLiveToolsSelection();
-                }
-            }
-            continue;
-        }
-
         if (s_liveModal) {
             if (isModalCloseKey(k)) {
                 closeLiveModal();
@@ -32812,7 +32867,7 @@ static void pumpKeyboardInput() {
             }
             if (k == 'l' || k == 'L') {
                 closeLegendModal();
-                openLiveModal();
+                openLiveToolsModal();
                 continue;
             }
             continue;
@@ -33120,7 +33175,7 @@ static void pumpKeyboardInput() {
 #endif
 
             if (k == 'l' || k == 'L') {
-                openLiveModal();
+                openLiveToolsModal();
             } else if (k == 'a' || k == 'A') {
                 openChannelActionsModal();
             } else if (k == 'd' || k == 'D') {
@@ -39207,11 +39262,11 @@ static void buildUi() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(s_chatShortcutText, "C(h)annels   (A)ctions");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   (L)ive   (A)ctions");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions");
 #elif defined(DEVICE_TDECK_PRO)
-    lv_label_set_text(s_chatShortcutText, "C:Cfg H:Ch D:DM N:Node L:Live A:Act");
+    lv_label_set_text(s_chatShortcutText, "C:Cfg H:Ch D:DM N:Node L:Tools A:Act");
 #else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   (L)ive   (A)ct");
+    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   Too(l)s   (A)ct");
 #endif
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);

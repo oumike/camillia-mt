@@ -692,8 +692,10 @@ if [[ "$NOTES_ONLY" == true ]]; then
     echo "Release notes for $TAG written to $NOTES_FILE. Nothing built or published."
     echo ""
     echo "Next:"
-    echo "  git add $NOTES_FILE"
-    echo "  git commit -m \"Release notes for $TAG\" && git push"
+    echo "  git add -A     # the work too, not just the notes — GitHub builds"
+    echo "                 # the pushed commit, so anything left uncommitted"
+    echo "                 # is not in the release"
+    echo "  git commit -m \"Prepare release $TAG\" && git push"
     echo "  gh workflow run release.yml -f channel=$NOTES_CHANNEL -f version=$VERSION"
     echo ""
     echo "Pass that version to the workflow. Left blank it derives its own, and"
@@ -708,41 +710,55 @@ if [[ "$REMOTE" == true ]]; then
         exit 1
     fi
 
-    # GitHub builds what gets pushed, not what is sitting in the working tree.
-    # A local-only edit would silently be left out of the release, which is a
-    # failure mode the --build-local path simply cannot have.
-    DIRTY="$(git status --porcelain --untracked-files=no \
-             | grep -v "[[:space:]]${NOTES_FILE}$" || true)"
+    # Everything in the tree goes in, exactly as a local release has always done
+    # it: `git add -A` further down is how every "Release vX.Y.Z" commit in this
+    # history came to carry the work it was releasing and not just its notes.
+    # GitHub then builds that pushed commit.
+    #
+    # Listed before the prompt rather than swept up silently. The local path
+    # never showed this, and it matters more here — what you approve is what the
+    # runner compiles, and by the time a release is public it is too late to
+    # notice that something you meant to include was still only on disk.
+    PENDING="$(git status --porcelain || true)"
 
     echo ""
     echo "Ready to release $TAG on GitHub:"
     echo "  branch:   $BRANCH"
     echo "  channel:  $NOTES_CHANNEL"
     echo "  notes:    $NOTES_FILE, published verbatim"
-    if [[ -n "$DIRTY" ]]; then
-        echo ""
-        echo "  !! Uncommitted changes that will NOT be in this release:"
-        printf '%s\n' "$DIRTY" | sed 's/^/     /'
+    echo ""
+    if [[ -n "$PENDING" ]]; then
+        echo "  Committing to $BRANCH, and releasing:"
+        printf '%s\n' "$PENDING" | sed 's/^/     /'
+    else
+        echo "  Nothing to commit — releasing $BRANCH as it already stands."
     fi
     echo ""
 
     if [[ -t 0 && "$ASSUME_YES" != true ]]; then
-        read -rp "Commit the notes, push $BRANCH and dispatch? [y/N]: " ans || ans="n"
+        read -rp "Commit, push $BRANCH and dispatch? [y/N]: " ans || ans="n"
         case "${ans:-n}" in
             y|Y|yes|Yes) ;;
             *) echo "Aborted. RELEASE_NOTES.md will be restored." >&2; exit 1 ;;
         esac
     fi
 
-    git add -- "$NOTES_FILE"
-    if git diff --cached --quiet -- "$NOTES_FILE"; then
-        echo "Release notes unchanged — nothing to commit."
+    git add -A
+    if git diff --cached --quiet; then
+        echo "Nothing to commit."
     else
-        git commit -m "Release notes for $TAG"
+        # Not "Release $TAG": the workflow makes that commit itself, carrying
+        # the VERSION bump, once the build has succeeded. This is the work going
+        # into it.
+        if [[ "$ALPHA" == true ]]; then
+            git commit -m "Prepare alpha release $TAG"
+        else
+            git commit -m "Prepare release $TAG"
+        fi
     fi
 
-    # Past this point the notes are committed, so the pre-run copy is no longer
-    # the one that should win.
+    # Past this point the work and its notes are committed, so the pre-run copy
+    # of RELEASE_NOTES.md is no longer the one that should win.
     GUARD_ARMED=false
 
     git push || git push -u origin "$BRANCH"

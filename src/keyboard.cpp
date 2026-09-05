@@ -20,7 +20,7 @@ static char altNavShortcut(char k) {
         case 'h': case 'H': return KEY_OPEN_HOME;
         case 'd': case 'D': return KEY_OPEN_DMS;
         case 'n': case 'N': return KEY_OPEN_NODES;
-        case 'l': case 'L': return KEY_OPEN_LIVE;
+        case 'l': case 'L': return KEY_OPEN_TOOLS;
         case 'c': case 'C': return KEY_OPEN_CONFIG;
         default:            return KEY_NONE;
     }
@@ -431,7 +431,7 @@ char tloraTranslateKey(uint8_t keyNum) {
         else if (keyNum == 15) nav = KEY_OPEN_HOME;
         else if (keyNum == 18) nav = KEY_OPEN_DMS;
         else if (keyNum == 24) nav = KEY_OPEN_NODES;
-        else if (keyNum == 12) nav = KEY_OPEN_LIVE;
+        else if (keyNum == 12) nav = KEY_OPEN_TOOLS;
         else if (keyNum == 27) nav = KEY_OPEN_CONFIG;
         else if (keyNum == 17) nav = KEY_NEXT_CHAN;
         else if (keyNum == 19) nav = KEY_PREV_CHAN;
@@ -1622,8 +1622,13 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         // Home opens Home, and only that. Holding it used to sleep the screen,
         // which is now the d-pad centre's job.
         case 0x82: return KEY_OPEN_HOME;     // dedicated Home button
-        case 0x83: return KEY_OPEN_LIVE;     // function button below Home
-        case 0x84: return KEY_OPEN_NODES;    // GPS-area button below Back
+        // These two swapped when Live stopped being a top-level destination.
+        // 0x83 used to open Live; Nodes moved up to it because it is the button
+        // under Home and the roster is what people reach for there. Tools took
+        // 0x84, one step further out, matching the nav bar where it also sits
+        // past the reading destinations.
+        case 0x83: return KEY_OPEN_NODES;    // function button below Home
+        case 0x84: return KEY_OPEN_TOOLS;    // GPS-area button below Back
         case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button
         // Dedicated M9 functions have no Camillia binding yet. Their raw values
         // overlap this driver's synthetic navigation codes, so drop them.

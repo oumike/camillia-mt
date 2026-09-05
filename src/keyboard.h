@@ -27,7 +27,7 @@
 // not collide with KEY_NEXT_CHAN.
 #define KEY_OPEN_DMS    0x8A
 #define KEY_OPEN_HOME   0x8B
-#define KEY_OPEN_LIVE   0x8C
+#define KEY_OPEN_TOOLS  0x8C
 #define KEY_OPEN_DISCOVERY 0x8D
 #define KEY_OPEN_NODES  0x8E
 #define KEY_SLEEP_SCREEN 0x8F
