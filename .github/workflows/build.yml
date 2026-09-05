@@ -36,6 +36,12 @@ concurrency:
 # dead weight, since pushes made with the default GITHUB_TOKEN do not trigger
 # other workflows and every release tag now comes from that job.
 #
+# Release commits do not reach this workflow either: release.sh puts [skip ci]
+# in their message. Without that a release cost two full nine-environment builds
+# of identical source, this one and release.yml's, starting seconds apart. Note
+# the flip side — a release commit gets no build.yml run at all, so this is not
+# the place to look for a release's build log. release.yml's own run is.
+#
 # IMPORTANT: this workflow must NOT publish release assets.
 #
 # release.yml is the single source of truth for published artifacts: it builds,

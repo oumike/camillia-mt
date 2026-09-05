@@ -782,10 +782,17 @@ if [[ "$REMOTE" == true ]]; then
         # Not "Release $TAG": the workflow makes that commit itself, carrying
         # the VERSION bump, once the build has succeeded. This is the work going
         # into it.
+        #
+        # [skip ci] stops build.yml firing on this push. Without it a release
+        # costs two full nine-environment builds of identical source — this one
+        # and the release workflow's, kicked off seconds apart. build.yml exists
+        # to catch breakage in ordinary work; on a commit that release.yml is
+        # already compiling from scratch it has nothing left to tell us.
+        # workflow_dispatch ignores [skip ci], so the release itself still runs.
         if [[ "$ALPHA" == true ]]; then
-            git commit -m "Prepare alpha release $TAG"
+            git commit -m "Prepare alpha release $TAG [skip ci]"
         else
-            git commit -m "Prepare release $TAG"
+            git commit -m "Prepare release $TAG [skip ci]"
         fi
     fi
 
@@ -894,10 +901,14 @@ echo "Build successful."
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
 GUARD_STAGED=true
 git add -A
+# [skip ci] for the same reason as the remote path above: this tree has just
+# been built right here, so build.yml compiling it again on the push tells us
+# nothing. It is a no-op on the workflow's own run — pushes made with the
+# default GITHUB_TOKEN never trigger workflows — and matters for --build-local.
 if [[ "$ALPHA" == true ]]; then
-    git commit -m "Alpha release $TAG"
+    git commit -m "Alpha release $TAG [skip ci]"
 else
-    git commit -m "Release $TAG"
+    git commit -m "Release $TAG [skip ci]"
 fi
 
 # Point of no return. VERSION and the notes are part of a commit now, so the
