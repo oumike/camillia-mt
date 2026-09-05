@@ -14,3 +14,8 @@ backups/
 
 # OTA image signing private key — NEVER commit; back this up securely.
 ota_signing_key.pem
+
+# Generated from RELEASE_NOTES.md by tools/gen_release_notes.py as a pre: build
+# step, so it is rewritten before every compile. Tracking it meant it went dirty
+# after every release, and the committed copy was never the one that shipped.
+src/release_notes.h
