@@ -1,1 +1,1 @@
-v4.8.2 contains no user-visible firmware changes — every change since v4.8.1 is in the release tooling (`release.sh`, GitHub workflows, README, `.gitignore`, and untracking the generated `src/release_notes.h`), all of which the rules exclude. There are no bullets to publish.
+No user-visible firmware changes in this release.
