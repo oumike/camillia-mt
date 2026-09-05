@@ -3,9 +3,23 @@ name: Build
 on:
   push:
     branches: [ main ]          # Primary: catch breakage while it's cheap to fix
-    tags:     [ 'v*.*.*' ]      # Per-release record of the tagged tree
+    # Skip the ~20 minute build for pushes that cannot change a binary.
+    # RELEASE_NOTES.md is deliberately NOT in this list: the build bakes it into
+    # the firmware via tools/gen_release_notes.py, so editing it does change
+    # every image.
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'HANDOFF-*.md'
+      - '.gitignore'
   pull_request:
     branches: [ main ]
+
+# Only the newest push on a ref is worth checking — a burst of commits used to
+# queue a full 9-environment build for each one.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 # What this job is actually for: building from a CLEAN CHECKOUT.
 #
@@ -17,9 +31,10 @@ on:
 # by .github/workflows/release.yml, which does its own clean build of every
 # environment before it signs anything — so this job has nothing left to gate.
 #
-# Note that release.yml's commit and tag do NOT reach this workflow: pushes made
-# with the default GITHUB_TOKEN deliberately do not trigger other workflows. The
-# tag trigger below therefore only fires for a tag pushed by hand.
+# There is deliberately no tag trigger. It used to exist to keep a per-release
+# record of the tagged tree, which release.yml now supersedes; it would also be
+# dead weight, since pushes made with the default GITHUB_TOKEN do not trigger
+# other workflows and every release tag now comes from that job.
 #
 # IMPORTANT: this workflow must NOT publish release assets.
 #

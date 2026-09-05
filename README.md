@@ -110,15 +110,22 @@ workflow refuses to publish if that key does not match the public key baked into
 `src/ota_signing_pubkey.h`, since a mismatch would lock out every device in the
 field.
 
-[`release.sh`](release.sh) is what the workflow runs, and still cuts a release
-entirely locally (it needs `ota_signing_key.pem` present):
+[`release.sh`](release.sh) is what the workflow runs. It can still cut a release
+entirely on your machine, but that is now opt-in: without `--build-local` it
+refuses to build and prints the workflow route instead, so a bare `./release.sh`
+can never quietly publish from an unverified working tree. A local release needs
+`ota_signing_key.pem` present.
 
 ```bash
-./release.sh                    # prompts for a version, e.g. 3.2.0
-./release.sh --version 4.9.0    # release exactly this version
-./release.sh --alpha -y         # next alpha in the current series
-./release.sh --check-targets    # validates release/OTA slugs without building
+./release.sh --notes-only -y                # draft notes, build nothing
+./release.sh --check-targets                # validate release/OTA slugs
+./release.sh --build-local                  # full local release, prompts for a version
+./release.sh --build-local --alpha -y       # local alpha, next in the series
+./release.sh --build-local --version 4.9.0  # local release of exactly this version
 ```
+
+A run on GitHub Actions is exempt from `--build-local` — on a runner the flag
+would be a lie, so the workflow is recognised by `GITHUB_ACTIONS` instead.
 
 [The build workflow](.github/workflows/build.yml) compiles every environment
 from a clean checkout on pushes and PRs. It is a breakage check on ordinary
