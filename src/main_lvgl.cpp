@@ -8998,17 +8998,20 @@ static void sendComposeMessage() {
 
 static void initCfgActions() {
     s_cfgActionCount = 0;
+
+    // Order here is the order on screen. Grouped by what a person is trying to
+    // do rather than by which subsystem owns the setting: identity, then the
+    // radios, then what they carry, then how the device looks and sounds, then
+    // the mesh modules, then the things you do once or rarely.
+
     // First row: it is this node's identity — the one setting every other node
     // on the mesh sees — and after onboarding this screen is the only place it
     // can be changed without the web form.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NODE_NAME;
+
+    // The radios themselves, each with whatever picks what it talks to.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
-#if HAS_VNC_HOST
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
-#endif
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
 #if HAS_BLE_KEYBOARD
     // Same two-row shape as WiFi directly above -- a toggle, then the picker
     // that chooses what it connects to -- because it is the same job, and
@@ -9017,16 +9020,28 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_PAIR;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
-    // Directly under GPS, because that row is where people look for this and
-    // the two are routinely confused: GPS picks whether the hardware is one of
-    // the position sources, this decides whether any of them leave the device.
+
+    // Then the services those radios carry, which are useless without them.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+#if HAS_VNC_HOST
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
+#endif
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MQTT_TOGGLE;
+
+    // In the same run as GPS above, because the two are routinely confused:
+    // that row picks whether the hardware is one of the position sources, this
+    // decides whether any of them leave the device.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHARE_LOCATION;
     // Immediately after it: this row only means anything while sharing is on,
     // and someone turning sharing off is often really looking for this instead.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_POSITION_PRECISION;
+
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHANNEL_CFG;
-    // Keep Chat Style near the top so it's visible without deep scrolling on
-    // compact config layouts (notably the Pager's split action/info screen).
+
+    // ── How it looks ─────────────────────────────────────────────────────────
+#if HAS_UI_THEMES
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
+#endif
     // All builds get the full set — the Cardputer's bubble/outline styles render
     // fine on its 240x135 panel.
 #if HAS_CHAT_STYLE_OPTIONS
@@ -9034,44 +9049,41 @@ static void initCfgActions() {
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_NAMES;
 #if HAS_UI_COLOR_OPTIONS
+    // The three colour rows in one run: what other senders look like, what you
+    // look like, and the reset that reassigns the first.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHAT_COLORS;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
 #endif
     // Font Size scales the chat and DM text in every style, so every build gets
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
-    // Next to Brightness: both are about the backlight, and the pair is the
-    // usual reason someone opens this screen on a device running on a battery.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SCREEN_TIMEOUT;
-    // Sits with the display preferences rather than the maintenance actions:
-    // it is a comfort setting, changed once to taste. Only on boards with a
-    // trackball to invert.
-    #if HAS_SCROLL_INVERT
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_INVERT_SCROLL;
-    #endif
-    // With the display preferences for the same reason: it decides what the
-    // bottom of every screen looks like, and is set once to taste.
+    // Decides what the bottom of every screen looks like; set once to taste.
     #if HAS_NAV_BAR_TOGGLE
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
     #endif
-#if HAS_UI_THEMES
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_THEME;
-#endif
-#if HAS_UI_COLOR_OPTIONS
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OWNER_COLOR;
-#endif
-    // Sound settings sit with the other presentation options rather than down
-    // among the mesh/module actions.
+    // With Brightness rather than the maintenance actions: both are about the
+    // backlight, and the pair is the usual reason someone opens this screen on
+    // a device running on a battery.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SCREEN_TIMEOUT;
+    // A comfort setting, changed once to taste. Only on boards with a trackball
+    // to invert.
+    #if HAS_SCROLL_INVERT
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_INVERT_SCROLL;
+    #endif
+
+    // ── How it gets your attention ───────────────────────────────────────────
     #if HAS_VOLUME_CONTROL
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VOLUME;
     #endif
     // Both play a tone, so both are absent where nothing can play one — the
     // rows would otherwise be settings for hardware the board does not have.
     #if HAS_AUDIO_ALERTS
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MSG_ALERT;
     #endif
-    // Under the sound it accompanies where there is one, and the only alert
-    // setting at all where there is not. Absent on boards with no LED wired.
+    // The light half of the same group. Absent on boards with no LED wired.
     #if defined(DEVICE_MESH_DECK)
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_CHANNEL_COLOR;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LED_DM_COLOR;
@@ -9088,63 +9100,61 @@ static void initCfgActions() {
     #if HAS_LIGHT_NOTIFY
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NOTIFY_LIGHT_TIMEOUT;
     #endif
-    #if HAS_AUDIO_ALERTS
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SPLASH_MELODY;
-    #endif
+
+    // ── How it reads things out ──────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
-#endif
-#if !defined(DEVICE_CARDPUTER_LORA_HAT)
-    // Directly under the update action it governs: it decides what that check
-    // will find. Absent on the Cardputer for the same reason the update row is
-    // — a channel setting for an update path that does not exist is inert.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_CHANNEL;
-#endif
-    // Sits under the update entry it describes. Present on every board — the
-    // notes are baked into the image, so this needs neither OTA nor WiFi, and
-    // the Cardputer (no OTA) still gets to see what its build contains.
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RELEASE_NOTES;
-// Every real SD-card target gets firmware-side config transfer. Preserve the
-// Mesh Deck's existing internal-flash transfer path; Heltec remains excluded.
-#if HAS_SD_CARD || (HAS_FILE_STORAGE && !defined(DEVICE_HELTEC_V4_EXPANSION))
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
-#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     // Unconditional: every supported board reads a battery voltage, so there is
     // no board this row would have nothing to show.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_DISPLAY;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
+
+    // ── Mesh modules ─────────────────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NEIGHBOR_INFO;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_MESH_BEACON;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_CLIENT;
     // Directly under the toggle it depends on: a router never replays history
     // unsolicited, so asking is the only way the client ever receives anything.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SNF_REQUEST;
-    // Hardware trim, so it sits with the maintenance entries rather than up
-    // among the display settings — it is set once per unit, not adjusted.
+
+    // ── Done once, or rarely ─────────────────────────────────────────────────
+    // Hardware trim: set once per unit rather than adjusted, which is why it is
+    // down here and not up among the display settings.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BATT_CAL;
-    // Sits with the maintenance actions, directly above Clear Messages: it is
-    // the mildest of the "undo something about the stored chat" group.
-#if HAS_UI_COLOR_OPTIONS
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RESET_CHAT_COLORS;
-#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_MSGS;
 #if HAS_SD_CARD
-    // Heads the node-list group, in the order the two settings depend on each
-    // other: keep the evicted nodes, then show them. Only on boards with a slot
-    // — the archive both govern is written to the card, so elsewhere these
-    // would toggle settings with nothing behind them.
+    // In the order the two settings depend on each other: keep the evicted
+    // nodes, then show them. Only on boards with a slot — the archive both
+    // govern is written to the card, so elsewhere these would toggle settings
+    // with nothing behind them.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
 #endif
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     // Mildest first: keeping the pinned contacts is the common case, and the
-    // total wipe sits between it and Factory Reset.
+    // total wipe sits below it.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES;
+// Every real SD-card target gets firmware-side config transfer. Preserve the
+// Mesh Deck's existing internal-flash transfer path; Heltec remains excluded.
+#if HAS_SD_CARD || (HAS_FILE_STORAGE && !defined(DEVICE_HELTEC_V4_EXPANSION))
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_EXPORT;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
+#endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
+
+    // ── Firmware ─────────────────────────────────────────────────────────────
+#if !defined(DEVICE_CARDPUTER_LORA_HAT)
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_UPDATE;
+    // Directly under the update action it governs: it decides what that check
+    // will find. Absent on the Cardputer for the same reason the update row is
+    // — a channel setting for an update path that does not exist is inert.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_OTA_CHANNEL;
+#endif
+    // Under the update entries it describes. Present on every board — the notes
+    // are baked into the image, so this needs neither OTA nor WiFi, and the
+    // Cardputer (no OTA) still gets to see what its build contains.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_RELEASE_NOTES;
 
     // Narrow to the rows matching the filter, in place and last so the whole
     // list above stays a plain statement of what exists and in what order —

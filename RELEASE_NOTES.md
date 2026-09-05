@@ -16,3 +16,16 @@
 
 ### Fixed
 - An update found by the boot check is no longer lost when you open Config: the Firmware Update row keeps offering "Install <tag>" until it is installed or the channel changes.
+
+
+### Update (v4.8.1)
+### Changed
+- Settings screen reordered into task-based groups: identity, radios, the services those radios carry, appearance, alerts, mesh modules, and the things you set once or rarely.
+- Web Config, MQTT, and (where available) VNC Host now sit directly under the radio rows they depend on.
+- Theme now heads the appearance settings instead of sitting further down the list.
+- Chat Colors, your own message color, and Reset Chat Colors are now three consecutive rows; Reset Chat Colors is no longer down with the maintenance actions.
+- Nav Bar now sits with Brightness and the other display settings.
+- Startup Melody moved up to join the other sound settings; the LED alert row follows the sound rows it accompanies.
+- Announce and Telemetry moved down with the other occasional settings rather than heading the mesh module group.
+- Export and Import Config moved down to the maintenance group on boards that have them (SD-card boards, plus the Attaky Mesh Deck's internal-flash path).
+- Check for Updates, Update Channel, and Release Notes now sit at the very bottom of the settings list; the Cardputer still shows Release Notes without the update rows.
