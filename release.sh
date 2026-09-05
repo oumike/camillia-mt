@@ -224,6 +224,41 @@ if [[ "$NOTES_ONLY" != true && "$CHECK_TARGETS_ONLY" != true \
     REMOTE=true
 fi
 
+# ── Catch up with the branch before doing anything ───────────────────────────
+# A remote release leaves this clone exactly one commit behind every time: the
+# workflow pushes its own "Release <tag>" commit — the VERSION bump — to this
+# branch once the build succeeds. So the *next* release's push is guaranteed to
+# be rejected unless we sync first, which is a miserable place to discover it,
+# with the work already committed and the notes already written.
+#
+# It also matters before the version is picked: the tag the workflow created
+# lives only on the remote until we fetch, and -y derives the next version from
+# the tag list.
+if [[ "$REMOTE" == true ]]; then
+    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    if [[ "$BRANCH" == "HEAD" ]]; then
+        echo "Detached HEAD — check out a branch before releasing." >&2
+        exit 1
+    fi
+
+    git fetch -q --tags origin 2>/dev/null || true
+    if git rev-parse --verify -q "origin/$BRANCH" >/dev/null 2>&1; then
+        BEHIND="$(git rev-list --count "HEAD..origin/$BRANCH" 2>/dev/null || echo 0)"
+        if [[ "$BEHIND" != "0" ]]; then
+            echo "$BRANCH is $BEHIND commit(s) behind origin — rebasing onto it."
+            # autostash: uncommitted work is the normal state here, and it is
+            # the very thing this release is about to ship.
+            if ! git -c rebase.autoStash=true rebase "origin/$BRANCH"; then
+                git rebase --abort 2>/dev/null || true
+                echo "" >&2
+                echo "Could not rebase $BRANCH onto origin/$BRANCH." >&2
+                echo "Resolve it by hand, then rerun. Nothing has been changed." >&2
+                exit 1
+            fi
+        fi
+    fi
+fi
+
 validate_release_targets
 if [[ "$CHECK_TARGETS_ONLY" == true ]]; then
     echo "Release target contract OK."
@@ -704,11 +739,8 @@ if [[ "$NOTES_ONLY" == true ]]; then
 fi
 
 if [[ "$REMOTE" == true ]]; then
-    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-    if [[ "$BRANCH" == "HEAD" ]]; then
-        echo "Detached HEAD — check out a branch before releasing." >&2
-        exit 1
-    fi
+    # BRANCH was resolved, and the branch synced with origin, up beside the
+    # mode selector — both had to happen before the version was derived.
 
     # Everything in the tree goes in, exactly as a local release has always done
     # it: `git add -A` further down is how every "Release vX.Y.Z" commit in this
