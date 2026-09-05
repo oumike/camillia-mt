@@ -1,0 +1,184 @@
+name: Release
+
+# Cuts a release end to end: picks the version, generates the notes, builds
+# every device profile, signs the OTA images, tags, and publishes. This is the
+# job that used to be a `./release.sh` run on the maintainer's laptop.
+#
+# It is deliberately manual-only. Nothing here fires on a push or a tag, so a
+# release is always something a human asked for from the Actions tab.
+#
+# Release notes are written and reviewed locally, not here. `./release.sh
+# --notes-only` drafts them, shows them to you, and lets you edit them; you
+# commit the result and this job publishes RELEASE_NOTES.md verbatim. That is
+# not an extra step for CI's benefit — the file has to be committed regardless,
+# because the build bakes it into the firmware (tools/gen_release_notes.py) so
+# the device shows the same text the release publishes. Choosing `generate`
+# instead has this job write the notes unreviewed, which needs an
+# ANTHROPIC_API_KEY secret.
+#
+# The signing key now lives in the `release` environment as the OTA_SIGNING_KEY
+# secret rather than only on one machine. That is a real widening of who can
+# sign firmware: anyone able to merge a change to a workflow file can also make
+# a job read that secret. The environment gate is what keeps it out of reach of
+# ordinary workflow runs — do not reference OTA_SIGNING_KEY from any other job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel'
+        type: choice
+        options: [stable, alpha]
+        default: stable
+      version:
+        description: 'Exact version, e.g. 4.9.0 (blank = bump the latest tag)'
+        type: string
+        default: ''
+      notes:
+        description: 'Release notes source'
+        type: choice
+        options: [committed, generate]
+        default: committed
+
+# One release at a time. Two concurrent runs would race on the tag, the release
+# commit, and dist/ — and never cancel a run mid-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # push the release commit and tag, create the release
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # release.sh derives the next version from the full tag list, so a
+          # shallow clone would pick the wrong one (or none at all).
+          fetch-depth: 0
+
+      - name: Configure git for the release commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # actions/checkout creates the local branch without an upstream, so a
+          # bare `git push` would fail. push.default=current sends it to the
+          # same-named branch on origin, using the credentials checkout left.
+          git config push.default current
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache PlatformIO toolchains
+        # Only ~/.platformio (compilers, frameworks, libraries) is cached. The
+        # build output in .pio/ deliberately is not: a release image must never
+        # be able to pick up an object file from an earlier run.
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO and esptool
+        # esptool is pinned, not floated. Every image shipped so far was merged
+        # by 4.11.x, and esptool 5 renamed the merge_bin subcommand and its
+        # flash flags — an unpinned upgrade would break the merge step, or worse,
+        # quietly change the layout of a published factory image.
+        run: pip install platformio 'esptool==4.11.0'
+
+      - name: Install device frameworks
+        # release.sh checks for boot_app0.bin during preflight, before it builds
+        # anything, and that file only exists once the Arduino ESP32 framework
+        # package has been downloaded. All release environments share it, so
+        # resolving one is enough to satisfy the check.
+        run: pio pkg install -e tdeck
+
+      - name: Install OTA signing key
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OTA_SIGNING_KEY:-}" ]; then
+            echo "::error::OTA_SIGNING_KEY is not set on the 'release' environment."
+            echo "::error::Add the contents of ota_signing_key.pem as that secret."
+            exit 1
+          fi
+          printf '%s\n' "$OTA_SIGNING_KEY" > ota_signing_key.pem
+          chmod 600 ota_signing_key.pem
+          if ! openssl ec -in ota_signing_key.pem -noout 2>/dev/null; then
+            echo "::error::OTA_SIGNING_KEY is not a readable EC private key."
+            exit 1
+          fi
+
+      - name: Verify the key matches the one devices already trust
+        # release.sh regenerates src/ota_signing_pubkey.h from whatever key it
+        # finds, so a wrong key would still produce a self-consistent build —
+        # and every device already in the field, holding the old public key,
+        # would reject the update and need a USB reflash to recover. Comparing
+        # against the committed header catches that here instead.
+        run: |
+          set -euo pipefail
+          fresh=$(openssl ec -in ota_signing_key.pem -pubout 2>/dev/null \
+                  | grep -v -- '-----' | tr -d '\n')
+          baked=$(grep -o '"[A-Za-z0-9+/=]\+' src/ota_signing_pubkey.h \
+                  | tr -d '"' | tr -d '\n')
+          if [ -z "$fresh" ] || [ -z "$baked" ]; then
+            echo "::error::Could not extract a public key to compare."
+            exit 1
+          fi
+          if [ "$fresh" != "$baked" ]; then
+            echo "::error::OTA_SIGNING_KEY does not match src/ota_signing_pubkey.h."
+            echo "::error::Publishing with it would lock out every device in the field."
+            exit 1
+          fi
+          echo "Signing key matches the public key baked into the firmware."
+
+      - name: Cut the release
+        id: cut
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only consulted when notes=generate. On the default path the notes
+          # come from the committed RELEASE_NOTES.md and no key is needed.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Read through the environment rather than interpolated into the
+          # script, so a dispatch input can never inject shell.
+          CHANNEL: ${{ inputs.channel }}
+          REQ_VERSION: ${{ inputs.version }}
+          NOTES_SOURCE: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          # --no-clean is safe here and nowhere else: the fullclean exists to
+          # defend against stale objects in a long-lived .pio/, and this is a
+          # fresh checkout with no .pio/ at all. It saves several minutes.
+          args=(-y --no-clean)
+          if [ "$CHANNEL" = "alpha" ]; then args+=(--alpha); fi
+          if [ -n "$REQ_VERSION" ]; then args+=(--version "$REQ_VERSION"); fi
+          if [ "$NOTES_SOURCE" = "committed" ]; then args+=(--use-committed-notes); fi
+          ./release.sh "${args[@]}"
+          echo "tag=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Archive debug symbols
+        # These are now the only copy. release.sh keeps .elf files out of the
+        # published release (~35MB each), and they used to survive in dist/ on
+        # the release machine — which no longer exists. They match the signed,
+        # shipped image exactly, so they are what a real crash symbolicates
+        # against.
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ steps.cut.outputs.tag }}
+          path: dist/*.elf
+          retention-days: 90
+
+      - name: Remove the signing key from the workspace
+        if: always()
+        run: rm -f ota_signing_key.pem

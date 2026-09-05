@@ -76,27 +76,57 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 
 ## Releases
 
-Releases are cut with [`release.sh`](release.sh), which builds every device
-profile, merges factory images, signs the OTA images, tags the commit, and
-publishes a GitHub release with the `.bin`/`.sig` assets. Debug symbols
-(`.elf`/`.map`) stay in `dist/` on the release machine rather than bloating the
-release by ~35MB per profile. T-Deck Pro publishes the `tdeck-pro` factory and
-OTA images; the release script verifies the target list and every OTA signature
-before publication.
+Releases are cut by [the release workflow](.github/workflows/release.yml), run
+manually from the Actions tab. It builds every device profile, merges factory
+images, signs the OTA images, tags the commit, and publishes a GitHub release
+with the `.bin`/`.sig` assets. Debug symbols (`.elf`) are uploaded as a
+`debug-symbols-<tag>` workflow artifact rather than bloating the release by
+~35MB per profile. T-Deck Pro publishes the `tdeck-pro` factory and OTA images;
+the release script verifies the target list and every OTA signature before
+publication.
 
-Pushing the tag also triggers [the build workflow](.github/workflows/build.yml),
-which compiles every environment from a clean checkout. It is a breakage check,
-not a release gate — `release.sh` publishes before CI finishes — and it never
-uploads release assets, since only the release machine holds the OTA signing
-key.
+Release notes are written and reviewed on your machine, then carried to the
+release in `RELEASE_NOTES.md` — which has to be committed anyway, since the
+build bakes it into the firmware so the device shows the same text that gets
+published.
 
 ```bash
-./release.sh        # prompts for a version, e.g. 3.2.0
-./release.sh --check-targets  # validates release/OTA slugs without building
+./release.sh --notes-only -y          # draft, review and edit the notes
+git add RELEASE_NOTES.md && git commit -m "Release notes for v4.9.0" && git push
+gh workflow run release.yml -f channel=stable -f version=4.9.0
 ```
 
-Publishes a release. On-device OTA and the website flasher both track GitHub's
-*latest* release.
+`--notes-only` builds nothing, publishes nothing, and leaves `VERSION` alone —
+it only writes the notes and prints the exact `gh workflow run` line to follow
+it with. Pass that version to the workflow; left blank it derives its own, and
+the notes would then be published under a different tag.
+
+The workflow's `notes` input defaults to `committed`, which publishes that file
+verbatim. Setting it to `generate` has the workflow write the notes itself,
+unreviewed, and requires an `ANTHROPIC_API_KEY` secret.
+
+Signing uses the `OTA_SIGNING_KEY` secret on the `release` environment; the
+workflow refuses to publish if that key does not match the public key baked into
+`src/ota_signing_pubkey.h`, since a mismatch would lock out every device in the
+field.
+
+[`release.sh`](release.sh) is what the workflow runs, and still cuts a release
+entirely locally (it needs `ota_signing_key.pem` present):
+
+```bash
+./release.sh                    # prompts for a version, e.g. 3.2.0
+./release.sh --version 4.9.0    # release exactly this version
+./release.sh --alpha -y         # next alpha in the current series
+./release.sh --check-targets    # validates release/OTA slugs without building
+```
+
+[The build workflow](.github/workflows/build.yml) compiles every environment
+from a clean checkout on pushes and PRs. It is a breakage check on ordinary
+work, not a release gate, and it never uploads release assets.
+
+On-device OTA and the website flasher both track GitHub's *latest* release,
+which is why an alpha publishes as a GitHub *prerelease* — that is what keeps it
+off the stable channel.
 
 
 ## Use of AI
