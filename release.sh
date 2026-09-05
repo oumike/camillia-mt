@@ -116,10 +116,15 @@ NO_CLEAN=false
 APPEND_LAST_NOTES=false
 CHECK_TARGETS_ONLY=false
 ALPHA=false
-for arg in "$@"; do
-    case "$arg" in
+VERSION_ARG=""
+NOTES_ONLY=false
+USE_COMMITTED_NOTES=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         -h|--help)
-            echo "Usage: $0 [-y|--yes] [--alpha] [--no-clean] [--append-last-notes] [--check-targets]"
+            echo "Usage: $0 [-y|--yes] [--alpha] [--version V] [--no-clean]"
+            echo "          [--append-last-notes] [--check-targets] [--notes-only]"
+            echo "          [--use-committed-notes]"
             echo "  Cuts a stable release: builds all envs, signs OTA images,"
             echo "  tags v<version>, and publishes a GitHub release."
             echo ""
@@ -131,6 +136,13 @@ for arg in "$@"; do
             echo "              counter is bumped (v1.2.3-alpha.4 ->"
             echo "              v1.2.3-alpha.5); from a stable tag it starts a"
             echo "              new series at -alpha.1 on the next patch."
+            echo "  --version V"
+            echo "              Release exactly this version instead of deriving"
+            echo "              one from the tag list (a leading 'v' is fine)."
+            echo "              This is how an unattended run cuts anything other"
+            echo "              than a patch bump, since there is no prompt to"
+            echo "              answer. With --alpha, a bare X.Y.Z starts that"
+            echo "              version's alpha series at -alpha.1."
             echo "  -y, --yes   Bump the patch level of the latest tag without"
             echo "              prompting (v3.6.5 -> v3.6.6) and accept the AI"
             echo "              release notes."
@@ -145,6 +157,17 @@ for arg in "$@"; do
             echo "  --check-targets"
             echo "              Validate release environments and artifact slugs,"
             echo "              then exit without building or publishing."
+            echo "  --notes-only"
+            echo "              Write and review RELEASE_NOTES.md for the next"
+            echo "              release, then stop. Nothing is built, committed,"
+            echo "              tagged or published, and VERSION is left alone."
+            echo "              Commit the notes and let the GitHub release"
+            echo "              workflow cut the release from them."
+            echo "  --use-committed-notes"
+            echo "              Publish RELEASE_NOTES.md exactly as it stands"
+            echo "              instead of generating a summary. This is how an"
+            echo "              unattended run reuses notes reviewed elsewhere,"
+            echo "              and why it needs no model access of its own."
             exit 0
             ;;
         -y|--yes) ASSUME_YES=true ;;
@@ -152,9 +175,27 @@ for arg in "$@"; do
         --no-clean) NO_CLEAN=true ;;
         --append-last-notes) APPEND_LAST_NOTES=true ;;
         --check-targets) CHECK_TARGETS_ONLY=true ;;
-        *) echo "Unknown argument: $arg (see --help)" >&2; exit 1 ;;
+        --notes-only) NOTES_ONLY=true ;;
+        --use-committed-notes) USE_COMMITTED_NOTES=true ;;
+        --version)
+            if [[ -z "${2:-}" ]]; then
+                echo "--version requires a value (e.g. --version 4.9.0)" >&2
+                exit 1
+            fi
+            VERSION_ARG="$2"
+            shift
+            ;;
+        --version=*) VERSION_ARG="${1#*=}" ;;
+        *) echo "Unknown argument: $1 (see --help)" >&2; exit 1 ;;
     esac
+    shift
 done
+
+if [[ "$NOTES_ONLY" == true && "$USE_COMMITTED_NOTES" == true ]]; then
+    echo "--notes-only writes the notes; --use-committed-notes reuses them." >&2
+    echo "They are the two halves of the same flow, not a combination." >&2
+    exit 1
+fi
 
 validate_release_targets
 if [[ "$CHECK_TARGETS_ONLY" == true ]]; then
@@ -187,7 +228,22 @@ version_ge() {
     [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" == "$1" ]]
 }
 
-if [[ "$ALPHA" == true ]]; then
+if [[ -n "$VERSION_ARG" ]]; then
+    # An explicitly requested version beats every derivation below. This is the
+    # only way an unattended run (CI) can cut anything but a patch bump, since
+    # there is no prompt for it to answer.
+    VERSION="${VERSION_ARG#v}"   # a pasted tag name works as-is
+    if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+        echo "--version must look like 4.9.0 or 4.9.0-alpha.1 (got '$VERSION_ARG')." >&2
+        exit 1
+    fi
+    # A bare X.Y.Z with --alpha means "start that version's alpha series",
+    # matching what the interactive alpha prompt accepts.
+    if [[ "$ALPHA" == true && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        VERSION="${VERSION}-alpha.1"
+    fi
+    echo "Using requested version v$VERSION"
+elif [[ "$ALPHA" == true ]]; then
     # Alphas are numbered per stable version: vX.Y.Z-alpha.N, where X.Y.Z is the
     # release the series is heading towards — so the alphas leading to v4.7.8
     # are v4.7.8-alpha.1, -alpha.2, and so on, and they sort below the finished
@@ -235,13 +291,6 @@ if [[ "$ALPHA" == true ]]; then
             echo "Using v$VERSION"
         fi
     fi
-
-    if [[ -n "$VERSION" && ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-        echo "Alpha version must look like 4.7.8-alpha.1 (got '$VERSION')." >&2
-        echo "The device only treats a tag as a prerelease when it carries a" >&2
-        echo "'-' suffix, so this shape is what keeps it off the stable channel." >&2
-        exit 1
-    fi
 elif [[ "$ASSUME_YES" == true ]]; then
     # Derived from the latest tag, not the VERSION file: the tag is what was
     # actually published, and VERSION has been seen lagging behind it.
@@ -266,6 +315,12 @@ if [[ -z "$VERSION" ]]; then
     echo "No version entered. Aborting."
     exit 1
 fi
+if [[ "$ALPHA" == true && ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+    echo "Alpha version must look like 4.7.8-alpha.1 (got '$VERSION')." >&2
+    echo "The device only treats a tag as a prerelease when it carries a" >&2
+    echo "'-' suffix, so this shape is what keeps it off the stable channel." >&2
+    exit 1
+fi
 TAG="v$VERSION"
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
@@ -279,6 +334,18 @@ BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/parti
 if [[ -z "$BOOT_APP0" ]]; then
     echo "Error: boot_app0.bin not found in PlatformIO packages." >&2
     echo "Run 'pio run' at least once to download the framework." >&2
+    exit 1
+fi
+
+# PlatformIO installs itself into a private venv on a workstation, but a CI
+# runner gets it on PATH from `pip install platformio`. Prefer the venv copy
+# where it exists so a machine with both keeps using the one it always used.
+if [[ -x "$HOME/.platformio/penv/bin/pio" ]]; then
+    PIO="$HOME/.platformio/penv/bin/pio"
+elif command -v pio >/dev/null 2>&1; then
+    PIO="pio"
+else
+    echo "Error: platformio not found. Run: pip install platformio" >&2
     exit 1
 fi
 
@@ -369,8 +436,12 @@ trap 'exit 143' TERM
 guard_snapshot
 
 # ── Update VERSION file ───────────────────────────────────────────────────────
-echo "$TAG" > VERSION
-echo "Updated VERSION to $TAG"
+# Skipped for --notes-only: that run is not cutting the release, and the job
+# that does will write this itself.
+if [[ "$NOTES_ONLY" != true ]]; then
+    echo "$TAG" > VERSION
+    echo "Updated VERSION to $TAG"
+fi
 
 # ── AI release summary ────────────────────────────────────────────────────────
 # Turns the commit range since the last tag into user-facing release notes,
@@ -476,7 +547,7 @@ ${diff}"
 
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         jq -n --arg p "$prompt" \
-            '{model:"claude-opus-4-8",
+            '{model:"claude-opus-5",
               max_tokens:16000,
               thinking:{type:"adaptive"},
               messages:[{role:"user",content:$p}]}' 2>/dev/null \
@@ -493,61 +564,105 @@ ${diff}"
     fi
 }
 
+# Interactive accept/edit/discard for freshly generated notes. Returns 0 when the
+# notes should be used, 1 when the caller should fall back. Only prompts on a
+# TTY, so an unattended run accepts and continues; --yes accepts explicitly
+# rather than relying on that heuristic.
+review_notes_interactively() {
+    local ans
+    [[ -t 0 && "$ASSUME_YES" != true ]] || return 0
+    while true; do
+        read -rp "Use these notes? [Y]es / [e]dit / [n]o: " ans || ans="y"
+        case "${ans:-y}" in
+            y|Y|yes|Yes) return 0 ;;
+            e|E|edit)
+                "${EDITOR:-vi}" "$NOTES_FILE" || true
+                echo ""
+                echo "──────── edited release notes ────────"
+                cat "$NOTES_FILE"
+                echo "──────────────────────────────────────"
+                ;;
+            n|N|no) return 1 ;;
+            *) echo "Please answer y, e, or n." ;;
+        esac
+    done
+}
+
 NOTES_ARGS=(--generate-notes)
-echo ""
-echo "Generating AI release summary..."
-AI_SUMMARY=$(generate_ai_summary || true)
-if [[ -n "${AI_SUMMARY// /}" ]]; then
-    AI_NOTES_FILE="$NOTES_FILE"
-    write_release_notes "$AI_SUMMARY"
-    echo ""
-    echo "──────── proposed release notes ────────"
-    cat "$AI_NOTES_FILE"
-    echo "────────────────────────────────────────"
-
-    # Only prompt on a TTY so CI/non-interactive runs accept and continue.
-    # --yes accepts explicitly rather than relying on that heuristic.
-    if [[ -t 0 && "$ASSUME_YES" != true ]]; then
-        while true; do
-            read -rp "Use these notes? [Y]es / [e]dit / [n]o (GitHub notes only): " ans \
-                || ans="y"
-            case "${ans:-y}" in
-                y|Y|yes|Yes)
-                    break
-                    ;;
-                e|E|edit)
-                    "${EDITOR:-vi}" "$AI_NOTES_FILE" || true
-                    echo ""
-                    echo "──────── edited release notes ────────"
-                    cat "$AI_NOTES_FILE"
-                    echo "──────────────────────────────────────"
-                    ;;
-                n|N|no)
-                    write_placeholder_notes
-                    AI_NOTES_FILE=""
-                    echo "Discarded — using GitHub's generated notes only."
-                    break
-                    ;;
-                *)
-                    echo "Please answer y, e, or n."
-                    ;;
-            esac
-        done
-    fi
-
-    # An accepted-but-emptied file would publish blank notes; fall back instead.
-    if [[ -n "$AI_NOTES_FILE" && -s "$AI_NOTES_FILE" ]]; then
-        # gh prepends --notes-file content above the auto-generated commit list.
-        NOTES_ARGS=(--notes-file "$AI_NOTES_FILE" --generate-notes)
-    elif [[ -n "$AI_NOTES_FILE" ]]; then
+if [[ "$USE_COMMITTED_NOTES" == true ]]; then
+    # Publish RELEASE_NOTES.md exactly as committed. It was written and reviewed
+    # by an earlier `--notes-only` run, so this release needs no model access of
+    # its own — which is what lets the GitHub workflow publish notes that were
+    # read by a human first.
+    if [[ -s "$NOTES_FILE" ]]; then
+        echo ""
+        echo "Using committed release notes:"
+        echo "──────── release notes ────────"
+        cat "$NOTES_FILE"
+        echo "───────────────────────────────"
+        NOTES_ARGS=(--notes-file "$NOTES_FILE" --generate-notes)
+    else
         write_placeholder_notes
-        AI_NOTES_FILE=""
-        echo "Notes file is empty — using GitHub's generated notes only."
+        echo "No committed release notes found — using GitHub's generated notes only."
     fi
 else
-    write_placeholder_notes
-    echo "AI summary unavailable (no ANTHROPIC_API_KEY and no usable 'claude' CLI,"
-    echo "or the request failed) — falling back to GitHub's generated notes."
+    echo ""
+    echo "Generating AI release summary..."
+    AI_SUMMARY=$(generate_ai_summary || true)
+    if [[ -n "${AI_SUMMARY// /}" ]]; then
+        write_release_notes "$AI_SUMMARY"
+        echo ""
+        echo "──────── proposed release notes ────────"
+        cat "$NOTES_FILE"
+        echo "────────────────────────────────────────"
+
+        if review_notes_interactively; then
+            # An accepted-but-emptied file would publish blank notes.
+            if [[ -s "$NOTES_FILE" ]]; then
+                # gh prepends --notes-file content above the generated commit list.
+                NOTES_ARGS=(--notes-file "$NOTES_FILE" --generate-notes)
+            else
+                write_placeholder_notes
+                echo "Notes file is empty — using GitHub's generated notes only."
+            fi
+        elif [[ "$NOTES_ONLY" == true ]]; then
+            # Nothing to hand to GitHub, and the failure guard restores the file
+            # on the way out — so a rejected draft costs nothing.
+            echo "Discarded. RELEASE_NOTES.md left as it was." >&2
+            exit 1
+        else
+            write_placeholder_notes
+            echo "Discarded — using GitHub's generated notes only."
+        fi
+    elif [[ "$NOTES_ONLY" == true ]]; then
+        echo "Could not generate release notes (no ANTHROPIC_API_KEY and no usable" >&2
+        echo "'claude' CLI, or the request failed). RELEASE_NOTES.md left as it was." >&2
+        exit 1
+    else
+        write_placeholder_notes
+        echo "AI summary unavailable (no ANTHROPIC_API_KEY and no usable 'claude' CLI,"
+        echo "or the request failed) — falling back to GitHub's generated notes."
+    fi
+fi
+
+if [[ "$NOTES_ONLY" == true ]]; then
+    # Stop here: the release itself happens on GitHub. RELEASE_NOTES.md is the
+    # only thing this run produces, and committing it is not an extra step —
+    # the build bakes that file into the firmware (tools/gen_release_notes.py)
+    # so the device shows the same text the release publishes.
+    GUARD_ARMED=false
+    if [[ "$ALPHA" == true ]]; then NOTES_CHANNEL=alpha; else NOTES_CHANNEL=stable; fi
+    echo ""
+    echo "Release notes for $TAG written to $NOTES_FILE. Nothing built or published."
+    echo ""
+    echo "Next:"
+    echo "  git add $NOTES_FILE"
+    echo "  git commit -m \"Release notes for $TAG\" && git push"
+    echo "  gh workflow run release.yml -f channel=$NOTES_CHANNEL -f version=$VERSION"
+    echo ""
+    echo "Pass that version to the workflow. Left blank it derives its own, and"
+    echo "these notes would then be published under a different tag."
+    exit 0
 fi
 
 # ── Build firmware ────────────────────────────────────────────────────────────
@@ -609,10 +724,10 @@ if [[ "$NO_CLEAN" == true ]]; then
     echo "Skipping full clean (--no-clean); building on existing .pio output."
 else
     echo "Running full clean for release environments..."
-    ~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}" -t fullclean
+    "$PIO" run "${BUILD_ARGS[@]}" -t fullclean
 fi
 
-~/.platformio/penv/bin/pio run "${BUILD_ARGS[@]}"
+"$PIO" run "${BUILD_ARGS[@]}"
 echo "Build successful."
 
 # ── Commit, push, and tag ─────────────────────────────────────────────────────

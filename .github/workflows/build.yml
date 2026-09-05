@@ -13,25 +13,27 @@ on:
 # catch an uncommitted header or a .gitignore'd dependency. This job can, and
 # that is the whole of its value.
 #
-# It is NOT a release gate, despite the tag trigger. release.sh pushes the tag
-# and then publishes seconds later, while this job spends minutes installing
-# PlatformIO and building every environment — so the release is always public
-# before CI has an opinion. The branch trigger above is the one that earns its
-# keep: it runs on the commit release.sh pushes just before tagging, and on
-# every ordinary push in between. To make it a real gate, release.sh would have
-# to wait on the run (`gh run watch`) before `gh release create`.
+# It is a breakage check on ordinary work, not a release gate. Releases are cut
+# by .github/workflows/release.yml, which does its own clean build of every
+# environment before it signs anything — so this job has nothing left to gate.
+#
+# Note that release.yml's commit and tag do NOT reach this workflow: pushes made
+# with the default GITHUB_TOKEN deliberately do not trigger other workflows. The
+# tag trigger below therefore only fires for a tag pushed by hand.
 #
 # IMPORTANT: this workflow must NOT publish release assets.
 #
-# release.sh is the single source of truth for published artifacts: it builds,
+# release.yml is the single source of truth for published artifacts: it builds,
 # merges the factory images, copies the app-only OTA images, and signs each
-# -ota.bin with the private ECDSA key (which lives only on the release machine,
-# never in CI). It then uploads every .bin/.sig via `gh release create`.
+# -ota.bin with the private ECDSA key (held as the OTA_SIGNING_KEY secret on the
+# `release` environment, and reachable from nowhere else). It then uploads every
+# .bin/.sig via `gh release create`.
 #
-# If CI also published dist/*.bin, its independently-built binaries would
-# overwrite the exact bytes release.sh signed — while the detached .sig stayed
-# put — so the on-device signature check would reject every OTA image. CI has
-# no signing key, so it can never produce a matching pair.
+# If this workflow also published dist/*.bin, its independently-built binaries
+# would overwrite the exact bytes release.sh signed — while the detached .sig
+# stayed put — so the on-device signature check would reject every OTA image.
+# This job has no access to the signing key, so it can never produce a matching
+# pair.
 
 jobs:
   build:
@@ -65,8 +67,8 @@ jobs:
           pio run -e m9
           pio run -e wio-tracker-l2
 
-      # Debug symbols are deliberately not archived here. CI's build is not
-      # byte-identical to the release.sh-built, signed binaries that actually
-      # ship, so its addresses can drift — symbolicating a real crash against
-      # them is misleading. Use the dist/*.elf left on the machine that ran
-      # release.sh, which matches the shipped image exactly.
+      # Debug symbols are deliberately not archived here. This build is not
+      # byte-identical to the signed binaries that actually ship, so its
+      # addresses can drift — symbolicating a real crash against them is
+      # misleading. Use the debug-symbols-<tag> artifact from the release.yml
+      # run that published the firmware; those match the shipped image exactly.
