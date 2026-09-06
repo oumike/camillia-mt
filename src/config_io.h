@@ -465,6 +465,30 @@ struct RhinoConfig {
     // padding and carries the same caveat — an upgraded device reads zero
     // there, not your compiled default.
     uint8_t  _reservedPad12[1];
+
+    // ── Lock screen ──────────────────────────────────────────────────────────
+    // Appended past _reservedPad12 deliberately, not placed in it. These are the
+    // case the note above rules out: both want a non-zero default, and a field
+    // inside that padding reads zero on an upgraded device however it is
+    // declared. Beyond the old struct size the append-only rule applies instead
+    // — a shorter stored blob simply stops, and these keep their compiled
+    // defaults on a device upgrading into this firmware.
+    //
+    // Only the Wio Tracker L2 acts on them today (FEATURE_LOCK_SCREEN). The
+    // T-Deck Pro's sleep clock is a different thing that happens to look similar:
+    // there the overlay *is* the sleeping state, because e-paper holds an image
+    // at zero power. On a backlit LCD the lock screen is a lit state that has to
+    // be paid for and therefore has to end, which is what lockScreenOffSecs is.
+
+    // How long the lock screen stays lit before the panel is put out for real.
+    // 300..3600 (5..60 min); 0 means never — stay on the lock screen until the
+    // wake button is pressed. Ignored entirely when lockScreenEnabled is false.
+    uint32_t lockScreenOffSecs;
+
+    // False restores the pre-lock-screen behaviour exactly: the wake-button hold
+    // and the idle timeout both put the panel straight out, and no overlay is
+    // ever built.
+    bool     lockScreenEnabled;
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -561,6 +585,10 @@ static inline uint8_t cfgCoerceTimeSource(int v) {
     return (v == TIME_SOURCE_MANUAL) ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
 }
 
+// Exhaustive states for a binary three-channel RGB indicator: seven non-empty
+// R/G/B combinations plus Off. Mesh Deck drives these channels as GPIO, not
+// constant-current outputs, so brightness controls or additional hues such as
+// orange would promise hardware states this path cannot produce.
 enum : uint8_t {
     NOTIFY_LED_COLOR_RED = 0,
     NOTIFY_LED_COLOR_GREEN = 1,
@@ -595,6 +623,23 @@ static inline uint8_t cfgCoerceBrightness(int pct) {
     if (pct > BRIGHTNESS_PCT_MAX) return BRIGHTNESS_PCT_MAX;
     return (uint8_t)(((pct + BRIGHTNESS_PCT_STEP / 2) / BRIGHTNESS_PCT_STEP)
                      * BRIGHTNESS_PCT_STEP);
+}
+
+// ── Lock screen dwell ────────────────────────────────────────────────────────
+// How long the lock screen may stay lit, in seconds. Zero is a value, not an
+// out-of-range input: it means "never put the panel out", and has to survive
+// every path that touches this field. Everything else is clamped to 5..60
+// minutes and snapped to a five-minute step, so the on-device slider, the web
+// form and a hand-edited YAML file cannot disagree about what is storable.
+#define LOCK_SCREEN_OFF_SECS_MIN  300U     // 5 min
+#define LOCK_SCREEN_OFF_SECS_MAX  3600U    // 60 min
+#define LOCK_SCREEN_OFF_NEVER     0U
+
+static inline uint32_t cfgCoerceLockScreenOffSecs(uint32_t secs) {
+    if (secs == LOCK_SCREEN_OFF_NEVER) return LOCK_SCREEN_OFF_NEVER;
+    if (secs < LOCK_SCREEN_OFF_SECS_MIN) return LOCK_SCREEN_OFF_SECS_MIN;
+    if (secs > LOCK_SCREEN_OFF_SECS_MAX) return LOCK_SCREEN_OFF_SECS_MAX;
+    return ((secs + 150U) / 300U) * 300U;
 }
 
 // The auto-favorite radius is stored in meters but always entered and shown in

@@ -25,6 +25,11 @@
 #include "battery_util.h"
 #include "power_mgr.h"
 #include "emoji_font.h"
+#if HAS_SLEEP_OVERLAY
+// Bold face for the sleep-overlay message rows; built only into environments
+// that draw the overlay (see the font source and build_src_filter).
+LV_FONT_DECLARE(lv_font_montserrat_bold_12);
+#endif
 #include "env_sensor.h"
 #include "gps.h"
 #include "los.h"
@@ -219,21 +224,84 @@ static lv_obj_t *s_chatNewMsgLabel = nullptr;
 static lv_obj_t *s_chatActBtn = nullptr;
 static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
-#if defined(DEVICE_TDECK_PRO)
+#if HAS_SLEEP_OVERLAY
 static lv_obj_t *s_tdeckProSleepOverlay = nullptr;
 static lv_obj_t *s_tdeckProSleepTitle = nullptr;
 static lv_obj_t *s_tdeckProSleepNode = nullptr;
 static lv_obj_t *s_tdeckProSleepTime = nullptr;
 static lv_obj_t *s_tdeckProSleepDate = nullptr;
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
-static lv_obj_t *s_tdeckProSleepUnread = nullptr;
 static lv_obj_t *s_tdeckProSleepBatt = nullptr;
+
+// The notification area under the date: newest unread message previews first.
+// Each first line uses separate labels for time/channel, sender and body so the
+// Wio lock screen can color those semantic fields independently.
+// How many messages the ring holds and the panel has labels for. Eight, because
+// eight one-line messages is the most the line budget below can display; a
+// screen full of two-line messages uses only four of them.
+static constexpr int kTdeckProSleepMsgSlots = 8;
+static lv_obj_t *s_tdeckProSleepMsgBold[kTdeckProSleepMsgSlots] = {nullptr};
+static lv_obj_t *s_tdeckProSleepMsgSender[kTdeckProSleepMsgSlots] = {nullptr};
+static lv_obj_t *s_tdeckProSleepMsgRest[kTdeckProSleepMsgSlots] = {nullptr};
+// The wrapped remainder, on its own label because it starts at a different x
+// than the first line's body does -- one label cannot indent its second line
+// differently from its first.
+static lv_obj_t *s_tdeckProSleepMsgCont[kTdeckProSleepMsgSlots] = {nullptr};
+
 // Unread state the overlay is currently showing, plus the coalescing timer that
 // decides when a change is worth a panel refresh. See serviceTdeckProSleepClock.
-static uint32_t s_tdeckProSleepUnreadKey = UINT32_MAX;
-static uint32_t s_tdeckProSleepUnreadPendingKey = UINT32_MAX;
+// 64-bit because the key now carries a message sequence number as well as the
+// unread counts -- see tdeckProSleepUnreadKey().
+static uint64_t s_tdeckProSleepUnreadKey = UINT64_MAX;
+static uint64_t s_tdeckProSleepUnreadPendingKey = UINT64_MAX;
 static uint32_t s_tdeckProSleepUnreadChangedMs = 0;
+
+// Neither Channels nor DMs can hand back "the last three messages". Both store
+// DisplayLine rows, which are rendered, word-wrapped display text: the prefix
+// ("14:32 [Alice] ") is baked into the first row's string and the body is split
+// across however many rows it needed. Recovering the four fields from that means
+// stripping a prefix whose length depends on the sender's name as it was when
+// the message arrived, then re-joining continuations -- brittle enough to reject.
+//
+// So keep them structured here instead, filled at the two points where an
+// inbound message actually lands. T-Deck Pro only: no other build draws the
+// overlay, and none pays the ~450 bytes.
+struct TdeckProRecentMsg {
+    uint32_t epoch;          // 0 = clock was unset when it arrived; row omits the time
+    uint32_t senderNodeId;
+    int8_t   chanIdx;        // -1 = DM
+    char     text[144];
+};
+static TdeckProRecentMsg s_tdeckProRecentMsgs[kTdeckProSleepMsgSlots];
+static uint8_t  s_tdeckProRecentMsgHead = 0;   // next slot to write
+static uint8_t  s_tdeckProRecentMsgCount = 0;
+// Monotonic, and the whole point of the repaint key change: a second message on
+// an already-unread channel moves no count and sets no new attention bit, so
+// nothing else in the unread state notices it.
+static uint32_t s_tdeckProRecentMsgSeq = 0;
 #endif
+
+#if FEATURE_LOCK_SCREEN
+// ── Lock screen state ────────────────────────────────────────────────────────
+// A third display state, between the UI and a dark panel:
+//
+//   UI ──(wake-button hold, or idle timeout)──> LOCKED ──(lockScreenOffSecs)──> ASLEEP
+//    ^                                            │                              │
+//    └──────────(wake button press)───────────────┘                              │
+//    └───────────────────────────(wake button press)─────────────────────────────┘
+//
+// LOCKED is a *lit* state, and that is the whole reason it cannot be modelled
+// the way the T-Deck Pro models its sleep clock. s_screenAsleep stays false
+// here: the backlight is on, LVGL has to keep running for the clock to tick,
+// and powerSaveShouldNap() must keep refusing to light-sleep — it already
+// requires s_screenAsleep, so it refuses on its own without a change.
+//
+// The cost of the state is why lockScreenOffSecs exists. Nothing about a lit
+// LCD is free, so the lock screen is deliberately a thing that ends.
+static bool     s_lockScreenActive = false;
+static uint32_t s_lockScreenSinceMs = 0;
+#endif
+
 // Right-hand cluster of the bottom bar on builds where the nav buttons share it
 // with the GPS/WiFi/DM icons. nullptr everywhere else.
 static lv_obj_t *s_chatStatusBox = nullptr;
@@ -1277,6 +1345,37 @@ static uint32_t s_gpsClockSyncMs = 0;
 // A clock this far along is one somebody actually set; anything below it is the
 // 1970 epoch the ESP32 boots at.
 static constexpr time_t kClockSetEpoch = 1700000000;
+
+#if HAS_SLEEP_OVERLAY
+// Record an inbound message for the sleeping panel's preview rows. Called from
+// the RX paths only -- deliberately not from the `chatseed` CLI helper, which
+// pushes synthetic traffic straight into Channels and has no business changing
+// what the lock screen claims arrived.
+//
+// chanIdx < 0 means a DM. Callers gate on the same condition that decides
+// whether the message raises an alert at all (not muted, not the channel or
+// conversation already on screen), so the ring only ever holds things the
+// device is actually notifying about.
+static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char *text) {
+    TdeckProRecentMsg &slot = s_tdeckProRecentMsgs[s_tdeckProRecentMsgHead];
+    const time_t now = time(nullptr);
+    slot.epoch        = (now >= kClockSetEpoch) ? (uint32_t)now : 0;
+    slot.senderNodeId = fromNode;
+    slot.chanIdx      = (chanIdx >= 0 && chanIdx < MESH_CHANNELS) ? (int8_t)chanIdx : -1;
+    utf8util::copyTruncate(slot.text, sizeof(slot.text), text ? text : "");
+    // A preview row is one line by construction, and a label given a newline
+    // draws a second one straight through the row underneath it. Flatten the
+    // control characters here rather than at render time, so every reader of
+    // the ring gets a single-line string.
+    for (char *c = slot.text; *c; c++) {
+        if ((uint8_t)*c < 0x20 || *c == 0x7F) *c = ' ';
+    }
+
+    s_tdeckProRecentMsgHead = (uint8_t)((s_tdeckProRecentMsgHead + 1) % kTdeckProSleepMsgSlots);
+    if (s_tdeckProRecentMsgCount < kTdeckProSleepMsgSlots) s_tdeckProRecentMsgCount++;
+    s_tdeckProRecentMsgSeq++;
+}
+#endif
 static uint32_t s_lastChannelGlowAnimMs = 0;
 static bool s_radioReady = false;
 static bool s_webCfgEnabled = false;
@@ -1702,6 +1801,12 @@ static void closeCfgNodeNameModal();
 static void openCfgBrightnessModal();
 static void openCfgScreenTimeoutModal();
 static const char *screenTimeoutName(uint32_t secs);
+#if FEATURE_LOCK_SCREEN
+// Both are wanted by the config row renderer, which sits well above where the
+// lock-screen picker is defined — beside the screen-timeout picker it copies.
+static void openCfgLockScreenOffModal();
+static const char *lockScreenOffName(uint32_t secs);
+#endif
 static void closeCfgBrightnessModal();
 #if HAS_VOLUME_CONTROL
 static void openCfgVolumeModal();
@@ -1826,6 +1931,11 @@ static void refreshLiveFilterHeader();
 static void openDiscoveryModal();
 static void closeDiscoveryModal();
 static void refreshDiscoveryModal(bool force = false);
+static void openDiscoveryPresetModal();
+static void closeDiscoveryPresetModal();
+// Puts the radio back on the node's own preset. `aborted` is true when the scan
+// did not run its window out — the screen was closed, or a save retuned under it.
+static void discoveryEndPresetScan(bool aborted);
 #endif
 static void openBeaconsModal();
 static void closeBeaconsModal();
@@ -2514,6 +2624,10 @@ enum CfgActionId {
     CFG_ACTION_FONT_SIZE,
     CFG_ACTION_BRIGHTNESS,
     CFG_ACTION_SCREEN_TIMEOUT,
+    #if FEATURE_LOCK_SCREEN
+    CFG_ACTION_LOCK_SCREEN,
+    CFG_ACTION_LOCK_SCREEN_OFF,
+    #endif
     CFG_ACTION_BATT_DISPLAY,
     #if HAS_SCROLL_INVERT
     CFG_ACTION_INVERT_SCROLL,
@@ -4350,6 +4464,16 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Screen Timeout: %s",
                      screenTimeoutName(s_cfg.screenOnSecs));
             break;
+        #if FEATURE_LOCK_SCREEN
+        case CFG_ACTION_LOCK_SCREEN:
+            snprintf(buf, bufLen, "Lock Screen: %s",
+                     s_cfg.lockScreenEnabled ? "On" : "Off");
+            break;
+        case CFG_ACTION_LOCK_SCREEN_OFF:
+            snprintf(buf, bufLen, "Lock Screen Off: %s",
+                     lockScreenOffName(s_cfg.lockScreenOffSecs));
+            break;
+        #endif
         #if HAS_SCROLL_INVERT
         case CFG_ACTION_INVERT_SCROLL:
             snprintf(buf, bufLen, "Invert Scrolling: %s", s_cfg.invertScroll ? "On" : "Off");
@@ -5701,48 +5825,454 @@ static void applyBrightness() {
     displayDev().setBrightness(cfgBrightnessDuty(s_cfg.brightness));
 }
 
-#if defined(DEVICE_TDECK_PRO)
+#if HAS_SLEEP_OVERLAY
 static uint32_t tdeckProSleepClockMinuteKey() {
     const time_t now = time(nullptr);
     if (now >= kClockSetEpoch) return (uint32_t)(now / 60);
     return 0x80000000u | (millis() / 60000UL);
 }
 
-// Everything unread, folded into one value. Used both to render the notifier
-// and to decide whether the sleeping panel needs repainting, so the two can
-// never disagree about what is currently on screen.
-static uint32_t tdeckProSleepUnreadKey() {
+// Everything the notification area depends on, folded into one value. Used both
+// to render it and to decide whether the sleeping panel needs repainting, so
+// the two can never disagree about what is currently on screen.
+//
+// The sequence number in the high word is load-bearing. While this area was a
+// count, the unread counts were the whole state: a second message on a channel
+// already flagged unread genuinely changed nothing on screen. Now that it shows
+// the newest three messages, that second message changes everything and moves
+// neither the DM count nor the attention mask -- so a key built from those two
+// alone reports "no change" and the panel silently never repaints. The sequence
+// number moves on every message, and sitting in its own 32 bits it can never
+// collide with an unread state that happens to hash the same way.
+static uint64_t tdeckProSleepUnreadKey() {
     uint32_t chanMask = 0;
     for (int i = 0; i < MESH_CHANNELS && i < 24; i++) {
         if (s_channelNeedsAttention[i]) chanMask |= (1u << i);
     }
     int dm = DMs.unreadMessageCount();
     if (dm < 0)   dm = 0;
-    if (dm > 255) dm = 255;   // saturates; the text says "255+" past this
-    return ((uint32_t)dm << 24) | chanMask;
+    if (dm > 255) dm = 255;   // saturates
+    const uint32_t unread = ((uint32_t)dm << 24) | chanMask;
+    return ((uint64_t)s_tdeckProRecentMsgSeq << 32) | unread;
 }
 
-// Renders that into the line under the date. Empty when nothing is unread, so
-// a quiet device shows the clock exactly as it did before.
-static void tdeckProSleepUnreadText(char *out, size_t outLen) {
+// True when anything is waiting. The preview rows are shown only while
+// something is unread, which is what the count line did before them.
+static bool tdeckProSleepHasUnread() {
+    if (DMs.unreadMessageCount() > 0) return true;
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) return true;
+    }
+    return false;
+}
+
+// Copy at most maxChars *characters* of src, appending "..." if that cut
+// anything off. Counts codepoints rather than bytes: channel and node names are
+// user-supplied and routinely hold multi-byte characters, and a byte-wise clamp
+// would slice one in half and emit a broken glyph.
+static void tdeckProClampLabel(char *out, size_t outLen, const char *src, int maxChars) {
     if (!out || outLen == 0) return;
     out[0] = '\0';
+    if (!src || !src[0] || maxChars <= 0) return;
 
-    int chans = 0;
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        if (s_channelNeedsAttention[i]) chans++;
+    // Reserve three characters of the budget for the ellipsis, so a clamped
+    // field still occupies the width it was allotted rather than overrunning it.
+    const int keep = (maxChars > 3) ? (maxChars - 3) : maxChars;
+
+    size_t bytes = 0, chars = 0;
+    while (src[bytes] && (int)chars < keep) {
+        size_t adv = 1;
+        while (src[bytes + adv] && utf8util::isContinuationByte((uint8_t)src[bytes + adv])) adv++;
+        if (bytes + adv >= outLen - 1) break;
+        bytes += adv;
+        chars++;
     }
-    const int dm = DMs.unreadMessageCount();
 
-    if (dm > 0 && chans > 0) {
-        snprintf(out, outLen, "%d new %s  -  %d %s",
-                 dm, (dm == 1) ? "DM" : "DMs",
-                 chans, (chans == 1) ? "channel" : "channels");
-    } else if (dm > 0) {
-        snprintf(out, outLen, "%d new %s", dm, (dm == 1) ? "DM" : "DMs");
-    } else if (chans > 0) {
-        snprintf(out, outLen, "New messages in %d %s",
-                 chans, (chans == 1) ? "channel" : "channels");
+    memcpy(out, src, bytes);
+    out[bytes] = '\0';
+    if (src[bytes] && keep < maxChars && bytes + 4 <= outLen) {
+        memcpy(out + bytes, "...", 4);
+    }
+}
+
+// One UTF-8 codepoint at *i, advancing *i past it. Malformed input advances by
+// at least one byte, so no caller can be made to spin on it.
+static uint32_t tdeckProNextCodepoint(const char *s, size_t *i) {
+    const uint8_t b0 = (uint8_t)s[*i];
+    (*i)++;
+    if (b0 < 0x80) return b0;
+    const int extra = (b0 >= 0xF0) ? 3 : (b0 >= 0xE0) ? 2 : 1;
+    uint32_t cp = b0 & (0x3Fu >> extra);
+    for (int k = 0; k < extra && utf8util::isContinuationByte((uint8_t)s[*i]); k++) {
+        cp = (cp << 6) | ((uint8_t)s[*i] & 0x3Fu);
+        (*i)++;
+    }
+    return cp;
+}
+
+// Longest prefix of `txt` that fits `maxW`, broken at the last space if there is
+// one. Returns that prefix's byte length and reports through `nextOut` where the
+// following line begins, past the space it broke on.
+//
+// Widths accumulate exactly the way lv_text_get_width() accumulates them --
+// lv_font_get_glyph_width() per codepoint, with the following codepoint passed
+// in for kerning -- so the split lands where LVGL would have wrapped it.
+static size_t tdeckProBreakAt(const char *txt, const lv_font_t *font, int maxW,
+                              size_t *nextOut) {
+    size_t i = 0;
+    size_t breakLen = 0, breakNext = 0;   // last space seen
+    int w = 0;
+
+    while (txt[i]) {
+        size_t cur = i;
+        const uint32_t letter = tdeckProNextCodepoint(txt, &cur);
+        size_t peek = cur;
+        const uint32_t nextLetter = txt[peek] ? tdeckProNextCodepoint(txt, &peek) : 0;
+
+        w += lv_font_get_glyph_width(font, letter, nextLetter);
+        if (w > maxW) {
+            if (breakLen > 0) { *nextOut = breakNext; return breakLen; }
+            // A single word wider than the whole line. Break inside it rather
+            // than pushing all of it down, which would leave line one empty.
+            *nextOut = (i > 0) ? i : cur;
+            return *nextOut;
+        }
+        if (letter == ' ') { breakLen = i; breakNext = cur; }
+        i = cur;
+    }
+    *nextOut = i;
+    return i;
+}
+
+// The channel a preview row belongs to, as it should read on the panel.
+static void tdeckProSleepChannelLabel(int chanIdx, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    if (chanIdx < 0 || chanIdx >= MESH_CHANNELS) {
+        snprintf(out, outLen, "DM");
+        return;
+    }
+    const ChannelKey &ck = CHANNEL_KEYS[chanIdx];
+    const char *nm = ck.name_buf[0] ? ck.name_buf : ck.name;
+    if (!nm || !nm[0]) snprintf(out, outLen, "ch%d", chanIdx);
+    else               utf8util::copyTruncate(out, outLen, nm);
+}
+
+// Still-unread messages, newest first, up to the number of rows there are.
+// Filtering on unread rather than just replaying the ring keeps the list honest:
+// a channel read on another surface drops out of it instead of lingering as a
+// preview of something already seen.
+static int tdeckProCollectSleepMsgs(const TdeckProRecentMsg *out[kTdeckProSleepMsgSlots]) {
+    const bool dmUnread = (DMs.unreadMessageCount() > 0);
+    int found = 0;
+    for (int back = 1; back <= s_tdeckProRecentMsgCount && found < kTdeckProSleepMsgSlots; back++) {
+        const int idx = (s_tdeckProRecentMsgHead + kTdeckProSleepMsgSlots - back) % kTdeckProSleepMsgSlots;
+        const TdeckProRecentMsg &m = s_tdeckProRecentMsgs[idx];
+        const bool live = (m.chanIdx < 0)
+                              ? dmUnread
+                              : (m.chanIdx < MESH_CHANNELS && s_channelNeedsAttention[m.chanIdx]);
+        if (live) out[found++] = &m;
+    }
+    return found;
+}
+
+// Montserrat Bold 12 with the metrics of lv_font_montserrat_12 and its emoji
+// fallback chained on. Both overrides matter: LVGL positions a label's glyphs
+// from line_height and base_line, so the generated face's own 13/2 would sit
+// the bold half of a row a pixel above the regular half, and without the
+// fallback any character outside ASCII in a channel or node name would come out
+// blank in the bold field while rendering fine in the regular one.
+static const lv_font_t *tdeckProBoldRowFont() {
+    static lv_font_t bold;
+    static bool ready = false;
+    if (!ready) {
+        bold = lv_font_montserrat_bold_12;
+        bold.line_height = lv_font_montserrat_12.line_height;
+        bold.base_line   = lv_font_montserrat_12.base_line;
+        bold.fallback    = emojiFont(&lv_font_montserrat_12);
+        ready = true;
+    }
+    return &bold;
+}
+
+// ── Overlay palette ──────────────────────────────────────────────────────────
+// The Pro is black on white because that is what an e-paper panel does well and
+// what it holds with the power off. The lock-screen boards use white text with
+// blue time/channel and green node accents on black. Every lit pixel is
+// backlight the device is paying for, so the glance surface stays mostly unlit.
+//
+// Deliberately not the theme palette. This screen is not part of the themed UI
+// — it is what the device looks like when the UI is put away — and a light
+// theme would otherwise light the whole panel to show a clock.
+#if FEATURE_LOCK_SCREEN
+static inline lv_color_t sleepOverlayInk() { return lv_color_make(255, 255, 255); }
+static inline lv_color_t sleepOverlayBg()  { return lv_color_make(0, 0, 0); }
+static inline lv_color_t sleepOverlayTimeChannelInk() { return lv_color_make(32, 160, 255); }
+static inline lv_color_t sleepOverlayNodeInk() { return lv_color_make(64, 220, 112); }
+static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
+static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_32;
+#else
+static inline lv_color_t sleepOverlayInk() { return lv_color_make(0, 0, 0); }
+static inline lv_color_t sleepOverlayBg()  { return lv_color_make(255, 255, 255); }
+static inline lv_color_t sleepOverlayTimeChannelInk() { return sleepOverlayInk(); }
+static inline lv_color_t sleepOverlayNodeInk() { return sleepOverlayInk(); }
+static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_16;
+static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
+#endif
+
+// Geometry of the notification area, in absolute panel coordinates. It sits in
+// the band between the date and the battery.
+static constexpr int kTdeckProMsgRowLeft   = 8;
+#if FEATURE_LOCK_SCREEN
+// The Wio Tracker L2 runs landscape (TFT_ROTATION_DEFAULT 0 plus the panel's
+// own offset_rotation of 1 gives internal rotation 1), so it is 320 wide and
+// 240 tall — wider rows than the Pro and 80 px less height to stack them in.
+static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_LANDSCAPE_W - 2 * kTdeckProMsgRowLeft;
+#else
+static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_PORTRAIT_W - 2 * kTdeckProMsgRowLeft;
+#endif
+// A preview may wrap onto a second line, so a message is one or two lines tall
+// and the block is laid out by accumulating heights rather than by a fixed
+// pitch -- that is what keeps a two-line message from drawing over the one
+// below it.
+//
+// The budget is eight lines of text, however many messages that turns out to be:
+// four if every one of them wraps, eight if none does. The tallest the block can
+// therefore get is eight single-line messages, which is also the case with the
+// most gaps in it: 8*15 + 7*6 = 162 px, running 150..312 and leaving the same
+// 8 px at the bottom that the status band leaves at the top.
+#if FEATURE_LOCK_SCREEN
+// 240 px of height rather than 320, so the stack above is tighter and the block
+// starts higher but has less room: 116..240 is 124 px, which is six single-line
+// messages (6*15 + 5*6 = 120) against the Pro's eight.
+static constexpr int kTdeckProMsgTop        = 116;
+#else
+static constexpr int kTdeckProMsgTop        = 150;
+#endif
+static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
+static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
+#if FEATURE_LOCK_SCREEN
+static constexpr int kTdeckProMsgTotalLines = 6;    // across the whole block
+#else
+static constexpr int kTdeckProMsgTotalLines = 8;    // across the whole block
+#endif
+static constexpr int kTdeckProMsgGapY       = 6;    // between messages, not lines
+// Space between the bold half of a row and the rest, as real pixels rather than
+// a trailing space character: whether LVGL counts a trailing space in a text's
+// measured width is not something the gap should depend on.
+static constexpr int kTdeckProMsgGapPx     = 4;
+
+// The status band across the top: date pinned left, battery pinned right, both
+// at montserrat_14. The date used to be an 18 px centred line in the middle of
+// the stack, but a corner pinned opposite the battery reads as a status band
+// only if the two match -- a heavier date beside a lighter battery reads as two
+// unrelated things that happen to share a row.
+static constexpr int kTdeckProBandInset    = 8;    // from either edge
+#if FEATURE_LOCK_SCREEN
+static constexpr int kTdeckProBandTop      = 4;
+// Same order and the same grouping as the Pro, compressed into 80 px less
+// height: the title drops from a 32 px face to 18, the node name from 16 to 14,
+// and the clock from 40 to 32. The smaller clock avoids linking Wio-only copies
+// of the 24 px and 40 px LVGL glyph tables, which together cost about 99 KB.
+static constexpr int kTdeckProTitleTop     = 24;   // 18 px face, 21 px line box
+static constexpr int kTdeckProNodeTop      = 54;   // 14 px face, 16 px line box
+static constexpr int kTdeckProTimeTop      = 72;   // 32 px face, 35 px line box
+#else
+static constexpr int kTdeckProBandTop      = 8;
+// "Camillia", the node name and the clock group together under the band, tight
+// enough to read as one block: 6 px, 3 px and 8 px of air between them.
+static constexpr int kTdeckProTitleTop     = 30;   // 32 px face, 35 px line box
+static constexpr int kTdeckProNodeTop      = 68;   // 16 px face, 18 px line box
+static constexpr int kTdeckProTimeTop      = 94;   // 40 px face, 44 px line box
+#endif
+// However tight the row gets, leave this much for the message itself -- the
+// point of the change is to show some of what was said, so a long channel name
+// and a long sender name must give way to it rather than squeeze it to nothing.
+static constexpr int kTdeckProMsgBodyMinPx = 74;
+
+static int tdeckProTextWidth(const char *txt, const lv_font_t *font) {
+    lv_point_t sz = {0, 0};
+    lv_text_get_size(&sz, txt, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    return (int)sz.x;
+}
+
+// Fills one message: bold "HH:MM Channel", then regular "Name: message", the
+// latter allowed to wrap onto a second line before LVGL ellipsises it. Draws at
+// `y`, uses at most `maxLines` of them, and returns the height it took, so the
+// caller can place the next message under it and keep count of the budget.
+//
+// The continuation line begins where the time above it ended, so it clears the
+// timestamp column but sits left of the channel and sender -- far enough in that
+// it cannot be mistaken for another message starting, far enough out that it
+// gets most of the row's width. Montserrat's digits are proportional, so that x
+// is measured per message rather than assumed.
+//
+// The fields are clamped by measuring rather than by counting characters. A
+// character budget has to assume an average glyph width, and it is wrong in both
+// directions -- "WWWWWWWW" and "iiiiiiii" are the same eight characters and
+// nowhere near the same width -- which on a 240 px panel is the difference
+// between a readable row and one with no message left on it.
+static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
+                                   const TdeckProRecentMsg &m) {
+    lv_obj_t *boldLbl = s_tdeckProSleepMsgBold[row];
+    lv_obj_t *senderLbl = s_tdeckProSleepMsgSender[row];
+    lv_obj_t *restLbl = s_tdeckProSleepMsgRest[row];
+    lv_obj_t *contLbl = s_tdeckProSleepMsgCont[row];
+    if (!boldLbl || !senderLbl || !restLbl) return 0;
+
+    const lv_font_t *boldFont = tdeckProBoldRowFont();
+    const lv_font_t *restFont = emojiFont(&lv_font_montserrat_12);
+
+    char timeText[8] = "";
+    if (m.epoch != 0) {
+        const time_t when = (time_t)m.epoch;
+        struct tm lt;
+        localtime_r(&when, &lt);
+        strftime(timeText, sizeof(timeText), "%H:%M", &lt);
+    }
+
+    // Where the continuation line will start. Measured from the time alone, not
+    // from the whole bold field, so it lands under the channel name.
+    const int timeW = timeText[0] ? tdeckProTextWidth(timeText, boldFont) : 0;
+
+    char chanFull[24];
+    tdeckProSleepChannelLabel(m.chanIdx, chanFull, sizeof(chanFull));
+
+    char sender[48];
+    chatSenderLabel(m.senderNodeId, sender, sizeof(sender));
+    if (!sender[0]) snprintf(sender, sizeof(sender), "?");
+
+    // Shrink the channel first, then the sender, one character at a time, until
+    // the fixed part of the row leaves the body its minimum. The message text
+    // itself is not clamped here at all -- LV_LABEL_LONG_DOT on a label of known
+    // width does that, and does it by measurement too.
+    char boldText[40];
+    char senderText[32];
+    int chanChars = 12;
+    int nameChars = 14;
+    int boldW = 0;
+    int senderW = 0;
+    for (;;) {
+        char chanText[24];
+        tdeckProClampLabel(chanText, sizeof(chanText), chanFull, chanChars);
+
+        char nameText[32];
+        tdeckProClampLabel(nameText, sizeof(nameText), sender, nameChars);
+
+        if (timeText[0]) snprintf(boldText, sizeof(boldText), "%s %s", timeText, chanText);
+        else             snprintf(boldText, sizeof(boldText), "%s", chanText);
+        snprintf(senderText, sizeof(senderText), "%s:", nameText);
+
+        boldW = tdeckProTextWidth(boldText, boldFont);
+        senderW = tdeckProTextWidth(senderText, restFont);
+        const int fixedW = boldW + kTdeckProMsgGapPx
+                         + senderW + kTdeckProMsgGapPx;
+        if (fixedW <= kTdeckProMsgRowWidth - kTdeckProMsgBodyMinPx) {
+            break;
+        }
+        // Trim whichever field is still the more generous, so neither collapses
+        // while the other stays long.
+        if (chanChars >= nameChars && chanChars > 4)      chanChars--;
+        else if (nameChars > 4)                            nameChars--;
+        else {
+            // Both are at their floor: the row is as short as it can be made.
+            break;
+        }
+    }
+
+    lv_label_set_text(boldLbl, boldText);
+    lv_obj_align(boldLbl, LV_ALIGN_TOP_LEFT, kTdeckProMsgRowLeft, y);
+
+    const int senderX = kTdeckProMsgRowLeft + boldW + kTdeckProMsgGapPx;
+    lv_label_set_text(senderLbl, senderText);
+    lv_obj_align(senderLbl, LV_ALIGN_TOP_LEFT, senderX, y);
+
+    const int restX = senderX + senderW + kTdeckProMsgGapPx;
+    int restW = kTdeckProMsgRowWidth - (restX - kTdeckProMsgRowLeft);
+    if (restW < 1) restW = 1;
+
+    // Split the body where LVGL would have wrapped it, rather than letting one
+    // label wrap: the two lines start at different x, which is not something a
+    // single label can express.
+    size_t contStart = 0;
+    const size_t firstLen = tdeckProBreakAt(m.text, restFont, restW, &contStart);
+    const bool wraps = (maxLines > 1) && contLbl && (m.text[contStart] != '\0');
+
+    lv_obj_clear_flag(boldLbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(senderLbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_size(restLbl, restW, kTdeckProMsgLineH);
+    lv_obj_align(restLbl, LV_ALIGN_TOP_LEFT, restX, y);
+    lv_obj_clear_flag(restLbl, LV_OBJ_FLAG_HIDDEN);
+
+    if (!wraps) {
+        // One line, either because the body fits on one or because the block has
+        // no room left for a second. LV_LABEL_LONG_DOT rather than CLIP here:
+        // with no continuation line to carry the remainder, the ellipsis is the
+        // only thing left that can say there was more to the message.
+        lv_label_set_long_mode(restLbl, LV_LABEL_LONG_DOT);
+        lv_label_set_text(restLbl, m.text);
+        if (contLbl) lv_obj_add_flag(contLbl, LV_OBJ_FLAG_HIDDEN);
+        return kTdeckProMsgLineH;
+    }
+
+    // Clipped, not dotted: this half of the split fits by construction, and the
+    // ellipsis belongs on the line that carries what is left over.
+    char firstLine[sizeof(m.text)];
+    const size_t firstCopy = (firstLen < sizeof(firstLine)) ? firstLen : sizeof(firstLine) - 1;
+    memcpy(firstLine, m.text, firstCopy);
+    firstLine[firstCopy] = '\0';
+    lv_label_set_long_mode(restLbl, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(restLbl, firstLine);
+
+    // Line two, starting at the x where the time above it ended. The height is
+    // one line and fixed, which is what makes the ellipsis appear: dots are what
+    // LV_LABEL_LONG_DOT writes when text overflows the box it was given, so a
+    // box left to grow to fit could never overflow and would never show them.
+    const int contX = kTdeckProMsgRowLeft + timeW;
+    int contW = kTdeckProMsgRowWidth - timeW;
+    if (contW < 1) contW = 1;
+
+    lv_label_set_text(contLbl, m.text + contStart);
+    lv_obj_set_size(contLbl, contW, kTdeckProMsgLineH);
+    lv_obj_align(contLbl, LV_ALIGN_TOP_LEFT, contX, y + kTdeckProMsgLineH);
+    lv_obj_clear_flag(contLbl, LV_OBJ_FLAG_HIDDEN);
+
+    return kTdeckProMsgMaxLines * kTdeckProMsgLineH;
+}
+
+// Repaints the whole notification area.
+static void tdeckProRefreshSleepMsgRows() {
+    const TdeckProRecentMsg *picked[kTdeckProSleepMsgSlots] = {nullptr};
+    const int n = tdeckProSleepHasUnread() ? tdeckProCollectSleepMsgs(picked) : 0;
+
+    int y = kTdeckProMsgTop;
+    int linesLeft = kTdeckProMsgTotalLines;
+    for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
+        if (i < n && picked[i] && linesLeft > 0) {
+            // Offer the message what is left of the budget, never more than a
+            // message may take. With one line left a long body still gets shown,
+            // ellipsised, rather than dropped for not fitting in two.
+            const int allow = (linesLeft < kTdeckProMsgMaxLines) ? linesLeft
+                                                                 : kTdeckProMsgMaxLines;
+            // Advance by what the message actually drew. A fixed pitch would
+            // have to be two lines tall for every message -- leaving a blank
+            // line under each short one -- or overlap whenever one wrapped.
+            const int drew = tdeckProFillSleepMsgRow(i, y, allow, *picked[i]);
+            y += drew + kTdeckProMsgGapY;
+            linesLeft -= drew / kTdeckProMsgLineH;
+        } else if (s_tdeckProSleepMsgBold[i] && s_tdeckProSleepMsgSender[i]
+               && s_tdeckProSleepMsgRest[i]) {
+            // Hidden, not blanked: an empty label still occupies a line box, and
+            // three of those under a quiet clock is exactly the empty-notification
+            // -area artefact the single label was written to avoid.
+            lv_obj_add_flag(s_tdeckProSleepMsgBold[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_tdeckProSleepMsgSender[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_tdeckProSleepMsgRest[i], LV_OBJ_FLAG_HIDDEN);
+            if (s_tdeckProSleepMsgCont[i]) {
+                lv_obj_add_flag(s_tdeckProSleepMsgCont[i], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
     }
 }
 
@@ -5764,10 +6294,8 @@ static void updateTdeckProSleepClock() {
     lv_label_set_text(s_tdeckProSleepTime, timeText);
     lv_label_set_text(s_tdeckProSleepDate, dateText);
 
-    if (s_tdeckProSleepUnread && lv_obj_is_valid(s_tdeckProSleepUnread)) {
-        char unreadText[48];
-        tdeckProSleepUnreadText(unreadText, sizeof(unreadText));
-        lv_label_set_text(s_tdeckProSleepUnread, unreadText);
+    if (s_tdeckProSleepMsgBold[0] && lv_obj_is_valid(s_tdeckProSleepMsgBold[0])) {
+        tdeckProRefreshSleepMsgRows();
         s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
     }
 
@@ -5791,6 +6319,9 @@ static void updateTdeckProSleepClock() {
                      (unsigned)batteryReadPercent());
         }
         lv_label_set_text(s_tdeckProSleepBatt, battText);
+        // No repositioning: pinned to the top-right corner it cannot collide
+        // with the preview rows, so it stays where showTdeckProSleepClock put
+        // it whether or not there is anything unread.
     }
 
     s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
@@ -5809,64 +6340,130 @@ static void showTdeckProSleepClock() {
     lv_obj_set_size(s_tdeckProSleepOverlay, lv_pct(100), lv_pct(100));
     lv_obj_align(s_tdeckProSleepOverlay, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_tdeckProSleepOverlay, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_bg_color(s_tdeckProSleepOverlay, sleepOverlayBg(), 0);
     lv_obj_set_style_bg_opa(s_tdeckProSleepOverlay, LV_OPA_COVER, 0);
+#if FEATURE_LOCK_SCREEN
+    // Swallow taps. remove_style_all() leaves the overlay non-clickable, which
+    // on a lit panel means touches fall straight through to whatever screen is
+    // still built underneath — the lock screen would be pressing buttons the
+    // user cannot see. The Pro does not need this: its panel is asleep and the
+    // touch controller with it.
+    lv_obj_add_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_CLICKABLE);
+#endif
 
     s_tdeckProSleepTitle = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_width(s_tdeckProSleepTitle, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepTitle, &lv_font_montserrat_32, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepTitle, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_font(s_tdeckProSleepTitle, kSleepOverlayTitleFont, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepTitle, sleepOverlayInk(), 0);
     lv_obj_set_style_text_align(s_tdeckProSleepTitle, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(s_tdeckProSleepTitle, "Camillia");
-    lv_obj_align(s_tdeckProSleepTitle, LV_ALIGN_CENTER, 0, -96);
+    lv_obj_align(s_tdeckProSleepTitle, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
 
     s_tdeckProSleepNode = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_width(s_tdeckProSleepNode, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepNode, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepNode, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_text_font(s_tdeckProSleepNode, kSleepOverlayNodeFont, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepNode, sleepOverlayNodeInk(), 0);
     lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_CENTER, 0, -58);
+    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
 
     s_tdeckProSleepTime = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepTime, &lv_font_montserrat_40, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepTime, lv_color_make(0, 0, 0), 0);
-    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_CENTER, 0, -4);
+    lv_obj_set_style_text_font(s_tdeckProSleepTime, kSleepOverlayTimeFont, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepTime, sleepOverlayTimeChannelInk(), 0);
+    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
 
+    // Left half of the status band. Sized to its own text rather than to a
+    // percentage of the panel: a 92% box pinned to the left edge would reach
+    // under the battery, and the two would collide the moment either grew.
     s_tdeckProSleepDate = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_width(s_tdeckProSleepDate, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepDate, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepDate, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepDate, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_tdeckProSleepDate, LV_ALIGN_CENTER, 0, 48);
+    lv_obj_set_style_text_font(s_tdeckProSleepDate, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepDate, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepDate, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(s_tdeckProSleepDate, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProBandTop);
 
-    // Under the date. Plain text with no border: the label is present even when
-    // nothing is unread, so any persistent decoration draws an empty box on an
-    // otherwise quiet screensaver.
-    s_tdeckProSleepUnread = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_width(s_tdeckProSleepUnread, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepUnread, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepUnread, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepUnread, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_tdeckProSleepUnread, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_tdeckProSleepUnread, LV_ALIGN_CENTER, 0, 82);
+    // Under the date: message previews, newest first. Separate first-line labels
+    // keep time/channel blue, sender green and message white on Wio. Plain text
+    // has no border or background, for the reason the single count line had none --
+    // the rows exist even when there is nothing to say, and any persistent
+    // decoration would draw empty boxes on an otherwise quiet screensaver. They
+    // are hidden rather than emptied when unused; see tdeckProRefreshSleepMsgRows.
+    //
+    // Left-aligned, unlike everything above them: this is a list of messages,
+    // and centring each row would leave the names in a different place on every
+    // line for no gain.
+    for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
+        s_tdeckProSleepMsgBold[i] = lv_label_create(s_tdeckProSleepOverlay);
+        lv_obj_set_style_text_font(s_tdeckProSleepMsgBold[i], tdeckProBoldRowFont(), 0);
+        lv_obj_set_style_text_color(s_tdeckProSleepMsgBold[i], sleepOverlayTimeChannelInk(), 0);
+        // Pinned rather than inherited. Every position on these rows is computed
+        // from lv_text_get_size() and a 15 px line, so letter spacing, line
+        // spacing and padding have to be the values that arithmetic assumes --
+        // a theme that set any of them would put the labels somewhere the code
+        // did not measure.
+        lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgBold[i], 0, 0);
+        lv_obj_set_style_text_line_space(s_tdeckProSleepMsgBold[i], 0, 0);
+        lv_obj_set_style_pad_all(s_tdeckProSleepMsgBold[i], 0, 0);
+        lv_label_set_long_mode(s_tdeckProSleepMsgBold[i], LV_LABEL_LONG_CLIP);
+        lv_obj_add_flag(s_tdeckProSleepMsgBold[i], LV_OBJ_FLAG_HIDDEN);
 
-    // Bottom of the stack, under the date and the unread line. Deliberately the
-    // smallest text on the screen: it is a glance-value, and on a panel with no
-    // colour the only way to rank information is size.
+        s_tdeckProSleepMsgSender[i] = lv_label_create(s_tdeckProSleepOverlay);
+        lv_obj_set_style_text_font(s_tdeckProSleepMsgSender[i], emojiFont(&lv_font_montserrat_12), 0);
+        lv_obj_set_style_text_color(s_tdeckProSleepMsgSender[i], sleepOverlayNodeInk(), 0);
+        lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgSender[i], 0, 0);
+        lv_obj_set_style_text_line_space(s_tdeckProSleepMsgSender[i], 0, 0);
+        lv_obj_set_style_pad_all(s_tdeckProSleepMsgSender[i], 0, 0);
+        lv_label_set_long_mode(s_tdeckProSleepMsgSender[i], LV_LABEL_LONG_CLIP);
+        lv_obj_add_flag(s_tdeckProSleepMsgSender[i], LV_OBJ_FLAG_HIDDEN);
+
+        s_tdeckProSleepMsgRest[i] = lv_label_create(s_tdeckProSleepOverlay);
+        lv_obj_set_style_text_font(s_tdeckProSleepMsgRest[i], emojiFont(&lv_font_montserrat_12), 0);
+        lv_obj_set_style_text_color(s_tdeckProSleepMsgRest[i], sleepOverlayInk(), 0);
+        lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgRest[i], 0, 0);
+        lv_obj_set_style_text_line_space(s_tdeckProSleepMsgRest[i], 0, 0);
+        lv_obj_set_style_pad_all(s_tdeckProSleepMsgRest[i], 0, 0);
+        // Clipped, not dotted: the split is computed here, so whatever is put in
+        // this label already fits. An ellipsis on it could only be a disagreement
+        // between the measurement and LVGL, and it belongs on the line below.
+        lv_label_set_long_mode(s_tdeckProSleepMsgRest[i], LV_LABEL_LONG_CLIP);
+        lv_obj_add_flag(s_tdeckProSleepMsgRest[i], LV_OBJ_FLAG_HIDDEN);
+
+        // Line two. The only label that ellipsises -- it holds everything that
+        // did not fit on line one, and says so when it cannot show all of that
+        // either.
+        s_tdeckProSleepMsgCont[i] = lv_label_create(s_tdeckProSleepOverlay);
+        lv_obj_set_style_text_font(s_tdeckProSleepMsgCont[i], emojiFont(&lv_font_montserrat_12), 0);
+        lv_obj_set_style_text_color(s_tdeckProSleepMsgCont[i], sleepOverlayInk(), 0);
+        lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgCont[i], 0, 0);
+        lv_obj_set_style_text_line_space(s_tdeckProSleepMsgCont[i], 0, 0);
+        lv_obj_set_style_pad_all(s_tdeckProSleepMsgCont[i], 0, 0);
+        lv_label_set_long_mode(s_tdeckProSleepMsgCont[i], LV_LABEL_LONG_DOT);
+        lv_obj_add_flag(s_tdeckProSleepMsgCont[i], LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Right half of the status band, opposite the date. Still the smallest text
+    // on the screen -- it is a glance value, and on a panel with no colour the
+    // only way to rank information is size -- but a corner now says so as well.
+    // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
+    // end in the same place instead of drifting with the reading.
     s_tdeckProSleepBatt = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_width(s_tdeckProSleepBatt, lv_pct(92));
     lv_obj_set_style_text_font(s_tdeckProSleepBatt, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepBatt, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepBatt, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_tdeckProSleepBatt, LV_ALIGN_CENTER, 0, 112);
+    lv_obj_set_style_text_color(s_tdeckProSleepBatt, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepBatt, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_tdeckProSleepBatt, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProBandTop);
 
     updateTdeckProSleepClock();
     lv_obj_move_foreground(s_tdeckProSleepOverlay);
     lv_obj_invalidate(s_tdeckProSleepOverlay);
     lv_refr_now(s_lvDisplay);
+#if defined(DEVICE_TDECK_PRO)
+    // E-paper only. The panel is about to be put to sleep with this image on
+    // it, so the image has to be pushed now; a lit LCD is repainted by LVGL's
+    // normal timer and needs none of this.
     lcd.requestRefresh(true);
     lcd.serviceRefresh(true);
+#endif
 }
 
 static void hideTdeckProSleepClock() {
@@ -5878,11 +6475,16 @@ static void hideTdeckProSleepClock() {
     s_tdeckProSleepNode = nullptr;
     s_tdeckProSleepTime = nullptr;
     s_tdeckProSleepDate = nullptr;
-    s_tdeckProSleepUnread = nullptr;
     s_tdeckProSleepBatt = nullptr;
+    for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
+        s_tdeckProSleepMsgBold[i] = nullptr;
+        s_tdeckProSleepMsgSender[i] = nullptr;
+        s_tdeckProSleepMsgRest[i] = nullptr;
+        s_tdeckProSleepMsgCont[i] = nullptr;
+    }
     s_tdeckProSleepMinuteKey = UINT32_MAX;
-    s_tdeckProSleepUnreadKey = UINT32_MAX;
-    s_tdeckProSleepUnreadPendingKey = UINT32_MAX;
+    s_tdeckProSleepUnreadKey = UINT64_MAX;
+    s_tdeckProSleepUnreadPendingKey = UINT64_MAX;
     s_tdeckProSleepUnreadChangedMs = 0;
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
 }
@@ -5895,10 +6497,18 @@ static void hideTdeckProSleepClock() {
 static constexpr uint32_t kTdeckProSleepUnreadQuietMs = 3000;
 
 static void serviceTdeckProSleepClock() {
+#if FEATURE_LOCK_SCREEN
+    // The overlay is what is on a *lit* panel here, so the gate is the lock
+    // screen being up rather than the panel being out. s_lockScreenActive is
+    // declared below with the rest of the lock-screen state; this runs from the
+    // main loop, well after both exist.
+    if (!s_lockScreenActive || !s_tdeckProSleepOverlay) return;
+#else
     if (!s_screenAsleep || !s_tdeckProSleepOverlay) return;
+#endif
 
     const uint32_t nowMs = millis();
-    const uint32_t unreadNow = tdeckProSleepUnreadKey();
+    const uint64_t unreadNow = tdeckProSleepUnreadKey();
     if (unreadNow != s_tdeckProSleepUnreadPendingKey) {
         s_tdeckProSleepUnreadPendingKey = unreadNow;
         s_tdeckProSleepUnreadChangedMs = nowMs;
@@ -5911,12 +6521,20 @@ static void serviceTdeckProSleepClock() {
     const bool minuteDue = (tdeckProSleepClockMinuteKey() != s_tdeckProSleepMinuteKey);
     if (!minuteDue && !unreadDue) return;
 
+#if defined(DEVICE_TDECK_PRO)
+    // Wake the controller only for the repaint, then put it straight back.
     lcd.wakeup(false);
     updateTdeckProSleepClock();
     lv_obj_invalidate(s_tdeckProSleepOverlay);
     lv_refr_now(s_lvDisplay);
     lcd.serviceRefresh(true);
     lcd.sleep();
+#else
+    // Panel is already on and LVGL is already running: mark it dirty and let
+    // the normal refresh timer pick it up.
+    updateTdeckProSleepClock();
+    lv_obj_invalidate(s_tdeckProSleepOverlay);
+#endif
 }
 #endif
 
@@ -5946,6 +6564,86 @@ static void sleepScreen(const char *reason) {
         Serial.println("[screen] sleeping");
     }
 }
+
+#if FEATURE_LOCK_SCREEN
+// Puts the UI away behind the glance overlay, leaving the panel lit. Callers
+// check s_cfg.lockScreenEnabled — with it off nothing here is ever reached and
+// the firmware keeps its original two-state behaviour exactly.
+static void enterLockScreen(const char *reason) {
+    if (s_lockScreenActive || s_screenAsleep) return;
+
+    showTdeckProSleepClock();
+    s_lockScreenActive = true;
+    s_lockScreenSinceMs = millis();
+    // Whatever the backlight was doing on the way here — the pre-sleep dim in
+    // particular — the lock screen is shown at the configured brightness. A
+    // glance surface that arrives already dimmed reads as a fault.
+    s_preSleepDimmed = false;
+    applyBrightness();
+
+    if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
+        Serial.printf("[screen] lock screen (%s), staying on\n", reason ? reason : "");
+    } else {
+        Serial.printf("[screen] lock screen (%s), panel out in %lus\n",
+                      reason ? reason : "",
+                      (unsigned long)s_cfg.lockScreenOffSecs);
+    }
+}
+
+// Back to the UI. Used by the wake button, and by anything that has to take the
+// overlay down without going through a panel sleep — a theme rebuild, say.
+static void exitLockScreen() {
+    if (!s_lockScreenActive) return;
+    s_lockScreenActive = false;
+    hideTdeckProSleepClock();
+
+    // Restart the idle clock. Without this the screen timeout is measured from
+    // whenever input last landed, which was before the lock screen, and the UI
+    // would drop straight back onto it.
+    s_lastActivityMs = millis();
+    s_preSleepDimmed = false;
+
+    // The UI underneath has been sitting behind an opaque overlay and its
+    // dirty-checked refreshers have had nothing to do; force the repaint the
+    // same way wakeScreen() does.
+    s_lastRenderedChannel = -1;
+    s_lastRenderedCount = -1;
+    s_lastHeaderTime[0] = '\0';
+    s_lastBattPct = 255;
+    if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
+    Serial.println("[screen] lock screen dismissed");
+}
+
+// Ends the lit phase once lockScreenOffSecs has run out. Never fires on the
+// "stay on" setting, which is the whole point of offering it.
+static void serviceLockScreen(uint32_t nowMs) {
+    if (!s_lockScreenActive) return;
+
+    // A theme rebuild deletes the root screen and takes the overlay with it
+    // without anything here being told. Left alone, the flag would stay set
+    // over a visible UI and the wake button would appear to do nothing.
+    if (!s_tdeckProSleepOverlay || !lv_obj_is_valid(s_tdeckProSleepOverlay)) {
+        s_tdeckProSleepOverlay = nullptr;
+        exitLockScreen();
+        return;
+    }
+    // Turned off from web config while it was up.
+    if (!s_cfg.lockScreenEnabled) {
+        exitLockScreen();
+        return;
+    }
+    if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) return;
+
+    const uint32_t heldMs = (uint32_t)(nowMs - s_lockScreenSinceMs);
+    if (heldMs < (uint32_t)s_cfg.lockScreenOffSecs * 1000UL) return;
+
+    // Panel out first, overlay down second: taking the overlay down while the
+    // screen is still lit would show a frame of the UI on the way to darkness.
+    s_lockScreenActive = false;
+    sleepScreen("lock screen timeout");
+    hideTdeckProSleepClock();
+}
+#endif  // FEATURE_LOCK_SCREEN
 
 #if defined(DEVICE_MESH_DECK)
 // The front buttons hang off expander 0x59, not GPIO, so they are polled rather
@@ -6030,6 +6728,7 @@ static bool meshDeckLedDualColorEnabled() {
 
 static void meshDeckLedSetColor(uint8_t color, bool on) {
     const uint8_t c = cfgCoerceNotifyLedColor((int)color);
+    meshDeckKeyboardSetLedColor(c, on);
     if (!on || c == NOTIFY_LED_COLOR_OFF) {
         meshDeckLedSet(false, false, false);
         return;
@@ -6546,15 +7245,35 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 
     if (!stablePressed || sleepTriggered) return false;
     if (s_screenAsleep) {
+        // Straight back to the UI, whether the panel went dark from the lock
+        // screen or from a plain sleep. The button means "give me the device";
+        // making it land on the lock screen would give it two meanings
+        // depending on a state the user cannot see from a dark panel.
         wakeScreen();
         sleepTriggered = true;
         Serial.println("[screen] Wio Tracker L2 Wake button");
         return true;
     }
+#if FEATURE_LOCK_SCREEN
+    // A press unlocks — not a hold, which is how you arrived here. Checked
+    // before the activity timestamp below so unlocking does not also count as
+    // the input that restarts the idle timeout; exitLockScreen() does that.
+    if (s_lockScreenActive) {
+        exitLockScreen();
+        sleepTriggered = true;
+        return true;
+    }
+#endif
     s_lastActivityMs = nowMs;
     if (holdStartMs != 0
         && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
         sleepTriggered = true;
+#if FEATURE_LOCK_SCREEN
+        if (s_cfg.lockScreenEnabled) {
+            enterLockScreen("Wio Tracker L2 Wake button hold");
+            return true;
+        }
+#endif
         sleepScreen("Wio Tracker L2 Wake button hold");
         return true;
     }
@@ -6603,6 +7322,17 @@ static bool pollUserButton(uint32_t nowMs) {
     if ((nowMs - userBtnDebounceMs) >= 30 && userPressed != userBtnStable) {
         userBtnStable = userPressed;
         if (userBtnStable) {
+#if FEATURE_LOCK_SCREEN
+            // Only the dedicated Wake button dismisses the lock screen. GPIO0
+            // must not activate controls hidden underneath the opaque overlay.
+            if (s_lockScreenActive) return true;
+#endif
+            // Consume the press as a wake before inspecting the hidden UI.
+            // The held-button fallback below retries after the wake-input guard.
+            if (s_screenAsleep) {
+                (void)tryWakeScreenFromInput(nowMs);
+                return true;
+            }
             if (s_cfgModal) {
                 activateCfgSelection();
                 return true;
@@ -7122,6 +7852,10 @@ static void applyLoadedConfigInvariants() {
     // An off-list value would show on the row as "Never" while behaving as
     // something else entirely, and the row could not cycle back to it.
     s_cfg.notifyLightTimeoutS = cfgCoerceNotifyLightTimeout((long)s_cfg.notifyLightTimeoutS);
+    // Off-list values would leave the lock screen lit for an interval the slider
+    // cannot show or cycle back to. 0 survives coercion on purpose — it is the
+    // "stay on the lock screen" choice, not an unset field.
+    s_cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs(s_cfg.lockScreenOffSecs);
     applyPresetParams(s_cfg);
 }
 
@@ -9068,6 +9802,15 @@ static void initCfgActions() {
     // backlight, and the pair is the usual reason someone opens this screen on
     // a device running on a battery.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SCREEN_TIMEOUT;
+    #if FEATURE_LOCK_SCREEN
+    // Directly under Screen Timeout, because that is the timeout that leads
+    // here: the three rows read top to bottom as the whole story of what the
+    // panel does when it is left alone. The dwell row stays listed while the
+    // lock screen is off — greying rows out is not a pattern this screen has,
+    // and the row above it already says why it does nothing.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LOCK_SCREEN;
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LOCK_SCREEN_OFF;
+    #endif
     // A comfort setting, changed once to taste. Only on boards with a trackball
     // to invert.
     #if HAS_SCROLL_INVERT
@@ -10890,6 +11633,101 @@ static void openCfgScreenTimeoutModal() {
     openCfgSliderModal(&kSpec, screenTimeoutNearestIdx(s_cfg.screenOnSecs));
 }
 
+#if FEATURE_LOCK_SCREEN
+// ── Lock screen dwell ────────────────────────────────────────────────────────
+// How long the lock screen stays lit before the panel goes out for real. Same
+// stepped-slider shape as Screen Timeout above, and for the same reason: the
+// values worth choosing are a short list, and a free-running number would let
+// someone pick 37 minutes without meaning to.
+//
+// Five to sixty in five-minute steps, then "Stay on". Stay on is last rather
+// than first because it is the expensive answer — the panel never goes out on
+// its own — and a list you scroll through should not open on it.
+struct LockScreenOffOption { uint32_t secs; const char *label; };
+static const LockScreenOffOption kLockScreenOffs[] = {
+    {  300, "5 min"  },
+    {  600, "10 min" },
+    {  900, "15 min" },
+    { 1200, "20 min" },
+    { 1500, "25 min" },
+    { 1800, "30 min" },
+    { 2100, "35 min" },
+    { 2400, "40 min" },
+    { 2700, "45 min" },
+    { 3000, "50 min" },
+    { 3300, "55 min" },
+    { 3600, "60 min" },
+    {    0, "Stay on" },
+};
+static constexpr int kLockScreenOffCount =
+    (int)(sizeof(kLockScreenOffs) / sizeof(kLockScreenOffs[0]));
+
+// Label for any stored value, listed or not, so the config row can render
+// something a hand-edited YAML produced. Static buffer for the same reason
+// screenTimeoutName()'s is: callers copy the text immediately.
+static const char *lockScreenOffName(uint32_t secs) {
+    for (int i = 0; i < kLockScreenOffCount; i++) {
+        if (kLockScreenOffs[i].secs == secs) return kLockScreenOffs[i].label;
+    }
+    static char buf[16];
+    snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
+    return buf;
+}
+
+// Nearest listed stop, with "Stay on" (0) matched exactly and never approached
+// by distance — the same rule screenTimeoutNearestIdx() follows, and for the
+// same reason: 0 is the smallest number in the table and every stray value
+// would otherwise land on it.
+static int lockScreenOffNearestIdx(uint32_t secs) {
+    int best = 0;
+    long bestDelta = -1;
+    for (int i = 0; i < kLockScreenOffCount; i++) {
+        if (kLockScreenOffs[i].secs == secs) return i;
+        if (kLockScreenOffs[i].secs == LOCK_SCREEN_OFF_NEVER) continue;
+        long delta = (long)kLockScreenOffs[i].secs - (long)secs;
+        if (delta < 0) delta = -delta;
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            best = i;
+        }
+    }
+    return best;
+}
+
+static const char *cfgLockScreenOffLabelFor(int idx) {
+    if (idx < 0 || idx >= kLockScreenOffCount) idx = 0;
+    return kLockScreenOffs[idx].label;
+}
+
+static void cfgLockScreenOffApply(int idx) {
+    if (idx < 0 || idx >= kLockScreenOffCount) idx = 0;
+    s_cfg.lockScreenOffSecs = kLockScreenOffs[idx].secs;
+    persistConfigToPrefs();
+    // Restart the dwell against the new value. Only reachable with the lock
+    // screen down, but shortening 60 minutes to 5 should not be measured from
+    // whenever the last one started either way.
+    s_lockScreenSinceMs = millis();
+    if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Lock screen stays on");
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Screen off after %s on lock",
+                 lockScreenOffName(s_cfg.lockScreenOffSecs));
+    }
+}
+
+static void openCfgLockScreenOffModal() {
+    static const CfgSliderPicker kSpec = {
+        "Lock Screen Off",
+        kLockScreenOffCount,
+        cfgLockScreenOffLabelFor,
+        cfgLockScreenOffApply,
+        "5 min",
+        "stay on",
+    };
+    openCfgSliderModal(&kSpec, lockScreenOffNearestIdx(s_cfg.lockScreenOffSecs));
+}
+#endif  // FEATURE_LOCK_SCREEN
+
 // ── Battery calibration ──────────────────────────────────────────────────────
 // Same slider shape as brightness, trimming the measured battery voltage by
 // +/-20% in 0.5% steps. The reading updates live while the slider moves, so the
@@ -12363,10 +13201,25 @@ static constexpr uint32_t kNodeInfoReplyThrottleMs = 3600000UL;
 // NodeInfo request (NodeInfoModule.cpp:168-172, the shorterTimeout path).
 static constexpr uint32_t kDiscoverySweepMinGapMs = 60000UL;
 
-// How long replies are counted against a sweep before it is called done. Same
-// order as the traceroute window — long enough for a 3-hop round trip with
-// relay backoff, short enough that a dead sweep stops looking live.
-static constexpr uint32_t kDiscoverySweepWindowMs = 45000UL;
+// How long replies are counted against a sweep before it is called done. A flat
+// minute: comfortably past a 3-hop round trip with relay backoff, short enough
+// that a dead sweep stops looking live, and a round figure someone waiting on
+// one can hold in their head next to the preset scan's five.
+static constexpr uint32_t kDiscoverySweepWindowMs = 60000UL;
+
+// Quiet time after a sweep closes before another is accepted. Deliberately
+// separate from kDiscoverySweepMinGapMs above, which measures from a sweep's
+// *start* and cites an upstream rule: folding this into that number would make
+// its citation false, and would silently vanish on the preset scan below, whose
+// window outlasts the gap several times over. Two rules, each measuring what it
+// says it measures.
+static constexpr uint32_t kDiscoverySweepCooldownMs = 15000UL;
+
+// A preset scan listens far longer than a sweep waits for replies, and for a
+// different reason: the one broadcast collects whoever answers, and the rest of
+// the window is what catches the foreign mesh's own periodic NodeInfo, Position
+// and Telemetry broadcasts. That is where most of the picture comes from.
+static constexpr uint32_t kDiscoveryPresetScanWindowMs = 300000UL;   // 5 minutes
 
 // Meshtastic's *polite* channel-utilization threshold (airtime.h:70-72); its
 // hard refusal is 40%. A sweep is discretionary and asks others to transmit, so
@@ -12433,6 +13286,49 @@ static uint32_t s_discoveryLastSweepMs = 0;
 static int      s_discoverySweepBaseNodes = 0;
 static char     s_discoveryStatus[72] = {};
 static uint32_t s_discoveryRenderedSig = 0;
+// When the last sweep's window closed, for kDiscoverySweepCooldownMs. 0 = none
+// has closed this boot.
+static uint32_t s_discoverySweepEndedMs = 0;
+
+// ── Preset scan ──────────────────────────────────────────────────────────────
+// A sweep answers "who is out there on the preset this node runs". A preset
+// scan asks the same question of a preset the node is *not* running: it parks
+// the radio there, sweeps, and puts the radio back.
+//
+// The manoeuvre is Meshtastic 2.7's beacon trick in reverse — their nodes
+// retune briefly to *advertise* on a foreign preset (mesh_proto.h:148) and we
+// have only ever received those. This retunes to listen.
+//
+// Nothing about it is a configuration change, and that distinction is the whole
+// design. s_cfg is never written, so no save path can make the scanned preset
+// permanent — see discoveryStartPresetScan() for why that matters more than it
+// sounds. The only global state it moves is the radio tuning and channel 0's
+// name, both restored by discoveryEndPresetScan().
+static bool     s_presetScanActive = false;
+static uint8_t  s_presetScanPreset = 0;        // PRESET_* being scanned
+// What the radio has to go back to. Snapshotted rather than re-derived on the
+// way out: re-deriving would depend on applyPresetParams() reaching the same
+// answer it reached at boot, and a restore has no business being that clever.
+// It also has to be right for a node running custom modem settings, where there
+// is no preset to derive anything from.
+static float    s_presetScanPrevFreq = 0.0f;
+static float    s_presetScanPrevBw   = 0.0f;
+static uint8_t  s_presetScanPrevSf   = 0;
+static uint8_t  s_presetScanPrevCr   = 0;
+// Channel 0's name, restored verbatim. Both halves: name may point at a
+// compiled-in literal rather than into name_buf (see ChannelKey, mesh_proto.h).
+static const char *s_presetScanPrevChanName = nullptr;
+static char     s_presetScanPrevChanBuf[sizeof(CHANNEL_KEYS[0].name_buf)] = {};
+static bool     s_presetScanRenamedChan = false;
+
+// Preset picker. Rows are the presets worth scanning, so a row index is not a
+// preset index — s_presetPickChoices maps one to the other.
+static lv_obj_t *s_presetPickBackdrop = nullptr;
+static lv_obj_t *s_presetPickModal = nullptr;
+static lv_obj_t *s_presetPickRows[PRESET_COUNT] = {};
+static uint8_t   s_presetPickChoices[PRESET_COUNT] = {};
+static int       s_presetPickCount = 0;
+static int       s_presetPickSelection = 0;
 #endif  // FEATURE_DISCOVERY
 
 
@@ -22144,10 +23040,9 @@ static void refreshLiveView(bool force) {
     // emoji-enabled one, drew any emoji in a live line as a fallback box
     // despite the text going through setLabelTextEmojiSafe() below.
     //
-    // Only the feed rows scale. The header's filter chip and Tools button are
-    // fixed-size boxes (52x20, and a 92px chip sized to hold the longest filter
-    // name), so a larger face would spill out of them rather than move the
-    // layout with it.
+    // Only the feed rows scale. The header's filter chip is fixed at 92px to
+    // hold the longest filter name, so a larger face would spill out of it
+    // rather than move the layout with it.
     const lv_font_t *liveBodyFont = scaledChatFont(kChannelChatFont);
 
     const Channel &ch = Channels.get(CHAN_LIVE);
@@ -22493,9 +23388,9 @@ static void openLiveModal() {
     // No Back tooltip here. Esc leaves every modal on this build, and carrying
     // it made the legend 239 px wide against 230 px of content — it wrapped to
     // a second line and took 11 px off the feed. The rest fits on one line.
-    lv_label_set_text(hint, "C = Clear   T = Tools   F = Filter");
+    lv_label_set_text(hint, "C = Clear   F = Filter");
 #else
-    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   T = Tools   F = Filter",
+    lv_label_set_text_fmt(hint, "%s = Back   C = Clear   F = Filter",
                           modalCloseKeyLabel());
 #endif
 #endif
@@ -24672,6 +25567,7 @@ static void openMqttSendModal() {
 #if FEATURE_DISCOVERY
 
 static void closeDiscoveryModal() {
+    closeDiscoveryPresetModal();
     lvObjDeleteSafe(s_discoveryModal);
     s_discoveryStatusLabel = nullptr;
     s_discoveryList = nullptr;
@@ -24679,6 +25575,16 @@ static void closeDiscoveryModal() {
     s_discoveryRenderedSig = 0;
     // s_discoverySweepStartedMs is deliberately left alone: a sweep already on
     // the air keeps running, and serviceDiscoverySweep() still closes it out.
+    //
+    // A preset scan is the exception, and the difference is that it is not one
+    // packet already gone — it is the radio parked somewhere the node does not
+    // live, deaf to its own mesh for as long as it stays there. Leaving the
+    // screen has to bring it home, so the scan is abandoned here rather than
+    // left to run its window out with nobody watching.
+    //
+    // prepareGlobalNavigation() calls this, so every Alt+letter shortcut and
+    // every M9 hardware button routes through the restore for free.
+    discoveryEndPresetScan(/*aborted=*/true);   // no-op unless one is running
 }
 
 // Clear watermark: Discovery ignores anything it has not heard since this
@@ -24923,11 +25829,19 @@ static void discoverySetStatus(const char *text) {
     }
 }
 
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
 // ── Saving a snapshot ────────────────────────────────────────────────────────
-// SD-card boards only. Boards with just internal flash could write the same
-// file, but these snapshots accumulate one per press and a small internal
-// partition is the wrong place to let that happen unattended.
+// Anywhere a file can be written, which is what HAS_FILE_STORAGE answers —
+// storage.h says to prefer it over HAS_SD_CARD for exactly this question, and
+// everything below already goes through storageFs()/storageName() rather than
+// naming a backend.
+//
+// This used to be SD-only, on the grounds that snapshots accumulate one per
+// press and "a small internal partition is the wrong place to let that happen
+// unattended". The premise does not hold: the internal-flash boards carry a
+// 9.5 MB littlefs partition (partitions_16mb_fs.csv), which is thousands of
+// snapshots, and the restriction was costing more than it saved — see the Save
+// button in openDiscoveryModal() for the board it locked out of its own SD card.
 
 // Minimal JSON string escaping. Quote and backslash get escaped; anything below
 // 0x20 becomes a space rather than \uXXXX, which keeps the worst case at 2x the
@@ -25118,7 +26032,7 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
     snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
     return true;
 }
-#endif  // HAS_SD_CARD
+#endif  // HAS_FILE_STORAGE
 
 // Empties the screen — every group, not just the one Discovery stores itself.
 //
@@ -25150,31 +26064,49 @@ static void discoveryClear() {
 // Every guard here maps to a specific Meshtastic rule; each refusal says why,
 // because a Sweep button that silently does nothing is indistinguishable from
 // a broken one.
-static void discoveryStartSweep() {
+//
+// Shared with the preset scan, which sends the identical broadcast and so owes
+// the mesh the identical restraint — the only difference is which preset hears
+// it. Returns false with the reason in msg.
+static bool discoverySweepAllowed(char *msg, size_t msgLen) {
     if (s_discoverySweepStartedMs != 0) {
-        discoverySetStatus("Sweep already running");
-        return;
+        snprintf(msg, msgLen, "Sweep already running");
+        return false;
     }
     if (!Radio.isReady() || s_myNodeId == 0) {
-        discoverySetStatus("Radio not ready");
-        return;
+        snprintf(msg, msgLen, "Radio not ready");
+        return false;
     }
+    // Two separate rules, and the refusal names whichever is actually binding
+    // so the countdown it prints is the one being waited on. From the last
+    // sweep's start: the upstream one-per-minute floor. From its end: the quiet
+    // gap that stops a sweep being re-fired the instant the last one lands. For
+    // a 60 s sweep they coincide at 75 s from the start; after a five-minute
+    // preset scan only the second one is left to do any work.
+    uint32_t waitMs = 0;
     if (s_discoveryLastSweepMs != 0) {
         const uint32_t since = millis() - s_discoveryLastSweepMs;
-        if (since < kDiscoverySweepMinGapMs) {
-            char msg[72];
-            snprintf(msg, sizeof(msg), "Wait %lus between sweeps",
-                     (unsigned long)((kDiscoverySweepMinGapMs - since + 999UL) / 1000UL));
-            discoverySetStatus(msg);
-            return;
+        if (since < kDiscoverySweepMinGapMs) waitMs = kDiscoverySweepMinGapMs - since;
+    }
+    if (s_discoverySweepEndedMs != 0) {
+        const uint32_t since = millis() - s_discoverySweepEndedMs;
+        if (since < kDiscoverySweepCooldownMs) {
+            const uint32_t left = kDiscoverySweepCooldownMs - since;
+            if (left > waitMs) waitMs = left;
         }
     }
+    if (waitMs > 0) {
+        snprintf(msg, msgLen, "Wait %lus between sweeps",
+                 (unsigned long)((waitMs + 999UL) / 1000UL));
+        return false;
+    }
+    // Measured on the preset we are on, which for a preset scan is not the one
+    // the sweep will land on. It still bounds the thing it exists to bound —
+    // how often *this* node asks a mesh to answer — so it is applied either way.
     const float chUtil = Radio.channelUtilPercent();
     if (chUtil >= kDiscoverySweepMaxChUtil) {
-        char msg[72];
-        snprintf(msg, sizeof(msg), "Channel busy (%.0f%%) - not sweeping", chUtil);
-        discoverySetStatus(msg);
-        return;
+        snprintf(msg, msgLen, "Channel busy (%.0f%%) - not sweeping", chUtil);
+        return false;
     }
 
     // Every NODEINFO broadcast shares one 15 s window, and the periodic announce
@@ -25184,10 +26116,17 @@ static void discoveryStartSweep() {
     // there. Checked before sending so the message can name the remaining time.
     const uint32_t cooldownMs = Channels.nodeInfoBroadcastCooldownMs();
     if (cooldownMs > 0) {
-        char msg[72];
-        snprintf(msg, sizeof(msg), "Radio busy - retry in %lus",
+        snprintf(msg, msgLen, "Radio busy - retry in %lus",
                  (unsigned long)((cooldownMs + 999UL) / 1000UL));
-        discoverySetStatus(msg);
+        return false;
+    }
+    return true;
+}
+
+static void discoveryStartSweep() {
+    char why[72];
+    if (!discoverySweepAllowed(why, sizeof(why))) {
+        discoverySetStatus(why);
         return;
     }
 
@@ -25212,21 +26151,196 @@ static void discoveryStartSweep() {
     discoverySetStatus("Sweeping...");
 }
 
+// ── Preset scan ──────────────────────────────────────────────────────────────
+
+// Human label for a preset index, for status lines and picker rows.
+static const char *discoveryPresetLabel(uint8_t preset) {
+    return (preset < PRESET_COUNT) ? kPresets[preset].name : "?";
+}
+
+// The preset the node is configured for, or -1 when custom modem settings are
+// in force and no preset is in play. Only used to leave a preset out of the
+// picker — there is nothing to scan for on the one we are already on.
+static int discoveryCurrentPreset() {
+    if (!s_cfg.loraUsePreset) return -1;
+    return (s_cfg.modemPreset < PRESET_COUNT) ? (int)s_cfg.modemPreset : -1;
+}
+
+// Parks the radio on `preset`, having snapshotted what it has to go back to.
+//
+// Deliberately NOT applyPresetParams() and NOT the onWebCfgSaved() retune
+// sequence, both of which write s_cfg. That would be the whole feature's
+// failure mode: markConfigDirty() is called from three dozen unrelated places
+// and serviceConfigFlush() writes the *entire* s_cfg to NVS 1.5 s later, so a
+// brightness nudge during the five-minute window would make the scanned preset
+// permanent. Same argument s_powerWifiHold settled for the low-battery Wi-Fi
+// shed: a runtime hold is not a configuration change, and must not be able to
+// become one. Everything below is derived locally and handed straight to the
+// radio.
+static void discoveryTuneToPreset(uint8_t preset) {
+    const PresetParams &p = kPresets[preset];
+
+    s_presetScanPrevFreq = s_cfg.loraFreq;
+    s_presetScanPrevBw   = s_cfg.loraBw;
+    s_presetScanPrevSf   = s_cfg.loraSf;
+    s_presetScanPrevCr   = s_cfg.loraCr;
+
+    // Channel 0's name, and why the scan cannot skip it: the hash stamped on
+    // every packet is computeChannelHash(name, key, keyLen), so a sweep sent
+    // while channel 0 is still called LongFast carries the LongFast hash and the
+    // mesh we just retuned to hear will drop it — and drop us. Gated on the same
+    // test every other path uses, so a primary channel the user deliberately
+    // renamed is left alone here as it is everywhere else.
+    //
+    // Keys are not swapped, which bounds what a scan can see: it finds the mesh
+    // that shares this node's primary key on that preset — the public one, when
+    // the node is on the default key. openDiscoveryPresetModal() says so rather
+    // than letting it be discovered.
+    s_presetScanRenamedChan = primaryChannelNameIsPresetDefault();
+    if (s_presetScanRenamedChan) {
+        s_presetScanPrevChanName = CHANNEL_KEYS[0].name;
+        memcpy(s_presetScanPrevChanBuf, CHANNEL_KEYS[0].name_buf,
+               sizeof(s_presetScanPrevChanBuf));
+        strncpy(CHANNEL_KEYS[0].name_buf, p.channelName,
+                sizeof(CHANNEL_KEYS[0].name_buf) - 1);
+        CHANNEL_KEYS[0].name_buf[sizeof(CHANNEL_KEYS[0].name_buf) - 1] = '\0';
+        CHANNEL_KEYS[0].name = CHANNEL_KEYS[0].name_buf;
+        recomputeChannelHashes();
+    }
+
+    // Same slot arithmetic applyPresetParams() runs, read straight out of the
+    // preset table instead of through the config struct.
+    const float freq = regionSlotFreq(s_cfg.region, p.bw, p.channelName);
+    Radio.reconfigure(freq, p.bw, p.sf, p.cr, s_cfg.loraPower);
+}
+
+static void discoveryEndPresetScan(bool aborted) {
+    if (!s_presetScanActive) return;
+    s_presetScanActive = false;
+    // An abort takes the sweep with it. The window only means anything while the
+    // radio is on the preset being swept, so letting it run on after the retune
+    // would close a scan that is no longer happening and report a count for it.
+    // The completion path has already cleared this.
+    if (aborted) s_discoverySweepStartedMs = 0;
+
+    if (s_presetScanRenamedChan) {
+        memcpy(CHANNEL_KEYS[0].name_buf, s_presetScanPrevChanBuf,
+               sizeof(s_presetScanPrevChanBuf));
+        CHANNEL_KEYS[0].name = s_presetScanPrevChanName;
+        recomputeChannelHashes();
+        s_presetScanRenamedChan = false;
+    }
+    if (s_radioReady) {
+        Radio.reconfigure(s_presetScanPrevFreq, s_presetScanPrevBw,
+                          s_presetScanPrevSf, s_presetScanPrevCr, s_cfg.loraPower);
+    }
+
+    // The cooldown runs from here whether the scan finished or was cut short: an
+    // abort has just retuned the radio, which is exactly when it should not be
+    // asked to go straight back out again.
+    uint32_t now = millis();
+    if (now == 0) now = 1;
+    s_discoverySweepEndedMs = now;
+
+    Serial.printf("[discovery] preset scan %s (%s) - radio back on %.4f MHz\n",
+                  aborted ? "aborted" : "done",
+                  discoveryPresetLabel(s_presetScanPreset),
+                  (double)s_presetScanPrevFreq);
+}
+
+// Retunes to `preset`, sweeps it, and leaves serviceDiscoverySweep() to bring
+// the radio home when the window closes.
+static void discoveryStartPresetScan(uint8_t preset) {
+    if (preset >= PRESET_COUNT) return;
+    if (s_presetScanActive) {
+        discoverySetStatus("Preset scan already running");
+        return;
+    }
+    if (preset == discoveryCurrentPreset()) {
+        discoverySetStatus("Already on that preset");
+        return;
+    }
+    char why[72];
+    if (!discoverySweepAllowed(why, sizeof(why))) {
+        discoverySetStatus(why);
+        return;
+    }
+
+    // Guards first, then retune, then send — and if the send fails the radio
+    // goes home before the failure is reported, so a refused scan never leaves
+    // the node parked somewhere it does not live.
+    s_presetScanActive = true;
+    s_presetScanPreset = preset;
+    discoveryTuneToPreset(preset);
+
+    if (!Channels.sendDiscoverySweep(s_myNodeId,
+                                     s_cfg.nodeLong,
+                                     s_cfg.nodeShort,
+                                     kDiscoverySweepHopLimit)) {
+        discoveryEndPresetScan(/*aborted=*/true);
+        discoverySetStatus("Scan send failed");
+        return;
+    }
+
+    // Findings have to be readable as an answer to "what is on MediumFast",
+    // which they are not while nodes heard on this node's own preset are still
+    // listed alongside them. The clear watermark does it without touching the
+    // node table — see discoveryClear(). The results stay on screen after the
+    // radio comes home, which is the point of running the scan at all.
+    discoveryClear();
+
+    uint32_t now = millis();
+    if (now == 0) now = 1;   // 0 is the "no sweep in flight" sentinel
+    s_discoverySweepStartedMs = now;
+    s_discoveryLastSweepMs = now;
+    s_discoverySweepBaseNodes = Nodes.count();
+
+    char msg[72];
+    snprintf(msg, sizeof(msg), "Scanning %s...", discoveryPresetLabel(preset));
+    discoverySetStatus(msg);
+    Serial.printf("[discovery] preset scan started: %s (%.1f kHz SF%u CR4/%u)\n",
+                  discoveryPresetLabel(preset), (double)kPresets[preset].bw,
+                  (unsigned)kPresets[preset].sf, (unsigned)kPresets[preset].cr);
+}
+
 // Closes out a sweep once its collection window has passed. Runs from the main
 // loop whether or not the modal is open, so a sweep started and then abandoned
 // still clears and still counts.
 static void serviceDiscoverySweep() {
+    // A theme rebuild deletes the root screen — and the modal with it — without
+    // going through closeDiscoveryModal(). For a plain sweep that costs nothing;
+    // for a scan it would strand the radio on a foreign preset until the next
+    // reboot, so the modal being gone is itself a reason to come home.
+    if (s_presetScanActive && !lvObjAlive(s_discoveryModal)) {
+        discoveryEndPresetScan(/*aborted=*/true);
+        return;
+    }
     if (s_discoverySweepStartedMs == 0) return;
+    const uint32_t windowMs = s_presetScanActive ? kDiscoveryPresetScanWindowMs
+                                                 : kDiscoverySweepWindowMs;
     const uint32_t elapsedMs = millis() - s_discoverySweepStartedMs;
-    if (elapsedMs < kDiscoverySweepWindowMs) return;
+    if (elapsedMs < windowMs) return;
 
     int found = Nodes.count() - s_discoverySweepBaseNodes;
     if (found < 0) found = 0;   // the table evicts; a shrinking count is not -2 nodes
     s_discoverySweepStartedMs = 0;
 
     char msg[72];
-    snprintf(msg, sizeof(msg), "Sweep done: %d new (%lus)",
-             found, (unsigned long)(elapsedMs / 1000UL));
+    if (s_presetScanActive) {
+        // Names the preset, because "4 new" means something very different when
+        // those four are on another mesh entirely.
+        const uint8_t scanned = s_presetScanPreset;
+        discoveryEndPresetScan(/*aborted=*/false);
+        snprintf(msg, sizeof(msg), "%s: %d found (%lus)",
+                 discoveryPresetLabel(scanned), found,
+                 (unsigned long)(elapsedMs / 1000UL));
+    } else {
+        uint32_t endedMs = millis();
+        if (endedMs == 0) endedMs = 1;
+        s_discoverySweepEndedMs = endedMs;
+        snprintf(msg, sizeof(msg), "Sweep done: %d new (%lus)",
+                 found, (unsigned long)(elapsedMs / 1000UL));
+    }
     discoverySetStatus(msg);
     refreshDiscoveryModal(true);
 }
@@ -25248,7 +26362,14 @@ static void refreshDiscoveryModal(bool force) {
     if (s_discoverySweepStartedMs != 0) {
         const uint32_t elapsedS = (millis() - s_discoverySweepStartedMs) / 1000UL;
         char msg[72];
-        snprintf(msg, sizeof(msg), "Sweeping... (%lus)", (unsigned long)elapsedS);
+        if (s_presetScanActive) {
+            snprintf(msg, sizeof(msg), "Scanning %s %lu/%lus",
+                     discoveryPresetLabel(s_presetScanPreset),
+                     (unsigned long)elapsedS,
+                     (unsigned long)(kDiscoveryPresetScanWindowMs / 1000UL));
+        } else {
+            snprintf(msg, sizeof(msg), "Sweeping... (%lus)", (unsigned long)elapsedS);
+        }
         discoverySetStatus(msg);
     } else if (!s_discoveryStatus[0]) {
         discoverySetStatus("Ready");
@@ -25282,6 +26403,277 @@ static void refreshDiscoveryModal(bool force) {
     s_discoveryRenderedSig = sig;
 
     discoveryBuildColumns();
+}
+
+// ── Preset picker ────────────────────────────────────────────────────────────
+// Sits above Discovery and chooses the preset to scan. Unlike the chat-name and
+// font-size pickers, a tap here selects rather than commits: the Scan button and
+// Enter are the only ways to start one. A stray tap on those costs a repaint; a
+// stray tap on this costs five minutes off the node's own mesh.
+
+static void closeDiscoveryPresetModal() {
+    if (lvObjValid(s_presetPickBackdrop)) {
+        lv_obj_del(s_presetPickBackdrop);
+    } else if (lvObjValid(s_presetPickModal)) {
+        lv_obj_del(s_presetPickModal);
+    }
+    s_presetPickBackdrop = nullptr;
+    s_presetPickModal = nullptr;
+    memset(s_presetPickRows, 0, sizeof(s_presetPickRows));
+    s_presetPickCount = 0;
+    s_presetPickSelection = 0;
+}
+
+static void refreshDiscoveryPresetSelection() {
+    if (!s_presetPickModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < s_presetPickCount; i++) {
+        lv_obj_t *row = s_presetPickRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_presetPickSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < s_presetPickCount; i++) {
+        lv_obj_t *row = s_presetPickRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_presetPickSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+static void discoveryPresetPickCommit() {
+    if (s_presetPickSelection < 0 || s_presetPickSelection >= s_presetPickCount) return;
+    const uint8_t preset = s_presetPickChoices[s_presetPickSelection];
+    // Closed before the scan starts, so the status line the scan writes is on
+    // the screen the user is looking at rather than behind this modal.
+    closeDiscoveryPresetModal();
+    discoveryStartPresetScan(preset);   // refuses, with a reason, when it must
+    refreshDiscoveryModal(true);
+}
+
+static void onDiscoveryPresetRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_presetPickCount) return;
+    s_presetPickSelection = idx;
+    refreshDiscoveryPresetSelection();
+}
+
+static void openDiscoveryPresetModal() {
+    if (!s_rootScreen || !s_discoveryModal) return;
+    if (s_presetPickModal || s_presetPickBackdrop) return;
+    if (s_presetScanActive) {
+        discoverySetStatus("Preset scan already running");
+        refreshDiscoveryModal(true);
+        return;
+    }
+
+    // Every preset but the one in force. With custom modem settings active no
+    // preset is current, so all of them are offered.
+    const int current = discoveryCurrentPreset();
+    s_presetPickCount = 0;
+    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+        if ((int)i == current) continue;
+        s_presetPickChoices[s_presetPickCount++] = i;
+    }
+    if (s_presetPickCount == 0) return;
+    s_presetPickSelection = 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_presetPickBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_presetPickBackdrop, w, h);
+    lv_obj_align(s_presetPickBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_presetPickBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_presetPickBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_presetPickBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_presetPickBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_presetPickBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_presetPickBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_presetPickBackdrop,
+                        [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryPresetModal(); },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_presetPickModal = lv_obj_create(s_presetPickBackdrop);
+    lv_obj_set_size(s_presetPickModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_presetPickModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_presetPickModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_presetPickModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_presetPickModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_presetPickModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_presetPickModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_presetPickModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_presetPickModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_presetPickModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_presetPickModal, 1, 0);
+    lv_obj_set_style_pad_all(s_presetPickModal, 8, 0);
+    lv_obj_set_style_pad_row(s_presetPickModal, 5, 0);
+    lv_obj_set_flex_flow(s_presetPickModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_presetPickModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_presetPickBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_presetPickModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Scan a preset");
+
+    // The cost, before the user commits rather than after. A node parked on
+    // another preset hears nothing sent to it on its own — no messages, no ACKs,
+    // no traceroute replies — and five minutes is long enough to matter.
+    lv_obj_t *warn = lv_label_create(s_presetPickModal);
+    lv_obj_set_width(warn, lv_pct(100));
+    lv_obj_set_style_text_font(warn, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(warn, hintColor, 0);
+    lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(warn, "5 min on that preset. This node hears nothing on its own "
+                            "while it runs, and finds only meshes sharing your primary "
+                            "channel key.");
+
+    lv_obj_t *list = lv_obj_create(s_presetPickModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    // Capped so the Scan button below stays on screen rather than scrolling off
+    // with the rows.
+    lv_obj_set_style_max_height(list, (h > 150) ? (h - 118) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(list);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    for (int i = 0; i < s_presetPickCount; i++) {
+        const PresetParams &p = kPresets[s_presetPickChoices[i]];
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_presetPickRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onDiscoveryPresetRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        lv_label_set_text(name, p.name);
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            lv_label_set_text_fmt(desc, "%s  SF%u  %.0f kHz",
+                                  p.channelName, (unsigned)p.sf, (double)p.bw);
+        }
+    }
+
+    lv_obj_t *btnRow = lv_obj_create(s_presetPickModal);
+    lv_obj_set_width(btnRow, lv_pct(100));
+    lv_obj_set_height(btnRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(btnRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btnRow, 0, 0);
+    lv_obj_set_style_pad_all(btnRow, 0, 0);
+    lv_obj_set_style_pad_column(btnRow, 10, 0);
+    lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makePickBtn = [](lv_obj_t *parent, const char *text, uint32_t color,
+                          lv_event_cb_t cb) {
+        lv_obj_t *btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 26);
+        lv_obj_set_style_min_width(btn, 76, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+#if defined(DEVICE_TDECK_PRO)
+        LV_UNUSED(color);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+#else
+        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+#endif
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
+#else
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+#endif
+        lv_label_set_text(lbl, text);
+        lv_obj_center(lbl);
+    };
+    makePickBtn(btnRow, "Cancel", 0x6B3030,
+                [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryPresetModal(); });
+    makePickBtn(btnRow, "Scan", 0x2F6B30,
+                [](lv_event_t *e) { LV_UNUSED(e); discoveryPresetPickCommit(); });
+
+    lv_obj_t *hint = lv_label_create(s_presetPickModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, "Tap a preset, then Scan");
+#else
+    lv_label_set_text_fmt(hint, "Move  Enter=Scan  %s=Cancel", modalCloseKeyLabel());
+#endif
+
+    refreshDiscoveryPresetSelection();
 }
 
 static void openDiscoveryModal() {
@@ -25354,16 +26746,34 @@ static void openDiscoveryModal() {
     lv_label_set_text(title, "Discovery");
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+    if (lv_obj_t *discoveryClose = appendHeltecCloseX(
+            header, [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); },
+            /*size=*/20)) {
+        lv_obj_align(discoveryClose, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
 
-    // Touch build: Sweep and Clear live in the header beside the corner X, as
-    // on the charts. 44px buttons: they plus the X and their gaps have to clear
-    // the title, and the vertical build only has 240px of header to spend.
-    // Heltec has no SD slot, so there is no Save button to fit as well.
-    auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, int xOffset,
-                               lv_event_cb_t cb) {
+    // Actions get their own full-width row rather than sharing the header with
+    // the title and the corner X, as they used to. Two right-aligned 44px
+    // buttons fitted there; four do not — on the 240px vertical build they would
+    // leave 28px for the title. A flex row of equal shares also gives bigger tap
+    // targets (~55px on the narrowest panel) than the fixed widths did, and adding
+    // a fifth action later is a line rather than a re-layout.
+    lv_obj_t *actionRow = lv_obj_create(s_discoveryModal);
+    lv_obj_set_width(actionRow, lv_pct(100));
+    lv_obj_set_height(actionRow, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(actionRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(actionRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(actionRow, 0, 0);
+    lv_obj_set_style_pad_all(actionRow, 0, 0);
+    lv_obj_set_style_pad_column(actionRow, 4, 0);
+    lv_obj_set_flex_flow(actionRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(actionRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
         lv_obj_t *btn = lv_btn_create(parent);
-        lv_obj_set_size(btn, 44, 20);
-        lv_obj_align(btn, LV_ALIGN_RIGHT_MID, xOffset, 0);
+        lv_obj_set_height(btn, 22);
+        lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_style_radius(btn, 4, 0);
         lv_obj_set_style_pad_all(btn, 0, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -25378,21 +26788,36 @@ static void openDiscoveryModal() {
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
     };
-    if (lv_obj_t *discoveryClose = appendHeltecCloseX(
-            header, [](lv_event_t *e) { LV_UNUSED(e); closeDiscoveryModal(); },
-            /*size=*/20)) {
-        lv_obj_align(discoveryClose, LV_ALIGN_RIGHT_MID, 0, 0);
-    }
-    makeDiscoveryBtn(header, "Sweep", -24, [](lv_event_t *e) {
+    makeDiscoveryBtn(actionRow, "Sweep", [](lv_event_t *e) {
         LV_UNUSED(e);
         discoveryStartSweep();
         refreshDiscoveryModal(true);
     });
-    makeDiscoveryBtn(header, "Clear", -72, [](lv_event_t *e) {
+    // The keyboard boards reach this with P; on a touch-only build a button is
+    // the only way in.
+    makeDiscoveryBtn(actionRow, "Preset", [](lv_event_t *e) {
+        LV_UNUSED(e);
+        openDiscoveryPresetModal();
+    });
+    makeDiscoveryBtn(actionRow, "Clear", [](lv_event_t *e) {
         LV_UNUSED(e);
         discoveryClear();
         refreshDiscoveryModal(true);
     });
+#if HAS_FILE_STORAGE
+    // Same reasoning as the S key on the keyboard builds: the question is
+    // whether a file can be saved, not whether a card slot exists. These boards
+    // had no way to reach Save at all — the Wio Tracker L2 has an SD card and
+    // still could not use it, because the only route in was a keyboard it does
+    // not have.
+    makeDiscoveryBtn(actionRow, "Save", [](lv_event_t *e) {
+        LV_UNUSED(e);
+        char msg[72];
+        (void)discoverySaveJson(msg, sizeof(msg));   // msg says which way it went
+        discoverySetStatus(msg);
+        refreshDiscoveryModal(true);
+    });
+#endif
 #else
     lv_obj_center(title);
 #endif
@@ -25478,11 +26903,12 @@ static void openDiscoveryModal() {
 #else
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #endif
-#if HAS_SD_CARD
-    lv_label_set_text_fmt(hint, "W = Sweep   C = Clear   S = Save   %s = Back",
+#if HAS_FILE_STORAGE
+    lv_label_set_text_fmt(hint, "W = Sweep   P = Preset   C = Clear   S = Save   %s = Back",
                           modalCloseKeyLabel());
 #else
-    lv_label_set_text_fmt(hint, "W = Sweep   C = Clear   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "W = Sweep   P = Preset   C = Clear   %s = Back",
+                          modalCloseKeyLabel());
 #endif
 #endif
 
@@ -28475,6 +29901,26 @@ static void performCfgAction(int actionId) {
             showActionPopup = false;    // row already reads the chosen value
             openCfgScreenTimeoutModal();
             break;
+
+#if FEATURE_LOCK_SCREEN
+        case CFG_ACTION_LOCK_SCREEN:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec LOCK_SCREEN");
+            s_cfg.lockScreenEnabled = !s_cfg.lockScreenEnabled;
+            persistConfigToPrefs();
+            // Turning it off with it on screen is only reachable from web
+            // config, but the call is free and makes the setting honest either
+            // way: off means off now, not at the next timeout.
+            if (!s_cfg.lockScreenEnabled) exitLockScreen();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Lock Screen: %s",
+                     s_cfg.lockScreenEnabled ? "On" : "Off");
+            break;
+
+        case CFG_ACTION_LOCK_SCREEN_OFF:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec LOCK_SCREEN_OFF");
+            showActionPopup = false;    // row already reads the chosen value
+            openCfgLockScreenOffModal();
+            break;
+#endif
 
 #if HAS_SCROLL_INVERT
         case CFG_ACTION_INVERT_SCROLL:
@@ -32628,6 +34074,32 @@ static void pumpKeyboardInput() {
         }
 
 #if FEATURE_DISCOVERY
+        // Above the Discovery block because it is drawn above the Discovery
+        // modal: while the picker is up it owns the keys.
+        if (s_presetPickModal) {
+            if (isModalCloseKey(k)) {
+                closeDiscoveryPresetModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                discoveryPresetPickCommit();
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_presetPickSelection + delta;
+                if (next < 0) next = 0;
+                if (next > s_presetPickCount - 1) next = s_presetPickCount - 1;
+                if (next != s_presetPickSelection) {
+                    s_presetPickSelection = next;
+                    refreshDiscoveryPresetSelection();
+                }
+            }
+            continue;   // nothing reaches Discovery underneath the picker
+        }
+
         if (s_discoveryModal) {
             if (isModalCloseKey(k)) {
                 closeDiscoveryModal();
@@ -32641,12 +34113,18 @@ static void pumpKeyboardInput() {
                 refreshDiscoveryModal(true);
                 continue;
             }
+            // (P)reset opens the picker rather than starting anything: the scan
+            // itself is committed from in there.
+            if (k == 'p' || k == 'P') {
+                openDiscoveryPresetModal();
+                continue;
+            }
             if (k == 'c' || k == 'C') {
                 discoveryClear();
                 refreshDiscoveryModal(true);
                 continue;
             }
-#if HAS_SD_CARD
+#if HAS_FILE_STORAGE
             if (k == 's' || k == 'S') {
                 char msg[72];
                 (void)discoverySaveJson(msg, sizeof(msg));   // msg says which way it went
@@ -32809,10 +34287,6 @@ static void pumpKeyboardInput() {
                 s_lastRenderedLiveCount = -1;
                 s_lastRenderedLiveScrollOff = -1;
                 refreshLiveView(true);
-                continue;
-            }
-            if (k == 't' || k == 'T') {
-                openLiveToolsModal();
                 continue;
             }
             if (k == 'f' || k == 'F') {
@@ -33443,6 +34917,13 @@ static void onChatMessagePressed(lv_event_t *e) {
 }
 
 static void onWebCfgSaved() {
+#if FEATURE_DISCOVERY
+    // This save ends in a Radio.reconfigure() from s_cfg, which would retune out
+    // from under a preset scan and leave it to "restore" to settings it is
+    // already on. The scan is the thing that has to give way: it is temporary by
+    // definition and a config save is not.
+    discoveryEndPresetScan(/*aborted=*/true);
+#endif
     uint8_t prevTheme = s_appliedUiTheme;
     uint8_t prevMode = s_appliedUiMode;
     const uint8_t prevFontSize = s_appliedFontSize;
@@ -35992,6 +37473,13 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel
         && !channelIsMuted(chanIdx)) {
         s_channelNeedsAttention[chanIdx] = true;
+#if HAS_SLEEP_OVERLAY
+        // Same condition, so the lock screen previews exactly the messages the
+        // device is raising an alert for -- a muted channel stays silent there
+        // too. The unwrapped body is recorded here, before addMessage() bakes a
+        // prefix into it and splits it across rows.
+        tdeckProNoteRecentMessage(chanIdx, fromNode, text);
+#endif
     }
 }
 
@@ -36521,6 +38009,14 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                     if (viewingDm) {
                         DMs.markRead(pkt.hdr.from);
                     }
+#if HAS_SLEEP_OVERLAY
+                    else {
+                        // -1, not chanIdx: the row should read "DM", not the
+                        // channel the DM happened to arrive on. Skipped when the
+                        // conversation is already open, matching the alert.
+                        tdeckProNoteRecentMessage(-1, pkt.hdr.from, textBuf);
+                    }
+#endif
                 } else {
                     appendRxText(chanIdx, pkt.hdr.from, textBuf, pkt.hdr.id, viaMqtt);
                 }
@@ -36771,6 +38267,13 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                         if (viewingDm) {
                             DMs.markRead(pkt.hdr.from);
                         }
+#if HAS_SLEEP_OVERLAY
+                        else {
+                            // Keeps the "[SF] " marker, so a replayed message
+                            // reads as one on the lock screen too.
+                            tdeckProNoteRecentMessage(-1, pkt.hdr.from, prefixedBuf);
+                        }
+#endif
                     } else {
                         appendRxText(chanIdx, pkt.hdr.from, prefixedBuf, pkt.hdr.id, viaMqtt);
                     }
@@ -41152,7 +42655,16 @@ void loop() {
     nodeArchiveFlush();
 
     now = millis();
+#if FEATURE_LOCK_SCREEN
+    // Runs before the idle check below and returns early through it: while the
+    // lock screen is up the panel's fate belongs to lockScreenOffSecs, not to
+    // the screen timeout that put it there.
+    serviceLockScreen(now);
+#endif
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0
+#if FEATURE_LOCK_SCREEN
+        && !s_lockScreenActive
+#endif
 #if defined(DEVICE_TDECK_PRO) && HAS_KB_BLINK
         && !kbBlinkBusy()
 #endif
@@ -41160,10 +42672,22 @@ void loop() {
         const uint32_t idleMs    = (uint32_t)(now - s_lastActivityMs);
         const uint32_t timeoutMs = (uint32_t)s_cfg.screenOnSecs * 1000UL;
         if (idleMs > timeoutMs) {
-            Serial.printf("[screen] sleeping (idle %lus, timeout %us)\n",
+            Serial.printf("[screen] idle %lus (timeout %us)\n",
                           (unsigned long)(idleMs / 1000UL),
                           (unsigned)s_cfg.screenOnSecs);
+#if FEATURE_LOCK_SCREEN
+            // The idle timeout lands on the lock screen too, not just the
+            // wake-button hold. A device left on a desk is the main way anyone
+            // ever sees this screen, and a lock screen you can only reach by
+            // deliberately reaching for it is not one.
+            if (s_cfg.lockScreenEnabled) {
+                enterLockScreen("idle timeout");
+            } else {
+                sleepScreen("timeout");
+            }
+#else
             sleepScreen("timeout");
+#endif
         } else {
             // Step the backlight down for the tail of the timeout. Skipped
             // entirely when the timeout is shorter than the dim window — there
@@ -41211,6 +42735,16 @@ void loop() {
     // Forced on a wake pass so the panel gets a full repaint before the
     // backlight comes up, rather than briefly showing the pre-sleep frame the
     // controller held across SLPIN/SLPOUT.
+#if FEATURE_LOCK_SCREEN
+    // Everything in the refresh block below is invisible while the lock screen
+    // is up — it is an opaque, full-panel overlay — and any refresher that
+    // created a new root-screen child would create it *above* that overlay.
+    // So the lock screen's own repaint runs instead, and lv_timer_handler()
+    // further down still runs either way, which is what puts it on the panel.
+    if (s_lockScreenActive) {
+        serviceTdeckProSleepClock();
+    } else
+#endif
     if ((uint32_t)(now - s_lastUiTickMs) >= kUiRefreshTickMs || s_backlightPendingOn) {
         s_lastUiTickMs = now;
         const bool meshDirty = s_meshChangedPending;

@@ -618,11 +618,13 @@ a single beep for all three settings.
 
 ### Light timeout
 
-On boards with a notification light — the Mesh Deck's RGB LED, and the T-Deck
-and T-Lora Pager's keyboard backlight — that light repeats once a second for as
-long as anything is unread. A message that lands overnight blinks all night, and
-on the keyboard-blink boards it also keeps the device out of light sleep, so it
-costs battery as well as attention.
+On boards with a notification light — the Mesh Deck's Core RGB LED plus the
+left and right RGB indicators when its Keyboard module is attached, and the
+T-Deck and T-Lora Pager's keyboard backlight — those lights repeat once a second
+for as long as anything is unread. All three Mesh Deck LEDs mirror the same
+color and pattern. A message that lands overnight blinks all night, and on the
+keyboard-blink boards it also keeps the device out of light sleep, so it costs
+battery as well as attention.
 
 **Light Timeout** stops that after a set time: Never, 30 sec, 1 min, 5 min, or
 30 min. It is a single setting because no board has both lights.

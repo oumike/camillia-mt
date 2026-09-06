@@ -88,7 +88,8 @@
 // Keyboard — two AW9523 expanders over the 12-pin FPC, one per half. Each
 // drives a 5x5 matrix: rows P10..P14 pulled low one at a time, columns P00..P04
 // read back; a key reads pressed when its row x column intersection pulls a
-// column low. Each half raises its own interrupt line.
+// column low. P17/P16/P15 on that same row port drive the half's active-low
+// red/green/blue indicator. Each half raises its own interrupt line.
 #define KB_LEFT_I2C_ADDR        0x5A
 #define KB_RIGHT_I2C_ADDR       0x5B
 

@@ -911,6 +911,10 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
     cfg.brightness         = cfgCoerceBrightness(MY_BRIGHTNESS_PCT);
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
+    // On where the board draws one at all; the value is inert elsewhere. Five
+    // minutes is a glance surface that still ends well inside a battery's day.
+    cfg.lockScreenEnabled  = true;
+    cfg.lockScreenOffSecs  = 300;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.battDisplayMode    = MY_BATT_DISPLAY;
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
@@ -1302,6 +1306,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "  display:\n";
     snprintf(tmp, sizeof(tmp), "    brightness: %u\n", (unsigned)cfg.brightness); out += tmp;
     snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    lockScreen: %s\n", cfg.lockScreenEnabled ? "true" : "false"); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    lockScreenOffSecs: %lu\n", (unsigned long)cfg.lockScreenOffSecs); out += tmp;
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
@@ -1878,6 +1884,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
             } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
                 if      (!strcmp(key, "brightness"))      cfg.brightness      = cfgCoerceBrightness(atoi(val));
                 else if (!strcmp(key, "screenOnSecs"))    cfg.screenOnSecs    = (uint32_t)atol(val);
+                else if (!strcmp(key, "lockScreen"))      cfg.lockScreenEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "lockScreenOffSecs"))
+                    cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs((uint32_t)atol(val));
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
@@ -2050,6 +2059,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
     cfg.fontSize = (uint8_t)constrain((int)cfg.fontSize, 0, FONT_SIZE_MAX);
     cfg.volumePct = cfgCoerceVolume((int)cfg.volumePct);
     cfg.battCalTrim = cfgCoerceBattCalTrim((int)cfg.battCalTrim);
+    cfg.lockScreenOffSecs = cfgCoerceLockScreenOffSecs(cfg.lockScreenOffSecs);
     // Now that any themeCustom lines have filled their slots, a CUSTOM<n>
     // selection can be checked. A config restored onto a device whose slot is
     // empty would otherwise select a theme that does not exist, and every

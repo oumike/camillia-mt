@@ -55,6 +55,10 @@
 // boot-time report is printed before the USB bridge settles and is routinely
 // lost — a half that never came up looks exactly like a keymap bug otherwise.
 bool     meshDeckKeyboardHalfPresent(int half);   // 0 = left 0x5A, 1 = right 0x5B
+// Mirrors the existing notification color onto both present keyboard-half RGB
+// indicators. The scanner applies it with its next row write; no extra I2C
+// transaction is generated here.
+void     meshDeckKeyboardSetLedColor(uint8_t color, bool on);
 #endif
 
 // Logs every raw scancode and the code it maps to, until switched off again.
