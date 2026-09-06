@@ -3791,6 +3791,33 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
     html += tmp; html += "'></label>";
+#if FEATURE_LOCK_SCREEN
+    // Two selects rather than a number box: both are short lists of stopping
+    // points, and cfgCoerceLockScreenOffSecs() would silently move a typed 37
+    // minutes anyway. Same values as the on-device slider, in the same order.
+    html += "<label>Lock Screen<select name='lock_screen'>"
+            "<option value='0'"; if (!gCfg->lockScreenEnabled) html += " selected";
+    html += ">Off</option>"
+            "<option value='1'"; if ( gCfg->lockScreenEnabled) html += " selected";
+    html += ">On</option></select></label>";
+    html += "<label>Lock Screen Off<select name='lock_screen_off'>";
+    {
+        static const struct { uint32_t secs; const char *label; } kOffs[] = {
+            {  300, "5 min"  }, {  600, "10 min" }, {  900, "15 min" },
+            { 1200, "20 min" }, { 1500, "25 min" }, { 1800, "30 min" },
+            { 2100, "35 min" }, { 2400, "40 min" }, { 2700, "45 min" },
+            { 3000, "50 min" }, { 3300, "55 min" }, { 3600, "60 min" },
+            {    0, "Stay on" },
+        };
+        for (const auto &o : kOffs) {
+            snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)o.secs);
+            html += "<option value='"; html += tmp; html += "'";
+            if (gCfg->lockScreenOffSecs == o.secs) html += " selected";
+            html += ">"; html += o.label; html += "</option>";
+        }
+    }
+    html += "</select></label>";
+#endif
         html += "<label>Units (Display &amp; Telemetry)<select name='disp_units'>"
             "<option value='0'"; if (!gCfg->displayUnits) html += " selected"; html += ">Metric (C / hPa)</option>"
             "<option value='1'"; if ( gCfg->displayUnits) html += " selected"; html += ">Imperial (F / inHg)</option>"
@@ -6770,6 +6797,19 @@ static void handlePostSave() {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
+#if FEATURE_LOCK_SCREEN
+    // hasArg-guarded like volume and brightness above: a lite page that does not
+    // render these must leave the stored values alone rather than zero them —
+    // and zero here is a real setting ("stay on"), so a missing field silently
+    // becoming one would be worse than usual.
+    if (server.hasArg("lock_screen")) {
+        gCfg->lockScreenEnabled = server.arg("lock_screen").toInt() != 0;
+    }
+    if (server.hasArg("lock_screen_off")) {
+        gCfg->lockScreenOffSecs =
+            cfgCoerceLockScreenOffSecs((uint32_t)server.arg("lock_screen_off").toInt());
+    }
+#endif
     // Kept because the auto-favorite radius below is submitted in whatever units
     // the page was *rendered* in, which is not necessarily the units this same
     // POST is switching to.

@@ -89,8 +89,12 @@ GitHub, merges the factory images, signs the OTA images and publishes the
 ./release.sh --version 4.9.0    # exactly this version
 ```
 
-It confirms before committing, and warns about any uncommitted changes first —
-GitHub builds what you push, not what is in your working tree.
+Like a local release always has, it commits your whole working tree into the
+release (`git add -A`) — the release carries the work, not just its notes. It
+lists exactly what that is and waits for confirmation first, because GitHub
+builds the commit you push rather than the tree on your disk, and anything left
+uncommitted would be missing from the firmware while the notes still described
+it.
 
 The notes are reviewed before anything is dispatched (`[Y]es / [e]dit / [n]o`).
 Be aware that `-y` accepts them unread as well as picking the version; pass

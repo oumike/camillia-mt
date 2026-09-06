@@ -20,7 +20,7 @@ static char altNavShortcut(char k) {
         case 'h': case 'H': return KEY_OPEN_HOME;
         case 'd': case 'D': return KEY_OPEN_DMS;
         case 'n': case 'N': return KEY_OPEN_NODES;
-        case 'l': case 'L': return KEY_OPEN_LIVE;
+        case 'l': case 'L': return KEY_OPEN_TOOLS;
         case 'c': case 'C': return KEY_OPEN_CONFIG;
         default:            return KEY_NONE;
     }
@@ -431,7 +431,7 @@ char tloraTranslateKey(uint8_t keyNum) {
         else if (keyNum == 15) nav = KEY_OPEN_HOME;
         else if (keyNum == 18) nav = KEY_OPEN_DMS;
         else if (keyNum == 24) nav = KEY_OPEN_NODES;
-        else if (keyNum == 12) nav = KEY_OPEN_LIVE;
+        else if (keyNum == 12) nav = KEY_OPEN_TOOLS;
         else if (keyNum == 27) nav = KEY_OPEN_CONFIG;
         else if (keyNum == 17) nav = KEY_NEXT_CHAN;
         else if (keyNum == 19) nav = KEY_PREV_CHAN;
@@ -653,8 +653,10 @@ TDeckKeyboard *TDeckKeyboard::_instance = nullptr;
 // than driven high. Two keys held in the same column would otherwise short a
 // driven-high row against a driven-low one through the matrix.
 #include "aw9523.h"
+#include "config_io.h"
 
 static Aw9523  s_mdKbLeft, s_mdKbRight;
+static bool    s_mdHalfReady[2] = {};
 static uint8_t s_mdPrev[2][5] = {};      // column bits already reported as down
 static uint8_t s_mdStable[2][5] = {};    // debounced column bits per row
 static uint8_t s_mdRelCand[2][5] = {};   // bits currently counting down to released
@@ -695,17 +697,21 @@ static const char kMdKeymapRight[5][5] = {
     {KEY_NONE, '.', KEY_NONE, KEY_SYMBOL, KEY_NONE},
 };
 
-// Port 1 resting state: all five rows high, and P15..P17 (unused) held high.
-static constexpr uint8_t kMdP1Idle = 0xE0;
+// Port 1 high bits are the half's RGB indicator: P17 red, P16 green, P15 blue,
+// active low (0 lights it). Rows occupy the low five bits and are rewritten
+// every scan, so the LED state has to ride along in the same byte.
+static constexpr uint8_t kMdP1Rows = 0x1F;
+static constexpr uint8_t kMdP1LedOff = 0xE0;
+static uint8_t s_mdP1Led[2] = {kMdP1LedOff, kMdP1LedOff};
 
 // Puts a half into scanning shape: columns in, rows out. Aw9523::begin() leaves
 // everything as inputs, which is the safe default but cannot drive a matrix.
-static bool mdConfigureHalf(Aw9523 &dev) {
+static bool mdConfigureHalf(Aw9523 &dev, uint8_t half) {
     if (!dev.present()) return false;
     return dev.configPort(0, 0xFF)          // port 0 = columns, inputs
         && dev.configPort(1, 0x00)          // port 1 = rows, outputs
         && dev.writePort(0, 0x00)
-        && dev.writePort(1, kMdP1Idle);
+        && dev.writePort(1, (uint8_t)(kMdP1Rows | s_mdP1Led[half]));
 }
 
 // Drives each row low in turn and returns a pressed-bit mask per row.
@@ -714,10 +720,10 @@ static bool mdConfigureHalf(Aw9523 &dev) {
 // would be gentler on simultaneous presses, but it only reads correctly if the
 // columns have pull-ups, and whether this module has them is not documented.
 // Driving high is what the working wadamesh port does, so it is known good.
-static bool mdScanHalf(Aw9523 &dev, uint8_t rowsOut[5]) {
+static bool mdScanHalf(Aw9523 &dev, uint8_t half, uint8_t rowsOut[5]) {
     if (!dev.present()) return false;
     for (uint8_t r = 0; r < 5; r++) {
-        const uint8_t out = (uint8_t)(~(1u << r) | kMdP1Idle);
+        const uint8_t out = (uint8_t)((kMdP1Rows & ~(1u << r)) | s_mdP1Led[half]);
         if (!dev.writePort(1, out)) return false;
         delayMicroseconds(50);                  // let the column settle
         uint8_t cols = 0;
@@ -733,7 +739,7 @@ static bool mdScanHalf(Aw9523 &dev, uint8_t rowsOut[5]) {
         if (downBits == 0x1F) return false;
         rowsOut[r] = downBits;
     }
-    dev.writePort(1, kMdP1Idle);
+    dev.writePort(1, (uint8_t)(kMdP1Rows | s_mdP1Led[half]));
     return true;
 }
 
@@ -823,7 +829,33 @@ static char mdApplyShift(char k) {
 }
 
 bool meshDeckKeyboardHalfPresent(int half) {
-    return half ? s_mdKbRight.present() : s_mdKbLeft.present();
+    return half >= 0 && half < 2 && s_mdHalfReady[half];
+}
+
+void meshDeckKeyboardSetLedColor(uint8_t color, bool on) {
+    const uint8_t c = cfgCoerceNotifyLedColor((int)color);
+    uint8_t ledBits = kMdP1LedOff;
+    if (on && c != NOTIFY_LED_COLOR_OFF) {
+        bool red = false, green = false, blue = false;
+        switch (c) {
+            case NOTIFY_LED_COLOR_RED:     red = true; break;
+            case NOTIFY_LED_COLOR_GREEN:   green = true; break;
+            case NOTIFY_LED_COLOR_BLUE:    blue = true; break;
+            case NOTIFY_LED_COLOR_YELLOW:  red = true; green = true; break;
+            case NOTIFY_LED_COLOR_CYAN:    green = true; blue = true; break;
+            case NOTIFY_LED_COLOR_MAGENTA: red = true; blue = true; break;
+            case NOTIFY_LED_COLOR_WHITE:   red = true; green = true; blue = true; break;
+            case NOTIFY_LED_COLOR_OFF:     break;
+            default:                       blue = true; break;
+        }
+        if (red)   ledBits &= (uint8_t)~(1u << 7);
+        if (green) ledBits &= (uint8_t)~(1u << 6);
+        if (blue)  ledBits &= (uint8_t)~(1u << 5);
+    }
+
+    for (uint8_t half = 0; half < 2; half++) {
+        if (s_mdHalfReady[half]) s_mdP1Led[half] = ledBits;
+    }
 }
 
 // Walks both halves over I2C and folds the result into the debounced state.
@@ -837,8 +869,8 @@ static void mdScanAll() {
 
     for (uint8_t half = 0; half < 2; half++) {
         Aw9523 &dev = half ? s_mdKbRight : s_mdKbLeft;
-        if (!dev.present()) continue;
-        if (!mdScanHalf(dev, fresh)) continue;
+        if (!s_mdHalfReady[half]) continue;
+        if (!mdScanHalf(dev, half, fresh)) continue;
         mdDebounce(half, fresh);
     }
 }
@@ -855,7 +887,7 @@ static char mdEmitPending() {
         (s_mdStable[kMdAltHalf][kMdAltRow] & (1u << kMdAltCol)) != 0;
 
     for (uint8_t half = 0; half < 2; half++) {
-        if (!(half ? s_mdKbRight : s_mdKbLeft).present()) continue;
+        if (!s_mdHalfReady[half]) continue;
         for (uint8_t r = 0; r < 5; r++) {
             const uint8_t now = s_mdStable[half][r];
             // Releases are always consumed; presses are consumed one at a time,
@@ -967,8 +999,12 @@ void TDeckKeyboard::begin() {
     const char *whyR = probeHalf(KB_RIGHT_I2C_ADDR);
 #endif
 
-    const bool okL = s_mdKbLeft.begin(KB_LEFT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbLeft);
-    const bool okR = s_mdKbRight.begin(KB_RIGHT_I2C_ADDR, Wire) && mdConfigureHalf(s_mdKbRight);
+    const bool okL = s_mdKbLeft.begin(KB_LEFT_I2C_ADDR, Wire)
+                  && mdConfigureHalf(s_mdKbLeft, 0);
+    const bool okR = s_mdKbRight.begin(KB_RIGHT_I2C_ADDR, Wire)
+                  && mdConfigureHalf(s_mdKbRight, 1);
+    s_mdHalfReady[0] = okL;
+    s_mdHalfReady[1] = okR;
     Serial.printf("[meshdeck-kb] left(0x%02X)=%s right(0x%02X)=%s\n",
                   KB_LEFT_I2C_ADDR, okL ? "ok" : "MISSING",
                   KB_RIGHT_I2C_ADDR, okR ? "ok" : "MISSING");
@@ -1622,8 +1658,13 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         // Home opens Home, and only that. Holding it used to sleep the screen,
         // which is now the d-pad centre's job.
         case 0x82: return KEY_OPEN_HOME;     // dedicated Home button
-        case 0x83: return KEY_OPEN_LIVE;     // function button below Home
-        case 0x84: return KEY_OPEN_NODES;    // GPS-area button below Back
+        // These two swapped when Live stopped being a top-level destination.
+        // 0x83 used to open Live; Nodes moved up to it because it is the button
+        // under Home and the roster is what people reach for there. Tools took
+        // 0x84, one step further out, matching the nav bar where it also sits
+        // past the reading destinations.
+        case 0x83: return KEY_OPEN_NODES;    // function button below Home
+        case 0x84: return KEY_OPEN_TOOLS;    // GPS-area button below Back
         case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button
         // Dedicated M9 functions have no Camillia binding yet. Their raw values
         // overlap this driver's synthetic navigation codes, so drop them.

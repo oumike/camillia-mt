@@ -27,7 +27,7 @@
 // not collide with KEY_NEXT_CHAN.
 #define KEY_OPEN_DMS    0x8A
 #define KEY_OPEN_HOME   0x8B
-#define KEY_OPEN_LIVE   0x8C
+#define KEY_OPEN_TOOLS  0x8C
 #define KEY_OPEN_DISCOVERY 0x8D
 #define KEY_OPEN_NODES  0x8E
 #define KEY_SLEEP_SCREEN 0x8F
@@ -55,6 +55,10 @@
 // boot-time report is printed before the USB bridge settles and is routinely
 // lost — a half that never came up looks exactly like a keymap bug otherwise.
 bool     meshDeckKeyboardHalfPresent(int half);   // 0 = left 0x5A, 1 = right 0x5B
+// Mirrors the existing notification color onto both present keyboard-half RGB
+// indicators. The scanner applies it with its next row write; no extra I2C
+// transaction is generated here.
+void     meshDeckKeyboardSetLedColor(uint8_t color, bool on);
 #endif
 
 // Logs every raw scancode and the code it maps to, until switched off again.

@@ -344,6 +344,33 @@
 #else
 #define FEATURE_DISCOVERY 1
 #endif
+// Lock screen: a lit glance surface between the UI and a dark panel. Entered by
+// the wake-button hold and by the idle timeout, left by the wake button, and
+// abandoned for a genuinely dark panel after cfg.lockScreenOffSecs.
+//
+// Wio Tracker L2 only, and deliberately not the T-Deck Pro. The Pro's sleep
+// clock looks like the same feature and is not: e-paper holds an image at zero
+// power, so there the overlay *is* the sleeping state and there is nothing to
+// time out of. A backlit LCD holds nothing — a visible clock means a lit
+// backlight, the largest draw on the board — so here the lock screen is a state
+// that costs something and therefore has to end. The two must not be merged.
+#if defined(DEVICE_WIO_TRACKER_L2)
+#define FEATURE_LOCK_SCREEN 1
+#else
+#define FEATURE_LOCK_SCREEN 0
+#endif
+
+// Boards that build the glance overlay — clock, node name, battery, date and
+// the recent-message preview rows — whatever they then do with it. The Pro
+// leaves it on a sleeping panel; the lock screen boards light it for a while
+// and then put the panel out. One overlay, two lifecycles: the drawing code,
+// the message ring that feeds it and the repaint coalescing are identical, and
+// only the geometry, the palette and the entry/exit rules differ.
+#if defined(DEVICE_TDECK_PRO) || FEATURE_LOCK_SCREEN
+#define HAS_SLEEP_OVERLAY 1
+#else
+#define HAS_SLEEP_OVERLAY 0
+#endif
 // MQTT Monitor (Live -> Tools -> MQTT) is a census of the channels arriving
 // under the configured root. It rides the bridge's existing subscription, so it
 // costs nothing until it is opened and a bounded ~1 KB of heap while it is — but
