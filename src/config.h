@@ -236,6 +236,9 @@
 // How the local battery reads in the chat header and the web status chip.
 // 0 = PERCENT (the behavior before the setting existed), 1 = VOLTAGE.
 #define MY_BATT_DISPLAY     0
+// How a time reads wherever a person sees one.
+// 0 = 24-hour (the behavior before the setting existed), 1 = 12-hour with AM/PM.
+#define MY_CLOCK_FORMAT     0
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
 #define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL, 12=CAMELLIA_BLACK
@@ -345,16 +348,14 @@
 #define FEATURE_DISCOVERY 1
 #endif
 // Lock screen: a lit glance surface between the UI and a dark panel. Entered by
-// the wake-button hold and by the idle timeout, left by the wake button, and
-// abandoned for a genuinely dark panel after cfg.lockScreenOffSecs.
+// the board's existing screen-off gesture or idle timeout, left by its existing
+// wake gesture, and abandoned for a dark panel after cfg.lockScreenOffSecs.
 //
-// Wio Tracker L2 only, and deliberately not the T-Deck Pro. The Pro's sleep
-// clock looks like the same feature and is not: e-paper holds an image at zero
-// power, so there the overlay *is* the sleeping state and there is nothing to
-// time out of. A backlit LCD holds nothing — a visible clock means a lit
-// backlight, the largest draw on the board — so here the lock screen is a state
-// that costs something and therefore has to end. The two must not be merged.
-#if defined(DEVICE_WIO_TRACKER_L2)
+// Enabled on every backlit display except Cardputer, whose 240x135 panel and
+// tight first-boot heap budget cannot carry this overlay. T-Deck Pro stays on
+// its separate e-paper lifecycle: its overlay *is* the sleeping state because
+// the panel holds an image at zero power, so there is nothing to time out of.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TDECK_PRO)
 #define FEATURE_LOCK_SCREEN 1
 #else
 #define FEATURE_LOCK_SCREEN 0
@@ -398,6 +399,11 @@
 // and are expected to be rougher. Stable by default — an alpha channel is
 // something a tester opts into, never somewhere a device lands on its own.
 #define MY_OTA_CHANNEL      OTA_CHANNEL_AUTO
+// Unattended auto-update: check on a 1/6/12/24 h timer and install with no
+// prompt. Off by default and deliberately so — a device that installs firmware
+// and reboots without asking is something an operator opts into for a node
+// nobody visits, never somewhere a device lands on its own.
+#define MY_OTA_AUTOUPDATE   OTA_AUTO_UPDATE_OFF
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 // Auto-favorite threshold, in meters. One round unit in whichever system the

@@ -3,8 +3,8 @@
  * message rows. LVGL 9.5 ships Montserrat Medium only and has no synthetic
  * bold, so the heavier half of each row needs a face of its own.
  *
- * Built only into the T-Deck Pro and Wio Tracker L2 environments (see
- * build_src_filter in platformio.ini); other boards do not carry the glyphs.
+ * Built only into environments that draw the sleep/lock overlay (see
+ * build_src_filter in platformio.ini); Cardputer does not carry the glyphs.
  *
  * Montserrat is SIL OFL 1.1, the same face LVGL's own built-ins are cut from.
  *

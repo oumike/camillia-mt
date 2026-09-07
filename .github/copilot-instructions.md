@@ -24,6 +24,17 @@ Use these files as the source of truth before changing board-specific behavior:
 
 Do not invent pin maps, bus addresses, or peripheral wiring.
 
+## Requesting Work
+
+"New ticket" means **open a GitHub issue and stop there**. It is a request to
+file the work, not to do it. Write the issue and report the issue number; do not
+create a branch, write code, or push anything.
+
+Implementation is a separate, explicit ask ("implement", "fix", "build this",
+"work issue #12"). When a request could be read either way, ask which is wanted
+before writing code — a ticket that arrives as an unrequested branch costs more
+to unpick than one clarifying question.
+
 ## Default Workflow
 
 Use this staged flow for feature and bug work:

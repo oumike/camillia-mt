@@ -645,6 +645,14 @@ static const char *kBattDisplayNames[] = {
 };
 static const int kNumBattDisplayModes = 2;
 
+// "H24"/"H12" rather than "24H"/"12H" on purpose: the import path treats a value
+// starting with a digit as the numeric form, so "24H" would parse as 24 and then
+// clamp to 1 — silently selecting the format the file did not ask for.
+static const char *kClockFormatNames[] = {
+    "H24", "H12"
+};
+static const int kNumClockFormats = 2;
+
 // ── Custom theme store ───────────────────────────────────────────────────────
 // One NVS blob holding the whole slot array. Written whole on every change:
 // four slots is 104 bytes, so there is nothing to gain from per-slot keys and a
@@ -1036,6 +1044,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.lockScreenOffSecs  = 300;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.battDisplayMode    = MY_BATT_DISPLAY;
+    cfg.clockFormat        = cfgCoerceClockFormat(MY_CLOCK_FORMAT);
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
@@ -1091,6 +1100,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.snfRouterNodeId    = MY_SNF_ROUTER_ID;
     cfg.otaAutoCheckEnabled = MY_OTA_AUTOCHECK;
     cfg.otaChannel          = MY_OTA_CHANNEL;
+    cfg.otaAutoUpdatePeriod = MY_OTA_AUTOUPDATE;
     cfg.nodeArchiveEnabled = MY_NODE_ARCHIVE_EN;
     // Off regardless of whether archiving is on. The Nodes screen is a live-mesh
     // view by default on a fresh device exactly as it is on an upgraded one --
@@ -1351,6 +1361,26 @@ const char *cfgOtaChannelName(uint8_t channel) {
     }
 }
 
+const char *cfgOtaAutoUpdateName(uint8_t period) {
+    switch (period) {
+        case OTA_AUTO_UPDATE_1H:  return "1h";
+        case OTA_AUTO_UPDATE_6H:  return "6h";
+        case OTA_AUTO_UPDATE_12H: return "12h";
+        case OTA_AUTO_UPDATE_24H: return "24h";
+        default:                  return "Off";
+    }
+}
+
+uint32_t cfgOtaAutoUpdatePeriodMs(uint8_t period) {
+    switch (period) {
+        case OTA_AUTO_UPDATE_1H:  return 1UL  * 3600UL * 1000UL;
+        case OTA_AUTO_UPDATE_6H:  return 6UL  * 3600UL * 1000UL;
+        case OTA_AUTO_UPDATE_12H: return 12UL * 3600UL * 1000UL;
+        case OTA_AUTO_UPDATE_24H: return 24UL * 3600UL * 1000UL;
+        default:                  return 0;
+    }
+}
+
 void cfgToYaml(const RhinoConfig &cfg, String &out) {
     char tmp[96];
     out  = "# start of Meshtastic configure yaml\n";
@@ -1403,6 +1433,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     if (cfg.tzDef[0]) { out += "    tzdef: "; out += cfg.tzDef; out += "\n"; }
     snprintf(tmp, sizeof(tmp), "    otaAutoCheck: %s\n", cfg.otaAutoCheckEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    otaChannel: %s\n", cfgOtaChannelName(cfg.otaChannel)); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    otaAutoUpdate: %s\n",
+             cfgOtaAutoUpdateName(cfgCoerceOtaAutoUpdate(cfg.otaAutoUpdatePeriod))); out += tmp;
     // security — the Curve25519 identity keypair, so a backup can restore the
     // same node identity after a reflash or NVS wipe. Without it a restored
     // device comes up as a new identity: peers' stored public key no longer
@@ -1508,6 +1540,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    battDisplay: ";
     out += (cfg.battDisplayMode < kNumBattDisplayModes)
            ? kBattDisplayNames[cfg.battDisplayMode] : kBattDisplayNames[0];
+    out += "\n";
+    out += "    clockFormat: ";   // H24 = 14:32, H12 = 2:32 PM
+    out += (cfg.clockFormat < kNumClockFormats)
+           ? kClockFormatNames[cfg.clockFormat] : kClockFormatNames[0];
     out += "\n";
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
@@ -1969,6 +2005,18 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         cfg.otaChannel = OTA_CHANNEL_AUTO;
                 }
+                else if (!strcmp(key, "otaAutoUpdate")) {
+                    // Same discipline as otaChannel above, and for a sharper
+                    // reason: anything unrecognised is OFF, never a period, and
+                    // never a shorter one than was written. A config.yaml this
+                    // cannot read must not leave a device installing firmware
+                    // on a schedule nobody chose.
+                    if (!strcasecmp(val, "1h"))       cfg.otaAutoUpdatePeriod = OTA_AUTO_UPDATE_1H;
+                    else if (!strcasecmp(val, "6h"))  cfg.otaAutoUpdatePeriod = OTA_AUTO_UPDATE_6H;
+                    else if (!strcasecmp(val, "12h")) cfg.otaAutoUpdatePeriod = OTA_AUTO_UPDATE_12H;
+                    else if (!strcasecmp(val, "24h")) cfg.otaAutoUpdatePeriod = OTA_AUTO_UPDATE_24H;
+                    else                              cfg.otaAutoUpdatePeriod = OTA_AUTO_UPDATE_OFF;
+                }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "position")) {
                 if (!strcmp(key, "shareLocation"))
                     cfg.shareLocation = parseBoolValue(val);
@@ -2110,6 +2158,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     else
                         cfg.battDisplayMode = findName(val, kBattDisplayNames, kNumBattDisplayModes);
                 }
+                else if (!strcmp(key, "clockFormat")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.clockFormat = (uint8_t)constrain(atoi(val), 0, CLOCK_FORMAT_MAX);
+                    else
+                        cfg.clockFormat = findName(val, kClockFormatNames, kNumClockFormats);
+                }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);
                 }
@@ -2237,8 +2291,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
         cfgSavedWifiCommit();
     }
 
-    // Only client roles are supported; coerce anything else from imported YAML.
-    cfg.deviceRole = cfgCoerceClientRole(cfg.deviceRole);
+    // An imported YAML can name any role in kRoleNames; coerce the ones this
+    // firmware does not offer (see cfgCoerceDeviceRole) down to CLIENT.
+    cfg.deviceRole = cfgCoerceDeviceRole(cfg.deviceRole);
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);

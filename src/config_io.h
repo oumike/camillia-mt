@@ -468,10 +468,22 @@ struct RhinoConfig {
     // default. Zero is "off", which is the wanted default, so the two agree —
     // a field whose default were On could not go here.
     bool     nodeArchiveShow;
-    // For whoever appends next: the byte below is the remainder of that same
-    // padding and carries the same caveat — an upgraded device reads zero
-    // there, not your compiled default.
-    uint8_t  _reservedPad12[1];
+    // Unattended auto-update period: OTA_AUTO_UPDATE_OFF, or one of the 1/6/12/
+    // 24 hour settings. One byte rather than a bool plus an interval, so the
+    // disabled state and the stored default are the same value.
+    //
+    // Takes the last byte of that same padding, under the rule otaChannel and
+    // nodeArchiveShow above document: an upgrading device reads zero here, not
+    // the compiled default. Zero is OTA_AUTO_UPDATE_OFF, which is exactly what
+    // every existing device must come up with -- a device that has never been
+    // told to update itself unattended must not start doing so because it took
+    // a firmware update. A field whose wanted default were non-zero could not
+    // go here.
+    //
+    // For whoever appends next: that padding is now fully consumed. There is no
+    // spare byte left before the old struct size, so the next field must be
+    // appended past the members below and follows the plain append-only rule.
+    uint8_t  otaAutoUpdatePeriod;
 
     // ── Lock screen ──────────────────────────────────────────────────────────
     // Appended past _reservedPad12 deliberately, not placed in it. These are the
@@ -481,11 +493,11 @@ struct RhinoConfig {
     // — a shorter stored blob simply stops, and these keep their compiled
     // defaults on a device upgrading into this firmware.
     //
-    // Only the Wio Tracker L2 acts on them today (FEATURE_LOCK_SCREEN). The
-    // T-Deck Pro's sleep clock is a different thing that happens to look similar:
-    // there the overlay *is* the sleeping state, because e-paper holds an image
-    // at zero power. On a backlit LCD the lock screen is a lit state that has to
-    // be paid for and therefore has to end, which is what lockScreenOffSecs is.
+    // Every backlit display except Cardputer acts on them (FEATURE_LOCK_SCREEN).
+    // The T-Deck Pro's sleep clock is a different thing that happens to look
+    // similar: there the overlay *is* the sleeping state, because e-paper holds
+    // an image at zero power. On a backlit LCD the lock screen is a lit state
+    // that has to be paid for and therefore has to end.
 
     // How long the lock screen stays lit before the panel is put out for real.
     // 300..3600 (5..60 min); 0 means never — stay on the lock screen until the
@@ -496,6 +508,23 @@ struct RhinoConfig {
     // and the idle timeout both put the panel straight out, and no overlay is
     // ever built.
     bool     lockScreenEnabled;
+
+    // Whether the wall clock reads 12-hour with AM/PM or 24-hour, everywhere a
+    // time is shown to a person: the chat header, message timestamps, the
+    // sleep/lock clock, Device Info and the archived-node detail. Machine-facing
+    // output is deliberately excluded -- export filenames, the messages CSV and
+    // the discovery JSON stay ISO-ish 24-hour, because those are read by tools.
+    //
+    // Placed in what was lockScreenEnabled's trailing padding, under the same
+    // rule otaChannel and nodeArchiveShow above document: an upgrading device
+    // reads zero here, not the compiled default. Zero is CLOCK_FORMAT_24H, the
+    // format every build before this setting used, so the two agree -- a field
+    // whose wanted default were 12-hour could not go here.
+    uint8_t  clockFormat;
+    // For whoever appends next: the two bytes below are the remainder of that
+    // same padding and carry the same caveat -- an upgraded device reads zero
+    // there, not your compiled default.
+    uint8_t  _reservedPad13[2];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -580,6 +609,22 @@ enum BattDisplayMode : uint8_t {
     BATT_DISPLAY_VOLTAGE = 1,
 };
 #define BATT_DISPLAY_MAX 1
+
+// How a wall-clock time is written where a person reads it. 24-hour is 0 so an
+// upgraded device, which reads zero out of the old blob's trailing padding for
+// clockFormat, keeps the format every earlier build used.
+//
+// An enum rather than a bool for the same reason BattDisplayMode is one: a later
+// "24-hour with seconds" would otherwise need a second field.
+enum ClockFormat : uint8_t {
+    CLOCK_FORMAT_24H = 0,
+    CLOCK_FORMAT_12H = 1,
+};
+#define CLOCK_FORMAT_MAX 1
+
+static inline uint8_t cfgCoerceClockFormat(int v) {
+    return (v == CLOCK_FORMAT_12H) ? CLOCK_FORMAT_12H : CLOCK_FORMAT_24H;
+}
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
 // GPS otherwise; MANUAL means the user set it and nothing may overwrite it.
@@ -695,12 +740,19 @@ static inline uint8_t cfgBrightnessDuty(uint8_t pct) {
     return (uint8_t)((cfgCoerceBrightness(pct) * 255 + 50) / 100);
 }
 
-// Only client device roles are supported on this firmware. Values are the
-// canonical Meshtastic enum positions so they stay wire-compatible.
-//   0 = CLIENT, 1 = CLIENT_MUTE, 8 = CLIENT_HIDDEN
+// The device roles this firmware offers. Values are the canonical Meshtastic
+// enum positions (Config.DeviceConfig.Role) so they stay wire-compatible.
+//   0 = CLIENT, 1 = CLIENT_MUTE, 5 = TRACKER, 8 = CLIENT_HIDDEN
 // Any other role is coerced to CLIENT.
-static inline uint8_t cfgCoerceClientRole(uint8_t role) {
-    return (role == 1 || role == 8) ? role : 0;
+//
+// The infrastructure roles stay out on purpose. ROUTER and ROUTER_LATE change
+// how the whole mesh routes around a node, and REPEATER — deprecated upstream in
+// 2.7.11 for punching holes in the rebroadcast chain — originates nothing at
+// all. None of the three is a thing a handheld with a screen should advertise
+// itself as, and a node that claims one changes other people's routing, not
+// just its own behaviour.
+static inline uint8_t cfgCoerceDeviceRole(uint8_t role) {
+    return (role == 1 || role == 5 || role == 8) ? role : 0;
 }
 
 // Derives loraFreq/loraBw/loraSf/loraCr from cfg.region and cfg.modemPreset.
@@ -757,6 +809,38 @@ enum : uint8_t {
 
 // Human-readable channel name for UI rows and the YAML dump.
 const char *cfgOtaChannelName(uint8_t channel);
+
+// ── Unattended auto-update ───────────────────────────────────────────────────
+// How often a device left alone checks for and INSTALLS a new release, with no
+// prompt and no keypress. Distinct from otaAutoCheckEnabled, which only ever
+// offers: this one reboots into the new firmware on its own.
+//
+// A period rather than a bool plus an interval, so "off" and "the value an
+// upgrading device reads out of the old blob padding" are the same byte. OFF is
+// therefore zero, and that is load-bearing -- see otaAutoUpdatePeriod above.
+enum : uint8_t {
+    OTA_AUTO_UPDATE_OFF = 0,
+    OTA_AUTO_UPDATE_1H  = 1,
+    OTA_AUTO_UPDATE_6H  = 2,
+    OTA_AUTO_UPDATE_12H = 3,
+    OTA_AUTO_UPDATE_24H = 4,
+};
+#define OTA_AUTO_UPDATE_MAX OTA_AUTO_UPDATE_24H
+
+// Anything out of range is Off, never a period. A byte that cannot be read is
+// not a schedule, and the failure mode of a malformed value must never be a
+// device that flashes itself hourly.
+static inline uint8_t cfgCoerceOtaAutoUpdate(uint8_t period) {
+    return (period <= OTA_AUTO_UPDATE_MAX) ? period : OTA_AUTO_UPDATE_OFF;
+}
+
+// Name for the YAML dump and UI rows. Compact tokens, not sentences: this
+// round-trips through config.yaml, where a value with spaces in it is one more
+// thing the importer has to get right.
+const char *cfgOtaAutoUpdateName(uint8_t period);
+
+// The period in milliseconds; 0 for OFF and for anything unrecognised.
+uint32_t cfgOtaAutoUpdatePeriodMs(uint8_t period);
 
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 

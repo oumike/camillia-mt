@@ -286,10 +286,10 @@ static uint32_t s_tdeckProRecentMsgSeq = 0;
 // ── Lock screen state ────────────────────────────────────────────────────────
 // A third display state, between the UI and a dark panel:
 //
-//   UI ──(wake-button hold, or idle timeout)──> LOCKED ──(lockScreenOffSecs)──> ASLEEP
-//    ^                                            │                              │
-//    └──────────(wake button press)───────────────┘                              │
-//    └───────────────────────────(wake button press)─────────────────────────────┘
+//   UI ──(screen-off gesture or idle timeout)──> LOCKED ──(dwell)──> ASLEEP
+//    ^                                               │                       │
+//    └────────────(allowed wake gesture)─────────────┘                       │
+//    └────────────────────(allowed wake gesture)─────────────────────────────┘
 //
 // LOCKED is a *lit* state, and that is the whole reason it cannot be modelled
 // the way the T-Deck Pro models its sleep clock. s_screenAsleep stays false
@@ -1324,7 +1324,7 @@ static uint32_t s_composeDmNodeId = 0;
 
 static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
-static char s_lastHeaderTime[8] = "";
+static char s_lastHeaderTime[LIVE_CLOCK_BUF] = "";
 static uint8_t s_lastBattPct = 255;
 // Battery voltage in hundredths, cached alongside the percentage so the header
 // early-out notices a change in either. 0xFFFF is the "not yet drawn" sentinel,
@@ -2696,6 +2696,7 @@ enum CfgActionId {
     CFG_ACTION_OTA_CHANNEL,
     CFG_ACTION_RELEASE_NOTES,
     CFG_ACTION_TIME_DATE,
+    CFG_ACTION_CLOCK_FORMAT,
     CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_RESET_CHAT_COLORS,
     CFG_ACTION_CLEAR_MSGS,
@@ -4628,6 +4629,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Time and Date: %s",
                      (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? "Manual" : "Auto");
             break;
+        case CFG_ACTION_CLOCK_FORMAT:
+            snprintf(buf, bufLen, "Clock Format: %s",
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
+            break;
         case CFG_ACTION_RESET_CHAT_COLORS:
             snprintf(buf, bufLen, "Reset Chat Colors");
             break;
@@ -4691,11 +4696,18 @@ static bool cfgActionDisabled(int actionId) {
     }
 }
 
+// Names for the canonical Meshtastic Role enum, so an imported or legacy value
+// reads as itself rather than as a number. Only the handful cfgCoerceDeviceRole
+// admits are reachable from a setting; the rest are here so a config that
+// arrived carrying one is named honestly before it is coerced.
 static const char *cfgDeviceRoleName(uint8_t role) {
     switch (role) {
         case 0:  return "CLIENT";
         case 1:  return "CLIENT_MUTE";
-        case 2:  return "CLIENT_HIDDEN_MQTT";
+        // 2 read "CLIENT_HIDDEN_MQTT", which is not a Meshtastic role at all and
+        // disagreed with kRoleNames[] in config_io.cpp. ROUTER is what the
+        // protobuf calls this position.
+        case 2:  return "ROUTER";
         case 3:  return "ROUTER_CLIENT";
         case 4:  return "REPEATER";
         case 5:  return "TRACKER";
@@ -4968,10 +4980,34 @@ static void otaRequestCheckNow() {
 
 static bool s_otaWorkerUiReady = true;
 
-// The title every install-phase draw carries. Named rather than repeated as a
-// literal because the e-paper path below matches on it to decide which state is
-// the long one, and a typo in either place would silently stop matching.
+// The stem of the title every install-phase draw carries. Named rather than
+// repeated as a literal because the e-paper path below matches on it to decide
+// which state is the long one, and a typo in either place would silently stop
+// matching. It is a *prefix* now, not the whole title -- see below.
 static const char kOtaInstallTitle[] = "Installing update";
+
+// The title actually drawn: the stem plus the release being written. The panel
+// is the only place a user can see which version their device is about to
+// become, and during an install it is also the only thing on screen that could
+// tell them the update they asked for is the update they are getting.
+//
+// File scope rather than a local, because the progress callback is a
+// capture-less lambda (it has to convert to a plain function pointer) and so
+// cannot carry it in. Composed once per install, before the transfer starts, so
+// every draw for that install sees the same string -- which is what keeps the
+// chrome dedupe below collapsing them into one paint.
+static char s_otaInstallTitle[80] = {};
+
+static const char *otaComposeInstallTitle(const char *tag) {
+    if (tag && tag[0]) {
+        snprintf(s_otaInstallTitle, sizeof(s_otaInstallTitle), "%s %s", kOtaInstallTitle, tag);
+    } else {
+        // No tag to name: the bare stem reads correctly on its own, where
+        // "Installing update latest" would not.
+        snprintf(s_otaInstallTitle, sizeof(s_otaInstallTitle), "%s", kOtaInstallTitle);
+    }
+    return s_otaInstallTitle;
+}
 
 #if defined(DEVICE_TDECK_PRO)
 // ── The Pro's OTA screen ────────────────────────────────────────────────────
@@ -5044,8 +5080,265 @@ static void otaProShowState(const char *headline, const char *detail) {
 // minutes, and it is the one the panel is really there to explain. Every other
 // state keeps the caller's own wording, which is already short enough to fit.
 static const char *otaProHeadlineFor(const char *title) {
-    if (title && strcmp(title, kOtaInstallTitle) == 0) return "Firmware updating...";
+    // Prefix, not equality: the install title now carries the release tag, and an
+    // exact match would stop firing the moment it did -- leaving the Pro showing
+    // the raw title instead of its own wording.
+    if (title && strncmp(title, kOtaInstallTitle, sizeof(kOtaInstallTitle) - 1) == 0) {
+        return "Firmware updating...";
+    }
     return (title && title[0]) ? title : "Firmware updating...";
+}
+#endif
+
+#if defined(DEVICE_TDECK_PRO)
+// The Pro's screen is static by design (see above): there is no incremental
+// render state to throw away, so the invalidation the TFT path needs is a no-op
+// here and the call sites do not have to care which board they are on.
+static inline void otaWorkerInvalidateScreen() {}
+#else
+// ── The TFT install screen's render cache ───────────────────────────────────
+// The install screen is redrawn about 5.5 times a second for the whole download
+// and almost nothing on it changes between ticks: a few pixels of bar and three
+// short strings. Wiping to black and repainting all of it costs a full frame of
+// blocking SPI — ~31 ms at TFT_SPI_WRITE_HZ 40 MHz, ~17% of the download's wall
+// time — inside the loop that is supposed to be draining the socket. It also
+// blinks the whole panel at 5.5 Hz.
+//
+// So the screen is split in two: chrome (background, title, bar outline) is
+// painted once and keyed on the title, and each field below remembers what it
+// last put on the panel and skips the draw when the answer has not moved. The
+// state is all fixed-size POD in .bss — this path exists precisely so the TLS
+// handshake gets the largest contiguous internal DRAM it can, and it must not
+// add a single heap allocation.
+struct OtaUiTextRow {
+    char     text[160];   // sized for the longest detail drawn: the err[] buffer
+    uint16_t color;
+    int      width;       // pixels the cached string covered, for tail clearing
+    bool     valid;
+};
+
+static bool s_otaUiChromeValid = false;
+static char s_otaUiTitle[sizeof(s_otaInstallTitle)] = {};
+static int  s_otaUiLastFillW = 0;
+static bool s_otaUiBarStalled = false;
+static OtaUiTextRow s_otaUiPctRow = {};
+static OtaUiTextRow s_otaUiBytesRow = {};
+static OtaUiTextRow s_otaUiDetailRow = {};
+
+// Geometry, shared so the chrome's bar outline and the incremental fill drawn
+// inside it cannot drift apart. Width comes from the panel rather than a
+// constant: heltec-v4-vertical is portrait 240x320, not 320x240.
+static constexpr int kOtaUiBarX = 8;
+static constexpr int kOtaUiBarY = 52;
+static constexpr int kOtaUiBarH = 18;
+static constexpr int kOtaUiTextX = 8;
+static constexpr int kOtaUiPctY = 78;
+static constexpr int kOtaUiBytesY = 102;
+static constexpr int kOtaUiDetailY = 126;
+
+static inline int otaWorkerBarW() {
+    return max(120, (int)displayDev().width() - 16);
+}
+
+// ── The rhino ────────────────────────────────────────────────────────────────
+// Runs back and forth under the detail line for the length of the download.
+// Purely decorative, and cheap enough to stay that way: an opaque 24x13 blit is
+// 624 bytes of pixels, about 0.13 ms at 40 MHz, against the ~31 ms full-frame
+// wipe this screen used to pay on every tick. Only the strip the sprite vacates
+// is cleared, so there is no flicker and no second pass over the pixels it
+// still covers.
+//
+// It takes one step per progress callback that reaches it, so it runs at
+// whatever rate the download is reporting -- about 5.5 steps a second while
+// bytes are moving, and a crawl once the transfer stalls. That is not a bug: a
+// rhino slowing to a stop is a fair reading of what the panel is already
+// saying in words.
+//
+// 1 bpp, MSB first, 24 px = exactly three bytes a row with no padding. The
+// source art is kept beside each row because that is the only form of it anyone
+// can edit.
+static constexpr int kOtaRhinoW    = 24;
+static constexpr int kOtaRhinoH    = 13;
+static constexpr int kOtaRhinoStep = 6;
+
+static const uint8_t kOtaRhinoRightA[] = {
+    0x00, 0x00, 0x00,   // ........................
+    0x00, 0x00, 0x02,   // ......................#.
+    0x00, 0x00, 0x06,   // .....................##.
+    0x00, 0x00, 0x8C,   // ................#...##..
+    0x20, 0x00, 0xDC,   // ..#.............##.###..
+    0x33, 0xFF, 0xBE,   // ..##..###########.#####.
+    0x7F, 0xFF, 0xFF,   // .#######################
+    0x7F, 0xFF, 0xFF,   // .#######################
+    0x7F, 0xFF, 0xFE,   // .######################.
+    0x3F, 0xFF, 0xFC,   // ..####################..
+    0x3B, 0x81, 0xDC,   // ..###.###......###.###..
+    0x3B, 0x81, 0xDC,   // ..###.###......###.###..
+    0x33, 0x01, 0x98,   // ..##..##.......##..##...
+};
+
+static const uint8_t kOtaRhinoRightB[] = {
+    0x00, 0x00, 0x00,   // ........................
+    0x00, 0x00, 0x02,   // ......................#.
+    0x00, 0x00, 0x06,   // .....................##.
+    0x00, 0x00, 0x8C,   // ................#...##..
+    0x20, 0x00, 0xDC,   // ..#.............##.###..
+    0x33, 0xFF, 0xBE,   // ..##..###########.#####.
+    0x7F, 0xFF, 0xFF,   // .#######################
+    0x7F, 0xFF, 0xFF,   // .#######################
+    0x7F, 0xFF, 0xFE,   // .######################.
+    0x3F, 0xFF, 0xFC,   // ..####################..
+    0x71, 0xC3, 0x8E,   // .###...###....###...###.
+    0x71, 0xC3, 0x8E,   // .###...###....###...###.
+    0xC0, 0xC3, 0x06,   // ##......##....##.....##.
+};
+
+static const uint8_t kOtaRhinoLeftA[] = {
+    0x00, 0x00, 0x00,   // ........................
+    0x40, 0x00, 0x00,   // .#......................
+    0x60, 0x00, 0x00,   // .##.....................
+    0x31, 0x00, 0x00,   // ..##...#................
+    0x3B, 0x00, 0x04,   // ..###.##.............#..
+    0x7D, 0xFF, 0xCC,   // .#####.###########..##..
+    0xFF, 0xFF, 0xFE,   // #######################.
+    0xFF, 0xFF, 0xFE,   // #######################.
+    0x7F, 0xFF, 0xFE,   // .######################.
+    0x3F, 0xFF, 0xFC,   // ..####################..
+    0x3B, 0x81, 0xDC,   // ..###.###......###.###..
+    0x3B, 0x81, 0xDC,   // ..###.###......###.###..
+    0x19, 0x80, 0xCC,   // ...##..##.......##..##..
+};
+
+static const uint8_t kOtaRhinoLeftB[] = {
+    0x00, 0x00, 0x00,   // ........................
+    0x40, 0x00, 0x00,   // .#......................
+    0x60, 0x00, 0x00,   // .##.....................
+    0x31, 0x00, 0x00,   // ..##...#................
+    0x3B, 0x00, 0x04,   // ..###.##.............#..
+    0x7D, 0xFF, 0xCC,   // .#####.###########..##..
+    0xFF, 0xFF, 0xFE,   // #######################.
+    0xFF, 0xFF, 0xFE,   // #######################.
+    0x7F, 0xFF, 0xFE,   // .######################.
+    0x3F, 0xFF, 0xFC,   // ..####################..
+    0x71, 0xC3, 0x8E,   // .###...###....###...###.
+    0x71, 0xC3, 0x8E,   // .###...###....###...###.
+    0x60, 0xC3, 0x03,   // .##.....##....##......##
+};
+
+static int     s_otaRhinoX = -1;     // left edge in panel coords; -1 = not placed
+static int     s_otaRhinoDir = 1;    // +1 running right, -1 running left
+static uint8_t s_otaRhinoFrame = 0;  // alternates the legs
+
+static void otaWorkerRunRhino() {
+    const int y = kOtaUiDetailY + (int)displayDev().fontHeight() + 6;
+    const int minX = 8;
+    const int maxX = (int)displayDev().width() - 8 - kOtaRhinoW;
+    // A panel with no room for the track, or none below the detail row, simply
+    // does not get a rhino. Everything above it still draws.
+    if (maxX <= minX) return;
+    if (y + kOtaRhinoH > (int)displayDev().height()) return;
+
+    const int prevX = s_otaRhinoX;
+    if (prevX < 0) {
+        s_otaRhinoX = minX;
+        s_otaRhinoDir = 1;
+    } else {
+        s_otaRhinoX += s_otaRhinoDir * kOtaRhinoStep;
+        if (s_otaRhinoX >= maxX) {
+            s_otaRhinoX = maxX;
+            s_otaRhinoDir = -1;
+        } else if (s_otaRhinoX <= minX) {
+            s_otaRhinoX = minX;
+            s_otaRhinoDir = 1;
+        }
+        s_otaRhinoFrame ^= 1;
+    }
+
+    // Direction is read after the turn, so at each end it faces the way it is
+    // about to go -- which renders as the rhino turning around rather than
+    // moonwalking back across the panel.
+    const uint8_t *bits;
+    if (s_otaRhinoDir > 0) bits = s_otaRhinoFrame ? kOtaRhinoRightB : kOtaRhinoRightA;
+    else                   bits = s_otaRhinoFrame ? kOtaRhinoLeftB  : kOtaRhinoLeftA;
+
+    displayDev().drawBitmap(s_otaRhinoX, y, bits, kOtaRhinoW, kOtaRhinoH,
+                            TFT_WHITE, TFT_BLACK);
+
+    // Clear only what it left behind. The opaque blit above has already
+    // repainted everything the sprite still covers, so wiping the whole track
+    // first would be both wasted pixels and a visible blink.
+    if (prevX >= 0 && prevX != s_otaRhinoX) {
+        if (s_otaRhinoX > prevX) {
+            displayDev().fillRect(prevX, y, s_otaRhinoX - prevX, kOtaRhinoH, TFT_BLACK);
+        } else {
+            displayDev().fillRect(s_otaRhinoX + kOtaRhinoW, y,
+                                  prevX - s_otaRhinoX, kOtaRhinoH, TFT_BLACK);
+        }
+    }
+}
+
+// Anything that repaints the panel out from under this cache has to say so, or
+// the next progress tick draws a delta against a screen that no longer holds
+// what the delta was measured from.
+static void otaWorkerInvalidateScreen() {
+    s_otaUiChromeValid = false;
+    s_otaUiTitle[0] = '\0';
+    s_otaUiLastFillW = 0;
+    s_otaUiBarStalled = false;
+    s_otaUiPctRow.valid = false;
+    s_otaUiBytesRow.valid = false;
+    s_otaUiDetailRow.valid = false;
+    s_otaRhinoX = -1;
+    s_otaRhinoDir = 1;
+    s_otaRhinoFrame = 0;
+}
+
+static inline bool otaWorkerRowChanged(const OtaUiTextRow &row, const char *text, uint16_t color) {
+    return !row.valid || row.color != color || strcmp(row.text, text) != 0;
+}
+
+// One text row, drawn only when its rendered value or its colour actually moved.
+// setTextColor(fg, bg) paints an opaque background, so a string at least as wide
+// as the last one erases it for free; a shorter one leaves a tail, which is all
+// the fillRect here is for — a few hundred bytes of pixels against the ~150 KB a
+// fillScreen costs.
+static void otaWorkerDrawTextRow(OtaUiTextRow &row, int y, const char *text, uint16_t color) {
+    if (!text) text = "";
+    if (!otaWorkerRowChanged(row, text, color)) return;
+
+    const int newW = (int)displayDev().textWidth(text);
+    displayDev().setTextColor(color, TFT_BLACK);
+    displayDev().drawString(text, kOtaUiTextX, y);
+    if (row.valid && row.width > newW) {
+        displayDev().fillRect(kOtaUiTextX + newW,
+                              y,
+                              row.width - newW,
+                              displayDev().fontHeight() + 2,
+                              TFT_BLACK);
+    }
+
+    snprintf(row.text, sizeof(row.text), "%s", text);
+    row.color = color;
+    row.width = newW;
+    row.valid = true;
+}
+
+// The one paint still allowed to cost a full frame, because it only happens on a
+// phase change: the first progress draw of an install attempt, or a title change
+// — which is how the "OTA install failed" screen gets the whole panel it wants.
+static void otaWorkerDrawProgressChrome(const char *title) {
+    displayDev().startWrite();
+    displayDev().fillScreen(TFT_BLACK);
+    displayDev().setTextSize(1);
+    displayDev().setFont(&fonts::DejaVu12);
+    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
+    if (title && title[0]) displayDev().drawString(title, kOtaUiTextX, 14);
+    displayDev().drawRect(kOtaUiBarX, kOtaUiBarY, otaWorkerBarW(), kOtaUiBarH, TFT_WHITE);
+    displayDev().endWrite();
+
+    otaWorkerInvalidateScreen();
+    snprintf(s_otaUiTitle, sizeof(s_otaUiTitle), "%s", title ? title : "");
+    s_otaUiChromeValid = true;
 }
 #endif
 
@@ -5055,6 +5348,11 @@ static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) 
     otaProShowState(otaProHeadlineFor(line1), line2);
     return;
 #else
+    // This one legitimately wipes the panel, which leaves nothing of the
+    // progress screen the cache below thinks is still up there.
+    otaWorkerInvalidateScreen();
+
+    displayDev().startWrite();
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
     displayDev().setTextSize(1);
@@ -5068,6 +5366,7 @@ static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) 
     if (line2 && line2[0]) {
         displayDev().drawString(line2, 8, y);
     }
+    displayDev().endWrite();
 #endif
 }
 
@@ -5086,38 +5385,43 @@ static void otaWorkerDrawProgress(const char *title,
     otaProShowState(otaProHeadlineFor(title), detail);
     return;
 #else
-    displayDev().fillScreen(TFT_BLACK);
+    // A new title means a new phase, and the phase screens do not share a
+    // layout — that is what earns the full repaint here, and it is the only
+    // thing that does.
+    if (!s_otaUiChromeValid ||
+        strncmp(s_otaUiTitle, title ? title : "", sizeof(s_otaUiTitle) - 1) != 0) {
+        otaWorkerDrawProgressChrome(title);
+    }
+
     displayDev().setTextSize(1);
     displayDev().setFont(&fonts::DejaVu12);
 
-    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
-    if (title && title[0]) displayDev().drawString(title, 8, 14);
+    // The rhino runs on the install screen only; the failure screen keeps the
+    // panel still. Ahead of the change test below on purpose -- the whole point
+    // of it is that it moves on every tick, whether or not anything else did.
+    // This is the one thing that now draws on a tick where nothing changed, and
+    // it costs about a five-hundredth of what the old full repaint did.
+    if (strncmp(s_otaUiTitle, kOtaInstallTitle, sizeof(kOtaInstallTitle) - 1) == 0) {
+        displayDev().startWrite();
+        otaWorkerRunRhino();
+        displayDev().endWrite();
+    }
 
-    const int barX = 8;
-    const int barY = 52;
-    const int barW = max(120, (int)displayDev().width() - 16);
-    const int barH = 18;
-    displayDev().drawRect(barX, barY, barW, barH, TFT_WHITE);
-
+    const int barW = otaWorkerBarW();
     int fillW = 0;
     int pct = 0;
     if (total > 0) {
         pct = (int)((written * 100UL) / total);
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
+        // Quantising through whole percent is what bounds the bar to at most
+        // 100 fills for a download instead of one per callback.
         fillW = (barW - 2) * pct / 100;
-    }
-
-    if (fillW > 0) {
-        uint16_t fillColor = stalled ? TFT_ORANGE : TFT_GREEN;
-        displayDev().fillRect(barX + 1, barY + 1, fillW, barH - 2, fillColor);
     }
 
     char pctBuf[24];
     if (total > 0) snprintf(pctBuf, sizeof(pctBuf), "%d%%", pct);
     else snprintf(pctBuf, sizeof(pctBuf), "working...");
-    displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_CYAN, TFT_BLACK);
-    displayDev().drawString(pctBuf, 8, 78);
 
     char bytesBuf[64];
     if (total > 0) {
@@ -5132,13 +5436,52 @@ static void otaWorkerDrawProgress(const char *title,
                  "%lu KB downloaded",
                  (unsigned long)(written / 1024UL));
     }
-    displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
-    displayDev().drawString(bytesBuf, 8, 102);
 
-    if (detail && detail[0]) {
-        displayDev().setTextColor(stalled ? TFT_ORANGE : TFT_WHITE, TFT_BLACK);
-        displayDev().drawString(detail, 8, 126);
+    const uint16_t pctColor = stalled ? TFT_ORANGE : TFT_CYAN;
+    const uint16_t detailColor = stalled ? TFT_ORANGE : TFT_WHITE;
+    const uint16_t barColor = stalled ? TFT_ORANGE : TFT_GREEN;
+    const char *detailText = (detail && detail[0]) ? detail : "";
+
+    const bool barMoved = (fillW != s_otaUiLastFillW) || (stalled != s_otaUiBarStalled);
+    if (!barMoved &&
+        !otaWorkerRowChanged(s_otaUiPctRow, pctBuf, pctColor) &&
+        !otaWorkerRowChanged(s_otaUiBytesRow, bytesBuf, TFT_WHITE) &&
+        !otaWorkerRowChanged(s_otaUiDetailRow, detailText, detailColor)) {
+        return;   // nothing on this screen says anything new: touch no pixels
     }
+
+    // One transaction for the whole composite paint, so LovyanGFX holds the bus
+    // across the primitives instead of re-acquiring it for each one.
+    displayDev().startWrite();
+
+    if (fillW < s_otaUiLastFillW) {
+        // The bar only ever runs backwards when the transfer restarted from
+        // zero — the low-memory TLS retry. Without this the bar would keep the
+        // failed attempt's fill and never move again.
+        displayDev().fillRect(kOtaUiBarX + 1, kOtaUiBarY + 1, barW - 2, kOtaUiBarH - 2, TFT_BLACK);
+        s_otaUiLastFillW = 0;
+    }
+    if (stalled != s_otaUiBarStalled) {
+        // Colour flip only: repaint the span already filled, once. 18 px tall,
+        // so ~11.5 KB even at full width.
+        if (s_otaUiLastFillW > 0) {
+            displayDev().fillRect(kOtaUiBarX + 1, kOtaUiBarY + 1,
+                                  s_otaUiLastFillW, kOtaUiBarH - 2, barColor);
+        }
+        s_otaUiBarStalled = stalled;
+    }
+    if (fillW > s_otaUiLastFillW) {
+        // The common case, and the whole point: paint the new segment only.
+        displayDev().fillRect(kOtaUiBarX + 1 + s_otaUiLastFillW, kOtaUiBarY + 1,
+                              fillW - s_otaUiLastFillW, kOtaUiBarH - 2, barColor);
+        s_otaUiLastFillW = fillW;
+    }
+
+    otaWorkerDrawTextRow(s_otaUiPctRow, kOtaUiPctY, pctBuf, pctColor);
+    otaWorkerDrawTextRow(s_otaUiBytesRow, kOtaUiBytesY, bytesBuf, TFT_WHITE);
+    otaWorkerDrawTextRow(s_otaUiDetailRow, kOtaUiDetailY, detailText, detailColor);
+
+    displayDev().endWrite();
 #endif
 }
 
@@ -5409,12 +5752,20 @@ static bool runOtaWorkerModeIfRequested() {
         return true;
     }
 
-    otaWorkerDrawStatus(kOtaInstallTitle, check.latestTag[0] ? check.latestTag : "latest");
+    // Composed once, here, ahead of every draw that uses it. The tag stays on
+    // the second line as well: on the TFT this screen is overwritten by the
+    // progress draw a few instructions later and nobody reads it, but on the
+    // Pro it *is* the install screen -- otaProShowState() dedupes every later
+    // tick into this one paint -- and dropping the line would take the version
+    // off the only screen that board shows for the whole update.
+    otaWorkerDrawStatus(otaComposeInstallTitle(check.latestTag),
+                        check.latestTag[0] ? check.latestTag : "latest");
     static volatile size_t s_otaWorkerBytesWritten = 0;
     static volatile size_t s_otaWorkerBytesTotal = 0;
     static volatile uint32_t s_otaWorkerLastProgressMs = 0;
     static volatile size_t s_otaWorkerLastAdvancedBytes = 0;
     static uint32_t s_otaWorkerLastDrawMs = 0;
+    static bool s_otaWorkerLastDrawStalled = false;
     auto onOtaProgress = [](size_t written, size_t total) {
         const uint32_t now = millis();
         if (written != s_otaWorkerLastAdvancedBytes) {
@@ -5426,12 +5777,26 @@ static bool runOtaWorkerModeIfRequested() {
 
         const bool stalled = (s_otaWorkerLastProgressMs != 0)
                           && ((uint32_t)(now - s_otaWorkerLastProgressMs) > 3000UL);
-        if ((uint32_t)(now - s_otaWorkerLastDrawMs) >= 180UL || stalled) {
-            otaWorkerDrawProgress(kOtaInstallTitle,
+
+        // Entering or leaving a stall is news, so it is shown at once. After
+        // that the floor is 180 ms while bytes are moving and 1 s once they
+        // have stopped. The old code did the opposite -- `|| stalled` bypassed
+        // the throttle entirely -- and since this callback fires from the
+        // download loop's idle branches, which spin on delay(10), a stall meant
+        // ~25 repaints a second competing with the very poll that was trying to
+        // recover before the 15 s abort fired.
+        const uint32_t minGapMs = stalled ? 1000UL : 180UL;
+        if (stalled != s_otaWorkerLastDrawStalled ||
+            (uint32_t)(now - s_otaWorkerLastDrawMs) >= minGapMs) {
+            // Cheap when nothing changed: otaWorkerDrawProgress() compares each
+            // field against what is already on the panel and touches no pixels
+            // if they all match.
+            otaWorkerDrawProgress(s_otaInstallTitle,
                                   stalled ? "No progress for 3s..." : "Downloading...",
                                   written,
                                   total,
                                   stalled);
+            s_otaWorkerLastDrawStalled = stalled;
             s_otaWorkerLastDrawMs = now;
         }
     };
@@ -5441,7 +5806,9 @@ static bool runOtaWorkerModeIfRequested() {
     s_otaWorkerLastAdvancedBytes = 0;
     s_otaWorkerLastProgressMs = millis();
     s_otaWorkerLastDrawMs = 0;
-    otaWorkerDrawProgress(kOtaInstallTitle,
+    s_otaWorkerLastDrawStalled = false;
+    otaWorkerInvalidateScreen();
+    otaWorkerDrawProgress(s_otaInstallTitle,
                           "Starting download...",
                           0,
                           0,
@@ -5454,13 +5821,23 @@ static bool runOtaWorkerModeIfRequested() {
                                              onOtaProgress);
     if (!installOk && otaWorkerErrIsTlsLowMem(err)) {
         Serial.println("[ota-worker] low-mem TLS on install; retrying after WiFi recycle");
-        otaWorkerDrawProgress(kOtaInstallTitle,
+        otaWorkerDrawProgress(s_otaInstallTitle,
                               "Retrying download...",
                               (size_t)s_otaWorkerBytesWritten,
                               (size_t)s_otaWorkerBytesTotal,
                               true);
         if (otaWorkerReconnectWifiForLowMemRetry()) {
             err[0] = '\0';
+            // Second attempt, second transfer: the screen starts clean rather
+            // than carrying the failed run's chrome and bar fill. The byte
+            // counters are deliberately left alone -- if the retry dies before
+            // its first callback, the failure screen should still show how far
+            // the first attempt got.
+            s_otaWorkerLastAdvancedBytes = 0;
+            s_otaWorkerLastProgressMs = millis();
+            s_otaWorkerLastDrawMs = 0;
+            s_otaWorkerLastDrawStalled = false;
+            otaWorkerInvalidateScreen();
             installOk = otaInstallLatestRelease(check.latestTag[0] ? check.latestTag : nullptr,
                                                 err,
                                                 sizeof(err),
@@ -6029,8 +6406,9 @@ static const lv_font_t *tdeckProBoldRowFont() {
 // ── Overlay palette ──────────────────────────────────────────────────────────
 // The Pro is black on white because that is what an e-paper panel does well and
 // what it holds with the power off. The lock-screen boards use white text with
-// blue time/channel and green node accents on black. Every lit pixel is
-// backlight the device is paying for, so the glance surface stays mostly unlit.
+// an orange clock, blue time/channel and green node accents on black. Every lit
+// pixel is backlight the device is paying for, so the glance surface stays
+// mostly unlit.
 //
 // Deliberately not the theme palette. This screen is not part of the themed UI
 // — it is what the device looks like when the UI is put away — and a light
@@ -6040,6 +6418,12 @@ static inline lv_color_t sleepOverlayInk() { return lv_color_make(255, 255, 255)
 static inline lv_color_t sleepOverlayBg()  { return lv_color_make(0, 0, 0); }
 static inline lv_color_t sleepOverlayTimeChannelInk() { return lv_color_make(32, 160, 255); }
 static inline lv_color_t sleepOverlayNodeInk() { return lv_color_make(64, 220, 112); }
+// The clock gets its own ink rather than sharing the time/channel blue. It is
+// the one thing on this screen someone is actually looking for at a glance, and
+// the blue is spoken for: the per-message prefix labels use it for "14:32
+// #general", so recolouring that helper would have repainted every channel name
+// on the panel too.
+static inline lv_color_t sleepOverlayClockInk() { return lv_color_make(255, 149, 0); }
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_32;
@@ -6048,6 +6432,9 @@ static inline lv_color_t sleepOverlayInk() { return lv_color_make(0, 0, 0); }
 static inline lv_color_t sleepOverlayBg()  { return lv_color_make(255, 255, 255); }
 static inline lv_color_t sleepOverlayTimeChannelInk() { return sleepOverlayInk(); }
 static inline lv_color_t sleepOverlayNodeInk() { return sleepOverlayInk(); }
+// Stays black: this is the e-paper overlay, where the panel has no colour to
+// give and the whole point of the palette is what it holds with the power off.
+static inline lv_color_t sleepOverlayClockInk() { return sleepOverlayInk(); }
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_16;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
@@ -6056,14 +6443,11 @@ static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
 // Geometry of the notification area, in absolute panel coordinates. It sits in
 // the band between the date and the battery.
 static constexpr int kTdeckProMsgRowLeft   = 8;
-#if FEATURE_LOCK_SCREEN
-// The Wio Tracker L2 runs landscape (TFT_ROTATION_DEFAULT 0 plus the panel's
-// own offset_rotation of 1 gives internal rotation 1), so it is 320 wide and
-// 240 tall — wider rows than the Pro and 80 px less height to stack them in.
-static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_LANDSCAPE_W - 2 * kTdeckProMsgRowLeft;
-#else
-static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_PORTRAIT_W - 2 * kTdeckProMsgRowLeft;
-#endif
+static int sleepOverlayMsgRowWidth() {
+    const int panelW = lv_disp_get_hor_res(NULL);
+    const int width = panelW - 2 * kTdeckProMsgRowLeft;
+    return (width > 0) ? width : 1;
+}
 // A preview may wrap onto a second line, so a message is one or two lines tall
 // and the block is laid out by accumulating heights rather than by a fixed
 // pitch -- that is what keeps a two-line message from drawing over the one
@@ -6074,17 +6458,26 @@ static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_PORTRAIT_W - 2 * kTdeckP
 // therefore get is eight single-line messages, which is also the case with the
 // most gaps in it: 8*15 + 7*6 = 162 px, running 150..312 and leaving the same
 // 8 px at the bottom that the status band leaves at the top.
-#if FEATURE_LOCK_SCREEN
-// 240 px of height rather than 320, so the stack above is tighter and the block
-// starts higher but has less room: 116..240 is 124 px, which is six single-line
-// messages (6*15 + 5*6 = 120) against the Pro's eight.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// The Pager is only 222 px tall in landscape. Five one-line messages consume
+// 99 px including gaps and finish at y=205, leaving a safe bottom margin.
+static constexpr int kTdeckProMsgTop        = 106;
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProMsgTop        = 150;
+#elif FEATURE_LOCK_SCREEN
+// Standard 320x240 lock screens fit six single-line messages: 6*15 + 5*6 =
+// 120 px, running 116..236 with four pixels left at the bottom.
 static constexpr int kTdeckProMsgTop        = 116;
 #else
 static constexpr int kTdeckProMsgTop        = 150;
 #endif
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
-#if FEATURE_LOCK_SCREEN
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int kTdeckProMsgTotalLines = 5;    // 480x222
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProMsgTotalLines = 8;    // 240x320
+#elif FEATURE_LOCK_SCREEN
 static constexpr int kTdeckProMsgTotalLines = 6;    // across the whole block
 #else
 static constexpr int kTdeckProMsgTotalLines = 8;    // across the whole block
@@ -6101,12 +6494,21 @@ static constexpr int kTdeckProMsgGapPx     = 4;
 // only if the two match -- a heavier date beside a lighter battery reads as two
 // unrelated things that happen to share a row.
 static constexpr int kTdeckProBandInset    = 8;    // from either edge
-#if FEATURE_LOCK_SCREEN
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int kTdeckProBandTop      = 3;
+static constexpr int kTdeckProTitleTop     = 20;   // 18 px face, 21 px line box
+static constexpr int kTdeckProNodeTop      = 44;   // 14 px face, 16 px line box
+static constexpr int kTdeckProTimeTop      = 62;   // 32 px face, 35 px line box
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProBandTop      = 8;
+static constexpr int kTdeckProTitleTop     = 30;   // 18 px face, 21 px line box
+static constexpr int kTdeckProNodeTop      = 58;   // 14 px face, 16 px line box
+static constexpr int kTdeckProTimeTop      = 82;   // 32 px face, 35 px line box
+#elif FEATURE_LOCK_SCREEN
 static constexpr int kTdeckProBandTop      = 4;
-// Same order and the same grouping as the Pro, compressed into 80 px less
-// height: the title drops from a 32 px face to 18, the node name from 16 to 14,
-// and the clock from 40 to 32. The smaller clock avoids linking Wio-only copies
-// of the 24 px and 40 px LVGL glyph tables, which together cost about 99 KB.
+// Same order and grouping as the Pro, compressed into 80 px less height. The
+// smaller faces also avoid linking 24 px and 40 px LVGL glyph tables solely for
+// a backlit lock screen.
 static constexpr int kTdeckProTitleTop     = 24;   // 18 px face, 21 px line box
 static constexpr int kTdeckProNodeTop      = 54;   // 14 px face, 16 px line box
 static constexpr int kTdeckProTimeTop      = 72;   // 32 px face, 35 px line box
@@ -6156,12 +6558,12 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     const lv_font_t *boldFont = tdeckProBoldRowFont();
     const lv_font_t *restFont = emojiFont(&lv_font_montserrat_12);
 
-    char timeText[8] = "";
+    char timeText[LIVE_CLOCK_BUF] = "";
     if (m.epoch != 0) {
         const time_t when = (time_t)m.epoch;
         struct tm lt;
         localtime_r(&when, &lt);
-        strftime(timeText, sizeof(timeText), "%H:%M", &lt);
+        liveFormatClock(lt, timeText, sizeof(timeText));
     }
 
     // Where the continuation line will start. Measured from the time alone, not
@@ -6200,7 +6602,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
         senderW = tdeckProTextWidth(senderText, restFont);
         const int fixedW = boldW + kTdeckProMsgGapPx
                          + senderW + kTdeckProMsgGapPx;
-        if (fixedW <= kTdeckProMsgRowWidth - kTdeckProMsgBodyMinPx) {
+        if (fixedW <= sleepOverlayMsgRowWidth() - kTdeckProMsgBodyMinPx) {
             break;
         }
         // Trim whichever field is still the more generous, so neither collapses
@@ -6221,7 +6623,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     lv_obj_align(senderLbl, LV_ALIGN_TOP_LEFT, senderX, y);
 
     const int restX = senderX + senderW + kTdeckProMsgGapPx;
-    int restW = kTdeckProMsgRowWidth - (restX - kTdeckProMsgRowLeft);
+    int restW = sleepOverlayMsgRowWidth() - (restX - kTdeckProMsgRowLeft);
     if (restW < 1) restW = 1;
 
     // Split the body where LVGL would have wrapped it, rather than letting one
@@ -6262,7 +6664,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     // LV_LABEL_LONG_DOT writes when text overflows the box it was given, so a
     // box left to grow to fit could never overflow and would never show them.
     const int contX = kTdeckProMsgRowLeft + timeW;
-    int contW = kTdeckProMsgRowWidth - timeW;
+    int contW = sleepOverlayMsgRowWidth() - timeW;
     if (contW < 1) contW = 1;
 
     lv_label_set_text(contLbl, m.text + contStart);
@@ -6314,13 +6716,13 @@ static void updateTdeckProSleepClock() {
     const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
     lv_label_set_text(s_tdeckProSleepNode, nodeName);
 
-    char timeText[8] = "--:--";
+    char timeText[LIVE_CLOCK_BUF] = "--:--";
     char dateText[24] = "Date unavailable";
     const time_t now = time(nullptr);
     if (now >= kClockSetEpoch) {
         struct tm localTime;
         localtime_r(&now, &localTime);
-        strftime(timeText, sizeof(timeText), "%H:%M", &localTime);
+        liveFormatClock(localTime, timeText, sizeof(timeText));
         strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
     }
     lv_label_set_text(s_tdeckProSleepTime, timeText);
@@ -6401,7 +6803,7 @@ static void showTdeckProSleepClock() {
 
     s_tdeckProSleepTime = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_style_text_font(s_tdeckProSleepTime, kSleepOverlayTimeFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepTime, sleepOverlayTimeChannelInk(), 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepTime, sleepOverlayClockInk(), 0);
     lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
 
     // Left half of the status band. Sized to its own text rather than to a
@@ -6607,10 +7009,14 @@ static void enterLockScreen(const char *reason) {
     showTdeckProSleepClock();
     s_lockScreenActive = true;
     s_lockScreenSinceMs = millis();
+    // Match the dark-panel path's guard so the press that entered the lock
+    // screen cannot also dismiss it when that input reports its release/click.
+    s_screenWakeBlockedUntilMs = s_lockScreenSinceMs + kScreenWakeInputDelayMs;
     // Whatever the backlight was doing on the way here — the pre-sleep dim in
     // particular — the lock screen is shown at the configured brightness. A
     // glance surface that arrives already dimmed reads as a fault.
     s_preSleepDimmed = false;
+    setPagerKeyboardBacklight(false);
     applyBrightness();
 
     if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
@@ -6622,8 +7028,8 @@ static void enterLockScreen(const char *reason) {
     }
 }
 
-// Back to the UI. Used by the wake button, and by anything that has to take the
-// overlay down without going through a panel sleep — a theme rebuild, say.
+// Back to the UI. Used by each board's wake gesture, and by anything that has
+// to take the overlay down without going through panel sleep — a theme rebuild.
 static void exitLockScreen() {
     if (!s_lockScreenActive) return;
     s_lockScreenActive = false;
@@ -6642,8 +7048,20 @@ static void exitLockScreen() {
     s_lastRenderedCount = -1;
     s_lastHeaderTime[0] = '\0';
     s_lastBattPct = 255;
+    setPagerKeyboardBacklight(true);
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
     Serial.println("[screen] lock screen dismissed");
+}
+
+// Consumes every input while locked. A permitted wake gesture dismisses the
+// overlay once the entry guard has elapsed; all other input stays swallowed so
+// it cannot operate the UI hidden underneath.
+static bool tryExitLockScreenFromInput(uint32_t nowMs, bool mayWake) {
+    if (!s_lockScreenActive) return false;
+    if (mayWake && (int32_t)(nowMs - s_screenWakeBlockedUntilMs) >= 0) {
+        exitLockScreen();
+    }
+    return true;
 }
 
 // Ends the lit phase once lockScreenOffSecs has run out. Never fires on the
@@ -6653,7 +7071,7 @@ static void serviceLockScreen(uint32_t nowMs) {
 
     // A theme rebuild deletes the root screen and takes the overlay with it
     // without anything here being told. Left alone, the flag would stay set
-    // over a visible UI and the wake button would appear to do nothing.
+    // over a visible UI and the next wake gesture would appear to do nothing.
     if (!s_tdeckProSleepOverlay || !lv_obj_is_valid(s_tdeckProSleepOverlay)) {
         s_tdeckProSleepOverlay = nullptr;
         exitLockScreen();
@@ -6676,6 +7094,16 @@ static void serviceLockScreen(uint32_t nowMs) {
     hideTdeckProSleepClock();
 }
 #endif  // FEATURE_LOCK_SCREEN
+
+static void requestScreenOff(const char *reason) {
+#if FEATURE_LOCK_SCREEN
+    if (s_cfg.lockScreenEnabled) {
+        enterLockScreen(reason);
+        return;
+    }
+#endif
+    sleepScreen(reason);
+}
 
 #if defined(DEVICE_MESH_DECK)
 // The front buttons hang off expander 0x59, not GPIO, so they are polled rather
@@ -7227,7 +7655,7 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
             // Ignore any pending click event from this same press.
             s_tdeckSuppressRollerClick = true;
             if (!s_screenAsleep) {
-                sleepScreen("T-Deck trackball hold");
+                requestScreenOff("T-Deck trackball hold");
                 return true;
             }
         }
@@ -7291,7 +7719,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     // before the activity timestamp below so unlocking does not also count as
     // the input that restarts the idle timeout; exitLockScreen() does that.
     if (s_lockScreenActive) {
-        exitLockScreen();
+        (void)tryExitLockScreenFromInput(nowMs, true);
         sleepTriggered = true;
         return true;
     }
@@ -7300,13 +7728,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     if (holdStartMs != 0
         && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
         sleepTriggered = true;
-#if FEATURE_LOCK_SCREEN
-        if (s_cfg.lockScreenEnabled) {
-            enterLockScreen("Wio Tracker L2 Wake button hold");
-            return true;
-        }
-#endif
-        sleepScreen("Wio Tracker L2 Wake button hold");
+        requestScreenOff("Wio Tracker L2 Wake button hold");
         return true;
     }
     return false;
@@ -7355,9 +7777,12 @@ static bool pollUserButton(uint32_t nowMs) {
         userBtnStable = userPressed;
         if (userBtnStable) {
 #if FEATURE_LOCK_SCREEN
-            // Only the dedicated Wake button dismisses the lock screen. GPIO0
-            // must not activate controls hidden underneath the opaque overlay.
-            if (s_lockScreenActive) return true;
+            if (s_lockScreenActive) {
+                // On touch-only boards GPIO0 is the UI action button, not the
+                // display toggle. Elsewhere it is an existing wake gesture.
+                (void)tryExitLockScreenFromInput(nowMs, !UI_TOUCH_ONLY_PROFILE);
+                return true;
+            }
 #endif
             // Consume the press as a wake before inspecting the hidden UI.
             // The held-button fallback below retries after the wake-input guard.
@@ -7414,7 +7839,7 @@ static bool pollUserButton(uint32_t nowMs) {
                     return true;
                 }
             } else {
-                sleepScreen("BOOT button");
+                requestScreenOff("BOOT button");
             }
             return true;
 #endif
@@ -7443,12 +7868,18 @@ static bool pollUserButton(uint32_t nowMs) {
     if ((nowMs - displayBtnDebounceMs) >= 30 && displayPressed != displayBtnStable) {
         displayBtnStable = displayPressed;
         if (displayBtnStable) {
+#if FEATURE_LOCK_SCREEN
+            if (s_lockScreenActive) {
+                (void)tryExitLockScreenFromInput(nowMs, true);
+                return true;
+            }
+#endif
             if (s_screenAsleep) {
                 if (!tryWakeScreenFromInput(nowMs)) {
                     return true;
                 }
             } else {
-                sleepScreen("GPIO35 button");
+                requestScreenOff("GPIO35 button");
             }
             return true;
         }
@@ -7868,6 +8299,10 @@ static void applyLoadedConfigInvariants() {
     }
     // Anything but a known source would silently disable both NTP and GPS.
     s_cfg.timeSource = cfgCoerceTimeSource(s_cfg.timeSource);
+    // Coerced and mirrored here rather than only in the loop, so the first frame
+    // drawn after a load already reads in the format the user chose.
+    s_cfg.clockFormat = cfgCoerceClockFormat((int)s_cfg.clockFormat);
+    liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
     // A trim out of range would scale the battery reading into nonsense; an
     // imported YAML or a hand-edited value is enough to get there.
     s_cfg.battCalTrim = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim);
@@ -8018,7 +8453,7 @@ static void loadConfigFromPrefs() {
     if (i >= 0) s_cfg.alt = i;
 
     uint8_t ro = prefs.getUChar("devRole", 0xFF);
-    if (ro != 0xFF) s_cfg.deviceRole = cfgCoerceClientRole(ro);
+    if (ro != 0xFF) s_cfg.deviceRole = cfgCoerceDeviceRole(ro);
     ro = prefs.getUChar("rebroadcast", 0xFF);
     if (ro != 0xFF) s_cfg.rebroadcastMode = ro;
 
@@ -9956,6 +10391,9 @@ static void initCfgActions() {
 
     // ── How it reads things out ──────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
+    // Directly under the row that sets the clock: the two questions a person
+    // asks about time in a row, what it is and how it is written.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLOCK_FORMAT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     // Unconditional: every supported board reads a battery voltage, so there is
     // no board this row would have nothing to show.
@@ -10061,8 +10499,10 @@ static void deviceInfoFormatHeard(uint32_t lastHeardMs, char *out, size_t outLen
         time_t t = nowEpoch - (time_t)ageS;
         struct tm lt;
         localtime_r(&t, &lt);
-        snprintf(out, outLen, "%02d/%02d %02d:%02d",
-                 lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+        char clock[LIVE_CLOCK_BUF];
+        liveFormatClock(lt, clock, sizeof(clock));
+        snprintf(out, outLen, "%02d/%02d %s",
+                 lt.tm_mon + 1, lt.tm_mday, clock);
     } else if (ageS < 3600UL) {
         snprintf(out, outLen, "%lum ago", (unsigned long)(ageS / 60UL));
     } else {
@@ -10084,7 +10524,17 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     }
     if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
     if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
-    if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
+    // A TRACKER that is not sharing location transmits no position at all, which
+    // is the whole of the role — and nothing else on the device says so, since
+    // Share Location looks perfectly reasonable on its own. Called out here
+    // rather than refused at the point of setting: the two are set on different
+    // screens, in either order, so refusing one would just be a race.
+    if (n < maxLines) {
+        const bool trackerNotSharing =
+            (s_cfg.deviceRole == 5 /*TRACKER*/) && !s_cfg.shareLocation;
+        snprintf(info[n++], 96, "Role: %s%s", cfgDeviceRoleName(s_cfg.deviceRole),
+                 trackerNotSharing ? " (not sharing location)" : "");
+    }
     if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
     if (n < maxLines) snprintf(info[n++], 96, "Long: %s", s_cfg.nodeLong);
     if (n < maxLines) snprintf(info[n++], 96, "Short: %s", s_cfg.nodeShort);
@@ -17664,10 +18114,10 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
 #endif
 }
 
-static bool isDigitChar(char c) {
-    return (c >= '0' && c <= '9');
-}
-
+// Split a live-feed line into the clock liveBuildPrefix() put on it and the
+// body after it. Anchored: the feed's own lines start with the clock, so
+// liveFindClock() is given a one-byte window rather than allowed to find a time
+// somewhere inside the body.
 static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, const char **bodyOut) {
     if (!s) s = "";
     if (tsOut && tsOutLen > 0) tsOut[0] = '\0';
@@ -17678,23 +18128,27 @@ static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, co
 
     size_t len = strlen(s);
     if (len < 6) return false;
-    bool hhmm = isDigitChar(s[0]) && isDigitChar(s[1]) &&
-                s[2] == ':' &&
-                isDigitChar(s[3]) && isDigitChar(s[4]) &&
-                s[5] == ' ';
+
+    const char *tsStart = nullptr;
+    const char *tsEnd = liveFindClock(s, 1, &tsStart);
+    // "--:--" is not a time, so liveFindClock() does not match it; the feed
+    // prints it like any other prefix and the body still has to be split off.
     bool unset = (s[0] == '-' && s[1] == '-' && s[2] == ':' &&
                   s[3] == '-' && s[4] == '-' && s[5] == ' ');
-    if (hhmm || unset) {
-        if (tsOut && tsOutLen >= 6) {
-            memcpy(tsOut, s, 5);
-            tsOut[5] = '\0';
-        }
-        s += 6;
-        while (*s == ' ') s++;
-        *bodyOut = s;
-        return true;
+    if (unset) { tsStart = s; tsEnd = s + 5; }
+    // A clock has to be followed by the separating space, or what was found is
+    // the start of the body rather than a prefix.
+    if (!tsStart || !tsEnd || *tsEnd != ' ') return false;
+
+    const size_t tsLen = (size_t)(tsEnd - tsStart);
+    if (tsOut && tsOutLen > tsLen) {
+        memcpy(tsOut, tsStart, tsLen);
+        tsOut[tsLen] = '\0';
     }
-    return false;
+    s = tsEnd;
+    while (*s == ' ') s++;
+    *bodyOut = s;
+    return true;
 }
 
 static const char *livePortLabel(const char *tag) {
@@ -17752,7 +18206,7 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
     if (!out || outLen == 0) return;
     out[0] = '\0';
 
-    char ts[6];
+    char ts[LIVE_CLOCK_BUF];
     const char *body = "";
     liveTimestampAndBody(dl.text, ts, sizeof(ts), &body);
 
@@ -21552,18 +22006,22 @@ static void refreshNodesDetails() {
         nodesShowSections(false);
         lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
 
+        // Date stays ISO because it is a date, not a clock; only the time half
+        // follows the Clock Format setting.
+        auto archivedStamp = [](uint32_t epoch, char *out, size_t outLen) {
+            if (epoch == 0) return;   // leave the caller's placeholder in place
+            const time_t t = (time_t)epoch;
+            struct tm tmv;
+            if (!localtime_r(&t, &tmv)) return;
+            char clock[LIVE_CLOCK_BUF];
+            liveFormatClock(tmv, clock, sizeof(clock));
+            snprintf(out, outLen, "%04d-%02d-%02d %s",
+                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, clock);
+        };
         char when[32] = "unknown date";
-        if (selectedArchived->archivedEpoch > 0) {
-            const time_t t = (time_t)selectedArchived->archivedEpoch;
-            struct tm tmv;
-            if (localtime_r(&t, &tmv)) strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tmv);
-        }
+        archivedStamp(selectedArchived->archivedEpoch, when, sizeof(when));
         char heardWhen[32] = "unknown";
-        if (selectedArchived->lastHeardEpoch > 0) {
-            const time_t t = (time_t)selectedArchived->lastHeardEpoch;
-            struct tm tmv;
-            if (localtime_r(&t, &tmv)) strftime(heardWhen, sizeof(heardWhen), "%Y-%m-%d %H:%M", &tmv);
-        }
+        archivedStamp(selectedArchived->lastHeardEpoch, heardWhen, sizeof(heardWhen));
 
         const NodeEntry *full = nodesArchivedDetail(selectedArchived->nodeId);
 
@@ -28353,7 +28811,7 @@ static void refreshDmModal(bool force) {
             // (DMs have no reply/selection model).
             if (chatStyleUsesBubbles(s_cfg.chatStyle)) {
                 const bool isMe = dmLineIsFromMe(dl->text);
-                char dmIconBuf[12], dmTimeBuf[8], dmMetaBuf[24];
+                char dmIconBuf[12], dmTimeBuf[LIVE_CLOCK_BUF], dmMetaBuf[28];
                 chatParsePrefix(dl->text, dmIconBuf, sizeof(dmIconBuf),
                                 dmTimeBuf, sizeof(dmTimeBuf));
                 if (!dmTimeBuf[0]) formatChatClock(dl->epoch, dmTimeBuf, sizeof(dmTimeBuf));
@@ -30346,6 +30804,22 @@ static void performCfgAction(int actionId) {
             openTimeCfgModal();
             break;
 
+        case CFG_ACTION_CLOCK_FORMAT:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLOCK_FORMAT");
+            showActionPopup = false;   // row already reads 12-hour/24-hour
+            s_cfg.clockFormat = (s_cfg.clockFormat == CLOCK_FORMAT_12H)
+                                ? CLOCK_FORMAT_24H : CLOCK_FORMAT_12H;
+            liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
+            persistConfigToPrefs();
+            // Both forced: the minute has not changed and neither has any
+            // message, so the early-outs in these two would hold the old
+            // rendering on screen until something else moved.
+            refreshHeaderTime(true);
+            refreshChatView(true);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock Format: %s",
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
+            break;
+
         case CFG_ACTION_OTA_UPDATE: {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec OTA_UPDATE");
             Serial.println("[ota-worker] firmware update action requested");
@@ -31315,13 +31789,18 @@ static void styleOnboardingPaperTree(lv_obj_t *parent) {
 }
 #endif
 
-// Roles offered during onboarding. Only client roles are supported by this
-// firmware (see cfgCoerceClientRole); values are the canonical Meshtastic enum
-// positions so they stay wire-compatible.
+// Roles offered during onboarding (see cfgCoerceDeviceRole for which roles this
+// firmware supports and why the infrastructure ones are absent); values are the
+// canonical Meshtastic enum positions so they stay wire-compatible.
+//
+// Ordered by enum value rather than by likelihood, so the list reads the same
+// way the web config's does and the same way Meshtastic's own documentation
+// lists them.
 struct OnboardRoleOption { uint8_t value; const char *label; };
 static const OnboardRoleOption kOnboardRoles[] = {
     {0, "CLIENT"},
     {1, "CLIENT_MUTE"},
+    {5, "TRACKER"},
     {8, "CLIENT_HIDDEN"},
 };
 static const int kOnboardRoleCount =
@@ -32032,7 +32511,7 @@ static void onboardingFinalize() {
     utf8util::copyTruncate(s_cfg.nodeLong, MESH_LONG_NAME_MAX_BYTES + 1, s_onboardingLongScratch);
     utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), s_onboardingShortScratch);
     utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), s_onboardingRegionScratch);
-    s_cfg.deviceRole = cfgCoerceClientRole(s_onboardingRoleScratch);
+    s_cfg.deviceRole = cfgCoerceDeviceRole(s_onboardingRoleScratch);
     utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_onboardingWifiSsidScratch);
     utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), s_onboardingWifiPassScratch);
 
@@ -32188,7 +32667,7 @@ static void openM9DiscoveryShortcut() {
 static bool handleGlobalNavigationKey(char key) {
 #if defined(DEVICE_M9)
     if (key == KEY_SLEEP_SCREEN) {
-        sleepScreen("M9 d-pad centre hold");
+        requestScreenOff("M9 d-pad centre hold");
         return true;
     }
     // M9 only: its Home button returns to the first channel as well as to the
@@ -32336,6 +32815,29 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
         if (k == KEY_ROLLER && s_tdeckSuppressRollerClick) {
             continue;
+        }
+#endif
+
+#if FEATURE_LOCK_SCREEN
+        if (s_lockScreenActive) {
+            bool mayWake = fromVnc;
+            if (fromTrackball) {
+                // Match the dark-screen path below: motion is ignored and only
+                // the wheel/trackball click is a deliberate wake gesture.
+                mayWake = (k == KEY_ROLLER);
+            } else if (!fromVnc) {
+#if SCREEN_WAKE_FROM_KEYBOARD
+                mayWake = true;
+#else
+                mayWake = false;
+#endif
+#if defined(DEVICE_M9)
+                // Same pocket guard used when the panel is fully asleep.
+                mayWake = (k == KEY_ENTER || k == KEY_SLEEP_SCREEN);
+#endif
+            }
+            (void)tryExitLockScreenFromInput(millis(), mayWake);
+            return;   // the wake gesture never also acts on the hidden UI
         }
 #endif
 
@@ -33694,7 +34196,7 @@ static void pumpKeyboardInput() {
             continue;   // swallow all other keys while the tray is up
         }
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_M9) || defined(DEVICE_MESH_DECK)
         // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
@@ -33707,14 +34209,25 @@ static void pumpKeyboardInput() {
         // lv_textarea_delete_char(), both cursor-relative, so insert-in-the-
         // middle and backspace-in-the-middle come free once the caret can move.
         if (s_composeModal && s_composeInput) {
-#if defined(DEVICE_M9)
+#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK)
             // D-pad: Left/Right by a character, Up/Down by a display line. The
-            // compose box is multi-line here (lv_textarea_set_one_line(false)),
-            // which is what makes the vertical pair meaningful.
+            // compose box is multi-line on both boards
+            // (lv_textarea_set_one_line(false)), which is what makes the
+            // vertical pair meaningful.
+            //
+            // The Mesh Deck belongs here because its front D-pad already folds
+            // onto these exact four tokens -- meshDeckPollButtons() maps
+            // UP/DOWN to KEY_SCROLL_UP/DN and LEFT/RIGHT to
+            // KEY_PREV_CHAN/KEY_NEXT_CHAN -- and its matrix has no arrow keys of
+            // its own. Nothing downstream claimed them while compose was open
+            // (the chat screen's channel stepping is behind `if
+            // (!s_composeModal)`, and the compose switches only pass 0x20..0x7F
+            // through to the textarea), so all four were being dropped and the
+            // pad did nothing at all inside a message.
             //
             // Deliberately NOT reusing the pager's invertScrollNav below: that
             // is kPagerWheelChatNav && !navFromJk, and kPagerWheelChatNav is
-            // false on M9, so folding this board into that expression would
+            // false on both boards, so folding them into that expression would
             // pick a direction by accident rather than state one.
             if (k == KEY_PREV_CHAN) { lv_textarea_cursor_left(s_composeInput);  continue; }
             if (k == KEY_NEXT_CHAN) { lv_textarea_cursor_right(s_composeInput); continue; }
@@ -35923,6 +36436,13 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
 #endif
 
     if (touched) {
+#if FEATURE_LOCK_SCREEN
+        if (s_lockScreenActive) {
+            (void)tryExitLockScreenFromInput(millis(), SCREEN_WAKE_FROM_TOUCH);
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+#endif
         if (s_screenAsleep) {
             // Normally unreachable — loop() stops calling lv_timer_handler()
             // while the screen is off — but modal helpers do call it directly,
@@ -37333,7 +37853,7 @@ static void loadConfigForOtaWorker() {
 static void refreshHeaderTime(bool force) {
     if (!s_chatHeaderTime) return;
 
-    char buf[8];
+    char buf[LIVE_CLOCK_BUF];
     liveBuildPrefix(buf, sizeof(buf));
     size_t n = strlen(buf);
     if (n > 0 && buf[n - 1] == ' ') buf[n - 1] = '\0';
@@ -37949,7 +38469,14 @@ static bool snfRequestHistory(const char **why) {
 }
 
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
-// Stock Meshtastic: every role rebroadcasts except CLIENT_MUTE / CLIENT_HIDDEN.
+// CLIENT_MUTE is the role that does not forward other people's packets, and
+// this table is why TRACKER needed nothing added to it: a tracker relays exactly
+// like a CLIENT upstream, and reports its own position on top of that. Anyone
+// wanting a node that only reports itself wants CLIENT_MUTE, not TRACKER.
+//
+// One known divergence, left as-is because changing it would alter what existing
+// CLIENT_HIDDEN nodes do on the mesh: upstream's CLIENT_HIDDEN still rebroadcasts
+// (under local-only rebroadcast), where here it does not relay at all.
 static bool roleRebroadcasts(uint8_t role) {
     return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
 }
@@ -39407,10 +39934,14 @@ static uint32_t chatDateBucket(uint32_t epoch) {
     return (uint32_t)((tmv.tm_year + 1900) * 512 + tmv.tm_yday);
 }
 
-// "HH:MM" for a stored message, matching liveBuildPrefix()'s 24-hour format and
-// its 1700000000 sentinel for "clock was not synced when this arrived". Empty
-// output means no usable time, and callers drop the field rather than print a
-// placeholder inside a bubble.
+// The clock for a stored message, in whichever format liveBuildPrefix() is
+// currently writing, and sharing its 1700000000 sentinel for "clock was not
+// synced when this arrived". Empty output means no usable time, and callers
+// drop the field rather than print a placeholder inside a bubble.
+//
+// The fallback for a stored line that carries no prefix to parse; the bubble
+// renderer prefers the prefix, so most lines keep the format they were written
+// in. Only lines reaching this path follow a later change of the setting.
 static void formatChatClock(uint32_t epoch, char *out, size_t len) {
     if (!out || len == 0) return;
     out[0] = '\0';
@@ -39418,7 +39949,7 @@ static void formatChatClock(uint32_t epoch, char *out, size_t len) {
     time_t t = (time_t)epoch;
     struct tm tmv;
     localtime_r(&t, &tmv);
-    snprintf(out, len, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    liveFormatClock(tmv, out, len);
 }
 
 static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
@@ -39535,6 +40066,13 @@ static lv_color_t bubbleTextColor(uint16_t bg565) {
 // The clock is found by pattern rather than position, since the icon precedes
 // it. The scan is bounded to the prefix window so a "12:34" inside message text
 // cannot be mistaken for one.
+//
+// Both clock formats have to be recognised here, and not only the one currently
+// selected: lines are stored with the prefix that was in force when they
+// arrived, so a transcript spanning a settings change carries both.
+//
+// liveFindClock() does the recognising, shared with the live feed's own splitter
+// so the two can never disagree about what a stored prefix looks like.
 static void chatParsePrefix(const char *line,
                             char *iconOut, size_t iconLen,
                             char *timeOut, size_t timeLen) {
@@ -39542,21 +40080,15 @@ static void chatParsePrefix(const char *line,
     if (timeOut && timeLen) timeOut[0] = '\0';
     if (!line) return;
 
-    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    const int kWindow = 24;   // icon + clock always lands well inside this
     const char *found = nullptr;
-    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
-        if (isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])
-            && p[2] == ':'
-            && isdigit((unsigned char)p[3]) && isdigit((unsigned char)p[4])) {
-            found = p;
-            break;
-        }
-    }
-    if (!found) return;
+    const char *clockEnd = liveFindClock(line, kWindow, &found);
+    if (!clockEnd || !found) return;
 
-    if (timeOut && timeLen >= 6) {
-        memcpy(timeOut, found, 5);
-        timeOut[5] = '\0';
+    const size_t clockLen = (size_t)(clockEnd - found);
+    if (timeOut && timeLen > clockLen) {
+        memcpy(timeOut, found, clockLen);
+        timeOut[clockLen] = '\0';
     }
 
     // Whatever sits ahead of the clock is the transport icon (empty when the
@@ -39589,15 +40121,21 @@ static void chatInsertAckMarker(char *line, size_t lineCap, const char *marker) 
     const size_t mlen = strlen(marker);
     if (len + mlen + 1 > lineCap) return;
 
-    auto clockDigit = [](char c) { return (bool)(isdigit((unsigned char)c) || c == '-'); };
-
-    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    const int kWindow = 24;   // icon + clock always lands well inside this
     char *at = nullptr;
-    for (char *p = line; *p && (int)(p - line) < kWindow; p++) {
-        if (clockDigit(p[0]) && clockDigit(p[1]) && p[2] == ':'
-            && clockDigit(p[3]) && clockDigit(p[4])) {
-            at = p + 5;
-            break;
+    // A real clock first, in either format, so the marker lands after the
+    // meridiem rather than between "2:34" and its "PM".
+    if (const char *end = liveFindClock(line, kWindow, nullptr)) {
+        at = line + (end - line);
+    } else {
+        // liveFindClock() deliberately does not match "--:--" — it is not a
+        // time — and only this marker cares where that placeholder ends.
+        for (char *p = line; *p && (int)(p - line) < kWindow; p++) {
+            if (p[0] == '-' && p[1] == '-' && p[2] == ':'
+                && p[3] == '-' && p[4] == '-') {
+                at = p + 5;
+                break;
+            }
         }
     }
     if (!at) {
@@ -39972,7 +40510,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
         // Prefer the prefix, so a bubble shows the same time and transport icon
         // classic does for the same line; fall back to epoch for lines stored
         // without a prefix.
-        char iconBuf[12], timeBuf[8], metaBuf[24];
+        char iconBuf[12], timeBuf[LIVE_CLOCK_BUF], metaBuf[28];
         chatParsePrefix(rows[i]->text, iconBuf, sizeof(iconBuf), timeBuf, sizeof(timeBuf));
         if (!timeBuf[0]) formatChatClock(rows[i]->epoch, timeBuf, sizeof(timeBuf));
         chatComposeBubbleMeta(iconBuf, timeBuf, metaBuf, sizeof(metaBuf));
@@ -41764,7 +42302,7 @@ static void handleSerialCommandLine(char *line) {
         const int show = (rowCount < 4) ? rowCount : 4;
         for (int r = 0; r < show; r++) {
             if (!rows[r]) continue;
-            char icon[12], clock[8];
+            char icon[12], clock[LIVE_CLOCK_BUF];
             chatParsePrefix(rows[r]->text, icon, sizeof(icon), clock, sizeof(clock));
             Serial.printf("[chat] row%d epoch=%lu text=\"%s\"\n",
                           r, (unsigned long)rows[r]->epoch, rows[r]->text);
@@ -42607,6 +43145,77 @@ static void powerInstallHooks() {
 //     the on-boot preference — because the user has just asked by hand. The
 //     hard gates below still apply to it.
 //
+// ── Unattended auto-update ───────────────────────────────────────────────────
+// True while the device is set to install releases on its own. Read through the
+// coerce so a config blob carrying an out-of-range byte reads as Off rather
+// than as some period the enum does not have.
+static inline bool otaAutoUpdateEnabled() {
+    return cfgCoerceOtaAutoUpdate(s_cfg.otaAutoUpdatePeriod) != OTA_AUTO_UPDATE_OFF;
+}
+
+// Install-failure backoff.
+//
+// A check that succeeds followed by an install that does not -- a truncated
+// asset, a signature mismatch, a release built without this device's slug --
+// repeats forever at the configured period. At the 1 hour setting that is 24
+// full firmware downloads a day, indefinitely, over what may be a metered or
+// very slow link. So the tag that failed and how many times it has failed are
+// remembered across reboots, beside the worker-mode flag, and a tag is dropped
+// once it has burned through its attempts.
+static constexpr const char *kPrefOtaFailTag   = "otaFailTag";
+static constexpr const char *kPrefOtaFailCount = "otaFailN";
+static constexpr uint8_t     kOtaAutoUpdateMaxFailures = 3;
+
+static bool otaAutoUpdateTagExhausted(const char *tag) {
+    if (!tag || !tag[0]) return false;
+    Preferences p;
+    if (!p.begin("camillia", true)) return false;
+    char stored[48] = {};
+    p.getString(kPrefOtaFailTag, stored, sizeof(stored));
+    const uint8_t count = p.getUChar(kPrefOtaFailCount, 0);
+    p.end();
+    return count >= kOtaAutoUpdateMaxFailures && strcmp(stored, tag) == 0;
+}
+
+// Counts one attempt against `tag`, resetting when the tag on record is a
+// different one -- a newly published release deserves its own three tries.
+//
+// Called BEFORE the install, not after. A failed install does return here, but
+// a brownout or a watchdog reset partway through does not, and an install that
+// keeps killing the device before it can record anything is precisely the
+// failure this bound exists for.
+static void otaAutoUpdateNoteAttempt(const char *tag) {
+    if (!tag || !tag[0]) return;
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    char stored[48] = {};
+    p.getString(kPrefOtaFailTag, stored, sizeof(stored));
+    uint8_t count = p.getUChar(kPrefOtaFailCount, 0);
+    if (strcmp(stored, tag) != 0) {
+        p.putString(kPrefOtaFailTag, tag);
+        count = 0;
+    }
+    if (count < 0xFF) count++;
+    p.putUChar(kPrefOtaFailCount, count);
+    p.end();
+}
+
+// Drops a record that belongs to the firmware now running: the attempt it was
+// counting evidently worked, and leaving it would hold a stale failure against
+// a tag that installed fine. Cheap and once per arm, so it stays out of the
+// query above rather than making that a read that writes.
+static void otaAutoUpdateForgetInstalledTag() {
+    Preferences p;
+    if (!p.begin("camillia", false)) return;
+    char stored[48] = {};
+    p.getString(kPrefOtaFailTag, stored, sizeof(stored));
+    if (stored[0] && strcmp(stored, APP_VERSION) == 0) {
+        p.remove(kPrefOtaFailTag);
+        p.remove(kPrefOtaFailCount);
+    }
+    p.end();
+}
+
 // It lives in the loop rather than in the keypress handler because the check is
 // a synchronous HTTP request with a 12 s timeout; running it from input would
 // freeze the UI before the row saying "checking..." had been painted.
@@ -42618,10 +43227,20 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
     LV_UNUSED(nowMs);
 #else
     const bool manual = s_otaCheckRequested;
+    // Auto-update supersedes the boot prompt. With it on, serviceOtaAutoUpdate()
+    // below installs on its own one settle window into the boot, so raising a
+    // Yes/No modal here would put a dialog in front of a node nobody is
+    // standing at -- and one whose question is answered by the install
+    // happening anyway. The "Check for Updates on Boot" preference is simply
+    // moot while auto-update is set.
+    //
+    // The forced one-shot from a channel switch is deliberately NOT suppressed:
+    // somebody just changed the channel by hand and is waiting to see what the
+    // new one offers.
+    const bool bootPref = s_cfg.otaAutoCheckEnabled && !otaAutoUpdateEnabled();
     // Cleared with the boot attempt it belongs to, so a web-config channel
     // switch buys exactly one forced check rather than one per reconnect.
-    const bool wantBoot = !s_otaAutoCheckDone
-                          && (s_cfg.otaAutoCheckEnabled || s_otaBootCheckForced);
+    const bool wantBoot = !s_otaAutoCheckDone && (bootPref || s_otaBootCheckForced);
     if (!manual && !wantBoot) return;
 
     // Reports a reason to the Config screen and drops the request. Only ever
@@ -42759,6 +43378,149 @@ static void serviceOtaAutoCheck(uint32_t nowMs) {
 #endif
 }
 
+// ── Unattended auto-update scheduler ─────────────────────────────────────────
+// Checks on the configured period and, if a newer release exists, installs it
+// with no prompt and no keypress, rebooting into it. Off unless somebody has
+// turned it on; this is for a repeater on a mast or a solar node in a field,
+// where the boot prompt and the Config row both wait forever for a human who is
+// not coming.
+//
+// It adds no OTA machinery. performCfgAction(CFG_ACTION_OTA_UPDATE) already
+// tears down the web server and the BLE stack for the TLS handshake, brings the
+// download up, verifies the signature, retries once on low-memory TLS failure
+// and restarts -- headlessly, which is what otaPromptAccept() has always relied
+// on. This is a caller of that, not a change to it.
+//
+// In the loop for the same reason the boot check is: otaCheckLatestRelease() is
+// a synchronous HTTP GET with a 12 s timeout.
+//
+// The timer is millis() uptime, not wall clock. A field node may never see NTP
+// and timeSource can be manual or unset, so a wall-clock schedule is not
+// dependable; uptime is, and it survives the light-sleep naps in enterLightNap()
+// because esp_light_sleep_start() keeps system time advancing.
+static uint32_t s_otaAutoUpdateDueMs = 0;
+static uint8_t  s_otaAutoUpdateArmedFor = OTA_AUTO_UPDATE_OFF;
+
+static void serviceOtaAutoUpdate(uint32_t nowMs) {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // OTA is compiled out on this build (see CFG_ACTION_OTA_UPDATE), so there is
+    // nothing to schedule.
+    LV_UNUSED(nowMs);
+#else
+    const uint8_t period = cfgCoerceOtaAutoUpdate(s_cfg.otaAutoUpdatePeriod);
+    if (period == OTA_AUTO_UPDATE_OFF) {
+        s_otaAutoUpdateDueMs = 0;
+        s_otaAutoUpdateArmedFor = OTA_AUTO_UPDATE_OFF;
+        return;
+    }
+
+    // Arm, and re-arm whenever the setting changes under us -- web config saves
+    // this without a reboot, so the running timer can be for a period nobody
+    // has selected any more.
+    //
+    // The first cycle is one settle window after arming rather than a full
+    // period, on the same reasoning the boot check settles: a node that has
+    // just come back from a power cut should catch up now, not in up to 24
+    // hours. It is also why the boot prompt stands down while this is on.
+    if (s_otaAutoUpdateDueMs == 0 || s_otaAutoUpdateArmedFor != period) {
+        s_otaAutoUpdateArmedFor = period;
+        s_otaAutoUpdateDueMs = nowMs + kOtaAutoCheckSettleMs;
+        otaAutoUpdateForgetInstalledTag();
+        Serial.printf("[ota-auto] armed: every %s\n", cfgOtaAutoUpdateName(period));
+        return;
+    }
+    if ((int32_t)(nowMs - s_otaAutoUpdateDueMs) < 0) return;
+
+    // ── Gates ────────────────────────────────────────────────────────────────
+    // None of these does any I/O, so a blocked cycle simply waits here and runs
+    // the moment the blockage clears, rather than forfeiting its slot and
+    // sleeping another full period. That is deliberately more eager than the
+    // ticket's "retry next period": for a node whose battery recovers at 02:10,
+    // waiting until 03:00 buys nothing, and re-testing a cached tier once per
+    // loop pass costs nothing either. Nothing below re-arms the timer, so a
+    // long block cannot pile up cycles.
+
+    // Nothing to install into on a third-party partition layout.
+    if (!otaLayoutSupportsUpdate()) return;
+    if (!s_cfg.wifiEnabled || WiFi.status() != WL_CONNECTED) return;
+
+    // Do not reboot out from under someone who does happen to be standing at
+    // the device, and do not start before there is a screen at all.
+    if (!s_rootScreen || s_onboardingModal || s_cfgConfirmModal || s_otaPromptModal) return;
+#if HAS_STATE_MAPS
+    if (s_legacyMapPromptModal) return;
+#endif
+
+    // The one gate the interactive paths do not apply. They get away with it
+    // because a human seeing a low-battery banner declines; nothing declines
+    // for an unattended node, and a flash write at the battery's knee is the
+    // single operation that must not be interrupted.
+    if (powerMgrShouldDeferHeavyWork()) {
+        Serial.println("[ota-auto] holding: battery too low for an install");
+        return;
+    }
+
+    // Rescheduled before the work, not after, so every exit below -- a failed
+    // check, a failed install, a tag given up on -- lands on the full period.
+    // There is no fast retry on purpose: an offline or broken node must not
+    // spend its uptime re-downloading firmware, the same reasoning the boot
+    // check's "failures are not retried" already carries.
+    s_otaAutoUpdateDueMs = nowMs + cfgOtaAutoUpdatePeriodMs(period);
+
+    Serial.printf("[ota-auto] checking for a newer release (every %s)\n",
+                  cfgOtaAutoUpdateName(period));
+
+    // The gate is what keeps OTA networking out of normal operation; open it
+    // only for this one request. The channel is re-asserted rather than trusted
+    // from boot because a config import can change it without a reboot.
+    otaSetNetworkAllowed(true);
+    otaSetChannel(s_cfg.otaChannel);
+    OtaCheckResult check = {};
+    const bool ok = otaCheckLatestRelease(check) && check.ok;
+    otaSetNetworkAllowed(false);
+
+    if (!ok) {
+        Serial.printf("[ota-auto] check failed: %s\n",
+                      check.error[0] ? check.error : "unknown");
+        return;
+    }
+    if (!check.updateAvailable) {
+        Serial.printf("[ota-auto] up to date (%s)\n",
+                      check.latestTag[0] ? check.latestTag : APP_VERSION);
+        return;
+    }
+
+    if (otaAutoUpdateTagExhausted(check.latestTag)) {
+        Serial.printf("[ota-auto] not attempting %s again: %u installs of it have failed\n",
+                      check.latestTag, (unsigned)kOtaAutoUpdateMaxFailures);
+        // Carried to the next boot, so a node that has quietly stopped updating
+        // says why the next time anyone looks at it.
+        char notice[sizeof(s_otaWorkerBootNotice)] = {};
+        snprintf(notice, sizeof(notice),
+                 "Auto-update gave up on %s after %u failed installs",
+                 check.latestTag, (unsigned)kOtaAutoUpdateMaxFailures);
+        setOtaWorkerBootNotice(notice);
+        return;
+    }
+
+    Serial.printf("[ota-auto] installing %s -> %s, unattended\n",
+                  APP_VERSION, check.latestTag);
+    otaAutoUpdateNoteAttempt(check.latestTag);
+    // Straight to the install: no openOtaUpdatePrompt(), and no arming of the
+    // Config row's "Install <tag>" offer, because there is nobody to accept
+    // either. A successful install never returns from here.
+    performCfgAction(CFG_ACTION_OTA_UPDATE);
+
+    // Only reached when the install did not happen. performCfgAction() ends by
+    // popping its result modal, which is right for someone who just picked the
+    // row and wrong here -- nobody is going to dismiss it, and it would sit on
+    // the panel until the next keypress.
+    closeCfgActionMessageModal();
+    Serial.printf("[ota-auto] install did not complete: %s\n",
+                  s_cfgStatus[0] ? s_cfgStatus : "unknown");
+#endif
+}
+
 void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
@@ -42808,6 +43570,9 @@ void loop() {
     // the panel/UI timers alive so remote input is never swallowed by the
     // screen-off path.
     if (vncHostClientConnected()) {
+#if FEATURE_LOCK_SCREEN
+        (void)tryExitLockScreenFromInput(now, true);
+#endif
         if (s_screenAsleep) wakeScreen();
         s_lastActivityMs = now;
     }
@@ -42876,6 +43641,7 @@ void loop() {
 #endif
     LOOP_PHASE("power", powerMgrService(now));
     LOOP_PHASE("otacheck", serviceOtaAutoCheck(now));
+    LOOP_PHASE("otaauto", serviceOtaAutoUpdate(now));
     LOOP_PHASE("mqtt", mqttBridgeLoop(now));
     if (s_mqttDownlinkUiDirty) { meshChanged = true; s_mqttDownlinkUiDirty = false; }
     // Mirrored every pass so a web save / YAML import / factory reset can never
@@ -42948,6 +43714,9 @@ void loop() {
     // from config (web save, YAML import, and factory reset all land here).
     nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled);
     nodeArchiveFlush();
+    // Same reason, same place: web save, YAML import and factory reset all land
+    // here, and every module that prints a time reads this mirror.
+    liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
 
     now = millis();
 #if FEATURE_LOCK_SCREEN
@@ -42971,15 +43740,10 @@ void loop() {
                           (unsigned long)(idleMs / 1000UL),
                           (unsigned)s_cfg.screenOnSecs);
 #if FEATURE_LOCK_SCREEN
-            // The idle timeout lands on the lock screen too, not just the
-            // wake-button hold. A device left on a desk is the main way anyone
-            // ever sees this screen, and a lock screen you can only reach by
-            // deliberately reaching for it is not one.
-            if (s_cfg.lockScreenEnabled) {
-                enterLockScreen("idle timeout");
-            } else {
-                sleepScreen("timeout");
-            }
+            // The idle timeout lands on the lock screen too, not just a manual
+            // screen-off gesture. A device left on a desk is the main way
+            // anyone sees this screen.
+            requestScreenOff("idle timeout");
 #else
             sleepScreen("timeout");
 #endif

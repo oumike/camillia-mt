@@ -3337,10 +3337,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     section(html, lite, "Device", false);
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
-    // Only client roles are offered; values are the canonical Meshtastic enum
+    // See cfgCoerceDeviceRole for which roles this firmware offers and why the
+    // infrastructure ones are absent; values are the canonical Meshtastic enum
     // positions (kept intact for wire compatibility and rebroadcast gating).
     static const struct { uint8_t v; const char *l; } kRoles[] = {
-        {0,"CLIENT"},{1,"CLIENT_MUTE"},{8,"CLIENT_HIDDEN"}
+        {0,"CLIENT"},{1,"CLIENT_MUTE"},{5,"TRACKER"},{8,"CLIENT_HIDDEN"}
     };
     for (int i = 0; i < (int)(sizeof(kRoles) / sizeof(kRoles[0])); i++) {
         snprintf(tmp, sizeof(tmp), "%d", kRoles[i].v);
@@ -3360,6 +3361,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += ">"; html += kRebroad[i].l; html += "</option>";
     }
     html += "</select></label></div>";
+    // What the role actually does here, said plainly, because on this firmware
+    // it is mostly an advertised identity rather than a behaviour switch — and
+    // someone picking TRACKER expecting upstream's power-saving duty cycle
+    // should find that out on this page, not from a battery that never lasts.
+    html += "<p class='gps-hint'>The role goes out in this node's NodeInfo, so other "
+            "nodes and the map see how it means to be treated. "
+            "<b>CLIENT</b> is an ordinary node. <b>CLIENT_MUTE</b> does not relay "
+            "other people's traffic. <b>CLIENT_HIDDEN</b> only speaks when spoken "
+            "to. <b>TRACKER</b> is a node whose job is reporting where it is: it "
+            "still relays like a CLIENT, and it needs <i>Share Location</i> on "
+            "with a <i>GPS Broadcast Interval</i> short enough to be worth "
+            "tracking (Meshtastic suggests 60&nbsp;s). It does <b>not</b> put the "
+            "device to sleep between fixes the way upstream's tracker does with "
+            "<code>is_power_saving</code> &mdash; this firmware has no such mode, "
+            "so a tracker here costs the same battery as a client. (GPS Duty "
+            "Cycle, under Position, sleeps the GPS receiver only.)</p>";
+    sendChunkIfBig(html);   // AP mode renders this section with very little heap
     // GPS Broadcast Interval lives in the Position section, next to the poll
     // interval it is easily confused with.
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->nodeInfoIntervalS);
@@ -3411,6 +3429,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // read as local time in the timezone selected above.
     {
         const bool manual = (gCfg->timeSource == TIME_SOURCE_MANUAL);
+        // How a time reads everywhere the device shows one — the chat header,
+        // message timestamps, the sleep/lock clock. Exported files keep 24-hour
+        // regardless: those are read by tools, not people.
+        html += "<label>Clock Format<select name='clock_format'>"
+                "<option value='0'";
+        if (gCfg->clockFormat != CLOCK_FORMAT_12H) html += " selected";
+        html += ">24-hour (14:32)</option>"
+                "<option value='1'";
+        if (gCfg->clockFormat == CLOCK_FORMAT_12H) html += " selected";
+        html += ">12-hour (2:32 PM)</option>"
+                "</select></label>";
         html += "<label>Time Source<select name='time_source' id='time_source'>";
         html += "<option value='0'";
         if (!manual) html += " selected";
@@ -4318,6 +4347,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "Changing the channel here reboots the device and checks the new "
                 "channel on the way back up, whatever the setting above says; "
                 "any update it finds is offered on the device's own screen.</p>";
+
+        const uint8_t autoUpdateNow = cfgCoerceOtaAutoUpdate(gCfg->otaAutoUpdatePeriod);
+        html += "<label>Automatic Updates<select name='ota_autoupdate'>";
+        static const struct { uint8_t v; const char *label; } kAutoUpdateOpts[] = {
+            { OTA_AUTO_UPDATE_OFF, "Off" },
+            { OTA_AUTO_UPDATE_1H,  "Every hour" },
+            { OTA_AUTO_UPDATE_6H,  "Every 6 hours" },
+            { OTA_AUTO_UPDATE_12H, "Every 12 hours" },
+            { OTA_AUTO_UPDATE_24H, "Every 24 hours" },
+        };
+        for (const auto &opt : kAutoUpdateOpts) {
+            html += "<option value='"; html += String((int)opt.v); html += "'";
+            if (autoUpdateNow == opt.v) html += " selected";
+            html += ">"; html += opt.label; html += "</option>";
+        }
+        html += "</select></label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "When set, the device checks for a new release on this schedule and "
+                "installs it <b>without asking</b>, then reboots. Intended for nodes "
+                "left unattended; anything in progress on the device is lost at the "
+                "reboot. Off by default. Automatic updates follow the Release Channel "
+                "above, are skipped while the battery is low, and need WiFi connected. "
+                "While this is set it supersedes <i>Check for Updates on Boot</i> — the "
+                "device installs on its own shortly after booting rather than asking, "
+                "so that setting has no effect until you turn this back off.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -5736,7 +5790,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "}"
                         "function liveSplitTimestamp(t){"
                             "var s=String(t||'').trim();"
-                            "var m=s.match(/^(\\d\\d:\\d\\d|--:--)\\s+(.*)$/);"
+                            // Both clock formats, since the device sends whichever
+                            // its Clock Format setting was on when the line was built.
+                            "var m=s.match(/^(\\d{1,2}:\\d\\d(?: [AP]M)?|--:--)\\s+(.*)$/);"
                             "if(m)return {ts:m[1],body:String(m[2]||'').trim()};"
                             "return {ts:'',body:s};"
                         "}"
@@ -6604,7 +6660,7 @@ static void handlePostSave() {
     // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
 
     // Device
-    gCfg->deviceRole        = cfgCoerceClientRole((uint8_t)server.arg("role").toInt());
+    gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
     gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
     gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());
@@ -6634,6 +6690,9 @@ static void handlePostSave() {
     // Time source, and the clock itself when set manually. The clock is queued
     // rather than set here: the main loop owns it, and this handler runs on the
     // web server task.
+    if (server.hasArg("clock_format")) {
+        gCfg->clockFormat = cfgCoerceClockFormat(server.arg("clock_format").toInt());
+    }
     if (server.hasArg("time_source")) {
         gCfg->timeSource = cfgCoerceTimeSource(server.arg("time_source").toInt());
     }
@@ -6994,6 +7053,20 @@ static void handlePostSave() {
 
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
+    }
+    if (server.hasArg("ota_autoupdate")) {
+        // Clamped to the enum, and anything unrecognised is Off. The failure
+        // mode of a malformed or injected value here must never be a device
+        // that flashes itself hourly.
+        const long submitted = server.arg("ota_autoupdate").toInt();
+        gCfg->otaAutoUpdatePeriod =
+            (submitted >= 0 && submitted <= OTA_AUTO_UPDATE_MAX)
+                ? cfgCoerceOtaAutoUpdate((uint8_t)submitted)
+                : OTA_AUTO_UPDATE_OFF;
+        // Deliberately no otaRequestBootCheckOnce() here, unlike the channel
+        // switch below: there is nothing for the user to be shown. The
+        // scheduler picks the new period up on its next loop pass and runs its
+        // first cycle a settle window later.
     }
     if (server.hasArg("ota_channel")) {
         // Anything that is not an explicit Alpha is Stable, so a malformed or

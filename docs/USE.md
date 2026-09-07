@@ -452,6 +452,56 @@ Config includes Web Config controls, export and import, the theme picker, announ
   see, so typing part of a value works too — `on` finds every setting currently
   switched on. Keyboard builds only; the touch-only Heltec has no Space to press.
 
+### Device role
+
+**Role**, under Device in web config and asked once during onboarding, is how
+this node tells the rest of the mesh it means to be treated. It travels in
+NodeInfo, so other nodes and MQTT-fed maps see it, and it is exported as
+`config: device: role:`.
+
+Four roles are offered, using the same names and enum values as stock
+Meshtastic:
+
+- **CLIENT** (default) — an ordinary node. Sends its own traffic and relays
+  everyone else's.
+- **CLIENT_MUTE** — never relays other people's packets. For a node in a spot
+  where relaying adds nothing but airtime, or where battery matters more than
+  the mesh does.
+- **TRACKER** — a node whose job is reporting where it is. It still relays like
+  a CLIENT; what makes it a tracker is that its position is the point of it.
+- **CLIENT_HIDDEN** — only speaks when spoken to. One difference from stock
+  Meshtastic worth knowing: theirs still relays, restricted to known meshes,
+  where here CLIENT_HIDDEN does not relay at all.
+
+The infrastructure roles — ROUTER, ROUTER_LATE and REPEATER — are deliberately
+not offered. They change how the whole mesh routes traffic around a node, and
+they are not something a handheld with a screen should claim to be. A config
+imported with one of them is coerced to CLIENT rather than honoured.
+
+#### What TRACKER does here
+
+Upstream, TRACKER means two things: position packets are prioritised in the
+node's own transmit queue, and — with `power.is_power_saving` on — the device
+wakes, sends a position, and sleeps until the next one.
+
+This firmware has neither mechanism. There is no priority transmit queue — a
+packet is transmitted at the point it is built — and nothing puts the device to
+sleep between position sends. (GPS Duty Cycle, under Position, parks the *GPS
+receiver* between samples; it is not upstream's whole-device sleep and is not
+tied to the role.) So setting TRACKER here **advertises the role and changes
+nothing about power draw** — a tracker costs the same battery as a client. What
+makes it behave like a tracker is the two settings under Position, which you set
+yourself:
+
+- **Share Location** must be on. A TRACKER with it off transmits no position at
+  all, which is the whole of the role; Device Info shows the role as
+  `TRACKER (not sharing location)` when that is the case.
+- **GPS Broadcast Interval** decides how often the position actually goes out.
+  It defaults to 1800 s, which is a client's interval, not a tracker's —
+  Meshtastic suggests 60 s for a tracker. Nothing changes it for you: it is your
+  airtime to spend, and a firmware that quietly shortened a broadcast interval
+  on a shared channel would be a worse neighbour than one that asked.
+
 ### Location precision
 
 **Share Location** decides whether this node puts its coordinates on the mesh at
@@ -580,6 +630,37 @@ nothing else:
 It applies immediately with no reboot, and travels with config export/import as
 `display: battDisplay:` (`PERCENT` or `VOLTAGE`).
 
+### Clock format
+
+**Clock Format** on the Config screen (directly under Time and Date, and in web
+config in the same **Time and Date** block) chooses how a time is written:
+
+- **24-hour** (default) — `14:32`.
+- **12-hour** — `2:32 PM`. The hour is not zero-padded, the way a clock is
+  normally written; midnight reads `12:05 AM` and noon `12:00 PM`.
+
+It applies everywhere the device shows a time to a person: the chat header
+clock, message timestamps in both classic and bubble styles, the live feed, the
+sleep and lock screens, the Device Info "Newest/Oldest heard" lines, and the
+detail panel for an archived node.
+
+Machine-readable output deliberately stays 24-hour, because it is read by tools
+rather than people: exported config and message CSV timestamps, discovery JSON,
+and export filenames.
+
+Two things it does not change:
+
+- **Setting the clock by hand** — the Hour field on the Time and Date modal, and
+  the web form's `Time (24h)` box, stay 24-hour entry in both modes.
+- **Messages already received.** A message's timestamp is part of the line as
+  it was stored, written in whatever format was in force when it arrived, and
+  the bubble styles read that same prefix so classic and bubbles agree. A
+  transcript spanning a change therefore carries both formats; everything
+  arriving after the change uses the new one.
+
+It applies immediately with no reboot, and travels with config export/import as
+`display: clockFormat:` (`H24` or `H12`).
+
 ### Theme
 
 T-Deck Pro is the exception to this section: its e-paper UI always uses the
@@ -674,6 +755,28 @@ The device info panel is scrollable with the keyboard on every keyboard build:
   and I or Esc closes it
 - **Heltec** — touch-only; the popup has a **Close** button beside its title.
   (Any key still dismisses it, which is what a keyboard driven over VNC sends)
+
+### Lock screen
+
+Every backlit build except Cardputer can show a lock screen before putting the
+panel fully to sleep. It uses a black background with the time and channel in
+blue, node names in green, and message text in white. The current date, battery
+reading and newest unread message previews remain visible while it is active.
+
+The normal **Screen Timeout** and each board's existing screen-off gesture enter
+the lock screen. The same deliberate input that wakes that board from a dark
+panel dismisses it; other keys, touches and controls are swallowed rather than
+acting on the hidden UI. After the configured dwell, the panel enters its normal
+fully-off state and the next wake returns directly to the UI.
+
+- **Lock Screen** enables or disables the intermediate screen. Disabled keeps
+  the previous direct-to-sleep behavior.
+- **Lock Screen Off** ranges from 5 to 60 minutes in five-minute steps, plus
+  **Stay on**. The default is 5 minutes.
+- Both settings are available in on-device Config and web config.
+- Cardputer keeps direct screen sleep and does not show these settings.
+- T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
+  holds that image without a lit backlight, so it does not use the dwell timer.
 
 ### Notification sound
 
@@ -937,6 +1040,45 @@ entirely when WiFi is off or unreachable; a failed check is not retried until
 the next boot. The update source is fixed in firmware and is not configurable.
 
 Not available on the Cardputer, where OTA is disabled altogether.
+
+#### Automatic updates
+
+The boot check needs someone in front of the device to answer it. A node that
+sits unattended for months — a repeater on a mast, a solar node in a field —
+therefore never updates, whatever the boot preference says. Web Config →
+**Firmware Updates** → *Automatic Updates* is the answer to that: set it to
+**Every hour**, **Every 6 hours**, **Every 12 hours** or **Every 24 hours** and
+the device checks on that schedule and, if a newer release exists, downloads,
+verifies and installs it **with no prompt and no keypress**, then reboots into
+it. Anything in progress on the device is lost at that reboot.
+
+It is **Off** by default, on a fresh flash and on a device upgrading from an
+older build alike. A device only ever installs firmware unattended because
+somebody asked it to.
+
+- It follows the **Release Channel** setting, exactly as the boot check does.
+- It is skipped while the battery is low, and while WiFi is off or
+  disconnected — the cycle simply waits and runs once the condition clears.
+- It is skipped on a third-party partition layout, where there is no slot to
+  install into.
+- It will not reboot out from under an open dialog.
+- The first cycle runs shortly after boot rather than a full period later, so a
+  node coming back from a power cut catches up straight away.
+- The schedule is measured on uptime, not the wall clock: a field node may never
+  get an NTP sync, so a clock-based schedule would not be dependable.
+
+While Automatic Updates is set it **supersedes** *Check for Updates on Boot* —
+the device installs on its own shortly after booting instead of asking, so the
+boot preference has no effect until Automatic Updates is turned back off.
+
+If an install keeps failing on the same release — a truncated download, a
+signature mismatch, a build published without this device's slug — the device
+gives up on that particular version after three attempts rather than
+re-downloading it every period forever. It starts trying again as soon as a
+different release is published, and the reason is reported on the next boot.
+
+The setting round-trips through `config.yaml` as `otaAutoUpdate` (`Off`, `1h`,
+`6h`, `12h` or `24h`). Anything else in that field reads as `Off`.
 
 ### Chat style
 
