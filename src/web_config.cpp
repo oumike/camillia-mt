@@ -4294,6 +4294,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "Changing the channel here reboots the device and checks the new "
                 "channel on the way back up, whatever the setting above says; "
                 "any update it finds is offered on the device's own screen.</p>";
+
+        const uint8_t autoUpdateNow = cfgCoerceOtaAutoUpdate(gCfg->otaAutoUpdatePeriod);
+        html += "<label>Automatic Updates<select name='ota_autoupdate'>";
+        static const struct { uint8_t v; const char *label; } kAutoUpdateOpts[] = {
+            { OTA_AUTO_UPDATE_OFF, "Off" },
+            { OTA_AUTO_UPDATE_1H,  "Every hour" },
+            { OTA_AUTO_UPDATE_6H,  "Every 6 hours" },
+            { OTA_AUTO_UPDATE_12H, "Every 12 hours" },
+            { OTA_AUTO_UPDATE_24H, "Every 24 hours" },
+        };
+        for (const auto &opt : kAutoUpdateOpts) {
+            html += "<option value='"; html += String((int)opt.v); html += "'";
+            if (autoUpdateNow == opt.v) html += " selected";
+            html += ">"; html += opt.label; html += "</option>";
+        }
+        html += "</select></label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "When set, the device checks for a new release on this schedule and "
+                "installs it <b>without asking</b>, then reboots. Intended for nodes "
+                "left unattended; anything in progress on the device is lost at the "
+                "reboot. Off by default. Automatic updates follow the Release Channel "
+                "above, are skipped while the battery is low, and need WiFi connected. "
+                "While this is set it supersedes <i>Check for Updates on Boot</i> — the "
+                "device installs on its own shortly after booting rather than asking, "
+                "so that setting has no effect until you turn this back off.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -6969,6 +6994,20 @@ static void handlePostSave() {
 
     if (server.hasArg("ota_autocheck")) {
         gCfg->otaAutoCheckEnabled = server.arg("ota_autocheck").toInt() != 0;
+    }
+    if (server.hasArg("ota_autoupdate")) {
+        // Clamped to the enum, and anything unrecognised is Off. The failure
+        // mode of a malformed or injected value here must never be a device
+        // that flashes itself hourly.
+        const long submitted = server.arg("ota_autoupdate").toInt();
+        gCfg->otaAutoUpdatePeriod =
+            (submitted >= 0 && submitted <= OTA_AUTO_UPDATE_MAX)
+                ? cfgCoerceOtaAutoUpdate((uint8_t)submitted)
+                : OTA_AUTO_UPDATE_OFF;
+        // Deliberately no otaRequestBootCheckOnce() here, unlike the channel
+        // switch below: there is nothing for the user to be shown. The
+        // scheduler picks the new period up on its next loop pass and runs its
+        // first cycle a settle window later.
     }
     if (server.hasArg("ota_channel")) {
         // Anything that is not an explicit Alpha is Stable, so a malformed or

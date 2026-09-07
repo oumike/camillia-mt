@@ -461,10 +461,22 @@ struct RhinoConfig {
     // default. Zero is "off", which is the wanted default, so the two agree —
     // a field whose default were On could not go here.
     bool     nodeArchiveShow;
-    // For whoever appends next: the byte below is the remainder of that same
-    // padding and carries the same caveat — an upgraded device reads zero
-    // there, not your compiled default.
-    uint8_t  _reservedPad12[1];
+    // Unattended auto-update period: OTA_AUTO_UPDATE_OFF, or one of the 1/6/12/
+    // 24 hour settings. One byte rather than a bool plus an interval, so the
+    // disabled state and the stored default are the same value.
+    //
+    // Takes the last byte of that same padding, under the rule otaChannel and
+    // nodeArchiveShow above document: an upgrading device reads zero here, not
+    // the compiled default. Zero is OTA_AUTO_UPDATE_OFF, which is exactly what
+    // every existing device must come up with -- a device that has never been
+    // told to update itself unattended must not start doing so because it took
+    // a firmware update. A field whose wanted default were non-zero could not
+    // go here.
+    //
+    // For whoever appends next: that padding is now fully consumed. There is no
+    // spare byte left before the old struct size, so the next field must be
+    // appended past the members below and follows the plain append-only rule.
+    uint8_t  otaAutoUpdatePeriod;
 
     // ── Lock screen ──────────────────────────────────────────────────────────
     // Appended past _reservedPad12 deliberately, not placed in it. These are the
@@ -790,6 +802,38 @@ enum : uint8_t {
 
 // Human-readable channel name for UI rows and the YAML dump.
 const char *cfgOtaChannelName(uint8_t channel);
+
+// ── Unattended auto-update ───────────────────────────────────────────────────
+// How often a device left alone checks for and INSTALLS a new release, with no
+// prompt and no keypress. Distinct from otaAutoCheckEnabled, which only ever
+// offers: this one reboots into the new firmware on its own.
+//
+// A period rather than a bool plus an interval, so "off" and "the value an
+// upgrading device reads out of the old blob padding" are the same byte. OFF is
+// therefore zero, and that is load-bearing -- see otaAutoUpdatePeriod above.
+enum : uint8_t {
+    OTA_AUTO_UPDATE_OFF = 0,
+    OTA_AUTO_UPDATE_1H  = 1,
+    OTA_AUTO_UPDATE_6H  = 2,
+    OTA_AUTO_UPDATE_12H = 3,
+    OTA_AUTO_UPDATE_24H = 4,
+};
+#define OTA_AUTO_UPDATE_MAX OTA_AUTO_UPDATE_24H
+
+// Anything out of range is Off, never a period. A byte that cannot be read is
+// not a schedule, and the failure mode of a malformed value must never be a
+// device that flashes itself hourly.
+static inline uint8_t cfgCoerceOtaAutoUpdate(uint8_t period) {
+    return (period <= OTA_AUTO_UPDATE_MAX) ? period : OTA_AUTO_UPDATE_OFF;
+}
+
+// Name for the YAML dump and UI rows. Compact tokens, not sentences: this
+// round-trips through config.yaml, where a value with spaces in it is one more
+// thing the importer has to get right.
+const char *cfgOtaAutoUpdateName(uint8_t period);
+
+// The period in milliseconds; 0 for OFF and for anything unrecognised.
+uint32_t cfgOtaAutoUpdatePeriodMs(uint8_t period);
 
 void cfgToYaml(const RhinoConfig &cfg, String &out);
 

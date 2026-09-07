@@ -341,6 +341,11 @@
 // and are expected to be rougher. Stable by default — an alpha channel is
 // something a tester opts into, never somewhere a device lands on its own.
 #define MY_OTA_CHANNEL      OTA_CHANNEL_AUTO
+// Unattended auto-update: check on a 1/6/12/24 h timer and install with no
+// prompt. Off by default and deliberately so — a device that installs firmware
+// and reboots without asking is something an operator opts into for a node
+// nobody visits, never somewhere a device lands on its own.
+#define MY_OTA_AUTOUPDATE   OTA_AUTO_UPDATE_OFF
 #define MY_NODE_ARCHIVE_EN  0   // opt-in: archive nodes evicted from the full table to SD
 #define MY_AUTOFAV_ENABLED  0      // opt-in: auto-favorite nodes within range
 // Auto-favorite threshold, in meters. One round unit in whichever system the

@@ -1,12 +1,14 @@
 ### New
-- Lock screen is now available on every backlit board — T-Deck, T-Lora Pager TFT, Heltec V4, Attaky Mesh Deck, ThinkNode M9 and Wio Tracker L2 — instead of the Wio Tracker L2 alone. The screen timeout and each board's usual screen-off gesture show the time, date, battery and newest unread messages before the panel goes fully dark.
-- **Lock Screen** and **Lock Screen Off** (5–60 minutes or **Stay on**, default 5 minutes) appear in on-device Config and web config on all boards that support the feature.
+- Clock Format setting: choose 12-hour (`2:32 PM`) or 24-hour (`14:32`) for every time the device shows you — chat header, message timestamps, live feed, sleep and lock screens, Device Info and archived-node details. Found on the Config screen under Time and Date, and in web config; applies instantly with no reboot, and travels with config export/import.
+- TRACKER is now offered as a device role, on the device Config screen, in web config and during onboarding. It relays like a CLIENT and advertises itself as a position reporter; it does not change power use, so pair it with Share Location on and a shorter GPS Broadcast Interval. Device Info shows `TRACKER (not sharing location)` if Share Location is off.
+- Automatic Updates in Web Config → Firmware Updates: set the device to check every 1, 6, 12 or 24 hours and install a newer release with no prompt and no keypress, then reboot into it. Off by default on fresh flashes and on upgrades. It follows your Release Channel, waits while the battery is low or WiFi is down, will not reboot over an open dialog, and gives up on a release that fails to install three times (reporting why on the next boot). While it is on it supersedes Check for Updates on Boot. Not available on the Cardputer, where OTA is disabled.
 
 ### Changed
-- The lock screen sizes itself to the panel it is on: five message previews on the T-Lora Pager TFT, eight on portrait screens, six on 320x240 landscape screens.
-- Any input is swallowed while the lock screen is up — only that board's normal wake gesture dismisses it, so a stray key or touch can no longer trigger something in the UI hidden underneath.
-- T-Lora Pager TFT turns its keyboard backlight off while the lock screen is showing and back on when it is dismissed.
-- M5Stack Cardputer keeps going straight to screen sleep and does not show the new settings; T-Deck Pro keeps its existing e-paper sleep screen, which stays visible without a dwell timer.
+- The firmware install screen now names the release it is installing (e.g. "Installing update v4.9.2"), on both the colour and T-Deck Pro screens, so you can see which version the device is about to become.
+- A rhino runs back and forth under the install progress, and slows to a stop when the download stalls.
+- The clock on the sleep screen is now orange instead of blue on colour displays, so it reads at a glance; e-paper screens are unchanged.
 
 ### Fixed
-- The button press or hold that brings up the lock screen no longer immediately dismisses it again.
+- The front D-pad on the Attaky Mesh Deck did nothing while a message was open. Up/down now scroll and left/right move within the compose box.
+- The install progress screen no longer blinks the whole panel several times a second, and it no longer repaints furiously during a stalled download — the download itself gets that time back.
+- Device Info showed role 2 as "CLIENT_HIDDEN_MQTT", which is not a Meshtastic role. It now reads ROUTER, the role that value actually means.

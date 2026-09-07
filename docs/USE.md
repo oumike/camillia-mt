@@ -960,6 +960,45 @@ the next boot. The update source is fixed in firmware and is not configurable.
 
 Not available on the Cardputer, where OTA is disabled altogether.
 
+#### Automatic updates
+
+The boot check needs someone in front of the device to answer it. A node that
+sits unattended for months — a repeater on a mast, a solar node in a field —
+therefore never updates, whatever the boot preference says. Web Config →
+**Firmware Updates** → *Automatic Updates* is the answer to that: set it to
+**Every hour**, **Every 6 hours**, **Every 12 hours** or **Every 24 hours** and
+the device checks on that schedule and, if a newer release exists, downloads,
+verifies and installs it **with no prompt and no keypress**, then reboots into
+it. Anything in progress on the device is lost at that reboot.
+
+It is **Off** by default, on a fresh flash and on a device upgrading from an
+older build alike. A device only ever installs firmware unattended because
+somebody asked it to.
+
+- It follows the **Release Channel** setting, exactly as the boot check does.
+- It is skipped while the battery is low, and while WiFi is off or
+  disconnected — the cycle simply waits and runs once the condition clears.
+- It is skipped on a third-party partition layout, where there is no slot to
+  install into.
+- It will not reboot out from under an open dialog.
+- The first cycle runs shortly after boot rather than a full period later, so a
+  node coming back from a power cut catches up straight away.
+- The schedule is measured on uptime, not the wall clock: a field node may never
+  get an NTP sync, so a clock-based schedule would not be dependable.
+
+While Automatic Updates is set it **supersedes** *Check for Updates on Boot* —
+the device installs on its own shortly after booting instead of asking, so the
+boot preference has no effect until Automatic Updates is turned back off.
+
+If an install keeps failing on the same release — a truncated download, a
+signature mismatch, a build published without this device's slug — the device
+gives up on that particular version after three attempts rather than
+re-downloading it every period forever. It starts trying again as soon as a
+different release is published, and the reason is reported on the next boot.
+
+The setting round-trips through `config.yaml` as `otaAutoUpdate` (`Off`, `1h`,
+`6h`, `12h` or `24h`). Anything else in that field reads as `Off`.
+
 ### Chat style
 
 Config has a **Chat Style** action. Selecting it opens a picker modal — navigate
