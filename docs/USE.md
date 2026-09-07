@@ -417,6 +417,56 @@ Config includes Web Config controls, export and import, the theme picker, announ
   see, so typing part of a value works too — `on` finds every setting currently
   switched on. Keyboard builds only; the touch-only Heltec has no Space to press.
 
+### Device role
+
+**Role**, under Device in web config and asked once during onboarding, is how
+this node tells the rest of the mesh it means to be treated. It travels in
+NodeInfo, so other nodes and MQTT-fed maps see it, and it is exported as
+`config: device: role:`.
+
+Four roles are offered, using the same names and enum values as stock
+Meshtastic:
+
+- **CLIENT** (default) — an ordinary node. Sends its own traffic and relays
+  everyone else's.
+- **CLIENT_MUTE** — never relays other people's packets. For a node in a spot
+  where relaying adds nothing but airtime, or where battery matters more than
+  the mesh does.
+- **TRACKER** — a node whose job is reporting where it is. It still relays like
+  a CLIENT; what makes it a tracker is that its position is the point of it.
+- **CLIENT_HIDDEN** — only speaks when spoken to. One difference from stock
+  Meshtastic worth knowing: theirs still relays, restricted to known meshes,
+  where here CLIENT_HIDDEN does not relay at all.
+
+The infrastructure roles — ROUTER, ROUTER_LATE and REPEATER — are deliberately
+not offered. They change how the whole mesh routes traffic around a node, and
+they are not something a handheld with a screen should claim to be. A config
+imported with one of them is coerced to CLIENT rather than honoured.
+
+#### What TRACKER does here
+
+Upstream, TRACKER means two things: position packets are prioritised in the
+node's own transmit queue, and — with `power.is_power_saving` on — the device
+wakes, sends a position, and sleeps until the next one.
+
+This firmware has neither mechanism. There is no priority transmit queue — a
+packet is transmitted at the point it is built — and nothing puts the device to
+sleep between position sends. (GPS Duty Cycle, under Position, parks the *GPS
+receiver* between samples; it is not upstream's whole-device sleep and is not
+tied to the role.) So setting TRACKER here **advertises the role and changes
+nothing about power draw** — a tracker costs the same battery as a client. What
+makes it behave like a tracker is the two settings under Position, which you set
+yourself:
+
+- **Share Location** must be on. A TRACKER with it off transmits no position at
+  all, which is the whole of the role; Device Info shows the role as
+  `TRACKER (not sharing location)` when that is the case.
+- **GPS Broadcast Interval** decides how often the position actually goes out.
+  It defaults to 1800 s, which is a client's interval, not a tracker's —
+  Meshtastic suggests 60 s for a tracker. Nothing changes it for you: it is your
+  airtime to spend, and a firmware that quietly shortened a broadcast interval
+  on a shared channel would be a worse neighbour than one that asked.
+
 ### Location precision
 
 **Share Location** decides whether this node puts its coordinates on the mesh at

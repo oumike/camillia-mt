@@ -721,12 +721,19 @@ static inline uint8_t cfgBrightnessDuty(uint8_t pct) {
     return (uint8_t)((cfgCoerceBrightness(pct) * 255 + 50) / 100);
 }
 
-// Only client device roles are supported on this firmware. Values are the
-// canonical Meshtastic enum positions so they stay wire-compatible.
-//   0 = CLIENT, 1 = CLIENT_MUTE, 8 = CLIENT_HIDDEN
+// The device roles this firmware offers. Values are the canonical Meshtastic
+// enum positions (Config.DeviceConfig.Role) so they stay wire-compatible.
+//   0 = CLIENT, 1 = CLIENT_MUTE, 5 = TRACKER, 8 = CLIENT_HIDDEN
 // Any other role is coerced to CLIENT.
-static inline uint8_t cfgCoerceClientRole(uint8_t role) {
-    return (role == 1 || role == 8) ? role : 0;
+//
+// The infrastructure roles stay out on purpose. ROUTER and ROUTER_LATE change
+// how the whole mesh routes around a node, and REPEATER — deprecated upstream in
+// 2.7.11 for punching holes in the rebroadcast chain — originates nothing at
+// all. None of the three is a thing a handheld with a screen should advertise
+// itself as, and a node that claims one changes other people's routing, not
+// just its own behaviour.
+static inline uint8_t cfgCoerceDeviceRole(uint8_t role) {
+    return (role == 1 || role == 5 || role == 8) ? role : 0;
 }
 
 // Derives loraFreq/loraBw/loraSf/loraCr from cfg.region and cfg.modemPreset.

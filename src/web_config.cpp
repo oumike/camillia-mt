@@ -3284,10 +3284,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     section(html, lite, "Device", false);
     html += "<div class='row2'>";
     html += "<label>Role<select name='role'>";
-    // Only client roles are offered; values are the canonical Meshtastic enum
+    // See cfgCoerceDeviceRole for which roles this firmware offers and why the
+    // infrastructure ones are absent; values are the canonical Meshtastic enum
     // positions (kept intact for wire compatibility and rebroadcast gating).
     static const struct { uint8_t v; const char *l; } kRoles[] = {
-        {0,"CLIENT"},{1,"CLIENT_MUTE"},{8,"CLIENT_HIDDEN"}
+        {0,"CLIENT"},{1,"CLIENT_MUTE"},{5,"TRACKER"},{8,"CLIENT_HIDDEN"}
     };
     for (int i = 0; i < (int)(sizeof(kRoles) / sizeof(kRoles[0])); i++) {
         snprintf(tmp, sizeof(tmp), "%d", kRoles[i].v);
@@ -3307,6 +3308,23 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += ">"; html += kRebroad[i].l; html += "</option>";
     }
     html += "</select></label></div>";
+    // What the role actually does here, said plainly, because on this firmware
+    // it is mostly an advertised identity rather than a behaviour switch — and
+    // someone picking TRACKER expecting upstream's power-saving duty cycle
+    // should find that out on this page, not from a battery that never lasts.
+    html += "<p class='gps-hint'>The role goes out in this node's NodeInfo, so other "
+            "nodes and the map see how it means to be treated. "
+            "<b>CLIENT</b> is an ordinary node. <b>CLIENT_MUTE</b> does not relay "
+            "other people's traffic. <b>CLIENT_HIDDEN</b> only speaks when spoken "
+            "to. <b>TRACKER</b> is a node whose job is reporting where it is: it "
+            "still relays like a CLIENT, and it needs <i>Share Location</i> on "
+            "with a <i>GPS Broadcast Interval</i> short enough to be worth "
+            "tracking (Meshtastic suggests 60&nbsp;s). It does <b>not</b> put the "
+            "device to sleep between fixes the way upstream's tracker does with "
+            "<code>is_power_saving</code> &mdash; this firmware has no such mode, "
+            "so a tracker here costs the same battery as a client. (GPS Duty "
+            "Cycle, under Position, sleeps the GPS receiver only.)</p>";
+    sendChunkIfBig(html);   // AP mode renders this section with very little heap
     // GPS Broadcast Interval lives in the Position section, next to the poll
     // interval it is easily confused with.
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->nodeInfoIntervalS);
@@ -6558,7 +6576,7 @@ static void handlePostSave() {
     // gCfg->nodeIdOverride = (ovr.length() > 0) ? (uint32_t)strtoul(ovr.c_str(), nullptr, 16) : 0;
 
     // Device
-    gCfg->deviceRole        = cfgCoerceClientRole((uint8_t)server.arg("role").toInt());
+    gCfg->deviceRole        = cfgCoerceDeviceRole((uint8_t)server.arg("role").toInt());
     gCfg->rebroadcastMode   = (uint8_t)constrain(server.arg("rebroadcast").toInt(), 0,  4);
     gCfg->nodeInfoIntervalS = (uint32_t)max((long)60, server.arg("nodeinfo_intv").toInt());
     gCfg->posIntervalS      = (uint32_t)max((long)60, server.arg("pos_intv").toInt());

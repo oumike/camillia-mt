@@ -2135,8 +2135,9 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
         cfgSavedWifiCommit();
     }
 
-    // Only client roles are supported; coerce anything else from imported YAML.
-    cfg.deviceRole = cfgCoerceClientRole(cfg.deviceRole);
+    // An imported YAML can name any role in kRoleNames; coerce the ones this
+    // firmware does not offer (see cfgCoerceDeviceRole) down to CLIENT.
+    cfg.deviceRole = cfgCoerceDeviceRole(cfg.deviceRole);
     // Re-derive freq/BW/SF/CR from region + preset; any imported loraFreq is
     // advisory and must not override the name-hashed channel slot.
     applyPresetParams(cfg);

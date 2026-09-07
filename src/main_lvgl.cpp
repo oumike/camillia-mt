@@ -4664,11 +4664,18 @@ static bool cfgActionDisabled(int actionId) {
     }
 }
 
+// Names for the canonical Meshtastic Role enum, so an imported or legacy value
+// reads as itself rather than as a number. Only the handful cfgCoerceDeviceRole
+// admits are reachable from a setting; the rest are here so a config that
+// arrived carrying one is named honestly before it is coerced.
 static const char *cfgDeviceRoleName(uint8_t role) {
     switch (role) {
         case 0:  return "CLIENT";
         case 1:  return "CLIENT_MUTE";
-        case 2:  return "CLIENT_HIDDEN_MQTT";
+        // 2 read "CLIENT_HIDDEN_MQTT", which is not a Meshtastic role at all and
+        // disagreed with kRoleNames[] in config_io.cpp. ROUTER is what the
+        // protobuf calls this position.
+        case 2:  return "ROUTER";
         case 3:  return "ROUTER_CLIENT";
         case 4:  return "REPEATER";
         case 5:  return "TRACKER";
@@ -8027,7 +8034,7 @@ static void loadConfigFromPrefs() {
     if (i >= 0) s_cfg.alt = i;
 
     uint8_t ro = prefs.getUChar("devRole", 0xFF);
-    if (ro != 0xFF) s_cfg.deviceRole = cfgCoerceClientRole(ro);
+    if (ro != 0xFF) s_cfg.deviceRole = cfgCoerceDeviceRole(ro);
     ro = prefs.getUChar("rebroadcast", 0xFF);
     if (ro != 0xFF) s_cfg.rebroadcastMode = ro;
 
@@ -10033,7 +10040,17 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
     }
     if (n < maxLines) snprintf(info[n++], 96, "Firmware: %s", APP_VERSION);
     if (n < maxLines) snprintf(info[n++], 96, "Node ID: !%08lx", (unsigned long)s_myNodeId);
-    if (n < maxLines) snprintf(info[n++], 96, "Role: %s", cfgDeviceRoleName(s_cfg.deviceRole));
+    // A TRACKER that is not sharing location transmits no position at all, which
+    // is the whole of the role — and nothing else on the device says so, since
+    // Share Location looks perfectly reasonable on its own. Called out here
+    // rather than refused at the point of setting: the two are set on different
+    // screens, in either order, so refusing one would just be a race.
+    if (n < maxLines) {
+        const bool trackerNotSharing =
+            (s_cfg.deviceRole == 5 /*TRACKER*/) && !s_cfg.shareLocation;
+        snprintf(info[n++], 96, "Role: %s%s", cfgDeviceRoleName(s_cfg.deviceRole),
+                 trackerNotSharing ? " (not sharing location)" : "");
+    }
     if (n < maxLines) snprintf(info[n++], 96, "PKI key: %s", hasPubKey ? "present" : "missing");
     if (n < maxLines) snprintf(info[n++], 96, "Long: %s", s_cfg.nodeLong);
     if (n < maxLines) snprintf(info[n++], 96, "Short: %s", s_cfg.nodeShort);
@@ -31220,13 +31237,18 @@ static void styleOnboardingPaperTree(lv_obj_t *parent) {
 }
 #endif
 
-// Roles offered during onboarding. Only client roles are supported by this
-// firmware (see cfgCoerceClientRole); values are the canonical Meshtastic enum
-// positions so they stay wire-compatible.
+// Roles offered during onboarding (see cfgCoerceDeviceRole for which roles this
+// firmware supports and why the infrastructure ones are absent); values are the
+// canonical Meshtastic enum positions so they stay wire-compatible.
+//
+// Ordered by enum value rather than by likelihood, so the list reads the same
+// way the web config's does and the same way Meshtastic's own documentation
+// lists them.
 struct OnboardRoleOption { uint8_t value; const char *label; };
 static const OnboardRoleOption kOnboardRoles[] = {
     {0, "CLIENT"},
     {1, "CLIENT_MUTE"},
+    {5, "TRACKER"},
     {8, "CLIENT_HIDDEN"},
 };
 static const int kOnboardRoleCount =
@@ -31935,7 +31957,7 @@ static void onboardingFinalize() {
     utf8util::copyTruncate(s_cfg.nodeLong, sizeof(s_cfg.nodeLong), s_onboardingLongScratch);
     utf8util::copyTruncate(s_cfg.nodeShort, sizeof(s_cfg.nodeShort), s_onboardingShortScratch);
     utf8util::copyTruncate(s_cfg.region, sizeof(s_cfg.region), s_onboardingRegionScratch);
-    s_cfg.deviceRole = cfgCoerceClientRole(s_onboardingRoleScratch);
+    s_cfg.deviceRole = cfgCoerceDeviceRole(s_onboardingRoleScratch);
     utf8util::copyTruncate(s_cfg.wifiSsid, sizeof(s_cfg.wifiSsid), s_onboardingWifiSsidScratch);
     utf8util::copyTruncate(s_cfg.wifiPass, sizeof(s_cfg.wifiPass), s_onboardingWifiPassScratch);
     // Re-derive loraFreq/BW/SF/CR from the chosen region + current preset.
@@ -37860,7 +37882,14 @@ static bool snfRequestHistory(const char **why) {
 }
 
 // ── Managed flood rebroadcasting ──────────────────────────────────────────────
-// Stock Meshtastic: every role rebroadcasts except CLIENT_MUTE / CLIENT_HIDDEN.
+// CLIENT_MUTE is the role that does not forward other people's packets, and
+// this table is why TRACKER needed nothing added to it: a tracker relays exactly
+// like a CLIENT upstream, and reports its own position on top of that. Anyone
+// wanting a node that only reports itself wants CLIENT_MUTE, not TRACKER.
+//
+// One known divergence, left as-is because changing it would alter what existing
+// CLIENT_HIDDEN nodes do on the mesh: upstream's CLIENT_HIDDEN still rebroadcasts
+// (under local-only rebroadcast), where here it does not relay at all.
 static bool roleRebroadcasts(uint8_t role) {
     return role != 1 /*CLIENT_MUTE*/ && role != 8 /*CLIENT_HIDDEN*/;
 }
