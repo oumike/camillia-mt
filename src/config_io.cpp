@@ -527,6 +527,14 @@ static const char *kBattDisplayNames[] = {
 };
 static const int kNumBattDisplayModes = 2;
 
+// "H24"/"H12" rather than "24H"/"12H" on purpose: the import path treats a value
+// starting with a digit as the numeric form, so "24H" would parse as 24 and then
+// clamp to 1 — silently selecting the format the file did not ask for.
+static const char *kClockFormatNames[] = {
+    "H24", "H12"
+};
+static const int kNumClockFormats = 2;
+
 // ── Custom theme store ───────────────────────────────────────────────────────
 // One NVS blob holding the whole slot array. Written whole on every change:
 // four slots is 104 bytes, so there is nothing to gain from per-slot keys and a
@@ -917,6 +925,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.lockScreenOffSecs  = 300;
     cfg.displayUnits       = MY_DISPLAY_UNITS;
     cfg.battDisplayMode    = MY_BATT_DISPLAY;
+    cfg.clockFormat        = cfgCoerceClockFormat(MY_CLOCK_FORMAT);
     cfg.compassNorthTop    = MY_COMPASS_NORTH;
     cfg.flipScreen         = MY_FLIP_SCREEN;
     cfg.splashMelodyEnabled = MY_SPLASH_MELODY_ENABLED;
@@ -1389,6 +1398,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    battDisplay: ";
     out += (cfg.battDisplayMode < kNumBattDisplayModes)
            ? kBattDisplayNames[cfg.battDisplayMode] : kBattDisplayNames[0];
+    out += "\n";
+    out += "    clockFormat: ";   // H24 = 14:32, H12 = 2:32 PM
+    out += (cfg.clockFormat < kNumClockFormats)
+           ? kClockFormatNames[cfg.clockFormat] : kClockFormatNames[0];
     out += "\n";
     out += "    userMsgColor: ";  // own-message color: 0..15 palette index, or "default"
     if (cfg.userMsgColor <= 15) { snprintf(tmp, sizeof(tmp), "%d", cfg.userMsgColor); out += tmp; }
@@ -1989,6 +2002,12 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                         cfg.battDisplayMode = (uint8_t)constrain(atoi(val), 0, BATT_DISPLAY_MAX);
                     else
                         cfg.battDisplayMode = findName(val, kBattDisplayNames, kNumBattDisplayModes);
+                }
+                else if (!strcmp(key, "clockFormat")) {
+                    if (isdigit((unsigned char)val[0]))
+                        cfg.clockFormat = (uint8_t)constrain(atoi(val), 0, CLOCK_FORMAT_MAX);
+                    else
+                        cfg.clockFormat = findName(val, kClockFormatNames, kNumClockFormats);
                 }
                 else if (!strcmp(key, "chatColors")) {
                     cfg.chatColorsEnabled = parseBoolValue(val);

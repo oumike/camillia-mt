@@ -489,6 +489,23 @@ struct RhinoConfig {
     // and the idle timeout both put the panel straight out, and no overlay is
     // ever built.
     bool     lockScreenEnabled;
+
+    // Whether the wall clock reads 12-hour with AM/PM or 24-hour, everywhere a
+    // time is shown to a person: the chat header, message timestamps, the
+    // sleep/lock clock, Device Info and the archived-node detail. Machine-facing
+    // output is deliberately excluded -- export filenames, the messages CSV and
+    // the discovery JSON stay ISO-ish 24-hour, because those are read by tools.
+    //
+    // Placed in what was lockScreenEnabled's trailing padding, under the same
+    // rule otaChannel and nodeArchiveShow above document: an upgrading device
+    // reads zero here, not the compiled default. Zero is CLOCK_FORMAT_24H, the
+    // format every build before this setting used, so the two agree -- a field
+    // whose wanted default were 12-hour could not go here.
+    uint8_t  clockFormat;
+    // For whoever appends next: the two bytes below are the remainder of that
+    // same padding and carry the same caveat -- an upgraded device reads zero
+    // there, not your compiled default.
+    uint8_t  _reservedPad13[2];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
@@ -573,6 +590,22 @@ enum BattDisplayMode : uint8_t {
     BATT_DISPLAY_VOLTAGE = 1,
 };
 #define BATT_DISPLAY_MAX 1
+
+// How a wall-clock time is written where a person reads it. 24-hour is 0 so an
+// upgraded device, which reads zero out of the old blob's trailing padding for
+// clockFormat, keeps the format every earlier build used.
+//
+// An enum rather than a bool for the same reason BattDisplayMode is one: a later
+// "24-hour with seconds" would otherwise need a second field.
+enum ClockFormat : uint8_t {
+    CLOCK_FORMAT_24H = 0,
+    CLOCK_FORMAT_12H = 1,
+};
+#define CLOCK_FORMAT_MAX 1
+
+static inline uint8_t cfgCoerceClockFormat(int v) {
+    return (v == CLOCK_FORMAT_12H) ? CLOCK_FORMAT_12H : CLOCK_FORMAT_24H;
+}
 
 // Where the wall clock comes from. AUTO is NTP when there's a network path and
 // GPS otherwise; MANUAL means the user set it and nothing may overwrite it.

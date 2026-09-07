@@ -1323,7 +1323,7 @@ static uint32_t s_composeDmNodeId = 0;
 
 static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
-static char s_lastHeaderTime[8] = "";
+static char s_lastHeaderTime[LIVE_CLOCK_BUF] = "";
 static uint8_t s_lastBattPct = 255;
 // Battery voltage in hundredths, cached alongside the percentage so the header
 // early-out notices a change in either. 0xFFFF is the "not yet drawn" sentinel,
@@ -2664,6 +2664,7 @@ enum CfgActionId {
     CFG_ACTION_OTA_CHANNEL,
     CFG_ACTION_RELEASE_NOTES,
     CFG_ACTION_TIME_DATE,
+    CFG_ACTION_CLOCK_FORMAT,
     CFG_ACTION_CHANNEL_CFG,
     CFG_ACTION_RESET_CHAT_COLORS,
     CFG_ACTION_CLEAR_MSGS,
@@ -4596,6 +4597,10 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
             snprintf(buf, bufLen, "Time and Date: %s",
                      (s_cfg.timeSource == TIME_SOURCE_MANUAL) ? "Manual" : "Auto");
             break;
+        case CFG_ACTION_CLOCK_FORMAT:
+            snprintf(buf, bufLen, "Clock Format: %s",
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
+            break;
         case CFG_ACTION_RESET_CHAT_COLORS:
             snprintf(buf, bufLen, "Reset Chat Colors");
             break;
@@ -6139,12 +6144,12 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     const lv_font_t *boldFont = tdeckProBoldRowFont();
     const lv_font_t *restFont = emojiFont(&lv_font_montserrat_12);
 
-    char timeText[8] = "";
+    char timeText[LIVE_CLOCK_BUF] = "";
     if (m.epoch != 0) {
         const time_t when = (time_t)m.epoch;
         struct tm lt;
         localtime_r(&when, &lt);
-        strftime(timeText, sizeof(timeText), "%H:%M", &lt);
+        liveFormatClock(lt, timeText, sizeof(timeText));
     }
 
     // Where the continuation line will start. Measured from the time alone, not
@@ -6297,13 +6302,13 @@ static void updateTdeckProSleepClock() {
     const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
     lv_label_set_text(s_tdeckProSleepNode, nodeName);
 
-    char timeText[8] = "--:--";
+    char timeText[LIVE_CLOCK_BUF] = "--:--";
     char dateText[24] = "Date unavailable";
     const time_t now = time(nullptr);
     if (now >= kClockSetEpoch) {
         struct tm localTime;
         localtime_r(&now, &localTime);
-        strftime(timeText, sizeof(timeText), "%H:%M", &localTime);
+        liveFormatClock(localTime, timeText, sizeof(timeText));
         strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
     }
     lv_label_set_text(s_tdeckProSleepTime, timeText);
@@ -7880,6 +7885,10 @@ static void applyLoadedConfigInvariants() {
     }
     // Anything but a known source would silently disable both NTP and GPS.
     s_cfg.timeSource = cfgCoerceTimeSource(s_cfg.timeSource);
+    // Coerced and mirrored here rather than only in the loop, so the first frame
+    // drawn after a load already reads in the format the user chose.
+    s_cfg.clockFormat = cfgCoerceClockFormat((int)s_cfg.clockFormat);
+    liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
     // A trim out of range would scale the battery reading into nonsense; an
     // imported YAML or a hand-edited value is enough to get there.
     s_cfg.battCalTrim = cfgCoerceBattCalTrim((int)s_cfg.battCalTrim);
@@ -9891,6 +9900,9 @@ static void initCfgActions() {
 
     // ── How it reads things out ──────────────────────────────────────────────
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TIME_DATE;
+    // Directly under the row that sets the clock: the two questions a person
+    // asks about time in a row, what it is and how it is written.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLOCK_FORMAT;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_UNITS;
     // Unconditional: every supported board reads a battery voltage, so there is
     // no board this row would have nothing to show.
@@ -9996,8 +10008,10 @@ static void deviceInfoFormatHeard(uint32_t lastHeardMs, char *out, size_t outLen
         time_t t = nowEpoch - (time_t)ageS;
         struct tm lt;
         localtime_r(&t, &lt);
-        snprintf(out, outLen, "%02d/%02d %02d:%02d",
-                 lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+        char clock[LIVE_CLOCK_BUF];
+        liveFormatClock(lt, clock, sizeof(clock));
+        snprintf(out, outLen, "%02d/%02d %s",
+                 lt.tm_mon + 1, lt.tm_mday, clock);
     } else if (ageS < 3600UL) {
         snprintf(out, outLen, "%lum ago", (unsigned long)(ageS / 60UL));
     } else {
@@ -17539,10 +17553,10 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
 #endif
 }
 
-static bool isDigitChar(char c) {
-    return (c >= '0' && c <= '9');
-}
-
+// Split a live-feed line into the clock liveBuildPrefix() put on it and the
+// body after it. Anchored: the feed's own lines start with the clock, so
+// liveFindClock() is given a one-byte window rather than allowed to find a time
+// somewhere inside the body.
 static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, const char **bodyOut) {
     if (!s) s = "";
     if (tsOut && tsOutLen > 0) tsOut[0] = '\0';
@@ -17553,23 +17567,27 @@ static bool liveTimestampAndBody(const char *s, char *tsOut, size_t tsOutLen, co
 
     size_t len = strlen(s);
     if (len < 6) return false;
-    bool hhmm = isDigitChar(s[0]) && isDigitChar(s[1]) &&
-                s[2] == ':' &&
-                isDigitChar(s[3]) && isDigitChar(s[4]) &&
-                s[5] == ' ';
+
+    const char *tsStart = nullptr;
+    const char *tsEnd = liveFindClock(s, 1, &tsStart);
+    // "--:--" is not a time, so liveFindClock() does not match it; the feed
+    // prints it like any other prefix and the body still has to be split off.
     bool unset = (s[0] == '-' && s[1] == '-' && s[2] == ':' &&
                   s[3] == '-' && s[4] == '-' && s[5] == ' ');
-    if (hhmm || unset) {
-        if (tsOut && tsOutLen >= 6) {
-            memcpy(tsOut, s, 5);
-            tsOut[5] = '\0';
-        }
-        s += 6;
-        while (*s == ' ') s++;
-        *bodyOut = s;
-        return true;
+    if (unset) { tsStart = s; tsEnd = s + 5; }
+    // A clock has to be followed by the separating space, or what was found is
+    // the start of the body rather than a prefix.
+    if (!tsStart || !tsEnd || *tsEnd != ' ') return false;
+
+    const size_t tsLen = (size_t)(tsEnd - tsStart);
+    if (tsOut && tsOutLen > tsLen) {
+        memcpy(tsOut, tsStart, tsLen);
+        tsOut[tsLen] = '\0';
     }
-    return false;
+    s = tsEnd;
+    while (*s == ' ') s++;
+    *bodyOut = s;
+    return true;
 }
 
 static const char *livePortLabel(const char *tag) {
@@ -17627,7 +17645,7 @@ static void formatLiveLineText(const DisplayLine &dl, char *out, size_t outLen) 
     if (!out || outLen == 0) return;
     out[0] = '\0';
 
-    char ts[6];
+    char ts[LIVE_CLOCK_BUF];
     const char *body = "";
     liveTimestampAndBody(dl.text, ts, sizeof(ts), &body);
 
@@ -21427,18 +21445,22 @@ static void refreshNodesDetails() {
         nodesShowSections(false);
         lv_obj_clear_flag(s_nodesDetail, LV_OBJ_FLAG_HIDDEN);
 
+        // Date stays ISO because it is a date, not a clock; only the time half
+        // follows the Clock Format setting.
+        auto archivedStamp = [](uint32_t epoch, char *out, size_t outLen) {
+            if (epoch == 0) return;   // leave the caller's placeholder in place
+            const time_t t = (time_t)epoch;
+            struct tm tmv;
+            if (!localtime_r(&t, &tmv)) return;
+            char clock[LIVE_CLOCK_BUF];
+            liveFormatClock(tmv, clock, sizeof(clock));
+            snprintf(out, outLen, "%04d-%02d-%02d %s",
+                     tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, clock);
+        };
         char when[32] = "unknown date";
-        if (selectedArchived->archivedEpoch > 0) {
-            const time_t t = (time_t)selectedArchived->archivedEpoch;
-            struct tm tmv;
-            if (localtime_r(&t, &tmv)) strftime(when, sizeof(when), "%Y-%m-%d %H:%M", &tmv);
-        }
+        archivedStamp(selectedArchived->archivedEpoch, when, sizeof(when));
         char heardWhen[32] = "unknown";
-        if (selectedArchived->lastHeardEpoch > 0) {
-            const time_t t = (time_t)selectedArchived->lastHeardEpoch;
-            struct tm tmv;
-            if (localtime_r(&t, &tmv)) strftime(heardWhen, sizeof(heardWhen), "%Y-%m-%d %H:%M", &tmv);
-        }
+        archivedStamp(selectedArchived->lastHeardEpoch, heardWhen, sizeof(heardWhen));
 
         const NodeEntry *full = nodesArchivedDetail(selectedArchived->nodeId);
 
@@ -28220,7 +28242,7 @@ static void refreshDmModal(bool force) {
             // (DMs have no reply/selection model).
             if (chatStyleUsesBubbles(s_cfg.chatStyle)) {
                 const bool isMe = dmLineIsFromMe(dl->text);
-                char dmIconBuf[12], dmTimeBuf[8], dmMetaBuf[24];
+                char dmIconBuf[12], dmTimeBuf[LIVE_CLOCK_BUF], dmMetaBuf[28];
                 chatParsePrefix(dl->text, dmIconBuf, sizeof(dmIconBuf),
                                 dmTimeBuf, sizeof(dmTimeBuf));
                 if (!dmTimeBuf[0]) formatChatClock(dl->epoch, dmTimeBuf, sizeof(dmTimeBuf));
@@ -30211,6 +30233,22 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec TIME_DATE");
             showActionPopup = false;
             openTimeCfgModal();
+            break;
+
+        case CFG_ACTION_CLOCK_FORMAT:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CLOCK_FORMAT");
+            showActionPopup = false;   // row already reads 12-hour/24-hour
+            s_cfg.clockFormat = (s_cfg.clockFormat == CLOCK_FORMAT_12H)
+                                ? CLOCK_FORMAT_24H : CLOCK_FORMAT_12H;
+            liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
+            persistConfigToPrefs();
+            // Both forced: the minute has not changed and neither has any
+            // message, so the early-outs in these two would hold the old
+            // rendering on screen until something else moved.
+            refreshHeaderTime(true);
+            refreshChatView(true);
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Clock Format: %s",
+                     (s_cfg.clockFormat == CLOCK_FORMAT_12H) ? "12-hour" : "24-hour");
             break;
 
         case CFG_ACTION_OTA_UPDATE: {
@@ -37209,7 +37247,7 @@ static void loadConfigForOtaWorker() {
 static void refreshHeaderTime(bool force) {
     if (!s_chatHeaderTime) return;
 
-    char buf[8];
+    char buf[LIVE_CLOCK_BUF];
     liveBuildPrefix(buf, sizeof(buf));
     size_t n = strlen(buf);
     if (n > 0 && buf[n - 1] == ' ') buf[n - 1] = '\0';
@@ -39191,10 +39229,14 @@ static uint32_t chatDateBucket(uint32_t epoch) {
     return (uint32_t)((tmv.tm_year + 1900) * 512 + tmv.tm_yday);
 }
 
-// "HH:MM" for a stored message, matching liveBuildPrefix()'s 24-hour format and
-// its 1700000000 sentinel for "clock was not synced when this arrived". Empty
-// output means no usable time, and callers drop the field rather than print a
-// placeholder inside a bubble.
+// The clock for a stored message, in whichever format liveBuildPrefix() is
+// currently writing, and sharing its 1700000000 sentinel for "clock was not
+// synced when this arrived". Empty output means no usable time, and callers
+// drop the field rather than print a placeholder inside a bubble.
+//
+// The fallback for a stored line that carries no prefix to parse; the bubble
+// renderer prefers the prefix, so most lines keep the format they were written
+// in. Only lines reaching this path follow a later change of the setting.
 static void formatChatClock(uint32_t epoch, char *out, size_t len) {
     if (!out || len == 0) return;
     out[0] = '\0';
@@ -39202,7 +39244,7 @@ static void formatChatClock(uint32_t epoch, char *out, size_t len) {
     time_t t = (time_t)epoch;
     struct tm tmv;
     localtime_r(&t, &tmv);
-    snprintf(out, len, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    liveFormatClock(tmv, out, len);
 }
 
 static void formatChatDateLabel(uint32_t epoch, char *out, size_t len) {
@@ -39319,6 +39361,13 @@ static lv_color_t bubbleTextColor(uint16_t bg565) {
 // The clock is found by pattern rather than position, since the icon precedes
 // it. The scan is bounded to the prefix window so a "12:34" inside message text
 // cannot be mistaken for one.
+//
+// Both clock formats have to be recognised here, and not only the one currently
+// selected: lines are stored with the prefix that was in force when they
+// arrived, so a transcript spanning a settings change carries both.
+//
+// liveFindClock() does the recognising, shared with the live feed's own splitter
+// so the two can never disagree about what a stored prefix looks like.
 static void chatParsePrefix(const char *line,
                             char *iconOut, size_t iconLen,
                             char *timeOut, size_t timeLen) {
@@ -39326,21 +39375,15 @@ static void chatParsePrefix(const char *line,
     if (timeOut && timeLen) timeOut[0] = '\0';
     if (!line) return;
 
-    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    const int kWindow = 24;   // icon + clock always lands well inside this
     const char *found = nullptr;
-    for (const char *p = line; *p && (int)(p - line) < kWindow; p++) {
-        if (isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1])
-            && p[2] == ':'
-            && isdigit((unsigned char)p[3]) && isdigit((unsigned char)p[4])) {
-            found = p;
-            break;
-        }
-    }
-    if (!found) return;
+    const char *clockEnd = liveFindClock(line, kWindow, &found);
+    if (!clockEnd || !found) return;
 
-    if (timeOut && timeLen >= 6) {
-        memcpy(timeOut, found, 5);
-        timeOut[5] = '\0';
+    const size_t clockLen = (size_t)(clockEnd - found);
+    if (timeOut && timeLen > clockLen) {
+        memcpy(timeOut, found, clockLen);
+        timeOut[clockLen] = '\0';
     }
 
     // Whatever sits ahead of the clock is the transport icon (empty when the
@@ -39373,15 +39416,21 @@ static void chatInsertAckMarker(char *line, size_t lineCap, const char *marker) 
     const size_t mlen = strlen(marker);
     if (len + mlen + 1 > lineCap) return;
 
-    auto clockDigit = [](char c) { return (bool)(isdigit((unsigned char)c) || c == '-'); };
-
-    const int kWindow = 24;   // icon + "HH:MM" always lands well inside this
+    const int kWindow = 24;   // icon + clock always lands well inside this
     char *at = nullptr;
-    for (char *p = line; *p && (int)(p - line) < kWindow; p++) {
-        if (clockDigit(p[0]) && clockDigit(p[1]) && p[2] == ':'
-            && clockDigit(p[3]) && clockDigit(p[4])) {
-            at = p + 5;
-            break;
+    // A real clock first, in either format, so the marker lands after the
+    // meridiem rather than between "2:34" and its "PM".
+    if (const char *end = liveFindClock(line, kWindow, nullptr)) {
+        at = line + (end - line);
+    } else {
+        // liveFindClock() deliberately does not match "--:--" — it is not a
+        // time — and only this marker cares where that placeholder ends.
+        for (char *p = line; *p && (int)(p - line) < kWindow; p++) {
+            if (p[0] == '-' && p[1] == '-' && p[2] == ':'
+                && p[3] == '-' && p[4] == '-') {
+                at = p + 5;
+                break;
+            }
         }
     }
     if (!at) {
@@ -39756,7 +39805,7 @@ static void refreshChatViewBubbles(const DisplayLine *const *rows, int rowCount,
         // Prefer the prefix, so a bubble shows the same time and transport icon
         // classic does for the same line; fall back to epoch for lines stored
         // without a prefix.
-        char iconBuf[12], timeBuf[8], metaBuf[24];
+        char iconBuf[12], timeBuf[LIVE_CLOCK_BUF], metaBuf[28];
         chatParsePrefix(rows[i]->text, iconBuf, sizeof(iconBuf), timeBuf, sizeof(timeBuf));
         if (!timeBuf[0]) formatChatClock(rows[i]->epoch, timeBuf, sizeof(timeBuf));
         chatComposeBubbleMeta(iconBuf, timeBuf, metaBuf, sizeof(metaBuf));
@@ -41548,7 +41597,7 @@ static void handleSerialCommandLine(char *line) {
         const int show = (rowCount < 4) ? rowCount : 4;
         for (int r = 0; r < show; r++) {
             if (!rows[r]) continue;
-            char icon[12], clock[8];
+            char icon[12], clock[LIVE_CLOCK_BUF];
             chatParsePrefix(rows[r]->text, icon, sizeof(icon), clock, sizeof(clock));
             Serial.printf("[chat] row%d epoch=%lu text=\"%s\"\n",
                           r, (unsigned long)rows[r]->epoch, rows[r]->text);
@@ -42730,6 +42779,9 @@ void loop() {
     // from config (web save, YAML import, and factory reset all land here).
     nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled);
     nodeArchiveFlush();
+    // Same reason, same place: web save, YAML import and factory reset all land
+    // here, and every module that prints a time reads this mirror.
+    liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
 
     now = millis();
 #if FEATURE_LOCK_SCREEN

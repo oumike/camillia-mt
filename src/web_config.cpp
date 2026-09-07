@@ -3358,6 +3358,17 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // read as local time in the timezone selected above.
     {
         const bool manual = (gCfg->timeSource == TIME_SOURCE_MANUAL);
+        // How a time reads everywhere the device shows one — the chat header,
+        // message timestamps, the sleep/lock clock. Exported files keep 24-hour
+        // regardless: those are read by tools, not people.
+        html += "<label>Clock Format<select name='clock_format'>"
+                "<option value='0'";
+        if (gCfg->clockFormat != CLOCK_FORMAT_12H) html += " selected";
+        html += ">24-hour (14:32)</option>"
+                "<option value='1'";
+        if (gCfg->clockFormat == CLOCK_FORMAT_12H) html += " selected";
+        html += ">12-hour (2:32 PM)</option>"
+                "</select></label>";
         html += "<label>Time Source<select name='time_source' id='time_source'>";
         html += "<option value='0'";
         if (!manual) html += " selected";
@@ -5683,7 +5694,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "}"
                         "function liveSplitTimestamp(t){"
                             "var s=String(t||'').trim();"
-                            "var m=s.match(/^(\\d\\d:\\d\\d|--:--)\\s+(.*)$/);"
+                            // Both clock formats, since the device sends whichever
+                            // its Clock Format setting was on when the line was built.
+                            "var m=s.match(/^(\\d{1,2}:\\d\\d(?: [AP]M)?|--:--)\\s+(.*)$/);"
                             "if(m)return {ts:m[1],body:String(m[2]||'').trim()};"
                             "return {ts:'',body:s};"
                         "}"
@@ -6575,6 +6588,9 @@ static void handlePostSave() {
     // Time source, and the clock itself when set manually. The clock is queued
     // rather than set here: the main loop owns it, and this handler runs on the
     // web server task.
+    if (server.hasArg("clock_format")) {
+        gCfg->clockFormat = cfgCoerceClockFormat(server.arg("clock_format").toInt());
+    }
     if (server.hasArg("time_source")) {
         gCfg->timeSource = cfgCoerceTimeSource(server.arg("time_source").toInt());
     }

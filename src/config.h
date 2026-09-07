@@ -178,6 +178,9 @@
 // How the local battery reads in the chat header and the web status chip.
 // 0 = PERCENT (the behavior before the setting existed), 1 = VOLTAGE.
 #define MY_BATT_DISPLAY     0
+// How a time reads wherever a person sees one.
+// 0 = 24-hour (the behavior before the setting existed), 1 = 12-hour with AM/PM.
+#define MY_CLOCK_FORMAT     0
 #define MY_COMPASS_NORTH    0
 #define MY_FLIP_SCREEN      0
 #define MY_UI_THEME         0      // 0=CAMELLIA, 1=EVERGREEN, 2=EARTHEN, 3=SOLARIZED, 4=CRIMSON, 5=SCARLET_POP, 6=INK_WASH, 7=LAVENDAR_FIELDS, 8=WILD_FLOWERS, 9=QUIET_LUXURY, 10=MORNING_DEW, 11=WINTER_CHILL, 12=CAMELLIA_BLACK

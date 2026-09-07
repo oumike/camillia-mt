@@ -499,6 +499,37 @@ nothing else:
 It applies immediately with no reboot, and travels with config export/import as
 `display: battDisplay:` (`PERCENT` or `VOLTAGE`).
 
+### Clock format
+
+**Clock Format** on the Config screen (directly under Time and Date, and in web
+config in the same **Time and Date** block) chooses how a time is written:
+
+- **24-hour** (default) — `14:32`.
+- **12-hour** — `2:32 PM`. The hour is not zero-padded, the way a clock is
+  normally written; midnight reads `12:05 AM` and noon `12:00 PM`.
+
+It applies everywhere the device shows a time to a person: the chat header
+clock, message timestamps in both classic and bubble styles, the live feed, the
+sleep and lock screens, the Device Info "Newest/Oldest heard" lines, and the
+detail panel for an archived node.
+
+Machine-readable output deliberately stays 24-hour, because it is read by tools
+rather than people: exported config and message CSV timestamps, discovery JSON,
+and export filenames.
+
+Two things it does not change:
+
+- **Setting the clock by hand** — the Hour field on the Time and Date modal, and
+  the web form's `Time (24h)` box, stay 24-hour entry in both modes.
+- **Messages already received.** A message's timestamp is part of the line as
+  it was stored, written in whatever format was in force when it arrived, and
+  the bubble styles read that same prefix so classic and bubbles agree. A
+  transcript spanning a change therefore carries both formats; everything
+  arriving after the change uses the new one.
+
+It applies immediately with no reboot, and travels with config export/import as
+`display: clockFormat:` (`H24` or `H12`).
+
 ### Theme
 
 T-Deck Pro is the exception to this section: its e-paper UI always uses the
