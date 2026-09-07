@@ -594,6 +594,28 @@ The device info panel is scrollable with the keyboard on every keyboard build:
 - **Heltec** — touch-only; the popup has a **Close** button beside its title.
   (Any key still dismisses it, which is what a keyboard driven over VNC sends)
 
+### Lock screen
+
+Every backlit build except Cardputer can show a lock screen before putting the
+panel fully to sleep. It uses a black background with the time and channel in
+blue, node names in green, and message text in white. The current date, battery
+reading and newest unread message previews remain visible while it is active.
+
+The normal **Screen Timeout** and each board's existing screen-off gesture enter
+the lock screen. The same deliberate input that wakes that board from a dark
+panel dismisses it; other keys, touches and controls are swallowed rather than
+acting on the hidden UI. After the configured dwell, the panel enters its normal
+fully-off state and the next wake returns directly to the UI.
+
+- **Lock Screen** enables or disables the intermediate screen. Disabled keeps
+  the previous direct-to-sleep behavior.
+- **Lock Screen Off** ranges from 5 to 60 minutes in five-minute steps, plus
+  **Stay on**. The default is 5 minutes.
+- Both settings are available in on-device Config and web config.
+- Cardputer keeps direct screen sleep and does not show these settings.
+- T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
+  holds that image without a lit backlight, so it does not use the dwell timer.
+
 ### Notification sound
 
 **Notification Sound** opens a picker (same navigation as Chat Style) with

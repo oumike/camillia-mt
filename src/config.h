@@ -287,16 +287,14 @@
 #define FEATURE_DISCOVERY 1
 #endif
 // Lock screen: a lit glance surface between the UI and a dark panel. Entered by
-// the wake-button hold and by the idle timeout, left by the wake button, and
-// abandoned for a genuinely dark panel after cfg.lockScreenOffSecs.
+// the board's existing screen-off gesture or idle timeout, left by its existing
+// wake gesture, and abandoned for a dark panel after cfg.lockScreenOffSecs.
 //
-// Wio Tracker L2 only, and deliberately not the T-Deck Pro. The Pro's sleep
-// clock looks like the same feature and is not: e-paper holds an image at zero
-// power, so there the overlay *is* the sleeping state and there is nothing to
-// time out of. A backlit LCD holds nothing — a visible clock means a lit
-// backlight, the largest draw on the board — so here the lock screen is a state
-// that costs something and therefore has to end. The two must not be merged.
-#if defined(DEVICE_WIO_TRACKER_L2)
+// Enabled on every backlit display except Cardputer, whose 240x135 panel and
+// tight first-boot heap budget cannot carry this overlay. T-Deck Pro stays on
+// its separate e-paper lifecycle: its overlay *is* the sleeping state because
+// the panel holds an image at zero power, so there is nothing to time out of.
+#if !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_TDECK_PRO)
 #define FEATURE_LOCK_SCREEN 1
 #else
 #define FEATURE_LOCK_SCREEN 0

@@ -285,10 +285,10 @@ static uint32_t s_tdeckProRecentMsgSeq = 0;
 // ── Lock screen state ────────────────────────────────────────────────────────
 // A third display state, between the UI and a dark panel:
 //
-//   UI ──(wake-button hold, or idle timeout)──> LOCKED ──(lockScreenOffSecs)──> ASLEEP
-//    ^                                            │                              │
-//    └──────────(wake button press)───────────────┘                              │
-//    └───────────────────────────(wake button press)─────────────────────────────┘
+//   UI ──(screen-off gesture or idle timeout)──> LOCKED ──(dwell)──> ASLEEP
+//    ^                                               │                       │
+//    └────────────(allowed wake gesture)─────────────┘                       │
+//    └────────────────────(allowed wake gesture)─────────────────────────────┘
 //
 // LOCKED is a *lit* state, and that is the whole reason it cannot be modelled
 // the way the T-Deck Pro models its sleep clock. s_screenAsleep stays false
@@ -6024,14 +6024,11 @@ static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
 // Geometry of the notification area, in absolute panel coordinates. It sits in
 // the band between the date and the battery.
 static constexpr int kTdeckProMsgRowLeft   = 8;
-#if FEATURE_LOCK_SCREEN
-// The Wio Tracker L2 runs landscape (TFT_ROTATION_DEFAULT 0 plus the panel's
-// own offset_rotation of 1 gives internal rotation 1), so it is 320 wide and
-// 240 tall — wider rows than the Pro and 80 px less height to stack them in.
-static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_LANDSCAPE_W - 2 * kTdeckProMsgRowLeft;
-#else
-static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_PORTRAIT_W - 2 * kTdeckProMsgRowLeft;
-#endif
+static int sleepOverlayMsgRowWidth() {
+    const int panelW = lv_disp_get_hor_res(NULL);
+    const int width = panelW - 2 * kTdeckProMsgRowLeft;
+    return (width > 0) ? width : 1;
+}
 // A preview may wrap onto a second line, so a message is one or two lines tall
 // and the block is laid out by accumulating heights rather than by a fixed
 // pitch -- that is what keeps a two-line message from drawing over the one
@@ -6042,17 +6039,26 @@ static constexpr int kTdeckProMsgRowWidth  = DEVICE_LCD_PORTRAIT_W - 2 * kTdeckP
 // therefore get is eight single-line messages, which is also the case with the
 // most gaps in it: 8*15 + 7*6 = 162 px, running 150..312 and leaving the same
 // 8 px at the bottom that the status band leaves at the top.
-#if FEATURE_LOCK_SCREEN
-// 240 px of height rather than 320, so the stack above is tighter and the block
-// starts higher but has less room: 116..240 is 124 px, which is six single-line
-// messages (6*15 + 5*6 = 120) against the Pro's eight.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// The Pager is only 222 px tall in landscape. Five one-line messages consume
+// 99 px including gaps and finish at y=205, leaving a safe bottom margin.
+static constexpr int kTdeckProMsgTop        = 106;
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProMsgTop        = 150;
+#elif FEATURE_LOCK_SCREEN
+// Standard 320x240 lock screens fit six single-line messages: 6*15 + 5*6 =
+// 120 px, running 116..236 with four pixels left at the bottom.
 static constexpr int kTdeckProMsgTop        = 116;
 #else
 static constexpr int kTdeckProMsgTop        = 150;
 #endif
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
-#if FEATURE_LOCK_SCREEN
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int kTdeckProMsgTotalLines = 5;    // 480x222
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProMsgTotalLines = 8;    // 240x320
+#elif FEATURE_LOCK_SCREEN
 static constexpr int kTdeckProMsgTotalLines = 6;    // across the whole block
 #else
 static constexpr int kTdeckProMsgTotalLines = 8;    // across the whole block
@@ -6069,12 +6075,21 @@ static constexpr int kTdeckProMsgGapPx     = 4;
 // only if the two match -- a heavier date beside a lighter battery reads as two
 // unrelated things that happen to share a row.
 static constexpr int kTdeckProBandInset    = 8;    // from either edge
-#if FEATURE_LOCK_SCREEN
+#if defined(DEVICE_TLORA_PAGER_TFT)
+static constexpr int kTdeckProBandTop      = 3;
+static constexpr int kTdeckProTitleTop     = 20;   // 18 px face, 21 px line box
+static constexpr int kTdeckProNodeTop      = 44;   // 14 px face, 16 px line box
+static constexpr int kTdeckProTimeTop      = 62;   // 32 px face, 35 px line box
+#elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
+static constexpr int kTdeckProBandTop      = 8;
+static constexpr int kTdeckProTitleTop     = 30;   // 18 px face, 21 px line box
+static constexpr int kTdeckProNodeTop      = 58;   // 14 px face, 16 px line box
+static constexpr int kTdeckProTimeTop      = 82;   // 32 px face, 35 px line box
+#elif FEATURE_LOCK_SCREEN
 static constexpr int kTdeckProBandTop      = 4;
-// Same order and the same grouping as the Pro, compressed into 80 px less
-// height: the title drops from a 32 px face to 18, the node name from 16 to 14,
-// and the clock from 40 to 32. The smaller clock avoids linking Wio-only copies
-// of the 24 px and 40 px LVGL glyph tables, which together cost about 99 KB.
+// Same order and grouping as the Pro, compressed into 80 px less height. The
+// smaller faces also avoid linking 24 px and 40 px LVGL glyph tables solely for
+// a backlit lock screen.
 static constexpr int kTdeckProTitleTop     = 24;   // 18 px face, 21 px line box
 static constexpr int kTdeckProNodeTop      = 54;   // 14 px face, 16 px line box
 static constexpr int kTdeckProTimeTop      = 72;   // 32 px face, 35 px line box
@@ -6168,7 +6183,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
         senderW = tdeckProTextWidth(senderText, restFont);
         const int fixedW = boldW + kTdeckProMsgGapPx
                          + senderW + kTdeckProMsgGapPx;
-        if (fixedW <= kTdeckProMsgRowWidth - kTdeckProMsgBodyMinPx) {
+        if (fixedW <= sleepOverlayMsgRowWidth() - kTdeckProMsgBodyMinPx) {
             break;
         }
         // Trim whichever field is still the more generous, so neither collapses
@@ -6189,7 +6204,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     lv_obj_align(senderLbl, LV_ALIGN_TOP_LEFT, senderX, y);
 
     const int restX = senderX + senderW + kTdeckProMsgGapPx;
-    int restW = kTdeckProMsgRowWidth - (restX - kTdeckProMsgRowLeft);
+    int restW = sleepOverlayMsgRowWidth() - (restX - kTdeckProMsgRowLeft);
     if (restW < 1) restW = 1;
 
     // Split the body where LVGL would have wrapped it, rather than letting one
@@ -6230,7 +6245,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     // LV_LABEL_LONG_DOT writes when text overflows the box it was given, so a
     // box left to grow to fit could never overflow and would never show them.
     const int contX = kTdeckProMsgRowLeft + timeW;
-    int contW = kTdeckProMsgRowWidth - timeW;
+    int contW = sleepOverlayMsgRowWidth() - timeW;
     if (contW < 1) contW = 1;
 
     lv_label_set_text(contLbl, m.text + contStart);
@@ -6575,10 +6590,14 @@ static void enterLockScreen(const char *reason) {
     showTdeckProSleepClock();
     s_lockScreenActive = true;
     s_lockScreenSinceMs = millis();
+    // Match the dark-panel path's guard so the press that entered the lock
+    // screen cannot also dismiss it when that input reports its release/click.
+    s_screenWakeBlockedUntilMs = s_lockScreenSinceMs + kScreenWakeInputDelayMs;
     // Whatever the backlight was doing on the way here — the pre-sleep dim in
     // particular — the lock screen is shown at the configured brightness. A
     // glance surface that arrives already dimmed reads as a fault.
     s_preSleepDimmed = false;
+    setPagerKeyboardBacklight(false);
     applyBrightness();
 
     if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
@@ -6590,8 +6609,8 @@ static void enterLockScreen(const char *reason) {
     }
 }
 
-// Back to the UI. Used by the wake button, and by anything that has to take the
-// overlay down without going through a panel sleep — a theme rebuild, say.
+// Back to the UI. Used by each board's wake gesture, and by anything that has
+// to take the overlay down without going through panel sleep — a theme rebuild.
 static void exitLockScreen() {
     if (!s_lockScreenActive) return;
     s_lockScreenActive = false;
@@ -6610,8 +6629,20 @@ static void exitLockScreen() {
     s_lastRenderedCount = -1;
     s_lastHeaderTime[0] = '\0';
     s_lastBattPct = 255;
+    setPagerKeyboardBacklight(true);
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
     Serial.println("[screen] lock screen dismissed");
+}
+
+// Consumes every input while locked. A permitted wake gesture dismisses the
+// overlay once the entry guard has elapsed; all other input stays swallowed so
+// it cannot operate the UI hidden underneath.
+static bool tryExitLockScreenFromInput(uint32_t nowMs, bool mayWake) {
+    if (!s_lockScreenActive) return false;
+    if (mayWake && (int32_t)(nowMs - s_screenWakeBlockedUntilMs) >= 0) {
+        exitLockScreen();
+    }
+    return true;
 }
 
 // Ends the lit phase once lockScreenOffSecs has run out. Never fires on the
@@ -6621,7 +6652,7 @@ static void serviceLockScreen(uint32_t nowMs) {
 
     // A theme rebuild deletes the root screen and takes the overlay with it
     // without anything here being told. Left alone, the flag would stay set
-    // over a visible UI and the wake button would appear to do nothing.
+    // over a visible UI and the next wake gesture would appear to do nothing.
     if (!s_tdeckProSleepOverlay || !lv_obj_is_valid(s_tdeckProSleepOverlay)) {
         s_tdeckProSleepOverlay = nullptr;
         exitLockScreen();
@@ -6644,6 +6675,16 @@ static void serviceLockScreen(uint32_t nowMs) {
     hideTdeckProSleepClock();
 }
 #endif  // FEATURE_LOCK_SCREEN
+
+static void requestScreenOff(const char *reason) {
+#if FEATURE_LOCK_SCREEN
+    if (s_cfg.lockScreenEnabled) {
+        enterLockScreen(reason);
+        return;
+    }
+#endif
+    sleepScreen(reason);
+}
 
 #if defined(DEVICE_MESH_DECK)
 // The front buttons hang off expander 0x59, not GPIO, so they are polled rather
@@ -7195,7 +7236,7 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
             // Ignore any pending click event from this same press.
             s_tdeckSuppressRollerClick = true;
             if (!s_screenAsleep) {
-                sleepScreen("T-Deck trackball hold");
+                requestScreenOff("T-Deck trackball hold");
                 return true;
             }
         }
@@ -7259,7 +7300,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     // before the activity timestamp below so unlocking does not also count as
     // the input that restarts the idle timeout; exitLockScreen() does that.
     if (s_lockScreenActive) {
-        exitLockScreen();
+        (void)tryExitLockScreenFromInput(nowMs, true);
         sleepTriggered = true;
         return true;
     }
@@ -7268,13 +7309,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     if (holdStartMs != 0
         && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
         sleepTriggered = true;
-#if FEATURE_LOCK_SCREEN
-        if (s_cfg.lockScreenEnabled) {
-            enterLockScreen("Wio Tracker L2 Wake button hold");
-            return true;
-        }
-#endif
-        sleepScreen("Wio Tracker L2 Wake button hold");
+        requestScreenOff("Wio Tracker L2 Wake button hold");
         return true;
     }
     return false;
@@ -7323,9 +7358,12 @@ static bool pollUserButton(uint32_t nowMs) {
         userBtnStable = userPressed;
         if (userBtnStable) {
 #if FEATURE_LOCK_SCREEN
-            // Only the dedicated Wake button dismisses the lock screen. GPIO0
-            // must not activate controls hidden underneath the opaque overlay.
-            if (s_lockScreenActive) return true;
+            if (s_lockScreenActive) {
+                // On touch-only boards GPIO0 is the UI action button, not the
+                // display toggle. Elsewhere it is an existing wake gesture.
+                (void)tryExitLockScreenFromInput(nowMs, !UI_TOUCH_ONLY_PROFILE);
+                return true;
+            }
 #endif
             // Consume the press as a wake before inspecting the hidden UI.
             // The held-button fallback below retries after the wake-input guard.
@@ -7382,7 +7420,7 @@ static bool pollUserButton(uint32_t nowMs) {
                     return true;
                 }
             } else {
-                sleepScreen("BOOT button");
+                requestScreenOff("BOOT button");
             }
             return true;
 #endif
@@ -7411,12 +7449,18 @@ static bool pollUserButton(uint32_t nowMs) {
     if ((nowMs - displayBtnDebounceMs) >= 30 && displayPressed != displayBtnStable) {
         displayBtnStable = displayPressed;
         if (displayBtnStable) {
+#if FEATURE_LOCK_SCREEN
+            if (s_lockScreenActive) {
+                (void)tryExitLockScreenFromInput(nowMs, true);
+                return true;
+            }
+#endif
             if (s_screenAsleep) {
                 if (!tryWakeScreenFromInput(nowMs)) {
                     return true;
                 }
             } else {
-                sleepScreen("GPIO35 button");
+                requestScreenOff("GPIO35 button");
             }
             return true;
         }
@@ -31990,7 +32034,7 @@ static void openM9DiscoveryShortcut() {
 static bool handleGlobalNavigationKey(char key) {
 #if defined(DEVICE_M9)
     if (key == KEY_SLEEP_SCREEN) {
-        sleepScreen("M9 d-pad centre hold");
+        requestScreenOff("M9 d-pad centre hold");
         return true;
     }
     // M9 only: its Home button returns to the first channel as well as to the
@@ -32138,6 +32182,29 @@ static void pumpKeyboardInput() {
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
         if (k == KEY_ROLLER && s_tdeckSuppressRollerClick) {
             continue;
+        }
+#endif
+
+#if FEATURE_LOCK_SCREEN
+        if (s_lockScreenActive) {
+            bool mayWake = fromVnc;
+            if (fromTrackball) {
+                // Match the dark-screen path below: motion is ignored and only
+                // the wheel/trackball click is a deliberate wake gesture.
+                mayWake = (k == KEY_ROLLER);
+            } else if (!fromVnc) {
+#if SCREEN_WAKE_FROM_KEYBOARD
+                mayWake = true;
+#else
+                mayWake = false;
+#endif
+#if defined(DEVICE_M9)
+                // Same pocket guard used when the panel is fully asleep.
+                mayWake = (k == KEY_ENTER || k == KEY_SLEEP_SCREEN);
+#endif
+            }
+            (void)tryExitLockScreenFromInput(millis(), mayWake);
+            return;   // the wake gesture never also acts on the hidden UI
         }
 #endif
 
@@ -35725,6 +35792,13 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
 #endif
 
     if (touched) {
+#if FEATURE_LOCK_SCREEN
+        if (s_lockScreenActive) {
+            (void)tryExitLockScreenFromInput(millis(), SCREEN_WAKE_FROM_TOUCH);
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+#endif
         if (s_screenAsleep) {
             // Normally unreachable — loop() stops calling lv_timer_handler()
             // while the screen is off — but modal helpers do call it directly,
@@ -42513,6 +42587,9 @@ void loop() {
     // the panel/UI timers alive so remote input is never swallowed by the
     // screen-off path.
     if (vncHostClientConnected()) {
+#if FEATURE_LOCK_SCREEN
+        (void)tryExitLockScreenFromInput(now, true);
+#endif
         if (s_screenAsleep) wakeScreen();
         s_lastActivityMs = now;
     }
@@ -42676,15 +42753,10 @@ void loop() {
                           (unsigned long)(idleMs / 1000UL),
                           (unsigned)s_cfg.screenOnSecs);
 #if FEATURE_LOCK_SCREEN
-            // The idle timeout lands on the lock screen too, not just the
-            // wake-button hold. A device left on a desk is the main way anyone
-            // ever sees this screen, and a lock screen you can only reach by
-            // deliberately reaching for it is not one.
-            if (s_cfg.lockScreenEnabled) {
-                enterLockScreen("idle timeout");
-            } else {
-                sleepScreen("timeout");
-            }
+            // The idle timeout lands on the lock screen too, not just a manual
+            // screen-off gesture. A device left on a desk is the main way
+            // anyone sees this screen.
+            requestScreenOff("idle timeout");
 #else
             sleepScreen("timeout");
 #endif

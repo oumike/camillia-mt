@@ -474,11 +474,11 @@ struct RhinoConfig {
     // — a shorter stored blob simply stops, and these keep their compiled
     // defaults on a device upgrading into this firmware.
     //
-    // Only the Wio Tracker L2 acts on them today (FEATURE_LOCK_SCREEN). The
-    // T-Deck Pro's sleep clock is a different thing that happens to look similar:
-    // there the overlay *is* the sleeping state, because e-paper holds an image
-    // at zero power. On a backlit LCD the lock screen is a lit state that has to
-    // be paid for and therefore has to end, which is what lockScreenOffSecs is.
+    // Every backlit display except Cardputer acts on them (FEATURE_LOCK_SCREEN).
+    // The T-Deck Pro's sleep clock is a different thing that happens to look
+    // similar: there the overlay *is* the sleeping state, because e-paper holds
+    // an image at zero power. On a backlit LCD the lock screen is a lit state
+    // that has to be paid for and therefore has to end.
 
     // How long the lock screen stays lit before the panel is put out for real.
     // 300..3600 (5..60 min); 0 means never — stay on the lock screen until the
