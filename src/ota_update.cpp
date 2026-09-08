@@ -8,7 +8,6 @@
 #include <esp_heap_caps.h>
 #include <ctype.h>
 #include <string.h>
-#include <type_traits>
 #include "mbedtls/sha256.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/md.h"
