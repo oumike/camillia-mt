@@ -1,9 +1,9 @@
 ### New
-- Seven new modem presets: Lite Fast, Lite Slow, Narrow Fast, Narrow Slow, Tiny Fast, Tiny Slow and Medium Turbo, matching the ones Meshtastic 2.7 and 2.8 added.
-- The Tiny presets (15.6 kHz) are offered only where the radio can produce them — they are absent on the Attaky Mesh Deck and the Elecrow ThinkNode M9, and importing a config that names one falls back to Long Fast there.
+- Seven new modem presets — Lite Fast, Lite Slow, Narrow Fast, Narrow Slow, Tiny Fast, Tiny Slow and Medium Turbo — matching the ones Meshtastic 2.7 and 2.8 added, so a mesh that has moved to one of them can now be joined.
+- The Tiny presets (15.6 kHz) are offered only where the radio can produce them; they are absent on the Attaky Mesh Deck and the Elecrow ThinkNode M9, and importing a config that names one falls back to Long Fast on those boards.
 - Two new regions, EU 866 (865.6–867.6 MHz) and EU Narrow 868 (869.4–869.65 MHz), selectable in Config and web config.
 - 15.6 kHz is available as a custom LoRa bandwidth on boards whose radio supports it.
-- The node detail panel has a new **Signed** row showing whether a node has proved it holds the key you have for it: *yes*, *not seen* or *no key*. Signatures from Meshtastic 2.8 nodes are checked on arrival; nothing is ever rejected for being unsigned or for failing.
+- The node detail panel has a new **Signed** row showing whether a node has proved it holds the key you have for it — *yes*, *not seen* or *no key*. Signatures from Meshtastic 2.8 nodes are checked on arrival; nothing is ever rejected for being unsigned or for failing a check.
 - Web config can derive this node's ID from its public key the way Meshtastic 2.8 does. Off by default, never changed by an upgrade, and switching it on gives you a new address on the mesh — your own chat history is carried across.
 
 ### Changed
@@ -13,7 +13,7 @@
 - A node that has not moved about 90 m since its last position now waits up to six hours between position broadcasts instead of using the configured interval, because 2.8 receivers discard the repeats. Moving restores the normal cadence immediately, and Announce always transmits.
 - Packets whose hop count is malformed — including anything from firmware older than Meshtastic 2.3.0 — are no longer relayed, since 2.8 nodes refuse them anyway. Drops are logged under `[fwd]`.
 - The amateur-radio regions Meshtastic 2.8 added at 2 m, 70 cm and 125 cm are deliberately not offered.
-- The M5Stack Cardputer now advertises itself as custom hardware rather than claiming a hardware ID that belongs to the Cardputer Adv.
+- M5Stack Cardputer: the node now advertises itself as custom hardware rather than claiming a hardware ID that belongs to the Cardputer Adv.
 - Store-and-forward, map report, beacon and LoRa OTA traffic is now named in the debug monitor instead of appearing as a bare port number.
 
 ### Fixed
