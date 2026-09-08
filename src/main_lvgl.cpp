@@ -468,6 +468,18 @@ static lv_obj_t *s_cfgBrightModal = nullptr;
 static lv_obj_t *s_cfgBrightSlider = nullptr;
 static lv_obj_t *s_cfgBrightValue = nullptr;
 static uint8_t   s_cfgBrightOriginal = 0;   // restored if the user cancels
+#if FEATURE_LOCK_SCREEN
+// The lock screen's own level, edited in the same modal. Two rows rather than
+// two modals because they are read against each other -- the useful question is
+// how much dimmer the glance surface is than the UI, which you cannot judge one
+// screen at a time.
+static lv_obj_t *s_cfgBrightLockSlider = nullptr;
+static lv_obj_t *s_cfgBrightLockValue = nullptr;
+static lv_obj_t *s_cfgBrightScreenLabel = nullptr;
+static lv_obj_t *s_cfgBrightLockLabel = nullptr;
+static uint8_t   s_cfgBrightLockOriginal = 0;
+static int       s_cfgBrightFocus = 0;      // 0 = screen, 1 = lock screen
+#endif
 // Battery voltage trim, reachable from the CFG screen.
 static lv_obj_t *s_cfgBattCalBackdrop = nullptr;
 static lv_obj_t *s_cfgBattCalModal = nullptr;
@@ -6224,10 +6236,21 @@ static void setTouchSleep(bool asleep) {
 #endif
 }
 
-// Pushes the configured brightness to the panel. Used at boot, on wake, and
-// live while the slider moves; sleepScreen() still drives the backlight to 0.
+// Pushes the brightness the device should be at right now. Used at boot, on
+// wake, and live while the slider moves; sleepScreen() still drives the
+// backlight to 0.
+//
+// Which level that is depends on what is on the panel: the lock screen has its
+// own, usually much lower, because it is a glance surface rather than something
+// anyone reads for minutes. Deciding it here rather than at the call sites is
+// what keeps a config save made *while the lock screen is up* -- from web
+// config, say -- from quietly restoring full brightness underneath it.
 static void applyBrightness() {
-    displayDev().setBrightness(cfgBrightnessDuty(s_cfg.brightness));
+    uint8_t pct = s_cfg.brightness;
+#if FEATURE_LOCK_SCREEN
+    if (s_lockScreenActive) pct = s_cfg.lockScreenBrightness;
+#endif
+    displayDev().setBrightness(cfgBrightnessDuty(cfgCoerceBrightness(pct)));
 }
 
 #if HAS_SLEEP_OVERLAY
@@ -7027,8 +7050,10 @@ static void enterLockScreen(const char *reason) {
     // screen cannot also dismiss it when that input reports its release/click.
     s_screenWakeBlockedUntilMs = s_lockScreenSinceMs + kScreenWakeInputDelayMs;
     // Whatever the backlight was doing on the way here — the pre-sleep dim in
-    // particular — the lock screen is shown at the configured brightness. A
-    // glance surface that arrives already dimmed reads as a fault.
+    // particular — the lock screen is shown at its own configured level, not at
+    // whatever fraction the dim had reached. A glance surface that arrives
+    // already dimmed by something else reads as a fault. s_lockScreenActive is
+    // set above, so applyBrightness() below resolves to lockScreenBrightness.
     s_preSleepDimmed = false;
     setPagerKeyboardBacklight(false);
     applyBrightness();
@@ -7063,6 +7088,10 @@ static void exitLockScreen() {
     s_lastHeaderTime[0] = '\0';
     s_lastBattPct = 255;
     setPagerKeyboardBacklight(true);
+    // s_lockScreenActive is already false, so this resolves back to the UI's own
+    // brightness. Nothing else on the way out does it, and without it the UI
+    // would come back at the lock screen's level.
+    applyBrightness();
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
     noteUiVisibleAgain();
     Serial.println("[screen] lock screen dismissed");
@@ -11427,6 +11456,44 @@ static void setCfgBrightnessPreview(int pct) {
     }
 }
 
+#if FEATURE_LOCK_SCREEN
+// Marks which row the keys act on. Touch boards can drag either slider directly
+// and never need this, but it still follows the slider being touched so the two
+// input styles cannot disagree about where focus is.
+static void refreshCfgBrightnessFocus() {
+    if (lvObjValid(s_cfgBrightScreenLabel)) {
+        lv_label_set_text(s_cfgBrightScreenLabel,
+                          s_cfgBrightFocus == 0 ? "> Screen" : "  Screen");
+    }
+    if (lvObjValid(s_cfgBrightLockLabel)) {
+        lv_label_set_text(s_cfgBrightLockLabel,
+                          s_cfgBrightFocus == 1 ? "> Lock screen" : "  Lock screen");
+    }
+}
+
+// Drives the panel straight to the previewed level rather than going through
+// applyBrightness(): the lock screen is not up while this modal is open, so
+// applyBrightness() would resolve to the UI's level and show nothing. This is
+// the only way to judge a glance level while looking at it.
+static void setCfgLockBrightnessPreview(int pct) {
+    s_cfg.lockScreenBrightness = cfgCoerceBrightness(pct);
+    displayDev().setBrightness(cfgBrightnessDuty(s_cfg.lockScreenBrightness));
+    if (lvObjValid(s_cfgBrightLockValue)) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%u%%", (unsigned)s_cfg.lockScreenBrightness);
+        lv_label_set_text(s_cfgBrightLockValue, buf);
+    }
+}
+
+static void onCfgBrightLockSliderChanged(lv_event_t *e) {
+    lv_obj_t *slider = lv_event_get_target_obj(e);
+    if (!slider) return;
+    s_cfgBrightFocus = 1;
+    refreshCfgBrightnessFocus();
+    setCfgLockBrightnessPreview((int)lv_slider_get_value(slider));
+}
+#endif
+
 #if UI_TOUCH_ONLY_PROFILE
 // Cancel/commit row for the touch build's modals that stage a value.
 //
@@ -11493,6 +11560,12 @@ static void closeCfgBrightnessModal() {
     s_cfgBrightModal = nullptr;
     s_cfgBrightSlider = nullptr;
     s_cfgBrightValue = nullptr;
+#if FEATURE_LOCK_SCREEN
+    s_cfgBrightLockSlider = nullptr;
+    s_cfgBrightLockValue = nullptr;
+    s_cfgBrightScreenLabel = nullptr;
+    s_cfgBrightLockLabel = nullptr;
+#endif
 }
 
 // Abandon the preview and put the panel back where it was. Teardown-safe: the
@@ -11501,6 +11574,13 @@ static void closeCfgBrightnessModal() {
 static void revertCfgBrightnessPreview() {
     if (!s_cfgBrightModal && !s_cfgBrightBackdrop) return;
     s_cfg.brightness = s_cfgBrightOriginal;
+#if FEATURE_LOCK_SCREEN
+    // Both rows preview live, so both have to be put back -- including when the
+    // user was on the lock row when they cancelled, which is also why the panel
+    // is driven from applyBrightness() below rather than left where the preview
+    // had it.
+    s_cfg.lockScreenBrightness = s_cfgBrightLockOriginal;
+#endif
     applyBrightness();
     closeCfgBrightnessModal();
 }
@@ -11512,8 +11592,17 @@ static void cancelCfgBrightness() {
 
 static void applyCfgBrightness() {
     persistConfigToPrefs();
+#if FEATURE_LOCK_SCREEN
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Brightness: %u%%  Lock: %u%%",
+             (unsigned)s_cfg.brightness,
+             (unsigned)cfgCoerceBrightness(s_cfg.lockScreenBrightness));
+    // The lock row previews on the live panel, so saving from it would otherwise
+    // leave the UI sitting at the glance level until something else repainted.
+    applyBrightness();
+#else
     snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Brightness: %u%%",
              (unsigned)s_cfg.brightness);
+#endif
     closeCfgBrightnessModal();
     refreshCfgModal();
 }
@@ -11521,6 +11610,18 @@ static void applyCfgBrightness() {
 // Nudge by whole steps; used by the key handler on non-touch boards.
 static void stepCfgBrightness(int steps) {
     if (!steps) return;
+#if FEATURE_LOCK_SCREEN
+    if (s_cfgBrightFocus == 1) {
+        const int nextLock = (int)s_cfg.lockScreenBrightness + steps * BRIGHTNESS_PCT_STEP;
+        const uint8_t coercedLock = cfgCoerceBrightness(nextLock);
+        if (coercedLock == cfgCoerceBrightness(s_cfg.lockScreenBrightness)) return;
+        setCfgLockBrightnessPreview(coercedLock);
+        if (lvObjValid(s_cfgBrightLockSlider)) {
+            lv_slider_set_value(s_cfgBrightLockSlider, coercedLock, LV_ANIM_OFF);
+        }
+        return;
+    }
+#endif
     const int next = (int)s_cfg.brightness + steps * BRIGHTNESS_PCT_STEP;
     const uint8_t coerced = cfgCoerceBrightness(next);
     if (coerced == s_cfg.brightness) return;
@@ -11533,6 +11634,10 @@ static void stepCfgBrightness(int steps) {
 static void onCfgBrightSliderChanged(lv_event_t *e) {
     lv_obj_t *slider = lv_event_get_target_obj(e);
     if (!slider) return;
+#if FEATURE_LOCK_SCREEN
+    s_cfgBrightFocus = 0;
+    refreshCfgBrightnessFocus();
+#endif
     setCfgBrightnessPreview((int)lv_slider_get_value(slider));
 }
 
@@ -11545,6 +11650,10 @@ static void openCfgBrightnessModal() {
     if (!s_rootScreen || s_cfgBrightModal || s_cfgBrightBackdrop) return;
 
     s_cfgBrightOriginal = cfgCoerceBrightness(s_cfg.brightness);
+#if FEATURE_LOCK_SCREEN
+    s_cfgBrightLockOriginal = cfgCoerceBrightness(s_cfg.lockScreenBrightness);
+    s_cfgBrightFocus = 0;
+#endif
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -11590,6 +11699,14 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Brightness");
 
+#if FEATURE_LOCK_SCREEN
+    s_cfgBrightScreenLabel = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightScreenLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBrightScreenLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgBrightScreenLabel, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgBrightScreenLabel, LV_TEXT_ALIGN_CENTER, 0);
+#endif
+
     s_cfgBrightValue = lv_label_create(s_cfgBrightModal);
     lv_obj_set_width(s_cfgBrightValue, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgBrightValue, &lv_font_montserrat_16, 0);
@@ -11609,6 +11726,31 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
 
+#if FEATURE_LOCK_SCREEN
+    s_cfgBrightLockLabel = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightLockLabel, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBrightLockLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_cfgBrightLockLabel, lv_color_hex(0xA7C7FF), 0);
+    lv_obj_set_style_text_align(s_cfgBrightLockLabel, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgBrightLockValue = lv_label_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightLockValue, lv_pct(100));
+    lv_obj_set_style_text_font(s_cfgBrightLockValue, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_cfgBrightLockValue, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_cfgBrightLockValue, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_cfgBrightLockSlider = lv_slider_create(s_cfgBrightModal);
+    lv_obj_set_width(s_cfgBrightLockSlider, modalW - 40);
+    lv_slider_set_range(s_cfgBrightLockSlider, BRIGHTNESS_PCT_MIN, BRIGHTNESS_PCT_MAX);
+    lv_slider_set_value(s_cfgBrightLockSlider, s_cfgBrightLockOriginal, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s_cfgBrightLockSlider, lv_color_hex(0x123266), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_cfgBrightLockSlider, lvColorFrom565(s_ui.selectAccent),
+                              LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_cfgBrightLockSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
+    lv_obj_add_event_cb(s_cfgBrightLockSlider, onCfgBrightLockSliderChanged,
+                        LV_EVENT_VALUE_CHANGED, nullptr);
+#endif
+
 #if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgBrightModal,
@@ -11620,9 +11762,24 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if FEATURE_LOCK_SCREEN
+    lv_label_set_text(hint, "j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel");
+#else
     lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
 #endif
+#endif
 
+#if FEATURE_LOCK_SCREEN
+    // Seeds the lock row's label without touching the panel: the modal opens
+    // focused on the screen row, so the level under the user's eyes should stay
+    // the screen one until they move down to the other.
+    if (lvObjValid(s_cfgBrightLockValue)) {
+        char lockBuf[8];
+        snprintf(lockBuf, sizeof(lockBuf), "%u%%", (unsigned)s_cfgBrightLockOriginal);
+        lv_label_set_text(s_cfgBrightLockValue, lockBuf);
+    }
+    refreshCfgBrightnessFocus();
+#endif
     setCfgBrightnessPreview(s_cfgBrightOriginal);
 }
 
@@ -22719,14 +22876,29 @@ static void refreshNodesActionMenuSelection() {
         if (!row) continue;
         const bool disabled = nodesActionRowDisabled(i);
         const bool selected = (i == s_nodesActionSelection);
+        // An unavailable action loses its button outline rather than being
+        // struck through: enabled rows are boxed, unavailable ones are bare
+        // text. That is the e-paper equivalent of greying the button out.
+        //
+        // Greying the label itself is not available on this panel, and not for
+        // want of trying -- it is 1 bpp. LVGL drives this display at
+        // LV_COLOR_FORMAT_I1, and lv_draw_sw_blend_to_i1.c reduces every colour
+        // through a hard luminance threshold with no dithering, so there is no
+        // middle to land on: a light grey crosses the threshold to white and the
+        // label disappears completely, while a dark grey stays black and looks
+        // exactly like an enabled row. The outline is the only thing on the row
+        // that can be taken away by degrees.
+        //
+        // The selection border still wins over all of it. The cursor can be
+        // moved onto an unavailable row, and it has to stay visible when it is.
+        const int borderWidth = selected ? 2 : (disabled ? 0 : 1);
         lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_width(row, borderWidth, 0);
         lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
         if (lv_obj_t *lbl = lv_obj_get_child(row, 0)) {
             lv_obj_set_style_text_color(lbl, lv_color_make(0, 0, 0), 0);
             lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
-            lv_obj_set_style_text_decor(
-                lbl, disabled ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE, 0);
+            lv_obj_set_style_text_decor(lbl, LV_TEXT_DECOR_NONE, 0);
         }
     }
 #else
@@ -33011,8 +33183,21 @@ static void pumpKeyboardInput() {
             else if (k == 'k' || k == 'K')       steps = 1;    // brighter
             else if (k == KEY_SCROLL_UP)         steps = (invertScrollNav || navFromJk) ? -1 : 1;
             else if (k == KEY_SCROLL_DN)         steps = (invertScrollNav || navFromJk) ? 1 : -1;
-            else if (k == KEY_NEXT_CHAN || k == KEY_PAGE_UP) steps = 1;
-            else if (k == KEY_PREV_CHAN || k == KEY_PAGE_DN) steps = -1;
+            else if (k == KEY_PAGE_UP)           steps = 1;
+            else if (k == KEY_PAGE_DN)           steps = -1;
+#if FEATURE_LOCK_SCREEN
+            // Left/right pick the row rather than nudging the value. They were a
+            // third alias for adjust, which j/k and the page keys already cover;
+            // a second row needed a way to be reached more than it needed that.
+            else if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+                s_cfgBrightFocus = (k == KEY_NEXT_CHAN) ? 1 : 0;
+                refreshCfgBrightnessFocus();
+                continue;
+            }
+#else
+            else if (k == KEY_NEXT_CHAN)         steps = 1;
+            else if (k == KEY_PREV_CHAN)         steps = -1;
+#endif
             stepCfgBrightness(steps);
             continue;
         }

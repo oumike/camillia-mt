@@ -3763,6 +3763,31 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "' oninput=\"document.getElementById('briOut').textContent=this.value+'%'\">"
                 "</label>";
     }
+#if FEATURE_LOCK_SCREEN
+    // The lock screen's own level, mirroring the second row of the on-device
+    // brightness modal. Same range and step as above so the two read against
+    // each other; the useful comparison is how much dimmer the glance surface
+    // is than the UI.
+    {
+        char b[8];
+        snprintf(b, sizeof(b), "%u",
+                 (unsigned)cfgCoerceBrightness(gCfg->lockScreenBrightness));
+        html += "<label>Lock Screen Brightness <output id='lbriOut'>";
+        html += b; html += "%</output>"
+                "<input name='lock_brightness' type='range' id='lbriIn'"
+                " min='"; html += String(BRIGHTNESS_PCT_MIN);
+        html += "' max='"; html += String(BRIGHTNESS_PCT_MAX);
+        html += "' step='"; html += String(BRIGHTNESS_PCT_STEP);
+        html += "' value='"; html += b;
+        html += "' oninput=\"document.getElementById('lbriOut').textContent=this.value+'%'\">"
+                "</label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "Backlight level while the lock screen is showing, separate from "
+                "the brightness above. Defaults to 10% — it is a glance surface, "
+                "and on a lit panel this is most of what the lock screen costs "
+                "in battery.</p>";
+    }
+#endif
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -6796,6 +6821,13 @@ static void handlePostSave() {
     if (server.hasArg("brightness")) {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }
+#if FEATURE_LOCK_SCREEN
+    // hasArg-guarded for the same reason as brightness above.
+    if (server.hasArg("lock_brightness")) {
+        gCfg->lockScreenBrightness =
+            cfgCoerceBrightness(server.arg("lock_brightness").toInt());
+    }
+#endif
     gCfg->screenOnSecs    = (uint32_t)server.arg("screen_on").toInt();
 #if FEATURE_LOCK_SCREEN
     // hasArg-guarded like volume and brightness above: a lite page that does not

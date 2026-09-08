@@ -1,8 +1,7 @@
 ### New
-- Support for the Heltec WiFi LoRa 32 V4-R8 paired with the Expansion Kit V2, in both the standard and vertical-UI layouts (`heltec-r8`, `heltec-r8-vertical`) — same features as the existing Heltec V4 builds plus a working microSD slot. This board has not yet been run on real hardware; see docs/BUILD.md before flashing.
+- Separate brightness level for the lock screen, defaulting to 10% so the glance screen uses far less battery than the UI you read messages on. Available on every board with the lock screen (all except M5Stack Cardputer and T-Deck Pro), and settable both from the on-device brightness screen and from the web config page.
+- The on-device brightness screen now shows two sliders — Screen and Lock screen — so the two levels can be compared side by side, and each previews live on the panel as it is adjusted.
 
-### Fixed
-- Elecrow ThinkNode M9: the keyboard no longer drops the occasional character when you type at normal speed, and a fast run of keys now comes through in full instead of one key per screen refresh.
-- Messages that arrive while the screen is off or locked are no longer treated as already read just because their channel or DM was the last one open — they now show up on the lock screen and glance overlay like any other traffic.
-- T-Deck Pro: messages arriving behind the glance overlay are now reported there instead of being skipped.
-- Unread markers for the channel or DM you were last in now clear as soon as you wake the device and can actually see the conversation, rather than staying stuck on screen.
+### Changed
+- In the brightness screen on lock-screen boards, left/right now move between the Screen and Lock screen rows; j/k and Page Up/Down still change the value.
+- T-Deck Pro: unavailable actions in the node menu are now shown as plain text without a button outline instead of struck through, which reads more clearly on the e-paper display.

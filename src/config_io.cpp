@@ -918,6 +918,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.webCfgPass, "admin", sizeof(cfg.webCfgPass) - 1);
     cfg.webCfgPass[sizeof(cfg.webCfgPass) - 1] = '\0';
     cfg.brightness         = cfgCoerceBrightness(MY_BRIGHTNESS_PCT);
+    cfg.lockScreenBrightness = cfgCoerceBrightness(MY_LOCKSCREEN_BRIGHTNESS);
     cfg.screenOnSecs       = MY_SCREEN_ON_SECS;
     // On where the board draws one at all; the value is inert elsewhere. Five
     // minutes is a glance surface that still ends well inside a battery's day.
@@ -1337,6 +1338,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // display
     out += "  display:\n";
     snprintf(tmp, sizeof(tmp), "    brightness: %u\n", (unsigned)cfg.brightness); out += tmp;
+    snprintf(tmp, sizeof(tmp), "    lockScreenBrightness: %u\n",
+             (unsigned)cfgCoerceBrightness(cfg.lockScreenBrightness)); out += tmp;
     snprintf(tmp, sizeof(tmp), "    screenOnSecs: %lu\n", (unsigned long)cfg.screenOnSecs); out += tmp;
     snprintf(tmp, sizeof(tmp), "    lockScreen: %s\n", cfg.lockScreenEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    lockScreenOffSecs: %lu\n", (unsigned long)cfg.lockScreenOffSecs); out += tmp;
@@ -1931,6 +1934,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "mode"))     cfg.btMode = !strcmp(val,"FIXED_PIN") ? 1 : !strcmp(val,"NO_PIN") ? 2 : 0;
             } else if (!strcmp(section, "config") && !strcmp(subsection, "display")) {
                 if      (!strcmp(key, "brightness"))      cfg.brightness      = cfgCoerceBrightness(atoi(val));
+                else if (!strcmp(key, "lockScreenBrightness"))
+                    cfg.lockScreenBrightness = cfgCoerceBrightness(atoi(val));
                 else if (!strcmp(key, "screenOnSecs"))    cfg.screenOnSecs    = (uint32_t)atol(val);
                 else if (!strcmp(key, "lockScreen"))      cfg.lockScreenEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "lockScreenOffSecs"))

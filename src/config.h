@@ -170,6 +170,10 @@
 #define MY_BRIGHTNESS_PCT \
     ((((TFT_BRIGHTNESS_DEFAULT * 100 + 127) / 255) + 5) / 10 * 10)
 #define BRIGHTNESS_PCT_MIN  10
+// Backlight percent for the lock screen, independent of MY_BRIGHTNESS_PCT.
+// Deliberately the floor: the glance surface exists to be read at arm's length
+// for a moment, and it is the state the device spends the most time in.
+#define MY_LOCKSCREEN_BRIGHTNESS  10
 #define BRIGHTNESS_PCT_MAX  100
 #define BRIGHTNESS_PCT_STEP 10
 
