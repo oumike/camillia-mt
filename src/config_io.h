@@ -521,10 +521,23 @@ struct RhinoConfig {
     // format every build before this setting used, so the two agree -- a field
     // whose wanted default were 12-hour could not go here.
     uint8_t  clockFormat;
-    // For whoever appends next: the two bytes below are the remainder of that
-    // same padding and carry the same caveat -- an upgraded device reads zero
+    // Backlight percent while the lock screen is up, as opposed to `brightness`
+    // above, which is the level the UI itself runs at. A glance surface is read
+    // from across a room for two seconds at a time; it does not need the level
+    // you chose for reading messages, and on a lit LCD that difference is most
+    // of what the lock screen costs in battery.
+    //
+    // Placed in the padding under the same rule the fields above document -- an
+    // upgrading device reads zero here, not the compiled default -- and this is
+    // the one field where zero needs no special pleading at all.
+    // cfgCoerceBrightness() clamps anything below BRIGHTNESS_PCT_MIN up to it,
+    // so a zero read out of an old blob resolves to 10%, which is exactly the
+    // wanted default. Always read this through cfgCoerceBrightness().
+    uint8_t  lockScreenBrightness;
+    // For whoever appends next: the byte below is the remainder of that same
+    // padding and carries the same caveat -- an upgraded device reads zero
     // there, not your compiled default.
-    uint8_t  _reservedPad13[2];
+    uint8_t  _reservedPad13[1];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

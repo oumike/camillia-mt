@@ -30,6 +30,9 @@
 //   DEVICE_TLORA_PAGER_TFT      LilyGO T-LoRa Pager TFT
 //   DEVICE_CARDPUTER_LORA_HAT   M5Stack Cardputer + LoRa-1262 Cap
 //   DEVICE_HELTEC_V4_EXPANSION  Heltec WiFi LoRa 32 V3 + TFT expansion
+//   DEVICE_HELTEC_R8            Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2.
+//                               Its build defines DEVICE_HELTEC_V4_EXPANSION as
+//                               well -- see the include chain below.
 //   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
 //   DEVICE_M9                   Elecrow ThinkNode M9 (LR1110, no touch)
 //   DEVICE_WIO_TRACKER_L2       Seeed Wio Tracker L2 (NV3031B, gated rails)
@@ -43,6 +46,15 @@
 #  include "hw_tlora_pager.h"
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
 #  include "hw_cardputer.h"
+// Before the V4 arm on purpose. An R8 build defines DEVICE_HELTEC_V4_EXPANSION
+// too, so that it inherits every piece of V4 behaviour keyed on that macro --
+// the touch-only UI profile, the CHSC6X paths, the rotation default, the sensor
+// and GPS arms -- without each of those three dozen call sites having to learn
+// about a second Heltec. What differs between the two boards is almost entirely
+// pins, and those live in the header this arm selects. Anything that is a real
+// behavioural difference gates on DEVICE_HELTEC_R8 explicitly.
+#elif defined(DEVICE_HELTEC_R8)
+#  include "hw_heltec_r8.h"
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
 #  include "hw_heltec_v4.h"
 #elif defined(DEVICE_MESH_DECK)
@@ -54,7 +66,7 @@
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
-DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
+DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #endif
 
 #ifndef KB_INT_ACTIVE_LEVEL

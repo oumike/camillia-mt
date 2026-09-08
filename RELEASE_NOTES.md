@@ -1,29 +1,7 @@
 ### New
-- Wio Tracker L2: new lock screen — hold Wake, or let the screen timeout run out, and the panel stays lit showing the clock, node name, date, battery and the newest unread messages; a press of Wake goes back to the UI. On by default, with the panel going fully dark after 5 minutes.
-- Wio Tracker L2: "Lock Screen" and "Lock Screen Off" settings, on-device under Config below Screen Timeout and in the web config page. The dwell runs 5–60 minutes in five-minute steps, or "Stay on" to keep the lock screen lit until Wake is pressed.
-- T-Deck Pro: the sleeping screen now lists the actual unread messages — time, channel (or DM), sender and message text, newest first, up to eight lines — instead of a single unread count.
-- Discovery preset scan: pick another LoRa preset and the node parks on it for five minutes to find meshes there, then retunes itself back. Reached with the new Preset button or the P key; the picker warns that the node hears nothing on its own mesh while a scan runs, and that it only finds meshes sharing your primary channel key. Leaving the Discovery screen or saving config brings the radio home early.
-- Attaky Mesh Deck: with the Keyboard module attached, its left and right RGB indicators now blink for unread messages alongside the Core RGB LED, in the same color and pattern.
-- Heltec V4 and Attaky Mesh Deck: Discovery snapshots can now be saved on these boards, to internal flash — previously the Save option existed only on boards with an SD card slot.
-- Heltec V4 and Wio Tracker L2: Discovery gained a full-width Sweep / Preset / Clear / Save button row and a close X. The Wio Tracker L2 had an SD card but no way to reach Save without a keyboard.
-- Clock Format setting: choose 12-hour (`2:32 PM`) or 24-hour (`14:32`) for every time the device shows you — chat header, message timestamps, live feed, sleep and lock screens, Device Info and archived-node details. Found on the Config screen under Time and Date, and in web config; applies instantly with no reboot, and travels with config export/import.
-- TRACKER is now offered as a device role, on the device Config screen, in web config and during onboarding. It relays like a CLIENT and advertises itself as a position reporter; it does not change power use, so pair it with Share Location on and a shorter GPS Broadcast Interval. Device Info shows `TRACKER (not sharing location)` if Share Location is off.
-- Automatic Updates in Web Config → Firmware Updates: set the device to check every 1, 6, 12 or 24 hours and install a newer release with no prompt and no keypress, then reboot into it. Off by default on fresh flashes and on upgrades. It follows your Release Channel, waits while the battery is low or WiFi is down, will not reboot over an open dialog, and gives up on a release that fails to install three times (reporting why on the next boot). While it is on it supersedes Check for Updates on Boot. Not available on the Cardputer, where OTA is disabled.
+- Separate brightness level for the lock screen, defaulting to 10% so the glance screen uses far less battery than the UI you read messages on. Available on every board with the lock screen (all except M5Stack Cardputer and T-Deck Pro), and settable both from the on-device brightness screen and from the web config page.
+- The on-device brightness screen now shows two sliders — Screen and Lock screen — so the two levels can be compared side by side, and each previews live on the panel as it is adjusted.
 
 ### Changed
-- Tools is now a top-level destination on every board with a keyboard or nav bar. The L key, Alt+L and the nav bar's wrench button open Tools, and the Live packet feed is its first row alongside the SNR/RSSI, Channel Utilization and Discovery entries.
-- The Live feed screen no longer has its own Tools button or T shortcut; C to clear and F to filter are unchanged.
-- T-Deck Pro: the function button below Home now opens Nodes, and the GPS-area button below Back now opens Tools.
-- T-Lora Pager TFT: the third trackball-row key now opens Tools rather than the Live feed.
-- T-Deck Pro: the sleeping screen puts the date in the top-left and the battery in the top-right as a status band, with the Camillia title, node name and clock grouped under it.
-- Discovery now waits 15 seconds after a sweep finishes before another can be started, on top of the existing one-per-minute limit, and the countdown message names whichever wait is actually holding things up.
-- The firmware install screen now names the release it is installing (e.g. "Installing update v4.9.2"), on both the colour and T-Deck Pro screens, so you can see which version the device is about to become.
-- A rhino runs back and forth under the install progress, and slows to a stop when the download stalls.
-- The clock on the sleep screen is now orange instead of blue on colour displays, so it reads at a glance; e-paper screens are unchanged.
-
-### Fixed
-- T-Deck Pro: the DM button in the nav bar drew as a solid filled block on the e-paper panel. It is now a speech balloon that renders correctly.
-- Pressing the BOOT/user button while the screen is off now only wakes the screen, instead of also activating whatever control was underneath on the hidden UI.
-- The front D-pad on the Attaky Mesh Deck did nothing while a message was open. Up/down now scroll and left/right move within the compose box.
-- The install progress screen no longer blinks the whole panel several times a second, and it no longer repaints furiously during a stalled download — the download itself gets that time back.
-- Device Info showed role 2 as "CLIENT_HIDDEN_MQTT", which is not a Meshtastic role. It now reads ROUTER, the role that value actually means.
+- In the brightness screen on lock-screen boards, left/right now move between the Screen and Lock screen rows; j/k and Page Up/Down still change the value.
+- T-Deck Pro: unavailable actions in the node menu are now shown as plain text without a button outline instead of struck through, which reads more clearly on the e-paper display.

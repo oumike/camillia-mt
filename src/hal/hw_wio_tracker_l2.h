@@ -70,7 +70,13 @@
 #define BOARD_VEXT_ENABLE         -1
 #define BOARD_VEXT_ON_LEVEL      HIGH
 // No piezo. Audio is a full ES8311/ES7243E codec pair (see the audio section),
-// which this firmware does not drive yet. -1 keeps HAS_VOLUME_CONTROL honest.
+// and the ES8311 half IS driven -- pagerAudioBegin() in main_lvgl.cpp brings it
+// up for this board as well as the Pager, and notification tones go out through
+// it. That makes the codec this board's only sound path, so it is not optional.
+// The ES7243E mic is not opened (cfg.input_device = ADC_INPUT_NONE).
+//
+// BOARD_BUZZER stays -1 because there is no piezo to PWM, which is what
+// HAS_VOLUME_CONTROL keys off; it does not mean the board is silent.
 #define BOARD_BUZZER              -1
 
 // ── TFT display — NV3031B 240x320 on a QUAD-SPI bus ─────────────────────────

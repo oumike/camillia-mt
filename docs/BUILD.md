@@ -269,6 +269,8 @@ Pick the environment for your board:
 | M5Stack Cardputer + Cap | `cardputer-cap` |
 | Heltec V4 | `heltec-v4` |
 | Heltec V4 (vertical UI) | `heltec-v4-vertical` |
+| Heltec V4-R8 + Expansion Kit V2 | `heltec-r8` |
+| Heltec V4-R8 + Expansion Kit V2 (vertical UI) | `heltec-r8-vertical` |
 | Attaky Mesh Deck | `mesh-deck` |
 | Elecrow ThinkNode M9 | `m9` |
 | Seeed Wio Tracker L2 | `wio-tracker-l2` |
@@ -329,6 +331,8 @@ Run it with no flags to get a device picker.
 | `--pager`, `-P` | `tlora-pager-tft` |
 | `--heltec`, `-H` | `heltec-v4` |
 | `--heltec-vertical`, `--vertical`, `-V` | `heltec-v4-vertical` |
+| `--heltec-r8`, `-R` | `heltec-r8` |
+| `--heltec-r8-vertical` | `heltec-r8-vertical` |
 | `--mesh-deck`, `--attaky`, `-M` | `mesh-deck` |
 | `--m9`, `-9` | `m9` |
 | `--wio-tracker-l2` | `wio-tracker-l2` |
@@ -403,6 +407,27 @@ Both are idempotent. The LovyanGFX patch fails the build if an existing
 `Bus_SPI.cpp` no longer matches or is only partially patched; the RadioLib patch
 still emits a warning on version drift. If you see `NOT patched - run the build
 once more` on a fresh checkout, the library had not been fetched yet; build again.
+
+### Heltec V4-R8 (heltec-r8, heltec-r8-vertical)
+
+The **WiFi LoRa 32 V4-R8** paired with the **Expansion Kit V2**. Same UI and
+feature set as the `heltec-v4` profiles below, which it shares almost all of its
+code with, plus a working micro-SD slot.
+
+It is a separate pair of envs rather than a flag on the V4 ones because the
+mainboard is an ESP32-S3**R8** — 8 MB *octal* PSRAM against the V4's 2 MB quad.
+Octal PSRAM consumes GPIO33-37 on the ESP32-S3, so every peripheral the V4 had
+in that range moved, and the build needs
+`board_build.arduino.memory_type = qio_opi`. The Expansion Kit V2 is also a
+different carrier from the v1 kit, with its own display, touch, SD and buzzer
+wiring. See [`src/hal/hw_heltec_r8.h`](../src/hal/hw_heltec_r8.h), which
+documents where each pin value came from.
+
+> **Untested on hardware.** The pin map is sourced from Heltec's published
+> V4-R8 differences, the Expansion_board_V2.03 schematic and the wadamesh
+> MeshCore port (several values hardware-confirmed there), but no unit has run
+> this firmware. The header carries a bring-up order; the LoRa front-end
+> TX-mode pin is the least certain value on the board.
 
 ### Heltec (heltec-v4, heltec-v4-vertical)
 

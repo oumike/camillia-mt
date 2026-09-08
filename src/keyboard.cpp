@@ -1303,17 +1303,58 @@ char TDeckKeyboard::readKey() {
     static uint32_t lastIdleProbeMs = 0;
     static uint32_t lastKeyHitMs = 0;
     bool irqActive = (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL);
-    // T-Deck can miss very short taps if we only probe every 250ms when the
-    // IRQ line is not asserted; keep a faster fallback cadence there.
+    // Two numbers describe how a board is polled while its IRQ line reads idle:
+    // how often to look at all, and how long after a key arrives every look goes
+    // through regardless, so a fast run of keys drains at bus speed instead of
+    // one key per cadence tick. kBurstWindowMs == 0 disables the drain.
+    //
+    // Only tdeck and m9 reach this code today -- every other keyboard board has
+    // its own arm above, or no keyboard -- but the #else keeps a board that
+    // grows one later from silently inheriting a cadence nobody chose for it.
 #if defined(DEVICE_TDECK)
-    static constexpr uint32_t kIdleProbeMs = 12;
+    // Short taps are missed at 250 ms even though this board's IRQ works.
+    static constexpr uint32_t kIdleProbeMs   = 12;
     static constexpr uint32_t kBurstWindowMs = 28;
+#elif defined(DEVICE_M9)
+    // KB_REG_KEY holds exactly one pending key (see hw_m9.h): a second key
+    // struck before the poll overwrites the first inside the controller, and
+    // nothing on this side can tell that it happened. At 250 ms that collision
+    // window was wide open at ordinary typing speed, which is what dropped the
+    // occasional character.
+    //
+    // The IRQ cannot be left to close it. Early controllers (keyreg 0x01) are
+    // what the units in the field report and are not known to drive KB_INT at
+    // all, and an undriven active-HIGH line held by a pulldown reads inactive
+    // forever -- so on those units this cadence is not a backstop, it is the
+    // whole of the polling.
+    //
+    // 30 ms rather than the T-Deck's 12: readKey() runs from
+    // pumpKeyboardInput(), once per main loop pass, so the real interval is
+    // whichever is longer -- this constant, or the loop period, which is ~18 ms
+    // at its best and considerably worse while the UI repaints. Below about
+    // 20 ms the extra polls are simply masked by the loop while still costing
+    // bus traffic and battery on a device that idles most of its life. At 30 ms
+    // two keys must land inside a thirtieth of a second to collide, which is
+    // well beyond what a thumb keyboard can produce.
+    static constexpr uint32_t kIdleProbeMs   = 30;
+    // Wide enough to span two or three loop passes, but the larger effect is
+    // inside a single pass: pumpKeyboardInput() calls readKey() eight times in
+    // the same millisecond, and lastIdleProbeMs is shared across them, so
+    // without a drain window only the first of the eight ever reaches the bus --
+    // one key per pass however many are waiting.
+    static constexpr uint32_t kBurstWindowMs = 60;
 #else
-    static constexpr uint32_t kIdleProbeMs = 250;
+    static constexpr uint32_t kIdleProbeMs   = 250;
+    static constexpr uint32_t kBurstWindowMs = 0;
 #endif
     if (!irqActive) {
-#if defined(DEVICE_TDECK)
-        bool inBurstDrain = (now - lastKeyHitMs) < kBurstWindowMs;
+        // No lastKeyHitMs != 0 term on purpose. Adding one would be tidier --
+        // an untouched keyboard spends its first kBurstWindowMs of uptime in a
+        // drain window it never earned -- but it would also change the T-Deck,
+        // which is not what this is fixing. The effect is confined to the boot
+        // window and amounts to polling a keyboard nobody has pressed yet.
+        const bool inBurstDrain = (kBurstWindowMs > 0)
+                                  && ((now - lastKeyHitMs) < kBurstWindowMs);
         if (!inBurstDrain) {
             if (now - lastIdleProbeMs < kIdleProbeMs) {
 #if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
@@ -1323,15 +1364,6 @@ char TDeckKeyboard::readKey() {
             }
             lastIdleProbeMs = now;
         }
-#else
-        if (now - lastIdleProbeMs < kIdleProbeMs) {
-#if !defined(DEVICE_TLORA_PAGER_TFT) && HAS_KEYBOARD
-            expireHeldKeyBestEffort(now);
-#endif
-            return KEY_NONE;
-        }
-        lastIdleProbeMs = now;
-#endif
     }
 #endif
 #if defined(DEVICE_M9)
@@ -1415,7 +1447,10 @@ char TDeckKeyboard::readKey() {
 #endif
         return KEY_NONE;
     }
-#if defined(DEVICE_TDECK)
+#if (KB_INT >= 0)
+    // Opens the burst-drain window above. Guarded by the same condition the
+    // variable is declared under so the two cannot drift apart; where
+    // kBurstWindowMs is 0 the drain test is constant-false and never reads it.
     lastKeyHitMs = now;
 #endif
     char mapped = mapKey(raw);

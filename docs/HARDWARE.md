@@ -1,6 +1,6 @@
 # Hardware Targets
 
-Camillia has **eight distinct boards** across nine build envs (the two Heltec
+Camillia has **nine distinct boards** across eleven build envs (the two Heltec
 envs select UI orientation). The comparison table below covers seven of them. All share an
 **ESP32-S3** SoC (dual-core Xtensa LX7 @ 240 MHz, 512 KB internal SRAM), the
 `espressif32@7.0.1` / Arduino toolchain, and a **dual-slot OTA** flash layout — two
@@ -113,6 +113,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | T-LoRa Pager | [`src/hal/hw_tlora_pager.h`](../src/hal/hw_tlora_pager.h) |
 | Cardputer + LoRa-1262 Cap | [`src/hal/hw_cardputer.h`](../src/hal/hw_cardputer.h) |
 | Heltec V4 (expansion) | [`src/hal/hw_heltec_v4.h`](../src/hal/hw_heltec_v4.h) |
+| Heltec V4-R8 (Expansion Kit V2) | [`src/hal/hw_heltec_r8.h`](../src/hal/hw_heltec_r8.h) |
 | Attaky Mesh Deck | [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h) |
 | Elecrow ThinkNode M9 | [`src/hal/hw_m9.h`](../src/hal/hw_m9.h) |
 | Seeed Wio Tracker L2 | [`src/hal/hw_wio_tracker_l2.h`](../src/hal/hw_wio_tracker_l2.h) |

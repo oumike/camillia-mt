@@ -8,6 +8,8 @@ RELEASE_ENVS=(
     cardputer-cap
     heltec-v4
     heltec-v4-vertical
+    heltec-r8
+    heltec-r8-vertical
     mesh-deck
     m9
     wio-tracker-l2

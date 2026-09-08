@@ -16,15 +16,19 @@ fi
 # 3) pager
 # 4) heltec
 # 5) heltec-vertical
-# 6) cardputer
-# 7) mesh-deck
-# 8) wio-tracker-l2
+# 6) heltec-r8
+# 7) heltec-r8-vertical
+# 8) cardputer
+# 9) mesh-deck
+# 10) wio-tracker-l2
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"
   "pager"
   "heltec"
   "heltec-vertical"
+  "heltec-r8"
+  "heltec-r8-vertical"
   "cardputer"
   "mesh-deck"
   "wio-tracker-l2"
@@ -36,6 +40,8 @@ TARGET_ENVS=(
   "tlora-pager-tft"
   "heltec-v4"
   "heltec-v4-vertical"
+  "heltec-r8"
+  "heltec-r8-vertical"
   "cardputer-cap"
   "mesh-deck"
   "wio-tracker-l2"
