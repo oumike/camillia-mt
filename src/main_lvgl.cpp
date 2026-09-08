@@ -1352,10 +1352,11 @@ static constexpr time_t kClockSetEpoch = 1700000000;
 // pushes synthetic traffic straight into Channels and has no business changing
 // what the lock screen claims arrived.
 //
-// chanIdx < 0 means a DM. Callers gate on the same condition that decides
-// whether the message raises an alert at all (not muted, not the channel or
-// conversation already on screen), so the ring only ever holds things the
-// device is actually notifying about.
+// chanIdx < 0 means a DM. Callers gate on what the user can currently see, not
+// on what the UI has selected: a channel that is not muted and is not the
+// conversation visible on screen right now. Behind the glance overlay nothing
+// is visible, so the ring holds the active channel's traffic too -- which is
+// usually the traffic most worth reporting.
 static void tdeckProNoteRecentMessage(int chanIdx, uint32_t fromNode, const char *text) {
     TdeckProRecentMsg &slot = s_tdeckProRecentMsgs[s_tdeckProRecentMsgHead];
     const time_t now = time(nullptr);
@@ -1383,6 +1384,33 @@ static bool s_webCfgEnabled = false;
 static bool s_vncEnabled = false;
 #endif
 static bool s_screenAsleep = false;
+
+// True while the user cannot see the chat view: the lit lock screen is up, or
+// the panel is out (which on T-Deck Pro is where the glance overlay lives).
+// Neither state is anyone reading a conversation, so nothing arriving during
+// them may be treated as already seen just because its channel or DM happens to
+// be the one the UI has selected underneath.
+static inline bool glanceOverlayHidesUi() {
+#if FEATURE_LOCK_SCREEN
+    if (s_lockScreenActive) return true;
+#endif
+    return s_screenAsleep;
+}
+
+// The DM conversation the UI currently has open, or 0 for none.
+static uint32_t openDmPeerNodeId() {
+    if (!s_dmModal) return 0;
+    if (s_dmSelection < 0 || s_dmSelection >= s_dmConvCount) return 0;
+    return s_dmConvNodeIds[s_dmSelection];
+}
+
+// True only while the user can actually see that conversation. One definition,
+// so the RX gates and the resume path cannot disagree about what counts as
+// read -- a disagreement there is exactly what strands an unread badge.
+static bool dmConversationOnScreen(uint32_t nodeId) {
+    return nodeId != 0 && openDmPeerNodeId() == nodeId && !glanceOverlayHidesUi();
+}
+
 static uint32_t s_lastActivityMs = 0;
 // Quiet gap after the last keypress/touch before a debounced transcript
 // snapshot is allowed to take the SPI bus. Comfortably longer than the gap
@@ -6967,6 +6995,24 @@ static void sleepScreen(const char *reason) {
     }
 }
 
+// The chat view is in front of the user again, so whatever piled up behind the
+// glance overlay for the conversation that is actually open has now been seen.
+// This is the counterpart to the RX gates: they stopped trusting "selected" to
+// mean "read", so something has to mark it read at the moment that becomes
+// true. Without it the last-used channel would stay flagged and the open DM
+// unread while the user looks straight at them.
+static void noteUiVisibleAgain() {
+    if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+        s_channelNeedsAttention[s_activeChannel] = false;
+    }
+    const uint32_t peer = openDmPeerNodeId();
+    if (peer != 0) {
+        DMs.markRead(peer);
+        refreshDmModal(true);   // clears the envelope indicator with it
+    }
+    refreshChannelGlow(true);
+}
+
 #if FEATURE_LOCK_SCREEN
 // Puts the UI away behind the glance overlay, leaving the panel lit. Callers
 // check s_cfg.lockScreenEnabled — with it off nothing here is ever reached and
@@ -7018,6 +7064,7 @@ static void exitLockScreen() {
     s_lastBattPct = 255;
     setPagerKeyboardBacklight(true);
     if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
+    noteUiVisibleAgain();
     Serial.println("[screen] lock screen dismissed");
 }
 
@@ -7557,6 +7604,9 @@ static void wakeScreen() {
 #else
     setPagerKeyboardBacklight(true);
 #endif
+    // After the flag clears, so the conversation on screen reads as visible
+    // again. This is also the T-Deck Pro's path out of its sleeping overlay.
+    noteUiVisibleAgain();
     s_lastActivityMs = millis();
 
     // Force repaint after wake so stale text/colors are not shown.
@@ -37990,7 +38040,12 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
 #endif
 
     Channels.addMessage(chanIdx, prefix, text, TFT_WHITE, packetId, false, fromNode);
-    if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && chanIdx != s_activeChannel
+    // Being the active channel is not the same as being on screen. Behind the
+    // glance overlay the chat view is not visible, so the channel the firmware
+    // was last on has to notify like any other -- treating it as read is what
+    // used to leave its messages off the lock screen entirely.
+    const bool chanOnScreen = (chanIdx == s_activeChannel) && !glanceOverlayHidesUi();
+    if (chanIdx >= 0 && chanIdx < MESH_CHANNELS && !chanOnScreen
         && !channelIsMuted(chanIdx)) {
         s_channelNeedsAttention[chanIdx] = true;
 #if HAS_SLEEP_OVERLAY
@@ -38520,27 +38575,26 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                         snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, who);
                     }
 
-                    bool viewingDm = false;
-                    if (s_dmModal && s_dmSelection >= 0 && s_dmSelection < s_dmConvCount) {
-                        viewingDm = (s_dmConvNodeIds[s_dmSelection] == pkt.hdr.from);
-                    }
+                    // Open in the DM modal *and* actually visible: with the
+                    // glance overlay up the conversation the user was last in
+                    // is as unseen as any other, so it must not auto-read.
+                    const bool dmOnScreen = dmConversationOnScreen(pkt.hdr.from);
 
                     DMs.addMessage(pkt.hdr.from,
                                    senderShort[0] ? senderShort : nullptr,
                                    prefix,
                                    textBuf,
                                    TFT_WHITE,
-                                   !viewingDm,
+                                   !dmOnScreen,
                                    chanIdx,
                                    pkt.hdr.id);  // retain sender pid for web reply/tapback targeting
-                    if (viewingDm) {
+                    if (dmOnScreen) {
                         DMs.markRead(pkt.hdr.from);
                     }
 #if HAS_SLEEP_OVERLAY
                     else {
                         // -1, not chanIdx: the row should read "DM", not the
-                        // channel the DM happened to arrive on. Skipped when the
-                        // conversation is already open, matching the alert.
+                        // channel the DM happened to arrive on.
                         tdeckProNoteRecentMessage(-1, pkt.hdr.from, textBuf);
                     }
 #endif
@@ -38775,23 +38829,20 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                             snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, who);
                         }
 
-                        bool viewingDm = false;
-                        if (s_dmModal && s_dmSelection >= 0 && s_dmSelection < s_dmConvCount) {
-                            viewingDm = (s_dmConvNodeIds[s_dmSelection] == pkt.hdr.from);
-                        }
+                        const bool dmOnScreen = dmConversationOnScreen(pkt.hdr.from);
 
                         DMs.addMessage(pkt.hdr.from,
                                        senderShort[0] ? senderShort : nullptr,
                                        prefix,
                                        prefixedBuf,
                                        TFT_WHITE,
-                                       !viewingDm,
+                                       !dmOnScreen,
                                        chanIdx,
                                        // Upstream restores the original packet id
                                        // on a replay, so the web UI's reply and
                                        // tapback flow can target it like any DM.
                                        pkt.hdr.id);
-                        if (viewingDm) {
+                        if (dmOnScreen) {
                             DMs.markRead(pkt.hdr.from);
                         }
 #if HAS_SLEEP_OVERLAY

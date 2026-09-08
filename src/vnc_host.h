@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stddef.h>
 #include <stdint.h>
 
 #include "config.h"   // HAS_VNC_HOST, via hal/board.h

@@ -16,7 +16,7 @@ on:
     branches: [ main ]
 
 # Only the newest push on a ref is worth checking — a burst of commits used to
-# queue a full 9-environment build for each one.
+# queue a full 11-environment build for each one.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -37,7 +37,7 @@ concurrency:
 # other workflows and every release tag now comes from that job.
 #
 # Release commits do not reach this workflow either: release.sh puts [skip ci]
-# in their message. Without that a release cost two full nine-environment builds
+# in their message. Without that a release cost two full eleven-environment builds
 # of identical source, this one and release.yml's, starting seconds apart. Note
 # the flip side — a release commit gets no build.yml run at all, so this is not
 # the place to look for a release's build log. release.yml's own run is.
@@ -84,6 +84,8 @@ jobs:
           pio run -e cardputer-cap
           pio run -e heltec-v4
           pio run -e heltec-v4-vertical
+          pio run -e heltec-r8
+          pio run -e heltec-r8-vertical
           pio run -e mesh-deck
           pio run -e m9
           pio run -e wio-tracker-l2
