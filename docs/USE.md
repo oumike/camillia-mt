@@ -1256,7 +1256,7 @@ shows a red banner. Turn Web Config off to resume messaging.
 
 Every board except the Cardputer has an experimental **VNC Host** action on the
 Config screen. It mirrors the live device UI into a browser — 480x222 on the
-Pager, 320x240 elsewhere, or 240x320 if you flashed the vertical Heltec build —
+Pager, 240x320 on the T-Deck Pro or a vertical Heltec build, 320x240 elsewhere —
 and sends browser taps and keyboard input back through the same UI paths as the
 physical controls. The viewer sizes itself to whichever panel it connects to.
 
@@ -1273,15 +1273,19 @@ physical controls. The viewer sizes itself to whichever panel it connects to.
 - VNC and Web Config run together. The viewer connects only while **Remote** is
   selected and the checkbox is on. Direct access at
   `http://<device-ip>:8765/` remains available while enabled.
-- The **Remote** tab and its endpoints are compiled into the `tdeck`,
-  `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`, `mesh-deck` and `m9`
-  environments. The Cardputer is the one board without them: the mirror needs a
-  full-panel buffer in PSRAM, which that board does not have. The other
-  requirement is a Wi-Fi station.
+- The **Remote** tab and its endpoints are compiled into every environment
+  except `cardputer-cap`. That board is the one without them: the mirror needs a
+  full-panel buffer in PSRAM, which it does not have. The other requirement is a
+  Wi-Fi station.
 - The Heltec has no physical keyboard of its own. Browser keystrokes are injected
   into its key handling as though one were attached, so they work wherever the
   other boards' hardware keys do. Its on-screen keyboard is a separate path into
   the text box and is unaffected.
+- On the T-Deck Pro the browser shows the e-paper UI in black and white, because
+  that is what the panel itself is: LVGL drives it at one bit per pixel and the
+  mirror expands those bits on their way into the frame. It updates on every
+  LVGL redraw rather than on every e-paper refresh, so the remote view usually
+  reaches a new screen slightly ahead of the panel it is mirroring.
 - On the Mesh Deck the mirror is the only way to see the screen remotely. Its
   panel has no MISO line, so it cannot be read back and the Web Config
   screenshot is unavailable there — but VNC copies the frames on their way to

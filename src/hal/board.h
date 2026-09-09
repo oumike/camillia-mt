@@ -163,11 +163,19 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 // the host never sees: it takes the panel size from the display at init, so the
 // portrait build mirrors 240x320 without anything here changing.
 //
+// The T-Deck Pro is the one host that does not hand LVGL RGB565. Its panel runs
+// at LV_COLOR_FORMAT_I1, so lvglFlush() feeds the mirror through
+// vncHostCaptureFlushI1() instead, which expands the bits as it writes. The
+// browser still receives ordinary RGB565, and the mirror updates at LVGL's rate
+// rather than the e-paper's — the remote view refreshes faster than the panel
+// it is mirroring.
+//
 // This was spelled out as defined(DEVICE_TDECK) at twenty-six call sites across
 // three files, which is twenty-six chances to miss one when a board joins.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2)
+    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDECK_PRO)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0

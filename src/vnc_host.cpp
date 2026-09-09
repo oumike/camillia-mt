@@ -59,6 +59,10 @@ static portMUX_TYPE s_keyMux = portMUX_INITIALIZER_UNLOCKED;
 static uint16_t s_keys[kKeyRingSize] = {};
 static uint16_t s_keyHead = 0;
 static uint16_t s_keyTail = 0;
+// Stamped when the browser sends a key, not when the UI consumes one: what a
+// redraw pacer needs to know is when the operator last typed, and consumption
+// is the thing being delayed.
+static volatile uint32_t s_lastKeyMs = 0;
 
 static char s_handshake[kHandshakeBytes] = {};
 static size_t s_handshakeLen = 0;
@@ -108,6 +112,7 @@ header{width:100%;display:flex;align-items:center;justify-content:space-between;
 h1{font-size:15px;line-height:1;margin:0;font-weight:700;white-space:nowrap}.tools{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
 #status{font:600 11px "Avenir Next","Trebuchet MS",sans-serif;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#status.live{color:var(--live)}#status.bad{color:var(--bad)}
 #screen{display:block;align-self:center;background:#000;width:auto;height:auto;max-width:100%;max-height:100%;box-shadow:0 8px 22px #0003;image-rendering:auto;cursor:crosshair}
+#screen:focus{outline:2px solid var(--live);outline-offset:2px}
 button{height:25px;border:1px solid var(--ink);background:transparent;color:var(--ink);font:700 11px "Avenir Next","Trebuchet MS",sans-serif;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap}button:active{background:var(--ink);color:var(--paper)}
 #keys{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;font-size:16px}
 </style>
@@ -115,7 +120,7 @@ button{height:25px;border:1px solid var(--ink);background:transparent;color:var(
 <body>
 <main>
 <header><h1>Camillia VNC</h1><div class="tools"><span id="status">Connecting</span><button id="keyboard" type="button">Keyboard</button></div></header>
-<canvas id="screen" width="320" height="240"></canvas>
+<canvas id="screen" width="320" height="240" tabindex="0"></canvas>
 </main>
 <textarea id="keys" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <script>
@@ -143,7 +148,7 @@ function connect(){
 }
 function point(event){const rect=canvas.getBoundingClientRect();return [Math.max(0,Math.min(width-1,Math.floor((event.clientX-rect.left)*width/rect.width))),Math.max(0,Math.min(height-1,Math.floor((event.clientY-rect.top)*height/rect.height)))]}
 function sendPointer(event,pressed){if(!socket||socket.readyState!==1)return;const [x,y]=point(event);socket.send(new Uint8Array([1,x&255,x>>8,y&255,y>>8,pressed?1:0]))}
-canvas.addEventListener('pointerdown',event=>{pointerDown=true;try{canvas.setPointerCapture(event.pointerId)}catch(_){ }sendPointer(event,true);event.preventDefault()});
+canvas.addEventListener('pointerdown',event=>{pointerDown=true;try{canvas.setPointerCapture(event.pointerId)}catch(_){ }try{canvas.focus({preventScroll:true})}catch(_){canvas.focus()}sendPointer(event,true);event.preventDefault()});
 canvas.addEventListener('pointermove',event=>{if(!pointerDown)return;const now=Date.now();if(now-lastMove<33)return;lastMove=now;sendPointer(event,true)});
 function release(event){if(!pointerDown)return;pointerDown=false;sendPointer(event,false)}
 canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);
@@ -269,6 +274,9 @@ static void pushKey(uint16_t codepoint) {
         s_keyHead = next;
     }
     portEXIT_CRITICAL(&s_keyMux);
+    // Outside the ring update, and set even when a full ring drops the key: the
+    // operator typed either way, which is what this timestamp answers.
+    s_lastKeyMs = millis();
 }
 
 static void dispatchWsPayload() {
@@ -602,6 +610,44 @@ static bool stationConnected() {
         && (uint32_t)WiFi.localIP() != 0;
 }
 
+// Clip one flush rectangle to the mirror, and answer whether any of it lands.
+// Shared by the two capture entry points so the RGB565 and 1 bpp paths cannot
+// drift apart on what counts as visible.
+static bool clipFlush(int32_t x, int32_t y, int32_t width, int32_t height,
+                      int32_t &x1, int32_t &y1, int32_t &x2, int32_t &y2) {
+    if (!s_enabled || !s_clientConnected || !s_framebuffer
+        || width <= 0 || height <= 0) {
+        return false;
+    }
+    x1 = x < 0 ? 0 : x;
+    y1 = y < 0 ? 0 : y;
+    x2 = x + width - 1;
+    y2 = y + height - 1;
+    if (x2 >= s_screenW) x2 = (int32_t)s_screenW - 1;
+    if (y2 >= s_screenH) y2 = (int32_t)s_screenH - 1;
+    return x1 <= x2 && y1 <= y2;
+}
+
+// Union a just-written rectangle into the region the sender still owes the
+// browser. Call with the frame mutex held.
+static void markDirty(int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
+    __sync_synchronize();
+    portENTER_CRITICAL(&s_dirtyMux);
+    if (!s_dirty) {
+        s_dirtyX1 = (int16_t)x1;
+        s_dirtyY1 = (int16_t)y1;
+        s_dirtyX2 = (int16_t)x2;
+        s_dirtyY2 = (int16_t)y2;
+        s_dirty = true;
+    } else {
+        if (x1 < s_dirtyX1) s_dirtyX1 = (int16_t)x1;
+        if (y1 < s_dirtyY1) s_dirtyY1 = (int16_t)y1;
+        if (x2 > s_dirtyX2) s_dirtyX2 = (int16_t)x2;
+        if (y2 > s_dirtyY2) s_dirtyY2 = (int16_t)y2;
+    }
+    portEXIT_CRITICAL(&s_dirtyMux);
+}
+
 }  // namespace
 
 void vncHostInit(uint16_t width, uint16_t height) {
@@ -641,6 +687,7 @@ bool vncHostSetEnabled(bool enabled) {
         portENTER_CRITICAL(&s_keyMux);
         s_keyTail = s_keyHead;
         portEXIT_CRITICAL(&s_keyMux);
+        s_lastKeyMs = 0;
     }
     return true;
 }
@@ -653,42 +700,43 @@ uint16_t vncHostPort() { return kVncPort; }
 
 void vncHostCaptureFlush(int32_t x, int32_t y, int32_t width, int32_t height,
                          const uint16_t *pixels) {
-    if (!s_enabled || !s_clientConnected || !s_framebuffer || !pixels
-        || width <= 0 || height <= 0) {
-        return;
-    }
-    int32_t clippedX1 = x < 0 ? 0 : x;
-    int32_t clippedY1 = y < 0 ? 0 : y;
-    int32_t clippedX2 = x + width - 1;
-    int32_t clippedY2 = y + height - 1;
-    if (clippedX2 >= s_screenW) clippedX2 = (int32_t)s_screenW - 1;
-    if (clippedY2 >= s_screenH) clippedY2 = (int32_t)s_screenH - 1;
-    if (clippedX1 > clippedX2 || clippedY1 > clippedY2) return;
+    if (!pixels) return;
+    int32_t x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    if (!clipFlush(x, y, width, height, x1, y1, x2, y2)) return;
     if (!s_frameMutex || xSemaphoreTake(s_frameMutex, portMAX_DELAY) != pdTRUE) {
         __atomic_store_n(&s_fullRepaintRequested, true, __ATOMIC_RELEASE);
         return;
     }
-    const size_t copyWidth = (size_t)(clippedX2 - clippedX1 + 1);
-    for (int32_t row = clippedY1; row <= clippedY2; ++row) {
-        const size_t sourceOffset = (size_t)(row - y) * width + (clippedX1 - x);
-        memcpy(s_framebuffer + (size_t)row * s_screenW + clippedX1,
+    const size_t copyWidth = (size_t)(x2 - x1 + 1);
+    for (int32_t row = y1; row <= y2; ++row) {
+        const size_t sourceOffset = (size_t)(row - y) * width + (x1 - x);
+        memcpy(s_framebuffer + (size_t)row * s_screenW + x1,
                pixels + sourceOffset, copyWidth * sizeof(uint16_t));
     }
-    __sync_synchronize();
-    portENTER_CRITICAL(&s_dirtyMux);
-    if (!s_dirty) {
-        s_dirtyX1 = (int16_t)clippedX1;
-        s_dirtyY1 = (int16_t)clippedY1;
-        s_dirtyX2 = (int16_t)clippedX2;
-        s_dirtyY2 = (int16_t)clippedY2;
-        s_dirty = true;
-    } else {
-        if (clippedX1 < s_dirtyX1) s_dirtyX1 = (int16_t)clippedX1;
-        if (clippedY1 < s_dirtyY1) s_dirtyY1 = (int16_t)clippedY1;
-        if (clippedX2 > s_dirtyX2) s_dirtyX2 = (int16_t)clippedX2;
-        if (clippedY2 > s_dirtyY2) s_dirtyY2 = (int16_t)clippedY2;
+    markDirty(x1, y1, x2, y2);
+    xSemaphoreGive(s_frameMutex);
+}
+
+void vncHostCaptureFlushI1(int32_t x, int32_t y, int32_t width, int32_t height,
+                           const uint8_t *bits, size_t strideBytes) {
+    if (!bits || strideBytes == 0) return;
+    int32_t x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+    if (!clipFlush(x, y, width, height, x1, y1, x2, y2)) return;
+    if (!s_frameMutex || xSemaphoreTake(s_frameMutex, portMAX_DELAY) != pdTRUE) {
+        __atomic_store_n(&s_fullRepaintRequested, true, __ATOMIC_RELEASE);
+        return;
     }
-    portEXIT_CRITICAL(&s_dirtyMux);
+    // 0xFFFF and 0x0000 are the same bytes either way round, so the two colours
+    // a 1 bpp panel can produce need no endian handling to reach the wire.
+    for (int32_t row = y1; row <= y2; ++row) {
+        const uint8_t *source = bits + (size_t)(row - y) * strideBytes;
+        uint16_t *dest = s_framebuffer + (size_t)row * s_screenW + x1;
+        for (int32_t col = x1; col <= x2; ++col) {
+            const int32_t bit = col - x;
+            *dest++ = (source[bit >> 3] & (0x80u >> (bit & 7))) ? 0xFFFF : 0x0000;
+        }
+    }
+    markDirty(x1, y1, x2, y2);
     xSemaphoreGive(s_frameMutex);
 }
 
@@ -707,6 +755,18 @@ bool vncHostReadPointer(int16_t *x, int16_t *y, bool *pressed) {
     }
     portEXIT_CRITICAL(&s_pointerMux);
     return known;
+}
+
+uint32_t vncHostLastKeyMs() { return s_lastKeyMs; }
+
+uint8_t vncHostPendingKeys() {
+    portENTER_CRITICAL(&s_keyMux);
+    const uint16_t head = s_keyHead;
+    const uint16_t tail = s_keyTail;
+    portEXIT_CRITICAL(&s_keyMux);
+    const uint16_t pending =
+        (uint16_t)((head + kKeyRingSize - tail) % kKeyRingSize);
+    return pending > 255 ? (uint8_t)255 : (uint8_t)pending;
 }
 
 bool vncHostPopKey(uint16_t *codepoint) {
@@ -732,8 +792,12 @@ bool vncHostClientConnected() { return false; }
 const char *vncHostIP() { return ""; }
 uint16_t vncHostPort() { return 0; }
 void vncHostCaptureFlush(int32_t, int32_t, int32_t, int32_t, const uint16_t *) {}
+void vncHostCaptureFlushI1(int32_t, int32_t, int32_t, int32_t, const uint8_t *,
+                           size_t) {}
 bool vncHostTakeFullRepaintRequest() { return false; }
 bool vncHostReadPointer(int16_t *, int16_t *, bool *) { return false; }
 bool vncHostPopKey(uint16_t *) { return false; }
+uint32_t vncHostLastKeyMs() { return 0; }
+uint8_t vncHostPendingKeys() { return 0; }
 
 #endif

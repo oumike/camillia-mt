@@ -2272,6 +2272,7 @@ static void bootSplashTick();
 static void bootSplashStatusEnd();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
+static bool tryWakeScreenFromInput(uint32_t nowMs);
 #if defined(DEVICE_WIO_TRACKER_L2)
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs);
 #endif
@@ -7408,10 +7409,33 @@ static void meshDeckPollButtons() {
     s_mdBtnPrev = p0;
     if (!pressed) return;
 
-    // BTN_R2 is deliberately unbound. Sleeping and waking the panel is the BOOT
-    // button's job (see pollUserButton) — that one is a real GPIO, so it can
-    // also wake the CPU out of a light-sleep nap, which an I2C expander button
-    // cannot. Having both do the same thing wasted the only other shoulder key.
+    // BTN_R2 (P06) is the screen key: second from the right along the top edge,
+    // between BTN_L1 and the hardware Power button, which is where wadamesh puts
+    // sleep/wake on this board.
+    //
+    // Handled here rather than folded into the key path below, and returning
+    // before it: every key there wakes the panel as a side effect, so a press
+    // that became a key would light the display straight back up and the button
+    // could never turn it off.
+    //
+    // An expander pin cannot wake the CPU out of a light-sleep nap, so a press
+    // made mid-nap registers when the nap ends rather than immediately. That is
+    // why the BOOT button keeps this job as well (see pollUserButton): it is a
+    // real GPIO and the board's only input that works while the CPU is down.
+    if (pressed & (1u << BTN_R2_BIT)) {
+#if FEATURE_LOCK_SCREEN
+        if (s_lockScreenActive) {
+            (void)tryExitLockScreenFromInput(now, true);
+            return;
+        }
+#endif
+        if (s_screenAsleep) {
+            (void)tryWakeScreenFromInput(now);
+        } else {
+            requestScreenOff("BTN_R2");
+        }
+        return;
+    }
 
     // The D-pad folds onto the same navigation tokens the keyboard produces, so
     // it drives every screen exactly as j/k and the arrows already do — no
@@ -20696,8 +20720,14 @@ static void nodeLocateUpdateLiveMarker() {
 }
 
 static lv_color_t nodeLocateCanvasBgColor() {
+#if defined(DEVICE_TDECK_PRO)
+    // Paper white. This panel has no third tone to hold a tinted ground, and a
+    // dark one reduces to a solid black viewport.
+    return lv_color_hex(0xFFFFFF);
+#else
     return (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0xDCE6F6)
                                            : lv_color_hex(0x0A1E45);
+#endif
 }
 
 static void nodeLocateClearLiveCanvas() {
@@ -21054,6 +21084,87 @@ static void nodeLocateStartNextTile() {
     }
 }
 
+#if defined(DEVICE_TDECK_PRO)
+// Ordered dither for the 1 bpp panel.
+//
+// LVGL reduces this display's pixels to I1 with a single luminance cut at
+// LV_DRAW_SW_I1_LUM_THRESHOLD (127) and no dithering at all. Every surface an
+// OpenStreetMap tile is made of sits well above that line -- land 0xF2EFE9 is
+// luminance 239, water 0xAAD3DF is 200, building fill 0xD9D0C9 is 211, minor
+// roads are pure white -- so the whole tile crosses to white together and only
+// label text and the darkest road casings survive. That is a map you cannot
+// read.
+//
+// So do the reduction here instead, while the pixels are still RGB565: stretch
+// the narrow band the tiles actually occupy across the full range, then dither
+// to pure black and white. What reaches LVGL's threshold afterwards is already
+// 0 or 255, so it has nothing left to throw away.
+//
+// Bayer rather than error diffusion: tiles land one at a time and the canvas is
+// memmove'd on every pan, so diffused error would seam at tile edges and change
+// pattern as the map moved. The matrix is indexed by each pixel's offset within
+// its own tile, which keeps the texture locked to the map content across both.
+// Tiles are 256 px, a multiple of 8, so the pattern is continuous across a
+// tile boundary as well.
+static constexpr uint8_t kNodeLocateBayer8[64] = {
+     0, 32,  8, 40,  2, 34, 10, 42,
+    48, 16, 56, 24, 50, 18, 58, 26,
+    12, 44,  4, 36, 14, 46,  6, 38,
+    60, 28, 52, 20, 62, 30, 54, 22,
+     3, 35, 11, 43,  1, 33,  9, 41,
+    51, 19, 59, 27, 49, 17, 57, 25,
+    15, 47,  7, 39, 13, 45,  5, 37,
+    63, 31, 55, 23, 61, 29, 53, 21,
+};
+
+// Anything darker than this becomes solid ink. Set just under the darkest fill
+// worth keeping texture in (motorway, luminance 176) so road casings, rail and
+// label text stay solid black while land, water and buildings each land on a
+// visibly different density above it.
+static constexpr int kNodeLocateInkFloor = 160;
+
+static void nodeLocateDitherTile(const NodeLocateTileJob &job) {
+    if (!s_nodeLocateCanvasBuf || s_locateMapW <= 0 || s_locateMapH <= 0) return;
+
+    int x0 = job.drawX;
+    int y0 = job.drawY;
+    int x1 = job.drawX + kNodeLocateTilePx;
+    int y1 = job.drawY + kNodeLocateTilePx;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s_locateMapW) x1 = s_locateMapW;
+    if (y1 > s_locateMapH) y1 = s_locateMapH;
+    if (x0 >= x1 || y0 >= y1) return;
+
+    for (int y = y0; y < y1; y++) {
+        uint16_t *row = (uint16_t *)(s_nodeLocateCanvasBuf->data
+                                     + y * s_nodeLocateCanvasBuf->header.stride);
+        const int bayerRow = ((y - job.drawY) & 7) * 8;
+        for (int x = x0; x < x1; x++) {
+            const uint16_t px = row[x];
+            const uint8_t r5 = (uint8_t)((px >> 11) & 0x1F);
+            const uint8_t g6 = (uint8_t)((px >> 5) & 0x3F);
+            const uint8_t b5 = (uint8_t)(px & 0x1F);
+            const uint8_t r = (uint8_t)((r5 << 3) | (r5 >> 2));
+            const uint8_t g = (uint8_t)((g6 << 2) | (g6 >> 4));
+            const uint8_t b = (uint8_t)((b5 << 3) | (b5 >> 2));
+            const int lum = (77 * r + 150 * g + 29 * b) >> 8;
+
+            int level = 0;
+            if (lum > kNodeLocateInkFloor) {
+                level = (lum - kNodeLocateInkFloor) * 255
+                        / (255 - kNodeLocateInkFloor);
+            }
+            // Cell n owns the band [4n, 4n+4); the +2 centres the comparison so
+            // a stretched 0 is always black and a stretched 255 always white.
+            const int threshold =
+                kNodeLocateBayer8[bayerRow + ((x - job.drawX) & 7)] * 4 + 2;
+            row[x] = (level > threshold) ? 0xFFFF : 0x0000;
+        }
+    }
+}
+#endif  // DEVICE_TDECK_PRO
+
 static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes) {
     if (!s_nodeLocateCanvas || !lvObjValid(s_nodeLocateCanvas)
         || !s_nodeLocateCanvasBuf || !nodeLocatePngBufferValid(pngBytes)) {
@@ -21080,6 +21191,9 @@ static bool nodeLocateComposeTile(const NodeLocateTileJob &job, size_t pngBytes)
     lv_canvas_init_layer(s_nodeLocateCanvas, &layer);
     lv_draw_image(&layer, &imageDsc, &tileArea);
     lv_canvas_finish_layer(s_nodeLocateCanvas, &layer);
+#if defined(DEVICE_TDECK_PRO)
+    nodeLocateDitherTile(job);
+#endif
     lv_image_cache_drop(&source);
     lv_draw_buf_flush_cache(s_nodeLocateCanvasBuf, nullptr);
 
@@ -21234,14 +21348,41 @@ static void openNodeLocateModal(uint32_t nodeId) {
     const int scrH = lv_disp_get_ver_res(NULL);
     int modalW = scrW - 24;
     if (modalW > 300) modalW = 300;
-    int modalH = scrH - 20;
-    if (modalH > 224) modalH = 224;
+    // Full viewport height. The map box is the modal's only flex-grow child, so
+    // every row reclaimed here lands in the canvas rather than in padding.
+    //
+    // This used to be capped at 224. Among the boards that compile Locate at
+    // all the T-Deck Pro is the only portrait panel -- HAS_STATE_MAPS is 0 on
+    // the Cardputer and on both Heltecs -- so the cap bound nothing except that
+    // one board, where it left 96 px of a 320 px panel unused. Every landscape
+    // panel here is already shorter than the cap was.
+    const int modalH = scrH;
 
     const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+#if defined(DEVICE_TDECK_PRO)
+    // Ink on paper. Every colour in the branch below is a blue whose luminance
+    // falls under LV_DRAW_SW_I1_LUM_THRESHOLD, and this panel is 1 bpp: chrome,
+    // borders, chips and button faces all reduce to the same black, and the
+    // opacities that separate them on a TFT have no middle tone to land on.
+    LV_UNUSED(lightUi);
+    const lv_color_t modalBg = lv_color_hex(0xFFFFFF);
+    const lv_color_t modalBorder = lv_color_hex(0x000000);
+    const lv_color_t titleColor = lv_color_hex(0x000000);
+    const lv_color_t bodyColor = lv_color_hex(0x000000);
+    // The status and attribution chips sit on the map, so they stay opaque: a
+    // translucent chip dithers through and takes its own text down with it.
+    const lv_color_t chipBg = lv_color_hex(0xFFFFFF);
+    const lv_color_t chipText = lv_color_hex(0x000000);
+    const lv_opa_t chipOpa = LV_OPA_COVER;
+#else
     const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
     const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
     const lv_color_t titleColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
     const lv_color_t bodyColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xE8F1FF);
+    const lv_color_t chipBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t chipText = lightUi ? lv_color_hex(0x31445E) : lv_color_hex(0xD9E8FF);
+    const lv_opa_t chipOpa = LV_OPA_70;
+#endif
 
     s_nodeLocateBackdrop = lv_obj_create(s_rootScreen);
     lv_obj_set_size(s_nodeLocateBackdrop, scrW, scrH);
@@ -21288,7 +21429,7 @@ static void openNodeLocateModal(uint32_t nodeId) {
     lv_obj_set_width(mapBox, lv_pct(100));
     lv_obj_set_flex_grow(mapBox, 1);
     lv_obj_clear_flag(mapBox, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(mapBox, lightUi ? lv_color_hex(0xDCE6F6) : lv_color_hex(0x0A1E45), 0);
+    lv_obj_set_style_bg_color(mapBox, nodeLocateCanvasBgColor(), 0);
     lv_obj_set_style_bg_opa(mapBox, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(mapBox, 1, 0);
     lv_obj_set_style_border_color(mapBox, modalBorder, 0);
@@ -21337,16 +21478,14 @@ static void openNodeLocateModal(uint32_t nodeId) {
         lv_canvas_set_draw_buf(s_nodeLocateCanvas, s_nodeLocateCanvasBuf);
         lv_obj_set_pos(s_nodeLocateCanvas, 0, 0);
         lv_obj_clear_flag(s_nodeLocateCanvas, LV_OBJ_FLAG_CLICKABLE);
-        lv_canvas_fill_bg(s_nodeLocateCanvas,
-                          lightUi ? lv_color_hex(0xDCE6F6) : lv_color_hex(0x0A1E45),
+        lv_canvas_fill_bg(s_nodeLocateCanvas, nodeLocateCanvasBgColor(),
                           LV_OPA_COVER);
     }
     s_nodeLocateStatusLabel = lv_label_create(s_nodeLocateTileLayer);
     lv_obj_set_style_text_font(s_nodeLocateStatusLabel, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_nodeLocateStatusLabel, bodyColor, 0);
-    lv_obj_set_style_bg_color(s_nodeLocateStatusLabel,
-                              lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(s_nodeLocateStatusLabel, LV_OPA_70, 0);
+    lv_obj_set_style_bg_color(s_nodeLocateStatusLabel, chipBg, 0);
+    lv_obj_set_style_bg_opa(s_nodeLocateStatusLabel, chipOpa, 0);
     lv_obj_set_style_pad_all(s_nodeLocateStatusLabel, 3, 0);
     lv_obj_set_style_radius(s_nodeLocateStatusLabel, 3, 0);
     lv_label_set_text(s_nodeLocateStatusLabel,
@@ -21355,11 +21494,9 @@ static void openNodeLocateModal(uint32_t nodeId) {
 
     lv_obj_t *attribution = lv_label_create(s_nodeLocateTileLayer);
     lv_obj_set_style_text_font(attribution, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(attribution,
-                                lightUi ? lv_color_hex(0x31445E) : lv_color_hex(0xD9E8FF), 0);
-    lv_obj_set_style_bg_color(attribution,
-                              lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B), 0);
-    lv_obj_set_style_bg_opa(attribution, LV_OPA_70, 0);
+    lv_obj_set_style_text_color(attribution, chipText, 0);
+    lv_obj_set_style_bg_color(attribution, chipBg, 0);
+    lv_obj_set_style_bg_opa(attribution, chipOpa, 0);
     lv_obj_set_style_pad_left(attribution, 2, 0);
     lv_obj_set_style_pad_right(attribution, 2, 0);
     lv_label_set_text(attribution, "(c) OpenStreetMap");
@@ -21410,10 +21547,16 @@ static void openNodeLocateModal(uint32_t nodeId) {
         lv_obj_t *ctlCol = lv_obj_create(mapBox);
         lv_obj_set_size(ctlCol, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
         lv_obj_clear_flag(ctlCol, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_color(ctlCol, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_bg_opa(ctlCol, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(ctlCol, lv_color_hex(0x000000), 0);
+#else
         lv_obj_set_style_bg_color(ctlCol, lv_color_hex(0x102D57), 0);
         lv_obj_set_style_bg_opa(ctlCol, LV_OPA_70, 0);
-        lv_obj_set_style_border_width(ctlCol, 1, 0);
         lv_obj_set_style_border_color(ctlCol, lv_color_hex(0x3E649B), 0);
+#endif
+        lv_obj_set_style_border_width(ctlCol, 1, 0);
         lv_obj_set_style_radius(ctlCol, 4, 0);
         lv_obj_set_style_pad_all(ctlCol, 2, 0);
         lv_obj_set_style_pad_row(ctlCol, 2, 0);
@@ -21424,18 +21567,35 @@ static void openNodeLocateModal(uint32_t nodeId) {
         struct Local {
             static lv_obj_t *btn(lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
                 lv_obj_t *b = lv_btn_create(parent);
-                lv_obj_set_size(b, 24, 18);
-                lv_obj_set_style_radius(b, 3, 0);
                 lv_obj_set_style_pad_all(b, 0, 0);
                 lv_obj_set_style_shadow_width(b, 0, 0);
+                lv_obj_set_style_border_width(b, 1, 0);
+                lv_obj_t *l = lv_label_create(b);
+#if defined(DEVICE_TDECK_PRO)
+                // A white face inside a black outline, with a black glyph. The
+                // TFT styling below is a dark fill inside a mid-blue border and
+                // a near-white glyph: on 1 bpp the fill and the border both
+                // reduce to black, and montserrat_10's thin strokes lose their
+                // antialiased edges to the same threshold, so the whole control
+                // arrives as one filled rectangle. The larger face and the 12 px
+                // font are what keep the glyph legible once it is ink on white.
+                lv_obj_set_size(b, 28, 22);
+                lv_obj_set_style_radius(b, 2, 0);
+                lv_obj_set_style_bg_color(b, lv_color_hex(0xFFFFFF), 0);
+                lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+                lv_obj_set_style_border_color(b, lv_color_hex(0x000000), 0);
+                lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+                lv_obj_set_style_text_color(l, lv_color_hex(0x000000), 0);
+#else
+                lv_obj_set_size(b, 24, 18);
+                lv_obj_set_style_radius(b, 3, 0);
                 lv_obj_set_style_bg_color(b, lv_color_hex(0x16386F), 0);
                 lv_obj_set_style_bg_opa(b, LV_OPA_80, 0);
-                lv_obj_set_style_border_width(b, 1, 0);
                 lv_obj_set_style_border_color(b, lv_color_hex(0x335D9D), 0);
-                lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
-                lv_obj_t *l = lv_label_create(b);
                 lv_obj_set_style_text_font(l, &lv_font_montserrat_10, 0);
                 lv_obj_set_style_text_color(l, lv_color_hex(0xE8F1FF), 0);
+#endif
+                lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
                 lv_label_set_text(l, text);
                 lv_obj_center(l);
                 return b;
@@ -21444,8 +21604,14 @@ static void openNodeLocateModal(uint32_t nodeId) {
 
         Local::btn(ctlCol, LV_SYMBOL_PLUS, onNodeLocateZoomInPressed);
         s_nodeLocateZoomLabel = lv_label_create(ctlCol);
+#if defined(DEVICE_TDECK_PRO)
+        // Matches the button face above and below it.
+        lv_obj_set_width(s_nodeLocateZoomLabel, 28);
+        lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_12, 0);
+#else
         lv_obj_set_width(s_nodeLocateZoomLabel, 24);
         lv_obj_set_style_text_font(s_nodeLocateZoomLabel, &lv_font_montserrat_10, 0);
+#endif
         lv_obj_set_style_text_color(s_nodeLocateZoomLabel, bodyColor, 0);
         lv_obj_set_style_text_align(s_nodeLocateZoomLabel, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text_fmt(s_nodeLocateZoomLabel, "%d", kNodeLocateZoomDefault);
@@ -36514,14 +36680,26 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
                       (long)area->x1, (long)area->y1,
                       (long)area->x2, (long)area->y2);
     }
+#if HAS_VNC_HOST
+    // The mirror is RGB565 and this panel is not, so the host expands the bits
+    // as it writes them into its own framebuffer. Same pointer and same stride
+    // the panel push above was handed: if that framing were wrong the display
+    // would be wrong first.
+    //
+    // Note this runs on every LVGL flush, not on every e-paper refresh, so the
+    // browser sees changes as they are drawn rather than when the panel next
+    // settles.
+    vncHostCaptureFlushI1(area->x1, area->y1, w, h,
+                          px_map + kI1PaletteBytes, sourceStride);
+#endif
     if (lv_display_flush_is_last(disp)) lcd.requestRefresh();
 #else
     // v9 hands over a raw byte buffer in the display's colour format (RGB565).
     uint16_t *pixels = (uint16_t *)px_map;
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
-#endif
 #if HAS_VNC_HOST
     vncHostCaptureFlush(area->x1, area->y1, w, h, pixels);
+#endif
 #endif
     // Web screenshots stay T-Deck-only: unlike the mirror above, the capture
     // path mallocs a whole frame out of *internal* RAM (see

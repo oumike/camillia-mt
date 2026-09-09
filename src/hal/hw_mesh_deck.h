@@ -64,9 +64,12 @@
 //   LED: red P10, green P11, blue P12 (active-low, common anode)
 // POWER_BTN is hardware-fixed: a long press (~2 s) cuts power below firmware.
 #define BTN_EXPANDER_ADDR       0x59
-// P06 (BTN_R2) is currently unbound — sleep/wake belongs to the BOOT button.
-// Kept named so whatever it gets assigned to has somewhere obvious to go.
-#define BTN_R2_BIT              6      // P06 BTN_R2, free
+// P06 (BTN_R2) sleeps and wakes the panel — second from the right along the top
+// edge, which is where wadamesh puts it. See meshDeckPollButtons(), which binds
+// it outside the key path so the press cannot wake the screen it just turned
+// off. The BOOT button below does the same job for the case an expander pin
+// cannot cover: waking the CPU out of a light-sleep nap.
+#define BTN_R2_BIT              6      // P06 BTN_R2, screen sleep/wake
 
 // Every expander interrupt is aggregated onto this one real GPIO: 0x59's INT
 // chains through 0x58 P17, and 0x58's INTN lands here. Nothing uses it yet —
