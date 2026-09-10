@@ -7838,10 +7838,12 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 }
 #endif
 
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_ONLY_PROFILE || UI_CHANNEL_LIST_DROPDOWN
 // True when the chat screen is what the user is looking at — nothing floating
-// over it. Only the USER button needs this: a tap lands on whatever is actually
-// on top, while a button press has to work out for itself who it is for.
+// over it. Buttons need this in a way taps do not: a tap lands on whatever is
+// actually on top, while a button press has to work out for itself who it is
+// for. The USER button asks so it knows whether to open the composer; the Home
+// gesture asks so it knows whether it has anywhere left to go.
 //
 // An explicit list rather than a flag, because the modals do not share one. It
 // has to name everything that can be up while the three full-screen views
@@ -7852,7 +7854,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 // A modal added later that forgets to appear in this list costs one thing: the
 // USER button opens the composer over it. Nothing crashes, and it is visible
 // the first time anyone presses the button on that screen.
-static bool heltecChatScreenIsForeground() {
+static bool chatScreenIsForeground() {
 #if HAS_STATE_MAPS
     if (s_legacyMapPromptModal) return false;
 #endif
@@ -7932,7 +7934,7 @@ static bool pollUserButton(uint32_t nowMs) {
             }
             // Nothing over the chat screen: compose, which is what its New
             // Message button does and what Enter does on the keyboard builds.
-            if (heltecChatScreenIsForeground()) {
+            if (chatScreenIsForeground()) {
                 chatComposeFromButton();
                 return true;
             }
@@ -11579,6 +11581,21 @@ static void onCfgColorBackdropPressed(lv_event_t *e) {
 // A slider in 10% steps. The panel follows the slider live so the level can be
 // judged directly; closing without Enter restores the level we opened with.
 
+// Which input moves between the two rows. Vertical input adjusts the value and
+// Left/Right picks the row on most boards — a trackball or a keyboard with real
+// arrows wants it that way round. The Pager and the M9 are the exceptions, and
+// for the same reason: neither can deliver Left/Right to this modal. The Pager
+// has no such keys on its matrix at all, and the M9 folds its pad's Left/Right
+// onto the scroll codes before any handler runs (see m9FourWaySelection), so on
+// both boards the second row was unreachable by key. Here the wheel and the pad
+// pick the row, and the value moves with j/k — plus Left/Right on the M9, which
+// this modal is exempted from the fold for.
+#if FEATURE_LOCK_SCREEN && (defined(DEVICE_M9) || defined(DEVICE_TLORA_PAGER_TFT))
+static constexpr bool kBrightVertPicksRow = true;
+#else
+static constexpr bool kBrightVertPicksRow = false;
+#endif
+
 static void setCfgBrightnessPreview(int pct) {
     s_cfg.brightness = cfgCoerceBrightness(pct);
     applyBrightness();
@@ -11590,18 +11607,59 @@ static void setCfgBrightnessPreview(int pct) {
 }
 
 #if FEATURE_LOCK_SCREEN
+// Paints one row as focused and the other as not: the caret on its label, the
+// accent outline around its slider, and full-strength value text, against a
+// dimmed knob and indicator on the row the keys are not on.
+//
+// Three cues rather than one because a slider already carries a moving knob, so
+// a single quiet mark is easy to lose next to it — and because the caret alone
+// is two characters of 10 px text on panels as small as 320x240.
+static void paintCfgBrightnessRow(lv_obj_t *slider, lv_obj_t *label,
+                                  lv_obj_t *value, const char *name, bool focused) {
+    if (lvObjValid(label)) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s%s", focused ? "> " : "  ", name);
+        lv_label_set_text(label, buf);
+        lv_obj_set_style_text_color(label,
+                                    focused ? lvColorFrom565(s_ui.selectAccent)
+                                            : lv_color_hex(0xA7C7FF), 0);
+    }
+    if (lvObjValid(value)) {
+        // The unfocused level stays readable — both rows preview live and the
+        // point is to compare them — just clearly not the one being moved.
+        lv_obj_set_style_text_opa(value, focused ? LV_OPA_COVER : LV_OPA_50, 0);
+    }
+    if (!lvObjValid(slider)) return;
+    // Outline rather than border: a border on a slider eats into the track and
+    // makes the focused row's bar visibly thinner than the other one.
+    lv_obj_set_style_outline_width(slider, focused ? 2 : 0, LV_PART_MAIN);
+    // 2, not more: the outline is drawn outside the track and the modal's rows
+    // are 6 px apart, so a wider halo starts touching the label above it.
+    lv_obj_set_style_outline_pad(slider, 2, LV_PART_MAIN);
+    lv_obj_set_style_outline_color(slider, lvColorFrom565(s_ui.selectAccent), LV_PART_MAIN);
+    lv_obj_set_style_outline_opa(slider, focused ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider,
+                              focused ? lvColorFrom565(s_ui.selectAccent)
+                                      : lv_color_hex(0x2E5390), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider,
+                              focused ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x7E97C4),
+                              LV_PART_KNOB);
+}
+
 // Marks which row the keys act on. Touch boards can drag either slider directly
 // and never need this, but it still follows the slider being touched so the two
 // input styles cannot disagree about where focus is.
 static void refreshCfgBrightnessFocus() {
-    if (lvObjValid(s_cfgBrightScreenLabel)) {
-        lv_label_set_text(s_cfgBrightScreenLabel,
-                          s_cfgBrightFocus == 0 ? "> Screen" : "  Screen");
-    }
-    if (lvObjValid(s_cfgBrightLockLabel)) {
-        lv_label_set_text(s_cfgBrightLockLabel,
-                          s_cfgBrightFocus == 1 ? "> Lock screen" : "  Lock screen");
-    }
+    paintCfgBrightnessRow(s_cfgBrightSlider, s_cfgBrightScreenLabel, s_cfgBrightValue,
+                          "Screen", s_cfgBrightFocus == 0);
+    paintCfgBrightnessRow(s_cfgBrightLockSlider, s_cfgBrightLockLabel, s_cfgBrightLockValue,
+                          "Lock screen", s_cfgBrightFocus == 1);
+    // The modal is height-capped and scrolls, so moving focus has to carry the
+    // row with it. Without this the lock row is selectable off the bottom of
+    // the shorter panels, which reads as the keys having done nothing.
+    lv_obj_t *focused = (s_cfgBrightFocus == 1) ? s_cfgBrightLockSlider
+                                                : s_cfgBrightSlider;
+    if (lvObjValid(focused)) lv_obj_scroll_to_view(focused, LV_ANIM_OFF);
 }
 
 // Drives the panel straight to the previewed level rather than going through
@@ -11621,8 +11679,13 @@ static void setCfgLockBrightnessPreview(int pct) {
 static void onCfgBrightLockSliderChanged(lv_event_t *e) {
     lv_obj_t *slider = lv_event_get_target_obj(e);
     if (!slider) return;
-    s_cfgBrightFocus = 1;
-    refreshCfgBrightnessFocus();
+    // Only on a real change of row. This fires for every event of a drag, and
+    // repainting both rows — and scrolling the focused one into view — under a
+    // finger that is already on the right slider is churn at best.
+    if (s_cfgBrightFocus != 1) {
+        s_cfgBrightFocus = 1;
+        refreshCfgBrightnessFocus();
+    }
     setCfgLockBrightnessPreview((int)lv_slider_get_value(slider));
 }
 #endif
@@ -11768,8 +11831,10 @@ static void onCfgBrightSliderChanged(lv_event_t *e) {
     lv_obj_t *slider = lv_event_get_target_obj(e);
     if (!slider) return;
 #if FEATURE_LOCK_SCREEN
-    s_cfgBrightFocus = 0;
-    refreshCfgBrightnessFocus();
+    if (s_cfgBrightFocus != 0) {   // same drag-churn reason as the lock row
+        s_cfgBrightFocus = 0;
+        refreshCfgBrightnessFocus();
+    }
 #endif
     setCfgBrightnessPreview((int)lv_slider_get_value(slider));
 }
@@ -11896,7 +11961,13 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if FEATURE_LOCK_SCREEN
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_label_set_text(hint, "j/k=Adjust  Wheel=Row  Enter=Save  Backspace=Cancel");
+#elif defined(DEVICE_M9)
+    lv_label_set_text(hint, "j/k or </>=Adjust  Up/Dn=Row  Enter=Save  Back=Cancel");
+#else
     lv_label_set_text(hint, "j/k=Adjust  </>=Row  Enter=Save  Backspace=Cancel");
+#endif
 #else
     lv_label_set_text(hint, "j/k=Adjust  Enter=Save  Backspace=Cancel");
 #endif
@@ -13999,7 +14070,7 @@ static void beaconOfferStore(const MeshPacket &pkt, const MeshBeaconPayload &b, 
 
 // The Beacons tool's own surface. Beacons used to be a group on Discovery,
 // which was the wrong home for them: Discovery answers "who is out there right
-// now" and is built around a sweep whose window is 45 s, where a beacon repeats
+// now" and is built around a sweep whose window is 60 s, where a beacon repeats
 // on the sender's schedule — minutes or hours apart. A group that is empty
 // nearly every time you look at it teaches you to stop looking, so they get a
 // screen that is only ever about them, and that keeps what it has heard until
@@ -33035,10 +33106,51 @@ static void openNavConfigShortcut() {
     openCfgModal();
 }
 
+#if UI_CHANNEL_LIST_DROPDOWN
+// Home has one job — get back to the chat screen — and on the chat screen that
+// job is already done. So there it does the next thing you wanted: opens the
+// channel list, which on these boards is a dropdown that has to be asked for.
+//
+// Asked before prepareGlobalNavigation() runs, because that closes everything
+// this looks at. A dropdown that is already open counts as "not plain chat":
+// Home closes it and stops there, so the gesture stays a way out of things
+// rather than a toggle that can leave you where you started.
+static bool homeShouldOpenChannelList() {
+    if (!chatScreenIsForeground()) return false;
+    if (isChannelDropdownVisible()) return false;
+    // The Tools surfaces sit above chat but outside that predicate's list — it
+    // was written for the USER button, where missing one costs a composer over
+    // the wrong screen. Here it would cost a dropdown popping open behind a
+    // screen the press was meant to close, which looks like the button did two
+    // things. Everything prepareGlobalNavigation() tears down belongs here; the
+    // Config pickers do not, because Config stays open behind them and
+    // s_cfgModal already answers for the lot.
+    if (s_otaPromptModal || s_liveToolsModal || s_beaconsModal
+        || s_chUtilChartModal || s_snrChartModal) {
+        return false;
+    }
+#if FEATURE_DISCOVERY
+    if (s_discoveryModal) return false;
+#endif
+#if FEATURE_MQTT_MONITOR
+    if (s_mqttMonModal) return false;
+#endif
+    return true;
+}
+#endif
+
 #if defined(DEVICE_M9)
 static void openM9HomeShortcut() {
+    const bool pickChannel = homeShouldOpenChannelList();
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
+    if (pickChannel) {
+        setChannelDropdownVisible(true);
+        refreshChannelGlow(true);
+        return;
+    }
+    // Coming back from another screen still lands on the first channel, which
+    // is what this button has always meant. Only the already-home press changed.
     setActiveChannel(0);
 }
 
@@ -33095,8 +33207,19 @@ static bool handleGlobalNavigationKey(char key) {
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_TLORA_PAGER_TFT)
 static void openKeyboardHomeShortcut() {
+#if UI_CHANNEL_LIST_DROPDOWN
+    // Same rule as the M9's Home button. The Pager compiles this out: its
+    // channel list is anchored beside the chat and never needs opening.
+    const bool pickChannel = homeShouldOpenChannelList();
+#endif
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
+#if UI_CHANNEL_LIST_DROPDOWN
+    if (pickChannel) {
+        setChannelDropdownVisible(true);
+        refreshChannelGlow(true);
+    }
+#endif
 }
 #endif
 
@@ -33336,7 +33459,11 @@ static void pumpKeyboardInput() {
                          || (s_chanCfgModal && !s_chanEditModal)
                          || (s_chanEditModal && !s_chanTextModal)
                          || s_timeCfgModal
-                         || s_liveToolsModal;
+                         || s_liveToolsModal
+                         // Not multi-column, but it has two rows and the pad's
+                         // Up/Down is what moves between them — so the value
+                         // needs Left/Right, which the fold would eat.
+                         || s_cfgBrightModal;
         // Compose is exempt too: it drives a caret, so it wants all four
         // directions. Collapsing here is irreversible — it happens before
         // `rawKey` is taken below, so no handler downstream can tell Left from
@@ -33539,6 +33666,28 @@ static void pumpKeyboardInput() {
                 continue;
             }
             int steps = 0;
+#if FEATURE_LOCK_SCREEN
+            // Wheel and d-pad move between the two rows on the boards where
+            // that is the only vertical gesture there is (kBrightVertPicksRow).
+            // j/k fold onto these same codes and must keep adjusting, which is
+            // what jkDirectionInvert separates: it is raised only when the key
+            // really was j or k, never for wheel or pad input.
+            if (kBrightVertPicksRow && !jkDirectionInvert
+                && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+                // Same sense as every other list on the board, wheel inversion
+                // included: positive moves down, onto the lock row.
+                const int rowDelta = (k == KEY_SCROLL_UP) ? (invertScrollNav ? 1 : -1)
+                                                          : (invertScrollNav ? -1 : 1);
+                int nextRow = s_cfgBrightFocus + rowDelta;
+                if (nextRow < 0) nextRow = 0;
+                if (nextRow > 1) nextRow = 1;
+                if (nextRow != s_cfgBrightFocus) {
+                    s_cfgBrightFocus = nextRow;
+                    refreshCfgBrightnessFocus();
+                }
+                continue;
+            }
+#endif
             // j/k reach here already remapped to KEY_SCROLL_UP/DN by
             // remapJkUiKey(), so the literal cases below only fire on builds
             // where that remap is compiled out. navFromJk is what tells the two
@@ -33550,13 +33699,21 @@ static void pumpKeyboardInput() {
             else if (k == KEY_PAGE_UP)           steps = 1;
             else if (k == KEY_PAGE_DN)           steps = -1;
 #if FEATURE_LOCK_SCREEN
-            // Left/right pick the row rather than nudging the value. They were a
-            // third alias for adjust, which j/k and the page keys already cover;
-            // a second row needed a way to be reached more than it needed that.
             else if (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
-                s_cfgBrightFocus = (k == KEY_NEXT_CHAN) ? 1 : 0;
-                refreshCfgBrightnessFocus();
-                continue;
+                if (kBrightVertPicksRow) {
+                    // Vertical is spoken for on these boards, so left/right is
+                    // what is left to adjust with. Only the M9 reaches this —
+                    // the Pager has no left/right and adjusts with j/k.
+                    steps = (k == KEY_NEXT_CHAN) ? 1 : -1;
+                } else {
+                    // Left/right pick the row rather than nudging the value.
+                    // They were a third alias for adjust, which j/k and the page
+                    // keys already cover; a second row needed a way to be
+                    // reached more than it needed that.
+                    s_cfgBrightFocus = (k == KEY_NEXT_CHAN) ? 1 : 0;
+                    refreshCfgBrightnessFocus();
+                    continue;
+                }
             }
 #else
             else if (k == KEY_NEXT_CHAN)         steps = 1;

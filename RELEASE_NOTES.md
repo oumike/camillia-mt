@@ -1,11 +1,11 @@
 ### New
-- T-Deck Pro can now be mirrored in a browser from the Remote tab — the e-paper UI is shown in black and white at 240x320, and it updates as the screen is drawn rather than waiting for the panel to refresh, so the browser view often arrives slightly ahead of the device.
-- Attaky Mesh Deck: the second key from the right along the top edge (BTN_R2) now puts the screen to sleep and wakes it again, matching where wadamesh places it. The BOOT button still works for waking the device from a deeper nap.
+- Home now opens the channel list when it is pressed on the chat screen with nothing over it, so one press gets you home and a second picks a channel; pressing it with the list already open just closes the list. Applies to the Home key on keyboard builds, the ThinkNode M9's dedicated Home button and Alt+H on T-Deck and Mesh Deck — not the T-Lora Pager, whose channel list is always on screen.
 
 ### Changed
-- T-Deck Pro: the Locate map now redraws its tiles as black-and-white halftone instead of flat white, so land, water, buildings, roads and labels stay distinguishable on e-paper.
-- T-Deck Pro: the Locate window now uses the full height of the screen, adding about 96 px more map, and its panels, chips and zoom buttons are restyled as black on white with a larger, more legible font.
+- The Brightness screen now shows clearly which of the two sliders your keys are on: a caret on the label, the label in the accent colour and an outline around the bar, while the other row's knob and level dim but stay readable so you can judge the lock-screen level against the screen level.
+- The Brightness screen's on-screen hint now names the keys your board actually has — wheel on the T-Lora Pager, d-pad on the ThinkNode M9.
 
 ### Fixed
-- Remote viewer: clicking or tapping the mirrored screen now gives it keyboard focus (with a visible focus ring), so typing reaches the device without having to click elsewhere first.
-- T-Deck Pro: typing from the browser mirror now holds off e-paper refreshes the same way typing on the physical keyboard does, instead of letting a refresh interrupt mid-message.
+- T-Lora Pager and ThinkNode M9: the lock-screen brightness row could not be reached with the keys at all. Rolling the wheel (Pager) or the d-pad Up/Down (M9) now moves between the two sliders, with j/k — plus d-pad Left/Right on the M9 — setting the level.
+- On smaller screens, moving to the lock-screen brightness row now scrolls it into view instead of leaving it below the bottom of the panel, where the keys looked like they had done nothing.
+- Dragging a brightness slider with a finger no longer causes the panel to redraw and jump under your touch.

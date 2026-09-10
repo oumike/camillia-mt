@@ -102,7 +102,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 - H toggles the channel selector
 - Alt+H returns directly to chat on keyboard-controller firmware with LilyGo's
-  five-byte raw-matrix mode (2025-06-12 or newer)
+  five-byte raw-matrix mode (2025-06-12 or newer); pressed on the chat screen
+  with nothing over it, it opens the channel selector, the same as H
 - J/K map to Up/Down navigation in lists and chat row selection
 - Trackball Up/Down follows the same Up/Down behavior as J/K
 - Modal close key is Backspace (Esc is also accepted)
@@ -164,6 +165,10 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   from anywhere, closing whatever is open first: **Messages** (DMs), **Home**,
   the function key below Home (Live), the key below Back (Nodes), and **Map**
   (Discovery)
+- **Home** returns to the chat screen on the first channel. Pressed when you are
+  already on the chat screen with nothing over it, it opens the **channel list**
+  instead — the same list H toggles — so a second press is how you change
+  channel. With the list already open, Home closes it and stops there
 - **Hold the d-pad centre to put the screen to sleep** — the same gesture as
   holding the T-Deck's trackball click. A tap of the centre is still Enter. How
   long counts as a hold is decided by the keyboard controller itself, not by the
@@ -189,7 +194,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 ### Attaky Mesh Deck (mesh-deck)
 
 - Alt+H returns directly to chat from Config, filters, nested pickers, and the
-  other device surfaces.
+  other device surfaces. Pressed on the chat screen with nothing over it, it
+  opens the channel selector, the same as H.
 - Alt is read as a held modifier from the left keyboard expander at row 4,
   column 2; an ordinary H remains available for the channel selector.
 
@@ -295,7 +301,7 @@ neighbor report.
 - Everything above is passive: it is built from NeighborInfo broadcasts that were
   already arriving, and costs no extra airtime
 - Press W (Heltec: the Sweep button) to sweep: **one** NodeInfo broadcast asking
-  nodes within 3 hops to answer, and replies are counted for 45 s. Never
+  nodes within 3 hops to answer, and replies are counted for 60 s. Never
   automatic. A sweep is refused, with the reason on screen, when one ran less
   than 60 s ago, when channel utilization is at or above 25%, or when the radio
   is not ready.
@@ -329,7 +335,7 @@ records the receive path fills in.
 They get a screen of their own rather than a group on Discovery because of the
 timing. A sender only beacons on its own schedule, minutes or hours apart, and
 only while it has retuned onto your channel, preset and region — so a group on a
-screen built around a 45-second sweep was empty nearly every time you looked at
+screen built around a 60-second sweep was empty nearly every time you looked at
 it.
 
 - Open from Live → Tools → Beacons (B), or the Beacons cell on Heltec
@@ -1196,13 +1202,30 @@ Web Config **Chat Names** dropdown offers the same two choices.
 
 The **Brightness** action opens a slider covering 10%–100% in 10% steps. The
 panel follows the slider as you move it, so you are judging the real level
-rather than a number:
+rather than a number.
 
-- **J** steps right (brighter), **K** steps left (dimmer); the scroll and
-  channel keys work too
-- **Enter** saves and closes
-- **Backspace/Esc** (or tapping outside) cancels and restores the level you
-  opened with
+On every board except Cardputer and the T-Deck Pro there are **two** sliders:
+the screen level and the lock-screen level, the latter being what the glance
+surface lights to. Both preview live, and the one your keys are on is marked
+three ways so it is unmistakable at a glance: a `>` caret on its label, the
+label in the accent colour, and an accent outline around the slider itself. The
+other row's knob and bar dim and its percentage fades, without going away —
+setting a glance level is largely about comparing it against the screen level.
+
+- **K** steps brighter, **J** steps dimmer
+- Which input moves between the two rows depends on what the board has:
+  - **T-Deck, Mesh Deck**: Left/Right pick the row; the trackball or scroll keys
+    adjust the value alongside j/k
+  - **T-Lora Pager**: rolling the **wheel** moves between the rows — it is the
+    board's only vertical input — and j/k adjust
+  - **ThinkNode M9**: the **d-pad Up/Down** moves between the rows, and d-pad
+    Left/Right adjusts along with j/k. This is the one screen where the pad's
+    Left/Right is not channel or column movement
+  - **Heltec, Wio Tracker L2**: no keys are involved — drag either slider
+    directly, then Save or Cancel
+- **Enter** saves both levels and closes
+- **Backspace/Esc/Back** (or tapping outside) cancels and restores the levels
+  you opened with
 
 The default matches whatever brightness the board has always used, so an
 unconfigured device looks unchanged. Web Config offers the same setting as a
@@ -1783,11 +1806,13 @@ Primary usage is touch.
 
 Primary usage is keyboard plus the d-pad and the dedicated function row.
 
-- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere
+- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere;
+  Home pressed on the chat screen opens the channel list
 - Holding the d-pad centre sleeps the screen
 - D-pad Up/Down navigates, Left/Right switches channels or hops columns —
   except in the New Message box, where the d-pad moves the text cursor
-  (Left/Right by a character, Up/Down by a line)
+  (Left/Right by a character, Up/Down by a line), and on the Brightness screen,
+  where Up/Down moves between the two sliders and Left/Right sets the level
 - H toggles the channel selector
 - Space opens compose or reply compose; Enter moves the cursor into the
   channel's messages, and Enter again opens Message Actions for the highlighted
