@@ -102,8 +102,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 - H toggles the channel selector
 - Alt+H returns directly to chat on keyboard-controller firmware with LilyGo's
-  five-byte raw-matrix mode (2025-06-12 or newer); pressed on the chat screen
-  with nothing over it, it opens the channel selector, the same as H
+  five-byte raw-matrix mode (2025-06-12 or newer). It closes things; it does not
+  open the channel selector — H alone does that
 - J/K map to Up/Down navigation in lists and chat row selection
 - Trackball Up/Down follows the same Up/Down behavior as J/K
 - Modal close key is Backspace (Esc is also accepted)
@@ -194,8 +194,9 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 ### Attaky Mesh Deck (mesh-deck)
 
 - Alt+H returns directly to chat from Config, filters, nested pickers, and the
-  other device surfaces. Pressed on the chat screen with nothing over it, it
-  opens the channel selector, the same as H.
+  other device surfaces. It closes things; it does not open the channel
+  selector — H alone does that, and leaving the channel list open on this board
+  slows the keyboard scan (see the note in `readKey()`, src/keyboard.cpp).
 - Alt is read as a held modifier from the left keyboard expander at row 4,
   column 2; an ordinary H remains available for the channel selector.
 

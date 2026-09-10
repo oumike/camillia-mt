@@ -10,3 +10,12 @@
 - Heltec V4: internal storage failed to mount on every boot, which silently broke chat transcripts, config export/import, saved map tiles and Discovery snapshots. Existing devices keep the old layout until they are reflashed over USB.
 - Heltec V4-R8: the update check asked for Heltec V4 firmware, built for a different mainboard and carrier. It now asks for the correct V4-R8 images.
 - Lock screen: message previews containing curly apostrophes and similar characters no longer show empty boxes, and long lines now wrap at the right place.
+
+
+### Update (v5.0.4)
+### Changed
+- Alt+H on the keyboard boards (T-Deck, T-Deck Pro, Cardputer, Attaky Mesh Deck) now only closes whatever is open and returns to chat — it no longer opens the channel selector when pressed on the chat screen; press H on its own for that.
+- The ThinkNode M9's dedicated Home button is unchanged and still opens the channel list from chat.
+
+### Fixed
+- Attaky Mesh Deck: keystrokes no longer get dropped after pressing Alt+H, since that gesture no longer leaves the channel list open, which slows the keyboard scan.

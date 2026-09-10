@@ -7944,7 +7944,7 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 }
 #endif
 
-#if UI_TOUCH_ONLY_PROFILE || UI_CHANNEL_LIST_DROPDOWN
+#if UI_TOUCH_ONLY_PROFILE || defined(DEVICE_M9)
 // True when the chat screen is what the user is looking at — nothing floating
 // over it. Buttons need this in a way taps do not: a tap lands on whatever is
 // actually on top, while a button press has to work out for itself who it is
@@ -33291,10 +33291,14 @@ static void openNavConfigShortcut() {
     openCfgModal();
 }
 
-#if UI_CHANNEL_LIST_DROPDOWN
+#if defined(DEVICE_M9) && UI_CHANNEL_LIST_DROPDOWN
 // Home has one job — get back to the chat screen — and on the chat screen that
 // job is already done. So there it does the next thing you wanted: opens the
-// channel list, which on these boards is a dropdown that has to be asked for.
+// channel list, which on this board is a dropdown that has to be asked for.
+//
+// M9 only, deliberately. The keyboard boards' Alt+H stays a plain escape hatch:
+// see the note on openKeyboardHomeShortcut() for what opening the list there
+// cost the Mesh Deck's keyboard.
 //
 // Asked before prepareGlobalNavigation() runs, because that closes everything
 // this looks at. A dropdown that is already open counts as "not plain chat":
@@ -33391,20 +33395,21 @@ static bool handleGlobalNavigationKey(char key) {
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_TLORA_PAGER_TFT)
+// Alt+H is "close everything and get back to chat", and it deliberately does
+// NOT open the channel list the way the M9's dedicated Home button does.
+//
+// It did briefly, for symmetry with that button. On the Mesh Deck that turned
+// out to cost keystrokes: readKey() is called once per loop() pass, so the
+// matrix scan interval is the loop period, and that is ~18 ms with the channel
+// list closed against 50-166 ms with it open (see the note in readKey(),
+// keyboard.cpp) — lv_timer_handler() renders and flushes over blocking SPI on
+// the same thread, and the matrix is simply not scanned while it does. Making
+// the escape-hatch gesture *open* the expensive surface meant a reflexive
+// Alt+H left the board dropping keys, and these boards already have a one-key
+// way to open the list: H on its own.
 static void openKeyboardHomeShortcut() {
-#if UI_CHANNEL_LIST_DROPDOWN
-    // Same rule as the M9's Home button. The Pager compiles this out: its
-    // channel list is anchored beside the chat and never needs opening.
-    const bool pickChannel = homeShouldOpenChannelList();
-#endif
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
-#if UI_CHANNEL_LIST_DROPDOWN
-    if (pickChannel) {
-        setChannelDropdownVisible(true);
-        refreshChannelGlow(true);
-    }
-#endif
 }
 #endif
 
