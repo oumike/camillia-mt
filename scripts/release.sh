@@ -1,15 +1,24 @@
 #!/bin/bash
 set -e
 
+# The -vertical Heltec envs are deliberately absent. Orientation is a runtime
+# setting now (issue #77), so they are not separate firmware -- each is its
+# parent's binary with the portrait first-boot default pre-set. They still build
+# (pio run -e heltec-v4-vertical) if a seeded image is ever wanted, but they are
+# not published.
+#
+# The cost is on units still running the OLD separate vertical firmware: that
+# build asks OTA for a `heltec-vertical` asset, and with none published its
+# update check fails and it stays where it is until someone reflashes it over
+# USB. Re-add heltec-v4-vertical here for one release if those units should be
+# carried across instead.
 RELEASE_ENVS=(
     tdeck
     tdeck-pro
     tlora-pager-tft
     cardputer-cap
     heltec-v4
-    heltec-v4-vertical
     heltec-r8
-    heltec-r8-vertical
     mesh-deck
     m9
     wio-tracker-l2
@@ -27,6 +36,8 @@ env_flash_size() {
 env_out_name() {
     case "$1" in
         heltec-v4)          echo "heltec" ;;
+        # Kept although the env is no longer released: it still names the file
+        # correctly if the seeded image is ever built and published by hand.
         heltec-v4-vertical) echo "heltec-vertical" ;;
         *)                  echo "$1" ;;
     esac

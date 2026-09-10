@@ -1,11 +1,12 @@
 ### New
-- Home now opens the channel list when it is pressed on the chat screen with nothing over it, so one press gets you home and a second picks a channel; pressing it with the list already open just closes the list. Applies to the Home key on keyboard builds, the ThinkNode M9's dedicated Home button and Alt+H on T-Deck and Mesh Deck — not the T-Lora Pager, whose channel list is always on screen.
+- Heltec V4 and V4-R8: screen orientation is now a setting instead of a separate firmware — Config → **Orientation** switches between landscape and portrait, asks to confirm, then reboots to apply it. New devices start in landscape.
+- Heltec V4 and V4-R8: orientation can also be set from the web config page, and is included in exported/imported YAML config files.
+- Heltec V4, V4-R8 and other touch-only boards: an unread direct message now blinks the **DM** button in the bottom nav bar amber, so the alert sits on the button that opens it.
 
 ### Changed
-- The Brightness screen now shows clearly which of the two sliders your keys are on: a caret on the label, the label in the accent colour and an outline around the bar, while the other row's knob and level dim but stay readable so you can judge the lock-screen level against the screen level.
-- The Brightness screen's on-screen hint now names the keys your board actually has — wheel on the T-Lora Pager, d-pad on the ThinkNode M9.
+- Heltec V4 and V4-R8 ship a single firmware image each; there are no longer separate vertical downloads. **Devices currently running the old vertical firmware will not update over the air** — their update check looks for an asset that is no longer published. Reflash once over USB to rejoin the normal update path.
 
 ### Fixed
-- T-Lora Pager and ThinkNode M9: the lock-screen brightness row could not be reached with the keys at all. Rolling the wheel (Pager) or the d-pad Up/Down (M9) now moves between the two sliders, with j/k — plus d-pad Left/Right on the M9 — setting the level.
-- On smaller screens, moving to the lock-screen brightness row now scrolls it into view instead of leaving it below the bottom of the panel, where the keys looked like they had done nothing.
-- Dragging a brightness slider with a finger no longer causes the panel to redraw and jump under your touch.
+- Heltec V4: internal storage failed to mount on every boot, which silently broke chat transcripts, config export/import, saved map tiles and Discovery snapshots. Existing devices keep the old layout until they are reflashed over USB.
+- Heltec V4-R8: the update check asked for Heltec V4 firmware, built for a different mainboard and carrier. It now asks for the correct V4-R8 images.
+- Lock screen: message previews containing curly apostrophes and similar characters no longer show empty boxes, and long lines now wrap at the right place.

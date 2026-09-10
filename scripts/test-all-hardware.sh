@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/.."
 
 if ! command -v pio >/dev/null 2>&1; then
   echo "PlatformIO CLI not found. Install it or run this from an environment with 'pio'."

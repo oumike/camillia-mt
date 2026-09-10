@@ -103,6 +103,24 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #  define TFT_ROTATION_DEFAULT 1
 #endif
 
+// ── Runtime panel orientation ────────────────────────────────────────────────
+// The Heltec V4 runs either way up and which one is a setting rather than a
+// build, so both rotations are named here and setup() picks one from NVS before
+// the panel comes up (issue #77). Every other board keeps the single
+// TFT_ROTATION_DEFAULT above, and uiPortrait() folds to a compile-time constant
+// there, so nothing downstream pays for a choice it does not have.
+//
+// Both Heltec families: the V4 on its expansion kit and the V4-R8 on the
+// Expansion Kit V2. They share this header's rotation values because they share
+// a panel orientation — only the pin maps differ.
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+#  define HAS_RUNTIME_ORIENTATION 1
+#  define TFT_ROTATION_LANDSCAPE  3
+#  define TFT_ROTATION_PORTRAIT   0
+#else
+#  define HAS_RUNTIME_ORIENTATION 0
+#endif
+
 // ── Channel list presentation ────────────────────────────────────────────────
 // Two layouts exist for the main screen. Boards with this set render channels
 // as an overlay dropdown that appears on demand, leaving the full width to the

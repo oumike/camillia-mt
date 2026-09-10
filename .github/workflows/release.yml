@@ -2,13 +2,13 @@ name: Release
 
 # Cuts a release end to end: picks the version, generates the notes, builds
 # every device profile, signs the OTA images, tags, and publishes. This is the
-# job that used to be a `./release.sh` run on the maintainer's laptop.
+# job that used to be a `./scripts/release.sh` run on the maintainer's laptop.
 #
 # It is deliberately manual-only. Nothing here fires on a push or a tag, so a
 # release is always something a human asked for from the Actions tab.
 #
-# Release notes are written and reviewed locally, not here. `./release.sh
-# --notes-only` drafts them, shows them to you, and lets you edit them; you
+# Release notes are written and reviewed locally, not here.
+# `./scripts/release.sh --notes-only` drafts them, shows them to you, and lets you edit them; you
 # commit the result and this job publishes RELEASE_NOTES.md verbatim. That is
 # not an extra step for CI's benefit — the file has to be committed regardless,
 # because the build bakes it into the firmware (tools/gen_release_notes.py) so
@@ -163,7 +163,7 @@ jobs:
           if [ "$CHANNEL" = "alpha" ]; then args+=(--alpha); fi
           if [ -n "$REQ_VERSION" ]; then args+=(--version "$REQ_VERSION"); fi
           if [ "$NOTES_SOURCE" = "committed" ]; then args+=(--use-committed-notes); fi
-          ./release.sh "${args[@]}"
+          ./scripts/release.sh "${args[@]}"
           echo "tag=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Archive debug symbols

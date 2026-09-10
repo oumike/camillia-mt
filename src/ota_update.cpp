@@ -571,12 +571,20 @@ const char *otaCurrentDeviceAssetSlug() {
     return "m9";
 #elif defined(DEVICE_WIO_TRACKER_L2)
     return "wio-tracker-l2";
+// Ahead of the V4 branch below, and load-bearing: an R8 build defines
+// DEVICE_HELTEC_V4_EXPANSION too, so without its own case here it fell through
+// and reported "heltec" — an R8 checking for updates was being offered V4
+// firmware, built for a different mainboard and a different carrier. release.sh
+// has always published heltec-r8 assets; nothing was ever asking for them.
+#elif defined(DEVICE_HELTEC_R8)
+    return "heltec-r8";
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)
-  #if defined(DEVICE_UI_VERTICAL) && (DEVICE_UI_VERTICAL)
-    return "heltec-vertical";
-  #else
+    // One slug for both orientations (issue #77): orientation is a setting, so
+    // there is nothing left for a second asset to mean. Note that a unit still
+    // running the OLD separate vertical firmware asks for `heltec-vertical`,
+    // which is no longer published — those need a USB reflash to get back onto
+    // the update path.
     return "heltec";
-  #endif
 #else
     return "";
 #endif

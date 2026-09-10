@@ -2695,6 +2695,7 @@ enum CfgActionId {
     CFG_ACTION_CHAT_NAMES,
     CFG_ACTION_CHAT_COLORS,
     CFG_ACTION_FONT_SIZE,
+    CFG_ACTION_ORIENTATION,
     CFG_ACTION_BRIGHTNESS,
     CFG_ACTION_SCREEN_TIMEOUT,
     #if FEATURE_LOCK_SCREEN
@@ -4510,6 +4511,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_UNITS:
             snprintf(buf, bufLen, "Units: %s", s_cfg.displayUnits ? "Imperial" : "Metric");
             break;
+#if HAS_RUNTIME_ORIENTATION
+        case CFG_ACTION_ORIENTATION:
+            snprintf(buf, bufLen, "Orientation: %s",
+                     s_cfg.uiOrientation ? "Portrait" : "Landscape");
+            break;
+#endif
         case CFG_ACTION_BATT_DISPLAY:
             snprintf(buf, bufLen, "Battery Display: %s",
                      s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE ? "Voltage" : "Percent");
@@ -4762,7 +4769,14 @@ static const char *cfgDeviceRoleName(uint8_t role) {
 }
 
 static bool cfgActionNeedsConfirm(int actionId) {
-    return actionId == CFG_ACTION_EXPORT
+    return
+#if HAS_RUNTIME_ORIENTATION
+        // Here for a different reason than the rest: not destructive, it simply
+        // cannot take effect without a restart, and a row that reboots the
+        // device the instant it is pressed should say so first.
+        actionId == CFG_ACTION_ORIENTATION ||
+#endif
+        actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
@@ -6286,6 +6300,52 @@ static void applyBrightness() {
     displayDev().setBrightness(cfgBrightnessDuty(cfgCoerceBrightness(pct)));
 }
 
+// ── Panel orientation ────────────────────────────────────────────────────────
+// Which way up this board runs. A setting on the boards that can do both, and a
+// compile-time constant everywhere else — so every call site below reads the
+// same way regardless, and only the board with a choice pays for one.
+//
+// Deliberately NOT read out of the settings blob. That blob is unpacked in
+// loadConfigFromSd(), roughly two hundred lines after the panel has already
+// been initialised and rotated, and rotation is the one setting that has to be
+// known before the display comes up. So this rides in its own NVS key, exactly
+// as wifiForceAp, webCfgEnabled and vncEnabled do, and for the same reason —
+// see the note beside them in persistConfigToPrefs().
+//
+// Changing it takes a reboot, which is what makes a plain cached bool correct
+// here: nothing can move it between boots, so no consumer has to re-read it.
+#if HAS_RUNTIME_ORIENTATION
+static bool s_uiPortrait = (ORIENTATION_SEED_PORTRAIT != 0);
+
+static inline bool uiPortrait() { return s_uiPortrait; }
+
+// Called before lcd.init(). Reads the key, or — on a device that has never had
+// one — takes this build's seed and writes it, so the flag becomes the device's
+// own from the first boot and no later update can move it.
+static void loadBootOrientation() {
+    Preferences p;
+    // Read/write, because this may have to seed. A failure leaves the seed in
+    // place, which is the right answer for this boot and gets written next time.
+    if (!p.begin("camillia", false)) {
+        Serial.println("[orient] NVS unavailable; using build seed");
+        return;
+    }
+    const uint8_t stored = p.getUChar("uiOrient", 0xFF);
+    if (stored == 0xFF) {
+        p.putUChar("uiOrient", (uint8_t)(s_uiPortrait ? 1 : 0));
+        Serial.printf("[orient] no key yet - seeded %s from this build\n",
+                      s_uiPortrait ? "portrait" : "landscape");
+    } else {
+        s_uiPortrait = (stored != 0);
+        Serial.printf("[orient] %s\n", s_uiPortrait ? "portrait" : "landscape");
+    }
+    p.end();
+}
+#else
+static constexpr bool uiPortrait() { return DEVICE_UI_VERTICAL != 0; }
+static inline void loadBootOrientation() {}
+#endif
+
 #if HAS_SLEEP_OVERLAY
 static uint32_t tdeckProSleepClockMinuteKey() {
     const time_t now = time(nullptr);
@@ -6510,7 +6570,12 @@ static int sleepOverlayMsgRowWidth() {
 // therefore get is eight single-line messages, which is also the case with the
 // most gaps in it: 8*15 + 7*6 = 162 px, running 150..312 and leaving the same
 // 8 px at the bottom that the status band leaves at the top.
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if HAS_RUNTIME_ORIENTATION
+// Both shapes in one build, so these are set at boot rather than compiled in —
+// see orientationApplyOverlayGeometry(). Initialised landscape; the portrait
+// values are the ones the vertical build used.
+static int kTdeckProMsgTop                  = 116;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
 // The Pager is only 222 px tall in landscape. Five one-line messages consume
 // 99 px including gaps and finish at y=205, leaving a safe bottom margin.
 static constexpr int kTdeckProMsgTop        = 106;
@@ -6525,7 +6590,9 @@ static constexpr int kTdeckProMsgTop        = 150;
 #endif
 static constexpr int kTdeckProMsgLineH      = 15;   // montserrat_12 line box
 static constexpr int kTdeckProMsgMaxLines   = 2;    // per message
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if HAS_RUNTIME_ORIENTATION
+static int kTdeckProMsgTotalLines           = 6;    // 320x240; 8 when portrait
+#elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int kTdeckProMsgTotalLines = 5;    // 480x222
 #elif FEATURE_LOCK_SCREEN && DEVICE_UI_VERTICAL
 static constexpr int kTdeckProMsgTotalLines = 8;    // 240x320
@@ -6546,7 +6613,25 @@ static constexpr int kTdeckProMsgGapPx     = 4;
 // only if the two match -- a heavier date beside a lighter battery reads as two
 // unrelated things that happen to share a row.
 static constexpr int kTdeckProBandInset    = 8;    // from either edge
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if HAS_RUNTIME_ORIENTATION
+static int kTdeckProBandTop                = 4;
+static int kTdeckProTitleTop               = 24;   // 18 px face, 21 px line box
+static int kTdeckProNodeTop                = 54;   // 14 px face, 16 px line box
+static int kTdeckProTimeTop                = 72;   // 32 px face, 35 px line box
+
+// The portrait values, applied once at boot. Landscape needs nothing done: it
+// is what the initialisers above already hold, so a board that never rotates
+// runs exactly the numbers it ran before this was a setting.
+static void orientationApplyOverlayGeometry() {
+    if (!uiPortrait()) return;
+    kTdeckProMsgTop        = 150;
+    kTdeckProMsgTotalLines = 8;      // 240x320 has room for two more
+    kTdeckProBandTop       = 8;
+    kTdeckProTitleTop      = 30;
+    kTdeckProNodeTop       = 58;
+    kTdeckProTimeTop       = 82;
+}
+#elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int kTdeckProBandTop      = 3;
 static constexpr int kTdeckProTitleTop     = 20;   // 18 px face, 21 px line box
 static constexpr int kTdeckProNodeTop      = 44;   // 14 px face, 16 px line box
@@ -6571,6 +6656,9 @@ static constexpr int kTdeckProBandTop      = 8;
 static constexpr int kTdeckProTitleTop     = 30;   // 32 px face, 35 px line box
 static constexpr int kTdeckProNodeTop      = 68;   // 16 px face, 18 px line box
 static constexpr int kTdeckProTimeTop      = 94;   // 40 px face, 44 px line box
+#endif
+#if !HAS_RUNTIME_ORIENTATION
+static inline void orientationApplyOverlayGeometry() {}
 #endif
 // However tight the row gets, leave this much for the message itself -- the
 // point of the change is to show some of what was said, so a long channel name
@@ -6610,6 +6698,18 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     const lv_font_t *boldFont = tdeckProBoldRowFont();
     const lv_font_t *restFont = emojiFont(&lv_font_montserrat_12);
 
+    // The same fold the chat view applies, for the same reason: these faces
+    // draw ASCII and little else, and a phone keyboard curls an apostrophe into
+    // U+2019 on the way out — which reaches LVGL as a missing-glyph box. The
+    // ring stores what arrived, so the fold belongs here, at the one place that
+    // draws it.
+    //
+    // Once, and before anything measures it. Measuring the raw text and drawing
+    // the folded one would break the line at a position computed from different
+    // bytes, so the split would land in the wrong place.
+    char body[sizeof(m.text) + 48];
+    renderEmojiSafeText(m.text, body, sizeof(body));
+
     char timeText[LIVE_CLOCK_BUF] = "";
     if (m.epoch != 0) {
         const time_t when = (time_t)m.epoch;
@@ -6626,7 +6726,13 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     tdeckProSleepChannelLabel(m.chanIdx, chanFull, sizeof(chanFull));
 
     char sender[48];
-    chatSenderLabel(m.senderNodeId, sender, sizeof(sender));
+    {
+        char raw[sizeof(sender)];
+        chatSenderLabel(m.senderNodeId, raw, sizeof(raw));
+        // Folded before the clamp below counts characters, not after: the fold
+        // is what turns a three-byte codepoint into one.
+        renderEmojiSafeText(raw, sender, sizeof(sender));
+    }
     if (!sender[0]) snprintf(sender, sizeof(sender), "?");
 
     // Shrink the channel first, then the sender, one character at a time, until
@@ -6682,8 +6788,8 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     // label wrap: the two lines start at different x, which is not something a
     // single label can express.
     size_t contStart = 0;
-    const size_t firstLen = tdeckProBreakAt(m.text, restFont, restW, &contStart);
-    const bool wraps = (maxLines > 1) && contLbl && (m.text[contStart] != '\0');
+    const size_t firstLen = tdeckProBreakAt(body, restFont, restW, &contStart);
+    const bool wraps = (maxLines > 1) && contLbl && (body[contStart] != '\0');
 
     lv_obj_clear_flag(boldLbl, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(senderLbl, LV_OBJ_FLAG_HIDDEN);
@@ -6697,16 +6803,16 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
         // with no continuation line to carry the remainder, the ellipsis is the
         // only thing left that can say there was more to the message.
         lv_label_set_long_mode(restLbl, LV_LABEL_LONG_DOT);
-        lv_label_set_text(restLbl, m.text);
+        lv_label_set_text(restLbl, body);
         if (contLbl) lv_obj_add_flag(contLbl, LV_OBJ_FLAG_HIDDEN);
         return kTdeckProMsgLineH;
     }
 
     // Clipped, not dotted: this half of the split fits by construction, and the
     // ellipsis belongs on the line that carries what is left over.
-    char firstLine[sizeof(m.text)];
+    char firstLine[sizeof(body)];
     const size_t firstCopy = (firstLen < sizeof(firstLine)) ? firstLen : sizeof(firstLine) - 1;
-    memcpy(firstLine, m.text, firstCopy);
+    memcpy(firstLine, body, firstCopy);
     firstLine[firstCopy] = '\0';
     lv_label_set_long_mode(restLbl, LV_LABEL_LONG_CLIP);
     lv_label_set_text(restLbl, firstLine);
@@ -6719,7 +6825,7 @@ static int tdeckProFillSleepMsgRow(int row, int y, int maxLines,
     int contW = sleepOverlayMsgRowWidth() - timeW;
     if (contW < 1) contW = 1;
 
-    lv_label_set_text(contLbl, m.text + contStart);
+    lv_label_set_text(contLbl, body + contStart);
     lv_obj_set_size(contLbl, contW, kTdeckProMsgLineH);
     lv_obj_align(contLbl, LV_ALIGN_TOP_LEFT, contX, y + kTdeckProMsgLineH);
     lv_obj_clear_flag(contLbl, LV_OBJ_FLAG_HIDDEN);
@@ -8212,6 +8318,9 @@ static void persistConfigToPrefs() {
     }
     const size_t wrote = p.putBytes(kCfgBlobKey, s_cfgBlobBuf, sizeof(s_cfgBlobBuf));
     // Read during early boot, before the blob is unpacked, so they stay keys.
+#if HAS_RUNTIME_ORIENTATION
+    p.putUChar("uiOrient", (uint8_t)(s_cfg.uiOrientation ? 1 : 0));
+#endif
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
 #if HAS_VNC_HOST
@@ -8395,6 +8504,14 @@ static int removeLegacyChannelKeys() {
 // are mutually exclusive, and the radio parameters are always re-derived from
 // region + preset rather than trusted from storage.
 static void applyLoadedConfigInvariants() {
+#if HAS_RUNTIME_ORIENTATION
+    // The blob field is a mirror, not the home. A device upgrading from a build
+    // that predates it reads zero out of the short blob whichever way its panel
+    // is actually running, so the key that drove setRotation() this boot is the
+    // one that wins — otherwise a vertical unit would show "Landscape" in
+    // settings and export it to YAML while plainly being portrait.
+    s_cfg.uiOrientation = uiPortrait() ? 1 : 0;
+#endif
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
         s_webCfgEnabled   = false;
@@ -10459,6 +10576,12 @@ static void initCfgActions() {
     // and the row above it already says why it does nothing.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LOCK_SCREEN;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_LOCK_SCREEN_OFF;
+    #endif
+    #if HAS_RUNTIME_ORIENTATION
+    // Below the lock-screen pair, at the end of the run of rows about what the
+    // panel itself does. It is also the only row here that reboots, which is a
+    // reason to keep it off the path someone scrolls through to reach the rest.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ORIENTATION;
     #endif
     // A comfort setting, changed once to taste. Only on boards with a trackball
     // to invert.
@@ -18087,6 +18210,42 @@ static lv_opa_t chatPanelBackgroundOpa() {
 #endif
 }
 
+#if UI_TOUCH_ONLY_PROFILE
+// The DM cell's glyph, for every nav bar that currently exists — the chat
+// screen's, plus one on whatever full-screen modal is sitting over it. Recorded
+// as the bars are built rather than searched for at blink time: the blink runs
+// at 2 Hz and has no business walking the widget tree to find its target.
+//
+// Entries go stale when a modal closes and takes its bar with it, so every
+// reader validates before touching one and clears what it finds dead.
+static constexpr int kNavDmIconSlots = 4;
+static lv_obj_t *s_navDmIcons[kNavDmIconSlots] = {nullptr};
+// Where the blink currently is, at file scope so a bar built mid-blink can be
+// painted to match rather than sitting at the wrong colour until the next flip.
+static bool s_navDmLit = false;
+
+static void navDmApplyInk(lv_obj_t *label, bool lit) {
+    if (!label || !lv_obj_is_valid(label)) return;
+    lv_obj_set_style_text_color(label,
+                                lit ? lv_color_hex(0xF4D35E)    // the envelope's amber
+                                    : lv_color_hex(0xD9E8FF),   // the bar's own ink
+                                0);
+}
+
+static void navDmIconRegister(lv_obj_t *label) {
+    for (int i = 0; i < kNavDmIconSlots; i++) {
+        if (s_navDmIcons[i] == label) { navDmApplyInk(label, s_navDmLit); return; }
+        if (!s_navDmIcons[i] || !lv_obj_is_valid(s_navDmIcons[i])) {
+            s_navDmIcons[i] = label;
+            navDmApplyInk(label, s_navDmLit);
+            return;
+        }
+    }
+    s_navDmIcons[0] = label;   // all live: the oldest gives way
+    navDmApplyInk(label, s_navDmLit);
+}
+#endif
+
 static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 #if UI_TOUCH_NAV_BAR
     if (!bar) return;
@@ -18191,17 +18350,12 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         {"?",                HELTEC_NAV_LEGEND, false, nullptr},
     };
 
-#if defined(DEVICE_UI_VERTICAL)
-    const int barPadX = 1;
-    const int barPadY = 1;
-    const int barPadCol = 1;
-    const int btnPad = 0;
-#else
-    const int barPadX = 2;
-    const int barPadY = 1;
-    const int barPadCol = 2;
-    const int btnPad = 1;
-#endif
+    // Portrait is 80 px narrower and the bar carries the same seven cells, so
+    // it gives up its padding first.
+    const int barPadX   = uiPortrait() ? 1 : 2;
+    const int barPadY   = 1;
+    const int barPadCol = uiPortrait() ? 1 : 2;
+    const int btnPad    = uiPortrait() ? 0 : 1;
 
     lv_obj_set_style_pad_left(bar, barPadX, 0);
     lv_obj_set_style_pad_right(bar, barPadX, 0);
@@ -18270,6 +18424,9 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                                    kItems[i].emoji ? navEmojiFont : navIconFont, 0);
         lv_obj_set_style_text_color(label, navTextColor, 0);
         lv_label_set_text(label, kItems[i].icon);
+#if UI_TOUCH_ONLY_PROFILE
+        if (kItems[i].target == HELTEC_NAV_DM) navDmIconRegister(label);
+#endif
 
 #if !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
         // Dimmer than the icon and a size down: it labels the button rather
@@ -25156,8 +25313,10 @@ static void openChUtilChartModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "CHANNEL UTILIZATION (%)");
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Centred, the title collides with the corner X on the narrower panel.
+    if (uiPortrait()) lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+    else              lv_obj_center(title);
 #else
     lv_obj_center(title);
 #endif
@@ -25351,8 +25510,10 @@ static void openSnrRssiChartModal() {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_text(title, "SNR (dB)  /  RSSI (dBm)");
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Centred, the title collides with the corner X on the narrower panel.
+    if (uiPortrait()) lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
+    else              lv_obj_center(title);
 #else
     lv_obj_center(title);
 #endif
@@ -30199,11 +30360,9 @@ static void openLegendModal() {
     // find a row for a footer button — it only pays the 11px the title row
     // grows by to sit level with the X.
     modalH = 126;
-#if defined(DEVICE_UI_VERTICAL)
-    // Vertical Heltec wraps legend body text into more lines, so it needs the
-    // extra height even without the button.
-    modalH = 142;
-#endif
+    // Portrait wraps the legend body into more lines, so it needs the extra
+    // height even without the button.
+    if (uiPortrait()) modalH = 142;
 #endif
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     modalH = 146;
@@ -30238,9 +30397,7 @@ static void openLegendModal() {
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_style_pad_bottom(s_legendModal, 8, 0);
     lv_obj_set_style_pad_row(s_legendModal, 5, 0);
-#if defined(DEVICE_UI_VERTICAL)
-    lv_obj_set_style_pad_bottom(s_legendModal, 10, 0);
-#endif
+    if (uiPortrait()) lv_obj_set_style_pad_bottom(s_legendModal, 10, 0);
 #endif
     lv_obj_set_flex_flow(s_legendModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_legendModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -30932,6 +31089,25 @@ static void performCfgAction(int actionId) {
             }
             break;
 
+#if HAS_RUNTIME_ORIENTATION
+        case CFG_ACTION_ORIENTATION: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ORIENTATION");
+            s_cfg.uiOrientation = (uint8_t)(s_cfg.uiOrientation ? 0 : 1);
+            // Straight to NVS, not the debounced flush: the reboot below would
+            // otherwise beat the write and the device would come back the way
+            // it went down. persistConfigToPrefs() writes the standalone
+            // uiOrient key that loadBootOrientation() reads on the way up.
+            persistConfigToPrefs();
+            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s - rebooting...",
+                     s_cfg.uiOrientation ? "Portrait" : "Landscape");
+            refreshCfgModal();
+            lv_timer_handler();
+            delay(900);
+            flushPersistentState();   // transcripts too, before we go
+            ESP.restart();
+        } break;
+#endif
+
         case CFG_ACTION_UNITS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec UNITS");
             showActionPopup = false;   // row already reads Imperial/Metric
@@ -31535,6 +31711,15 @@ static void openCfgConfirmModal(int actionId) {
 
     char actionText[96];
     cfgActionLabel(actionId, actionText, sizeof(actionText));
+#if HAS_RUNTIME_ORIENTATION
+    if (actionId == CFG_ACTION_ORIENTATION) {
+        // The row says what the panel is now, which is the wrong thing to put
+        // under "Confirm?" — it reads as asking you to confirm the status quo.
+        // The dialog says what pressing Yes does instead.
+        snprintf(actionText, sizeof(actionText), "Switch to %s and reboot",
+                 s_cfg.uiOrientation ? "Landscape" : "Portrait");
+    }
+#endif
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -37795,14 +37980,18 @@ static void refreshChannelGlow(bool force) {
     #else
         if (selectorShouldGlow) {
     #endif
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(DEVICE_UI_VERTICAL)
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        // Portrait has no room for the pulsing halo — the outline and shadow
+        // spread into the rows either side — so it glows with a plain border.
+        if (uiPortrait()) {
             lv_obj_set_style_border_width(s_channelSelectorBtn, 1, 0);
             lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
             lv_obj_set_style_outline_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
             lv_obj_set_style_outline_width(s_channelSelectorBtn, 0, 0);
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
             lv_obj_set_style_shadow_width(s_channelSelectorBtn, 0, 0);
-#else
+        } else {
+#endif
             lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
             lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
             lv_obj_set_style_outline_color(s_channelSelectorBtn, lv_color_hex(0x8EEBFF), 0);
@@ -37813,6 +38002,8 @@ static void refreshChannelGlow(bool force) {
             lv_obj_set_style_shadow_spread(s_channelSelectorBtn, 1, 0);
             lv_obj_set_style_shadow_width(s_channelSelectorBtn, shadowW, 0);
             lv_obj_set_style_shadow_opa(s_channelSelectorBtn, pulseOpa, 0);
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+        }
 #endif
         } else {
             const bool lightMode = (s_cfg.uiMode == UI_MODE_LIGHT);
@@ -37958,8 +38149,11 @@ static void setActiveChannel(int channelIdx) {
 }
 
 static bool useCompactVerticalHeltecSelector() {
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && defined(HELTEC_COMPACT_SELECTOR)
-    return true;
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Was its own build flag (HELTEC_COMPACT_SELECTOR), set by the vertical env
+    // and nothing else — so it was never anything but "this panel is portrait"
+    // spelled a second way. Folded into the setting with the rest of it.
+    return uiPortrait();
 #else
     return false;
 #endif
@@ -38714,9 +38908,35 @@ static void refreshDmAlertIndicator() {
     // read the same clock, so the one on a modal's nav bar blinks in step with
     // the chat screen's rather than on a phase of its own.
     const bool visible = DMs.hasUnread() && (((millis() / 500UL) & 1UL) == 0UL);
+#if UI_TOUCH_ONLY_PROFILE
+    // These boards light the nav bar's DM cell rather than the header envelope.
+    // The bar is always on screen here and is where the tap has to land anyway,
+    // so the alert and the way to answer it become one control instead of a
+    // mark in one corner and a button in another.
+    //
+    // The header envelope is still built — other things in that bar are laid
+    // out relative to it — but it never shows.
+    setDmAlertVisible(s_chatDmAlert, false);
+
+    // Only when it changes. This runs every loop pass, and re-asserting the
+    // same colour would invalidate the label on every one of them.
+    static bool primed = false;
+    if (visible != s_navDmLit || !primed) {
+        s_navDmLit = visible;
+        primed = true;
+        for (int i = 0; i < kNavDmIconSlots; i++) {
+            if (s_navDmIcons[i] && !lv_obj_is_valid(s_navDmIcons[i])) {
+                s_navDmIcons[i] = nullptr;   // its bar went with a closed modal
+                continue;
+            }
+            navDmApplyInk(s_navDmIcons[i], visible);
+        }
+    }
+#else
     setDmAlertVisible(s_chatDmAlert, visible);
 #if HAS_NAV_BAR_TOGGLE
     setDmAlertVisible(s_navStatusDm, visible);
+#endif
 #endif
 }
 
@@ -42052,11 +42272,8 @@ static void buildUi() {
     lv_obj_t *chatActLabel = lv_label_create(s_chatActBtn);
     lv_obj_set_style_text_font(chatActLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(chatActLabel, lv_color_hex(0xE8F1FF), 0);
-#if defined(DEVICE_UI_VERTICAL)
-    lv_label_set_text(chatActLabel, "Act");
-#else
-    lv_label_set_text(chatActLabel, "Actions");
-#endif
+    // "Actions" does not fit the button at portrait width.
+    lv_label_set_text(chatActLabel, uiPortrait() ? "Act" : "Actions");
     lv_obj_center(chatActLabel);
 
     s_chatNewMsgBtn = lv_btn_create(chatBtnRow);
@@ -43135,6 +43352,13 @@ void setup() {
         Serial.println("[wio-l2-io] initialization failed; display may remain unavailable");
     }
 #endif
+    // Which way up. Has to precede lcd.init() and the setRotation() below it,
+    // and it is only an NVS read, so it depends on nothing that is up yet.
+    loadBootOrientation();
+#if HAS_SLEEP_OVERLAY
+    orientationApplyOverlayGeometry();
+#endif
+
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY
     // The claim() the display makes on the peripheral rail. Everything on it —
     // panel, touch controller, I2C sensors — powers up from here, so the settle
@@ -43143,7 +43367,16 @@ void setup() {
     delay(50);
 #endif
     lcd.init();
+#if HAS_RUNTIME_ORIENTATION
+    // Before anything measures the panel: LVGL takes its resolution from
+    // displayDev().width()/height() further down, so the rotation set here is
+    // what every layout below is built against. The touch driver normalises to
+    // panel-native coordinates and lets LGFX rotate them, so it follows too.
+    displayDev().setRotation(uiPortrait() ? TFT_ROTATION_PORTRAIT
+                                          : TFT_ROTATION_LANDSCAPE);
+#else
     displayDev().setRotation(TFT_ROTATION_DEFAULT);
+#endif
     displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
     displayDev().fillScreen(TFT_BLACK);
     s_keyboard.begin();
@@ -43456,13 +43689,16 @@ void setup() {
         s_otaWorkerBootNotice[0] = '\0';
     }
     s_lastActivityMs = millis();
-#if defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
-    // Non-vertical Heltec has a wide/short layout where the onboarding modal's
-    // multi-line text is awkward to read. Skip onboarding on this build for
-    // now — the user can still configure via web config / SD import.
-    if (s_firstBoot) {
-        Serial.println("[onboarding] skipped (heltec non-vertical build)");
+#if defined(DEVICE_HELTEC_V4_EXPANSION)
+    // Landscape Heltec has a wide/short layout where the onboarding modal's
+    // multi-line text is awkward to read, so it is skipped there — the user can
+    // still configure via web config / SD import. Portrait shows it.
+    if (s_firstBoot && !uiPortrait()) {
+        Serial.println("[onboarding] skipped (heltec landscape)");
         s_firstBoot = false;
+    } else if (s_firstBoot) {
+        Serial.println("[onboarding] first boot detected - showing setup modal");
+        openOnboardingModal();
     }
 #else
     if (s_firstBoot) {

@@ -1765,12 +1765,21 @@ Primary usage is keyboard.
   and Enter again opens Message Actions for the highlighted message
 - D is the DM delete trigger
 
-### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4, heltec-v4-vertical)
+### Heltec WiFi LoRa 32 V4 + TFT expansion (heltec-v4)
 
 Primary usage is touch.
 
+- **Landscape or portrait is a setting, not a build.** Config → **Orientation**
+  switches between them; it confirms first and then reboots, because the panel
+  rotation is fixed when the display comes up. A fresh device is landscape.
+  There is no separate vertical firmware any more — `heltec-v4-vertical` still
+  exists as a build target, but it produces the same firmware with the portrait
+  default pre-set, for units coming off the old separate vertical build
 - Bottom touch nav provides Home, DM, Nodes, Live, Config, and Help, in that
   order left to right
+- **An unread DM lights the nav bar's DM icon**, which blinks amber until you
+  open it. Keyboard builds blink a small envelope in the header instead; here
+  the alert sits on the button that answers it, which is always on screen
 - Actions is not in the nav. On the chat screen it shares the strip under the
   conversation with New Message, one third and two thirds respectively; no other
   screen offers it, since there is no conversation there for it to act on

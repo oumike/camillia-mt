@@ -3,16 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/.."
 
 ENV_NAME="tdeck"
 DEBUG_ENV_NAME="tdeck-debug"
 TDECK_PRO_ENV_NAME="tdeck-pro"
 CARDPUTER_ENV_NAME="cardputer-cap"
 HELTEC_ENV_NAME="heltec-v4"
-HELTEC_VERTICAL_ENV_NAME="heltec-v4-vertical"
 HELTEC_R8_ENV_NAME="heltec-r8"
-HELTEC_R8_VERTICAL_ENV_NAME="heltec-r8-vertical"
 TLORA_ENV_NAME="tlora-pager-tft"
 ATTAKY_ENV_NAME="mesh-deck"
 M9_ENV_NAME="m9"
@@ -44,9 +42,9 @@ env_label() {
 		"$CARDPUTER_ENV_NAME")     echo "M5Stack Cardputer + Cap LoRa/GPS" ;;
 		"$TLORA_ENV_NAME")         echo "LilyGo T-Lora Pager TFT" ;;
 		"$HELTEC_ENV_NAME")        echo "Heltec V4 Expansion Kit" ;;
-		"$HELTEC_VERTICAL_ENV_NAME") echo "Heltec V4 Expansion Kit (Vertical UI)" ;;
+		heltec-v4-vertical)        echo "Heltec V4 Expansion Kit (portrait-seeded asset)" ;;
 		"$HELTEC_R8_ENV_NAME")     echo "Heltec V4-R8 + Expansion Kit V2" ;;
-		"$HELTEC_R8_VERTICAL_ENV_NAME") echo "Heltec V4-R8 + Expansion Kit V2 (Vertical UI)" ;;
+		heltec-r8-vertical)        echo "Heltec V4-R8 + Expansion Kit V2 (portrait-seeded asset)" ;;
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;
@@ -96,17 +94,9 @@ prompt_for_device() {
 		options+=("$HELTEC_ENV_NAME")
 		labels+=("Heltec V4 Expansion Kit")
 	fi
-	if has_env "$HELTEC_VERTICAL_ENV_NAME"; then
-		options+=("$HELTEC_VERTICAL_ENV_NAME")
-		labels+=("Heltec V4 Expansion Kit (Vertical UI)")
-	fi
 	if has_env "$HELTEC_R8_ENV_NAME"; then
 		options+=("$HELTEC_R8_ENV_NAME")
 		labels+=("Heltec V4-R8 + Expansion Kit V2")
-	fi
-	if has_env "$HELTEC_R8_VERTICAL_ENV_NAME"; then
-		options+=("$HELTEC_R8_VERTICAL_ENV_NAME")
-		labels+=("Heltec V4-R8 + Expansion Kit V2 (Vertical UI)")
 	fi
 	if has_env "$ATTAKY_ENV_NAME"; then
 		options+=("$ATTAKY_ENV_NAME")
@@ -149,16 +139,14 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-vertical|--vertical|-V] [--heltec-r8|-R] [--heltec-r8-vertical] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
 	echo "  --cardputer, -C  Use Cardputer + Cap LoRa/GPS environment ($CARDPUTER_ENV_NAME)"
 	echo "  --pager, -P   Use T-Lora Pager TFT environment ($TLORA_ENV_NAME)"
-	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME)"
-	echo "  --heltec-vertical, --vertical, -V  Use vertical Heltec env ($HELTEC_VERTICAL_ENV_NAME)"
-	echo "  --heltec-r8, -R  Use Heltec V4-R8 environment ($HELTEC_R8_ENV_NAME)"
-	echo "  --heltec-r8-vertical  Use vertical Heltec V4-R8 env ($HELTEC_R8_VERTICAL_ENV_NAME)"
+	echo "  --heltec, -H  Use Heltec V4 expansion environment ($HELTEC_ENV_NAME), either orientation"
+	echo "  --heltec-r8, -R  Use Heltec V4-R8 environment ($HELTEC_R8_ENV_NAME), either orientation"
 	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
 	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
 	echo "  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment ($WIO_TRACKER_L2_ENV_NAME)"
@@ -227,14 +215,8 @@ for arg in "$@"; do
 		--heltec|-H)
 			select_env_or_exit "$HELTEC_ENV_NAME" "Environment '$HELTEC_ENV_NAME' not found in platformio.ini"
 			;;
-		--heltec-vertical|--vertical|-V)
-			select_env_or_exit "$HELTEC_VERTICAL_ENV_NAME" "Environment '$HELTEC_VERTICAL_ENV_NAME' not found in platformio.ini"
-			;;
 		--heltec-r8|-R)
 			select_env_or_exit "$HELTEC_R8_ENV_NAME" "Environment '$HELTEC_R8_ENV_NAME' not found in platformio.ini"
-			;;
-		--heltec-r8-vertical)
-			select_env_or_exit "$HELTEC_R8_VERTICAL_ENV_NAME" "Environment '$HELTEC_R8_VERTICAL_ENV_NAME' not found in platformio.ini"
 			;;
 		--mesh-deck|--attaky|-M)
 			select_env_or_exit "$ATTAKY_ENV_NAME" "Environment '$ATTAKY_ENV_NAME' not found in platformio.ini"

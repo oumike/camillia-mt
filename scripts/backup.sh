@@ -7,11 +7,11 @@
 # including its node id and peers' trust in its public key.
 #
 # Usage:
-#   ./backup.sh                          # back up every board it can find
-#   ./backup.sh --port PORT              # just this one
-#   ./backup.sh [--baud N] [--out DIR] [--no-full]
-#   ./backup.sh --restore backups/<dir> --port PORT [--force]
-#   ./backup.sh --list
+#   ./scripts/backup.sh                          # back up every board it can find
+#   ./scripts/backup.sh --port PORT              # just this one
+#   ./scripts/backup.sh [--baud N] [--out DIR] [--no-full]
+#   ./scripts/backup.sh --restore backups/<dir> --port PORT [--force]
+#   ./scripts/backup.sh --list
 #
 # With no --port every serial device is tried and the ones that answer as an ESP
 # are backed up, each into its own backups/<mac>-<timestamp>/ directory. Serial
@@ -38,7 +38,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Repo root, not the script's own directory: backups/ and the default --out
+# path are relative to it, and the restore path reads files from the tree.
+cd "$SCRIPT_DIR/.."
 
 PORT=""
 BAUD_REQUESTED=921600
@@ -505,7 +507,7 @@ PY
             done < "$out/partitions.csv"
             echo ""
             echo "Re-run the backup. If it fails again at the same place, force a"
-            echo "slower link: ./backup.sh --port $port --baud 115200"
+            echo "slower link: ./scripts/backup.sh --port $port --baud 115200"
         } > "$out/INCOMPLETE.txt"
         echo "  INCOMPLETE: $failures region(s) failed — see $out/INCOMPLETE.txt" >&2
         return 1
@@ -540,7 +542,7 @@ another backup, so take one of the target device first if it holds anything.
 
 ## The whole device, exactly as it was
 
-    ./backup.sh --restore $out --port <PORT>
+    ./scripts/backup.sh --restore $out --port <PORT>
 
 or by hand:
 

@@ -92,7 +92,7 @@ When adding new config fields:
 
 ## Safety-Critical Repo Conventions
 
-- Full-device backup and restore path is `backup.sh`; keep that workflow intact.
+- Full-device backup and restore path is `scripts/backup.sh`; keep that workflow intact.
 - Prefer explicit restore safeguards over convenience shortcuts.
 - Preserve identity-sensitive behavior (node identity and key material) unless
   user intent is explicit.

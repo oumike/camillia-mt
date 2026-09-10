@@ -39,9 +39,9 @@ No additional hardware required.
 - LilyGo T-Deck Pro (`tdeck-pro`): e-paper touch UI with a fixed black-on-white, outline-only interface, T-Deck-compatible keyboard shortcuts, microSD config import/export, GPS, and full mesh UI support. Initial port; physical display/touch/radio validation is pending.
 - LilyGo T-Lora Pager TFT (`tlora-pager-tft`): keyboard + roller wheel input, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
 - M5Stack Cardputer + Cap LoRa/GPS (`cardputer-cap`): keyboard-driven input/navigation, microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config).
-- Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config); microSD is not enabled in this profile.
-- Heltec WiFi LoRa 32 V4 + TFT expansion kit, vertical UI (`heltec-v4-vertical`): same functionality as `heltec-v4` with a vertical-oriented UI layout.
-- Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2 (`heltec-r8`, `heltec-r8-vertical`): as above, plus a working microSD slot. 8 MB octal PSRAM. Untested on hardware — see docs/BUILD.md.
+- Heltec WiFi LoRa 32 V4 + TFT expansion kit (`heltec-v4`): touch-first UI in either orientation — landscape or portrait is a setting on the device (Config → Orientation), not a separate build. GPS and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config); no microSD slot, so config, DM history and the node archive live in internal flash.
+- Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2 (`heltec-r8`): as above, plus a working microSD slot. 8 MB octal PSRAM. Untested on hardware — see docs/BUILD.md.
+- The `-vertical` envs (`heltec-v4-vertical`, `heltec-r8-vertical`) are not separate firmware and are not released. Each builds the same binary as its parent with the portrait first-boot default pre-set, for a USB flash that comes up portrait — see docs/BUILD.md.
 - Attaky Mesh Deck (`mesh-deck`): keyboard + D-pad + touch input, GPS, and full mesh UI support; no microSD — config, DM history and the node archive live in internal flash.
 - Elecrow ThinkNode M9 (`m9`): keyboard + d-pad input (no touch), microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config). The only LR1110 board in the lineup.
 - Seeed Wio Tracker L2 (`wio-tracker-l2`): bring-up target with a touch-first 320x240 UI, optional external BLE keyboard, ES8311 sound notifications, GNSS, browser VNC Host/Remote control, and 1-bit SD_MMC storage, including firmware config import/export at `/camillia/config.yaml`. LP5814 brightness, ADS1115 battery, audio, SD, BLE, and Remote support still need hardware verification.
@@ -77,7 +77,7 @@ Export or import a full YAML configuration file via the **CFG** tab. The file is
 
 ## Releases
 
-`./release.sh` cuts a release without compiling anything on your machine. It
+`./scripts/release.sh` cuts a release without compiling anything on your machine. It
 works out the version, drafts the release notes and shows them to you, commits
 them, pushes, and dispatches [the release
 workflow](.github/workflows/release.yml) — which builds every device profile on
@@ -85,9 +85,9 @@ GitHub, merges the factory images, signs the OTA images and publishes the
 `.bin`/`.sig` assets.
 
 ```bash
-./release.sh                    # stable, prompts for the version
-./release.sh --alpha -y         # next alpha in the current series
-./release.sh --version 4.9.0    # exactly this version
+./scripts/release.sh                    # stable, prompts for the version
+./scripts/release.sh --alpha -y         # next alpha in the current series
+./scripts/release.sh --version 4.9.0    # exactly this version
 ```
 
 Like a local release always has, it commits your whole working tree into the
@@ -117,9 +117,9 @@ rather than bloating the release by ~35MB per profile.
 Other modes:
 
 ```bash
-./release.sh --notes-only       # draft notes only — no commit, no dispatch
-./release.sh --check-targets    # validate release/OTA slugs, build nothing
-./release.sh --build-local      # build, sign and publish from this machine
+./scripts/release.sh --notes-only       # draft notes only — no commit, no dispatch
+./scripts/release.sh --check-targets    # validate release/OTA slugs, build nothing
+./scripts/release.sh --build-local      # build, sign and publish from this machine
 ```
 
 `--build-local` needs the full toolchain and `ota_signing_key.pem` present. The

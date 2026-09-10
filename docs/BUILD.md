@@ -105,7 +105,6 @@ the `.bin` for your device:
 | LilyGo T-Lora Pager TFT | `camillia-mt-tlora-pager-tft-vX.Y.Z.bin` |
 | M5Stack Cardputer + Cap | `camillia-mt-cardputer-cap-vX.Y.Z.bin` |
 | Heltec V4 | `camillia-mt-heltec-vX.Y.Z.bin` |
-| Heltec V4 (vertical UI) | `camillia-mt-heltec-vertical-vX.Y.Z.bin` |
 | Attaky Mesh Deck | `camillia-mt-mesh-deck-vX.Y.Z.bin` |
 | Elecrow ThinkNode M9 | `camillia-mt-m9-vX.Y.Z.bin` |
 | Seeed Wio Tracker L2 | `camillia-mt-wio-tracker-l2-vX.Y.Z.bin` |
@@ -268,9 +267,7 @@ Pick the environment for your board:
 | LilyGo T-Lora Pager TFT | `tlora-pager-tft` |
 | M5Stack Cardputer + Cap | `cardputer-cap` |
 | Heltec V4 | `heltec-v4` |
-| Heltec V4 (vertical UI) | `heltec-v4-vertical` |
 | Heltec V4-R8 + Expansion Kit V2 | `heltec-r8` |
-| Heltec V4-R8 + Expansion Kit V2 (vertical UI) | `heltec-r8-vertical` |
 | Attaky Mesh Deck | `mesh-deck` |
 | Elecrow ThinkNode M9 | `m9` |
 | Seeed Wio Tracker L2 | `wio-tracker-l2` |
@@ -313,11 +310,11 @@ them by hand. Exit with `Ctrl+C`.
 
 ### Helper script (macOS and Linux only)
 
-`build-upload-monitor.sh` builds, uploads and opens the monitor in one go:
+`scripts/build-upload-monitor.sh` builds, uploads and opens the monitor in one go:
 
 ```bash
-./build-upload-monitor.sh --tdeck
-./build-upload-monitor.sh --m9 --erase
+./scripts/build-upload-monitor.sh --tdeck
+./scripts/build-upload-monitor.sh --m9 --erase
 ```
 
 Run it with no flags to get a device picker.
@@ -329,10 +326,8 @@ Run it with no flags to get a device picker.
 | `--debug`, `-d` | `tdeck-debug` (no such env in `platformio.ini` today — this flag will fail) |
 | `--cardputer`, `-C` | `cardputer-cap` |
 | `--pager`, `-P` | `tlora-pager-tft` |
-| `--heltec`, `-H` | `heltec-v4` |
-| `--heltec-vertical`, `--vertical`, `-V` | `heltec-v4-vertical` |
-| `--heltec-r8`, `-R` | `heltec-r8` |
-| `--heltec-r8-vertical` | `heltec-r8-vertical` |
+| `--heltec`, `-H` | `heltec-v4` (either orientation) |
+| `--heltec-r8`, `-R` | `heltec-r8` (either orientation) |
 | `--mesh-deck`, `--attaky`, `-M` | `mesh-deck` |
 | `--m9`, `-9` | `m9` |
 | `--wio-tracker-l2` | `wio-tracker-l2` |
@@ -411,10 +406,12 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
 ### Heltec V4-R8 (heltec-r8, heltec-r8-vertical)
 
 The **WiFi LoRa 32 V4-R8** paired with the **Expansion Kit V2**. Same UI and
-feature set as the `heltec-v4` profiles below, which it shares almost all of its
-code with, plus a working micro-SD slot.
+feature set as the `heltec-v4` profile below, which it shares almost all of its
+code with, plus a working micro-SD slot. Orientation is a runtime setting here
+too, so `heltec-r8-vertical` is a portrait-seeded build for USB flashing rather
+than a second firmware, and is not released — see the `heltec-v4` notes below.
 
-It is a separate pair of envs rather than a flag on the V4 ones because the
+It is a separate env from the V4 rather than a flag on it because the
 mainboard is an ESP32-S3**R8** — 8 MB *octal* PSRAM against the V4's 2 MB quad.
 Octal PSRAM consumes GPIO33-37 on the ESP32-S3, so every peripheral the V4 had
 in that range moved, and the build needs
@@ -431,6 +428,19 @@ documents where each pin value came from.
 
 ### Heltec (heltec-v4, heltec-v4-vertical)
 
+- **Neither `-vertical` env is a second firmware, and neither is released.**
+  `heltec-v4-vertical` `extends` `heltec-v4` and `heltec-r8-vertical` `extends`
+  `heltec-r8`; each adds one flag, `-DORIENTATION_SEED_PORTRAIT=1`. Orientation
+  is a runtime setting (Config → Orientation) stored in the standalone
+  `uiOrient` NVS key; the seed only decides what a device that has *never* had
+  that key writes on its first boot. Build one with
+  `pio run -e heltec-v4-vertical` when you want a USB flash that comes up
+  portrait; they are absent from `RELEASE_ENVS`, so no `-vertical` asset ships.
+- **Units still on the old separate vertical firmware do not update over the
+  air.** That build asks OTA for a `heltec-vertical` asset, and with none
+  published its update check fails and it stays where it is. Reflash once over
+  USB — `pio run -e heltec-v4 -t upload`, or the seeded env to come back up
+  portrait — and it rejoins the normal update path.
 - These envs moved from `partitions.csv` to `partitions_16mb_fs.csv` to give the
   board a filesystem, since it has no SD slot. The app slots and NVS are at the
   same offsets in both tables, so an OTA between them is safe — but **OTA does
@@ -459,7 +469,7 @@ documents where each pin value came from.
   [CH34x driver on macOS](#thinknode-m9-on-macos--driver-required) and shows up as
   `/dev/cu.wchusbserial*` rather than `/dev/cu.usbmodem*`.
 - Erase and flash in one esptool session with `pio run -e m9 -t upload_erase`
-  (or `./build-upload-monitor.sh --m9 --erase`). The separate `erase` target
+  (or `./scripts/build-upload-monitor.sh --m9 --erase`). The separate `erase` target
   needs a second port grab this board does not always give up cleanly.
 - First build on a fresh checkout may print
   `[patch_radiolib_lr11x0] NOT patched - run the build once more`. That is the

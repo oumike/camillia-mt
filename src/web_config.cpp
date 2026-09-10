@@ -3841,6 +3841,24 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "in battery.</p>";
     }
 #endif
+#if HAS_RUNTIME_ORIENTATION
+    // Same position as the on-device Config screen: after the lock-screen rows,
+    // at the end of the run of settings about what the panel itself does.
+    {
+        html += "<label>Orientation<select name='orientation'>"
+                "<option value='0'";
+        if (!gCfg->uiOrientation) html += " selected";
+        html += ">Landscape</option>"
+                "<option value='1'";
+        if (gCfg->uiOrientation) html += " selected";
+        html += ">Portrait</option>"
+                "</select></label>";
+        html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
+                "Which way up the display runs. The panel is rotated once at "
+                "startup, so this takes effect when the device reboots — which "
+                "saving here does anyway.</p>";
+    }
+#endif
     html += "<div class='row2'>";
     snprintf(tmp, sizeof(tmp), "%lu", (unsigned long)gCfg->screenOnSecs);
     html += "<label>Screen Timeout (s)<input name='screen_on' type='number' min='0' value='";
@@ -6881,6 +6899,14 @@ static void handlePostSave() {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }
 #if FEATURE_LOCK_SCREEN
+#if HAS_RUNTIME_ORIENTATION
+    // hasArg-guarded like brightness: a lite page that does not render the
+    // control must not be read as a request to set it to zero.
+    if (server.hasArg("orientation")) {
+        gCfg->uiOrientation = (server.arg("orientation").toInt() != 0) ? 1 : 0;
+    }
+#endif
+
     // hasArg-guarded for the same reason as brightness above.
     if (server.hasArg("lock_brightness")) {
         gCfg->lockScreenBrightness =

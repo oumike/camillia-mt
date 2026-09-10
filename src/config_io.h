@@ -534,10 +534,18 @@ struct RhinoConfig {
     // so a zero read out of an old blob resolves to 10%, which is exactly the
     // wanted default. Always read this through cfgCoerceBrightness().
     uint8_t  lockScreenBrightness;
-    // For whoever appends next: the byte below is the remainder of that same
-    // padding and carries the same caveat -- an upgraded device reads zero
-    // there, not your compiled default.
-    uint8_t  _reservedPad13[1];
+    // Panel orientation: 0 = landscape, 1 = portrait. Heltec V4 only; every
+    // other board ignores it and reads its shape off the build (issue #77).
+    //
+    // Spends the reserved byte the note above describes, and is the rare field
+    // that wants exactly what that note warns about: an upgrading device reads
+    // zero here, and zero is landscape, which is what every build before this
+    // setting ran unless it was the separate vertical firmware. Those units are
+    // carried across by the standalone `uiOrient` NVS key instead -- this field
+    // is the mirror of that key, not its home, because the settings blob is
+    // unpacked long after the panel has already been rotated. Written by
+    // persistConfigToPrefs() and re-read in applyLoadedConfigInvariants().
+    uint8_t  uiOrientation;
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

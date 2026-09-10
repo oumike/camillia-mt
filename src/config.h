@@ -28,6 +28,19 @@
 #  define DEVICE_UI_VERTICAL 0
 #endif
 
+// What a device with no orientation key yet takes as its own, once, on the boot
+// that finds the key missing (issue #77). Fresh installs are landscape.
+//
+// The heltec-v4-vertical / heltec-r8-vertical envs build byte-identical
+// firmware with this set to 1, so a device flashed from one comes up portrait
+// and writes that as its own choice. They are NOT published as release assets
+// (see RELEASE_ENVS in scripts/release.sh) -- they exist for a seeded USB flash
+// when one is wanted. A unit still on the old separate vertical firmware
+// therefore does not migrate over the air; it needs reflashing once.
+#ifndef ORIENTATION_SEED_PORTRAIT
+#  define ORIENTATION_SEED_PORTRAIT 0
+#endif
+
 #if defined(DEVICE_WIO_TRACKER_L2)
 #  define HAS_ENV_SENSOR_TELEMETRY 0
 #elif defined(DEVICE_HELTEC_V4_EXPANSION)

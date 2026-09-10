@@ -5,7 +5,7 @@
 .vscode/ipch
 .claude
 builds
-resume-claude.sh
+scripts/resume-claude.sh
 dist/
 logs/
 # Device backups from backup.sh. Multi-megabyte flash images, and nvs.bin holds
