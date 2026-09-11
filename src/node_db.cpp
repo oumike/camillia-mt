@@ -1,6 +1,7 @@
 #include "node_db.h"
 #include "utf8_utils.h"
 #include "config_io.h"   // sdBegin()
+#include "gps.h"         // gpsHasFix/gpsLatI/gpsLonI for the wardriving fallback
 #include <Preferences.h>
 #include "storage.h"
 #include <nvs.h>
@@ -189,6 +190,7 @@ void NodeDB::init() {
         e->lastHeardMs  = 0;  // unknown after reboot
         e->lastPosMs    = 0;  // unknown after reboot
         e->lastPersistMs = 0;
+        e->heardLatI = 0; e->heardLonI = 0; e->hasHeardPosition = false;
     }
 
     if (staleIds) {
@@ -429,7 +431,8 @@ static void nodeCsvQuote(const char *in, char *out, size_t outLen) {
 const char *nodeCsvHeader() {
     return "lastHeardEpoch,nodeId,shortName,longName,hops,snr,latI,lonI,alt,"
            "battPct,voltage,chUtil,airUtil,tempC,humidityPct,pressureHpa,"
-           "chanIdx,favorite,hasPosition,hasTelemetry,pubKey";
+           "chanIdx,favorite,hasPosition,hasTelemetry,pubKey,"
+           "heardLatI,heardLonI,hasHeardPosition";
 }
 
 void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
@@ -459,7 +462,8 @@ void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
 
     snprintf(out, outLen,
              "%ld,!%08lx,%s,%s,%u,%.2f,%ld,%ld,%ld,"
-             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%s",
+             "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d,%s,"
+             "%ld,%ld,%d",
              lastHeardEpoch,
              (unsigned long)e.nodeId,
              shortQ, longQ,
@@ -471,7 +475,9 @@ void nodeCsvFormatEntry(const NodeEntry &e, char *out, size_t outLen) {
              e.favorite ? 1 : 0,
              e.hasPosition ? 1 : 0,
              e.hasTelemetry ? 1 : 0,
-             pubHex);
+             pubHex,
+             (long)e.heardLatI, (long)e.heardLonI,
+             e.hasHeardPosition ? 1 : 0);
 }
 
 // Reader half of nodeCsvQuote(). See node_db.h for the contract.
@@ -1083,6 +1089,16 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     e->lastHeardMs = pkt.rxMs;
     _sortDirty = true;   // recency is a ranking key
     e->snr         = pkt.snr;
+    // Wardriving fallback (see node_db.h): overwritten on every packet so the
+    // stamp always reflects where we were the LAST time we heard this node,
+    // not the first — more useful when driving/walking a route. Only stamped
+    // while our own GPS actually has a fix; a node heard entirely indoors
+    // stays without a heard-position rather than getting a stale or bogus one.
+    if (gpsHasFix()) {
+        e->heardLatI = gpsLatI();
+        e->heardLonI = gpsLonI();
+        e->hasHeardPosition = true;
+    }
     // Routing ACK/NAK can arrive on a fallback channel and should not drive
     // future DM channel selection.
     bool isRoutingAckOrNak = (pkt.portnum == ROUTING_APP && pkt.requestId != 0);

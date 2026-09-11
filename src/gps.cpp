@@ -663,6 +663,35 @@ static void gpsSendNmea(const char *body) {
     _serial.flush();
 }
 
+// Best-effort: ask the receiver to search every constellation it supports
+// (GPS+GLONASS+Galileo+BeiDou) instead of whatever subset it powered up with.
+// More candidate satellites in view generally means a faster first fix,
+// especially with partial sky view (urban canyon, indoors near a window).
+//
+// Sent once, right after the NMEA stream is first confirmed alive — not
+// before, because a command sent to a receiver that has not even answered
+// yet cannot be trusted to land. Like the standby commands above, both
+// dialects are sent every time and the one that does not apply is simply
+// discarded as an unrecognised sentence: there is no reliable way to tell a
+// CASIC/AT6558-class part from a MediaTek L76-class part at runtime, and
+// guessing wrong here costs nothing.
+//
+//   PCAS (CASIC / AT6558-class)  $PCAS04,<mask>   bit0=GPS bit1=BDS
+//                                                  bit2=GLONASS bit3=Galileo
+//   PMTK (MediaTek L76-class)    $PMTK353,<GPS>,<GLONASS>,<Galileo>,<GALIL_FULL>,<BeiDou>
+//
+// Unverified against real hardware for this project — both command forms are
+// the commonly documented dialect for these chip families, but exact
+// behaviour varies by firmware revision. Worst case it is a no-op exactly
+// like an unrecognised standby command already is; it is not expected to
+// make anything worse.
+static void gpsEnableAllConstellations() {
+    gpsSendNmea("PCAS04,15");            // GPS+BDS+GLONASS+Galileo, all bits set
+    delay(20);
+    gpsSendNmea("PMTK353,1,1,1,0,1");    // GPS+GLONASS+Galileo+BeiDou
+    debugLogGps("[gps] requested multi-GNSS search (best-effort, chip dialect unknown)\n");
+}
+
 static void gpsDutySleep() {
     if (_dutyAsleep || !_enabled) return;
     // Ask for a standby slightly longer than our own timer so the module's
@@ -792,6 +821,7 @@ void gpsLoop() {
             _streamConfigLocked = true;
             _everValidStreamSeen = true;
         debugLogGps("[gps] valid NMEA stream detected at baud=%lu\n", (unsigned long)_activeBaud);
+        gpsEnableAllConstellations();
     }
 
     // Boards can occasionally latch onto a noisy UART config that yields

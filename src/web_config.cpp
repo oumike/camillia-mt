@@ -4356,6 +4356,39 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                 "remembered networks, and switching between them, live on the "
                 "<b>WiFi</b> tab.</p>";
     }
+    {
+        // Web config drops the connection after this many idle minutes (no HTTP
+        // request), to stop paying the WiFi-modem-sleep-disabled power cost
+        // forever if you forget to close the page. There was previously no way
+        // to see or change this from the UI at all — it silently used the
+        // 600s/10min compiled default (see MY_WEBCFG_IDLE_S in config.h), which
+        // is easy to hit mid-session while reading rather than clicking (e.g.
+        // stepping through several settings screens one at a time). 0 = never,
+        // for anyone who would rather manage power themselves.
+        static const struct { uint32_t secs; const char *label; } kIdleOpts[] = {
+            { 300,   "5 minutes" },
+            { 600,   "10 minutes (default)" },
+            { 900,   "15 minutes" },
+            { 1800,  "30 minutes" },
+            { 3600,  "1 hour" },
+            { 0,     "Never" },
+        };
+        const uint32_t curIdle = gCfg->webCfgIdleTimeoutS;
+        html += "<label>Web Config Idle Timeout<select name='webcfg_idle_s'>";
+        for (size_t i = 0; i < sizeof(kIdleOpts) / sizeof(kIdleOpts[0]); i++) {
+            snprintf(tmp, sizeof(tmp), "<option value='%lu'%s>%s</option>",
+                     (unsigned long)kIdleOpts[i].secs,
+                     (curIdle == kIdleOpts[i].secs) ? " selected" : "",
+                     kIdleOpts[i].label);
+            html += tmp;
+        }
+        html += "</select></label>";
+        html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+                "How long web config stays open with no activity before it shuts "
+                "itself down. Every page load and save counts as activity; time "
+                "spent just reading a page does not. \"Never\" keeps WiFi (and its "
+                "power draw) on until you close it from Utilities yourself.</p>";
+    }
     sectionEnd(html, lite);
     sendChunk(html);
 
@@ -7199,6 +7232,14 @@ static void handlePostSave() {
             gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
             strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
             gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
+        }
+
+        if (server.hasArg("webcfg_idle_s")) {
+            gCfg->webCfgIdleTimeoutS = (uint32_t)server.arg("webcfg_idle_s").toInt();
+            // Apply to the session that is saving it, not just the next one —
+            // otherwise the very act of changing this setting could still time
+            // you out under the old value a minute later.
+            gIdleTimeoutMs = gCfg->webCfgIdleTimeoutS * 1000UL;
         }
 
         // Persist auth/connectivity keys immediately so reboot recovery doesn't
