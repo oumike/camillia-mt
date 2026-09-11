@@ -4,6 +4,7 @@
 - Heltec V4, V4-R8 and other touch-only boards: an unread direct message now blinks the **DM** button in the bottom nav bar amber, so the alert sits on the button that opens it.
 
 ### Changed
+- T-Deck and Attaky Mesh Deck: the bottom nav bar no longer prints the keyboard shortcut letter beside each icon. The bar is icons only on every touch board now, the same as on the T-Deck Pro and the touch-only boards; the keys themselves are unchanged, and switching the bar off (Config → **Nav Bar**) still restores the key-hint strip under the chat.
 - Heltec V4 and V4-R8 ship a single firmware image each; there are no longer separate vertical downloads. **Devices currently running the old vertical firmware will not update over the air** — their update check looks for an asset that is no longer published. Reflash once over USB to rejoin the normal update path.
 
 ### Fixed

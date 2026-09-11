@@ -18256,12 +18256,6 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         // The one glyph that is not from the built-in symbol set, and so has to
         // be drawn with the emoji face instead of the plain one.
         bool emoji;
-        // The key that does the same thing from the chat screen, drawn beside
-        // the icon on keyboard boards and ignored on touch-only ones. nullptr
-        // where there is no key: Home is Backspace, which is not a letter to
-        // print, and Help has no chat-screen key at all — the button is the
-        // only way to it on this board.
-        const char *key;
     };
 
     // Nodes is a list of people, so it gets a person. LVGL's symbol set has no
@@ -18274,12 +18268,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // U+1F464 with the base face would put a tofu box in the nav bar. A list
     // icon is a worse Nodes icon than a person, and a much better one than a
     // rectangle.
-    // 14 on every board, keyboard ones included. The glyph and its shortcut
-    // letter do fit side by side at this size: the widest pair is the node
-    // roster's — a 16 px emoji beside "(N)" at 14.9 px — which comes to 32 px
-    // against the ~35 px a button has to give on a 320 px bar. (The letters are
-    // narrower than they look: "(C)" is 14 px at montserrat_10, not the ~17 px
-    // a glance at the parens suggests.)
+    // 14 on every board, keyboard ones included. A button is ~35 px wide on a
+    // 320 px bar and the widest glyph — the node roster's 16 px emoji — clears
+    // that with room to spare, so the icon is sized to be recognised rather
+    // than to share its cell.
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
     const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
     const bool navEmojiReady = (navEmojiFont != navIconFont);
@@ -18339,15 +18331,15 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // apart; it now sits with Help at the right end, where you go deliberately
     // rather than in passing.
     const NavItem kItems[] = {
-        {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false, nullptr},
-        {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji, "(D)"},
+        {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false},
+        {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji},
         // The node roster, and the packet feed coming in over the air.
         {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
-                             HELTEC_NAV_NODES,  navEmojiReady, "(N)"},
+                             HELTEC_NAV_NODES,  navEmojiReady},
         {navEmojiReady ? kToolsIcon : LV_SYMBOL_BARS,
-                             HELTEC_NAV_TOOLS,  navEmojiReady, "(L)"},
-        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
-        {"?",                HELTEC_NAV_LEGEND, false, nullptr},
+                             HELTEC_NAV_TOOLS,  navEmojiReady},
+        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false},
+        {"?",                HELTEC_NAV_LEGEND, false},
     };
 
     // Portrait is 80 px narrower and the bar carries the same seven cells, so
@@ -18403,19 +18395,6 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                             LV_EVENT_PRESSED,
                             (void *)(intptr_t)kItems[i].target);
 
-        // A flex row rather than a centered label: on keyboard boards the
-        // button holds two children — the glyph and the key that does the same
-        // thing — and centering the pair as a row is what keeps them one
-        // control instead of two things that happen to overlap. With a single
-        // child it centers exactly as lv_obj_center() did.
-        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
-        // 1 px, not 2: the glyph grew and this is part of what pays for it. The
-        // two read as one control at either gap — they are already the only
-        // things inside a bordered button.
-        lv_obj_set_style_pad_column(btn, 1, 0);
-
         lv_obj_t *label = lv_label_create(btn);
         // Bigger than the 10 the words used: a glyph carries no letters to
         // read, so it has to be big enough to recognise by shape. Still clears
@@ -18424,20 +18403,9 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                                    kItems[i].emoji ? navEmojiFont : navIconFont, 0);
         lv_obj_set_style_text_color(label, navTextColor, 0);
         lv_label_set_text(label, kItems[i].icon);
+        lv_obj_center(label);
 #if UI_TOUCH_ONLY_PROFILE
         if (kItems[i].target == HELTEC_NAV_DM) navDmIconRegister(label);
-#endif
-
-#if !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
-        // Dimmer than the icon and a size down: it labels the button rather
-        // than being the button, the same relationship the key hints it
-        // replaced had with the text around them.
-        if (kItems[i].key) {
-            lv_obj_t *keyLabel = lv_label_create(btn);
-            lv_obj_set_style_text_font(keyLabel, &lv_font_montserrat_10, 0);
-            lv_obj_set_style_text_color(keyLabel, lv_color_hex(0xA7C7FF), 0);
-            lv_label_set_text(keyLabel, kItems[i].key);
-        }
 #endif
     }
 #else
@@ -42348,8 +42316,9 @@ static void buildUi() {
     // touch-only builds use, sharing this bar with the GPS/WiFi/DM icons that
     // already lived on it. The key-hint text that used to fill the left is what
     // pays for the room — six buttons plus the status icons is the whole line.
-    // The keys themselves still work, and each button that has one now prints
-    // it beside its icon, so the hints are on the buttons rather than gone.
+    // The keys themselves still work and the Help screen lists them; the bar
+    // itself stays icons only, the same on a touch board with a keyboard as on
+    // one without.
     s_chatShortcutText = nullptr;
     populateHeltecBottomNav(s_chatShortcutBar, HELTEC_NAV_HOME);
 

@@ -92,6 +92,11 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   above. Holding your own message or a system line does nothing, and the tap
   that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
+- On touch builds the bottom navigation bar is icon-only. The letters above
+  still work; they are just not printed beside the icons, which keeps the bar
+  identical on a touch board with a keyboard and one without. Turning the bar
+  off (Config → **Nav Bar**, on T-Deck, T-Deck Pro and Mesh Deck) brings back
+  the key-hint strip under the chat
 - Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
   T opens the Tools modal (SNR/RSSI, ChUtil and Beacons everywhere, plus
   Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
@@ -129,8 +134,6 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   from both device and Web Config.
 - When the display sleeps, its retained frame shows Camillia, the node name,
   local time, and date. The time refreshes once per minute.
-- The bottom navigation bar is icon-only; physical keyboard shortcuts still
-  work but are not repeated beside the icons.
 - The expanded channel list matches the channel selector's width. In compose,
   keyboard hints and the character count occupy separate footer lines.
 
