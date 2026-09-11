@@ -26,6 +26,16 @@ struct NodeEntry {
     bool     hasHops;
     uint32_t lastHeardMs;
     bool     hasPosition;
+    // Wardriving fallback: our OWN position (degrees * 1e7) at the moment this
+    // node was last heard, stamped only while our GPS has a fix. Most nodes
+    // never broadcast their own POSITION packet, which otherwise makes them
+    // useless for mapping where you actually heard them. This does not claim
+    // to be the node's real location — it is "where I was standing when I
+    // heard it", the same convention WiFi wardriving already uses for an AP's
+    // logged position. hasPosition (the node's own reported fix, if any)
+    // always takes priority over this in the CSV export.
+    int32_t  heardLatI, heardLonI;
+    bool     hasHeardPosition;
     bool     hasTelemetry;
     bool     hasDeviceTelemetry;
     bool     hasEnvironmentTelemetry;
