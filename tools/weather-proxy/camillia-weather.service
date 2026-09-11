@@ -1,0 +1,20 @@
+# systemd alternative to the container, if you would rather not add one.
+#   sudo cp weather_proxy.py /opt/camillia/
+#   sudo cp camillia-weather.service /etc/systemd/system/
+#   sudo systemctl enable --now camillia-weather
+[Unit]
+Description=Camillia weather proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/camillia/weather_proxy.py
+Restart=on-failure
+RestartSec=5
+User=nobody
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

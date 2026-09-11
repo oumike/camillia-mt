@@ -62,6 +62,12 @@ Typical flow on keyboard builds: pick a channel, press **Enter** to move the
 cursor into that channel's messages, scroll to a message to select it, then press
 **Space** to compose (a reply if a row is selected, otherwise a new message).
 
+On every board with a touch panel, the bottom navigation bar is **icon-only**.
+The keyboard shortcuts that reach the same screens still work on the builds that
+have a keyboard — they are listed below and on the Help screen — but they are
+not printed beside the icons, and switching the bar off (Config → Nav Bar) still
+brings back the key-hint strip under the chat.
+
 ## Keyboard shortcuts by build
 
 ### Shared shortcuts (keyboard builds)
@@ -92,6 +98,13 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   above. Holding your own message or a system line does nothing, and the tap
   that ends the hold does not also select the message for reply.
 - Note: inside the compose box, Enter still **sends** the message.
+- **Alt+Backspace is Back** on every build whose keyboard has an Alt of its own —
+  T-Deck, T-Deck Pro, Mesh Deck and Cardputer — and does what the M9's dedicated
+  **Back** button does. In compose it discards the draft and closes; everywhere
+  else (filters, the channel and Wi-Fi text fields, closing a popup) it behaves
+  as an ordinary Backspace, so the chord is only worth reaching for when you
+  want to abandon a message. The Pager has no Alt — its modifier layer is
+  Sym/Shift — so it has no equivalent.
 - Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
   T opens the Tools modal (SNR/RSSI, ChUtil and Beacons everywhere, plus
   Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
@@ -129,8 +142,6 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   from both device and Web Config.
 - When the display sleeps, its retained frame shows Camillia, the node name,
   local time, and date. The time refreshes once per minute.
-- The bottom navigation bar is icon-only; physical keyboard shortcuts still
-  work but are not repeated beside the icons.
 - The expanded channel list matches the channel selector's width. In compose,
   keyboard hints and the character count occupy separate footer lines.
 
@@ -360,6 +371,35 @@ it.
 - The list also empties when Mesh Beacons is switched off, so an old offer can
   never sit on screen after the feature has been turned off
 - Close with the device close key (see device sections below)
+
+### Weather
+
+Current conditions for wherever the node is: temperature and what it feels
+like, the sky, humidity, and wind with its gusts and direction. Current
+conditions only — no forecast.
+
+- Open from Live → Tools → Weather (W). The title names the place the reading
+  is for — "Weather - Golden, CO" — when the proxy can resolve one
+- Units follow **Config → Units**; there is nothing to set separately
+- The reading is fetched when you open the screen and then cached for ten
+  minutes, so reopening it is free. **R** refetches inside that window — after a
+  failure, or once you have moved
+- **Works out of the box.** It ships pointing at a public proxy
+  (`http://weather.camillia.sumat.org`), because this firmware has no TLS client
+  and weather APIs are HTTPS-only, so something has to bridge the two. Point
+  Web Config → **Weather Server** at your own instead, or clear the field to
+  turn the screen off entirely — see [docs/WEATHER.md](WEATHER.md), which
+  includes the container and the contract
+- The position is **rounded to about a kilometre before it leaves the device**,
+  and the screen says so. Weather is a town-resolution question. This is
+  independent of Share Location, which governs what goes out over the mesh; to
+  send nothing at all, leave the Weather Server field empty
+- A reading that fails to refresh is kept and shown with its age rather than
+  discarded, so a dropped Wi-Fi connection leaves you the last thing that worked
+- Every failure names what to change: no server set, no position, no Wi-Fi, the
+  proxy unreachable, or the proxy answering with something that is not weather
+- Not available on Cardputer, for the same reason LOS is not: its web config is
+  lite-only, with nowhere to put the server field
 
 ### MQTT Monitor
 

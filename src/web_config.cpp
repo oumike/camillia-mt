@@ -3423,6 +3423,21 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "Leave empty to disable LOS.</p>";
 #endif
 
+#if HAS_WEATHER
+    // Weather proxy for Tools -> Weather. Same shape and same constraint as the
+    // elevation endpoint above, and a separate service — see docs/WEATHER.md.
+    html += "<div class='row2'>";
+    html += "<label>Weather Server<input name='weather_srv' type='text' maxlength='95' value='";
+    html += gCfg->weatherServer;
+    html += "' placeholder='http://host:port'></label>";
+    html += "</div>";
+    html += "<p class='hint'>The weather screen fetches current conditions from "
+            "<code>&lt;server&gt;/weather?lat=&amp;lon=&amp;units=</code>. Must be "
+            "<b>http://</b> — there is no TLS client in this firmware. The position is "
+            "rounded to about a kilometre before it is sent. Leave empty to disable "
+            "the weather screen.</p>";
+#endif
+
     // ── Time and Date ─────────────────────────────────────────
     // Automatic means NTP when there's a network path and GPS otherwise. Manual
     // stops both from touching the clock and uses the fields below, which are
@@ -6724,6 +6739,12 @@ static void handlePostSave() {
     strncpy(gCfg->losElevServer, server.arg("los_elev").c_str(),
             sizeof(gCfg->losElevServer) - 1);
     gCfg->losElevServer[sizeof(gCfg->losElevServer) - 1] = '\0';
+#endif
+#if HAS_WEATHER
+    // Trailing slashes are stripped by the fetcher here too.
+    strncpy(gCfg->weatherServer, server.arg("weather_srv").c_str(),
+            sizeof(gCfg->weatherServer) - 1);
+    gCfg->weatherServer[sizeof(gCfg->weatherServer) - 1] = '\0';
 #endif
     if (!gCfg->ntpServer[0]) {
         strncpy(gCfg->ntpServer, MY_NTP_SERVER, sizeof(gCfg->ntpServer) - 1);

@@ -1071,6 +1071,8 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     // network error. Empty means "not configured", which the LOS modal reports
     // in terms the operator can act on.
     cfg.losElevServer[0] = '\0';
+    strncpy(cfg.weatherServer, MY_WEATHER_SERVER, sizeof(cfg.weatherServer) - 1);
+    cfg.weatherServer[sizeof(cfg.weatherServer) - 1] = '\0';
     cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);

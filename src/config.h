@@ -62,6 +62,18 @@
 #  define HAS_NODE_LOS 1
 #endif
 
+// Weather (Tools -> Weather). Current conditions for wherever the node is,
+// fetched through an operator-run proxy — see docs/WEATHER.md.
+//
+// Off on the Cardputer for exactly the reason LOS is: the proxy address has to
+// be configured somewhere, and that board serves web config in lite form with
+// no Utilities tab to put the field on.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#  define HAS_WEATHER 0
+#else
+#  define HAS_WEATHER 1
+#endif
+
 // ── Hardware pin definitions (per-device) ────────────────────────────────────
 // All BOARD_*, TFT_*, LORA_*, GPS_*, BATT_*, HAS_* macros are defined here.
 #include "hal/board.h"
@@ -312,6 +324,18 @@
 // device can do. 0 = never time out.
 #define MY_WEBCFG_IDLE_S    600    // 10 minutes
 #define MY_NTP_SERVER       "meshtastic.pool.ntp.org"
+// Default weather proxy (Tools -> Weather). A public instance of
+// tools/weather-proxy/, so the screen works out of the box instead of being a
+// feature nobody can see until they have stood up a service.
+//
+// Plain http:// on purpose and not an oversight: this firmware has no TLS
+// client, so an https:// address could not be reached at all. The host answers
+// plain HTTP without redirecting, which is what makes it usable as a default.
+//
+// Point it somewhere else, or clear it to turn the screen off, in
+// Web Config -> Weather Server. Only the rounded position is ever sent —
+// see docs/WEATHER.md.
+#define MY_WEATHER_SERVER   "http://weather.camillia.sumat.org"
 #define MY_MQTT_ENABLED     0
 #define MY_MQTT_SERVER      "mqtt.meshtastic.org"
 #define MY_MQTT_USER        "meshdev"
@@ -492,6 +516,22 @@
 // its wheel already carries direction logic of its own (kPagerWheelChatNav flips
 // wheel input against j/k), so a second inversion stacked on that needs testing
 // on that hardware first. Add boards here deliberately, one at a time.
+// Boards that can raise KEY_BACK_BTN — "back out of this", as opposed to
+// Backspace's "delete a character". The M9 has a dedicated button for it; every
+// keyboard that exposes Alt as a modifier of its own reaches the same thing
+// with Alt+Backspace. Only compose tells the two apart (it discards the draft
+// and closes); isBackspaceKey() counts KEY_BACK_BTN, so everywhere else the
+// chord behaves exactly like the Backspace it is built from.
+//
+// The Pager is absent because its modifier layer is Sym/Shift with no Alt, so
+// there is no chord to bind. See altNavShortcut() in keyboard.cpp.
+#if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK) \
+    || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_BACK_KEY 1
+#else
+#define HAS_BACK_KEY 0
+#endif
+
 #if defined(DEVICE_TDECK)
 #define HAS_SCROLL_INVERT 1
 #else

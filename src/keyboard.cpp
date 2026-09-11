@@ -22,6 +22,11 @@ static char altNavShortcut(char k) {
         case 'n': case 'N': return KEY_OPEN_NODES;
         case 'l': case 'L': return KEY_OPEN_TOOLS;
         case 'c': case 'C': return KEY_OPEN_CONFIG;
+        // Alt+Backspace is Back, the same thing the M9's dedicated button
+        // raises: compose discards the draft and closes, and everywhere else it
+        // is an ordinary Backspace. 0x7F as well as 0x08 because a keyboard that
+        // reports DEL rather than BS still means the same key.
+        case KEY_BACKSPACE: case 0x7F: return KEY_BACK_BTN;
         default:            return KEY_NONE;
     }
 }
@@ -427,7 +432,11 @@ char tloraTranslateKey(uint8_t keyNum) {
         // tap map above turns it into a character, so the chord has to be
         // resolved before that. Numbers are kTloraTapMap indices + 1 --
         // 15='h', 18='d', 24='n', 12='l', 27='c'.
-        if (keyNum == 8) nav = KEY_SCROLL_UP;
+        // 11 is Backspace on this matrix (the map above runs ...10='q',
+        // 11=Backspace, 12='l'...), so this is the same Alt+Backspace chord the
+        // shared table binds for the boards that resolve Alt themselves.
+        if (keyNum == 11) nav = KEY_BACK_BTN;
+        else if (keyNum == 8) nav = KEY_SCROLL_UP;
         else if (keyNum == 15) nav = KEY_OPEN_HOME;
         else if (keyNum == 18) nav = KEY_OPEN_DMS;
         else if (keyNum == 24) nav = KEY_OPEN_NODES;

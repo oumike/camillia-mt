@@ -1,0 +1,21 @@
+# Camillia weather proxy.
+#
+#   docker compose up -d --build
+#   curl "http://localhost:5006/weather?lat=39.74&lon=-105.21&units=m"
+#
+# Standalone by default, on 5006 so it can sit beside the elevation proxy on
+# 5005 without either needing to move. They are separate services on purpose:
+# either can be run without the other, and neither takes the other down.
+#
+# WEATHER_CACHE_SECONDS sets how long a reading is reused. The default of 600
+# is plenty — conditions do not move faster than that, and the firmware caches
+# on its own side as well.
+services:
+  camillia-weather:
+    build: .
+    container_name: camillia-weather
+    restart: unless-stopped
+    environment:
+      - WEATHER_CACHE_SECONDS=600
+    ports:
+      - "5006:5006"

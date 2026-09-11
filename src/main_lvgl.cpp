@@ -34,6 +34,7 @@ LV_FONT_DECLARE(lv_font_montserrat_bold_12);
 #include "env_sensor.h"
 #include "gps.h"
 #include "los.h"
+#include "weather.h"
 #include "keyboard.h"
 #if defined(DEVICE_MESH_DECK)
 #include "aw9523.h"   // FT6636 reset sits on an expander, released at boot
@@ -1979,6 +1980,11 @@ static void closeDiscoveryPresetModal();
 static void discoveryEndPresetScan(bool aborted);
 #endif
 static void openBeaconsModal();
+#if HAS_WEATHER
+static void openWeatherModal();
+static void closeWeatherModal();
+static void weatherRefresh();
+#endif
 static void closeBeaconsModal();
 static void refreshBeaconsModal(bool force = false);
 #if FEATURE_MQTT_MONITOR
@@ -2189,9 +2195,14 @@ static void closeNodeLocateModal();
 static void nodeLocateOnDetailMapUpdated();
 static void serviceNodeLocateLiveMap(uint32_t nowMs);
 #endif
+#if HAS_NODE_LOS || HAS_WEATHER
+// GPS fix if there is one, else the configured/last-known position. Shared by
+// LOS and the weather screen — both ask the same question, and a second copy
+// would be a second answer waiting to drift.
+static bool nodeLosSelfPosition(double &lat, double &lon);
+#endif
 #if HAS_NODE_LOS
 static void closeNodeLosModal();
-static bool nodeLosSelfPosition(double &lat, double &lon);
 static void openNodeLosModal(uint32_t nodeId);
 #endif
 static void onWebCfgSaved();
@@ -9999,7 +10010,18 @@ static void openComposePrompt(uint32_t replyPacketId,
     const lv_coord_t composeModalRowPad = 1;
 #elif defined(DEVICE_TDECK_PRO)
     const lv_font_t *composeBodyFont = emojiFont(&lv_font_montserrat_12);
-    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 3) + 6);
+    // Ten lines, fixed, and the number is measured rather than chosen: a full
+    // 200-character message wraps to about nine lines at this width — word wrap
+    // leaves a ragged right, so the useful count is nearer 21 characters a line
+    // than the ~28 the pixel width suggests. Ten holds the longest message the
+    // box accepts with one line spare.
+    //
+    // Fixed, not grown and not content-sized. Filling the panel left a full
+    // message using two thirds of the box and the rest empty; sizing to the
+    // content instead made an empty composer collapse to three lines and jump
+    // about as you typed. A box that is always the size of the thing it has to
+    // hold is neither.
+    const lv_coord_t composeInputH = (lv_coord_t)((lv_font_get_line_height(composeBodyFont) * 10) + 6);
     const lv_coord_t composeInputPadTop = 1;
     const lv_coord_t composeModalBottomPad = 2;
     const lv_coord_t composeModalRowPad = 1;
@@ -10178,8 +10200,22 @@ static void openComposePrompt(uint32_t replyPacketId,
 #if defined(DEVICE_TLORA_PAGER_TFT)
     modalH = isReply ? 138 : 116;
 #elif defined(DEVICE_TDECK_PRO)
-    // Two footer rows: character count above, keyboard hints below.
-    modalH = isReply ? 142 : 120;
+    // Measured from the parts rather than picked: 4 px of top padding, the
+    // title, the input, and the two reserved footer rows. No slack anywhere, so
+    // there is no gap between the box and anything around it — which is the
+    // whole reason this is computed instead of being a round number.
+    modalH = (int)(4
+                   + lv_font_get_line_height(&lv_font_montserrat_10)
+                   + composeModalRowPad
+                   + composeInputH
+                   + composeModalRowPad
+                   + lv_font_get_line_height(composeBodyFont)   // character count
+                   + composeModalRowPad
+                   + lv_font_get_line_height(composeBodyFont)   // keyboard legend
+                   + composeModalBottomPad);
+    if (isReply) modalH += (int)(composeReplyRowH + composeModalRowPad);
+    const int composeMaxModalH = lv_disp_get_ver_res(NULL) - 16;
+    if (modalH > composeMaxModalH) modalH = composeMaxModalH;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_M9)
     modalH = isReply ? 126 : 104;
 #elif defined(DEVICE_MESH_DECK)
@@ -10200,7 +10236,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_size(s_composeModal, modalW, modalH);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, -12);
-#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK)
+#elif defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK_PRO)
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);   // centred, grows both ways
 #else
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 10);
@@ -10216,12 +10252,13 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_row(s_composeModal, composeModalRowPad, 0);
     lv_obj_set_flex_flow(s_composeModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_composeModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-#if defined(DEVICE_TDECK_PRO)
-    const lv_coord_t composeFooterLineH = lv_font_get_line_height(composeBodyFont);
-    lv_obj_set_style_pad_bottom(
-        s_composeModal,
-        (lv_coord_t)(composeFooterLineH * 2 + composeModalBottomPad), 0);
-#endif
+    // No bottom-padding reserve on the Pro any more. It used to hold back two
+    // rows for the footer, but lv_obj_align() aligns to the parent's CONTENT
+    // area — padding excluded — so BOTTOM_LEFT put the legend at the bottom of
+    // the *content*, over the input's last line, and left the reserved strip
+    // below it empty. That strip was the white space under the box. The two
+    // labels are ordinary column children below, which is both simpler and
+    // impossible to misplace that way.
 
     lv_obj_t *title = lv_label_create(s_composeModal);
     lv_obj_set_width(title, lv_pct(100));
@@ -10255,7 +10292,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     }
 
     lv_obj_t *composeInputHost = s_composeModal;
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+// No band on the Pro: its box is sized from the message (below), so there is
+// never slack for a band to centre it in — the band would just be somewhere for
+// empty space to live.
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     lv_obj_t *composeCenterBand = lv_obj_create(s_composeModal);
     lv_obj_set_width(composeCenterBand, lv_pct(100));
@@ -10293,7 +10333,7 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9)
     // composeInputH is the FLOOR now, not the exact height. It used to be both:
     // min and max were pinned to it, so the centre band grew to take the slack
@@ -10363,11 +10403,10 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_width(hint, modalW - 8);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
 #elif defined(DEVICE_TDECK_PRO)
-    // Give the keyboard legend its own lower footer line. The count sits one
-    // line above, so neither can overwrite the other as the count grows.
-    lv_obj_add_flag(hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_set_width(hint, modalW - 8);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -composeModalBottomPad);
+    // In the column, not floated: the legend is the last row of the modal and
+    // the modal's height is measured to include it, so it needs no anchoring.
+    // It is moved below the character count once that exists, further down.
+    lv_obj_set_width(hint, lv_pct(100));
 #endif
 
     // Live "x of 200" countdown. Most builds share the hint line; T-Deck Pro
@@ -10386,8 +10425,14 @@ static void openComposePrompt(uint32_t replyPacketId,
     // last item in the column, so its box already ends at the content bottom.
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, 0);
 #elif defined(DEVICE_TDECK_PRO)
-    lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4,
-                 -(composeModalBottomPad + composeFooterLineH));
+    // Right-aligned in its own full-width row, directly under the input, with
+    // the legend moved below it — the same two-row footer as before, built out
+    // of layout instead of two absolute positions that had to agree with a
+    // padding value to land correctly.
+    lv_obj_clear_flag(s_composeCharCount, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_width(s_composeCharCount, lv_pct(100));
+    lv_obj_set_style_text_align(s_composeCharCount, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_move_to_index(hint, (int32_t)lv_obj_get_child_count(s_composeModal) - 1);
 #else
     lv_obj_align(s_composeCharCount, LV_ALIGN_BOTTOM_RIGHT, -4, -composeModalBottomPad);
 #endif
@@ -13971,6 +14016,9 @@ enum LiveTool : uint8_t {
     LIVE_TOOL_DISCOVERY,
 #endif
     LIVE_TOOL_BEACONS,
+#if HAS_WEATHER
+    LIVE_TOOL_WEATHER,
+#endif
 #if FEATURE_MQTT_MONITOR
     LIVE_TOOL_MQTT,
 #endif
@@ -13986,6 +14034,9 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
     'D',
 #endif
     'B',
+#if HAS_WEATHER
+    'W',
+#endif
 #if FEATURE_MQTT_MONITOR
     'M',
 #endif
@@ -18168,6 +18219,12 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             // Home is on the bar of all of them, and whichever is on top is the
             // only one the tap can be coming from anyway.
             if (s_liveToolsModal) closeLiveToolsModal();
+#if HAS_WEATHER
+            // Unguarded, unlike its neighbours: s_weatherModal is defined with
+            // the weather screen far below this function, and closeWeatherModal()
+            // is a no-op when nothing is open anyway.
+            closeWeatherModal();
+#endif
             if (s_nodesActionModal) closeNodesActionMenu();
             if (s_channelActionsModal) closeChannelActionsModal();
             if (s_legendModal) closeLegendModal();
@@ -18256,12 +18313,6 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         // The one glyph that is not from the built-in symbol set, and so has to
         // be drawn with the emoji face instead of the plain one.
         bool emoji;
-        // The key that does the same thing from the chat screen, drawn beside
-        // the icon on keyboard boards and ignored on touch-only ones. nullptr
-        // where there is no key: Home is Backspace, which is not a letter to
-        // print, and Help has no chat-screen key at all — the button is the
-        // only way to it on this board.
-        const char *key;
     };
 
     // Nodes is a list of people, so it gets a person. LVGL's symbol set has no
@@ -18274,12 +18325,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // U+1F464 with the base face would put a tofu box in the nav bar. A list
     // icon is a worse Nodes icon than a person, and a much better one than a
     // rectangle.
-    // 14 on every board, keyboard ones included. The glyph and its shortcut
-    // letter do fit side by side at this size: the widest pair is the node
-    // roster's — a 16 px emoji beside "(N)" at 14.9 px — which comes to 32 px
-    // against the ~35 px a button has to give on a 320 px bar. (The letters are
-    // narrower than they look: "(C)" is 14 px at montserrat_10, not the ~17 px
-    // a glance at the parens suggests.)
+    // 14 on every board. It used to be the largest size that still left room
+    // for a shortcut letter beside the glyph; with the letters gone (issue #78)
+    // the glyph has the button to itself and this is simply the size that reads
+    // at a glance without crowding a 320 px bar's ~35 px cells.
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
     const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
     const bool navEmojiReady = (navEmojiFont != navIconFont);
@@ -18339,15 +18388,15 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // apart; it now sits with Help at the right end, where you go deliberately
     // rather than in passing.
     const NavItem kItems[] = {
-        {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false, nullptr},
-        {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji, "(D)"},
+        {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false},
+        {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji},
         // The node roster, and the packet feed coming in over the air.
         {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
-                             HELTEC_NAV_NODES,  navEmojiReady, "(N)"},
+                             HELTEC_NAV_NODES,  navEmojiReady},
         {navEmojiReady ? kToolsIcon : LV_SYMBOL_BARS,
-                             HELTEC_NAV_TOOLS,  navEmojiReady, "(L)"},
-        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false, "(C)"},
-        {"?",                HELTEC_NAV_LEGEND, false, nullptr},
+                             HELTEC_NAV_TOOLS,  navEmojiReady},
+        {LV_SYMBOL_SETTINGS, HELTEC_NAV_CFG,    false},
+        {"?",                HELTEC_NAV_LEGEND, false},
     };
 
     // Portrait is 80 px narrower and the bar carries the same seven cells, so
@@ -18403,19 +18452,6 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                             LV_EVENT_PRESSED,
                             (void *)(intptr_t)kItems[i].target);
 
-        // A flex row rather than a centered label: on keyboard boards the
-        // button holds two children — the glyph and the key that does the same
-        // thing — and centering the pair as a row is what keeps them one
-        // control instead of two things that happen to overlap. With a single
-        // child it centers exactly as lv_obj_center() did.
-        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER);
-        // 1 px, not 2: the glyph grew and this is part of what pays for it. The
-        // two read as one control at either gap — they are already the only
-        // things inside a bordered button.
-        lv_obj_set_style_pad_column(btn, 1, 0);
-
         lv_obj_t *label = lv_label_create(btn);
         // Bigger than the 10 the words used: a glyph carries no letters to
         // read, so it has to be big enough to recognise by shape. Still clears
@@ -18424,20 +18460,14 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
                                    kItems[i].emoji ? navEmojiFont : navIconFont, 0);
         lv_obj_set_style_text_color(label, navTextColor, 0);
         lv_label_set_text(label, kItems[i].icon);
+        // The glyph is the whole button now (issue #78): every board that draws
+        // this bar is a touch device, so a printed keyboard hint was telling a
+        // thumb about a key. The keys themselves are unchanged — Help still
+        // lists them, and turning the bar off still brings back the key-hint
+        // strip under the chat.
+        lv_obj_center(label);
 #if UI_TOUCH_ONLY_PROFILE
         if (kItems[i].target == HELTEC_NAV_DM) navDmIconRegister(label);
-#endif
-
-#if !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
-        // Dimmer than the icon and a size down: it labels the button rather
-        // than being the button, the same relationship the key hints it
-        // replaced had with the text around them.
-        if (kItems[i].key) {
-            lv_obj_t *keyLabel = lv_label_create(btn);
-            lv_obj_set_style_text_font(keyLabel, &lv_font_montserrat_10, 0);
-            lv_obj_set_style_text_color(keyLabel, lv_color_hex(0xA7C7FF), 0);
-            lv_label_set_text(keyLabel, kItems[i].key);
-        }
 #endif
     }
 #else
@@ -21869,6 +21899,33 @@ static void openNodeLocateModal(uint32_t nodeId) {
 }
 #endif  // HAS_NODE_LOCATE
 
+#if HAS_NODE_LOS || HAS_WEATHER
+// Where this node thinks it is: the GPS fix when there is one, otherwise the
+// configured or last-known position, otherwise nothing.
+//
+// Outside both feature blocks because both ask it — LOS for one end of the
+// path, the weather screen for the only end it has. It lived inside the LOS
+// block when LOS was the only caller; leaving it there would have made the two
+// features' gates load-bearing for each other, and a board that ever wanted one
+// without the other would have found out at link time.
+static bool nodeLosSelfPosition(double &lat, double &lon) {
+#if HAS_GPS
+    if (gpsHasFix() && (gpsLatI() != 0 || gpsLonI() != 0)) {
+        lat = (double)gpsLatI() / 1e7;
+        lon = (double)gpsLonI() / 1e7;
+        return true;
+    }
+#endif
+    if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
+        lat = (double)s_cfg.latI / 1e7;
+        lon = (double)s_cfg.lonI / 1e7;
+        return true;
+    }
+    return false;
+}
+
+#endif
+
 #if HAS_NODE_LOS
 // ── LOS (terrain line of sight) ──────────────────────────────────────────────
 // Node Actions -> LOS. Fetches a ground-elevation profile along the great
@@ -21924,22 +21981,6 @@ static void onNodeLosBackdropPressed(lv_event_t *e) {
 
 // Our own position: a live fix when there is one, the stored/manual position
 // otherwise. Without either there is no path to analyse.
-static bool nodeLosSelfPosition(double &lat, double &lon) {
-#if HAS_GPS
-    if (gpsHasFix() && (gpsLatI() != 0 || gpsLonI() != 0)) {
-        lat = (double)gpsLatI() / 1e7;
-        lon = (double)gpsLonI() / 1e7;
-        return true;
-    }
-#endif
-    if (s_cfg.latI != 0 || s_cfg.lonI != 0) {
-        lat = (double)s_cfg.latI / 1e7;
-        lon = (double)s_cfg.lonI / 1e7;
-        return true;
-    }
-    return false;
-}
-
 static void nodeLosRenderResult() {
     if (!lvObjValid(s_nodeLosPlot) || !lvObjValid(s_nodeLosVerdict)) return;
 
@@ -24697,6 +24738,11 @@ static bool liveToolEnabled(int tool) {
 #if FEATURE_MQTT_MONITOR
     if (tool == LIVE_TOOL_MQTT) return s_cfg.wifiEnabled;
 #endif
+#if HAS_WEATHER
+    // Same rule as MQTT: the row stays on the grid and says why it is dead,
+    // rather than coming and going with a setting.
+    if (tool == LIVE_TOOL_WEATHER) return s_cfg.wifiEnabled;
+#endif
     LV_UNUSED(tool);
     return true;
 }
@@ -24720,6 +24766,9 @@ static void liveToolsActivate(int tool) {
         case LIVE_TOOL_DISCOVERY: openDiscoveryModal();    break;
 #endif
         case LIVE_TOOL_BEACONS:   openBeaconsModal();      break;
+#if HAS_WEATHER
+        case LIVE_TOOL_WEATHER:   openWeatherModal();      break;
+#endif
 #if FEATURE_MQTT_MONITOR
         case LIVE_TOOL_MQTT:      openMqttMonitorModal();  break;
 #endif
@@ -24793,6 +24842,9 @@ static void openLiveToolsModal() {
         "Discovery",
 #endif
         "Beacons",
+#if HAS_WEATHER
+        "Weather",
+#endif
 #if FEATURE_MQTT_MONITOR
         "MQTT",
 #endif
@@ -24811,6 +24863,9 @@ static void openLiveToolsModal() {
         "(D)iscovery",
 #endif
         "(B)eacons",
+#if HAS_WEATHER
+        "(W)eather",
+#endif
 #if FEATURE_MQTT_MONITOR
         "(M)QTT",
 #endif
@@ -25846,6 +25901,344 @@ static void beaconsClear() {
     s_beaconOfferSeq++;
     refreshBeaconsModal(true);
 }
+
+#if HAS_WEATHER
+// ── Weather ──────────────────────────────────────────────────────────────────
+// Current conditions for wherever this node is, through an operator-run proxy.
+// See docs/WEATHER.md for the contract and why a proxy is needed at all.
+//
+// Fetched on open and then cached, rather than polled: Wi-Fi is not always up,
+// and a weather screen has no business being a reason to bring the radio up or
+// keep it there.
+static lv_obj_t   *s_weatherModal  = nullptr;
+static lv_obj_t   *s_weatherStatus = nullptr;
+static lv_obj_t   *s_weatherBody   = nullptr;
+static lv_obj_t   *s_weatherTitle  = nullptr;   // "Weather" / "Weather - City, ST"
+static lv_obj_t   *s_weatherTemp   = nullptr;   // the big number
+static lv_obj_t   *s_weatherDesc   = nullptr;   // "Clear", under it
+static lv_timer_t *s_weatherTimer  = nullptr;
+
+// Theme-aware ink. The modal follows the light/dark UI mode the rest of the
+// settings modals do, and the hero block takes the *theme's* accent rather than
+// a colour of its own, so it stays in key with whatever palette is chosen.
+//
+// The T-Deck Pro is exempt from all of it: that panel is 1-bit, so LVGL
+// thresholds every colour to pure black or white and an accent would land on
+// whichever side of the threshold it happened to fall. Black on white is the
+// only thing that reads there.
+struct WeatherInk {
+    lv_color_t bg, border, title, hero, body, muted;
+};
+
+static WeatherInk weatherInk() {
+    WeatherInk k;
+#if defined(DEVICE_TDECK_PRO)
+    k.bg     = lv_color_make(255, 255, 255);
+    k.border = lv_color_make(0, 0, 0);
+    k.title  = lv_color_make(0, 0, 0);
+    k.hero   = lv_color_make(0, 0, 0);
+    k.body   = lv_color_make(0, 0, 0);
+    k.muted  = lv_color_make(0, 0, 0);
+#else
+    const bool light = (s_cfg.uiMode == UI_MODE_LIGHT);
+    k.bg     = light ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    k.border = light ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    k.title  = light ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    // The accent is the same value in both modes — it is chosen to sit on a
+    // dark panel, so painting small text in it on a light one can come out
+    // washed. Dark mode takes it as-is; light mode carries it a long way toward
+    // the body ink, which keeps the hue and buys back the contrast. This is why
+    // the palette uses `accent` as a background elsewhere and puts textMain on
+    // top, rather than drawing type in it.
+    k.hero   = light ? lvColorFrom565(blend565(s_ui.accent, s_ui.textMain, 150))
+                     : lvColorFrom565(s_ui.selectAccent);
+    k.body   = light ? lv_color_hex(0x13243D) : lv_color_hex(0xE8F1FF);
+    k.muted  = light ? lv_color_hex(0x4A5B75) : lv_color_hex(0xA7C7FF);
+#endif
+    return k;
+}
+
+// A reading older than this is refetched when the screen opens. Conditions do
+// not move faster than this, and it is what makes reopening the screen free.
+static constexpr uint32_t kWeatherTtlMs = 10UL * 60UL * 1000UL;
+
+static const char *weatherCompass(int deg) {
+    static const char *const d[] = {"N","NE","E","SE","S","SW","W","NW"};
+    if (deg < 0) deg = 0;
+    return d[(int)((deg + 22) / 45) % 8];
+}
+
+static void weatherRenderReading() {
+    if (!lvObjValid(s_weatherBody) || !lvObjValid(s_weatherStatus)) return;
+    WeatherReading r;
+    if (!weatherLatest(r)) return;
+
+    if (lvObjValid(s_weatherTemp)) {
+        char big[16];
+        snprintf(big, sizeof(big), "%d%s", r.temp, r.tempUnit);
+        lv_label_set_text(s_weatherTemp, big);
+    }
+    if (lvObjValid(s_weatherDesc)) lv_label_set_text(s_weatherDesc, r.desc);
+    if (lvObjValid(s_weatherTitle)) {
+        // A hyphen, not an em dash: these faces draw ASCII and little else, and
+        // a dash outside that range would come back as a missing-glyph box —
+        // the same trap the lock screen's message rows fell into.
+        char t[64];
+        if (r.place[0]) snprintf(t, sizeof(t), "Weather - %s", r.place);
+        else            snprintf(t, sizeof(t), "Weather");
+        lv_label_set_text(s_weatherTitle, t);
+    }
+
+    // Everything the hero block does not say, one fact per line. "Feels like"
+    // lives here rather than beside the big number: it is the same reading
+    // qualified, and putting two temperatures in the headline makes neither of
+    // them the answer to "how warm is it".
+    char body[192];
+    snprintf(body, sizeof(body),
+             "Feels like   %d%s\n"
+             "Humidity     %d%%\n"
+             "Wind         %d %s from %s\n"
+             "Gusting      %d %s",
+             r.feels, r.tempUnit,
+             r.humidityPct,
+             r.wind, r.windUnit, weatherCompass(r.dirDeg),
+             r.gust, r.windUnit);
+    lv_label_set_text(s_weatherBody, body);
+
+    // The age matters here in a way it does not on a live screen: a reading
+    // shown after a failed refresh is still the last true thing we know, and
+    // the operator has to be able to tell one from the other.
+    const uint32_t ageS = weatherAgeMs() / 1000UL;
+    char status[96];
+    const bool stale = (weatherState() != WEATHER_OK);
+    if (ageS < 60) {
+        snprintf(status, sizeof(status), "%s%.2f, %.2f (rounded)",
+                 stale ? "Stale - " : "", r.lat, r.lon);
+    } else {
+        snprintf(status, sizeof(status), "%s%lu min ago - %.2f, %.2f (rounded)",
+                 stale ? "Stale - " : "", (unsigned long)(ageS / 60UL), r.lat, r.lon);
+    }
+    lv_label_set_text(s_weatherStatus, status);
+}
+
+static void weatherPoll(lv_timer_t *t) {
+    LV_UNUSED(t);
+    if (!lvObjValid(s_weatherModal)) return;
+    if (weatherState() == WEATHER_FETCHING) return;
+
+    if (s_weatherTimer) { lv_timer_del(s_weatherTimer); s_weatherTimer = nullptr; }
+
+    const WeatherState st = weatherState();
+    if (st == WEATHER_OK) { weatherRenderReading(); return; }
+
+    // A stale reading is worth more than an error alone, so when one exists it
+    // is drawn and the status line carries the failure instead.
+    WeatherReading r;
+    const bool haveStale = weatherLatest(r);
+    if (haveStale) weatherRenderReading();
+
+    if (!lvObjValid(s_weatherStatus)) return;
+    // Every failure names the thing that can actually be changed. "Failed"
+    // alone is indistinguishable from a bug.
+    char msg[112];
+    switch (st) {
+        case WEATHER_ERR_NO_SERVER:
+            snprintf(msg, sizeof(msg), "No weather server set.\nWeb Config -> Weather Server");
+            break;
+        case WEATHER_ERR_NO_WIFI:
+            snprintf(msg, sizeof(msg), "Wi-Fi needed to fetch conditions.");
+            break;
+        case WEATHER_ERR_NO_POSITION:
+            snprintf(msg, sizeof(msg), "No position yet.\nNeeds a GPS fix or a set location.");
+            break;
+        case WEATHER_ERR_BADREPLY:
+            snprintf(msg, sizeof(msg), "Server answered, but not with\nweather data. Check the proxy.");
+            break;
+        default: {
+            const int code = weatherHttpCode();
+            if (code > 0) snprintf(msg, sizeof(msg), "Weather server error (HTTP %d).", code);
+            else          snprintf(msg, sizeof(msg), "Could not reach the weather server.");
+            break;
+        }
+    }
+    if (haveStale) {
+        // Keep the age on screen next to the reason the refresh failed.
+        char both[192];
+        snprintf(both, sizeof(both), "%s\n%lu min old",
+                 msg, (unsigned long)(weatherAgeMs() / 60000UL));
+        lv_label_set_text(s_weatherStatus, both);
+    } else {
+        lv_label_set_text(s_weatherStatus, msg);
+        if (lvObjValid(s_weatherBody)) lv_label_set_text(s_weatherBody, "");
+        if (lvObjValid(s_weatherTemp)) lv_label_set_text(s_weatherTemp, "--");
+        if (lvObjValid(s_weatherDesc)) lv_label_set_text(s_weatherDesc, "");
+    }
+}
+
+static void closeWeatherModal() {
+    if (s_weatherTimer) { lv_timer_del(s_weatherTimer); s_weatherTimer = nullptr; }
+    if (lvObjValid(s_weatherModal)) lv_obj_del(s_weatherModal);
+    s_weatherModal = nullptr;
+    s_weatherStatus = nullptr;
+    s_weatherBody = nullptr;
+    s_weatherTitle = nullptr;
+    s_weatherTemp = nullptr;
+    s_weatherDesc = nullptr;
+    weatherReset();
+}
+
+static void onWeatherClosePressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    closeWeatherModal();
+}
+
+static void openWeatherModal() {
+    if (!s_rootScreen || s_weatherModal) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+
+    const WeatherInk ink = weatherInk();
+
+    s_weatherModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_weatherModal, w, h);
+    lv_obj_align(s_weatherModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_weatherModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_weatherModal, ink.bg, 0);
+    lv_obj_set_style_border_color(s_weatherModal, ink.border, 0);
+    lv_obj_set_style_bg_opa(s_weatherModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_weatherModal, 1, 0);
+    // 4, not 6: appendHeltecBottomNav() cancels exactly this padding and a 1 px
+    // border to put its bar on the display edges, so a modal that carries the
+    // bar has to use the numbers the helper is written against or the bar sits
+    // inset from the screen by the difference.
+    lv_obj_set_style_pad_all(s_weatherModal, 4, 0);
+    lv_obj_set_style_pad_row(s_weatherModal, 4, 0);
+    lv_obj_set_flex_flow(s_weatherModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_weatherModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_weatherModal);
+    s_weatherTitle = title;
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, ink.title, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_label_set_text(title, "Weather");
+
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_weatherModal, onWeatherClosePressed);
+    // reserveHeltecCloseXRow() pads the right to keep the title clear of the
+    // close button, which leaves a centre-aligned label centred inside the
+    // *reduced* width — that is the slight leftward shift. Matching the pad on
+    // the left puts the text back on the screen's centre line, and the X still
+    // has its gap because the reserved space is unchanged.
+    lv_obj_set_style_pad_left(title, kHeltecCloseXSize + 4, 0);
+#endif
+
+    // The headline: the two things you opened the screen for, at a size that
+    // reads from across a room. montserrat_32 rather than a larger face because
+    // it is already linked on every board that has this screen — the lock-screen
+    // clock uses it — so the size is free where a new one would not be.
+    s_weatherTemp = lv_label_create(s_weatherModal);
+    lv_obj_set_width(s_weatherTemp, lv_pct(100));
+    lv_obj_set_style_text_font(s_weatherTemp, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_color(s_weatherTemp, ink.hero, 0);
+    lv_obj_set_style_text_align(s_weatherTemp, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_pad_bottom(s_weatherTemp, 0, 0);
+    lv_label_set_text(s_weatherTemp, "--");
+
+    s_weatherDesc = lv_label_create(s_weatherModal);
+    lv_obj_set_width(s_weatherDesc, lv_pct(100));
+    lv_obj_set_style_text_font(s_weatherDesc, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(s_weatherDesc, ink.hero, 0);
+    lv_obj_set_style_text_align(s_weatherDesc, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_weatherDesc, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_weatherDesc, "");
+
+    // A rule, not a gap: the block above is one reading and the block below is
+    // its supporting detail, and a line says that where whitespace only hints.
+    lv_obj_t *rule = lv_obj_create(s_weatherModal);
+    lv_obj_set_width(rule, lv_pct(100));
+    lv_obj_set_height(rule, 1);
+    lv_obj_clear_flag(rule, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(rule, 0, 0);
+    lv_obj_set_style_radius(rule, 0, 0);
+    lv_obj_set_style_pad_all(rule, 0, 0);
+    lv_obj_set_style_bg_color(rule, ink.border, 0);
+    lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
+    lv_obj_set_style_margin_top(rule, 2, 0);
+    lv_obj_set_style_margin_bottom(rule, 2, 0);
+
+    s_weatherBody = lv_label_create(s_weatherModal);
+    lv_obj_set_width(s_weatherBody, lv_pct(100));
+    lv_obj_set_style_text_font(s_weatherBody, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_weatherBody, ink.body, 0);
+    lv_label_set_long_mode(s_weatherBody, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_weatherBody, "");
+
+    s_weatherStatus = lv_label_create(s_weatherModal);
+    lv_obj_set_width(s_weatherStatus, lv_pct(100));
+    lv_obj_set_style_text_font(s_weatherStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_weatherStatus, ink.muted, 0);
+    lv_label_set_long_mode(s_weatherStatus, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_weatherStatus, "");
+
+#if !UI_TOUCH_ONLY_PROFILE
+    lv_obj_t *hint = lv_label_create(s_weatherModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, ink.muted, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text_fmt(hint, "R=Refresh  %s=Back", modalCloseKeyLabel());
+#endif
+
+    // Last child, so its spacer reserves the bottom of the column and nothing
+    // above ends up underneath the bar. Tools is the active cell because that
+    // is the surface this screen was opened from — the same relationship Live
+    // has with its own entry.
+    //
+    // Added before the cached-reading return below, or the bar would appear on
+    // a cold open and vanish on a warm one.
+    appendHeltecBottomNav(s_weatherModal, HELTEC_NAV_TOOLS);
+
+    // A reading inside the TTL is shown as-is. Reopening the screen should not
+    // spend time, power and somebody else's API quota on a number that has not
+    // changed since the last look.
+    WeatherReading cached;
+    if (weatherLatest(cached) && weatherAgeMs() < kWeatherTtlMs) {
+        weatherRenderReading();
+        return;
+    }
+
+    weatherRefresh();
+}
+
+// Starts a fetch and puts the screen into its waiting state. Separate from
+// openWeatherModal() because R re-runs exactly this.
+static void weatherRefresh() {
+    if (!lvObjValid(s_weatherStatus)) return;
+
+    double lat = 0, lon = 0;
+    if (!nodeLosSelfPosition(lat, lon)) {
+        lv_label_set_text(s_weatherStatus,
+                          "No position yet.\nNeeds a GPS fix or a set location.");
+        return;
+    }
+
+    weatherReset();
+    lv_label_set_text(s_weatherStatus, "Fetching...");
+    if (!weatherRequest(s_cfg.weatherServer, lat, lon,
+                        s_cfg.displayUnits != 0)) {
+        weatherPoll(nullptr);    // publishes whatever refusal reason was set
+        return;
+    }
+    if (s_weatherTimer) lv_timer_del(s_weatherTimer);
+    s_weatherTimer = lv_timer_create(weatherPoll, 250, nullptr);
+}
+#endif  // HAS_WEATHER
 
 static void openBeaconsModal() {
     // A theme rebuild deletes the root screen out from under us; without this
@@ -33222,6 +33615,9 @@ static bool prepareGlobalNavigation() {
     closeDiscoveryModal();
 #endif
     closeBeaconsModal();
+#if HAS_WEATHER
+    closeWeatherModal();
+#endif
 #if FEATURE_MQTT_MONITOR
     closeMqttMonitorModal();
 #endif
@@ -35041,7 +35437,7 @@ static void pumpKeyboardInput() {
 #endif
                         }
                         break;
-#if defined(DEVICE_M9)
+#if HAS_BACK_KEY
                     // The M9's dedicated Back button. It used to be indistinguishable from the
                     // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
                     // character at a time and there was no way for compose to tell them apart.
@@ -35050,7 +35446,8 @@ static void pumpKeyboardInput() {
                     //
                     // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
                     // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
-                    // exactly as it always did.
+                    // exactly as it always did. Alt+Backspace raises it on the keyboards
+                    // that resolve an Alt of their own — see HAS_BACK_KEY in config.h.
                     case KEY_BACK_BTN:
                         if (s_composeInput) {
                             lv_textarea_set_text(s_composeInput, "");
@@ -35359,7 +35756,7 @@ static void pumpKeyboardInput() {
 #endif
                         }
                         break;
-#if defined(DEVICE_M9)
+#if HAS_BACK_KEY
                     // The M9's dedicated Back button. It used to be indistinguishable from the
                     // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
                     // character at a time and there was no way for compose to tell them apart.
@@ -35368,7 +35765,8 @@ static void pumpKeyboardInput() {
                     //
                     // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
                     // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
-                    // exactly as it always did.
+                    // exactly as it always did. Alt+Backspace raises it on the keyboards
+                    // that resolve an Alt of their own — see HAS_BACK_KEY in config.h.
                     case KEY_BACK_BTN:
                         if (s_composeInput) {
                             lv_textarea_set_text(s_composeInput, "");
@@ -35670,6 +36068,23 @@ static void pumpKeyboardInput() {
             }
             if (k == KEY_SCROLL_DN && s_mqttMonList) {
                 scrollListClamped(s_mqttMonList, -18);
+                continue;
+            }
+            continue;
+        }
+#endif
+
+#if HAS_WEATHER
+        if (s_weatherModal) {
+            if (isModalCloseKey(k)) {
+                closeWeatherModal();
+                continue;
+            }
+            // R refetches. The screen otherwise fetches once on open and then
+            // sits on its cache, so this is the only way to ask again inside
+            // the TTL — after a failure, or when you have moved.
+            if (k == 'r' || k == 'R') {
+                weatherRefresh();
                 continue;
             }
             continue;
@@ -36227,7 +36642,7 @@ static void pumpKeyboardInput() {
 #endif
                 }
                 break;
-#if defined(DEVICE_M9)
+#if HAS_BACK_KEY
             // The M9's dedicated Back button. It used to be indistinguishable from the
             // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
             // character at a time and there was no way for compose to tell them apart.

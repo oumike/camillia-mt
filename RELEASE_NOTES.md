@@ -1,21 +1,17 @@
 ### New
-- Heltec V4 and V4-R8: screen orientation is now a setting instead of a separate firmware — Config → **Orientation** switches between landscape and portrait, asks to confirm, then reboots to apply it. New devices start in landscape.
-- Heltec V4 and V4-R8: orientation can also be set from the web config page, and is included in exported/imported YAML config files.
-- Heltec V4, V4-R8 and other touch-only boards: an unread direct message now blinks the **DM** button in the bottom nav bar amber, so the alert sits on the button that opens it.
+
+- **Weather** — a new Tools screen (press **W**, or Live → Tools → Weather) showing current temperature, what it feels like, the sky, humidity, and wind with gusts and direction for wherever the node is. It works out of the box against a public server, units follow Config → Units, **R** refetches, and the reading is cached for ten minutes so reopening it is instant. Not available on the Cardputer.
+- The weather title names the place the reading is for — "Weather - Golden, CO" — when the server can resolve one.
+- Weather failures say what to change rather than just failing: no server set, no position, no Wi-Fi, server unreachable, or a reply that is not weather. A reading that fails to refresh is kept on screen with its age instead of being discarded.
+- Web Config → **Weather Server** points the weather screen at your own server instead of the default; clearing the field turns the screen off entirely and stops the device sending anything.
+- Ready-to-run weather server for self-hosting under `tools/weather-proxy/` (Docker Compose or systemd), documented in `docs/WEATHER.md`.
+- **Alt+Backspace is Back** on T-Deck, T-Deck Pro, Mesh Deck and Cardputer, doing what the M9's dedicated Back button does. In compose it discards the draft and closes; everywhere else it behaves as an ordinary Backspace.
 
 ### Changed
-- Heltec V4 and V4-R8 ship a single firmware image each; there are no longer separate vertical downloads. **Devices currently running the old vertical firmware will not update over the air** — their update check looks for an asset that is no longer published. Reflash once over USB to rejoin the normal update path.
+
+- The message compose box is now ten lines tall on every board, so a full-length message is visible as you type it, and the box no longer resizes or jumps as the text grows.
+- The bottom navigation bar is icon-only on every touch board — the shortcut letters beside the icons are gone. The keys themselves are unchanged and still listed on the Help screen, and switching the bar off in Config → Nav Bar still brings back the key-hint strip under the chat.
 
 ### Fixed
-- Heltec V4: internal storage failed to mount on every boot, which silently broke chat transcripts, config export/import, saved map tiles and Discovery snapshots. Existing devices keep the old layout until they are reflashed over USB.
-- Heltec V4-R8: the update check asked for Heltec V4 firmware, built for a different mainboard and carrier. It now asks for the correct V4-R8 images.
-- Lock screen: message previews containing curly apostrophes and similar characters no longer show empty boxes, and long lines now wrap at the right place.
 
-
-### Update (v5.0.4)
-### Changed
-- Alt+H on the keyboard boards (T-Deck, T-Deck Pro, Cardputer, Attaky Mesh Deck) now only closes whatever is open and returns to chat — it no longer opens the channel selector when pressed on the chat screen; press H on its own for that.
-- The ThinkNode M9's dedicated Home button is unchanged and still opens the channel list from chat.
-
-### Fixed
-- Attaky Mesh Deck: keystrokes no longer get dropped after pressing Alt+H, since that gesture no longer leaves the channel list open, which slows the keyboard scan.
+- T-Deck Pro: the empty white strip below the compose box is gone, and the keyboard legend no longer sits on top of the last line of the message being typed.

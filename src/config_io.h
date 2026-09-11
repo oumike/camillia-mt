@@ -546,6 +546,19 @@ struct RhinoConfig {
     // unpacked long after the panel has already been rotated. Written by
     // persistConfigToPrefs() and re-read in applyLoadedConfigInvariants().
     uint8_t  uiOrientation;
+    // Base URL of the weather proxy (Tools -> Weather). Plain http:// only,
+    // for the same reason losElevServer above is: no TLS client. Defaults to
+    // MY_WEATHER_SERVER; empty means "off" and the screen says so rather than
+    // failing with a network error that looks like a bug. See docs/WEATHER.md.
+    //
+    // This starts at offset 1112, which is exactly what sizeof(RhinoConfig) was
+    // before it existed — measured, not assumed: uiOrientation sits at 1111 and
+    // is one byte, and the struct had no trailing padding to spare. So it does
+    // NOT land in an old blob's padding, and the usual caveat about reading
+    // zeros there does not apply: an upgrading device leaves these bytes alone
+    // and keeps the compiled default, which is what lets the default above be a
+    // real address rather than only reaching fresh installs.
+    char     weatherServer[96];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────
