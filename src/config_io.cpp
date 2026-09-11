@@ -1584,6 +1584,12 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // network
     out += "  network:\n";
     out += "    ntpServer: "; out += cfg.ntpServer; out += "\n";
+    // The two proxy addresses. They were absent from here for as long as they
+    // have existed, which meant a config backup quietly did not carry them and
+    // a restore came back with both features switched off. It also left them
+    // unreachable on a board whose only way to be configured is this file.
+    out += "    losElevServer: "; out += cfg.losElevServer; out += "\n";
+    out += "    weatherServer: "; out += cfg.weatherServer; out += "\n";
     snprintf(tmp, sizeof(tmp), "    webCfgIdleTimeoutS: %lu\n",
              (unsigned long)cfg.webCfgIdleTimeoutS);                          out += tmp;
     out += "    timeSource: ";
@@ -2188,8 +2194,15 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     }
                 }
             } else if (!strcmp(section, "config") && !strcmp(subsection, "network")) {
-                if (!strcmp(key, "webCfgIdleTimeoutS")) cfg.webCfgIdleTimeoutS = (uint32_t)atol(val);
+                if (!strcmp(key, "webCfgIdleTimeoutS")) cfg.webCfgIdleTimeoutS = cfgCoerceWebCfgIdle(atol(val));
                 else if (!strcmp(key, "ntpServer")) strncpy(cfg.ntpServer, val, sizeof(cfg.ntpServer) - 1);
+                else if (!strcmp(key, "losElevServer")) {
+                    strncpy(cfg.losElevServer, val, sizeof(cfg.losElevServer) - 1);
+                    cfg.losElevServer[sizeof(cfg.losElevServer) - 1] = '\0';
+                } else if (!strcmp(key, "weatherServer")) {
+                    strncpy(cfg.weatherServer, val, sizeof(cfg.weatherServer) - 1);
+                    cfg.weatherServer[sizeof(cfg.weatherServer) - 1] = '\0';
+                }
                 else if (!strcmp(key, "timeSource")) {
                     cfg.timeSource = (!strcmp(val, "MANUAL") || !strcmp(val, "manual"))
                                          ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;

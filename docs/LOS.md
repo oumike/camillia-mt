@@ -89,6 +89,20 @@ gaps and only fails when too many are missing.
 It must be **http://**, not https://. An https:// address cannot be reached at
 all, and will fail on every attempt.
 
+On the **Cardputer** there is no Utilities tab — its web config is lite-only —
+so set the address through the microSD `config.yaml` instead:
+
+```yaml
+config:
+  network:
+    losElevServer: http://192.168.1.50:5005
+```
+
+That field is part of config export/import on every board, so a backup now
+carries it too; before it was added, a restore came back with LOS switched off.
+The Cardputer's 240x135 panel draws a shorter cross-section than the others —
+40 px rather than 74 — so the verdict and the numbers stay on screen.
+
 Leave the field empty to disable LOS entirely — the action stays visible but the
 modal tells you it is unconfigured rather than failing with a network error.
 

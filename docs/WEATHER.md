@@ -21,10 +21,18 @@ not a weather station.
 
 Units follow **Config → Units**. Nothing to set separately.
 
-Not available on the Cardputer, for the same reason terrain line-of-sight is
-not: the proxy address has to be configured somewhere, and that board serves
-web config in lite form with no Utilities tab to put the field on. A feature
-that can be reached but never configured is worse than one that is absent.
+Available on every board. The Cardputer has no Utilities tab in its lite web
+config, so set its address through the microSD `config.yaml` instead:
+
+```yaml
+config:
+  network:
+    weatherServer: http://192.168.1.50:5006
+```
+
+The shipped default means it works there without any of that; the file is how
+you point it somewhere else. Its 240x135 panel uses a compact layout — a
+smaller headline and three detail lines rather than four.
 
 ## Why it needs a proxy
 

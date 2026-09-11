@@ -51,28 +51,25 @@
 
 // Terrain line-of-sight ("LOS") between this node and a contact.
 //
-// Off on the Cardputer. Not for the reason Locate is — a 24-point line costs
-// nothing next to a decoded PNG — but because the elevation endpoint has to be
-// configured somewhere, and that board serves web config in lite form only,
-// with no Utilities tab to put the field on. A feature that can be reached but
-// never configured is worse than one that is absent.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-#  define HAS_NODE_LOS 0
-#else
-#  define HAS_NODE_LOS 1
-#endif
+// On everywhere. It was off on the Cardputer, and the reason was never memory —
+// a 24-point line costs nothing next to a decoded PNG — but that the elevation
+// endpoint had to be configured somewhere, and that board serves web config in
+// lite form with no Utilities tab to put the field on.
+//
+// That is fixed rather than worked around: losElevServer is in the YAML now
+// (config_io.cpp), so the microSD config import every Cardputer already has is
+// a way to set it. The same change also stopped a config backup silently
+// dropping the address on every other board.
+#define HAS_NODE_LOS 1
 
 // Weather (Tools -> Weather). Current conditions for wherever the node is,
 // fetched through an operator-run proxy — see docs/WEATHER.md.
 //
-// Off on the Cardputer for exactly the reason LOS is: the proxy address has to
-// be configured somewhere, and that board serves web config in lite form with
-// no Utilities tab to put the field on.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-#  define HAS_WEATHER 0
-#else
-#  define HAS_WEATHER 1
-#endif
+// On everywhere, for the same reason LOS now is: weatherServer rides in the
+// YAML, so the Cardputer can be told where its proxy is through the microSD
+// config it already supports. It also ships with a working default, so on that
+// board the screen needs no configuration at all to be useful.
+#define HAS_WEATHER 1
 
 // ── Hardware pin definitions (per-device) ────────────────────────────────────
 // All BOARD_*, TFT_*, LORA_*, GPS_*, BATT_*, HAS_* macros are defined here.

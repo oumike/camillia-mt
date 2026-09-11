@@ -1,17 +1,15 @@
 ### New
-
-- **Weather** — a new Tools screen (press **W**, or Live → Tools → Weather) showing current temperature, what it feels like, the sky, humidity, and wind with gusts and direction for wherever the node is. It works out of the box against a public server, units follow Config → Units, **R** refetches, and the reading is cached for ten minutes so reopening it is instant. Not available on the Cardputer.
-- The weather title names the place the reading is for — "Weather - Golden, CO" — when the server can resolve one.
-- Weather failures say what to change rather than just failing: no server set, no position, no Wi-Fi, server unreachable, or a reply that is not weather. A reading that fails to refresh is kept on screen with its age instead of being discarded.
-- Web Config → **Weather Server** points the weather screen at your own server instead of the default; clearing the field turns the screen off entirely and stops the device sending anything.
-- Ready-to-run weather server for self-hosting under `tools/weather-proxy/` (Docker Compose or systemd), documented in `docs/WEATHER.md`.
-- **Alt+Backspace is Back** on T-Deck, T-Deck Pro, Mesh Deck and Cardputer, doing what the M9's dedicated Back button does. In compose it discards the draft and closes; everywhere else it behaves as an ordinary Backspace.
+- Weather and terrain line-of-sight are now available on the Cardputer, which previously had neither; both server addresses are set through the microSD `config.yaml` (`network: losElevServer:` / `weatherServer:`), and weather ships with a working default so it needs no setup at all.
+- The sleep clock screen now shows current conditions and temperature beside the node name and time, using the last reading the Weather screen fetched; it stays blank rather than showing a stale reading after the device has been asleep for hours.
+- Web config has an Idle Timeout setting (5 minutes through 1 hour, or Never) to control how long it stays up with no activity before closing itself and releasing WiFi — previously the 10-minute default could only be changed by hand-editing a config file.
+- Config export now carries the line-of-sight elevation server and weather server addresses.
 
 ### Changed
-
-- The message compose box is now ten lines tall on every board, so a full-length message is visible as you type it, and the box no longer resizes or jumps as the text grows.
-- The bottom navigation bar is icon-only on every touch board — the shortcut letters beside the icons are gone. The keys themselves are unchanged and still listed on the Help screen, and switching the bar off in Config → Nav Bar still brings back the key-hint strip under the chat.
+- The sleep clock screen has a divider rule under the wordmark, separating the device name from the status below it.
+- Cardputer: the weather screen uses a compact layout for its 240x135 panel — temperature and conditions share one line, and the details fold into three lines instead of four.
+- Cardputer: the line-of-sight cross-section is drawn shorter so the verdict and numbers below it stay on screen.
 
 ### Fixed
-
-- T-Deck Pro: the empty white strip below the compose box is gone, and the keyboard legend no longer sits on top of the last line of the message being typed.
+- Cardputer: the `,` and `/` arrow keys now move left and right without holding Fn, matching the `;` and `.` keys — sliders and anything else using left/right can be driven from the bare arrow cluster.
+- Restoring a config backup no longer comes back with weather and terrain line-of-sight switched off, since the backup now includes their server addresses.
+- An out-of-range web config idle timeout imported from a config file is clamped to a usable value instead of closing the page before it can be read.

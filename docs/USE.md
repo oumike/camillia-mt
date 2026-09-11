@@ -398,8 +398,11 @@ conditions only — no forecast.
   discarded, so a dropped Wi-Fi connection leaves you the last thing that worked
 - Every failure names what to change: no server set, no position, no Wi-Fi, the
   proxy unreachable, or the proxy answering with something that is not weather
-- Not available on Cardputer, for the same reason LOS is not: its web config is
-  lite-only, with nowhere to put the server field
+- Available on every board. The Cardputer has no Utilities tab in its lite web
+  config, so its server address is set through the microSD `config.yaml`
+  (`network: weatherServer:`) — and the shipped default means it works without
+  setting anything. Its 240x135 panel gets a compact layout: a smaller headline
+  and three detail lines instead of four
 
 ### MQTT Monitor
 

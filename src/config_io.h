@@ -671,6 +671,21 @@ static inline uint8_t cfgCoerceTimeSource(int v) {
     return (v == TIME_SOURCE_MANUAL) ? TIME_SOURCE_MANUAL : TIME_SOURCE_AUTO;
 }
 
+// How long web config may sit idle before it shuts itself down, in seconds.
+// 0 means never, which the server already understands (gIdleTimeoutMs is
+// documented "0 = never expire" and the expiry check is gated on it).
+//
+// Anything else is clamped into a sane band rather than taken at face value:
+// this arrives from an HTTP form and from YAML import, and a one-second timeout
+// would close the page faster than it could be read — a setting that can be
+// used to make the UI unusable should not be settable to that by a typo.
+static inline uint32_t cfgCoerceWebCfgIdle(long secs) {
+    if (secs <= 0) return 0;                 // never
+    if (secs < 60) return 60;                // a minute is the shortest useful
+    if (secs > 86400UL) return 86400UL;      // a day; past this it IS "never"
+    return (uint32_t)secs;
+}
+
 // Exhaustive states for a binary three-channel RGB indicator: seven non-empty
 // R/G/B combinations plus Off. Mesh Deck drives these channels as GPIO, not
 // constant-current outputs, so brightness controls or additional hues such as

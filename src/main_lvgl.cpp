@@ -232,6 +232,12 @@ static lv_obj_t *s_tdeckProSleepTitle = nullptr;
 static lv_obj_t *s_tdeckProSleepNode = nullptr;
 static lv_obj_t *s_tdeckProSleepTime = nullptr;
 static lv_obj_t *s_tdeckProSleepDate = nullptr;
+#if HAS_WEATHER
+// The right-hand hero column: conditions opposite the node name, temperature
+// opposite the clock. Hidden whenever the cached reading is too old to show.
+static lv_obj_t *s_tdeckProSleepWxDesc = nullptr;
+static lv_obj_t *s_tdeckProSleepWxTemp = nullptr;
+#endif
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
 static lv_obj_t *s_tdeckProSleepBatt = nullptr;
 
@@ -1766,8 +1772,22 @@ static void scrollListClamped(lv_obj_t *obj, lv_coord_t dy) {
 static inline char remapCardputerUiKey(char k, bool allowScrollRemap) {
     if (k == '`' || k == '~') return KEY_ESCAPE;
     if (allowScrollRemap) {
+        // All four of the arrow-labelled keys, not just the vertical pair.
+        //
+        // ';' and '.' were remapped here from the start; ',' and '/' were only
+        // ever mapped in the driver's Fn branch (keyboard.cpp), so the two
+        // halves of the same physical cluster behaved differently: up and down
+        // worked bare, left and right needed Fn held. That is why a slider
+        // could be moved with the up/down keys and not with left/right, and it
+        // applied equally to anything else reading PREV/NEXT_CHAN.
+        //
+        // Typing is unaffected: allowScrollRemap is false in every typing
+        // context, so a comma or slash in a message, filter or text field is
+        // still a comma or slash. Fn+, and Fn+/ keep working too.
         if (k == ';') return KEY_SCROLL_UP;
         if (k == '.') return KEY_SCROLL_DN;
+        if (k == ',') return KEY_PREV_CHAN;
+        if (k == '/') return KEY_NEXT_CHAN;
     }
     return k;
 }
@@ -6550,6 +6570,8 @@ static inline lv_color_t sleepOverlayClockInk() { return lv_color_make(255, 149,
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_32;
+// Same weight as the clock it sits beside: the two are the point of the row.
+static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_32;
 #else
 static inline lv_color_t sleepOverlayInk() { return lv_color_make(0, 0, 0); }
 static inline lv_color_t sleepOverlayBg()  { return lv_color_make(255, 255, 255); }
@@ -6561,6 +6583,10 @@ static inline lv_color_t sleepOverlayClockInk() { return sleepOverlayInk(); }
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_16;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
+// One size below the clock here, unlike the boards above. This panel is 240 px
+// wide and its clock is 40 px: "12:34 PM" and a temperature at that size come
+// to more than the width, so the pair would collide in the middle.
+static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_32;
 #endif
 
 // Geometry of the notification area, in absolute panel coordinates. It sits in
@@ -6895,7 +6921,54 @@ static void updateTdeckProSleepClock() {
         strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
     }
     lv_label_set_text(s_tdeckProSleepTime, timeText);
+
     lv_label_set_text(s_tdeckProSleepDate, dateText);
+
+#if HAS_WEATHER
+    // The right-hand half of the two hero rows. Read from the cache and never
+    // fetched: this screen exists to be cheap, and waking Wi-Fi to refresh a
+    // temperature nobody asked for is the opposite of that. It shows whatever
+    // the Weather screen last obtained, and nothing at all once that is too old
+    // to believe — a device asleep overnight should not wake showing yesterday
+    // afternoon as if it were now.
+    // Keep the reading current while the screen is up. This runs on the
+    // overlay's own repaint, which is once a minute, and weatherRequest() is a
+    // no-op until the cached reading passes its TTL — so the actual fetch rate
+    // is the TTL, not the tick.
+    //
+    // It will not bring the radio up: the Wi-Fi check is explicit here rather
+    // than left to weatherRequest(), because failing inside it would also flip
+    // the module's state to an error, and a glance surface should have no
+    // opinion on what the Weather screen last displayed.
+    WeatherReading wx;
+    if (weatherState() != WEATHER_FETCHING
+        && s_cfg.weatherServer[0]
+        && WiFi.status() == WL_CONNECTED) {
+        const bool haveFresh = weatherLatest(wx) && weatherAgeMs() < kWeatherTtlMs;
+        double wxLat = 0, wxLon = 0;
+        if (!haveFresh && nodeLosSelfPosition(wxLat, wxLon)) {
+            weatherRequest(s_cfg.weatherServer, wxLat, wxLon, s_cfg.displayUnits != 0);
+        }
+    }
+
+    const bool wxFresh = weatherLatest(wx) && weatherAgeMs() < kWeatherGlanceMaxAgeMs;
+    if (lvObjValid(s_tdeckProSleepWxTemp) && lvObjValid(s_tdeckProSleepWxDesc)) {
+        if (wxFresh) {
+            char t[16];
+            snprintf(t, sizeof(t), "%d%s", wx.temp, wx.tempUnit);
+            lv_label_set_text(s_tdeckProSleepWxTemp, t);
+            lv_label_set_text(s_tdeckProSleepWxDesc, wx.desc);
+            lv_obj_clear_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            // Hidden, not emptied: an empty label still occupies its row, and
+            // the left column should read as deliberate rather than as the
+            // survivor of something that failed.
+            lv_obj_add_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+#endif
 
     if (s_tdeckProSleepMsgBold[0] && lv_obj_is_valid(s_tdeckProSleepMsgBold[0])) {
         tdeckProRefreshSleepMsgRows();
@@ -6962,18 +7035,86 @@ static void showTdeckProSleepClock() {
     lv_label_set_text(s_tdeckProSleepTitle, "Camillia");
     lv_obj_align(s_tdeckProSleepTitle, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
 
+    // A rule under the wordmark, separating "which device is this" from
+    // everything the screen is actually reporting.
+    //
+    // Placed in the middle of whatever gap the board leaves rather than at a
+    // fixed offset below the title: the six layouts put the title and the node
+    // name between 3 px and 9 px apart, so any constant that cleared one would
+    // land on top of the other. Measured from the title's own face, so it
+    // follows a font change too.
+    {
+        const int titleBottom =
+            kTdeckProTitleTop + (int)lv_font_get_line_height(kSleepOverlayTitleFont);
+        int ruleY = titleBottom + ((kTdeckProNodeTop - titleBottom) / 2);
+        if (ruleY <= titleBottom) ruleY = titleBottom;   // no gap: sit flush
+
+        lv_obj_t *sleepRule = lv_obj_create(s_tdeckProSleepOverlay);
+        lv_obj_set_width(sleepRule, lv_pct(80));
+        lv_obj_set_height(sleepRule, 1);
+        lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(sleepRule, 0, 0);
+        lv_obj_set_style_radius(sleepRule, 0, 0);
+        lv_obj_set_style_pad_all(sleepRule, 0, 0);
+        lv_obj_set_style_bg_color(sleepRule, sleepOverlayInk(), 0);
+#if defined(DEVICE_TDECK_PRO)
+        // Full strength on the e-paper: that panel is 1-bit, so a partial
+        // opacity thresholds to solid or to nothing with no say in which.
+        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_COVER, 0);
+#else
+        // Dimmer than the type it separates — a divider should organise the
+        // screen, not compete with it for attention.
+        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_40, 0);
+#endif
+        lv_obj_align(sleepRule, LV_ALIGN_TOP_MID, 0, ruleY);
+    }
+
     s_tdeckProSleepNode = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_width(s_tdeckProSleepNode, lv_pct(92));
     lv_obj_set_style_text_font(s_tdeckProSleepNode, kSleepOverlayNodeFont, 0);
     lv_obj_set_style_text_color(s_tdeckProSleepNode, sleepOverlayNodeInk(), 0);
+#if HAS_WEATHER
+    // Left half of the hero block, with conditions opposite it. Two rows, each
+    // with a small label and a large one: node name over the clock on this
+    // side, sky over the temperature on the other.
+    lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProNodeTop);
+#else
     lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
     lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
+#endif
 
     s_tdeckProSleepTime = lv_label_create(s_tdeckProSleepOverlay);
     lv_obj_set_style_text_font(s_tdeckProSleepTime, kSleepOverlayTimeFont, 0);
     lv_obj_set_style_text_color(s_tdeckProSleepTime, sleepOverlayClockInk(), 0);
+#if HAS_WEATHER
+    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProTimeTop);
+
+    // The opposite column. Same two rows, mirrored: the sky on the node's row,
+    // the temperature on the clock's.
+    s_tdeckProSleepWxDesc = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_style_text_font(s_tdeckProSleepWxDesc, kSleepOverlayNodeFont, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepWxDesc, sleepOverlayNodeInk(), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepWxDesc, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(s_tdeckProSleepWxDesc, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_tdeckProSleepWxDesc, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProNodeTop);
+    lv_obj_add_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
+
+    s_tdeckProSleepWxTemp = lv_label_create(s_tdeckProSleepOverlay);
+    lv_obj_set_style_text_font(s_tdeckProSleepWxTemp, kSleepOverlayWxFont, 0);
+    lv_obj_set_style_text_color(s_tdeckProSleepWxTemp, sleepOverlayClockInk(), 0);
+    lv_obj_set_style_text_align(s_tdeckProSleepWxTemp, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_tdeckProSleepWxTemp, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProTimeTop);
+    lv_obj_add_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
+#else
     lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
+#endif
 
     // Left half of the status band. Sized to its own text rather than to a
     // percentage of the panel: a 92% box pinned to the left edge would reach
@@ -7078,6 +7219,10 @@ static void hideTdeckProSleepClock() {
     s_tdeckProSleepNode = nullptr;
     s_tdeckProSleepTime = nullptr;
     s_tdeckProSleepDate = nullptr;
+#if HAS_WEATHER
+    s_tdeckProSleepWxDesc = nullptr;
+    s_tdeckProSleepWxTemp = nullptr;
+#endif
     s_tdeckProSleepBatt = nullptr;
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
         s_tdeckProSleepMsgBold[i] = nullptr;
@@ -22189,7 +22334,19 @@ static void openNodeLosModal(uint32_t nodeId) {
     s_nodeLosPlot = plot;
     lv_obj_remove_style_all(plot);
     lv_obj_set_width(plot, modalW - 20);
+    // 74 everywhere with the height to spare; less on the Cardputer, whose
+    // modal is only 115 px tall on a 240x135 panel — 74 of that is two thirds
+    // of the screen for the cross-section, and the verdict underneath it (which
+    // wraps to two lines) would be pushed off the bottom.
+    //
+    // Shrunk rather than dropped: the silhouette is what makes this feature
+    // read at a glance, and 40 px of it over 200 px of width still shows where
+    // the terrain rises. The numbers below say the rest.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    lv_obj_set_height(plot, 40);
+#else
     lv_obj_set_height(plot, 74);
+#endif
     lv_obj_clear_flag(plot, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(plot, lv_color_hex(0x0B0D0F), 0);
     lv_obj_set_style_bg_opa(plot, LV_OPA_COVER, 0);
@@ -25958,9 +26115,30 @@ static WeatherInk weatherInk() {
     return k;
 }
 
-// A reading older than this is refetched when the screen opens. Conditions do
-// not move faster than this, and it is what makes reopening the screen free.
-static constexpr uint32_t kWeatherTtlMs = 10UL * 60UL * 1000UL;
+// Type sizes for the screen. The Cardputer's panel is 240x135 — less than half
+// the height every other board brings — and the roomy layout simply does not
+// fit on it: title, a 32 px hero, four detail lines, a status line and a legend
+// come to about 170 px. It gets its own set, and a three-line body below, which
+// together land inside 135 with the legend still on screen.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+static const lv_font_t *const kWeatherHeroFont = &lv_font_montserrat_18;
+static const lv_font_t *const kWeatherDescFont = &lv_font_montserrat_12;
+static const lv_font_t *const kWeatherBodyFont = &lv_font_montserrat_10;
+static constexpr bool kWeatherCompactBody = true;
+// Temperature and sky share one line here. Two rows of hero plus a title, three
+// detail lines, a status line and a legend still overran 135 px and clipped the
+// bottom; folding the two into one row is worth more than the size difference
+// between them, which was never doing much at 18 px against 12 px anyway.
+static constexpr bool kWeatherHeroOneLine = true;
+static constexpr int  kWeatherRowPad      = 1;
+#else
+static const lv_font_t *const kWeatherHeroFont = &lv_font_montserrat_32;
+static const lv_font_t *const kWeatherDescFont = &lv_font_montserrat_18;
+static const lv_font_t *const kWeatherBodyFont = &lv_font_montserrat_14;
+static constexpr bool kWeatherCompactBody = false;
+static constexpr bool kWeatherHeroOneLine = false;
+static constexpr int  kWeatherRowPad      = 4;
+#endif
 
 static const char *weatherCompass(int deg) {
     static const char *const d[] = {"N","NE","E","SE","S","SW","W","NW"};
@@ -25974,11 +26152,15 @@ static void weatherRenderReading() {
     if (!weatherLatest(r)) return;
 
     if (lvObjValid(s_weatherTemp)) {
-        char big[16];
-        snprintf(big, sizeof(big), "%d%s", r.temp, r.tempUnit);
+        char big[48];
+        if (kWeatherHeroOneLine) snprintf(big, sizeof(big), "%d%s  %s",
+                                          r.temp, r.tempUnit, r.desc);
+        else                     snprintf(big, sizeof(big), "%d%s", r.temp, r.tempUnit);
         lv_label_set_text(s_weatherTemp, big);
     }
-    if (lvObjValid(s_weatherDesc)) lv_label_set_text(s_weatherDesc, r.desc);
+    if (lvObjValid(s_weatherDesc) && !kWeatherHeroOneLine) {
+        lv_label_set_text(s_weatherDesc, r.desc);
+    }
     if (lvObjValid(s_weatherTitle)) {
         // A hyphen, not an em dash: these faces draw ASCII and little else, and
         // a dash outside that range would come back as a missing-glyph box —
@@ -25994,15 +26176,28 @@ static void weatherRenderReading() {
     // qualified, and putting two temperatures in the headline makes neither of
     // them the answer to "how warm is it".
     char body[192];
-    snprintf(body, sizeof(body),
-             "Feels like   %d%s\n"
-             "Humidity     %d%%\n"
-             "Wind         %d %s from %s\n"
-             "Gusting      %d %s",
-             r.feels, r.tempUnit,
-             r.humidityPct,
-             r.wind, r.windUnit, weatherCompass(r.dirDeg),
-             r.gust, r.windUnit);
+    if (kWeatherCompactBody) {
+        // Three lines instead of four, pairing the two smallest facts. Dropping
+        // one outright would have been the other way to find the pixels, and
+        // this keeps all of them.
+        snprintf(body, sizeof(body),
+                 "Feels %d%s   Hum %d%%\n"
+                 "Wind %d %s %s\n"
+                 "Gusting %d %s",
+                 r.feels, r.tempUnit, r.humidityPct,
+                 r.wind, r.windUnit, weatherCompass(r.dirDeg),
+                 r.gust, r.windUnit);
+    } else {
+        snprintf(body, sizeof(body),
+                 "Feels like   %d%s\n"
+                 "Humidity     %d%%\n"
+                 "Wind         %d %s from %s\n"
+                 "Gusting      %d %s",
+                 r.feels, r.tempUnit,
+                 r.humidityPct,
+                 r.wind, r.windUnit, weatherCompass(r.dirDeg),
+                 r.gust, r.windUnit);
+    }
     lv_label_set_text(s_weatherBody, body);
 
     // The age matters here in a way it does not on a live screen: a reading
@@ -26071,7 +26266,9 @@ static void weatherPoll(lv_timer_t *t) {
         lv_label_set_text(s_weatherStatus, msg);
         if (lvObjValid(s_weatherBody)) lv_label_set_text(s_weatherBody, "");
         if (lvObjValid(s_weatherTemp)) lv_label_set_text(s_weatherTemp, "--");
-        if (lvObjValid(s_weatherDesc)) lv_label_set_text(s_weatherDesc, "");
+        if (lvObjValid(s_weatherDesc) && !kWeatherHeroOneLine) {
+            lv_label_set_text(s_weatherDesc, "");
+        }
     }
 }
 
@@ -26113,7 +26310,7 @@ static void openWeatherModal() {
     // bar has to use the numbers the helper is written against or the bar sits
     // inset from the screen by the difference.
     lv_obj_set_style_pad_all(s_weatherModal, 4, 0);
-    lv_obj_set_style_pad_row(s_weatherModal, 4, 0);
+    lv_obj_set_style_pad_row(s_weatherModal, kWeatherRowPad, 0);
     lv_obj_set_flex_flow(s_weatherModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_weatherModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
@@ -26144,19 +26341,21 @@ static void openWeatherModal() {
     // clock uses it — so the size is free where a new one would not be.
     s_weatherTemp = lv_label_create(s_weatherModal);
     lv_obj_set_width(s_weatherTemp, lv_pct(100));
-    lv_obj_set_style_text_font(s_weatherTemp, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_font(s_weatherTemp, kWeatherHeroFont, 0);
     lv_obj_set_style_text_color(s_weatherTemp, ink.hero, 0);
     lv_obj_set_style_text_align(s_weatherTemp, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_pad_bottom(s_weatherTemp, 0, 0);
     lv_label_set_text(s_weatherTemp, "--");
 
-    s_weatherDesc = lv_label_create(s_weatherModal);
-    lv_obj_set_width(s_weatherDesc, lv_pct(100));
-    lv_obj_set_style_text_font(s_weatherDesc, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(s_weatherDesc, ink.hero, 0);
-    lv_obj_set_style_text_align(s_weatherDesc, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_weatherDesc, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(s_weatherDesc, "");
+    if (!kWeatherHeroOneLine) {
+        s_weatherDesc = lv_label_create(s_weatherModal);
+        lv_obj_set_width(s_weatherDesc, lv_pct(100));
+        lv_obj_set_style_text_font(s_weatherDesc, kWeatherDescFont, 0);
+        lv_obj_set_style_text_color(s_weatherDesc, ink.hero, 0);
+        lv_obj_set_style_text_align(s_weatherDesc, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(s_weatherDesc, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(s_weatherDesc, "");
+    }
 
     // A rule, not a gap: the block above is one reading and the block below is
     // its supporting detail, and a line says that where whitespace only hints.
@@ -26169,12 +26368,12 @@ static void openWeatherModal() {
     lv_obj_set_style_pad_all(rule, 0, 0);
     lv_obj_set_style_bg_color(rule, ink.border, 0);
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
-    lv_obj_set_style_margin_top(rule, 2, 0);
-    lv_obj_set_style_margin_bottom(rule, 2, 0);
+    lv_obj_set_style_margin_top(rule, kWeatherRowPad, 0);
+    lv_obj_set_style_margin_bottom(rule, kWeatherRowPad, 0);
 
     s_weatherBody = lv_label_create(s_weatherModal);
     lv_obj_set_width(s_weatherBody, lv_pct(100));
-    lv_obj_set_style_text_font(s_weatherBody, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_weatherBody, kWeatherBodyFont, 0);
     lv_obj_set_style_text_color(s_weatherBody, ink.body, 0);
     lv_label_set_long_mode(s_weatherBody, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_weatherBody, "");

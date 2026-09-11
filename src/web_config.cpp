@@ -3417,7 +3417,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += gCfg->losElevServer;
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='hint'>Terrain line-of-sight fetches ground elevation from "
+    html += "<p class='gps-hint'>Terrain line-of-sight fetches ground elevation from "
             "<code>&lt;server&gt;/elev?locations=lat,lon|...</code>, expecting a CSV of "
             "metres. Must be <b>http://</b> — there is no TLS client in this firmware. "
             "Leave empty to disable LOS.</p>";
@@ -3431,7 +3431,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += gCfg->weatherServer;
     html += "' placeholder='http://host:port'></label>";
     html += "</div>";
-    html += "<p class='hint'>The weather screen fetches current conditions from "
+    html += "<p class='gps-hint'>The weather screen fetches current conditions from "
             "<code>&lt;server&gt;/weather?lat=&amp;lon=&amp;units=</code>. Must be "
             "<b>http://</b> — there is no TLS client in this firmware. The position is "
             "rounded to about a kilometre before it is sent. Leave empty to disable "
@@ -4355,6 +4355,50 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += "<p class='gps-hint'>This is the network the device joins. Other "
                 "remembered networks, and switching between them, live on the "
                 "<b>WiFi</b> tab.</p>";
+    }
+    {
+        // How long this page may sit idle before the server shuts itself down.
+        // The setting has existed in the config struct and in YAML export for
+        // as long as the timeout has, but had no control anywhere — so the only
+        // way to discover the ten-minute default was to be timed out by it
+        // mid-session, and the only way to change it was to hand-edit a YAML
+        // file and import it.
+        //
+        // A select rather than a number box: these are the stopping points that
+        // mean something, and cfgCoerceWebCfgIdle() would silently move a typed
+        // 7 to 60 anyway.
+        static const struct { uint32_t secs; const char *label; } kIdleOpts[] = {
+            { 300,  "5 minutes" },
+            { 600,  "10 minutes (default)" },
+            { 900,  "15 minutes" },
+            { 1800, "30 minutes" },
+            { 3600, "1 hour" },
+            { 0,    "Never" },
+        };
+        const uint32_t cur = cfgCoerceWebCfgIdle((long)gCfg->webCfgIdleTimeoutS);
+        html += "<label>Idle Timeout<select name='webcfg_idle_s'>";
+        bool matched = false;
+        for (size_t i = 0; i < sizeof(kIdleOpts) / sizeof(kIdleOpts[0]); i++) {
+            const bool sel = (cur == kIdleOpts[i].secs);
+            matched = matched || sel;
+            snprintf(tmp, sizeof(tmp), "<option value='%lu'%s>%s</option>",
+                     (unsigned long)kIdleOpts[i].secs, sel ? " selected" : "",
+                     kIdleOpts[i].label);
+            html += tmp;
+        }
+        // A value imported from YAML need not be one of the six. Showing it as
+        // its own option beats silently re-selecting 5 minutes and then saving
+        // that back the next time anything else on this page is changed.
+        if (!matched) {
+            snprintf(tmp, sizeof(tmp), "<option value='%lu' selected>%lu seconds</option>",
+                     (unsigned long)cur, (unsigned long)cur);
+            html += tmp;
+        }
+        html += "</select></label>";
+        html += "<p class='gps-hint'>How long web config stays up with no requests "
+                "before it closes itself and releases WiFi. Loading or saving a "
+                "page counts as activity; reading one does not. <b>Never</b> "
+                "keeps WiFi and its power draw on until you stop it yourself.</p>";
     }
     sectionEnd(html, lite);
     sendChunk(html);
@@ -7199,6 +7243,15 @@ static void handlePostSave() {
             gCfg->wifiSsid[sizeof(gCfg->wifiSsid) - 1] = '\0';
             strncpy(gCfg->wifiPass, gWifiPass, sizeof(gCfg->wifiPass) - 1);
             gCfg->wifiPass[sizeof(gCfg->wifiPass) - 1] = '\0';
+        }
+
+        if (server.hasArg("webcfg_idle_s")) {
+            gCfg->webCfgIdleTimeoutS =
+                cfgCoerceWebCfgIdle(server.arg("webcfg_idle_s").toInt());
+            // The running session too, not just the next one: otherwise the act
+            // of lengthening the timeout could still be cut short by the old
+            // value before the new one ever applied.
+            gIdleTimeoutMs = gCfg->webCfgIdleTimeoutS * 1000UL;
         }
 
         // Persist auth/connectivity keys immediately so reboot recovery doesn't

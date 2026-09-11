@@ -70,3 +70,19 @@ bool weatherLatest(WeatherReading &out);
 // Milliseconds since the last good reading landed, or 0 if there is none. What
 // the screen uses to decide whether to refresh on open and what age to print.
 uint32_t weatherAgeMs();
+
+// How old a reading may be before it is worth fetching again. Both the Weather
+// screen (on open) and the lock screen (on its minute tick) test against this,
+// which is what keeps the actual request rate at one per TTL however often
+// either of them looks.
+static constexpr uint32_t kWeatherTtlMs = 10UL * 60UL * 1000UL;
+
+// How old a reading may be and still be shown on the lock screen's status band.
+//
+// Deliberately generous next to the Weather screen's own ten-minute refresh
+// window, and for a different job: that number decides when to spend a fetch,
+// this one decides when a number stops being worth believing. The glance
+// surface never fetches — it shows what the Weather screen last obtained — so
+// without a ceiling a device left asleep overnight would wake showing
+// yesterday's afternoon as if it were now.
+static constexpr uint32_t kWeatherGlanceMaxAgeMs = 2UL * 60UL * 60UL * 1000UL;
