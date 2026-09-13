@@ -19,7 +19,8 @@
 ### New
 - Home dashboard on every board with a display except the Cardputer: node name, clock, conditions, date and battery across the top, with live channel-utilisation and SNR/RSSI charts below. The device now boots onto it, and chat is one press away.
 - Elecrow ThinkNode M9: the **Home** button opens the dashboard and **Messages** goes to the chat screen, with a second press of Messages opening the channel list.
-- Heltec V4 and Seeed Wio Tracker L2: the nav bar's **Home** cell opens the dashboard; tap it again and it steps aside to the chat underneath.
+- The bottom nav bar gains a **Chats** cell beside Home, so the dashboard and the messages each have a button of their own. Whichever of the two you are on is the lit cell.
+- Unread channel messages are now marked as well as unread DMs. Boards with the nav bar blink the **Chats** cell; boards without one show a bell beside the DM envelope in the shortcut bar. Both blink on the same phase and clear when you open the conversation, and muted channels raise nothing.
 - The compose window now names where the message is going — "New Message: LongFast" — so the channel is visible even when composing from the dashboard.
 - The boot log now prints the exact ESP32-S3 variant, revision, flash size and PSRAM, so a board-specific fault can be told apart from a dead card or empty slot in someone else's log.
 

@@ -204,6 +204,16 @@ static bool s_screenshotCaptureTouched = false;
 static lv_obj_t *s_channelBtns[MESH_CHANNELS] = {};
 static lv_obj_t *s_channelLabels[MESH_CHANNELS] = {};
 static bool s_channelNeedsAttention[MESH_CHANNELS] = {};
+// Anything unread on any channel, as against DMs.hasUnread() for the private
+// ones. Several boards had grown their own copy of this loop behind their own
+// feature gate (the Mesh Deck's LED, the keyboard backlight blink, the glance
+// overlay); this is the ungated one the unread indicators use.
+static inline bool anyChannelNeedsAttention() {
+    for (int i = 0; i < MESH_CHANNELS; i++) {
+        if (s_channelNeedsAttention[i]) return true;
+    }
+    return false;
+}
 static lv_obj_t *s_channelStrip = nullptr;
 static lv_obj_t *s_channelList = nullptr;
 static lv_obj_t *s_channelSelectorBtn = nullptr;
@@ -217,6 +227,10 @@ static lv_obj_t *s_chatHeaderWifi = nullptr;
 // Blinking envelope icon shown left of the wifi icon whenever any DM
 // conversation has unread messages the user has not opened yet.
 static lv_obj_t *s_chatDmAlert = nullptr;
+// Unread channel traffic, immediately left of the DM envelope. The boards that
+// draw a nav bar blink the bar's Chats cell instead and never build this; see
+// refreshChatAlertIndicator().
+static lv_obj_t *s_chatChanAlert = nullptr;
 static lv_obj_t *s_chatHeaderBattText = nullptr;
 static lv_obj_t *s_chatHeaderBattBar = nullptr;
 static lv_obj_t *s_chatPanel = nullptr;
@@ -335,6 +349,7 @@ static lv_obj_t *s_navStatusBox = nullptr;
 static lv_obj_t *s_navStatusGps = nullptr;
 static lv_obj_t *s_navStatusWifi = nullptr;
 static lv_obj_t *s_navStatusDm = nullptr;
+static lv_obj_t *s_navStatusChan = nullptr;
 
 // Called by every modal that carries a bar, as it closes. Explicit rather than
 // leaning on lv_obj_is_valid(): the modal takes these objects with it, and LVGL
@@ -345,6 +360,7 @@ static inline void clearNavBarStatusIcons() {
     s_navStatusGps = nullptr;
     s_navStatusWifi = nullptr;
     s_navStatusDm = nullptr;
+    s_navStatusChan = nullptr;
 }
 #else
 static inline void clearNavBarStatusIcons() {}
@@ -1328,9 +1344,11 @@ enum HeltecNavTarget : uint8_t {
     HELTEC_NAV_TOOLS,
     HELTEC_NAV_ACTIONS,
     HELTEC_NAV_LEGEND,
-    // Not a screen of its own: chat is what is left when everything stacked on
-    // top of it is gone, so this one closes rather than opens.
+    // Home opens the dashboard. Chat is not a screen of its own — it is what is
+    // left when everything stacked on top of it is gone — so its cell closes
+    // rather than opens. Both tear down whatever is up first.
     HELTEC_NAV_HOME,
+    HELTEC_NAV_CHAT,
 };
 
 #if UI_TOUCH_NAV_BAR
@@ -1844,6 +1862,7 @@ static void buildChatCursorOrder(const DisplayLine *const *rows,
 static void refreshHeaderTime(bool force = false);
 static void refreshHeaderStatus(bool force = false);
 static void refreshDmAlertIndicator();
+static void refreshChatAlertIndicator();
 static void layoutHeaderInlineItems();
 static void refreshChannelGlow(bool force = false);
 static void pumpKeyboardInput();
@@ -2009,9 +2028,6 @@ static void refreshSnrRssiChart(bool force = false);
 // is built long before that and has to be able to name them.
 static void openHomeDashboard();
 static void closeHomeDashboard();
-#if UI_TOUCH_NAV_BAR
-static bool homeDashboardIsForeground();
-#endif
 #endif
 static void openLiveToolsModal();
 static void closeLiveToolsModal();
@@ -18457,7 +18473,8 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_legendModal) closeLegendModal();
             else openLegendModal();
             break;
-        case HELTEC_NAV_HOME: {
+        case HELTEC_NAV_HOME:
+        case HELTEC_NAV_CHAT: {
             // Chat is the root screen; the nav-reachable screens are modals
             // layered over it. So "go home" is "close them", innermost first —
             // a menu opened from one of these screens has to go before the
@@ -18466,11 +18483,9 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             // Every one is checked rather than just the active screen's own:
             // Home is on the bar of all of them, and whichever is on top is the
             // only one the tap can be coming from anyway.
-#if HAS_HOME_DASHBOARD
-            // Sampled before the teardown below, which answers this question by
-            // destroying the evidence. See the toggle at the end of the case.
-            const bool wasHome = homeDashboardIsForeground();
-#endif
+            //
+            // Both cells share this teardown and differ only in what they leave
+            // standing at the end of it.
             if (s_liveToolsModal) closeLiveToolsModal();
 #if HAS_WEATHER
             // Unguarded, unlike its neighbours: s_weatherModal is defined with
@@ -18486,15 +18501,11 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_nodesModal) closeNodesModal();
             if (s_liveModal) closeLiveModal();
 #if HAS_HOME_DASHBOARD
-            // One cell, two destinations. The bar is six buttons across 240 px
-            // in portrait and has no room for a seventh, so Home carries both
-            // glance surfaces: the first tap brings up the dashboard from
-            // wherever you were, and a second one — with the dashboard already
-            // in front of you — steps aside to the chat underneath. That is the
-            // same "you are already there, so do the next thing" rule the M9's
-            // Messages button follows for the channel list.
-            if (wasHome) closeHomeDashboard();
-            else         openHomeDashboard();
+            // The dashboard is a sibling of the chat screen rather than a modal
+            // over it, so it survives the teardown above and has to be opened or
+            // closed by name.
+            if (target == HELTEC_NAV_CHAT) closeHomeDashboard();
+            else                           openHomeDashboard();
 #endif
             break;
         }
@@ -18542,9 +18553,13 @@ static lv_opa_t chatPanelBackgroundOpa() {
 // reader validates before touching one and clears what it finds dead.
 static constexpr int kNavDmIconSlots = 4;
 static lv_obj_t *s_navDmIcons[kNavDmIconSlots] = {nullptr};
+// Same again for the Chats cell. Same slot count for the same reason: one bar
+// on the chat screen plus one on whatever modal is over it.
+static lv_obj_t *s_navChatIcons[kNavDmIconSlots] = {nullptr};
 // Where the blink currently is, at file scope so a bar built mid-blink can be
 // painted to match rather than sitting at the wrong colour until the next flip.
 static bool s_navDmLit = false;
+static bool s_navChatLit = false;
 
 static void navDmApplyInk(lv_obj_t *label, bool lit) {
     if (!label || !lv_obj_is_valid(label)) return;
@@ -18552,6 +18567,35 @@ static void navDmApplyInk(lv_obj_t *label, bool lit) {
                                 lit ? lv_color_hex(0xF4D35E)    // the envelope's amber
                                     : lv_color_hex(0xD9E8FF),   // the bar's own ink
                                 0);
+}
+
+// The Chats cell gets the same treatment for unread *channel* traffic that the
+// DM cell gets for private messages: it is the bar that is always on screen, it
+// is where the tap has to land anyway, and colour costs no width on a bar that
+// is already seven cells across.
+//
+// A different amber would be a puzzle, so it is the same one. The two cells sit
+// apart on the bar and carry different glyphs; what the colour says is "there is
+// something here", and that means the same thing in both places.
+static void navChatApplyInk(lv_obj_t *label, bool lit) {
+    if (!label || !lv_obj_is_valid(label)) return;
+    lv_obj_set_style_text_color(label,
+                                lit ? lv_color_hex(0xF4D35E)    // the envelope's amber
+                                    : lv_color_hex(0xD9E8FF),   // the bar's own ink
+                                0);
+}
+
+static void navChatIconRegister(lv_obj_t *label) {
+    for (int i = 0; i < kNavDmIconSlots; i++) {
+        if (s_navChatIcons[i] == label) { navChatApplyInk(label, s_navChatLit); return; }
+        if (!s_navChatIcons[i] || !lv_obj_is_valid(s_navChatIcons[i])) {
+            s_navChatIcons[i] = label;
+            navChatApplyInk(label, s_navChatLit);
+            return;
+        }
+    }
+    s_navChatIcons[0] = label;   // all live: the oldest gives way
+    navChatApplyInk(label, s_navChatLit);
 }
 
 static void navDmIconRegister(lv_obj_t *label) {
@@ -18565,6 +18609,51 @@ static void navDmIconRegister(lv_obj_t *label) {
     }
     s_navDmIcons[0] = label;   // all live: the oldest gives way
     navDmApplyInk(label, s_navDmLit);
+}
+#endif
+
+#if UI_TOUCH_NAV_BAR
+// How a nav cell says "you are here". Pulled out of the build loop because the
+// bar outlives the screen it was built for: the chat screen's bar is the one
+// showing under the home dashboard too, so the lit cell moves between Home and
+// Chats without the bar itself being rebuilt.
+static void navBarStyleCell(lv_obj_t *btn, bool isActive) {
+    if (!btn || !lv_obj_is_valid(btn)) return;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn, isActive ? 2 : 1, 0);
+    lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(
+        btn,
+        (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor()
+                                        : (isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F)),
+        0);
+    lv_obj_set_style_bg_opa(btn, isActive ? LV_OPA_80 : LV_OPA_60, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn,
+                                  isActive ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x335D9D),
+                                  0);
+#endif
+}
+
+// Move the lit cell on an already-built bar. Walks the children rather than
+// keeping a table of them: seven widgets on a screen transition is nothing, and
+// a table would be another thing to invalidate when a bar goes with its modal.
+static void navBarSetActive(lv_obj_t *bar, int activeTarget) {
+    if (!bar || !lv_obj_is_valid(bar)) return;
+    const uint32_t n = lv_obj_get_child_count(bar);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *child = lv_obj_get_child(bar, i);
+        if (!child) continue;
+        // Stored as target+1 so that 0 means "not a nav cell". The status
+        // cluster shares this bar on the keyboard boards and carries no user
+        // data, and HELTEC_NAV_CFG is 0 — without the offset the two would be
+        // indistinguishable, and the status box would light up as Config.
+        const intptr_t tag = (intptr_t)lv_obj_get_user_data(child);
+        if (tag == 0) continue;
+        navBarStyleCell(child, (int)(tag - 1) == activeTarget);
+    }
 }
 #endif
 
@@ -18624,6 +18713,16 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     const bool navDmIsEmoji = false;
     const char *const kDmIcon = LV_SYMBOL_ENVELOPE;
 #endif
+
+    // Chats — the channel conversations, as against DM's private ones. The
+    // speech balloon where it is free, and "#" where it is not: on the T-Deck
+    // Pro the balloon is already DM's (see the note above), and a hash is what
+    // a channel is called everywhere else in this UI anyway. It is also plain
+    // ASCII, so the 1-bit panel cannot threshold it into a blob, and it can
+    // never collide with the list glyph Nodes falls back to when the emoji face
+    // fails to load.
+    const bool navChatIsEmoji = navEmojiReady && !navDmIsEmoji;
+    const char *const kChatIcon = navChatIsEmoji ? "\U0001F4AC" : "#";
     // Icons rather than words. Six buttons of text across 240 px meant either
     // an abbreviation per board ("Config" on the wide one, "Cfg" on the tall
     // one) or a 10 px label with nothing left over; a glyph is the same size on
@@ -18654,6 +18753,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // rather than in passing.
     const NavItem kItems[] = {
         {LV_SYMBOL_HOME,     HELTEC_NAV_HOME,   false},
+        // Immediately right of Home, because the two are a pair: Home is the
+        // glance at the node, this is the messages. It also retires the toggle
+        // Home briefly carried — a second tap on Home meaning "show me the chat"
+        // was only ever a way around not having this cell.
+        {kChatIcon,          HELTEC_NAV_CHAT,   navChatIsEmoji},
         {kDmIcon,            HELTEC_NAV_DM,     navDmIsEmoji},
         // The node roster, and the packet feed coming in over the air.
         {navEmojiReady ? kContactIcon : LV_SYMBOL_LIST,
@@ -18679,7 +18783,6 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    const lv_color_t navBgColor = chatPanelBackgroundColor();
     const lv_color_t navTextColor = lv_color_hex(0xD9E8FF);
 
     for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
@@ -18694,23 +18797,13 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_set_style_pad_all(btn, btnPad, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
 
-        const bool isActive = (activeTarget == kItems[i].target);
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(btn, isActive ? 2 : 1, 0);
-        lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(
-            btn,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? navBgColor
-                                            : (isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F)),
-            0);
-        lv_obj_set_style_bg_opa(btn, isActive ? LV_OPA_80 : LV_OPA_60, 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_border_color(btn,
-                                      isActive ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x335D9D),
-                                      0);
-    #endif
+        navBarStyleCell(btn, activeTarget == kItems[i].target);
+
+        // Which destination this cell is, readable back off the widget. It is
+        // what lets navBarSetActive() re-mark the bar when the root screen
+        // switches between the dashboard and the chat without rebuilding it —
+        // those two share one bar, so the lit cell has to be able to move.
+        lv_obj_set_user_data(btn, (void *)(intptr_t)(kItems[i].target + 1));
 
         lv_obj_add_event_cb(btn,
                             onHeltecBottomNavPressed,
@@ -18733,6 +18826,7 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         lv_obj_center(label);
 #if UI_TOUCH_ONLY_PROFILE
         if (kItems[i].target == HELTEC_NAV_DM) navDmIconRegister(label);
+        if (kItems[i].target == HELTEC_NAV_CHAT) navChatIconRegister(label);
 #endif
     }
 #else
@@ -18755,14 +18849,14 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 // way this bar has always packed them. refreshHeaderStatus() re-runs the same
 // alignments as the GPS label grows and shrinks with the satellite count.
 static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **gpsOut,
-                                  lv_obj_t **wifiOut, lv_obj_t **dmOut) {
+                                  lv_obj_t **wifiOut, lv_obj_t **dmOut,
+                                  lv_obj_t **chanOut) {
     if (!bar) return;
 
-    // Fits "GPS 12" plus the wifi and envelope glyphs at montserrat_10, which
-    // measure ~61 px together — the widest this realistically gets. The slack
-    // above that went to the buttons beside it, which need the width more: this
-    // box is read, not aimed at.
-    const int statusBoxW = 68;
+    // Fits "GPS 12" plus the wifi, envelope and channel glyphs at montserrat_10.
+    // Eight wider than it was: the channel bell is new, and the alternative was
+    // letting it overhang the box's left edge into the button beside it.
+    const int statusBoxW = 76;
 
     lv_obj_t *box = lv_obj_create(bar);
     lv_obj_set_size(box, statusBoxW, lv_pct(100));
@@ -18788,10 +18882,21 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     lv_obj_align_to(dm, wifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
     lv_obj_add_flag(dm, LV_OBJ_FLAG_HIDDEN);
 
+    // Unread channel traffic, left of the DM envelope. A bell rather than a
+    // second envelope: the two blink on the same phase and sit 5 px apart, so
+    // they have to be told apart by shape, not by position.
+    lv_obj_t *chan = lv_label_create(box);
+    lv_obj_set_style_text_font(chan, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(chan, lv_color_hex(0xF4D35E), 0);
+    lv_label_set_text(chan, LV_SYMBOL_BELL);
+    lv_obj_align_to(chan, dm, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+    lv_obj_add_flag(chan, LV_OBJ_FLAG_HIDDEN);
+
     if (boxOut)  *boxOut  = box;
     if (gpsOut)  *gpsOut  = gps;
     if (wifiOut) *wifiOut = wifi;
     if (dmOut)   *dmOut   = dm;
+    if (chanOut) *chanOut = chan;
 }
 #endif
 
@@ -18855,12 +18960,13 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
     // dark — this board keeps them on the bottom bar, and the bottom bar is
     // right here.
     buildNavStatusCluster(bar, &s_navStatusBox, &s_navStatusGps,
-                          &s_navStatusWifi, &s_navStatusDm);
+                          &s_navStatusWifi, &s_navStatusDm, &s_navStatusChan);
     // The labels are created empty, and the periodic refresh early-outs while
     // nothing has changed — which, opening a screen, is the normal case. Force
     // one pass so they arrive with the readings already on them.
     refreshHeaderStatus(true);
     refreshDmAlertIndicator();
+    refreshChatAlertIndicator();
 #endif
 #else
     LV_UNUSED(parent);
@@ -25977,21 +26083,15 @@ static uint32_t s_homeGlanceMinuteKey = UINT32_MAX;
 static inline bool homeDashboardVisible() { return lvObjValid(s_homeDash); }
 
 #if UI_TOUCH_NAV_BAR
-// Visible *and* with nothing layered over it. Asked by the touch nav bar's Home
-// cell, which has to tell "get me out of this screen" from "I am already home,
-// show me the chat".
-//
-// Answered from LVGL's own child order rather than from a list of every modal
-// that could be on top: openHomeDashboard() moves the dashboard to the front,
-// so anything created or raised afterwards is a later sibling. A list would be
-// one more place to forget a modal — which is exactly the failure the note on
-// chatScreenIsForeground() describes.
-static bool homeDashboardIsForeground() {
-    if (!homeDashboardVisible() || !lvObjValid(s_rootScreen)) return false;
-    const uint32_t n = lv_obj_get_child_count(s_rootScreen);
-    return n > 0 && lv_obj_get_child(s_rootScreen, n - 1) == s_homeDash;
+// Which of the two glance surfaces the shared bar should be lighting. Home and
+// Chats are one bar's worth of cells over two screens that swap without the bar
+// being rebuilt, so the lit cell has to be told to move.
+static void homeDashMarkNavBar(bool onDashboard) {
+    navBarSetActive(s_chatShortcutBar, onDashboard ? HELTEC_NAV_HOME : HELTEC_NAV_CHAT);
 }
-#endif  // UI_TOUCH_NAV_BAR
+#else
+static inline void homeDashMarkNavBar(bool) {}
+#endif
 
 // The bar under the dashboard keeps its right-hand cluster — Wi-Fi, GPS and the
 // DM alert are status, and status belongs on every screen — but loses the key
@@ -26010,6 +26110,7 @@ static void homeDashSetHintsHidden(bool hidden) {
 
 static void closeHomeDashboard() {
     homeDashSetHintsHidden(false);
+    homeDashMarkNavBar(false);
     lvObjDeleteSafe(s_homeDash);
     // Children of the deleted object; LVGL freed them with it, so this is just
     // the bookkeeping that stops anything reaching a dangling pointer.
@@ -26280,6 +26381,7 @@ static void openHomeDashboard() {
         // Already here. Bring it up and repaint rather than rebuild: Home
         // pressed twice should not cost a teardown.
         homeDashSetHintsHidden(true);
+        homeDashMarkNavBar(true);
         lv_obj_move_foreground(s_homeDash);
         refreshHomeDashboard(true);
         return;
@@ -26321,6 +26423,7 @@ static void openHomeDashboard() {
         s_homeGlanceMinuteKey = UINT32_MAX;
         refreshHomeDashboard(true);
         homeDashSetHintsHidden(true);
+        homeDashMarkNavBar(true);
         lv_obj_move_foreground(s_homeDash);
         return;
     }
@@ -26371,6 +26474,7 @@ static void openHomeDashboard() {
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
     homeDashSetHintsHidden(true);
+    homeDashMarkNavBar(true);
     lv_obj_move_foreground(s_homeDash);
 }
 #endif  // HAS_HOME_DASHBOARD
@@ -31573,8 +31677,9 @@ static void openLegendModal() {
         body,
         "Touch Navigation:\n"
 #if HAS_HOME_DASHBOARD
-        "Bottom buttons: Home, DM, Nodes, Live, Config, Help.\n"
-        "Home opens the dashboard; tap it again for the chat.\n"
+        "Bottom buttons: Home, Chats, DM, Nodes, Tools, Config, Help.\n"
+        "Home is the dashboard; Chats is the messages, and its icon\n"
+        "blinks when a channel has something unread.\n"
 #else
         "Use bottom buttons for Home, DM, Nodes, Live, Config, Help.\n"
 #endif
@@ -37411,8 +37516,7 @@ static void pumpKeyboardInput() {
                 // See the C branch above: no global-nav machinery on this board,
                 // so this is the nav bar's Home cell spelled out. Help keeps its
                 // "?" button on that bar.
-                if (homeDashboardIsForeground()) closeHomeDashboard();
-                else                             openHomeDashboard();
+                openHomeDashboard();
 #elif UI_TOUCH_ONLY_PROFILE
                 openLegendModal();
 #else
@@ -39959,6 +40063,10 @@ static void layoutHeaderInlineItems() {
         if (s_chatDmAlert && lv_obj_is_valid(s_chatDmAlert)
             && lv_obj_get_parent(s_chatDmAlert) == s_chatHeaderBar) {
             lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
+            if (lvObjValid(s_chatChanAlert)
+                && lv_obj_get_parent(s_chatChanAlert) == s_chatHeaderBar) {
+                lv_obj_align_to(s_chatChanAlert, s_chatDmAlert, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+            }
         }
     }
 
@@ -40166,6 +40274,14 @@ static void refreshHeaderStatus(bool force) {
         } else {
             lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
         }
+        // The bell follows the envelope, on whichever side of wifi it landed:
+        // outward from it, so the pair reads as one cluster either way.
+        if (lvObjValid(s_chatChanAlert)
+            && lv_obj_get_parent(s_chatChanAlert) == wifiParent) {
+            lv_obj_align_to(s_chatChanAlert, s_chatDmAlert,
+                            packFromRight ? LV_ALIGN_OUT_LEFT_MID : LV_ALIGN_OUT_RIGHT_MID,
+                            packFromRight ? -4 : 4, 0);
+        }
     }
 #if HAS_NAV_BAR_TOGGLE
     // The copy on whichever modal is open. Its own box, always packed from the
@@ -40242,6 +40358,41 @@ static void refreshDmAlertIndicator() {
     setDmAlertVisible(s_chatDmAlert, visible);
 #if HAS_NAV_BAR_TOGGLE
     setDmAlertVisible(s_navStatusDm, visible);
+#endif
+#endif
+}
+
+// The same thing for unread *channel* traffic, split the same way and on the
+// same 500 ms phase — so where both are showing they blink together as one
+// cluster rather than chasing each other.
+//
+// Boards with a nav bar blink its Chats cell instead of drawing a glyph: the
+// cell is already on screen, it is where the tap has to land, and a bar seven
+// cells wide has no room to spend on a status icon that repeats what one of the
+// cells could say itself. Boards without one get the bell beside the envelope.
+static void refreshChatAlertIndicator() {
+    const bool visible = anyChannelNeedsAttention() && (((millis() / 500UL) & 1UL) == 0UL);
+#if UI_TOUCH_ONLY_PROFILE
+    setDmAlertVisible(s_chatChanAlert, false);
+
+    // Only on change, for the reason the DM copy gives: this runs every loop
+    // pass and re-asserting a colour invalidates the label every time.
+    static bool primed = false;
+    if (visible != s_navChatLit || !primed) {
+        s_navChatLit = visible;
+        primed = true;
+        for (int i = 0; i < kNavDmIconSlots; i++) {
+            if (s_navChatIcons[i] && !lv_obj_is_valid(s_navChatIcons[i])) {
+                s_navChatIcons[i] = nullptr;   // its bar went with a closed modal
+                continue;
+            }
+            navChatApplyInk(s_navChatIcons[i], visible);
+        }
+    }
+#else
+    setDmAlertVisible(s_chatChanAlert, visible);
+#if HAS_NAV_BAR_TOGGLE
+    setDmAlertVisible(s_navStatusChan, visible);
 #endif
 #endif
 }
@@ -43458,6 +43609,7 @@ static void buildUi() {
 #else
     s_chatHeaderWifi = nullptr;
     s_chatDmAlert = nullptr;
+    s_chatChanAlert = nullptr;
 #endif
 #if UI_CHANNEL_LIST_DROPDOWN
     layoutHeaderInlineItems();
@@ -43705,8 +43857,11 @@ static void buildUi() {
 
 #if UI_TOUCH_ONLY_PROFILE
     s_chatShortcutText = nullptr;
-    // Chat is home, so Home is the lit button here — the one screen where the
-    // bar marks where you already are rather than where you can go.
+    // Home is the lit button because the dashboard is what opens over this bar
+    // at boot. Home and Chats are the one pair of cells that share a bar —
+    // both surfaces live on the root screen — so the mark moves between them
+    // from openHomeDashboard()/closeHomeDashboard() rather than being fixed
+    // here. See homeDashMarkNavBar().
     populateHeltecBottomNav(s_chatShortcutBar, HELTEC_NAV_HOME);
 #elif HAS_NAV_BAR_TOGGLE
     if (bottomNavEnabled()) {
@@ -43721,7 +43876,7 @@ static void buildUi() {
 
     // The same cluster the modals' copies of this bar carry.
     buildNavStatusCluster(s_chatShortcutBar, &s_chatStatusBox, &s_chatHeaderGps,
-                          &s_chatHeaderWifi, &s_chatDmAlert);
+                          &s_chatHeaderWifi, &s_chatDmAlert, &s_chatChanAlert);
     } else {
     // Bar switched off: fall through to the key-hint strip below, which is the
     // footer this board had before the bar and is still what every other
@@ -43810,6 +43965,20 @@ static void buildUi() {
     lv_label_set_text(s_chatDmAlert, LV_SYMBOL_ENVELOPE);
     lv_obj_align_to(s_chatDmAlert, s_chatHeaderWifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
     lv_obj_add_flag(s_chatDmAlert, LV_OBJ_FLAG_HIDDEN);
+
+    // Unread channel traffic, one glyph further left. A bell, not a second
+    // envelope: these two blink together and sit a few pixels apart, so shape
+    // is the only thing telling them apart.
+    s_chatChanAlert = lv_label_create(s_chatShortcutBar);
+    lv_obj_set_style_text_font(s_chatChanAlert, &lv_font_montserrat_10, 0);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_text_color(s_chatChanAlert, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_text_color(s_chatChanAlert, lv_color_hex(0xF4D35E), 0);
+#endif
+    lv_label_set_text(s_chatChanAlert, LV_SYMBOL_BELL);
+    lv_obj_align_to(s_chatChanAlert, s_chatDmAlert, LV_ALIGN_OUT_LEFT_MID, -4, 0);
+    lv_obj_add_flag(s_chatChanAlert, LV_OBJ_FLAG_HIDDEN);
 #endif
 #if HAS_NAV_BAR_TOGGLE
     }
@@ -43980,6 +44149,7 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     s_chatHeaderGps = nullptr;
     s_chatHeaderWifi = nullptr;
     s_chatDmAlert = nullptr;
+    s_chatChanAlert = nullptr;
     s_chatHeaderBattText = nullptr;
     s_chatHeaderBattBar = nullptr;
     s_chatPanel = nullptr;
@@ -46059,6 +46229,7 @@ void loop() {
         // has to keep moving on its own so a trim can be judged against a meter.
         refreshCfgBattCalReadout(false);
         refreshDmAlertIndicator();
+        refreshChatAlertIndicator();
         // Not forced: the content signature inside refreshChatView decides whether a
         // rebuild is actually needed, so mesh packets that don't change the visible
         // chat no longer trigger a full (bubble) teardown/rebuild every time.

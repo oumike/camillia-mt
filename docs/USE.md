@@ -209,9 +209,9 @@ How you reach it depends on the board:
 
 - **M9** — the **Home** button. **Messages** is the chat screen, and a second
   press of Messages opens the channel list
-- **Touch-only boards (Heltec, Wio)** — the nav bar's **Home** cell. Tapped
-  again with the dashboard already in front of you, it steps aside to the chat
-  underneath; the bar has no room for a seventh cell
+- **Touch-only boards (Heltec, Wio)** — the nav bar's **Home** cell, with a
+  **Chats** cell beside it for the messages. Whichever of the two you are on is
+  the lit cell
 - **Keyboard boards** — **H** on the chat screen, or the **Alt+H / Sym+H**
   chord. **C** is the chat screen (a second C opens the channel list, where the
   board has a dropdown rather than an anchored list), and **F** is Config, which
@@ -228,6 +228,23 @@ How you reach it depends on the board:
 
 On the T-Deck Pro the charts update once a minute rather than on every packet.
 A redraw there is an e-paper refresh, and this screen opens itself.
+
+## Unread indicators
+
+Unread messages are marked in two places, and which one you get depends on
+whether the board draws the bottom nav bar:
+
+- **With the nav bar** — the **Chats** cell blinks for unread channel traffic
+  and the **DM** cell blinks for unread private messages, on the same half-second
+  phase, in the same amber. The alert and the way to answer it are the same
+  control
+- **Without it** — two glyphs sit at the right-hand end of the shortcut bar,
+  beside the GPS and Wi-Fi readouts: a **bell** for channels and an **envelope**
+  for DMs. Different shapes, because they blink together and sit a few pixels
+  apart
+
+Either way the mark clears as soon as you open the conversation, and a muted
+channel raises nothing.
 - **Hold the d-pad centre to put the screen to sleep** — the same gesture as
   holding the T-Deck's trackball click. A tap of the centre is still Enter. How
   long counts as a hold is decided by the keyboard controller itself, not by the
