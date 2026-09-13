@@ -27,7 +27,7 @@
 - Keyboard boards (T-Deck, T-Deck Pro, T-Lora Pager TFT, Attaky Mesh Deck): **H** opens the home dashboard, **C** goes to chat (press again for the channel list) and **F** opens Config, which used to be C. D, N and L are unchanged.
 - The **Alt+H / Sym+H** chord now opens the dashboard, and **Alt+C / Sym+C** jumps straight to chat without opening the channel list.
 - T-Deck Pro: Config has no Alt chord, because Alt+F is already next-channel on that keyboard. Plain F and the nav bar still open it.
-- T-Deck: the hardware buttons shift along one — **Messages** opens chat, **Home** the dashboard, the key below Home opens DMs and the key below Back opens Tools. Nodes loses its dedicated button; N on the keyboard still reaches it.
+- Elecrow ThinkNode M9: the hardware buttons shift along one — **Messages** opens chat, **Home** the dashboard, the key below Home opens DMs and the key below Back opens Tools. Nodes loses its dedicated button; N on the keyboard still reaches it.
 - T-Deck Pro: the dashboard's charts redraw once a minute rather than on every packet received, since each redraw is an e-paper refresh on a screen that opens itself.
 - Space pressed on the home dashboard always starts a new message, rather than quietly replying to a message selected earlier on the chat screen.
 - The on-device help screen lists the new key assignments.
