@@ -1,0 +1,41 @@
+# Wio Tracker L2 only. 16 MB layout with 6 MB OTA app slots.
+#
+# Every other 16 MB board uses partitions_16mb_fs.csv, which gives 3.125 MB app
+# slots and a 9.56 MB littlefs partition. That split is right for the boards
+# that keep their files in internal flash (Heltec V4, Mesh Deck) -- and wrong
+# for this one, which has an SD card. hw_wio_tracker_l2.h defines HAS_SD_MMC and
+# not HAS_INTERNAL_FS, so storage.cpp mounts SD_MMC and that 9.56 MB partition
+# is never mounted at all: it was 9.5 MB of dead flash sitting beside an app
+# slot that shipped at 98.6% full and blocked two releases (issues #72, #76).
+#
+# So the space goes where this board actually needs it. 6 MB slots put a 3.2 MB
+# image at ~54%, which is headroom measured in megabytes rather than kilobytes,
+# and it is why the emoji font stays linked here like everywhere else -- see the
+# discussion in #76 about loading it from a file instead. A feature that needs
+# no provisioning step is worth more than one that saves 776 KB.
+#
+# 3.8 MB of littlefs is kept rather than spent. Nothing mounts it today, but
+# leaving the partition present means a later HAS_INTERNAL_FS on this board is a
+# header change and not another table.
+#
+# TWO THINGS TO KNOW BEFORE FLASHING THIS TO A DEVICE THAT ALREADY HAS FIRMWARE:
+#
+#   1. nvs MOVES, from 0x650000 to 0xC10000. The app slots sit before it and
+#      partitions are contiguous, so growing them cannot leave it where it was.
+#      A device flashed with this table comes up with empty NVS -- settings,
+#      channels and the node database are gone. Export config to the SD card
+#      first (Config -> Export) if any of it matters.
+#
+#   2. An OTA update does NOT rewrite the partition table. Units already in the
+#      field keep the 3.125 MB slots and keep updating normally only while the
+#      image still fits them. Once it grows past 3,276,800 bytes those units can
+#      no longer be updated over the air and need one USB reflash.
+#
+# 0xC30000 + 0x3D0000 = 0x1000000, exactly 16 MB.
+# Name,     Type, SubType, Offset,   Size,
+otadata,  data, ota,     0x9000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x600000,
+app1,     app,  ota_1,   0x610000, 0x600000,
+nvs,      data, nvs,     0xC10000, 0x10000,
+coredump, data, coredump,0xC20000, 0x10000,
+littlefs, data, spiffs,  0xC30000, 0x3D0000,

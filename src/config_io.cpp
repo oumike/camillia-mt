@@ -399,6 +399,10 @@ void applyPresetParams(RhinoConfig &cfg) {
 static const char *kPath = "/camillia/config.yaml";
 static const char *kWebCfgUser = "admin";
 static bool sdReady = false;
+// How many times the probe has failed. Used only to decide how hard to try
+// next time — the backoff that decides *when* to try is sdFailStreak, further
+// down. Reset by sdForceRescan().
+static uint8_t sdProbeRound = 0;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
@@ -1267,14 +1271,37 @@ static bool sdBeginProbe() {
     // costs nothing when the fast attempt succeeds, because it is only reached
     // after the faster ones fail.
     static const uint32_t kSdSpeeds[] = { 4000000UL, 1000000UL, 400000UL };
+    static constexpr size_t kSdSpeedCount = sizeof(kSdSpeeds) / sizeof(kSdSpeeds[0]);
     uint32_t mountedAt = 0;
-    for (size_t i = 0; i < sizeof(kSdSpeeds) / sizeof(kSdSpeeds[0]); i++) {
+
+    // The first probe walks every rate. Later ones try exactly one, cycling.
+    //
+    // A failed SD.begin() costs about a second inside f_mount, so walking all
+    // three is a ~3 s stall — and this runs on the main loop, where LVGL and
+    // the keyboard scan are waiting behind it. Paying that once at boot to find
+    // a card that needs a slow clock is right; paying it again every time the
+    // backoff fires, on a device whose slot is simply empty, is not: if all
+    // three rates already failed, a fourth identical walk learns nothing.
+    //
+    // Cycling rather than pinning the fastest keeps the coverage. A card
+    // inserted later that only works at 400 kHz is still found, just on the
+    // third retry instead of the first — and by then the backoff has spread
+    // those retries over a minute anyway.
+    size_t firstIdx = 0, tryCount = kSdSpeedCount;
+    if (sdProbeRound > 0) {
+        firstIdx = (size_t)(sdProbeRound - 1) % kSdSpeedCount;
+        tryCount = 1;
+    }
+    for (size_t n = 0; n < tryCount; n++) {
+        const size_t i = (firstIdx + n) % kSdSpeedCount;
         if (SD.begin(SD_CS, SPI, kSdSpeeds[i])) {
             sdReady = true;
             mountedAt = kSdSpeeds[i];
             break;
         }
     }
+    if (sdReady) sdProbeRound = 0;
+    else if (sdProbeRound < 0xFF) sdProbeRound++;
 #endif
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -1291,7 +1318,18 @@ static bool sdBeginProbe() {
                       (unsigned long)mountedAt,
                       SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
     } else {
-        Serial.printf("[sd] not found (tried 4M/1M/400k) cs=%d sck=%d miso=%d mosi=%d\n",
+        char triedBuf[24];
+        if (tryCount == kSdSpeedCount) {
+            snprintf(triedBuf, sizeof(triedBuf), "4M/1M/400k");
+        } else {
+            const uint32_t hz = kSdSpeeds[firstIdx];
+            if (hz >= 1000000UL) snprintf(triedBuf, sizeof(triedBuf), "%luM only",
+                                          (unsigned long)(hz / 1000000UL));
+            else                 snprintf(triedBuf, sizeof(triedBuf), "%luk only",
+                                          (unsigned long)(hz / 1000UL));
+        }
+        Serial.printf("[sd] not found (tried %s) cs=%d sck=%d miso=%d mosi=%d\n",
+                      triedBuf,
                       SD_CS, LORA_SPI_SCK, LORA_SPI_MISO, LORA_SPI_MOSI);
     }
 #endif
@@ -1322,6 +1360,9 @@ static uint32_t sdFailUntilMs = 0;
 static bool     sdFailArmed   = false;
 
 void sdForceRescan() {
+    // A full walk again: "I just inserted a card" is exactly when the cheap
+    // single-rate retry is the wrong thing to do.
+    sdProbeRound  = 0;
     sdFailStreak  = 0;
     sdFailUntilMs = 0;
     sdFailArmed   = false;

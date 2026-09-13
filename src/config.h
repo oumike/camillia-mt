@@ -410,6 +410,29 @@
 #else
 #define HAS_SLEEP_OVERLAY 0
 #endif
+
+// Home dashboard: a glance screen the device shows while awake, reached by the
+// Home button. The top half is the same header the lock screen draws -- node
+// name, clock, conditions, date, battery -- and the bottom half is the radio's
+// own health: channel utilisation over time, and the SNR/RSSI of what has been
+// heard. Chat moves onto its own button beside it.
+//
+// Every board that builds the glance overlay, which is every board with a
+// display except the Cardputer — its 240x135 panel has no room for a header and
+// two charts above the shortcut bar, and it is the one build that omits the
+// glance code this is made of (see FEATURE_LOCK_SCREEN above). So the gate is
+// simply HAS_SLEEP_OVERLAY: a board either has the header or it cannot have
+// this.
+//
+// How Home is reached differs by board and is decided at the call sites — a
+// hardware button on the M9, a letter or chord on the keyboard boards, the nav
+// bar's Home cell where taps are the only input — but what it opens is the same
+// screen everywhere.
+#if HAS_SLEEP_OVERLAY
+#define HAS_HOME_DASHBOARD 1
+#else
+#define HAS_HOME_DASHBOARD 0
+#endif
 // MQTT Monitor (Live -> Tools -> MQTT) is a census of the channels arriving
 // under the configured root. It rides the bridge's existing subscription, so it
 // costs nothing until it is opened and a bounded ~1 KB of heap while it is — but

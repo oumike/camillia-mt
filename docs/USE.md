@@ -172,14 +172,62 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 ### Elecrow ThinkNode M9 (m9)
 
-- Six dedicated hardware buttons below the screen jump straight to a surface
-  from anywhere, closing whatever is open first: **Messages** (DMs), **Home**,
-  the function key below Home (Live), the key below Back (Nodes), and **Map**
-  (Discovery)
-- **Home** returns to the chat screen on the first channel. Pressed when you are
-  already on the chat screen with nothing over it, it opens the **channel list**
-  instead — the same list H toggles — so a second press is how you change
-  channel. With the list already open, Home closes it and stops there
+- Dedicated hardware buttons below the screen jump straight to a surface from
+  anywhere, closing whatever is open first: **Messages** (chat), **Home** (the
+  home dashboard), the function key below Home (DMs), the key below Back
+  (Tools), and **Map** (Discovery)
+- **Home** opens the **home dashboard**: the lock screen's glance header — node
+  name, clock, conditions, date, battery — over the two radio-health charts,
+  channel utilisation on the left and SNR/RSSI on the right. The shortcut bar
+  stays along the bottom, so the key hints are still there. It is a place to
+  look at the node rather than at the mesh, which is why it is separate from
+  chat
+- **The device boots onto the dashboard.** Chat is built underneath it and is
+  one press of Messages away
+- **Messages** returns to the chat screen on the first channel. Pressed when you
+  are already on the chat screen with nothing over it, it opens the **channel
+  list** instead, so a second press is how you change channel. With the list
+  already open it closes it and stops there. This is what Home used to do
+- **Nodes has no dedicated button on this board.** Five destinations and four
+  buttons, and the roster is the one that is looked up rather than lived in —
+  N reaches it from the keyboard, as does Tools' own list
+
+## Home dashboard
+
+Every build with a display except the Cardputer opens a **home dashboard**: the
+lock screen's glance header — node name, clock, conditions, date, battery — over
+two charts of the radio's own health, channel utilisation and SNR/RSSI. The
+shortcut bar or nav bar stays along the bottom; on keyboard builds the chat
+screen's key hints are hidden while it is up, because they describe a screen you
+are not looking at. **The device boots onto it.**
+
+Where the charts sit side by side on a landscape panel, they stack on a portrait
+one, and each card puts its heading and current reading on one line there to
+leave the chart some height.
+
+How you reach it depends on the board:
+
+- **M9** — the **Home** button. **Messages** is the chat screen, and a second
+  press of Messages opens the channel list
+- **Touch-only boards (Heltec, Wio)** — the nav bar's **Home** cell. Tapped
+  again with the dashboard already in front of you, it steps aside to the chat
+  underneath; the bar has no room for a seventh cell
+- **Keyboard boards** — **H** on the chat screen, or the **Alt+H / Sym+H**
+  chord. **C** is the chat screen (a second C opens the channel list, where the
+  board has a dropdown rather than an anchored list), and **F** is Config, which
+  used to be C. D, N and L are unchanged
+- The **Alt+C chord** goes to chat *without* opening the channel list. That is
+  deliberate: the chord is the reflexive "get me out of here" gesture, and
+  binding it to the channel list is what once had the Mesh Deck dropping
+  keystrokes. A plain C, typed on purpose, still opens the list
+- **T-Deck Pro exception**: Config has no Alt chord there. Alt+F is already
+  next-channel on that keyboard, and the pair of channel chords straddle Alt+D
+  on the physical home row. Plain F still opens Config, as does the nav bar
+- **Cardputer** has no dashboard. Its 240x135 panel does not build the glance
+  header this is made of
+
+On the T-Deck Pro the charts update once a minute rather than on every packet.
+A redraw there is an e-paper refresh, and this screen opens itself.
 - **Hold the d-pad centre to put the screen to sleep** — the same gesture as
   holding the T-Deck's trackball click. A tap of the centre is still Enter. How
   long counts as a hold is decided by the keyboard controller itself, not by the
@@ -1859,14 +1907,16 @@ Primary usage is touch.
 
 Primary usage is keyboard plus the d-pad and the dedicated function row.
 
-- Dedicated buttons open Messages, Home, Live, Nodes and Map from anywhere;
-  Home pressed on the chat screen opens the channel list
+- Dedicated buttons open Chat, Home (the dashboard), DMs, Tools and Map from
+  anywhere; Chat pressed on the chat screen opens the channel list
 - Holding the d-pad centre sleeps the screen
 - D-pad Up/Down navigates, Left/Right switches channels or hops columns —
   except in the New Message box, where the d-pad moves the text cursor
   (Left/Right by a character, Up/Down by a line), and on the Brightness screen,
   where Up/Down moves between the two sliders and Left/Right sets the level
-- H toggles the channel selector
+- H opens the home dashboard, C the chat screen (again for the channel
+  selector), F the configuration screen. D, N and L are unchanged — Direct
+  Messages, Nodes and Tools
 - Space opens compose or reply compose; Enter moves the cursor into the
   channel's messages, and Enter again opens Message Actions for the highlighted
   message

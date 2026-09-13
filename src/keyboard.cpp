@@ -17,11 +17,19 @@
 #if defined(DEVICE_MESH_DECK) || defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT)
 static char altNavShortcut(char k) {
     switch (k) {
+        // H is Home on every build; what Home *means* is the difference.
+        // Where there is a dashboard it opens that, chat moves to C, and Config
+        // steps across to F to make room. See HAS_HOME_DASHBOARD in config.h.
         case 'h': case 'H': return KEY_OPEN_HOME;
         case 'd': case 'D': return KEY_OPEN_DMS;
         case 'n': case 'N': return KEY_OPEN_NODES;
         case 'l': case 'L': return KEY_OPEN_TOOLS;
+#if HAS_HOME_DASHBOARD
+        case 'c': case 'C': return KEY_OPEN_CHAT;
+        case 'f': case 'F': return KEY_OPEN_CONFIG;
+#else
         case 'c': case 'C': return KEY_OPEN_CONFIG;
+#endif
         // Alt+Backspace is Back, the same thing the M9's dedicated button
         // raises: compose discards the draft and closes, and everywhere else it
         // is an ordinary Backspace. 0x7F as well as 0x08 because a keyboard that
@@ -441,7 +449,16 @@ char tloraTranslateKey(uint8_t keyNum) {
         else if (keyNum == 18) nav = KEY_OPEN_DMS;
         else if (keyNum == 24) nav = KEY_OPEN_NODES;
         else if (keyNum == 12) nav = KEY_OPEN_TOOLS;
+#if HAS_HOME_DASHBOARD
+        // C is chat here as everywhere else. Config does NOT move to F on this
+        // board: F is keyNum 17, which is already Alt+next-channel, and the two
+        // channel chords straddle Alt+D on the physical home row (s d f) — worth
+        // more than a chord for a screen the touch nav bar also reaches with one
+        // tap. Plain F on the chat screen still opens Config.
+        else if (keyNum == 27) nav = KEY_OPEN_CHAT;
+#else
         else if (keyNum == 27) nav = KEY_OPEN_CONFIG;
+#endif
         else if (keyNum == 17) nav = KEY_NEXT_CHAN;
         else if (keyNum == 19) nav = KEY_PREV_CHAN;
         else if (keyNum == 25) nav = KEY_TOGGLE_KB_BACKLIGHT;
@@ -1698,6 +1715,18 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         // above. It used to be a second close gesture; Back's own long-press
         // (0x89, just above) is the close-hold now, and this is "screen off".
         case 0xA3: return KEY_SLEEP_SCREEN;
+#if HAS_HOME_DASHBOARD
+        // Home now opens the dashboard, so chat needs a button of its own and
+        // the four move up one. Messages takes chat because it is the one
+        // labelled for reading, and pressing it again from chat opens the
+        // channel list — the second press Home used to carry. DMs drops to the
+        // button under Home, and Nodes loses its dedicated button: N reaches it
+        // from the keyboard, and it is the one of the five that is looked up
+        // rather than lived in.
+        case 0x81: return KEY_OPEN_CHAT;     // dedicated Messages button
+        case 0x82: return KEY_OPEN_HOME;     // dedicated Home button
+        case 0x83: return KEY_OPEN_DMS;      // function button below Home
+#else
         case 0x81: return KEY_OPEN_DMS;      // dedicated Messages button
         // Home opens Home, and only that. Holding it used to sleep the screen,
         // which is now the d-pad centre's job.
@@ -1708,6 +1737,7 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
         // 0x84, one step further out, matching the nav bar where it also sits
         // past the reading destinations.
         case 0x83: return KEY_OPEN_NODES;    // function button below Home
+#endif
         case 0x84: return KEY_OPEN_TOOLS;    // GPS-area button below Back
         case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button
         // Dedicated M9 functions have no Camillia binding yet. Their raw values

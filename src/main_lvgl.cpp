@@ -228,18 +228,31 @@ static lv_obj_t *s_chatShortcutBar = nullptr;
 static lv_obj_t *s_chatShortcutText = nullptr;
 #if HAS_SLEEP_OVERLAY
 static lv_obj_t *s_tdeckProSleepOverlay = nullptr;
-static lv_obj_t *s_tdeckProSleepTitle = nullptr;
-static lv_obj_t *s_tdeckProSleepNode = nullptr;
-static lv_obj_t *s_tdeckProSleepTime = nullptr;
-static lv_obj_t *s_tdeckProSleepDate = nullptr;
+// The glance header: wordmark, node name and clock on the left, conditions
+// opposite, with the date/battery band above. Grouped into a struct because it
+// is built more than once -- the lock screen owns one, and on the M9 the home
+// screen owns another showing the same information while the device is awake.
+// Two copies of this block would drift the moment either was touched.
+struct GlanceHeader {
+    lv_obj_t *title;
+    lv_obj_t *node;
+    lv_obj_t *time;
+    lv_obj_t *date;
+    lv_obj_t *batt;
 #if HAS_WEATHER
-// The right-hand hero column: conditions opposite the node name, temperature
-// opposite the clock. Hidden whenever the cached reading is too old to show.
-static lv_obj_t *s_tdeckProSleepWxDesc = nullptr;
-static lv_obj_t *s_tdeckProSleepWxTemp = nullptr;
+    lv_obj_t *wxDesc;   // conditions, opposite the node name
+    lv_obj_t *wxTemp;   // temperature, opposite the clock
+#endif
+};
+static GlanceHeader s_sleepGlance = {};
+#if HAS_HOME_DASHBOARD
+// The home dashboard's own header. A second instance rather than a shared one:
+// both surfaces can exist at once — the idle timeout can put the lock screen up
+// over a dashboard that is still built underneath — and one set of pointers
+// would have the later build steal the earlier screen's labels.
+static GlanceHeader s_homeGlance = {};
 #endif
 static uint32_t s_tdeckProSleepMinuteKey = UINT32_MAX;
-static lv_obj_t *s_tdeckProSleepBatt = nullptr;
 
 // The notification area under the date: newest unread message previews first.
 // Each first line uses separate labels for time/channel, sender and body so the
@@ -780,6 +793,12 @@ static ChartHist s_airUtilHist;
 static ChartHist s_snrHist;
 static ChartHist s_rssiHist;
 
+#if HAS_HOME_DASHBOARD
+// Declared up here with the modals rather than beside the rest of the dashboard:
+// chatScreenIsForeground() has to name it, and that is defined long before the
+// dashboard's own block.
+static lv_obj_t *s_homeDash = nullptr;
+#endif
 static lv_obj_t *s_chUtilChartModal = nullptr;
 static lv_obj_t *s_chUtilChart = nullptr;
 static lv_chart_series_t *s_chUtilSeries = nullptr;
@@ -1984,6 +2003,15 @@ static void refreshChUtilChart(bool force = false);
 static void openSnrRssiChartModal();
 static void closeSnrRssiChartModal();
 static void refreshSnrRssiChart(bool force = false);
+#if HAS_HOME_DASHBOARD
+// Defined with the dashboard itself, far below; the touch nav bar's Home cell
+// is built long before that and has to be able to name them.
+static void openHomeDashboard();
+static void closeHomeDashboard();
+#if UI_TOUCH_NAV_BAR
+static bool homeDashboardIsForeground();
+#endif
+#endif
 static void openLiveToolsModal();
 static void closeLiveToolsModal();
 static void openLiveFilterModal();
@@ -6905,11 +6933,13 @@ static void tdeckProRefreshSleepMsgRows() {
     }
 }
 
-static void updateTdeckProSleepClock() {
-    if (!s_tdeckProSleepNode || !s_tdeckProSleepTime || !s_tdeckProSleepDate) return;
+// Repaint a glance header from the current clock, weather, battery and config.
+// The caller decides when this runs; this decides what it says.
+static void updateGlanceHeader(const GlanceHeader &w) {
+    if (!w.node || !w.time || !w.date) return;
 
     const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
-    lv_label_set_text(s_tdeckProSleepNode, nodeName);
+    lv_label_set_text(w.node, nodeName);
 
     char timeText[LIVE_CLOCK_BUF] = "--:--";
     char dateText[24] = "Date unavailable";
@@ -6920,9 +6950,9 @@ static void updateTdeckProSleepClock() {
         liveFormatClock(localTime, timeText, sizeof(timeText));
         strftime(dateText, sizeof(dateText), "%a, %b %d, %Y", &localTime);
     }
-    lv_label_set_text(s_tdeckProSleepTime, timeText);
+    lv_label_set_text(w.time, timeText);
 
-    lv_label_set_text(s_tdeckProSleepDate, dateText);
+    lv_label_set_text(w.date, dateText);
 
 #if HAS_WEATHER
     // The right-hand half of the two hero rows. Read from the cache and never
@@ -6952,38 +6982,33 @@ static void updateTdeckProSleepClock() {
     }
 
     const bool wxFresh = weatherLatest(wx) && weatherAgeMs() < kWeatherGlanceMaxAgeMs;
-    if (lvObjValid(s_tdeckProSleepWxTemp) && lvObjValid(s_tdeckProSleepWxDesc)) {
+    if (lvObjValid(w.wxTemp) && lvObjValid(w.wxDesc)) {
         if (wxFresh) {
             char t[16];
             snprintf(t, sizeof(t), "%d%s", wx.temp, wx.tempUnit);
-            lv_label_set_text(s_tdeckProSleepWxTemp, t);
-            lv_label_set_text(s_tdeckProSleepWxDesc, wx.desc);
-            lv_obj_clear_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(w.wxTemp, t);
+            lv_label_set_text(w.wxDesc, wx.desc);
+            lv_obj_clear_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(w.wxDesc, LV_OBJ_FLAG_HIDDEN);
         } else {
             // Hidden, not emptied: an empty label still occupies its row, and
             // the left column should read as deliberate rather than as the
             // survivor of something that failed.
-            lv_obj_add_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(w.wxDesc, LV_OBJ_FLAG_HIDDEN);
         }
     }
 #endif
 
-    if (s_tdeckProSleepMsgBold[0] && lv_obj_is_valid(s_tdeckProSleepMsgBold[0])) {
-        tdeckProRefreshSleepMsgRows();
-        s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
-    }
-
     // Read here rather than on its own timer, so the battery costs no extra
-    // panel refresh: this function only runs when the minute rolls over (or on
-    // an unread change that is already repainting), and on e-paper a refresh is
+    // panel refresh: callers run this when the minute rolls over (or on an
+    // unread change that is already repainting), and on e-paper a refresh is
     // ~1 s of parked loop() and real battery. A charge level that is one minute
     // stale on a sleeping device is not worth a redraw of its own.
     //
     // Follows the Battery Display setting for the same reason the header does —
     // someone who chose voltage wants voltage everywhere, not just awake.
-    if (s_tdeckProSleepBatt && lv_obj_is_valid(s_tdeckProSleepBatt)) {
+    if (w.batt && lv_obj_is_valid(w.batt)) {
         char battText[16];
         if (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE) {
             // snprintf, not lv_label_set_text_fmt: LVGL's printf has no float
@@ -6994,15 +7019,149 @@ static void updateTdeckProSleepClock() {
             snprintf(battText, sizeof(battText), "%u%%",
                      (unsigned)batteryReadPercent());
         }
-        lv_label_set_text(s_tdeckProSleepBatt, battText);
+        lv_label_set_text(w.batt, battText);
         // No repositioning: pinned to the top-right corner it cannot collide
-        // with the preview rows, so it stays where showTdeckProSleepClock put
-        // it whether or not there is anything unread.
+        // with the preview rows, so it stays where buildGlanceHeader put it
+        // whether or not there is anything unread.
+    }
+}
+
+static void updateTdeckProSleepClock() {
+    if (!s_sleepGlance.node || !s_sleepGlance.time || !s_sleepGlance.date) return;
+
+    updateGlanceHeader(s_sleepGlance);
+
+    if (s_tdeckProSleepMsgBold[0] && lv_obj_is_valid(s_tdeckProSleepMsgBold[0])) {
+        tdeckProRefreshSleepMsgRows();
+        s_tdeckProSleepUnreadKey = tdeckProSleepUnreadKey();
     }
 
+    // Re-read rather than threaded out of the header: the two want the same
+    // instant, and a second time() call a microsecond later cannot land in a
+    // different minute than the one just drawn.
+    const time_t now = time(nullptr);
     s_tdeckProSleepMinuteKey = (now >= kClockSetEpoch)
                                    ? (uint32_t)(now / 60)
                                    : (0x80000000u | (millis() / 60000UL));
+}
+
+// Build the glance header into `parent` and record its widgets in `w`.
+//
+// Every position here is an absolute offset from the parent's top edge rather
+// than a share of it, so a parent shorter than the panel lays the header out
+// exactly as the full-screen lock overlay does -- which is what lets the home
+// dashboard hand it the top half of the screen and get the same block back.
+static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
+    w.title = lv_label_create(parent);
+    lv_obj_set_width(w.title, lv_pct(92));
+    lv_obj_set_style_text_font(w.title, kSleepOverlayTitleFont, 0);
+    lv_obj_set_style_text_color(w.title, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_align(w.title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(w.title, "Camillia");
+    lv_obj_align(w.title, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
+
+    // A rule under the wordmark, separating "which device is this" from
+    // everything the screen is actually reporting.
+    //
+    // Placed in the middle of whatever gap the board leaves rather than at a
+    // fixed offset below the title: the six layouts put the title and the node
+    // name between 3 px and 9 px apart, so any constant that cleared one would
+    // land on top of the other. Measured from the title's own face, so it
+    // follows a font change too.
+    {
+        const int titleBottom =
+            kTdeckProTitleTop + (int)lv_font_get_line_height(kSleepOverlayTitleFont);
+        int ruleY = titleBottom + ((kTdeckProNodeTop - titleBottom) / 2);
+        if (ruleY <= titleBottom) ruleY = titleBottom;   // no gap: sit flush
+
+        lv_obj_t *sleepRule = lv_obj_create(parent);
+        lv_obj_set_width(sleepRule, lv_pct(80));
+        lv_obj_set_height(sleepRule, 1);
+        lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(sleepRule, 0, 0);
+        lv_obj_set_style_radius(sleepRule, 0, 0);
+        lv_obj_set_style_pad_all(sleepRule, 0, 0);
+        lv_obj_set_style_bg_color(sleepRule, sleepOverlayInk(), 0);
+#if defined(DEVICE_TDECK_PRO)
+        // Full strength on the e-paper: that panel is 1-bit, so a partial
+        // opacity thresholds to solid or to nothing with no say in which.
+        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_COVER, 0);
+#else
+        // Dimmer than the type it separates — a divider should organise the
+        // screen, not compete with it for attention.
+        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_40, 0);
+#endif
+        lv_obj_align(sleepRule, LV_ALIGN_TOP_MID, 0, ruleY);
+    }
+
+    w.node = lv_label_create(parent);
+    lv_obj_set_width(w.node, lv_pct(92));
+    lv_obj_set_style_text_font(w.node, kSleepOverlayNodeFont, 0);
+    lv_obj_set_style_text_color(w.node, sleepOverlayNodeInk(), 0);
+#if HAS_WEATHER
+    // Left half of the hero block, with conditions opposite it. Two rows, each
+    // with a small label and a large one: node name over the clock on this
+    // side, sky over the temperature on the other.
+    lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(w.node, LV_LABEL_LONG_DOT);
+    lv_obj_align(w.node, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProNodeTop);
+#else
+    lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(w.node, LV_LABEL_LONG_DOT);
+    lv_obj_align(w.node, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
+#endif
+
+    w.time = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.time, kSleepOverlayTimeFont, 0);
+    lv_obj_set_style_text_color(w.time, sleepOverlayClockInk(), 0);
+#if HAS_WEATHER
+    lv_obj_align(w.time, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProTimeTop);
+
+    // The opposite column. Same two rows, mirrored: the sky on the node's row,
+    // the temperature on the clock's.
+    w.wxDesc = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.wxDesc, kSleepOverlayNodeFont, 0);
+    lv_obj_set_style_text_color(w.wxDesc, sleepOverlayNodeInk(), 0);
+    lv_obj_set_style_text_align(w.wxDesc, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(w.wxDesc, LV_LABEL_LONG_DOT);
+    lv_obj_align(w.wxDesc, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProNodeTop);
+    lv_obj_add_flag(w.wxDesc, LV_OBJ_FLAG_HIDDEN);
+
+    w.wxTemp = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.wxTemp, kSleepOverlayWxFont, 0);
+    lv_obj_set_style_text_color(w.wxTemp, sleepOverlayClockInk(), 0);
+    lv_obj_set_style_text_align(w.wxTemp, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(w.wxTemp, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProTimeTop);
+    lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
+#else
+    lv_obj_align(w.time, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
+#endif
+
+    // Left half of the status band. Sized to its own text rather than to a
+    // percentage of the panel: a 92% box pinned to the left edge would reach
+    // under the battery, and the two would collide the moment either grew.
+    w.date = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(w.date, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_align(w.date, LV_ALIGN_TOP_LEFT,
+                 kTdeckProBandInset, kTdeckProBandTop);
+
+    // Right half of the status band, opposite the date. Still the smallest text
+    // on the screen -- it is a glance value, and on a panel with no colour the
+    // only way to rank information is size -- but a corner now says so as well.
+    // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
+    // end in the same place instead of drifting with the reading.
+    w.batt = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.batt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(w.batt, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
+                 -kTdeckProBandInset, kTdeckProBandTop);
 }
 
 static void showTdeckProSleepClock() {
@@ -7027,104 +7186,7 @@ static void showTdeckProSleepClock() {
     lv_obj_add_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_CLICKABLE);
 #endif
 
-    s_tdeckProSleepTitle = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_width(s_tdeckProSleepTitle, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepTitle, kSleepOverlayTitleFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepTitle, sleepOverlayInk(), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepTitle, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(s_tdeckProSleepTitle, "Camillia");
-    lv_obj_align(s_tdeckProSleepTitle, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
-
-    // A rule under the wordmark, separating "which device is this" from
-    // everything the screen is actually reporting.
-    //
-    // Placed in the middle of whatever gap the board leaves rather than at a
-    // fixed offset below the title: the six layouts put the title and the node
-    // name between 3 px and 9 px apart, so any constant that cleared one would
-    // land on top of the other. Measured from the title's own face, so it
-    // follows a font change too.
-    {
-        const int titleBottom =
-            kTdeckProTitleTop + (int)lv_font_get_line_height(kSleepOverlayTitleFont);
-        int ruleY = titleBottom + ((kTdeckProNodeTop - titleBottom) / 2);
-        if (ruleY <= titleBottom) ruleY = titleBottom;   // no gap: sit flush
-
-        lv_obj_t *sleepRule = lv_obj_create(s_tdeckProSleepOverlay);
-        lv_obj_set_width(sleepRule, lv_pct(80));
-        lv_obj_set_height(sleepRule, 1);
-        lv_obj_clear_flag(sleepRule, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_border_width(sleepRule, 0, 0);
-        lv_obj_set_style_radius(sleepRule, 0, 0);
-        lv_obj_set_style_pad_all(sleepRule, 0, 0);
-        lv_obj_set_style_bg_color(sleepRule, sleepOverlayInk(), 0);
-#if defined(DEVICE_TDECK_PRO)
-        // Full strength on the e-paper: that panel is 1-bit, so a partial
-        // opacity thresholds to solid or to nothing with no say in which.
-        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_COVER, 0);
-#else
-        // Dimmer than the type it separates — a divider should organise the
-        // screen, not compete with it for attention.
-        lv_obj_set_style_bg_opa(sleepRule, LV_OPA_40, 0);
-#endif
-        lv_obj_align(sleepRule, LV_ALIGN_TOP_MID, 0, ruleY);
-    }
-
-    s_tdeckProSleepNode = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_width(s_tdeckProSleepNode, lv_pct(92));
-    lv_obj_set_style_text_font(s_tdeckProSleepNode, kSleepOverlayNodeFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepNode, sleepOverlayNodeInk(), 0);
-#if HAS_WEATHER
-    // Left half of the hero block, with conditions opposite it. Two rows, each
-    // with a small label and a large one: node name over the clock on this
-    // side, sky over the temperature on the other.
-    lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_LEFT, 0);
-    lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProNodeTop);
-#else
-    lv_obj_set_style_text_align(s_tdeckProSleepNode, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(s_tdeckProSleepNode, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_tdeckProSleepNode, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
-#endif
-
-    s_tdeckProSleepTime = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepTime, kSleepOverlayTimeFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepTime, sleepOverlayClockInk(), 0);
-#if HAS_WEATHER
-    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProTimeTop);
-
-    // The opposite column. Same two rows, mirrored: the sky on the node's row,
-    // the temperature on the clock's.
-    s_tdeckProSleepWxDesc = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepWxDesc, kSleepOverlayNodeFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepWxDesc, sleepOverlayNodeInk(), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepWxDesc, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_long_mode(s_tdeckProSleepWxDesc, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_tdeckProSleepWxDesc, LV_ALIGN_TOP_RIGHT,
-                 -kTdeckProBandInset, kTdeckProNodeTop);
-    lv_obj_add_flag(s_tdeckProSleepWxDesc, LV_OBJ_FLAG_HIDDEN);
-
-    s_tdeckProSleepWxTemp = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepWxTemp, kSleepOverlayWxFont, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepWxTemp, sleepOverlayClockInk(), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepWxTemp, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_tdeckProSleepWxTemp, LV_ALIGN_TOP_RIGHT,
-                 -kTdeckProBandInset, kTdeckProTimeTop);
-    lv_obj_add_flag(s_tdeckProSleepWxTemp, LV_OBJ_FLAG_HIDDEN);
-#else
-    lv_obj_align(s_tdeckProSleepTime, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
-#endif
-
-    // Left half of the status band. Sized to its own text rather than to a
-    // percentage of the panel: a 92% box pinned to the left edge would reach
-    // under the battery, and the two would collide the moment either grew.
-    s_tdeckProSleepDate = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepDate, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepDate, sleepOverlayInk(), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepDate, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_align(s_tdeckProSleepDate, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProBandTop);
+    buildGlanceHeader(s_tdeckProSleepOverlay, s_sleepGlance);
 
     // Under the date: message previews, newest first. Separate first-line labels
     // keep time/channel blue, sender green and message white on Wio. Plain text
@@ -7185,17 +7247,6 @@ static void showTdeckProSleepClock() {
         lv_obj_add_flag(s_tdeckProSleepMsgCont[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Right half of the status band, opposite the date. Still the smallest text
-    // on the screen -- it is a glance value, and on a panel with no colour the
-    // only way to rank information is size -- but a corner now says so as well.
-    // Right-aligned to the edge rather than centred, so "4.05V" and "9%" both
-    // end in the same place instead of drifting with the reading.
-    s_tdeckProSleepBatt = lv_label_create(s_tdeckProSleepOverlay);
-    lv_obj_set_style_text_font(s_tdeckProSleepBatt, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(s_tdeckProSleepBatt, sleepOverlayInk(), 0);
-    lv_obj_set_style_text_align(s_tdeckProSleepBatt, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(s_tdeckProSleepBatt, LV_ALIGN_TOP_RIGHT,
-                 -kTdeckProBandInset, kTdeckProBandTop);
 
     updateTdeckProSleepClock();
     lv_obj_move_foreground(s_tdeckProSleepOverlay);
@@ -7215,15 +7266,15 @@ static void hideTdeckProSleepClock() {
         lv_obj_del(s_tdeckProSleepOverlay);
     }
     s_tdeckProSleepOverlay = nullptr;
-    s_tdeckProSleepTitle = nullptr;
-    s_tdeckProSleepNode = nullptr;
-    s_tdeckProSleepTime = nullptr;
-    s_tdeckProSleepDate = nullptr;
+    s_sleepGlance.title = nullptr;
+    s_sleepGlance.node = nullptr;
+    s_sleepGlance.time = nullptr;
+    s_sleepGlance.date = nullptr;
 #if HAS_WEATHER
-    s_tdeckProSleepWxDesc = nullptr;
-    s_tdeckProSleepWxTemp = nullptr;
+    s_sleepGlance.wxDesc = nullptr;
+    s_sleepGlance.wxTemp = nullptr;
 #endif
-    s_tdeckProSleepBatt = nullptr;
+    s_sleepGlance.batt = nullptr;
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
         s_tdeckProSleepMsgBold[i] = nullptr;
         s_tdeckProSleepMsgSender[i] = nullptr;
@@ -8100,7 +8151,12 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 }
 #endif
 
-#if UI_TOUCH_ONLY_PROFILE || defined(DEVICE_M9)
+// The last clause is what homeShouldOpenChannelList() needs. Not plain
+// HAS_HOME_DASHBOARD: the Pager has a dashboard but keeps its channel list
+// anchored beside the chat, so it has no caller for this and would only get an
+// unused-function warning out of it.
+#if UI_TOUCH_ONLY_PROFILE || defined(DEVICE_M9) \
+    || (HAS_HOME_DASHBOARD && UI_CHANNEL_LIST_DROPDOWN)
 // True when the chat screen is what the user is looking at — nothing floating
 // over it. Buttons need this in a way taps do not: a tap lands on whatever is
 // actually on top, while a button press has to work out for itself who it is
@@ -8119,6 +8175,11 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
 static bool chatScreenIsForeground() {
 #if HAS_STATE_MAPS
     if (s_legacyMapPromptModal) return false;
+#endif
+#if HAS_HOME_DASHBOARD
+    // Not a modal, but it covers chat all the same, and the chat button's
+    // second press must not open the channel list from behind it.
+    if (s_homeDash) return false;
 #endif
     return !s_cfgModal && !s_dmModal && !s_nodesModal && !s_liveModal
         && !s_composeModal && !s_emojiPickerModal && !s_legendModal
@@ -18354,7 +18415,7 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_legendModal) closeLegendModal();
             else openLegendModal();
             break;
-        case HELTEC_NAV_HOME:
+        case HELTEC_NAV_HOME: {
             // Chat is the root screen; the nav-reachable screens are modals
             // layered over it. So "go home" is "close them", innermost first —
             // a menu opened from one of these screens has to go before the
@@ -18363,6 +18424,11 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             // Every one is checked rather than just the active screen's own:
             // Home is on the bar of all of them, and whichever is on top is the
             // only one the tap can be coming from anyway.
+#if HAS_HOME_DASHBOARD
+            // Sampled before the teardown below, which answers this question by
+            // destroying the evidence. See the toggle at the end of the case.
+            const bool wasHome = homeDashboardIsForeground();
+#endif
             if (s_liveToolsModal) closeLiveToolsModal();
 #if HAS_WEATHER
             // Unguarded, unlike its neighbours: s_weatherModal is defined with
@@ -18377,7 +18443,19 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             if (s_dmModal) closeDmModal();
             if (s_nodesModal) closeNodesModal();
             if (s_liveModal) closeLiveModal();
+#if HAS_HOME_DASHBOARD
+            // One cell, two destinations. The bar is six buttons across 240 px
+            // in portrait and has no room for a seventh, so Home carries both
+            // glance surfaces: the first tap brings up the dashboard from
+            // wherever you were, and a second one — with the dashboard already
+            // in front of you — steps aside to the chat underneath. That is the
+            // same "you are already there, so do the next thing" rule the M9's
+            // Messages button follows for the channel list.
+            if (wasHome) closeHomeDashboard();
+            else         openHomeDashboard();
+#endif
             break;
+        }
         default:
             break;
     }
@@ -25819,6 +25897,441 @@ static void openSnrRssiChartModal() {
     refreshSnrRssiChart(true);
 }
 
+
+#if HAS_HOME_DASHBOARD
+// ── Home dashboard ───────────────────────────────────────────────────────────
+// What the Home button opens. The top half is the lock screen's glance header —
+// wordmark, node name, clock, conditions, date, battery — and the bottom half is
+// the radio's own health: channel utilisation on the left, SNR/RSSI on the
+// right. The chat screen's shortcut bar is left showing beneath it, so the key
+// hints do not disappear on the one screen someone is most likely to be lost on.
+//
+// A destination, not a modal: no backdrop, no close X, and it stops short of the
+// shortcut bar rather than covering it. Chat moves onto its own button beside
+// Home, which is what makes room for this to exist at all.
+//
+// The charts are deliberately a second, smaller pair rather than the Tools
+// modals reparented. Those own module-level pointers, a y-axis scale and a
+// three-line stats block sized for a full panel; borrowing them would mean
+// either two owners for one widget set or a modal that lays itself out
+// differently depending on who opened it. Sixty points and a value line is all
+// this surface wants, and it reads the same ChartHist rings, so there is no
+// second source of truth — only a second view of the one there is.
+
+static lv_obj_t *s_homeChUtilChart = nullptr;
+static lv_chart_series_t *s_homeChUtilSeries = nullptr;
+static lv_chart_series_t *s_homeAirUtilSeries = nullptr;
+static lv_obj_t *s_homeChUtilValue = nullptr;
+static lv_obj_t *s_homeSnrChart = nullptr;
+static lv_chart_series_t *s_homeSnrSeries = nullptr;
+static lv_chart_series_t *s_homeRssiSeries = nullptr;
+static lv_obj_t *s_homeSnrValue = nullptr;
+static uint32_t s_homeChUtilRenderedSeq = 0;
+static uint32_t s_homeAirUtilRenderedSeq = 0;
+static uint32_t s_homeSnrRenderedSeq = 0;
+static uint32_t s_homeRssiRenderedSeq = 0;
+static uint32_t s_homeGlanceMinuteKey = UINT32_MAX;
+
+static inline bool homeDashboardVisible() { return lvObjValid(s_homeDash); }
+
+#if UI_TOUCH_NAV_BAR
+// Visible *and* with nothing layered over it. Asked by the touch nav bar's Home
+// cell, which has to tell "get me out of this screen" from "I am already home,
+// show me the chat".
+//
+// Answered from LVGL's own child order rather than from a list of every modal
+// that could be on top: openHomeDashboard() moves the dashboard to the front,
+// so anything created or raised afterwards is a later sibling. A list would be
+// one more place to forget a modal — which is exactly the failure the note on
+// chatScreenIsForeground() describes.
+static bool homeDashboardIsForeground() {
+    if (!homeDashboardVisible() || !lvObjValid(s_rootScreen)) return false;
+    const uint32_t n = lv_obj_get_child_count(s_rootScreen);
+    return n > 0 && lv_obj_get_child(s_rootScreen, n - 1) == s_homeDash;
+}
+#endif  // UI_TOUCH_NAV_BAR
+
+// The bar under the dashboard keeps its right-hand cluster — Wi-Fi, GPS and the
+// DM alert are status, and status belongs on every screen — but loses the key
+// hints on its left. Those name what the letters do *on the chat screen*, which
+// is not the screen you are looking at, and a row of instructions for somewhere
+// else is worse than no row at all under a surface whose whole point is to be
+// glanced at.
+//
+// Hidden rather than retexted: the dashboard's own keys are Home and Messages,
+// both of them buttons with labels printed on the case.
+static void homeDashSetHintsHidden(bool hidden) {
+    if (!lvObjValid(s_chatShortcutText)) return;
+    if (hidden) lv_obj_add_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_clear_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void closeHomeDashboard() {
+    homeDashSetHintsHidden(false);
+    lvObjDeleteSafe(s_homeDash);
+    // Children of the deleted object; LVGL freed them with it, so this is just
+    // the bookkeeping that stops anything reaching a dangling pointer.
+    s_homeGlance = GlanceHeader{};
+    s_homeChUtilChart = nullptr;
+    s_homeChUtilSeries = nullptr;
+    s_homeAirUtilSeries = nullptr;
+    s_homeChUtilValue = nullptr;
+    s_homeSnrChart = nullptr;
+    s_homeSnrSeries = nullptr;
+    s_homeRssiSeries = nullptr;
+    s_homeSnrValue = nullptr;
+    s_homeGlanceMinuteKey = UINT32_MAX;
+}
+
+// How much height the dashboard may take before it would cover the shortcut
+// bar. Measured off the bar itself rather than recomputed from the chat
+// screen's margins: those live inside buildUi() as locals, and a second copy of
+// that arithmetic would be wrong the first time either changed.
+static int homeDashboardHeight() {
+    const int screenH = lv_disp_get_ver_res(NULL);
+    if (lvObjValid(s_chatShortcutBar) && lvObjValid(s_rootScreen)) {
+        lv_obj_update_layout(s_rootScreen);
+        const int barY = lv_obj_get_y(s_chatShortcutBar);
+        // Sanity bounds, not a guess: a bar that has not been laid out yet
+        // reports 0, and covering the whole panel is better than a dashboard
+        // with no height at all.
+        if (barY > 60 && barY <= screenH) return barY;
+    }
+    return screenH;
+}
+
+// The dashboard borrows the glance header's palette rather than the app's,
+// because it has to: sleepOverlayInk() and its siblings are fixed colours, not
+// theme tokens, so a themed background under them would eventually put white
+// text on a light ground. Taking the header's own background instead means the
+// pair can never disagree — black on the lit boards, white on the e-paper.
+static inline lv_color_t homeDashInk()      { return sleepOverlayInk(); }
+// Headings and units, a step back from the readings themselves. The e-paper has
+// no step to give: a mid grey thresholds to one of the two colours it has, and
+// which one is not ours to choose.
+static inline lv_color_t homeDashMutedInk() {
+#if defined(DEVICE_TDECK_PRO)
+    return sleepOverlayInk();
+#else
+    return lv_color_hex(0xA7C7FF);
+#endif
+}
+
+// Whether the two cards sit beside each other or stacked. A chart narrower than
+// about 140 px cannot show sixty points and a label, so the portrait panels --
+// the Pro, and the Heltec/Wio boards when they are rotated -- stack instead.
+// Read at build time and again by the card builder, so both agree.
+static bool homeDashSideBySide() {
+    return lv_disp_get_hor_res(NULL) >= 300;
+}
+
+// Series colour, or the absence of one. The e-paper has two tones and spends
+// both on ink and paper, so its series are black and told apart by the dash
+// pattern applyTdeckProChartStyle() installs — exactly as the Tools charts do.
+static inline lv_color_t homeDashSeriesColor(uint32_t litHex) {
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(litHex);
+    return lv_color_make(0, 0, 0);
+#else
+    return lv_color_hex(litHex);
+#endif
+}
+
+// One of the two chart cards. Returns the card; the chart and its value label
+// come back through the out-parameters so the caller keeps the pointers it
+// needs and this keeps the styling in one place.
+static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
+                                   lv_obj_t **chartOut, lv_obj_t **valueOut) {
+    lv_obj_t *card = lv_obj_create(row);
+    // Grows along whichever axis the row runs, so one card definition serves
+    // both the side-by-side and the stacked arrangement.
+    lv_obj_set_flex_grow(card, 1);
+    if (homeDashSideBySide()) lv_obj_set_height(card, lv_pct(100));
+    else                      lv_obj_set_width(card, lv_pct(100));
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    // The e-paper build draws the glance in black on white, so the modals'
+    // blues would be a dark slab under black text. No fill, black rule.
+    lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, sleepOverlayInk(), 0);
+#else
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x335D9D), 0);
+#endif
+    lv_obj_set_style_radius(card, 4, 0);
+    lv_obj_set_style_pad_all(card, 3, 0);
+    lv_obj_set_style_pad_row(card, 2, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    // Side by side, the card is tall and narrow: heading, chart, value, three
+    // rows. Stacked, it is short and wide and has no third row to spare -- on a
+    // 240x320 panel the header eats 144 px and two cards split what is left, so
+    // a row costs the chart a third of its height. There the heading and the
+    // reading share one line instead, which is what the extra width is for.
+    lv_obj_t *labelRow = card;
+    if (!homeDashSideBySide()) {
+        labelRow = lv_obj_create(card);
+        lv_obj_set_width(labelRow, lv_pct(100));
+        lv_obj_set_height(labelRow, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(labelRow, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(labelRow, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(labelRow, 0, 0);
+        lv_obj_set_style_pad_all(labelRow, 0, 0);
+        lv_obj_set_style_pad_column(labelRow, 6, 0);
+        lv_obj_set_flex_flow(labelRow, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(labelRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+    }
+
+    lv_obj_t *heading = lv_label_create(labelRow);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(heading, homeDashMutedInk(), 0);
+    lv_label_set_text(heading, title);
+
+    lv_obj_t *chart = lv_chart_create(card);
+    lv_obj_set_width(chart, lv_pct(100));
+    // Sits below the labels in both arrangements, because LVGL appends children
+    // and they were made first. The only one that grows, too: the label row is
+    // one text line whichever way it is built, so whatever height the card turns
+    // out to have lands here.
+    lv_obj_set_flex_grow(chart, 1);
+    lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chart, ChartHist::CAP);
+    lv_chart_set_update_mode(chart, LV_CHART_UPDATE_MODE_SHIFT);
+    lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_pad_all(chart, 2, 0);
+    lv_obj_set_style_bg_color(chart, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(chart, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_border_width(chart, 1, 0);
+    lv_obj_set_style_line_color(chart, lv_color_hex(0x335D9D), LV_PART_MAIN);
+    lv_obj_set_style_line_opa(chart, LV_OPA_40, LV_PART_MAIN);
+#if defined(DEVICE_TDECK_PRO)
+    // Overrides the block above wholesale — white ground, black rules, and the
+    // dashed/solid series distinction the 1-bit panel needs in place of colour.
+    // The same helper the Tools charts use, so the two read identically.
+    applyTdeckProChartStyle(chart);
+#endif
+    // Fewer division lines than the Tools modals draw. Those have a y-axis
+    // scale beside them to label the lines; at this size there is no room for
+    // one, so extra lines would be decoration over a chart that is already
+    // small.
+    lv_chart_set_div_line_count(chart, 3, 4);
+
+    lv_obj_t *value = lv_label_create(labelRow);
+    lv_obj_set_style_text_font(value, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(value, homeDashInk(), 0);
+    lv_label_set_long_mode(value, LV_LABEL_LONG_CLIP);
+    lv_label_set_text(value, "--");
+    if (labelRow == card) {
+        lv_obj_set_width(value, lv_pct(100));
+    } else {
+        // Takes the rest of the row, so the reading ends at the card's right
+        // edge rather than wherever the heading happens to stop.
+        lv_obj_set_flex_grow(value, 1);
+        lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
+    }
+
+    *chartOut = chart;
+    *valueOut = value;
+    return card;
+}
+
+static void refreshHomeDashCharts(bool force) {
+    if (!lvObjValid(s_homeChUtilChart) || !lvObjValid(s_homeSnrChart)) return;
+
+    // Right-aligns the newest sample against the right edge, so a ring that is
+    // not yet full grows in from the right rather than sitting in the left
+    // corner and jumping once it wraps.
+    auto fill = [](lv_obj_t *chart, lv_chart_series_t *series, const ChartHist &h,
+                   int16_t lo, int16_t hi) {
+        if (!series) return;
+        const int offset = ChartHist::CAP - h.count;
+        for (int i = 0; i < ChartHist::CAP; i++) {
+            const int sampleIdx = i - offset;
+            if (sampleIdx >= 0 && sampleIdx < h.count) {
+                lv_chart_set_value_by_id(chart, series, i,
+                                         chartClampInt(chartSampleAt(h, sampleIdx), lo, hi));
+            } else {
+                lv_chart_set_value_by_id(chart, series, i, LV_CHART_POINT_NONE);
+            }
+        }
+    };
+
+    if (force || s_homeChUtilRenderedSeq != s_chUtilHist.seq
+        || s_homeAirUtilRenderedSeq != s_airUtilHist.seq) {
+        fill(s_homeChUtilChart, s_homeChUtilSeries, s_chUtilHist, 0, 100);
+        fill(s_homeChUtilChart, s_homeAirUtilSeries, s_airUtilHist, 0, 100);
+        lv_chart_refresh(s_homeChUtilChart);
+        s_homeChUtilRenderedSeq = s_chUtilHist.seq;
+        s_homeAirUtilRenderedSeq = s_airUtilHist.seq;
+
+        if (lvObjValid(s_homeChUtilValue)) {
+            char ch[12] = "--", air[12] = "--";
+            if (s_chUtilHist.hasLast) snprintf(ch, sizeof(ch), "%.0f%%", (double)s_chUtilHist.lastVal);
+            if (s_airUtilHist.hasLast) snprintf(air, sizeof(air), "%.0f%%", (double)s_airUtilHist.lastVal);
+            char text[40];
+            snprintf(text, sizeof(text), "ch %s   air %s", ch, air);
+            lv_label_set_text(s_homeChUtilValue, text);
+        }
+    }
+
+    if (force || s_homeSnrRenderedSeq != s_snrHist.seq
+        || s_homeRssiRenderedSeq != s_rssiHist.seq) {
+        fill(s_homeSnrChart, s_homeSnrSeries, s_snrHist, -25, 15);
+        fill(s_homeSnrChart, s_homeRssiSeries, s_rssiHist, -130, -30);
+        lv_chart_refresh(s_homeSnrChart);
+        s_homeSnrRenderedSeq = s_snrHist.seq;
+        s_homeRssiRenderedSeq = s_rssiHist.seq;
+
+        if (lvObjValid(s_homeSnrValue)) {
+            char snr[12] = "--", rssi[12] = "--";
+            if (s_snrHist.hasLast) snprintf(snr, sizeof(snr), "%.1f", (double)s_snrHist.lastVal);
+            if (s_rssiHist.hasLast) snprintf(rssi, sizeof(rssi), "%.0f", (double)s_rssiHist.lastVal);
+            char text[40];
+            snprintf(text, sizeof(text), "snr %s   rssi %s", snr, rssi);
+            lv_label_set_text(s_homeSnrValue, text);
+        }
+    }
+}
+
+static void refreshHomeDashboard(bool force) {
+    if (!homeDashboardVisible()) return;
+
+    // The header is minute-resolution by construction — clock, date, battery and
+    // a weather reading with its own TTL — so repainting it on every UI tick
+    // would be six label writes a second to say the same thing.
+    const time_t now = time(nullptr);
+    const uint32_t minuteKey = (now >= kClockSetEpoch)
+                                   ? (uint32_t)(now / 60)
+                                   : (0x80000000u | (millis() / 60000UL));
+    const bool minuteRolled = (minuteKey != s_homeGlanceMinuteKey);
+    if (force || minuteRolled) {
+        updateGlanceHeader(s_homeGlance);
+        s_homeGlanceMinuteKey = minuteKey;
+    }
+
+#if defined(DEVICE_TDECK_PRO)
+    // E-paper, and this is the boot screen. A chart redraw here is a panel
+    // refresh — ~700 ms of parked loop() and real battery — and the chart
+    // sequences move on every packet received, so following them would have the
+    // Pro repainting itself all day while nobody is looking at it. It gets the
+    // charts on the header's cadence instead: once a minute, in the refresh the
+    // clock was going to cost anyway.
+    //
+    // The Tools chart modals keep their per-packet updates. You open those to
+    // watch the radio; this one opens itself.
+    if (force || minuteRolled) refreshHomeDashCharts(true);
+#else
+    refreshHomeDashCharts(force);
+#endif
+}
+
+static void openHomeDashboard() {
+    if (!s_rootScreen) return;
+    if (homeDashboardVisible()) {
+        // Already here. Bring it up and repaint rather than rebuild: Home
+        // pressed twice should not cost a teardown.
+        homeDashSetHintsHidden(true);
+        lv_obj_move_foreground(s_homeDash);
+        refreshHomeDashboard(true);
+        return;
+    }
+    closeHomeDashboard();   // clears stale child pointers if the screen was rebuilt
+
+    const int dashH = homeDashboardHeight();
+
+    s_homeDash = lv_obj_create(s_rootScreen);
+    lv_obj_remove_style_all(s_homeDash);
+    lv_obj_set_size(s_homeDash, lv_disp_get_hor_res(NULL), dashH);
+    lv_obj_align(s_homeDash, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_SCROLLABLE);
+    // The header's own ground — see homeDashInk(). Not the app background:
+    // lv_color_hex() is the theme remapper, so on a light theme it would hand
+    // back a pale colour to put the glance's fixed white type on.
+    lv_obj_set_style_bg_color(s_homeDash, sleepOverlayBg(), 0);
+    lv_obj_set_style_bg_opa(s_homeDash, LV_OPA_COVER, 0);
+    // Swallow taps for the same reason the lock screen does: the chat screen is
+    // still built underneath, and on a board with a touch panel a press would
+    // otherwise land on a button nobody can see.
+    lv_obj_add_flag(s_homeDash, LV_OBJ_FLAG_CLICKABLE);
+
+    buildGlanceHeader(s_homeDash, s_homeGlance);
+
+    // Under the header, where the lock screen puts its message previews. Its
+    // widgets are positioned absolutely from the top, so the first free row is
+    // the bottom of the clock — computed from the font rather than hardcoded,
+    // because the six layouts do not share one.
+    const int chartsTop = kTdeckProTimeTop
+                        + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+
+    // Defensive floor. Every panel this builds on clears 90 px here, but the
+    // header's height comes from a font and the dashboard's from a widget it
+    // measured, so neither is a constant this file controls — and a negative
+    // size handed to LVGL is a much worse failure than a header on its own.
+    const int chartsH = dashH - chartsTop;
+    if (chartsH < 48) {
+        s_homeGlanceMinuteKey = UINT32_MAX;
+        refreshHomeDashboard(true);
+        homeDashSetHintsHidden(true);
+        lv_obj_move_foreground(s_homeDash);
+        return;
+    }
+
+    lv_obj_t *chartRow = lv_obj_create(s_homeDash);
+    lv_obj_set_size(chartRow, lv_pct(100), chartsH);
+    lv_obj_align(chartRow, LV_ALIGN_TOP_LEFT, 0, chartsTop);
+    lv_obj_clear_flag(chartRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(chartRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chartRow, 0, 0);
+    lv_obj_set_style_pad_all(chartRow, kTdeckProBandInset / 2, 0);
+    lv_obj_set_style_pad_column(chartRow, 4, 0);
+    lv_obj_set_style_pad_row(chartRow, 4, 0);
+    lv_obj_set_flex_flow(chartRow,
+                         homeDashSideBySide() ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(chartRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    buildHomeDashCard(chartRow, "CHANNEL UTIL", &s_homeChUtilChart, &s_homeChUtilValue);
+    // Same colours the Tools modal uses for the same two series, so the legend
+    // someone learned there still reads here.
+    s_homeChUtilSeries = lv_chart_add_series(s_homeChUtilChart, homeDashSeriesColor(0x4FD1C5),
+                                             LV_CHART_AXIS_PRIMARY_Y);
+    s_homeAirUtilSeries = lv_chart_add_series(s_homeChUtilChart, homeDashSeriesColor(0xF6AD55),
+                                              LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_range(s_homeChUtilChart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    if (s_homeChUtilSeries) {
+        lv_chart_set_all_value(s_homeChUtilChart, s_homeChUtilSeries, LV_CHART_POINT_NONE);
+    }
+    if (s_homeAirUtilSeries) {
+        lv_chart_set_all_value(s_homeChUtilChart, s_homeAirUtilSeries, LV_CHART_POINT_NONE);
+    }
+
+    buildHomeDashCard(chartRow, "SNR / RSSI", &s_homeSnrChart, &s_homeSnrValue);
+    s_homeSnrSeries = lv_chart_add_series(s_homeSnrChart, homeDashSeriesColor(0x68D391),
+                                          LV_CHART_AXIS_PRIMARY_Y);
+    s_homeRssiSeries = lv_chart_add_series(s_homeSnrChart, homeDashSeriesColor(0xF687B3),
+                                           LV_CHART_AXIS_SECONDARY_Y);
+    lv_chart_set_range(s_homeSnrChart, LV_CHART_AXIS_PRIMARY_Y, -25, 15);
+    lv_chart_set_range(s_homeSnrChart, LV_CHART_AXIS_SECONDARY_Y, -130, -30);
+    if (s_homeSnrSeries) {
+        lv_chart_set_all_value(s_homeSnrChart, s_homeSnrSeries, LV_CHART_POINT_NONE);
+    }
+    if (s_homeRssiSeries) {
+        lv_chart_set_all_value(s_homeSnrChart, s_homeRssiSeries, LV_CHART_POINT_NONE);
+    }
+
+    s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
+    refreshHomeDashboard(true);
+    homeDashSetHintsHidden(true);
+    lv_obj_move_foreground(s_homeDash);
+}
+#endif  // HAS_HOME_DASHBOARD
 // True when this node's packets have told us it is one hop away. Anything that
 // never carried hop_start is "unknown", not "direct" — see NodeEntry::hasHops.
 // Outside the Discovery guard below: the NeighborInfo announce decides what to
@@ -30959,6 +31472,14 @@ static void openLegendModal() {
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
     modalH = 146;
 #endif
+#if HAS_HOME_DASHBOARD && !UI_TOUCH_ONLY_PROFILE
+    // The key list gained a ninth row when Home, Chat and Config became three
+    // entries instead of two. Clamped to the panel, because the Pager is 222 px
+    // tall and this is measured against 480x222 as readily as 320x240.
+    modalH += 14;
+    const int legendMaxH = lv_disp_get_ver_res(NULL) - 16;
+    if (modalH > legendMaxH) modalH = legendMaxH;
+#endif
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
 
 #if defined(DEVICE_TDECK)
@@ -31009,7 +31530,12 @@ static void openLegendModal() {
     lv_label_set_text_fmt(
         body,
         "Touch Navigation:\n"
+#if HAS_HOME_DASHBOARD
+        "Bottom buttons: Home, DM, Nodes, Live, Config, Help.\n"
+        "Home opens the dashboard; tap it again for the chat.\n"
+#else
         "Use bottom buttons for Home, DM, Nodes, Live, Config, Help.\n"
+#endif
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -31033,20 +31559,19 @@ static void openLegendModal() {
     lv_obj_set_style_text_font(leftCol, legendBodyFont, 0);
     lv_obj_set_style_text_color(leftCol, lv_color_hex(0xD9E8FF), 0);
     lv_label_set_long_mode(leftCol, LV_LABEL_LONG_WRAP);
-#if defined(DEVICE_TDECK)
     lv_label_set_text(
         leftCol,
+#if HAS_HOME_DASHBOARD
+        "(H) Home dashboard\n"
+        "(C) Chat (again: channels)\n"
+        "(F) Configuration\n"
         "(D) Direct Messages\n"
-        "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Tools (Live, charts)\n"
         "(E) Emoji\n"
-        "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages");
 #else
-    lv_label_set_text(
-        leftCol,
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
@@ -31098,6 +31623,17 @@ static void openLegendModal() {
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text_fmt(
         body,
+#if HAS_HOME_DASHBOARD
+        "(H) Home dashboard\n"
+        "(C) Chat (again: channels)\n"
+        "(F) Configuration\n"
+        "(D) Direct Messages\n"
+        "(N) Nodes\n"
+        "(L) Tools (Live, charts)\n"
+        "(E) Emoji\n"
+        "(Space) Compose/Reply\n"
+        "(Enter) Focus Messages\n"
+#else
         "(D) Direct Messages\n"
         "(C) Configuration\n"
         "(N) Nodes\n"
@@ -31106,6 +31642,7 @@ static void openLegendModal() {
         "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages\n"
+#endif
         "\n"
         "Transport Symbols:\n"
         "%s Radio Transmission\n"
@@ -33806,6 +34343,12 @@ static bool prepareGlobalNavigation() {
 #endif
 
     if (s_otaPromptModal) otaPromptDecline();
+#if HAS_HOME_DASHBOARD
+    // Closed here rather than in each shortcut: every one of them is going
+    // somewhere else, and a dashboard left behind would sit under the screen
+    // they opened and reappear when it closed.
+    closeHomeDashboard();
+#endif
     closeEmojiPicker();
     closeTracerouteProgressModal();
     closeChUtilChartModal();
@@ -33886,14 +34429,16 @@ static void openNavConfigShortcut() {
     openCfgModal();
 }
 
-#if defined(DEVICE_M9) && UI_CHANNEL_LIST_DROPDOWN
-// Home has one job — get back to the chat screen — and on the chat screen that
-// job is already done. So there it does the next thing you wanted: opens the
-// channel list, which on this board is a dropdown that has to be asked for.
+#if HAS_HOME_DASHBOARD && UI_CHANNEL_LIST_DROPDOWN
+// Chat has one job — get back to the messages — and on the chat screen that job
+// is already done. So there it does the next thing you wanted: opens the channel
+// list, which on these boards is a dropdown that has to be asked for.
 //
-// M9 only, deliberately. The keyboard boards' Alt+H stays a plain escape hatch:
-// see the note on openKeyboardHomeShortcut() for what opening the list there
-// cost the Mesh Deck's keyboard.
+// Only the *deliberate* ways of asking get this. The M9's Messages button and a
+// plain C on the chat screen do; the Alt+C/Sym+C chord does not, and gets the
+// plain "close everything and go to chat" instead — see the note on
+// openKeyboardHomeShortcut() for what binding the reflexive escape gesture to
+// the expensive surface cost the Mesh Deck's keyboard.
 //
 // Asked before prepareGlobalNavigation() runs, because that closes everything
 // this looks at. A dropdown that is already open counts as "not plain chat":
@@ -33923,9 +34468,30 @@ static bool homeShouldOpenChannelList() {
 }
 #endif
 
-#if defined(DEVICE_M9)
-static void openM9HomeShortcut() {
-    const bool pickChannel = homeShouldOpenChannelList();
+#if HAS_HOME_DASHBOARD
+// The chat screen as a destination of its own, which it has to be once Home
+// means the dashboard. Reached by the M9's Messages button, by C on a keyboard,
+// and by the Alt+C/Sym+C chord.
+//
+// Two flags rather than one behaviour, because the callers genuinely differ:
+//
+//  - allowChannelList: whether a press that lands on chat when chat is already
+//    there should go on to open the channel list. Deliberate presses yes, the
+//    reflexive chord no (see homeShouldOpenChannelList above).
+//  - resetChannel: the M9's button has always returned to the first channel,
+//    and people have that in their fingers. The keyboard boards' equivalent has
+//    always kept the channel you were reading. Neither should change now.
+static void openNavChatShortcut(bool allowChannelList, bool resetChannel) {
+#if UI_CHANNEL_LIST_DROPDOWN
+    // Asked before prepareGlobalNavigation() runs, because that closes
+    // everything the predicate looks at.
+    const bool pickChannel = allowChannelList && homeShouldOpenChannelList();
+#else
+    // The Pager keeps its channel list anchored beside the chat at all times,
+    // so there is nothing here to ask for.
+    LV_UNUSED(allowChannelList);
+    const bool pickChannel = false;
+#endif
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
     if (pickChannel) {
@@ -33933,19 +34499,39 @@ static void openM9HomeShortcut() {
         refreshChannelGlow(true);
         return;
     }
-    // Coming back from another screen still lands on the first channel, which
-    // is what this button has always meant. Only the already-home press changed.
-    setActiveChannel(0);
+    if (resetChannel) setActiveChannel(0);
 }
 
-#if FEATURE_DISCOVERY
+static void openNavHomeDashboardShortcut() {
+    // prepareGlobalNavigation() closes the dashboard on its way through, so
+    // Home pressed while already there rebuilds it rather than doing nothing.
+    // That is the same "tear down whatever is up and go" contract every other
+    // shortcut has, and it costs a dozen LVGL objects.
+    if (!prepareGlobalNavigation()) return;
+    closeDmModal();
+    openHomeDashboard();
+}
+#endif  // HAS_HOME_DASHBOARD
+
+#if defined(DEVICE_M9) && FEATURE_DISCOVERY
 static void openM9DiscoveryShortcut() {
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
     openDiscoveryModal();
 }
 #endif
-#endif  // DEVICE_M9
+
+#if HAS_HOME_DASHBOARD
+// Whether KEY_OPEN_CHAT arrives from a labelled button or from a modifier
+// chord. The M9's controller resolves Alt itself and reports no chords at all,
+// so on that board the code can only have come from the Messages button; on
+// every other board it can only have come from Alt+C/Sym+C.
+#if defined(DEVICE_M9)
+static constexpr bool kNavChatKeyIsDeliberate = true;
+#else
+static constexpr bool kNavChatKeyIsDeliberate = false;
+#endif
+#endif
 
 // Returns true when the key was a navigation shortcut and has been acted on.
 static bool handleGlobalNavigationKey(char key) {
@@ -33954,19 +34540,30 @@ static bool handleGlobalNavigationKey(char key) {
         requestScreenOff("M9 d-pad centre hold");
         return true;
     }
-    // M9 only: its Home button returns to the first channel as well as to the
-    // chat screen. The keyboard boards' Alt+H is the plain "close everything"
-    // gesture and is handled before this, so it keeps the channel you were on.
-    if (key == KEY_OPEN_HOME) {
-        openM9HomeShortcut();
-        return true;
-    }
 #if FEATURE_DISCOVERY
     if (key == KEY_OPEN_DISCOVERY) {
         openM9DiscoveryShortcut();
         return true;
     }
 #endif
+#endif
+#if HAS_HOME_DASHBOARD
+    // Home is the dashboard on every board that has one; chat is its own
+    // destination beside it. Outside the M9 block above because the boards
+    // without hardware buttons reach both of these by chord.
+    if (key == KEY_OPEN_HOME) {
+        openNavHomeDashboardShortcut();
+        return true;
+    }
+    if (key == KEY_OPEN_CHAT) {
+        // The M9 raises this from the Messages button, a deliberate press that
+        // has always reset to the first channel. Everywhere else it is the
+        // Alt+C/Sym+C chord — the reflexive escape hatch, which keeps both the
+        // channel you were on and the channel list closed.
+        openNavChatShortcut(/*allowChannelList=*/kNavChatKeyIsDeliberate,
+                            /*resetChannel=*/kNavChatKeyIsDeliberate);
+        return true;
+    }
 #endif
     if (key == KEY_OPEN_DMS) {
         openNavDirectMessagesShortcut();
@@ -34003,8 +34600,15 @@ static bool handleGlobalNavigationKey(char key) {
 // Alt+H left the board dropping keys, and these boards already have a one-key
 // way to open the list: H on its own.
 static void openKeyboardHomeShortcut() {
+#if HAS_HOME_DASHBOARD
+    // Home means the dashboard now, chord included. The reason the chord stayed
+    // cheap still holds: the dashboard is a static surface that repaints only
+    // when a chart's sequence moves, not a live-filtered list.
+    openNavHomeDashboardShortcut();
+#else
     if (!prepareGlobalNavigation()) return;
     closeDmModal();
+#endif
 }
 #endif
 
@@ -36727,8 +37331,31 @@ static void pumpKeyboardInput() {
                 openChannelActionsModal();
             } else if (k == 'd' || k == 'D') {
                 openDmModal();
+#if HAS_HOME_DASHBOARD
+            // C is chat and F is config, matching the buttons: Home opens the
+            // dashboard now, so the letter that used to mean "back to chat" had
+            // to move off H, and Config gave up C to make room. N and L are
+            // untouched — nothing about them changed.
+            } else if (k == 'c' || k == 'C') {
+#if HAS_GLOBAL_NAV_SHORTCUTS
+                // Chat is already what is on screen here, so this press is the
+                // second one, and a deliberate one unlike the chord: the channel
+                // list is what it answers with, exactly as the M9's Messages
+                // button does.
+                openNavChatShortcut(/*allowChannelList=*/true,
+                                    /*resetChannel=*/false);
+#else
+                // A touch-only board being driven from a Bluetooth keyboard.
+                // There is no global-nav machinery compiled in here, so this
+                // does what the nav bar's Home cell does on a second tap.
+                closeHomeDashboard();
+#endif
+            } else if (k == 'f' || k == 'F') {
+                openCfgModal();
+#else
             } else if (k == 'c' || k == 'C') {
                 openCfgModal();
+#endif
             } else if (k == 'n' || k == 'N') {
                 openNodesModal();
             } else if (k == 'e' || k == 'E') {
@@ -36736,7 +37363,15 @@ static void pumpKeyboardInput() {
                 // to the active channel (see sendQuickEmoji / emojiPickerActivate).
                 openEmojiPicker(true);
             } else if (k == 'h' || k == 'H') {
-#if UI_TOUCH_ONLY_PROFILE
+#if HAS_HOME_DASHBOARD && HAS_GLOBAL_NAV_SHORTCUTS
+                openNavHomeDashboardShortcut();
+#elif HAS_HOME_DASHBOARD
+                // See the C branch above: no global-nav machinery on this board,
+                // so this is the nav bar's Home cell spelled out. Help keeps its
+                // "?" button on that bar.
+                if (homeDashboardIsForeground()) closeHomeDashboard();
+                else                             openHomeDashboard();
+#elif UI_TOUCH_ONLY_PROFILE
                 openLegendModal();
 #else
                 setChannelDropdownVisible(!isChannelDropdownVisible());
@@ -40936,7 +41571,80 @@ static bool resolveAnnouncePosition(int32_t &latI, int32_t &lonI, int32_t &altM)
     return false;
 }
 
+// A position announce is one packet per location-sharing channel, and at SF11
+// each transmit blocks the main loop for the better part of a second. Sending
+// all of them in one pass is what put ann:nodeinfo at 6.3 s on an M9 with eight
+// sharing channels: tx:nodeinfo accounted for 1.0 s of it and the sweep for the
+// other 5.3 s, during which the web server reported the socket unserviced for
+// seven seconds and the UI and keyboard queued behind it.
+//
+// So the sweep runs one channel per loop pass. The total airtime is unchanged —
+// that belongs to the radio — but it is paid in ~0.7 s slices with everything
+// else serviced in between, instead of one five-second stall.
+//
+// The position is snapshotted when the sweep starts rather than re-read per
+// channel: one announce should report one position, not a different fix to each
+// channel as the device moves.
+struct PosAnnounceSweep {
+    bool     active;
+    int      nextChan;
+    int32_t  latI, lonI, altM;
+    int      attempted, sent;
+    bool     forced;      // an explicit Announce press, for the notice below
+};
+static PosAnnounceSweep s_posSweep = {};
+
+// Anchors the dedup cell and schedules the next announce. Split out because the
+// sweep now finishes on a later pass than the one that started it.
+static void finishPositionAnnounce(uint32_t nowMs) {
+    if (s_posSweep.attempted == 0 && s_posSweep.forced) {
+        // Sharing is on and we have coordinates, but no channel is set to carry
+        // them — otherwise the announce button looks broken. Reported here
+        // rather than at the start, because "how many channels shared" is only
+        // known once the sweep has walked them.
+        liveFeedAddPrefixed("", "[position] skip: no channel shares location",
+                            TFT_DARKGREY, 0, false);
+    }
+    if (s_posSweep.sent > 0 || s_posSweep.attempted == 0) {
+        // Anchor the cell to what actually went out, not to the fix we read:
+        // anchoring on a failed send would start the stationary timer against a
+        // position no one received.
+        if (s_posSweep.sent > 0) {
+            s_lastPosSentValid = true;
+            s_lastPosSentLatI  = s_posSweep.latI;
+            s_lastPosSentLonI  = s_posSweep.lonI;
+        }
+        scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
+    } else {
+        scheduleAnnounceRetry(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
+    }
+    s_posSweep.active = false;
+}
+
 static void serviceNodeInfoAnnounce(uint32_t nowMs) {
+    // A sweep already under way finishes, ahead of every gate below. Those gates
+    // decide whether to *start* an announce; this one is already committed, and
+    // abandoning it half-sent would leave some channels told and others not.
+    if (s_posSweep.active) {
+        if (!s_radioReady) { s_posSweep.active = false; return; }
+        while (s_posSweep.nextChan < MESH_CHANNELS
+               && !channelSharesLocation(s_posSweep.nextChan)) {
+            s_posSweep.nextChan++;
+        }
+        if (s_posSweep.nextChan >= MESH_CHANNELS) {
+            finishPositionAnnounce(nowMs);
+            return;
+        }
+        const int chan = s_posSweep.nextChan++;
+        s_posSweep.attempted++;
+        bool ok = false;
+        LOOP_PHASE("tx:position", ok = Channels.sendPosition(
+                       s_myNodeId, s_posSweep.latI, s_posSweep.lonI, s_posSweep.altM,
+                       s_cfg.okToMqtt, chan, s_cfg.positionPrecision));
+        if (ok) s_posSweep.sent++;
+        return;   // one packet per pass, whatever else is due
+    }
+
     bool forceAnnounce = webCfgAnnounceRequested();
     // An explicit Announce press is a deliberate instruction and still goes
     // out; a button that silently did nothing would read as broken.
@@ -40956,16 +41664,25 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
     }
 
     if (nodeInfoDue) {
-        bool ok = Channels.sendNodeInfo(s_myNodeId,
+        // Its own phase, like tx:telemetry below. Radio.transmit() blocks for
+        // the packet's airtime -- over a second at SF11 -- and without this the
+        // whole cost landed under ann:nodeinfo with no way to tell the transmit
+        // apart from the work around it. A boot log showing ann:nodeinfo at
+        // 6.3 s against one packet of air is exactly the question this answers.
+        bool ok = false;
+        LOOP_PHASE("tx:nodeinfo", ok = Channels.sendNodeInfo(s_myNodeId,
                                         s_cfg.nodeLong,
                                         s_cfg.nodeShort,
                                         0xFFFFFFFF,
                                         false,
-                                        s_cfg.okToMqtt);
+                                        s_cfg.okToMqtt));
         if (ok) scheduleAnnounceNext(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
         else scheduleAnnounceRetry(s_nextNodeInfoTxMs, s_nodeInfoTxFails, nowMs, s_cfg.nodeInfoIntervalS);
     }
 
+    // The other half of ann:nodeinfo. When both are due in the same pass -- as
+    // they are on the first announce after a boot -- the phase pays for two
+    // transmits, which is the first thing to rule out when it reads long.
     if (positionDue) {
         int32_t latI = 0;
         int32_t lonI = 0;
@@ -40984,37 +41701,20 @@ static void serviceNodeInfoAnnounce(uint32_t nowMs) {
                 return;
             }
 
-            // One announce, one packet per sharing channel. Reschedule as soon as
-            // any of them made it out: a retry resends to all of them, so letting
-            // a single failed channel force one would keep re-announcing to the
-            // channels that already heard us.
-            int attempted = 0;
-            int sent = 0;
-            for (int i = 0; i < MESH_CHANNELS; i++) {
-                if (!channelSharesLocation(i)) continue;
-                attempted++;
-                if (Channels.sendPosition(s_myNodeId, latI, lonI, altM, s_cfg.okToMqtt, i,
-                                          s_cfg.positionPrecision)) sent++;
-            }
-            if (sent > 0 || attempted == 0) {
-                // Anchor the cell to what actually went out, not to the fix we
-                // read: anchoring on a failed send would start the stationary
-                // timer against a position no one received.
-                if (sent > 0) {
-                    s_lastPosSentValid = true;
-                    s_lastPosSentLatI  = latI;
-                    s_lastPosSentLonI  = lonI;
-                }
-                scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
-            } else {
-                scheduleAnnounceRetry(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
-            }
-            if (attempted == 0 && forceAnnounce) {
-                // Sharing is on and we have coordinates, but no channel is set to
-                // carry them — otherwise the announce button looks broken.
-                liveFeedAddPrefixed("", "[position] skip: no channel shares location",
-                                    TFT_DARKGREY, 0, false);
-            }
+            // One announce, one packet per sharing channel — handed to the
+            // sweep above, which sends them one loop pass apart. Rescheduling
+            // still happens once, when the last channel is done: a retry
+            // resends to all of them, so letting a single failed channel force
+            // one would keep re-announcing to the channels that already heard
+            // us.
+            s_posSweep.active    = true;
+            s_posSweep.nextChan  = 0;
+            s_posSweep.latI      = latI;
+            s_posSweep.lonI      = lonI;
+            s_posSweep.altM      = altM;
+            s_posSweep.attempted = 0;
+            s_posSweep.sent      = 0;
+            s_posSweep.forced    = forceAnnounce;
         } else {
             scheduleAnnounceNext(s_nextPositionTxMs, s_positionTxFails, nowMs, s_cfg.posIntervalS);
             if (forceAnnounce) {
@@ -42997,12 +43697,34 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #endif
+// Each of these is sized to the panel it belongs to, which is why they are
+// separate strings rather than one with a board's name substituted in. Where
+// HAS_HOME_DASHBOARD is set, H and C changed destinations and F is new, so the
+// hints changed with them; the channel list lost its own letter, because it is
+// C's second press now.
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     lv_label_set_text(s_chatShortcutText, "C(h)annels   (A)ctions");
 #elif defined(DEVICE_TLORA_PAGER_TFT)
+#if HAS_HOME_DASHBOARD
+    // 480 px of panel: this is the one board with room to spell them all out.
+    lv_label_set_text(s_chatShortcutText,
+                      "(H)ome   (C)hat   con(f)ig   (D)M   (N)odes   Too(l)s   (A)ctions");
+#else
     lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions");
+#endif
 #elif defined(DEVICE_TDECK_PRO)
+#if HAS_HOME_DASHBOARD
+    // ~40 characters is what 228 px of montserrat_10 holds, and seven
+    // destinations do not fit in it. Actions is the one dropped: it is the only
+    // entry here that is not also a cell on the nav bar this line replaces, and
+    // A still works. Only visible with the bar switched off.
+    lv_label_set_text(s_chatShortcutText, "H:Home C:Chat F:Cfg D:DM N:Node L:Tools");
+#else
     lv_label_set_text(s_chatShortcutText, "C:Cfg H:Ch D:DM N:Node L:Tools A:Act");
+#endif
+#elif HAS_HOME_DASHBOARD
+    // Same length as the line below it, which is what fits on a 320 px panel.
+    lv_label_set_text(s_chatShortcutText, "(H)ome (C)hat con(f)ig (D)M (N)odes Too(l)s (A)ct");
 #else
     lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   Too(l)s   (A)ct");
 #endif
@@ -43181,6 +43903,9 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     closeNodesModal();
     closeLegendModal();
     closeCfgModal();
+#if HAS_HOME_DASHBOARD
+    closeHomeDashboard();
+#endif
 
     lvObjDeleteSafe(s_rootScreen);
 
@@ -43872,6 +44597,30 @@ void setup() {
     Serial.printf("\n[boot] setup() entered, reset reason=%d\n",
                   (int)esp_reset_reason());
 
+    // Which silicon this actually is, printed before anything can fail.
+    //
+    // Board headers assume a specific part, and those assumptions decide pin
+    // maps. The M9's SD chip select is GPIO48 on the stated grounds that a plain
+    // ESP32-S3R8 leaves that pin free -- on an R8V/R16V it is SPICLK_N, wired to
+    // a 1.8 V differential flash clock, and an SD card selected by it would never
+    // answer. That is indistinguishable in a log from an empty slot or a dead
+    // card, which is exactly the sort of report that arrives from someone else's
+    // device with no way to tell the cases apart.
+    //
+    // So the variant goes in every log, whether or not anything is wrong. It
+    // costs one line at boot and turns "it works on mine" into a comparison.
+    {
+        esp_chip_info_t chip = {};
+        esp_chip_info(&chip);
+        Serial.printf("[boot] chip: %s rev%d cores=%d flash=%uMB%s psram=%uKB\n",
+                      ESP.getChipModel(),
+                      (int)chip.revision,
+                      (int)chip.cores,
+                      (unsigned)(ESP.getFlashChipSize() / (1024UL * 1024UL)),
+                      (chip.features & CHIP_FEATURE_EMB_FLASH) ? " (embedded)" : "",
+                      (unsigned)(ESP.getPsramSize() / 1024UL));
+    }
+
     // Match baseline firmware board-power bring-up so keyboard/touch I2C devices are powered.
 #if (BOARD_POWERON >= 0)
     pinMode(BOARD_POWERON, OUTPUT);
@@ -44303,6 +45052,18 @@ void setup() {
     // The UI owns the panel from here; a later progress call must not paint a
     // boot message over it.
     bootSplashStatusEnd();
+#if HAS_HOME_DASHBOARD
+    // Boot lands on the dashboard, not on chat. It is the screen that answers
+    // "did this thing come up correctly" — clock, battery, conditions, and
+    // whether the radio is hearing anything — which is what you want in front
+    // of you the moment a device finishes starting. The Messages button is one
+    // press away, and chat is built underneath either way.
+    //
+    // Here rather than at the end of buildUi(), so the theme rebuild (which
+    // calls buildUi() too) keeps leaving you where you were instead of
+    // bouncing you home every time a colour changes.
+    openHomeDashboard();
+#endif
     if (s_otaWorkerBootNotice[0]) {
         openCfgActionMessageModal(s_otaWorkerBootNotice);
         s_otaWorkerBootNotice[0] = '\0';
@@ -45253,6 +46014,12 @@ void loop() {
         refreshLiveView(meshDirty);
         refreshChUtilChart(meshDirty);
         refreshSnrRssiChart(meshDirty);
+#if HAS_HOME_DASHBOARD
+        // Cheap no-op when the dashboard is closed, and when it is open the
+        // charts only redraw on a sequence change — so meshDirty is passed for
+        // symmetry with the modals above rather than because it is needed.
+        refreshHomeDashboard(meshDirty);
+#endif
 #if FEATURE_DISCOVERY
         // No meshDirty force: its own signature covers the packets that change
         // this screen, and meshDirty misses most of them anyway.

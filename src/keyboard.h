@@ -45,6 +45,10 @@
 // Alt+C. No dedicated button raises this — the M9's controller resolves Alt
 // itself and never reports the combination, so this one is keyboard-only.
 #define KEY_OPEN_CONFIG 0x93
+// The chat screen as a destination of its own. Only exists where Home opens the
+// dashboard instead (HAS_HOME_DASHBOARD): with two glance-and-read surfaces
+// there has to be a code for each, and "Home" could only keep one of them.
+#define KEY_OPEN_CHAT   0x94
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/

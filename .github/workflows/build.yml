@@ -90,6 +90,21 @@ jobs:
           pio run -e m9
           pio run -e wio-tracker-l2
 
+      # Flash headroom, printed tightest-first, so the next board to approach
+      # its ceiling is visible here rather than in a failed release. This has
+      # cost two releases already (#72, #76): a build that passes says nothing
+      # about how close it came.
+      #
+      # The floor is a ratchet, not the goal. Issue #76 wants 256 KB on every
+      # board; the tightest today is the Heltec pair at ~154 KB, so enforcing
+      # that now would fail every build and get switched off. 64 KB sits well
+      # under the tightest board, so it fires when someone takes a large bite
+      # out of the one that can least afford it. Raise it as headroom is
+      # recovered — it started at 32 KB when wio-tracker-l2 was at 47 KB, and
+      # that board is now at 2.9 MB after getting its own partition table.
+      - name: Flash headroom
+        run: python3 tools/flash_headroom.py --min-free 65536
+
       # Debug symbols are deliberately not archived here. This build is not
       # byte-identical to the signed binaries that actually ship, so its
       # addresses can drift — symbolicating a real crash against them is

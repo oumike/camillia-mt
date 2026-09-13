@@ -343,7 +343,7 @@ Windows users: run the three `pio` commands above instead, or use WSL.
 |---|---|
 | Platform | espressif32 7.0.1 |
 | Framework | Arduino |
-| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots; the Wio Tracker L2 uses the standard table and stores files on SD_MMC |
+| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots. The Wio Tracker L2 has its own, `partitions_16mb_wio.csv`, with **6 MB app slots** — it stores files on SD_MMC and never mounts LittleFS, so that space goes to the app instead (see below) |
 | PSRAM | enabled (OPI; none on Cardputer) |
 | Upload speed | 115200 |
 
@@ -402,6 +402,36 @@ Both are idempotent. The LovyanGFX patch fails the build if an existing
 `Bus_SPI.cpp` no longer matches or is only partially patched; the RadioLib patch
 still emits a warning on version drift. If you see `NOT patched - run the build
 once more` on a fresh checkout, the library had not been fetched yet; build again.
+
+### Seeed Wio Tracker L2 (wio-tracker-l2)
+
+- **Its own partition table**, `partitions_16mb_wio.csv`: 6 MB app slots rather
+  than the 3.125 MB every other 16 MB board gets.
+- The reason is that this board mounts **SD_MMC** and never mounts LittleFS —
+  `hw_wio_tracker_l2.h` defines `HAS_SD_MMC` and not `HAS_INTERNAL_FS`. On the
+  shared table it was therefore carrying a 9.56 MB partition it could not use
+  while its app slot ran at 98.6% and blocked two releases (#72, #76). The space
+  now goes where the board actually needs it: the same image sits at ~51%.
+- This is why the emoji font stays linked here as on every other board. #76
+  discusses loading it from a file to save 776 KB; with 2.9 MB of headroom that
+  trade — and the provisioning step it would impose on anyone flashing from the
+  web installer — is not worth making.
+
+This landed while the board was still a bring-up target, which is the right
+time for it: every unit flashed from here on starts on this table and none of
+the below ever applies. It matters only for a unit already carrying a
+pre-release build.
+
+- **`nvs` moves**, from `0x650000` to `0xC10000`. The app slots sit before it
+  and partitions are contiguous, so growing them cannot leave it in place. Such
+  a unit comes up with **empty NVS** — settings, channels and the node database
+  are gone. Export config to the SD card first (Config → Export) if any of it
+  matters. A fresh install from the web flasher erases anyway.
+- **An OTA update does not rewrite the partition table**, so a pre-release unit
+  keeps its 3.125 MB slots until it is reflashed over USB once. It goes on
+  updating normally in the meantime — the image is ~3.23 MB against a 3,276,800
+  byte slot — but that margin is about 48 KB, and it is the reason to reflash
+  rather than wait.
 
 ### Heltec V4-R8 (heltec-r8, heltec-r8-vertical)
 
