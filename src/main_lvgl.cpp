@@ -1359,6 +1359,7 @@ static inline bool bottomNavEnabled() {
 
 static ComposeTarget s_composeTarget = COMPOSE_TARGET_CHANNEL;
 static uint32_t s_composeDmNodeId = 0;
+static lv_obj_t *s_composeTitle = nullptr;
 
 static uint32_t s_composeReplyPacketId = 0;
 static int s_composeChannelIdx = 0;
@@ -9721,6 +9722,7 @@ static void closeComposePrompt() {
     s_composeInput = nullptr;
     s_composeKeyboard = nullptr;
     s_composeCharCount = nullptr;
+    s_composeTitle = nullptr;
     s_composeTarget = COMPOSE_TARGET_CHANNEL;
     s_composeDmNodeId = 0;
     s_composeReplyPacketId = 0;
@@ -10194,6 +10196,33 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
 }
 #endif
 
+// Names the destination in the composer's title row.
+//
+// The channel used to be implicit: you reached this from the chat screen, where
+// the selector above it already said which channel you were reading. The home
+// dashboard broke that — Space opens the composer from there too, and nothing
+// else on that screen names a channel — so the title carries it now. It is the
+// same answer on both screens rather than a dashboard special case, because a
+// composer that labels its target only sometimes is worse than one that always
+// does.
+//
+// DMs are left alone. openComposePromptForDm() flips the target after this has
+// already run once, and calls it again; there the peer is named by the screen
+// the composer opened over, and a channel name would be an outright lie.
+static void composeSetTitle(bool isReply) {
+    if (!lvObjValid(s_composeTitle)) return;
+    const char *kind = isReply ? "Reply" : "New Message";
+    if (s_composeTarget == COMPOSE_TARGET_DM) {
+        lv_label_set_text(s_composeTitle, kind);
+        return;
+    }
+    const char *chan = channelName(s_composeChannelIdx);
+    if (!chan || !chan[0]) chan = "Channel";
+    char text[64];
+    snprintf(text, sizeof(text), "%s: %s", kind, chan);
+    lv_label_set_text(s_composeTitle, text);
+}
+
 static void openComposePrompt(uint32_t replyPacketId,
                               const char *replyText,
                               bool allowSelectedReplyFallback) {
@@ -10313,7 +10342,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, isReply ? "Reply" : "New Message");
+    // Ellipsised, not wrapped. Channel names are user-set and can be long, and
+    // the default wrap would take a second line out of an input box that is
+    // measured to the pixel on these panels.
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    s_composeTitle = title;
+    composeSetTitle(isReply);
 
     if (isReply) {
         char preview[kReplyPreviewTextMax + 1];
@@ -10470,7 +10504,12 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
-    lv_label_set_text(title, isReply ? "Reply" : "New Message");
+    // Ellipsised, not wrapped. Channel names are user-set and can be long, and
+    // the default wrap would take a second line out of an input box that is
+    // measured to the pixel on these panels.
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    s_composeTitle = title;
+    composeSetTitle(isReply);
 
     if (isReply) {
         char preview[kReplyPreviewTextMax + 1];
@@ -10701,6 +10740,9 @@ static void openComposePromptForDm(uint32_t nodeId) {
     openComposePrompt(0, nullptr, false);
     s_composeTarget = COMPOSE_TARGET_DM;
     s_composeDmNodeId = nodeId;
+    // openComposePrompt() titled this for a channel, because that is what every
+    // other caller wants. Now that the target is known, say so.
+    composeSetTitle(false);
 }
 
 static void sendComposeMessage() {
@@ -37401,7 +37443,17 @@ static void pumpKeyboardInput() {
 #else
             } else if (k == ' '
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
-                if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+                // A selected reply target survives leaving the chat screen, and
+                // Space on the home dashboard should not quietly turn into a
+                // reply to a message that is not in front of you. There it is
+                // always a new message; the title says which channel it is going
+                // to, because nothing else on that screen does.
+#if HAS_HOME_DASHBOARD
+                const bool replyFromHere = !homeDashboardVisible();
+#else
+                const bool replyFromHere = true;
+#endif
+                if (replyFromHere && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
                     openComposePrompt(0, nullptr);
