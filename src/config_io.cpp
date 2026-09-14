@@ -403,6 +403,11 @@ static bool sdReady = false;
 // next time — the backoff that decides *when* to try is sdFailStreak, further
 // down. Reset by sdForceRescan().
 static uint8_t sdProbeRound = 0;
+// Reported by sdGetProbeStatus(). The clock the card actually answered at is
+// otherwise known only inside the probe and printed once to the serial log,
+// which is no use to someone holding the device.
+static uint32_t sdMountedHz = 0;
+static bool     sdLastProbeWalkedLadder = false;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
 namespace {
@@ -1292,6 +1297,7 @@ static bool sdBeginProbe() {
         firstIdx = (size_t)(sdProbeRound - 1) % kSdSpeedCount;
         tryCount = 1;
     }
+    sdLastProbeWalkedLadder = (tryCount == kSdSpeedCount);
     for (size_t n = 0; n < tryCount; n++) {
         const size_t i = (firstIdx + n) % kSdSpeedCount;
         if (SD.begin(SD_CS, SPI, kSdSpeeds[i])) {
@@ -1300,6 +1306,7 @@ static bool sdBeginProbe() {
             break;
         }
     }
+    sdMountedHz = mountedAt;   // 0 on failure, which is what the screen shows
     if (sdReady) sdProbeRound = 0;
     else if (sdProbeRound < 0xFF) sdProbeRound++;
 #endif
@@ -1395,6 +1402,30 @@ bool sdBegin(bool force) {
     sdFailArmed = true;
     if (sdFailStreak < 0xFF) sdFailStreak++;
     return false;
+}
+
+void sdGetProbeStatus(SdProbeStatus &out) {
+    out = SdProbeStatus{};
+#if defined(HAS_SD_MMC) && HAS_SD_MMC
+    out.hasSlot = true;
+#elif HAS_SD_CARD && (SD_CS >= 0)
+    out.hasSlot = true;
+#else
+    // Either no slot at all, or one the board does not wire to this driver —
+    // both mean the same thing to a screen: do not offer a card diagnosis.
+    out.hasSlot = false;
+#endif
+    out.mounted        = sdCardMounted();
+    out.mountedHz      = sdMountedHz;
+    out.failStreak     = sdFailStreak;
+    out.triedAllSpeeds = sdLastProbeWalkedLadder;
+    // Only meaningful while a cooldown is actually armed, and clamped at zero:
+    // an elapsed deadline reads as "any call now will probe", not as a huge
+    // number from the unsigned subtraction.
+    if (!out.mounted && sdFailArmed) {
+        const int32_t leftMs = (int32_t)(sdFailUntilMs - millis());
+        out.retryInMs = (leftMs > 0) ? (uint32_t)leftMs : 0;
+    }
 }
 
 // ── YAML serialise (Meshtastic CLI-compatible format) ─────────

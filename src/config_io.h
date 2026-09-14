@@ -916,6 +916,24 @@ void sdForceRescan();
 // this never probes the bus, so UI/web paths can ask cheaply and repeatedly.
 bool sdCardMounted();
 
+// What the last mount attempt found, for the Device Info screen. Everything
+// here is state the probe already keeps; reading it touches neither the bus nor
+// the cooldown, so a screen can ask whenever it repaints.
+//
+// The useful distinction it draws is between "no card in the slot" and "a card
+// that will not answer": a failure after the whole speed ladder has been walked
+// says the slot is empty or the card is dead, while one at a single rate is the
+// damped retry and says nothing yet.
+struct SdProbeStatus {
+    bool     hasSlot;         // this board has a card slot at all
+    bool     mounted;
+    uint32_t mountedHz;       // SPI clock the card answered at; 0 if not applicable
+    uint8_t  failStreak;      // consecutive failed probes, 0 once one succeeds
+    uint32_t retryInMs;       // until the cooldown lets another probe run; 0 if none
+    bool     triedAllSpeeds;  // last probe walked the full ladder rather than one rung
+};
+void sdGetProbeStatus(SdProbeStatus &out);
+
 // Write /camillia/config.yaml. Returns true on success.
 bool cfgExport(const RhinoConfig &cfg);
 

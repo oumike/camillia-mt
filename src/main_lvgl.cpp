@@ -253,10 +253,22 @@ struct GlanceHeader {
     lv_obj_t *time;
     lv_obj_t *date;
     lv_obj_t *batt;
+    lv_obj_t *gps;      // status band, left of the battery
+    lv_obj_t *wifi;     // status band, between GPS and the battery
 #if HAS_WEATHER
     lv_obj_t *wxDesc;   // conditions, opposite the node name
     lv_obj_t *wxTemp;   // temperature, opposite the clock
 #endif
+    // What the two icons above are currently showing, from glanceStatusIcons-
+    // Key(). The clock and the battery are worth a repaint once a minute; GPS
+    // and Wi-Fi are worth one when they change, which is the whole reason to
+    // put them on a screen someone looks at to check exactly that. Zero means
+    // "nothing painted yet" — the key function never returns it.
+    uint16_t statusKey;
+    // Which palette this header was built in, so a later repaint reaches for
+    // the same one. The flag rather than a copy of the colours: one source of
+    // truth, and glancePalette() is a handful of field reads.
+    bool themed;
 };
 static GlanceHeader s_sleepGlance = {};
 #if HAS_HOME_DASHBOARD
@@ -1448,9 +1460,24 @@ static bool s_screenAsleep = false;
 // Neither state is anyone reading a conversation, so nothing arriving during
 // them may be treated as already seen just because its channel or DM happens to
 // be the one the UI has selected underneath.
+#if HAS_HOME_DASHBOARD
+// Defined with the dashboard, far below. Declared here because the check just
+// under this line runs from the RX paths, which sit between the two.
+static inline bool homeDashboardVisible();
+#endif
 static inline bool glanceOverlayHidesUi() {
 #if FEATURE_LOCK_SCREEN
     if (s_lockScreenActive) return true;
+#endif
+#if HAS_HOME_DASHBOARD
+    // The dashboard belongs here for the same reason the lock screen does: it
+    // is an opaque surface over the chat screen, so the conversation the UI has
+    // selected underneath is not one anyone is reading. Left out, traffic on
+    // the active channel was marked seen while the user sat on the dashboard —
+    // no unread mark, and nothing recorded for the surfaces that report what
+    // arrived. Declared below with the dashboard itself; this runs from the RX
+    // paths, long after both exist.
+    if (homeDashboardVisible()) return true;
 #endif
     return s_screenAsleep;
 }
@@ -1484,15 +1511,12 @@ static bool s_tdeckTrackballHoldTriggered = false;
 static uint32_t s_tdeckTrackballHoldStartMs = 0;
 static bool s_tdeckSuppressRollerClick = false;
 #endif
-static bool s_themeRebuildPending = false;
-#if HAS_NAV_BAR_TOGGLE
-// Same deferral as the theme rebuild, for the setting that changes the shape of
-// every screen rather than its colors.
-static bool s_navRebuildPending = false;
-static bool s_navRebuildReopenCfg = false;
-#endif
-static bool s_themeRebuildReopenCfg = false;
-static int s_themeRebuildCfgSelection = 0;
+// A UI rebuild asked for from inside an LVGL event callback — the nav-bar
+// toggle, or a theme change arriving from web config — has to wait for the
+// loop: the widget the callback is running on is one of the things the rebuild
+// deletes.
+static bool s_uiRebuildPending = false;
+static bool s_uiRebuildReopenCfg = false;
 static bool s_nodesWifiSessionActive = false;
 static bool s_nodesWifiStateChanged = false;
 static wifi_mode_t s_nodesWifiPrevMode = WIFI_OFF;
@@ -2365,14 +2389,15 @@ static void kbBlinkNotify(bool isDm);
 static void wakeScreen();
 static void openComposePromptForDm(uint32_t nodeId);
 static void rebuildUiForThemeChange(bool reopenCfg);
-static void scheduleThemeRebuild(bool reopenCfg);
-#if HAS_NAV_BAR_TOGGLE
-static void scheduleNavBarRebuild(bool reopenCfg);
-#endif
-static void processPendingThemeRebuild();
-static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection);
+static void scheduleUiRebuild(bool reopenCfg);
+static void processPendingUiRebuild();
 static void applyChannelButtonTheme();
 static void startWebConfigAuto();
+#if !UI_TOUCH_ONLY_PROFILE
+// The footer's key-hint line. Defined with the bar it belongs to, far below;
+// the home dashboard borrows that label and has to put the hints back.
+static const char *chatShortcutHintText();
+#endif
 
 static void openOnboardingModal();
 static void closeOnboardingModal();
@@ -6422,6 +6447,55 @@ static constexpr bool uiPortrait() { return DEVICE_UI_VERTICAL != 0; }
 static inline void loadBootOrientation() {}
 #endif
 
+// ── Status icon ink ──────────────────────────────────────────────────────────
+// The GPS and Wi-Fi icons say four things by colour: located, searching,
+// connected, serving an AP. Which colours those are depends on the surface, not
+// on the state, so the state logic (below, in paintStatusIcons) takes a palette
+// rather than deciding one.
+static inline lv_color_t headerGoodGreenColor() {
+    return (s_cfg.uiMode == UI_MODE_LIGHT)
+        ? lv_color_hex(0x2C7A3B)
+        : lv_color_hex(0x84E07A);
+}
+
+static inline lv_color_t headerGpsBadColor() {
+    uint16_t bad = s_ui.battBad;
+    if (s_cfg.uiMode == UI_MODE_DARK) {
+        bad = blend565(bad, 0xFFFF, 96);
+    }
+    return lvColorFrom565(bad);
+}
+
+// GPS and Wi-Fi are two icons with four states between them, and each state
+// wants its own colour. Separate fields for the two "bad" inks because they are
+// not the same red: the GPS one is derived from the theme's battery-empty
+// colour, and the Wi-Fi one is fixed.
+struct StatusIconInk {
+    lv_color_t good;      // GPS holding a fix, Wi-Fi associated
+    lv_color_t gpsBad;    // GPS off, or on without a fix
+    lv_color_t wifiBad;   // Wi-Fi off or disconnected
+    lv_color_t ap;        // Wi-Fi serving its own access point
+};
+
+// The themed chat header and its copy on the modal nav bar.
+static inline StatusIconInk headerStatusInk() {
+#if defined(DEVICE_TDECK_PRO)
+    // E-paper: one ink, and the panel decides nothing else.
+    const lv_color_t ink = lv_color_make(0, 0, 0);
+    return StatusIconInk{ ink, ink, ink, ink };
+#else
+    return StatusIconInk{ headerGoodGreenColor(), headerGpsBadColor(),
+                          lv_color_hex(0xFF6B6B), lv_color_hex(0xF4D35E) };
+#endif
+}
+
+// Defined with the header code far below, but the glance surfaces paint their
+// own pair long before that.
+static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
+                             bool gpsEnabled, bool gpsFix, uint8_t gpsSatCount,
+                             bool wifiApMode, bool wifiConnected,
+                             const StatusIconInk &ink);
+
 #if HAS_SLEEP_OVERLAY
 static uint32_t tdeckProSleepClockMinuteKey() {
     const time_t now = time(nullptr);
@@ -6612,6 +6686,15 @@ static inline lv_color_t sleepOverlayNodeInk() { return lv_color_make(64, 220, 1
 // #general", so recolouring that helper would have repainted every channel name
 // on the panel too.
 static inline lv_color_t sleepOverlayClockInk() { return lv_color_make(255, 149, 0); }
+// The glance surfaces are not themed, so their status icons cannot be either:
+// the light theme's "good" green is a dark one, chosen to be read on a pale
+// header, and it disappears into this screen's black.
+static inline StatusIconInk glanceStatusInk() {
+    return StatusIconInk{ sleepOverlayNodeInk(),        // the green already here
+                          lv_color_make(255, 107, 107),
+                          lv_color_make(255, 107, 107),
+                          lv_color_make(244, 211, 94) };
+}
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_32;
@@ -6625,6 +6708,12 @@ static inline lv_color_t sleepOverlayNodeInk() { return sleepOverlayInk(); }
 // Stays black: this is the e-paper overlay, where the panel has no colour to
 // give and the whole point of the palette is what it holds with the power off.
 static inline lv_color_t sleepOverlayClockInk() { return sleepOverlayInk(); }
+// One ink here for the same reason the clock has one: nothing on this panel
+// carries colour, so state has to read from the glyph and the strikethrough.
+static inline StatusIconInk glanceStatusInk() {
+    const lv_color_t ink = sleepOverlayInk();
+    return StatusIconInk{ ink, ink, ink, ink };
+}
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_32;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_16;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
@@ -6633,6 +6722,56 @@ static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_40;
 // to more than the width, so the pair would collide in the middle.
 static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_32;
 #endif
+
+// Every colour a glance header draws with, so the two surfaces that share the
+// header can disagree about the palette without the drawing code knowing.
+//
+// The lock screen's is fixed: that overlay is always a black panel on the lit
+// boards and always black-on-white on the Pro's e-paper, and its inks were
+// chosen against that known ground. The home dashboard is part of the themed UI
+// — it is a screen you use, not what the device looks like with the UI put away
+// — so it takes the theme's own colours.
+struct GlancePalette {
+    lv_color_t bg;         // the ground the header is drawn on
+    lv_color_t ink;        // wordmark, the rule under it, date, battery
+    lv_color_t nodeInk;    // node name, and the conditions opposite it
+    lv_color_t clockInk;   // the clock, and the temperature opposite it
+    StatusIconInk status;  // the GPS/Wi-Fi pair in the status band
+};
+
+// themed=false is the lock screen's, and is byte-for-byte what every one of
+// these surfaces used before the dashboard asked for its own.
+static GlancePalette glancePalette(bool themed) {
+    const GlancePalette fixed = { sleepOverlayBg(), sleepOverlayInk(),
+                                  sleepOverlayNodeInk(), sleepOverlayClockInk(),
+                                  glanceStatusInk() };
+#if defined(DEVICE_TDECK_PRO)
+    // Not negotiable on this board whatever the theme says: the panel is 1-bit
+    // and thresholds every colour it is given to pure black or pure white, so a
+    // themed palette would come out as a coin toss per glyph. Same exemption
+    // homeDashSeriesColor() and homeDashMutedInk() already carry.
+    LV_UNUSED(themed);
+    return fixed;
+#else
+    if (!themed) return fixed;
+
+    GlancePalette p = fixed;
+    p.bg  = lvColorFrom565(s_ui.bgMain);
+    p.ink = lvColorFrom565(s_ui.textMain);
+    // The identity line is the one place colour belongs here, so it takes the
+    // theme's accent — the same role the fixed palette's green plays.
+    p.nodeInk = lvColorFrom565(s_ui.accent);
+    // Not the accent as well. The clock is 32-40 px of type: size is already
+    // its emphasis, and a second accent-coloured element on a theme with a loud
+    // one would fight the node name rather than rank under it. The fixed
+    // palette can afford an orange clock because it also owns its ground.
+    p.clockInk = lvColorFrom565(s_ui.textMain);
+    // The themed pair the chat header already uses, so the icons mean the same
+    // thing in the same colours wherever they appear on a themed screen.
+    p.status = headerStatusInk();
+    return p;
+#endif
+}
 
 // Geometry of the notification area, in absolute panel coordinates. It sits in
 // the band between the date and the battery.
@@ -6950,9 +7089,70 @@ static void tdeckProRefreshSleepMsgRows() {
     }
 }
 
+// Everything the glance header's two status icons show, folded into one value
+// so a caller can ask "has any of this changed" without re-reading it twice.
+// Never zero: GlanceHeader::statusKey uses that for "not painted yet".
+static uint16_t glanceStatusIconsKey() {
+    const bool gpsEnabled = gpsIsEnabled();
+    wifi_mode_t wifiMode = WiFi.getMode();
+    bool wifiApMode = (wifiMode == WIFI_AP);
+#ifdef WIFI_AP_STA
+    wifiApMode = wifiApMode || (wifiMode == WIFI_AP_STA);
+#endif
+    uint16_t key = 0x8000u;
+    if (gpsEnabled)                                  key |= 0x0100u;
+    if (gpsEnabled && gpsHasFix())                   key |= 0x0200u;
+    if (wifiApMode)                                  key |= 0x0400u;
+    if (!wifiApMode && WiFi.status() == WL_CONNECTED) key |= 0x0800u;
+    // Satellite count in the low byte: it is drawn, so a change in it is a
+    // change on the panel. Clamped rather than masked — 255 and 0 must not
+    // compare equal.
+    const unsigned sats = gpsEnabled ? gpsSats() : 0;
+    key |= (uint16_t)(sats > 99 ? 99 : sats);
+    return key;
+}
+
+// The GPS/Wi-Fi pair in a glance header's status band, painted and placed.
+// Cheap enough to call on a state change rather than only on the minute tick:
+// two labels, and on a lit panel LVGL redraws only what it is told changed.
+static void paintGlanceStatusIcons(GlanceHeader &w) {
+    if (!lvObjValid(w.gps) || !lvObjValid(w.wifi)) {
+        // A header built without the pair (see buildGlanceHeader): it is
+        // already showing everything it is going to, so record the state as
+        // drawn rather than leaving callers to re-check it forever.
+        w.statusKey = glanceStatusIconsKey();
+        return;
+    }
+
+    const bool gpsEnabled = gpsIsEnabled();
+    wifi_mode_t wifiMode = WiFi.getMode();
+    bool wifiApMode = (wifiMode == WIFI_AP);
+#ifdef WIFI_AP_STA
+    wifiApMode = wifiApMode || (wifiMode == WIFI_AP_STA);
+#endif
+    const bool wifiConnected = (!wifiApMode && WiFi.status() == WL_CONNECTED);
+
+    paintStatusIcons(w.gps, w.wifi, gpsEnabled, gpsEnabled && gpsHasFix(),
+                     gpsEnabled ? gpsSats() : 0, wifiApMode, wifiConnected,
+                     glancePalette(w.themed).status);
+
+    // Packed inward from the battery, the same order and direction the chat
+    // header uses. Re-placed on every paint rather than once at build time
+    // because the battery reading is what they hang off, and "9%" and "4.05V"
+    // are not the same width.
+    if (lvObjValid(w.batt)) {
+        lv_obj_t *band = lv_obj_get_parent(w.batt);
+        if (band) lv_obj_update_layout(band);
+        lv_obj_align_to(w.wifi, w.batt, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        lv_obj_align_to(w.gps, w.wifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
+    }
+
+    w.statusKey = glanceStatusIconsKey();
+}
+
 // Repaint a glance header from the current clock, weather, battery and config.
 // The caller decides when this runs; this decides what it says.
-static void updateGlanceHeader(const GlanceHeader &w) {
+static void updateGlanceHeader(GlanceHeader &w) {
     if (!w.node || !w.time || !w.date) return;
 
     const char *nodeName = s_cfg.nodeLong[0] ? s_cfg.nodeLong : "Unknown";
@@ -7041,6 +7241,10 @@ static void updateGlanceHeader(const GlanceHeader &w) {
         // with the preview rows, so it stays where buildGlanceHeader put it
         // whether or not there is anything unread.
     }
+
+    // Last, because the icons are placed against the battery label and it has
+    // just been given the text that decides its width.
+    paintGlanceStatusIcons(w);
 }
 
 static void updateTdeckProSleepClock() {
@@ -7068,11 +7272,24 @@ static void updateTdeckProSleepClock() {
 // than a share of it, so a parent shorter than the panel lays the header out
 // exactly as the full-screen lock overlay does -- which is what lets the home
 // dashboard hand it the top half of the screen and get the same block back.
-static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
+// themed picks the palette (see glancePalette): the lock screen passes false
+// for its own fixed one, the home dashboard true for the theme's.
+//
+// withStatusIcons=false leaves the GPS/Wi-Fi pair out of the status band. The
+// home dashboard passes false wherever the bar underneath it is already showing
+// them: the dashboard does not cover the bottom bar, so on those boards the two
+// would be on screen twice, a few centimetres apart. The lock screen always
+// passes true — it is an opaque, full-panel overlay, and nothing it covers is
+// showing anything.
+static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
+                              bool withStatusIcons, bool themed) {
+    w.themed = themed;
+    const GlancePalette pal = glancePalette(themed);
+
     w.title = lv_label_create(parent);
     lv_obj_set_width(w.title, lv_pct(92));
     lv_obj_set_style_text_font(w.title, kSleepOverlayTitleFont, 0);
-    lv_obj_set_style_text_color(w.title, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_color(w.title, pal.ink, 0);
     lv_obj_set_style_text_align(w.title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(w.title, "Camillia");
     lv_obj_align(w.title, LV_ALIGN_TOP_MID, 0, kTdeckProTitleTop);
@@ -7098,7 +7315,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
         lv_obj_set_style_border_width(sleepRule, 0, 0);
         lv_obj_set_style_radius(sleepRule, 0, 0);
         lv_obj_set_style_pad_all(sleepRule, 0, 0);
-        lv_obj_set_style_bg_color(sleepRule, sleepOverlayInk(), 0);
+        lv_obj_set_style_bg_color(sleepRule, pal.ink, 0);
 #if defined(DEVICE_TDECK_PRO)
         // Full strength on the e-paper: that panel is 1-bit, so a partial
         // opacity thresholds to solid or to nothing with no say in which.
@@ -7114,7 +7331,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
     w.node = lv_label_create(parent);
     lv_obj_set_width(w.node, lv_pct(92));
     lv_obj_set_style_text_font(w.node, kSleepOverlayNodeFont, 0);
-    lv_obj_set_style_text_color(w.node, sleepOverlayNodeInk(), 0);
+    lv_obj_set_style_text_color(w.node, pal.nodeInk, 0);
 #if HAS_WEATHER
     // Left half of the hero block, with conditions opposite it. Two rows, each
     // with a small label and a large one: node name over the clock on this
@@ -7131,7 +7348,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
 
     w.time = lv_label_create(parent);
     lv_obj_set_style_text_font(w.time, kSleepOverlayTimeFont, 0);
-    lv_obj_set_style_text_color(w.time, sleepOverlayClockInk(), 0);
+    lv_obj_set_style_text_color(w.time, pal.clockInk, 0);
 #if HAS_WEATHER
     lv_obj_align(w.time, LV_ALIGN_TOP_LEFT,
                  kTdeckProBandInset, kTdeckProTimeTop);
@@ -7140,7 +7357,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
     // the temperature on the clock's.
     w.wxDesc = lv_label_create(parent);
     lv_obj_set_style_text_font(w.wxDesc, kSleepOverlayNodeFont, 0);
-    lv_obj_set_style_text_color(w.wxDesc, sleepOverlayNodeInk(), 0);
+    lv_obj_set_style_text_color(w.wxDesc, pal.nodeInk, 0);
     lv_obj_set_style_text_align(w.wxDesc, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_long_mode(w.wxDesc, LV_LABEL_LONG_DOT);
     lv_obj_align(w.wxDesc, LV_ALIGN_TOP_RIGHT,
@@ -7149,7 +7366,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
 
     w.wxTemp = lv_label_create(parent);
     lv_obj_set_style_text_font(w.wxTemp, kSleepOverlayWxFont, 0);
-    lv_obj_set_style_text_color(w.wxTemp, sleepOverlayClockInk(), 0);
+    lv_obj_set_style_text_color(w.wxTemp, pal.clockInk, 0);
     lv_obj_set_style_text_align(w.wxTemp, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.wxTemp, LV_ALIGN_TOP_RIGHT,
                  -kTdeckProBandInset, kTdeckProTimeTop);
@@ -7163,7 +7380,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
     // under the battery, and the two would collide the moment either grew.
     w.date = lv_label_create(parent);
     lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(w.date, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_color(w.date, pal.ink, 0);
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_align(w.date, LV_ALIGN_TOP_LEFT,
                  kTdeckProBandInset, kTdeckProBandTop);
@@ -7175,10 +7392,38 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w) {
     // end in the same place instead of drifting with the reading.
     w.batt = lv_label_create(parent);
     lv_obj_set_style_text_font(w.batt, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(w.batt, sleepOverlayInk(), 0);
+    lv_obj_set_style_text_color(w.batt, pal.ink, 0);
     lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
                  -kTdeckProBandInset, kTdeckProBandTop);
+
+    // GPS and Wi-Fi, inside the same band, running inward from the battery.
+    // "Is it on the network, does it know where it is" is half of what anyone
+    // wakes this screen to find out.
+    //
+    // A size below the date and the battery on purpose: those are readings, and
+    // these are indicator lights. The band is also the narrowest row on the
+    // panel — a 240 px one carries a date and a battery already — so the two
+    // smallest icons that can still be told apart is what fits beside them.
+    if (!withStatusIcons) {
+        paintGlanceStatusIcons(w);   // records the state; there is nothing to draw
+        return;
+    }
+
+    w.gps = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.gps, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(w.gps, pal.ink, 0);
+    lv_label_set_text(w.gps, LV_SYMBOL_GPS);
+
+    w.wifi = lv_label_create(parent);
+    lv_obj_set_style_text_font(w.wifi, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(w.wifi, pal.ink, 0);
+    lv_label_set_text(w.wifi, LV_SYMBOL_WIFI);
+
+    // Placed here as well as on every repaint: the caller may not update the
+    // header before the panel is next drawn, and two icons stacked in the
+    // corner they were created in is a worse first frame than none at all.
+    paintGlanceStatusIcons(w);
 }
 
 static void showTdeckProSleepClock() {
@@ -7203,7 +7448,8 @@ static void showTdeckProSleepClock() {
     lv_obj_add_flag(s_tdeckProSleepOverlay, LV_OBJ_FLAG_CLICKABLE);
 #endif
 
-    buildGlanceHeader(s_tdeckProSleepOverlay, s_sleepGlance);
+    buildGlanceHeader(s_tdeckProSleepOverlay, s_sleepGlance,
+                      /*withStatusIcons=*/true, /*themed=*/false);
 
     // Under the date: message previews, newest first. Separate first-line labels
     // keep time/channel blue, sender green and message white on Wio. Plain text
@@ -7283,15 +7529,11 @@ static void hideTdeckProSleepClock() {
         lv_obj_del(s_tdeckProSleepOverlay);
     }
     s_tdeckProSleepOverlay = nullptr;
-    s_sleepGlance.title = nullptr;
-    s_sleepGlance.node = nullptr;
-    s_sleepGlance.time = nullptr;
-    s_sleepGlance.date = nullptr;
-#if HAS_WEATHER
-    s_sleepGlance.wxDesc = nullptr;
-    s_sleepGlance.wxTemp = nullptr;
-#endif
-    s_sleepGlance.batt = nullptr;
+    // Whole struct, not field by field: every widget in it was a child of the
+    // overlay and went with it, and a list maintained by hand is one field
+    // behind the next time the header grows one. Same reset closeHomeDashboard()
+    // does to its copy.
+    s_sleepGlance = GlanceHeader{};
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
         s_tdeckProSleepMsgBold[i] = nullptr;
         s_tdeckProSleepMsgSender[i] = nullptr;
@@ -7333,6 +7575,18 @@ static void serviceTdeckProSleepClock() {
     const bool unreadDue =
         (unreadNow != s_tdeckProSleepUnreadKey)
         && ((uint32_t)(nowMs - s_tdeckProSleepUnreadChangedMs) >= kTdeckProSleepUnreadQuietMs);
+
+#if FEATURE_LOCK_SCREEN
+    // GPS and Wi-Fi are the one thing on this screen that is worth showing the
+    // moment it changes — watching a device pick up a fix, or come up as an AP,
+    // is why the icons are here. Cheap, because it repaints the two labels
+    // rather than the overlay: LVGL invalidates what changed and the panel is
+    // lit already. Not done on the Pro, where any change at all is a full
+    // e-paper refresh; there they ride the minute below like everything else.
+    if (glanceStatusIconsKey() != s_sleepGlance.statusKey) {
+        paintGlanceStatusIcons(s_sleepGlance);
+    }
+#endif
 
     const bool minuteDue = (tdeckProSleepClockMinuteKey() != s_tdeckProSleepMinuteKey);
     if (!minuteDue && !unreadDue) return;
@@ -7431,7 +7685,7 @@ static void enterLockScreen(const char *reason) {
 }
 
 // Back to the UI. Used by each board's wake gesture, and by anything that has
-// to take the overlay down without going through panel sleep — a theme rebuild.
+// to take the overlay down without going through panel sleep — a UI rebuild.
 static void exitLockScreen() {
     if (!s_lockScreenActive) return;
     s_lockScreenActive = false;
@@ -7476,7 +7730,7 @@ static bool tryExitLockScreenFromInput(uint32_t nowMs, bool mayWake) {
 static void serviceLockScreen(uint32_t nowMs) {
     if (!s_lockScreenActive) return;
 
-    // A theme rebuild deletes the root screen and takes the overlay with it
+    // A UI rebuild deletes the root screen and takes the overlay with it
     // without anything here being told. Left alone, the flag would stay set
     // over a visible UI and the next wake gesture would appear to do nothing.
     if (!s_tdeckProSleepOverlay || !lv_obj_is_valid(s_tdeckProSleepOverlay)) {
@@ -10823,16 +11077,26 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CHOOSE_WIFI;
 #if HAS_BLE_KEYBOARD
-    // Same two-row shape as WiFi directly above -- a toggle, then the picker
-    // that chooses what it connects to -- because it is the same job, and
-    // someone looking for one row routinely means the other.
+    // Web Config sits with the WiFi pair on these boards instead of down in the
+    // services group below. It is what most people turn WiFi on *for*, and
+    // picking a network — or AP mode, which switches this row on by itself —
+    // reads as unfinished until the row saying where to point a browser is
+    // beside it. The two Bluetooth rows then follow, far enough down that the
+    // keyboard is no longer sitting between WiFi and the thing it serves.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+    // Same two-row shape as WiFi above -- a toggle, then the picker that
+    // chooses what it connects to -- because it is the same job, and someone
+    // looking for one row routinely means the other.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_TOGGLE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BLE_KBD_PAIR;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_GPS_TOGGLE;
 
     // Then the services those radios carry, which are useless without them.
+#if !HAS_BLE_KEYBOARD
+    // Boards with a keyboard row listed it higher up, beside the WiFi pair.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WEBCFG;
+#endif
 #if HAS_VNC_HOST
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_VNC_HOST;
 #endif
@@ -11053,6 +11317,24 @@ static const char *deviceInfoNodeLabel(const NodeEntry *e, char *buf, size_t len
     return buf;
 }
 
+// "29.7 GB" / "512 MB" / "1.5 MB" — whichever unit keeps the number readable.
+static void deviceInfoFormatBytes(uint64_t bytes, char *out, size_t cap) {
+    // snprintf rather than lv_label_set_text_fmt for the same reason as
+    // everywhere else in this file: LVGL's printf has no float support here.
+    if (bytes >= (1024ULL * 1024ULL * 1024ULL)) {
+        snprintf(out, cap, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
+    } else if (bytes >= (1024ULL * 1024ULL)) {
+        snprintf(out, cap, "%.0f MB", (double)bytes / (1024.0 * 1024.0));
+    } else {
+        snprintf(out, cap, "%lu KB", (unsigned long)(bytes / 1024ULL));
+    }
+}
+
+// How many rows buildDeviceInfoLines() can produce. One number, because two
+// callers size an array from it and a stale copy in either is a silently
+// truncated screen.
+static constexpr int kDeviceInfoMaxLines = 16;
+
 static int buildDeviceInfoLines(char info[][96], int maxLines) {
     int n = 0;
     bool hasPubKey = false;
@@ -11087,6 +11369,68 @@ static int buildDeviceInfoLines(char info[][96], int maxLines) {
                                (double)s_cfg.loraBw, s_cfg.loraSf, s_cfg.loraCr);
     if (n < maxLines) snprintf(info[n++], 96, "Pwr %d dBm Hops %d", s_cfg.loraPower, s_cfg.loraHopLimit);
     if (n < maxLines) snprintf(info[n++], 96, "Relayed: %lu", (unsigned long)s_rebroadcastCount);
+
+#if HAS_FILE_STORAGE
+    // Storage, and on a board with a slot, what the last mount attempt made of
+    // it. A device that has quietly stopped archiving nodes, writing DM history
+    // or taking an export looks exactly like one that never had a card, and
+    // until now the only place that difference was stated was the serial log —
+    // which needs a cable, and a reboot to read from the start.
+    {
+        SdProbeStatus sd;
+        sdGetProbeStatus(sd);
+        char sizeBuf[16];
+        deviceInfoFormatBytes(storageTotalBytes(), sizeBuf, sizeof(sizeBuf));
+
+        if (!sd.hasSlot) {
+            // No slot to diagnose: this board keeps the same files in internal
+            // flash, and "is the card in" is not a question it can be asked.
+            if (n < maxLines) {
+                if (sdCardMounted()) {
+                    snprintf(info[n++], 96, "Storage: %s %s", storageName(), sizeBuf);
+                } else {
+                    snprintf(info[n++], 96, "Storage: %s (not mounted)", storageName());
+                }
+            }
+        } else if (sd.mounted) {
+            const char *type = storageCardTypeName();
+            if (n < maxLines) {
+                if (sd.mountedHz > 0) {
+                    // The clock it answered at is the useful half: a card that
+                    // mounts only at 400 kHz is working but marginal, and that
+                    // is worth seeing before it starts failing writes.
+                    snprintf(info[n++], 96, "SD: %s %s @%lu kHz",
+                             type[0] ? type : "card", sizeBuf,
+                             (unsigned long)(sd.mountedHz / 1000UL));
+                } else {
+                    snprintf(info[n++], 96, "SD: %s %s", type[0] ? type : "card", sizeBuf);
+                }
+            }
+        } else {
+            if (n < maxLines) snprintf(info[n++], 96, "SD: no card");
+            if (n < maxLines) {
+                char when[16];
+                if (sd.retryInMs > 0) {
+                    snprintf(when, sizeof(when), "retry %lus",
+                             (unsigned long)((sd.retryInMs + 999UL) / 1000UL));
+                } else {
+                    snprintf(when, sizeof(when), "retry now");
+                }
+#if defined(HAS_SD_MMC) && HAS_SD_MMC
+                snprintf(info[n++], 96, "SD: %s, %u fails", when, (unsigned)sd.failStreak);
+#else
+                // Which rates were tried separates the two failures that matter:
+                // nothing answering after the whole ladder says empty slot or
+                // dead card, while a single-rate miss is just the damped retry
+                // and says nothing yet.
+                snprintf(info[n++], 96, "SD: %s, %s, %u fails",
+                         sd.triedAllSpeeds ? "all rates tried" : "one rate tried",
+                         when, (unsigned)sd.failStreak);
+#endif
+            }
+        }
+    }
+#endif
 
     // Most / least recently heard node. Entries restored from NVS have
     // lastHeardMs == 0 (unknown after reboot), so only nodes actually heard
@@ -11336,9 +11680,8 @@ static void refreshCfgModal() {
     }
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
-    static constexpr int kCfgInfoMaxLines = 14;   // 11 device rows + newest/oldest node
-    char info[kCfgInfoMaxLines][96] = {};
-    int infoCount = buildDeviceInfoLines(info, kCfgInfoMaxLines);
+    char info[kDeviceInfoMaxLines][96] = {};
+    int infoCount = buildDeviceInfoLines(info, kDeviceInfoMaxLines);
 
     lv_obj_t *infoHeader = lv_label_create(s_cfgInfoList);
     lv_obj_set_width(infoHeader, lv_pct(100));
@@ -11549,16 +11892,59 @@ static void applyCfgWifiSelection(int idx) {
 
     s_cfgWifiSelection = idx;
     s_wifiStaKickMs = 0;
-    webCfgSetForceAp(wifiForceApMode());
+    const bool forceAp = wifiForceApMode();
+    webCfgSetForceAp(forceAp);
     persistWifiForceAp();
     if (s_cfg.wifiEnabled && wifiHasActiveCreds()) {
         WiFi.disconnect(false);
     }
 
+    // Picking AP used to set a flag and nothing else. Nothing in the firmware
+    // raises a SoftAP on its own — web config is what does, and it reads the
+    // flag when it starts — so on a device with web config off, "AP mode
+    // selected" was a row that described a radio state the device was not in
+    // and had no way of reaching. The two settings that decide whether it can
+    // are therefore moved here rather than left for the user to find.
+    //
+    // Not with the master WiFi switch off, though: the load-time invariants
+    // clear both settings in that case, so switching them on here would be
+    // undone on the next boot, and neither can start meanwhile. The row says
+    // what is missing instead — the same answer the Web Config row gives.
+    if (forceAp && !s_cfg.wifiEnabled) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode selected - enable WiFi first");
+    } else if (forceAp) {
+        // MQTT first: the bridge dials out to a broker, and a device serving
+        // its own network has no route to one. It is also mutually exclusive
+        // with web config (see applyLoadedConfigInvariants), so it has to go
+        // before web config can come on at all. Stopped live rather than
+        // through the CFG row's reboot — this is a network being chosen, and a
+        // restart in the middle of that is not what anyone pressed.
+        if (s_cfg.mqttEnabled) {
+            s_cfg.mqttEnabled = false;
+            mqttBridgeConfigChanged();
+            persistConfigToPrefs();
+            Serial.println("[wifi] AP mode: MQTT bridge switched off");
+        }
+        if (!s_webCfgEnabled) {
+            s_webCfgEnabled = true;
+            persistWebCfgEnabled();
+            Serial.println("[wifi] AP mode: web config switched on");
+        }
+    }
+
     // Web config picked its radio mode when it started, so a running server has
-    // to be restarted to move between the SoftAP and the station network.
-    if (s_webCfgEnabled && webCfgRunning()) {
-        webCfgEnd();
+    // to be restarted to move between the SoftAP and the station network — and
+    // one just switched on above has to be started at all, or choosing AP would
+    // still leave the radio idle until the next boot.
+    const bool startForAp = forceAp && s_cfg.wifiEnabled && s_webCfgEnabled && !webCfgRunning();
+    if (s_webCfgEnabled && (webCfgRunning() || startForAp)) {
+#if HAS_BLE_KEYBOARD
+        // Same exclusion the CFG row enforces: the server must not come up
+        // while a BT keyboard controller is live. Only on the start path — if
+        // the server was already running, the keyboard is already stopped.
+        const bool stoppedBleKbd = startForAp ? webCfgStopBleKeyboardForWeb() : false;
+#endif
+        if (webCfgRunning()) webCfgEnd();
         webCfgPushActiveCreds();
 #if HAS_FILE_STORAGE && !defined(DEVICE_TDECK_PRO)
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, captureWebScreenshotPng);
@@ -11566,8 +11952,26 @@ static void applyCfgWifiSelection(int idx) {
         bool ok = webCfgBegin(&s_cfg, onWebCfgSaved, nullptr);
 #endif
         if (ok) {
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus),
-                     webCfgIsLite() ? "Web Lite: %s" : "Web: %s", webCfgIP());
+            if (forceAp) {
+                // Says AP, and says where: the address is the whole point of
+                // the mode, and it is not the one the station network gave.
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus), "AP mode: %s", webCfgIP());
+            } else {
+                snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                         webCfgIsLite() ? "Web Lite: %s" : "Web: %s", webCfgIP());
+            }
+            // Same two notices the CFG row raises when it starts the server,
+            // in the same order: a board that pauses chat for Wi-Fi is costing
+            // the user messages, which outranks a keyboard that was switched
+            // off. Only on the start path — a restart changes neither.
+            if (startForAp && webCfgChatPaused()) {
+                showWebCfgChatPausedNotice();
+            }
+#if HAS_BLE_KEYBOARD
+            else if (stoppedBleKbd) {
+                openCfgActionMessageModal(kWebBleKbdExclusiveNotice);
+            }
+#endif
         } else {
             s_webCfgEnabled = false;
             persistWebCfgEnabled();
@@ -13479,8 +13883,9 @@ static void openChatStyleModal() {
 // ── Theme picker ──────────────────────────────────────────────────────────────
 // Replaces blind theme cycling with a scrollable modal: every theme/mode preset
 // gets a row showing its name and a three-swatch preview (background, panel,
-// accent). Navigating highlights; Enter/tap applies live (no reboot) via the same
-// palette+rebuild path the old cycling used.
+// accent). Navigating highlights; Enter/tap saves the choice and reboots, the
+// way the orientation row does — every screen is built from the palette, and
+// buildUi() on the way up is the one path that reads all of it correctly.
 static lv_obj_t *s_themeBackdrop = nullptr;
 static lv_obj_t *s_themeModal = nullptr;
 // Sized for the built-ins plus every custom slot, so the array does not have
@@ -13646,11 +14051,13 @@ static void rebuildThemeRows() {
                                       s_themeFilter, s_themeVisibleCount);
             }
         } else {
+            // Says "reboots" because it does: applying a theme restarts the
+            // device rather than repainting the screen you are looking at.
             lv_label_set_text(s_themeFilterLabel,
 #if UI_TOUCH_ONLY_PROFILE
-                              "Tap a theme to apply"
+                              "Tap a theme - reboots"
 #else
-                              "Space=Filter  Enter=Select"
+                              "Space=Filter  Enter=Apply+reboot"
 #endif
             );
         }
@@ -13674,15 +14081,28 @@ static void applyThemeSelection(int idx) {
         refreshCfgModal();
         return;
     }
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s - rebooting...", p.name);
+    closeThemeModal();
+    // Same sequence the orientation row uses: paint the status line, give it a
+    // moment to actually reach the panel, then go.
+    refreshCfgModal();
+    lv_timer_handler();
+
+    // After that repaint, deliberately. Half the UI reads s_cfg.uiMode directly
+    // and the other half reads the palette s_ui, so a screen drawn between the
+    // two being updated is drawn in neither theme. The new one arrives whole,
+    // on the way back up.
+    //
+    // Straight to NVS, not the debounced flush persistUiTheme() queues: the
+    // restart below would otherwise beat the write and the device would come
+    // back wearing the theme it went down in.
     s_cfg.uiTheme = p.theme;
     s_cfg.uiMode = p.mode;
-    persistUiTheme();
-    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Theme: %s", p.name);
-    closeThemeModal();
-    // Applies live: repaint the palette and rebuild the UI (no reboot). The
-    // rebuild is deferred, so don't touch the CFG modal after scheduling it.
-    applyUiThemePalette();
-    scheduleThemeRebuild(true);
+    persistConfigToPrefs();
+
+    delay(900);
+    flushPersistentState();   // transcripts too, before we go
+    ESP.restart();
 }
 
 static void onThemeRowPressed(lv_event_t *e) {
@@ -18041,8 +18461,8 @@ static void infoAddRow(lv_obj_t *parent, const lv_font_t *font,
 static void openNodeInfoModal() {
     if (!s_rootScreen || s_nodeInfoModal) return;
 
-    char info[14][96] = {};   // 11 device rows + newest/oldest node
-    int infoCount = buildDeviceInfoLines(info, 14);
+    char info[kDeviceInfoMaxLines][96] = {};
+    int infoCount = buildDeviceInfoLines(info, kDeviceInfoMaxLines);
 
     int modalW = lv_disp_get_hor_res(NULL) - 24;
     if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
@@ -18543,6 +18963,30 @@ static lv_opa_t chatPanelBackgroundOpa() {
 #endif
 }
 
+#if UI_TOUCH_NAV_BAR
+// Paints one nav cell in its normal or active styling. Defined below with the
+// rest of the bar; the unread flash under it has to be able to put a cell back
+// the way it found it.
+static void navBarStyleCell(lv_obj_t *btn, bool isActive);
+
+// Which cell a bar is currently marking active, stored on the bar the same way
+// each cell stores which destination it is: offset by one so 0 reads as "not
+// recorded". The unread flash repaints a cell and has to put back the styling
+// it replaced, and only the bar knows whether that cell was the lit one.
+static constexpr int kNavBarNoActive = -1;
+
+static void navBarNoteActive(lv_obj_t *bar, int activeTarget) {
+    if (!bar || !lv_obj_is_valid(bar)) return;
+    lv_obj_set_user_data(bar, (void *)(intptr_t)(activeTarget + 1));
+}
+
+static int navBarActiveTarget(lv_obj_t *bar) {
+    if (!bar || !lv_obj_is_valid(bar)) return kNavBarNoActive;
+    const intptr_t tag = (intptr_t)lv_obj_get_user_data(bar);
+    return (tag == 0) ? kNavBarNoActive : (int)(tag - 1);
+}
+#endif  // UI_TOUCH_NAV_BAR
+
 #if UI_TOUCH_ONLY_PROFILE
 // The DM cell's glyph, for every nav bar that currently exists — the chat
 // screen's, plus one on whatever full-screen modal is sitting over it. Recorded
@@ -18561,12 +19005,44 @@ static lv_obj_t *s_navChatIcons[kNavDmIconSlots] = {nullptr};
 static bool s_navDmLit = false;
 static bool s_navChatLit = false;
 
-static void navDmApplyInk(lv_obj_t *label, bool lit) {
+// The whole cell, not the glyph inside it. On a bar of icon buttons the glyph
+// is a small part of a large target, and a button that changes colour is what
+// reads as "this one wants you" from arm's length — a recoloured 14 px symbol
+// does not. The cell is the label's parent; the label goes dark so it stays
+// legible on the amber rather than disappearing into it.
+//
+// Unlit restores through navBarStyleCell() rather than by remembering what was
+// replaced, so a cell that is also the active one comes back correctly marked.
+static void navCellApplyInk(lv_obj_t *label, bool lit) {
     if (!label || !lv_obj_is_valid(label)) return;
-    lv_obj_set_style_text_color(label,
-                                lit ? lv_color_hex(0xF4D35E)    // the envelope's amber
-                                    : lv_color_hex(0xD9E8FF),   // the bar's own ink
-                                0);
+
+    lv_obj_t *cell = lv_obj_get_parent(label);
+    if (!cell || !lv_obj_is_valid(cell)) {
+        // No cell to flash — colour the glyph, as this used to.
+        lv_obj_set_style_text_color(label,
+                                    lit ? lv_color_hex(0xF4D35E) : lv_color_hex(0xD9E8FF), 0);
+        return;
+    }
+
+    if (lit) {
+        lv_obj_set_style_bg_color(cell, lv_color_hex(0xF4D35E), 0);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(cell, lv_color_hex(0xF4D35E), 0);
+        // Fixed, not a theme token: s_ui.battWarn is the same amber on every
+        // theme (see applyUiThemePalette), so the ink that has to read on it is
+        // the same everywhere too.
+        lv_obj_set_style_text_color(label, lv_color_make(0x16, 0x23, 0x3A), 0);
+    } else {
+        const intptr_t tag = (intptr_t)lv_obj_get_user_data(cell);
+        const int target = (tag == 0) ? kNavBarNoActive : (int)(tag - 1);
+        navBarStyleCell(cell, target != kNavBarNoActive
+                              && target == navBarActiveTarget(lv_obj_get_parent(cell)));
+        lv_obj_set_style_text_color(label, lv_color_hex(0xD9E8FF), 0);
+    }
+}
+
+static void navDmApplyInk(lv_obj_t *label, bool lit) {
+    navCellApplyInk(label, lit);
 }
 
 // The Chats cell gets the same treatment for unread *channel* traffic that the
@@ -18578,11 +19054,7 @@ static void navDmApplyInk(lv_obj_t *label, bool lit) {
 // apart on the bar and carry different glyphs; what the colour says is "there is
 // something here", and that means the same thing in both places.
 static void navChatApplyInk(lv_obj_t *label, bool lit) {
-    if (!label || !lv_obj_is_valid(label)) return;
-    lv_obj_set_style_text_color(label,
-                                lit ? lv_color_hex(0xF4D35E)    // the envelope's amber
-                                    : lv_color_hex(0xD9E8FF),   // the bar's own ink
-                                0);
+    navCellApplyInk(label, lit);
 }
 
 static void navChatIconRegister(lv_obj_t *label) {
@@ -18642,6 +19114,7 @@ static void navBarStyleCell(lv_obj_t *btn, bool isActive) {
 // a table would be another thing to invalidate when a bar goes with its modal.
 static void navBarSetActive(lv_obj_t *bar, int activeTarget) {
     if (!bar || !lv_obj_is_valid(bar)) return;
+    navBarNoteActive(bar, activeTarget);
     const uint32_t n = lv_obj_get_child_count(bar);
     for (uint32_t i = 0; i < n; i++) {
         lv_obj_t *child = lv_obj_get_child(bar, i);
@@ -18695,33 +19168,43 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 
     // DM's icon is board-dependent, and only because of how the T-Deck Pro
     // draws. Its panel is 1-bit (the I1 flush path in the display driver), so
-    // LVGL thresholds every glyph to pure black or white with nothing in
-    // between. LV_SYMBOL_ENVELOPE is FontAwesome's *solid* envelope whose flap
-    // is a pair of thin light strokes — they threshold away and the whole glyph
-    // floods to a filled rectangle, which is what it looked like on the device.
+    // LVGL thresholds every glyph at a hard luminance cut with no dithering —
+    // LV_DRAW_SW_I1_LUM_THRESHOLD, 127. LV_SYMBOL_ENVELOPE is FontAwesome's
+    // *solid* envelope whose flap is a pair of thin light strokes: they land on
+    // the wrong side of that cut and the whole glyph floods to a filled
+    // rectangle, which is what it looked like on the device.
     //
-    // Noto Emoji is line art, so it survives the same treatment: the speech
-    // balloon keeps its outline, its tail and all three dots from 12 px through
-    // 16 px. It also says the right thing for a conversation list. Every other
-    // board anti-aliases, where the envelope renders correctly and is the more
-    // conventional icon, so they keep it.
+    // Noto Emoji is line art, so it survives the same treatment. U+2709 is the
+    // envelope this always wanted — an outline with an open flap rather than a
+    // solid block — and it comes out about 30% covered at 12, 14 and 16 px with
+    // the flap still legible, against the ~47% of a glyph that has flooded.
+    //
+    // It used to be the speech balloon, which survives thresholding just as
+    // well but belongs to the Chats cell beside it: taking it for DM is what
+    // pushed channels onto a bare "#" on this one board, so the private
+    // conversations wore the speech bubble and the public ones did not.
+    //
+    // Every other board anti-aliases, where FontAwesome's envelope renders
+    // correctly and is the more conventional icon, so they keep it.
 #if defined(DEVICE_TDECK_PRO)
     const bool navDmIsEmoji = navEmojiReady;
     const char *const kDmIcon =
-        navEmojiReady ? "\U0001F4AC" : LV_SYMBOL_ENVELOPE;  // speech balloon
+        navEmojiReady ? "\u2709" : LV_SYMBOL_ENVELOPE;  // outline envelope
 #else
     const bool navDmIsEmoji = false;
     const char *const kDmIcon = LV_SYMBOL_ENVELOPE;
 #endif
 
     // Chats — the channel conversations, as against DM's private ones. The
-    // speech balloon where it is free, and "#" where it is not: on the T-Deck
-    // Pro the balloon is already DM's (see the note above), and a hash is what
-    // a channel is called everywhere else in this UI anyway. It is also plain
-    // ASCII, so the 1-bit panel cannot threshold it into a blob, and it can
-    // never collide with the list glyph Nodes falls back to when the emoji face
-    // fails to load.
-    const bool navChatIsEmoji = navEmojiReady && !navDmIsEmoji;
+    // speech balloon on every board whose emoji face loaded, DM included now
+    // that it wears an envelope instead: the two are different glyphs from the
+    // same face rather than a choice between them.
+    //
+    // "#" is what is left when that face failed to load at all. It is plain
+    // ASCII, so the 1-bit panel cannot threshold it into a blob, it is what a
+    // channel is called everywhere else in this UI, and it can never collide
+    // with the list glyph Nodes falls back to in the same situation.
+    const bool navChatIsEmoji = navEmojiReady;
     const char *const kChatIcon = navChatIsEmoji ? "\U0001F4AC" : "#";
     // Icons rather than words. Six buttons of text across 240 px meant either
     // an abbreviation per board ("Config" on the wide one, "Cfg" on the tall
@@ -18784,6 +19267,10 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     const lv_color_t navTextColor = lv_color_hex(0xD9E8FF);
+
+    // Recorded before the cells are built, so a bar that is never re-marked
+    // still knows which of them is the lit one — the unread flash asks.
+    navBarNoteActive(bar, activeTarget);
 
     for (size_t i = 0; i < sizeof(kItems) / sizeof(kItems[0]); i++) {
         lv_obj_t *btn = lv_btn_create(bar);
@@ -26094,22 +26581,168 @@ static inline void homeDashMarkNavBar(bool) {}
 #endif
 
 // The bar under the dashboard keeps its right-hand cluster — Wi-Fi, GPS and the
-// DM alert are status, and status belongs on every screen — but loses the key
-// hints on its left. Those name what the letters do *on the chat screen*, which
-// is not the screen you are looking at, and a row of instructions for somewhere
-// else is worse than no row at all under a surface whose whole point is to be
-// glanced at.
+// DM alert are status, and status belongs on every screen — but the key hints
+// on its left have no business there. They name what the letters do *on the
+// chat screen*, which is not the screen you are looking at.
 //
-// Hidden rather than retexted: the dashboard's own keys are Home and Messages,
-// both of them buttons with labels printed on the case.
-static void homeDashSetHintsHidden(bool hidden) {
+// Where there is a hint line to take over, that space becomes a ticker of what
+// has arrived instead: the one question a glance surface should answer and did
+// not. Where there is not — a nav bar of icon buttons has no text row — the
+// hints are simply hidden, as before.
+#if HAS_HOME_DASHBOARD && !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
+// A scrolling label is an LVGL animation, i.e. a continuous stream of panel
+// refreshes. That is free on a backlit LCD and ruinous on the Pro's e-paper,
+// whose dashboard already rides a once-a-minute cadence for the same reason —
+// so the Pro keeps the plain hidden hints.
+#define HAS_HOME_TICKER 1
+#else
+#define HAS_HOME_TICKER 0
+#endif
+
+#if HAS_HOME_TICKER
+// What the strip is currently showing, as tdeckProSleepUnreadKey() reports it.
+// That key already folds in the ring's sequence number as well as the unread
+// counts, so it moves for a second message on an already-unread channel — which
+// is exactly the case a count-only check misses.
+static uint64_t s_homeTickerKey = UINT64_MAX;
+
+// How many messages one line carries. Three is what fits before the scroll
+// becomes long enough that the newest one is off screen most of the time.
+static constexpr int kHomeTickerMaxMsgs = 3;
+
+static void homeTickerBuildText(char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+
+    const TdeckProRecentMsg *picked[kTdeckProSleepMsgSlots] = {nullptr};
+    const int n = tdeckProSleepHasUnread() ? tdeckProCollectSleepMsgs(picked) : 0;
+    if (n <= 0) {
+        // Said, not left blank. An empty strip reads as something failing to
+        // draw; this reads as an answer, and it is the answer most of the time.
+        utf8util::copyTruncate(out, cap, "No new messages");
+        return;
+    }
+
+    size_t used = 0;
+    const int show = (n < kHomeTickerMaxMsgs) ? n : kHomeTickerMaxMsgs;
+    for (int i = 0; i < show && used + 1 < cap; i++) {
+        const TdeckProRecentMsg &m = *picked[i];
+
+        char when[LIVE_CLOCK_BUF] = "";
+        if (m.epoch != 0) {
+            const time_t at = (time_t)m.epoch;
+            struct tm lt;
+            localtime_r(&at, &lt);
+            liveFormatClock(lt, when, sizeof(when));
+        }
+
+        char chanFull[24];
+        tdeckProSleepChannelLabel(m.chanIdx, chanFull, sizeof(chanFull));
+        char chan[20];
+        tdeckProClampLabel(chan, sizeof(chan), chanFull, 10);
+
+        char sender[48];
+        {
+            char raw[sizeof(sender)];
+            chatSenderLabel(m.senderNodeId, raw, sizeof(raw));
+            // Folded before the clamp counts characters, not after: the fold is
+            // what turns a three-byte codepoint into one. The strip's face has
+            // no emoji fallback chained, so anything left unfolded draws blank.
+            char safe[sizeof(sender)];
+            renderEmojiSafeText(raw, safe, sizeof(safe));
+            tdeckProClampLabel(sender, sizeof(sender), safe[0] ? safe : "?", 12);
+        }
+
+        char body[80];
+        {
+            char safe[sizeof(body)];
+            renderEmojiSafeText(m.text, safe, sizeof(safe));
+            tdeckProClampLabel(body, sizeof(body), safe, 40);
+        }
+
+        // U+2022 is in the Montserrat faces (it is one of the two non-ASCII
+        // codepoints they carry), so the separator needs no fallback either.
+        char one[176];
+        snprintf(one, sizeof(one), "%s%s%s%s%s %s: %s",
+                 (used > 0) ? "  \u2022  " : "",
+                 when[0] ? when : "", when[0] ? " " : "",
+                 (m.chanIdx >= 0) ? "#" : "", chan,
+                 sender, body);
+        used = (size_t)strlen(out);
+        utf8util::copyTruncate(out + used, cap - used, one);
+        used = (size_t)strlen(out);
+    }
+}
+
+// Puts the ticker on the strip, or the hints back. Returns nothing, because
+// every caller has already decided which screen is up.
+static void homeTickerApply(bool onDashboard) {
     if (!lvObjValid(s_chatShortcutText)) return;
-    if (hidden) lv_obj_add_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
-    else        lv_obj_clear_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+
+    if (!onDashboard) {
+        s_homeTickerKey = UINT64_MAX;   // rebuild on the way back in
+        lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
+        lv_label_set_text(s_chatShortcutText, chatShortcutHintText());
+        return;
+    }
+
+    char text[240];
+    homeTickerBuildText(text, sizeof(text));
+    // Only the case with something to say scrolls. "No new messages" fits the
+    // strip, and a short line set to scroll circularly still drifts — motion
+    // that says nothing, on the screen whose whole point is to be glanced at.
+    const bool anyUnread = tdeckProSleepHasUnread();
+    lv_label_set_long_mode(s_chatShortcutText,
+                           anyUnread ? LV_LABEL_LONG_SCROLL_CIRCULAR
+                                     : LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_chatShortcutText, text);
+    s_homeTickerKey = tdeckProSleepUnreadKey();
+}
+
+// Called from the dashboard's own refresh, which runs on the UI tick.
+static void homeTickerService() {
+    if (!lvObjValid(s_chatShortcutText)) return;
+    if (tdeckProSleepUnreadKey() == s_homeTickerKey) return;
+    homeTickerApply(true);
+}
+#endif  // HAS_HOME_TICKER
+
+static void homeDashSetFooterMode(bool onDashboard) {
+    if (!lvObjValid(s_chatShortcutText)) return;
+#if HAS_HOME_TICKER
+    homeTickerApply(onDashboard);
+#else
+    // No hint line to take over: hide it on the way in, restore on the way out.
+    if (onDashboard) lv_obj_add_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+    else             lv_obj_clear_flag(s_chatShortcutText, LV_OBJ_FLAG_HIDDEN);
+#endif
+}
+
+// True when the bar the dashboard sits above is already showing GPS and Wi-Fi.
+//
+// Which board that is cannot be answered by a #if: the same build moves the
+// cluster between the chat screen's top header and its bottom bar depending on
+// the layout, and on the boards with a nav-bar setting it moves when the user
+// flips it. What decides is simply where the labels ended up, so that is what
+// this asks — walking up from the label rather than comparing against one
+// parent, because the nav bar keeps its cluster inside a box of its own.
+//
+// The dashboard stops short of the bottom bar (see homeDashboardHeight), so a
+// cluster down there stays visible underneath and a second copy in the glance
+// header would be the same two icons twice on one screen. A cluster in the chat
+// header is covered by the dashboard, and then the header copy is the only one.
+static bool homeDashFooterShowsStatus() {
+    if (!lvObjValid(s_chatShortcutBar)) return false;
+    if (!lvObjValid(s_chatHeaderGps) || !lvObjValid(s_chatHeaderWifi)) return false;
+    for (lv_obj_t *p = lv_obj_get_parent(s_chatHeaderGps); p; p = lv_obj_get_parent(p)) {
+        if (p == s_chatShortcutBar) return true;
+    }
+    return false;
 }
 
 static void closeHomeDashboard() {
-    homeDashSetHintsHidden(false);
+    homeDashSetFooterMode(false);
     homeDashMarkNavBar(false);
     lvObjDeleteSafe(s_homeDash);
     // Children of the deleted object; LVGL freed them with it, so this is just
@@ -26126,10 +26759,14 @@ static void closeHomeDashboard() {
     s_homeGlanceMinuteKey = UINT32_MAX;
 }
 
-// How much height the dashboard may take before it would cover the shortcut
-// bar. Measured off the bar itself rather than recomputed from the chat
-// screen's margins: those live inside buildUi() as locals, and a second copy of
-// that arithmetic would be wrong the first time either changed.
+// Where the shortcut bar starts, and so how much height the dashboard's content
+// may take before it would run under it. Measured off the bar itself rather
+// than recomputed from the chat screen's margins: those live inside buildUi()
+// as locals, and a second copy of that arithmetic would be wrong the first time
+// either changed.
+//
+// This bounds the charts, not the dashboard object — that covers the whole
+// panel and the bar is drawn over it. See openHomeDashboard().
 static int homeDashboardHeight() {
     const int screenH = lv_disp_get_ver_res(NULL);
     if (lvObjValid(s_chatShortcutBar) && lvObjValid(s_rootScreen)) {
@@ -26143,12 +26780,15 @@ static int homeDashboardHeight() {
     return screenH;
 }
 
-// The dashboard borrows the glance header's palette rather than the app's,
-// because it has to: sleepOverlayInk() and its siblings are fixed colours, not
-// theme tokens, so a themed background under them would eventually put white
-// text on a light ground. Taking the header's own background instead means the
-// pair can never disagree — black on the lit boards, white on the e-paper.
-static inline lv_color_t homeDashInk()      { return sleepOverlayInk(); }
+// The dashboard used to borrow the lock screen's fixed palette, because the two
+// share a header and that header's inks were fixed: a themed background under
+// them would have put white text on a light ground. Both move together now —
+// glancePalette(themed) hands out the ground and the inks as one set — so the
+// dashboard takes the theme like the rest of the UI it is part of.
+//
+// The card readings are the strongest text on the card, so they take the ink
+// the header's wordmark and battery do. The headings below stay a step back.
+static inline lv_color_t homeDashInk() { return glancePalette(/*themed=*/true).ink; }
 // Headings and units, a step back from the readings themselves. The e-paper has
 // no step to give: a mid grey thresholds to one of the two colours it has, and
 // which one is not ours to choose.
@@ -26346,6 +26986,13 @@ static void refreshHomeDashCharts(bool force) {
 static void refreshHomeDashboard(bool force) {
     if (!homeDashboardVisible()) return;
 
+#if HAS_HOME_TICKER
+    // Cheap: one 64-bit compare unless something actually arrived. Ahead of the
+    // minute gate below, because a message is worth showing when it lands and
+    // not up to a minute later.
+    homeTickerService();
+#endif
+
     // The header is minute-resolution by construction — clock, date, battery and
     // a weather reading with its own TTL — so repainting it on every UI tick
     // would be six label writes a second to say the same thing.
@@ -26358,6 +27005,16 @@ static void refreshHomeDashboard(bool force) {
         updateGlanceHeader(s_homeGlance);
         s_homeGlanceMinuteKey = minuteKey;
     }
+#if !defined(DEVICE_TDECK_PRO)
+    // Between minutes, the status icons still follow their state — the pair is
+    // on this screen precisely so a glance answers "is it on the network yet",
+    // and an answer a minute old does not. Two labels, so it costs nothing on a
+    // backlit panel; on the Pro every repaint is an e-paper refresh, so there
+    // they wait for the minute above.
+    else if (glanceStatusIconsKey() != s_homeGlance.statusKey) {
+        paintGlanceStatusIcons(s_homeGlance);
+    }
+#endif
 
 #if defined(DEVICE_TDECK_PRO)
     // E-paper, and this is the boot screen. A chart redraw here is a panel
@@ -26375,37 +27032,59 @@ static void refreshHomeDashboard(bool force) {
 #endif
 }
 
+// The bar is the one thing meant to stay visible while the dashboard is up, and
+// the dashboard now covers the whole panel, so the bar has to sit above it.
+//
+// Raising it is safe from these call sites: every path that opens the dashboard
+// tears down whatever modal was up first (prepareGlobalNavigation, or the nav
+// bar's own branch), and modals build their own copy of this bar anyway rather
+// than relying on the root screen's.
+static void homeDashRaiseBar() {
+    if (lvObjValid(s_chatShortcutBar)) lv_obj_move_foreground(s_chatShortcutBar);
+}
+
 static void openHomeDashboard() {
     if (!s_rootScreen) return;
     if (homeDashboardVisible()) {
         // Already here. Bring it up and repaint rather than rebuild: Home
         // pressed twice should not cost a teardown.
-        homeDashSetHintsHidden(true);
+        homeDashSetFooterMode(true);
         homeDashMarkNavBar(true);
         lv_obj_move_foreground(s_homeDash);
+        homeDashRaiseBar();
         refreshHomeDashboard(true);
         return;
     }
     closeHomeDashboard();   // clears stale child pointers if the screen was rebuilt
 
-    const int dashH = homeDashboardHeight();
+    // Where the bar below starts. The charts stop there — but the dashboard
+    // itself covers the whole panel, because stopping the *object* there left
+    // whatever the bar does not cover still showing the chat screen. On the
+    // T-Lora Pager that is the bottom of the channel list beside the bar, which
+    // is only as wide as the chat column: a strip of the screen underneath,
+    // visible along the bottom edge. Full height plus homeDashRaiseBar() costs
+    // nothing on the boards whose bar already spans the display.
+    const int contentH = homeDashboardHeight();
 
     s_homeDash = lv_obj_create(s_rootScreen);
     lv_obj_remove_style_all(s_homeDash);
-    lv_obj_set_size(s_homeDash, lv_disp_get_hor_res(NULL), dashH);
+    lv_obj_set_size(s_homeDash, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
     lv_obj_align(s_homeDash, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_SCROLLABLE);
-    // The header's own ground — see homeDashInk(). Not the app background:
-    // lv_color_hex() is the theme remapper, so on a light theme it would hand
-    // back a pale colour to put the glance's fixed white type on.
-    lv_obj_set_style_bg_color(s_homeDash, sleepOverlayBg(), 0);
+    // The theme's own background, and the header above draws in inks chosen
+    // against it — see glancePalette(). This used to be the lock screen's fixed
+    // black for the good reason that the header's type was fixed white; now
+    // that both come out of one palette, a themed ground is simply what a
+    // screen you use should have.
+    lv_obj_set_style_bg_color(s_homeDash, glancePalette(/*themed=*/true).bg, 0);
     lv_obj_set_style_bg_opa(s_homeDash, LV_OPA_COVER, 0);
     // Swallow taps for the same reason the lock screen does: the chat screen is
     // still built underneath, and on a board with a touch panel a press would
     // otherwise land on a button nobody can see.
     lv_obj_add_flag(s_homeDash, LV_OBJ_FLAG_CLICKABLE);
 
-    buildGlanceHeader(s_homeDash, s_homeGlance);
+    buildGlanceHeader(s_homeDash, s_homeGlance, !homeDashFooterShowsStatus(),
+                      /*themed=*/true);
 
     // Under the header, where the lock screen puts its message previews. Its
     // widgets are positioned absolutely from the top, so the first free row is
@@ -26418,13 +27097,14 @@ static void openHomeDashboard() {
     // header's height comes from a font and the dashboard's from a widget it
     // measured, so neither is a constant this file controls — and a negative
     // size handed to LVGL is a much worse failure than a header on its own.
-    const int chartsH = dashH - chartsTop;
+    const int chartsH = contentH - chartsTop;
     if (chartsH < 48) {
         s_homeGlanceMinuteKey = UINT32_MAX;
         refreshHomeDashboard(true);
-        homeDashSetHintsHidden(true);
+        homeDashSetFooterMode(true);
         homeDashMarkNavBar(true);
         lv_obj_move_foreground(s_homeDash);
+        homeDashRaiseBar();
         return;
     }
 
@@ -26473,9 +27153,10 @@ static void openHomeDashboard() {
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
-    homeDashSetHintsHidden(true);
+    homeDashSetFooterMode(true);
     homeDashMarkNavBar(true);
     lv_obj_move_foreground(s_homeDash);
+    homeDashRaiseBar();
 }
 #endif  // HAS_HOME_DASHBOARD
 // True when this node's packets have told us it is one hop away. Anything that
@@ -27099,7 +27780,7 @@ static void weatherRefresh() {
 #endif  // HAS_WEATHER
 
 static void openBeaconsModal() {
-    // A theme rebuild deletes the root screen out from under us; without this
+    // A UI rebuild deletes the root screen out from under us; without this
     // the stale pointer would lock the surface shut for the rest of the boot.
     if (s_beaconsModal && !lvObjAlive(s_beaconsModal)) {
         s_beaconsModal = nullptr;
@@ -27543,7 +28224,7 @@ static void mqttMonitorReset() {
 }
 
 static void openMqttMonitorModal() {
-    // Same guard the other tool surfaces carry: a theme rebuild deletes the root
+    // Same guard the other tool surfaces carry: a UI rebuild deletes the root
     // screen out from under the stale pointer.
     if (s_mqttMonModal && !lvObjAlive(s_mqttMonModal)) {
         s_mqttMonModal = nullptr;
@@ -28813,7 +29494,7 @@ static void discoveryStartPresetScan(uint8_t preset) {
 // loop whether or not the modal is open, so a sweep started and then abandoned
 // still clears and still counts.
 static void serviceDiscoverySweep() {
-    // A theme rebuild deletes the root screen — and the modal with it — without
+    // A UI rebuild deletes the root screen — and the modal with it — without
     // going through closeDiscoveryModal(). For a plain sweep that costs nothing;
     // for a scan it would strand the radio on a foreign preset until the next
     // reboot, so the modal being gone is itself a reason to come home.
@@ -29183,7 +29864,7 @@ static void openDiscoveryPresetModal() {
 }
 
 static void openDiscoveryModal() {
-    // A theme rebuild deletes the root screen out from under us; without this
+    // A UI rebuild deletes the root screen out from under us; without this
     // the stale pointer would lock the surface shut for the rest of the boot.
     if (s_discoveryModal && !lvObjAlive(s_discoveryModal)) {
         s_discoveryModal = nullptr;
@@ -32489,10 +33170,9 @@ static void performCfgAction(int actionId) {
                      s_cfg.navBarEnabled ? "On" : "Off");
             // The bar is built into the screens, not painted over them, and the
             // chat screen gives up a different amount of height for it — so
-            // this is a rebuild, not a restyle. Deferred like the theme rebuild
-            // for the same reason: we are inside an LVGL event callback on a
-            // row that the rebuild is about to delete.
-            scheduleNavBarRebuild(true);
+            // this is a rebuild, not a restyle. Deferred because we are inside
+            // an LVGL event callback on a row the rebuild is about to delete.
+            scheduleUiRebuild(true);
             break;
 #endif
 
@@ -37846,19 +38526,27 @@ static void onWebCfgSaved() {
     // Keep export an explicit user action. Auto-export after onboarding/web-save
     // can overwrite or churn SD config unexpectedly.
 
+    // The on-device picker reboots for a theme change; this callback cannot,
+    // because it also runs for the custom-theme editor's own save and delete,
+    // which are AJAX calls inside a page the user is still working in. The
+    // full rebuild is what covers those — it is the path the nav-bar toggle
+    // uses, and it draws every screen from the new palette rather than trying
+    // to repaint the live one widget by widget. A theme picked in the main
+    // settings form reboots anyway (handlePostSave), so there this is just the
+    // screen keeping up during the second before the restart.
     if ((prevTheme != s_appliedUiTheme || prevMode != s_appliedUiMode) && s_rootScreen) {
-        scheduleThemeRebuild(s_cfgModal != nullptr);
+        scheduleUiRebuild(s_cfgModal != nullptr);
     }
 
 #if HAS_NAV_BAR_TOGGLE
     // Turned on or off from the browser: same rebuild the on-device row asks
     // for, so the screen matches the setting without waiting for a reboot.
     if (prevNavBar != s_cfg.navBarEnabled && s_rootScreen) {
-        scheduleNavBarRebuild(s_cfgModal != nullptr);
+        scheduleUiRebuild(s_cfgModal != nullptr);
     }
 #endif
 
-    // Font size is not part of the theme, so a theme rebuild does not cover it,
+    // Font size is not part of the theme, so a UI rebuild does not cover it,
     // and web config no longer reboots for it — which leaves this as the only
     // thing that makes the change visible. Same steps the on-device picker
     // takes: clear the render cache so the refresh is not skipped as a no-op,
@@ -40110,20 +40798,6 @@ static void layoutHeaderInlineItems() {
 #endif
 }
 
-static inline lv_color_t headerGoodGreenColor() {
-    return (s_cfg.uiMode == UI_MODE_LIGHT)
-        ? lv_color_hex(0x2C7A3B)
-        : lv_color_hex(0x84E07A);
-}
-
-static inline lv_color_t headerGpsBadColor() {
-    uint16_t bad = s_ui.battBad;
-    if (s_cfg.uiMode == UI_MODE_DARK) {
-        bad = blend565(bad, 0xFFFF, 96);
-    }
-    return lvColorFrom565(bad);
-}
-
 static inline lv_color_t headerBatteryDotColor(uint8_t battPct) {
     if (battPct >= 80) {
         return headerGoodGreenColor();
@@ -40138,42 +40812,33 @@ static inline lv_color_t headerBatteryDotColor(uint8_t battPct) {
         : lv_color_hex(0xFF6B6B);
 }
 
-// Text, color and strikethrough for one GPS/WiFi pair. Two pairs can be on
-// screen at once — the chat screen's and the one on a modal's copy of the nav
-// bar — and they must never disagree, so both are painted from the same values
-// by the same code. Placement stays with the caller: these live in bars that
-// pack in different directions.
+// Text, color and strikethrough for one GPS/WiFi pair. Several pairs can be on
+// screen at once — the chat screen's, the one on a modal's copy of the nav bar,
+// and the glance header the lock screen and home dashboard each own — and they
+// must never disagree, so all of them are painted from the same values by this
+// code. What differs is only which palette they are painted in (see
+// StatusIconInk) and where they sit: placement stays with the caller, because
+// these live in bars that pack in different directions.
 static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
                              bool gpsEnabled, bool gpsFix, uint8_t gpsSatCount,
-                             bool wifiApMode, bool wifiConnected) {
+                             bool wifiApMode, bool wifiConnected,
+                             const StatusIconInk &ink) {
     if (gpsLabel) {
         if (gpsEnabled) {
             lv_label_set_text_fmt(gpsLabel, "%s %u", LV_SYMBOL_GPS, (unsigned)gpsSatCount);
         } else {
             lv_label_set_text(gpsLabel, LV_SYMBOL_GPS);
         }
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(gpsLabel, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(
-            gpsLabel,
-            (gpsEnabled && gpsFix) ? headerGoodGreenColor() : headerGpsBadColor(), 0);
-    #endif
+        lv_obj_set_style_text_color(gpsLabel,
+                                    (gpsEnabled && gpsFix) ? ink.good : ink.gpsBad, 0);
     }
 
     if (wifiLabel) {
         const bool wifiOffOrDisconnected = (!wifiApMode && !wifiConnected);
         lv_label_set_text(wifiLabel, wifiApMode ? LV_SYMBOL_UPLOAD : LV_SYMBOL_WIFI);
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(wifiLabel, lv_color_make(0, 0, 0), 0);
-    #else
         lv_obj_set_style_text_color(
             wifiLabel,
-            wifiApMode ? lv_color_hex(0xF4D35E)
-                   : (wifiOffOrDisconnected ? lv_color_hex(0xFF6B6B)
-                            : headerGoodGreenColor()),
-            0);
-    #endif
+            wifiApMode ? ink.ap : (wifiOffOrDisconnected ? ink.wifiBad : ink.good), 0);
         lv_obj_set_style_text_decor(
             wifiLabel,
             wifiOffOrDisconnected ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE,
@@ -40242,7 +40907,8 @@ static void refreshHeaderStatus(bool force) {
     }
 
     paintStatusIcons(s_chatHeaderGps, s_chatHeaderWifi,
-                     gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected);
+                     gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected,
+                     headerStatusInk());
 
     lv_obj_t *gpsParent = lv_obj_get_parent(s_chatHeaderGps);
     lv_obj_t *wifiParent = lv_obj_get_parent(s_chatHeaderWifi);
@@ -40288,7 +40954,8 @@ static void refreshHeaderStatus(bool force) {
     // right, so none of the parent-sniffing above applies to it.
     if (s_navStatusGps || s_navStatusWifi) {
         paintStatusIcons(s_navStatusGps, s_navStatusWifi,
-                         gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected);
+                         gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected,
+                         headerStatusInk());
         if (s_navStatusGps) lv_obj_align(s_navStatusGps, LV_ALIGN_RIGHT_MID, -2, 0);
         if (s_navStatusGps && s_navStatusWifi) {
             lv_obj_align_to(s_navStatusWifi, s_navStatusGps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
@@ -43283,6 +43950,100 @@ static void refreshChatView(bool force) {
     s_lastChatContextSignature = contextSig;
 }
 
+#if !UI_TOUCH_ONLY_PROFILE && !defined(DEVICE_TDECK_PRO)
+// One string's width in the chat bar's face, on one line.
+static lv_coord_t chatBarTextW(const char *text) {
+    lv_point_t sz;
+    lv_text_get_size(&sz, text, &lv_font_montserrat_10, 0, 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    return (lv_coord_t)sz.x;
+}
+
+// How much of the chat shortcut bar's right end belongs to the status cluster —
+// GPS, Wi-Fi, the DM envelope and the channel bell — and must therefore be kept
+// out of the key-hint label's width.
+//
+// Measured, not written down. This was a constant (74 px), and when the channel
+// bell joined the cluster in v5.1.0 the constant did not move with it: the
+// label's box then reached ~9 px under the bell, and on every board with an
+// unread channel the two drew on top of each other. A number derived from the
+// glyphs cannot fall behind them, so the next icon added to that row costs
+// nothing here.
+//
+// The arithmetic mirrors where the widgets below actually go: the label starts
+// pad_left + 2 in from the left edge, the GPS icon ends 4 px inside the content
+// area (which pad_right has already inset), and each icon to its left hangs off
+// its neighbour by a fixed gap.
+static lv_coord_t bottomStatusReserveW() {
+    // The widest the GPS label gets: the satellite count is drawn beside the
+    // glyph, and two digits is as many as a receiver reports in the open.
+    const lv_coord_t cluster = chatBarTextW(LV_SYMBOL_GPS " 99")
+                             + 7 + chatBarTextW(LV_SYMBOL_WIFI)
+                             + 5 + chatBarTextW(LV_SYMBOL_ENVELOPE)
+                             + 4 + chatBarTextW(LV_SYMBOL_BELL);
+    // 4 px of pad_left plus the label's own 2 px align offset at one end; 4 px
+    // of pad_right plus the GPS icon's 4 px inset at the other; then 4 px of
+    // slack, so a rounding difference is a gap rather than a collision.
+    return (lv_coord_t)(6 + 8 + cluster + 4);
+}
+#endif
+
+#if !UI_TOUCH_ONLY_PROFILE
+// The footer's key-hint line for this board. A function rather than a literal
+// set once at build time, because the home dashboard borrows that label for
+// its notification ticker and has to be able to put the hints back.
+//
+// Each of these is sized to the panel it belongs to, which is why they are
+// separate strings rather than one with a board's name substituted in. Where
+// HAS_HOME_DASHBOARD is set, H and C changed destinations and F is new, so the
+// hints changed with them; the channel list lost its own letter, because it is
+// C's second press now.
+static const char *chatShortcutHintText() {
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    return "C(h)annels   (A)ctions";
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+#if HAS_HOME_DASHBOARD
+    // The widest bar of any board, but worded like the 320 px one below: there
+    // is no reason for two builds to name the same destinations differently,
+    // and the short forms leave this line real headroom (262 px of the 283
+    // its 373 px bar has) instead of the 1 px the spelled-out version had.
+    return "(H)ome   (C)hat   C(f)g   (D)M   (N)odes   Too(l)s   (A)ct";
+#else
+    return "(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions";
+#endif
+#elif defined(DEVICE_TDECK_PRO)
+#if HAS_HOME_DASHBOARD
+    // ~40 characters is what 228 px of montserrat_10 holds, and seven
+    // destinations do not fit in it. Actions is the one dropped: it is the only
+    // entry here that is not also a cell on the nav bar this line replaces, and
+    // A still works. Only visible with the bar switched off.
+    return "H:Home C:Chat F:Cfg D:DM N:Node L:Tools";
+#else
+    return "C:Cfg H:Ch D:DM N:Node L:Tools A:Act";
+#endif
+#elif HAS_HOME_DASHBOARD
+    // 204 px of the 218 this board has for it. The 5.1.0 wording — "con(f)ig",
+    // and Actions still on the end — measured 245 px against 234 and wrapped
+    // onto a second row the 14 px bar has no room for. It passed review because
+    // it was checked against the line it replaced by character count (both 49)
+    // rather than by width: the old one was mostly spaces at 2.7 px each, and
+    // trading twelve of them for six letters cost ~22 px at the same length.
+    //
+    // Actions is the token dropped rather than another: it is the only entry
+    // here that is not also a cell on the nav bar this line stands in for, A
+    // still works, and the T-Deck Pro's line already drops it for that reason.
+    return "(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s";
+#else
+    // Double spaces, not triple: this is the pre-dashboard wording, and at
+    // three it measured 223 px — inside the old 234 budget but over the 218
+    // the corrected reserve leaves. Only built where the dashboard is compiled
+    // out, which is no current board, but a line that wraps the moment it is
+    // switched back on is not worth leaving behind.
+    return "(C)FG  C(h)an  (D)M  (N)odes  Too(l)s  (A)ct";
+#endif
+}
+#endif   // !UI_TOUCH_ONLY_PROFILE
+
 static void buildUi() {
 #if HAS_NAV_BAR_TOGGLE
     s_appliedNavBar = bottomNavEnabled();
@@ -43365,9 +44126,32 @@ static void buildUi() {
     const int chatHeaderH = 25;
     const int chatLegendH = 14;
 
+    // Worked out before the panel is built rather than after, because on the
+    // boards whose key-hint bar spans the whole display the panel has to know
+    // where that bar starts. The chat column itself is unchanged by any of it.
+    const int chatX = panelMargin + panelW + chatGap;
+    const int chatW = lv_disp_get_hor_res(NULL) - chatX - panelMargin;
+    const int chatY = panelMargin + chatHeaderH + chatGap;
+    const int chatH = panelH - chatHeaderH - chatGap - chatLegendH - 3;
+    const int legendTop = chatY + chatH + 3;
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // The bar runs edge to edge on this board (see where it is aligned, below),
+    // so the channel list stops above it instead of running down beside it.
+    // Anchored to the top rather than centred, because LV_ALIGN_LEFT_MID would
+    // put half of the height it just gave up straight back under the bar.
+    const int panelBodyH = legendTop - panelMargin;
+#else
+    const int panelBodyH = panelH;
+#endif
+
     panel = lv_obj_create(screen);
-    lv_obj_set_size(panel, panelW, panelH);
+    lv_obj_set_size(panel, panelW, panelBodyH);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    lv_obj_align(panel, LV_ALIGN_TOP_LEFT, panelMargin, panelMargin);
+#else
     lv_obj_align(panel, LV_ALIGN_LEFT_MID, panelMargin, 0);
+#endif
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
@@ -43396,10 +44180,6 @@ static void buildUi() {
     lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 #endif
 
-    const int chatX = panelMargin + panelW + chatGap;
-    const int chatW = lv_disp_get_hor_res(NULL) - chatX - panelMargin;
-    const int chatY = panelMargin + chatHeaderH + chatGap;
-    const int chatH = panelH - chatHeaderH - chatGap - chatLegendH - 3;
 #endif
 
     // Children align to the header's content area, so anything that has to line
@@ -43823,18 +44603,33 @@ static void buildUi() {
 #endif
 
     s_chatShortcutBar = lv_obj_create(screen);
+    // The width the bar is actually given, for the key-hint label's budget
+    // further down. Recorded here rather than read back with lv_obj_get_width():
+    // a size just set is not resolved until LVGL lays the screen out, so the
+    // query would have returned 0 and left the hint label zero pixels wide.
+    int legendBarW = chatW;
+    LV_UNUSED(legendBarW);   // no hint label on the touch-only builds
 #if UI_TOUCH_NAV_BAR
     if (bottomNavEnabled()) {
         // Edge to edge along the bottom, matching appendHeltecBottomNav()'s
         // copy exactly. Anything else and the same six buttons are a different
         // width here than they are one screen in, which reads as the bar
         // jumping every time you navigate.
-        lv_obj_set_size(s_chatShortcutBar, lv_disp_get_hor_res(NULL), kBottomNavHeight);
+        legendBarW = lv_disp_get_hor_res(NULL);
+        lv_obj_set_size(s_chatShortcutBar, legendBarW, kBottomNavHeight);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     } else {
         lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
     }
+#elif defined(DEVICE_TLORA_PAGER_TFT)
+    // Edge to edge. The chat column is only part of this display's width, so a
+    // bar that stopped where the column does left the bottom of the channel
+    // list showing beside it — a strip of a different screen along the bottom
+    // edge, under a footer that looked like it had been cut short.
+    legendBarW = lv_disp_get_hor_res(NULL);
+    lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
+    lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, 0, chatY + chatH + 3);
 #else
     lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
     lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
@@ -43887,9 +44682,10 @@ static void buildUi() {
 #if defined(DEVICE_TDECK_PRO)
     lv_coord_t legendTextW = chatW - 8;
 #else
-    const lv_coord_t bottomStatusReserve = (chatLegendH >= 14) ? 74 : 62;
-    lv_coord_t legendTextW = chatW - bottomStatusReserve;
-    if (legendTextW < 40) legendTextW = chatW;
+    // Measured against the bar, not the chat column: the two are the same width
+    // on most boards, but not where the bar spans the whole display.
+    lv_coord_t legendTextW = (lv_coord_t)legendBarW - bottomStatusReserveW();
+    if (legendTextW < 40) legendTextW = (lv_coord_t)legendBarW;
 #endif
     lv_obj_set_width(s_chatShortcutText, legendTextW);
     lv_obj_set_style_text_font(s_chatShortcutText, &lv_font_montserrat_10, 0);
@@ -43904,37 +44700,7 @@ static void buildUi() {
     lv_label_set_long_mode(s_chatShortcutText, LV_LABEL_LONG_DOT);
     lv_obj_align(s_chatShortcutText, LV_ALIGN_LEFT_MID, 2, 0);
 #endif
-// Each of these is sized to the panel it belongs to, which is why they are
-// separate strings rather than one with a board's name substituted in. Where
-// HAS_HOME_DASHBOARD is set, H and C changed destinations and F is new, so the
-// hints changed with them; the channel list lost its own letter, because it is
-// C's second press now.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-    lv_label_set_text(s_chatShortcutText, "C(h)annels   (A)ctions");
-#elif defined(DEVICE_TLORA_PAGER_TFT)
-#if HAS_HOME_DASHBOARD
-    // 480 px of panel: this is the one board with room to spell them all out.
-    lv_label_set_text(s_chatShortcutText,
-                      "(H)ome   (C)hat   con(f)ig   (D)M   (N)odes   Too(l)s   (A)ctions");
-#else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   (D)M   (N)odes   Too(l)s   (A)ctions");
-#endif
-#elif defined(DEVICE_TDECK_PRO)
-#if HAS_HOME_DASHBOARD
-    // ~40 characters is what 228 px of montserrat_10 holds, and seven
-    // destinations do not fit in it. Actions is the one dropped: it is the only
-    // entry here that is not also a cell on the nav bar this line replaces, and
-    // A still works. Only visible with the bar switched off.
-    lv_label_set_text(s_chatShortcutText, "H:Home C:Chat F:Cfg D:DM N:Node L:Tools");
-#else
-    lv_label_set_text(s_chatShortcutText, "C:Cfg H:Ch D:DM N:Node L:Tools A:Act");
-#endif
-#elif HAS_HOME_DASHBOARD
-    // Same length as the line below it, which is what fits on a 320 px panel.
-    lv_label_set_text(s_chatShortcutText, "(H)ome (C)hat con(f)ig (D)M (N)odes Too(l)s (A)ct");
-#else
-    lv_label_set_text(s_chatShortcutText, "(C)FG   C(h)an   (D)M   (N)odes   Too(l)s   (A)ct");
-#endif
+    lv_label_set_text(s_chatShortcutText, chatShortcutHintText());
 
     s_chatHeaderGps = lv_label_create(s_chatShortcutBar);
     lv_obj_set_style_text_font(s_chatHeaderGps, &lv_font_montserrat_10, 0);
@@ -44178,283 +44944,22 @@ static void rebuildUiForThemeChange(bool reopenCfg) {
     }
 }
 
-#if HAS_NAV_BAR_TOGGLE
-static void scheduleNavBarRebuild(bool reopenCfg) {
-    s_navRebuildPending = true;
-    if (reopenCfg) s_navRebuildReopenCfg = true;
-}
-#endif
-
-static void scheduleThemeRebuild(bool reopenCfg) {
-    s_themeRebuildPending = true;
-    if (reopenCfg) {
-        s_themeRebuildReopenCfg = true;
-        s_themeRebuildCfgSelection = s_cfgSelection;
-    }
+static void scheduleUiRebuild(bool reopenCfg) {
+    s_uiRebuildPending = true;
+    if (reopenCfg) s_uiRebuildReopenCfg = true;
 }
 
-static void applyThemeToVisibleUi(bool reopenCfg, int reopenSelection) {
-    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
-         indev = lv_indev_get_next(indev)) {
-        lv_indev_reset(indev, nullptr);
-    }
-
-    if (s_rootScreen) {
-        lv_obj_set_style_bg_color(s_rootScreen, lv_color_hex(0x0B1E44), 0);
-        lv_obj_set_style_bg_opa(s_rootScreen, LV_OPA_COVER, 0);
-    }
-
-    if (s_channelStrip) {
-        lv_obj_set_style_bg_color(s_channelStrip, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_bg_opa(s_channelStrip, LV_OPA_60, 0);
-        lv_obj_set_style_border_color(s_channelStrip, lv_color_hex(0x335D9D), 0);
-    } else if (s_channelBtns[0]) {
-        lv_obj_t *panel = lv_obj_get_parent(s_channelBtns[0]);
-        if (panel) {
-#if defined(DEVICE_TDECK_PRO)
-            lv_obj_set_style_bg_color(panel, lv_color_make(255, 255, 255), 0);
-            lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(panel, 0, 0);
-#else
-            lv_obj_set_style_bg_color(panel, lv_color_hex(0x0E285B), 0);
-            lv_obj_set_style_bg_opa(panel, LV_OPA_70, 0);
-            lv_obj_set_style_border_color(panel, lv_color_hex(0x335D9D), 0);
-#endif
-        }
-    }
-
-    if (s_channelList) {
-#if defined(DEVICE_TDECK) || UI_TOUCH_ONLY_PROFILE
-        lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0F2A5C), 0);
-    lv_obj_set_style_bg_opa(s_channelList, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(s_channelList, lv_color_hex(0x335D9D), 0);
-#endif
-        lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-    }
-    if (s_channelSelectorBtn) {
-#if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(s_channelSelectorBtn, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(s_channelSelectorBtn, 2, 0);
-        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_bg_color(s_channelSelectorBtn, lv_color_hex(0x102750), 0);
-        lv_obj_set_style_border_color(s_channelSelectorBtn, lv_color_hex(0x2B4D8C), 0);
-#endif
-    }
-    if (s_channelSelectorLabel) {
-        lv_obj_set_style_text_color(
-            s_channelSelectorLabel,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-            0);
-    }
-    if (s_channelSelectorCaretLabel) {
-        lv_obj_set_style_text_color(
-            s_channelSelectorCaretLabel,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? lv_color_hex(0x1B243D) : lv_color_hex(0xD9E8FF),
-            0);
-    }
-
-    if (s_chatHeaderBar) {
-#if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(s_chatHeaderBar, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_bg_color(
-            s_chatHeaderBar,
-            (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor() : lv_color_hex(0x0E285B),
-            0);
-        lv_obj_set_style_bg_opa(s_chatHeaderBar, (s_cfg.uiMode == UI_MODE_LIGHT) ? LV_OPA_60 : LV_OPA_70, 0);
-        lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
-#endif
-    }
-        if (s_chatHeaderTime) {
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(s_chatHeaderTime, lv_color_hex(0xD9E8FF), 0);
-    #endif
-        }
-        if (s_chatHeaderGps) {
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(s_chatHeaderGps, lv_color_hex(0xBFD6FF), 0);
-    #endif
-        }
-        if (s_chatHeaderBattText) {
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(s_chatHeaderBattText, lv_color_hex(0xBFD6FF), 0);
-    #endif
-        }
-    if (s_chatHeaderBattBar) {
-        lv_obj_set_style_border_color(s_chatHeaderBattBar, lv_color_hex(0x274A84), 0);
-        lv_obj_set_style_bg_color(s_chatHeaderBattBar, headerGoodGreenColor(), 0);
-    }
-        if (s_chatHeaderWifi) {
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_text_color(s_chatHeaderWifi, lv_color_hex(0xBFD6FF), 0);
-    #endif
-        }
-
-    if (s_chatPanel) {
-        lv_obj_set_style_bg_color(
-            s_chatPanel,
-            chatPanelBackgroundColor(),
-            0);
-        lv_obj_set_style_bg_opa(s_chatPanel, chatPanelBackgroundOpa(), 0);
-        lv_obj_set_style_border_color(s_chatPanel, lv_color_hex(0x335D9D), 0);
-    }
-    if (s_chatList) {
-        lv_obj_set_style_bg_color(s_chatList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-    }
-    if (s_chatNewMsgBtn) {
-        lv_obj_set_style_bg_color(s_chatNewMsgBtn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_border_color(s_chatNewMsgBtn, lv_color_hex(0x335D9D), 0);
-    }
-    if (s_chatActBtn) {
-        lv_obj_set_style_bg_color(s_chatActBtn, lv_color_hex(0x16386F), 0);
-        lv_obj_set_style_border_color(s_chatActBtn, lv_color_hex(0x335D9D), 0);
-    }
-    if (s_chatShortcutBar) {
-#if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_hex(0x335D9D), 0);
-#endif
-    }
-    if (s_chatShortcutText) {
-#if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_text_color(s_chatShortcutText, lv_color_make(0, 0, 0), 0);
-#else
-        lv_obj_set_style_text_color(s_chatShortcutText, lv_color_hex(0xA7C7FF), 0);
-#endif
-    }
-
-    if (s_liveModal) {
-        if (lv_obj_is_valid(s_liveModal) && lv_obj_get_disp(s_liveModal) != nullptr) {
-#if defined(DEVICE_TDECK_PRO)
-            lv_obj_set_style_bg_color(s_liveModal, lv_color_make(255, 255, 255), 0);
-            lv_obj_set_style_border_color(s_liveModal, lv_color_make(0, 0, 0), 0);
-#else
-            lv_obj_set_style_bg_color(s_liveModal, lv_color_hex(0x0E285B), 0);
-            lv_obj_set_style_border_color(s_liveModal, lv_color_hex(0x5C86C6), 0);
-#endif
-        } else {
-            s_liveModal = nullptr;
-        }
-    }
-    if (s_liveList) {
-        if (lv_obj_is_valid(s_liveList)
-            && lv_obj_get_disp(s_liveList) != nullptr
-            && s_liveModal
-            && lv_obj_is_valid(s_liveModal)
-            && lv_obj_get_parent(s_liveList) == s_liveModal) {
-            lv_obj_set_style_bg_color(s_liveList, liveListBackdropColor(), 0);
-            lv_obj_set_style_bg_opa(s_liveList, liveListBackdropOpa(), 0);
-#if defined(DEVICE_TDECK_PRO)
-            lv_obj_set_style_border_color(s_liveList, lv_color_make(0, 0, 0), 0);
-#else
-            lv_obj_set_style_border_color(s_liveList, lv_color_hex(0x335D9D), 0);
-#endif
-            lv_obj_set_style_bg_color(s_liveList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-            refreshLiveView(true);
-        } else {
-            s_liveList = nullptr;
-        }
-    }
-
-    if (s_dmModal) {
-        lv_obj_set_style_bg_color(s_dmModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_dmModal, lv_color_hex(0x5C86C6), 0);
-        refreshDmModal(true);
-    }
-    if (s_dmNodePickerModal) {
-        lv_obj_set_style_bg_color(s_dmNodePickerModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_dmNodePickerModal, lv_color_hex(0x5C86C6), 0);
-        refreshDmNodePicker(true);
-    }
-
-    if (s_nodesModal) {
-        lv_obj_set_style_bg_color(s_nodesModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_nodesModal, lv_color_hex(0x5C86C6), 0);
-        refreshNodesListSelection();
-        refreshNodesDetails();
-    }
-
-    if (s_legendModal) {
-        lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
-    }
-
-    if (s_cfgModal) {
-        lv_obj_set_style_bg_color(s_cfgModal, lv_color_hex(0x0E285B), 0);
-        lv_obj_set_style_border_color(s_cfgModal, lv_color_hex(0x5C86C6), 0);
-        if (s_cfgActionList) {
-            lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x0F2A5C), 0);
-            lv_obj_set_style_border_color(s_cfgActionList, lv_color_hex(0x335D9D), 0);
-            lv_obj_set_style_bg_color(s_cfgActionList, lv_color_hex(0x8FB5E6), LV_PART_SCROLLBAR);
-        }
-        if (reopenCfg && s_cfgActionCount > 0) {
-            s_cfgSelection = constrain(reopenSelection, 0, s_cfgActionCount - 1);
-        }
-        refreshCfgModal();
-    } else if (reopenCfg) {
-        openCfgModal();
-        if (s_cfgActionCount > 0) {
-            s_cfgSelection = constrain(reopenSelection, 0, s_cfgActionCount - 1);
-        }
-        refreshCfgModal();
-    }
-
-    s_lastRenderedChannel = -1;
-    s_lastRenderedCount = -1;
-    s_lastRenderedLiveCount = -1;
-    s_lastRenderedLiveScrollOff = -1;
-    s_lastHeaderTime[0] = '\0';
-    setActiveChannel(constrain(s_activeChannel, 0, MESH_CHANNELS - 1));
-    refreshHeaderTime(true);
-    refreshHeaderStatus(true);
-    refreshChatView(true);
-
-    for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev;
-         indev = lv_indev_get_next(indev)) {
-        lv_indev_reset(indev, nullptr);
-    }
-}
-
-static void processPendingThemeRebuild() {
+static void processPendingUiRebuild() {
 #if defined(DEVICE_TDECK_PRO)
     if (s_screenAsleep) return;
 #endif
-#if HAS_NAV_BAR_TOGGLE
-    if (s_navRebuildPending) {
-        const bool reopenCfg = s_navRebuildReopenCfg;
-        s_navRebuildPending = false;
-        s_navRebuildReopenCfg = false;
-        // A full teardown and rebuild draws everything a theme restyle would
-        // have, so a theme change queued in the same breath is already covered
-        // — running it afterwards would restyle objects that no longer exist.
-        s_themeRebuildPending = false;
-        s_themeRebuildReopenCfg = false;
-        rebuildUiForThemeChange(reopenCfg);
-        return;
-    }
-#endif
-    if (!s_themeRebuildPending) return;
+    if (!s_uiRebuildPending) return;
 
-    bool reopenCfg = s_themeRebuildReopenCfg;
-    int reopenSelection = s_themeRebuildCfgSelection;
+    const bool reopenCfg = s_uiRebuildReopenCfg;
+    s_uiRebuildPending = false;
+    s_uiRebuildReopenCfg = false;
 
-    s_themeRebuildPending = false;
-    s_themeRebuildReopenCfg = false;
-
-    applyThemeToVisibleUi(reopenCfg, reopenSelection);
+    rebuildUiForThemeChange(reopenCfg);
 }
 
 // In-place normalise a serial CLI line: trim whitespace, collapse runs of
@@ -45281,9 +45786,9 @@ void setup() {
     // of you the moment a device finishes starting. The Messages button is one
     // press away, and chat is built underneath either way.
     //
-    // Here rather than at the end of buildUi(), so the theme rebuild (which
-    // calls buildUi() too) keeps leaving you where you were instead of
-    // bouncing you home every time a colour changes.
+    // Here rather than at the end of buildUi(), so the UI rebuild (which calls
+    // buildUi() too) keeps leaving you where you were instead of bouncing you
+    // home every time the nav bar is toggled.
     openHomeDashboard();
 #endif
     if (s_otaWorkerBootNotice[0]) {
@@ -46013,7 +46518,7 @@ void loop() {
     }
 #endif
     LOOP_PHASE("keys", pumpKeyboardInput());
-    LOOP_PHASE("theme", processPendingThemeRebuild());
+    LOOP_PHASE("ui", processPendingUiRebuild());
     // lv_timer_handler() deliberately runs below the screen-asleep gate now —
     // there is nothing to draw with the panel in SLPIN, and its indev timer
     // would otherwise keep polling the touch controller over I2C the whole

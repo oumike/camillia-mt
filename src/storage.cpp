@@ -34,6 +34,43 @@ const char *storageName() {
 #endif
 }
 
+// Both of these ask the driver rather than sMounted. On the SPI-SD boards the
+// card is mounted by sdBegin() in config_io.cpp — its retry ladder and bus
+// setup live there — which never sets the flag below, so a check against it
+// would report "no card" on exactly the boards that have one. cardType() is
+// the driver's own answer and is safe before begin(): no card object means
+// CARD_NONE.
+uint64_t storageTotalBytes() {
+#if defined(HAS_SD_MMC) && HAS_SD_MMC
+    return (SD_MMC.cardType() == CARD_NONE) ? 0 : SD_MMC.cardSize();
+#elif HAS_SD_CARD
+    return (SD.cardType() == CARD_NONE) ? 0 : SD.cardSize();
+#else
+    return sMounted ? LittleFS.totalBytes() : 0;
+#endif
+}
+
+const char *storageCardTypeName() {
+#if HAS_SD_CARD
+#if defined(HAS_SD_MMC) && HAS_SD_MMC
+    const uint8_t type = SD_MMC.cardType();
+#else
+    const uint8_t type = SD.cardType();
+#endif
+    switch (type) {
+        case CARD_MMC:  return "MMC";
+        case CARD_SD:   return "SDSC";
+        case CARD_SDHC: return "SDHC";
+        case CARD_NONE: return "";
+        default:        return "unknown";
+    }
+#else
+    // Internal flash: there is no card, so there is no class to report. The
+    // caller prints storageName() instead.
+    return "";
+#endif
+}
+
 bool storageBegin() {
     if (sMounted) return true;
 

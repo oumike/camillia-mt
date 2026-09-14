@@ -45,3 +45,15 @@ bool storageMounted();
 // Human-readable backend name for diagnostics and UI ("SD card", "internal
 // flash"), so a message can say where a file actually went.
 const char *storageName();
+
+// Capacity of the mounted backend, in bytes; 0 when nothing is mounted. Read
+// from what the driver already knows — the card's CSD, or the filesystem's own
+// geometry — so this is cheap enough for a screen to ask on every open. Used
+// bytes are deliberately not offered: on FAT that answer costs a walk of the
+// allocation table, which is not something a status line should pay for.
+uint64_t storageTotalBytes();
+
+// Card class as the host negotiated it: "SDHC", "SDSC", "MMC", or "unknown"
+// when the type is not one of those. Empty string on a backend where the
+// question does not apply (internal flash), and when nothing is mounted.
+const char *storageCardTypeName();

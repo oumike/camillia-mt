@@ -196,7 +196,39 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 Every build with a display except the Cardputer opens a **home dashboard**: the
 lock screen's glance header — node name, clock, conditions, date, battery — over
-two charts of the radio's own health, channel utilisation and SNR/RSSI. The
+two charts of the radio's own health, channel utilisation and SNR/RSSI.
+
+**The dashboard follows the UI theme.** Background, header type and the chart
+cards all come from the theme you picked, so it looks like the rest of the
+device rather than a black slab in the middle of a light theme. The node name
+takes the theme's accent colour; everything else is the theme's normal text ink.
+The lock screen is deliberately not themed — it is what the device looks like
+with the UI put away, and stays white-on-black (black-on-white on the T-Deck
+Pro's e-paper, which has no colour to give either screen).
+
+**The footer becomes a notification ticker.** On the boards whose footer is a
+key-hint strip — M9, T-Lora Pager, and T-Deck or Mesh Deck with the nav bar
+switched off — the hints are replaced while the dashboard is up by the messages
+that have arrived: newest first, as `14:32 #general Alice: body`, up to three of
+them, scrolling if they do not fit. The hints name keys that belong to the chat
+screen, so they were only ever noise here.
+
+With nothing unread it reads **No new messages** and does not scroll. Leaving
+the dashboard puts the key hints straight back.
+
+Boards whose footer is the touch nav bar have no text row to use, so they keep
+the bar as it is; the T-Deck Pro keeps the plain hidden hints, because a
+scrolling label is an animation and every frame of one is a full e-paper
+refresh.
+
+GPS and Wi-Fi icons appear in the dashboard's top band **only on the touch-only
+boards** (Heltec, Wio), where the bar along the bottom is icon buttons with no
+room for status and the chat screen's own copy is covered by the dashboard.
+Everywhere else that bar is already showing them a few centimetres below, so the
+dashboard leaves them out rather than putting the same two icons on screen
+twice. Turning the nav bar off on a board that has the setting brings back the
+key-hint strip, which carries the icons too — the dashboard follows whichever is
+actually there. The
 shortcut bar or nav bar stays along the bottom; on keyboard builds the chat
 screen's key hints are hidden while it is up, because they describe a screen you
 are not looking at. **The device boots onto it.**
@@ -237,7 +269,9 @@ whether the board draws the bottom nav bar:
 - **With the nav bar** — the **Chats** cell blinks for unread channel traffic
   and the **DM** cell blinks for unread private messages, on the same half-second
   phase, in the same amber. The alert and the way to answer it are the same
-  control
+  control. **The whole cell flashes**, not just the glyph inside it: on a bar of
+  icon buttons a recoloured 14 px symbol is easy to miss, and a button that
+  changes colour is not
 - **Without it** — two glyphs sit at the right-hand end of the shortcut bar,
   beside the GPS and Wi-Fi readouts: a **bell** for channels and an **envelope**
   for DMs. Different shapes, because they blink together and sit a few pixels
@@ -785,10 +819,17 @@ the Web Config theme picker.
 The **Theme** action opens a picker rather than cycling. Each theme/mode preset
 gets a row with its name and a three-swatch preview — background, panel, and
 accent color — so you can see what you're choosing. Navigate with the usual
-up/down input and press Enter (or tap) to apply; it takes effect immediately, no
-reboot. Backspace/Esc (or tapping outside) cancels. Web Config shows the same
-themes as a grid of swatch cards, and previews the selected one live before you
-save.
+up/down input and press Enter (or tap) to apply. Backspace/Esc (or tapping
+outside) cancels. Web Config shows the same themes as a grid of swatch cards,
+and previews the selected one live before you save.
+
+**Choosing a theme reboots the device**, the same way Orientation and Chat Style
+do — the status line says `Theme: <name> - rebooting...` and the device comes
+back a few seconds later wearing it. Every screen is built from the palette, so
+coming up in it is what guarantees the whole interface matches rather than most
+of it. Re-choosing the theme already in use just closes the picker. Saving a
+theme from Web Config reboots for the same reason, as every Web Config save
+does.
 
 **Scrolling wraps.** Moving up from the first theme lands on the last, and down
 from the last returns to the first — with nearly thirty themes in the list, the
@@ -859,6 +900,28 @@ copied out of a text file usually picks some up.
 
 ### Information panel
 
+Firmware version, node id and identity, the radio's current settings, how many
+packets this node has relayed, the newest and oldest nodes heard — and a
+**storage** line saying whether the SD card is actually there.
+
+On a board with a card slot that line reads `SD: SDHC 29.7 GB @4000 kHz` when a
+card is mounted. The clock rate is the one the card answered at: a card that
+mounts only at 400 kHz is working but marginal, which is worth knowing before it
+starts failing writes. With no card it reads `SD: no card`, followed by a second
+line saying what the probe did — `SD: all rates tried, retry 12s, 5 fails`.
+
+"All rates tried" means the card did not answer at 4 MHz, 1 MHz or 400 kHz,
+which points at an empty slot or a dead card. "One rate tried" is the damped
+retry — after the first full sweep fails, later attempts try a single rate each
+time rather than stalling the device for three seconds — so it does not by
+itself mean the card is bad. The retry countdown is the backoff, which stretches
+from 2 seconds to a minute as failures accumulate; **Export** or **Import** in
+Config clears it and forces a full re-probe, which is what to press after
+inserting a card.
+
+Boards with no slot keep the same files in internal flash and show that instead:
+`Storage: internal flash 1.5 MB`.
+
 The device info panel is scrollable with the keyboard on every keyboard build:
 
 - **T-Lora Pager** — I focuses the info panel (Wheel Click also swaps between the
@@ -877,6 +940,18 @@ Every backlit build except Cardputer can show a lock screen before putting the
 panel fully to sleep. It uses a black background with the time and channel in
 blue, node names in green, and message text in white. The current date, battery
 reading and newest unread message previews remain visible while it is active.
+
+The top band carries **GPS and Wi-Fi icons** beside the battery, reading the
+same way they do on the chat screen: GPS green with a fix and showing its
+satellite count, red without one; Wi-Fi green when connected, struck through
+when it is not, and an upload arrow while the device is serving its own access
+point. They update as the state changes rather than on the clock's minute tick,
+so a device picking up a fix or coming up as an AP shows it immediately. On the
+T-Deck Pro they are black like everything else on that panel, and they change
+with the minute — each repaint there is a full e-paper refresh.
+
+The lock screen always shows them, unlike the home dashboard: it covers the
+whole panel, so there is no bar underneath still reporting the same thing.
 
 The normal **Screen Timeout** and each board's existing screen-off gesture enter
 the lock screen. The same deliberate input that wakes that board from a dark
@@ -1347,6 +1422,10 @@ Web Config serves a browser-based settings UI over Wi-Fi. **It is on by default
 on a new device**, so a freshly flashed board comes up as the `camillia-mt`
 access point and can be set up from a phone without touching the device screen.
 Toggle it from the Config screen; the row shows the address once it is running.
+On boards that can pair a Bluetooth keyboard, the row sits directly under
+**Choose WiFi** — it is what most people turn Wi-Fi on for — with the two BT
+keyboard rows after it. Elsewhere it stays at the head of the services group,
+under the GPS row.
 
 There are two versions of the page:
 
@@ -1657,6 +1736,15 @@ directly. This choice persists across reboots, so a device left on **AP** keeps
 hosting its own network until you pick a real one. While it is selected the
 Wi-Fi row reads *AP mode*, and features that need an internet connection (time
 sync, MQTT) stay offline.
+
+**Choosing AP switches the two settings the mode needs.** Web Config is what
+raises the access point, so it is turned on, and the status line comes back with
+the address to browse to (`AP mode: 192.168.4.1`). The MQTT bridge is turned off
+first — it dials out to a broker, there is no route to one from a device serving
+its own network, and the two cannot run together in any case. Both are ordinary
+settings afterwards: turning Web Config off again drops the access point with
+it. With the master **WiFi** row off nothing can start, so the picker says
+*enable WiFi first* and changes nothing.
 
 ![Config screen](screenshots/RiCa_screen_20260730_193743.png)
 
