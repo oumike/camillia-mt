@@ -200,12 +200,13 @@ two charts of the radio's own health, channel utilisation and SNR/RSSI.
 
 **The band under the header is a carousel of three pages.** The charts are the
 first of them; the other two answer who is out there rather than how the radio
-is doing, from the two ends of one ordering:
+is doing, from the two ends of one ordering. (The lock screen runs the same
+carousel with a messages page in front — see [Lock screen](#lock-screen).)
 
 | Page | What it shows |
 | --- | --- |
 | `CHANNEL UTIL` / `SNR / RSSI` | The two charts, as before |
-| `RECENTLY HEARD` | The nodes heard from most recently, newest first, each with how long ago |
+| `RECENTLY HEARD` | The nodes heard from most recently, newest first, by name with how long ago |
 | `LONGEST SILENT` | The nodes heard from longest ago, oldest first |
 
 A small `<` and `>` sit at the edges of the band to mark that it turns. They are
@@ -214,8 +215,18 @@ a hint, not buttons — the gesture is what drives it.
 Swipe **right** to go forward and **left** to go back; it wraps both ways, so
 you are never more than a swipe or two from any page. Off the touch panel it
 turns on **left/right or up/down**, whichever the board has: the T-Lora Pager's
-rotary wheel, the M9's and Mesh Deck's d-pads, the T-Deck's trackball. Nothing
-on this band scrolls, so both axes are free to mean "turn the page". The page slides
+rotary wheel, the M9's and Mesh Deck's d-pads, the T-Deck's trackball. On any
+build with a keyboard, **j and k** turn it too — k forward and j back, matching
+the way j and k move everywhere else on this firmware (j is up, not vim's j is
+down). Nothing on this band scrolls, so both axes are free to mean "turn the
+page".
+
+**On the T-Deck Pro, tap the band to turn it forward.** Swiping an e-paper panel
+is awkward — the touch controller is sampling against a refresh measured in
+hundreds of milliseconds, so the drag has to be slow and deliberate to register,
+where a tap is one unambiguous event. A tap anywhere on the band moves one page
+forward and wraps, and the keyboard's left/right still goes back, so nothing is
+out of reach. The other boards keep tap free; swiping there is no trouble. The page slides
 rather than cutting, so you can see which way the carousel went; the T-Deck Pro
 swaps instantly instead, because every animated frame there is a full e-paper
 refresh.
@@ -227,10 +238,16 @@ measurement the charts use (a panel 300 px or wider), so the T-Deck, Mesh Deck,
 M9, Wio and the Heltec boards in landscape pair them up, while the T-Deck Pro
 and anything in portrait keeps a page each.
 
+**Each row is a name and an age.** The name is the node's **long name** when it
+has sent one, falling back to its short name and then to its `!hex` id — the
+same order the Discovery and Beacons screens use. The age sits against the right
+edge and reads `45s`, `12m`, `3h`, `2d`. A name too long for the card is
+ellipsized rather than clipped, and the age is never the part that gets squeezed
+out: it is what the page is sorted by, so it always stays on screen.
+
 **How many rows a node page shows depends on the panel.** The band is whatever
 height is left under the header, and the pages fill it — a 480x222 Pager fits
-several more rows than a portrait T-Deck Pro. Ages read `45s`, `12m`, `3h`,
-`2d`.
+several more rows than a portrait T-Deck Pro.
 
 Only nodes actually **heard since boot** are listed. Node records restored from
 flash at startup have no last-heard time until a packet arrives, so they are
@@ -996,6 +1013,41 @@ with the minute — each repaint there is a full e-paper refresh.
 The lock screen always shows them, unlike the home dashboard: it covers the
 whole panel, so there is no bar underneath still reporting the same thing.
 
+**The band under the header is a carousel too, and it turns itself.** It carries
+the same faces the home dashboard's does, with one more in front of them:
+
+| Page | What it shows |
+| --- | --- |
+| Messages | The newest unread previews — what this band has always shown. Skipped when nothing is unread |
+| `CHANNEL UTIL` / `SNR / RSSI` | The two radio-health charts |
+| `RECENTLY HEARD` / `LONGEST SILENT` | The node lists, paired on a wide panel and a page each on a narrow one |
+
+It moves on **every 30 seconds** with no input, forward only, and wraps — so a
+lock screen left up cycles through everything it knows in about two minutes. It
+draws **no `<` and `>` arrows**, unlike the dashboard's, because there is no
+gesture for them to mark: every press on this screen dismisses it, so the band
+turns on the clock or not at all.
+
+**The messages page is only there when there is something on it.** With nothing
+unread it is skipped entirely: the band opens on the charts and turns between
+the faces that have something to show, rather than spending thirty seconds on a
+blank rectangle. A message arriving while the screen is locked brings the page
+back into the rotation at the next turn.
+
+When there *is* something unread, that is the page it opens on — it is what this
+band has always been, and what someone glancing at a locked device is most
+likely to be looking for. The lock screen is arrived at rather than returned to,
+so unlike the dashboard it does not resume wherever the timer had got to last
+time.
+
+The message previews keep the exact layout and the full line budget they had
+before — the band is measured to the bottom edge so the last row still fits.
+Very short panels skip the carousel altogether and keep the plain message list.
+
+The T-Deck Pro has no carousel here. Its sleep screen is a static e-paper image
+held without power, so a band that redrew itself every 30 seconds would be
+spending battery on refreshes nobody asked for.
+
 The normal **Screen Timeout** and each board's existing screen-off gesture enter
 the lock screen. The same deliberate input that wakes that board from a dark
 panel dismisses it; other keys, touches and controls are swallowed rather than
@@ -1009,7 +1061,8 @@ fully-off state and the next wake returns directly to the UI.
 - Both settings are available in on-device Config and web config.
 - Cardputer keeps direct screen sleep and does not show these settings.
 - T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
-  holds that image without a lit backlight, so it does not use the dwell timer.
+  holds that image without a lit backlight, so it does not use the dwell timer
+  and does not rotate its band.
 
 ### Notification sound
 

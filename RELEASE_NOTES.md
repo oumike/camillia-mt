@@ -1,5 +1,12 @@
+### New
+- The lock screen's band under the clock is now a carousel: unread message previews, the channel/air-utilisation and SNR/RSSI charts, and the Recently Heard / Longest Silent node lists, turning itself every 30 seconds so a locked device cycles through everything it knows in about two minutes. The T-Deck Pro keeps its static e-paper sleep screen, which does not rotate.
+- The lock screen's message page is skipped whenever nothing is unread, so the band never sits on a blank rectangle; a message arriving while locked brings it back at the next turn.
+- **j** and **k** now turn the home dashboard's glance carousel on any board with a keyboard — k forward, j back, matching how j/k move everywhere else in the firmware.
+- T-Deck Pro: tap anywhere on the dashboard band to turn it one page forward, instead of having to land a slow drag on the e-paper panel. Left/right on the keyboard still goes back.
+
+### Changed
+- The Recently Heard and Longest Silent lists now show each node's long name when it has advertised one, falling back to the short name and then the `!hex` id — the same naming the Discovery and Beacons screens use.
+- Node rows now keep the age pinned to the right edge and ellipsize a too-long name, so the age the page is sorted by can no longer be pushed off the card.
+
 ### Fixed
-- The device no longer freezes when the weather server cannot be reached. Looking up the server's name used a lock shared by everything on the device that resolves names, and held it for up to fifteen seconds when the name would not resolve — long enough to stall the screen, and it happened again on every refresh because the home dashboard fetches weather on its own. The address is now looked up once and remembered, so ordinary refreshes never wait on a name lookup at all.
-- A weather server that has gone away now costs one slow refresh instead of a run of them. When the name stops resolving the screen backs off before trying again — thirty seconds, doubling up to a ceiling of fifteen minutes — rather than retrying every time you look at it. Changing the address in Web Config clears the backoff at once, so a corrected address is tried immediately.
-- The Weather screen now says **"Can't resolve the weather server"** when the name is the problem, instead of reporting it as unreachable. The two send you to different places: one is the address or your network's DNS, the other is the proxy itself.
-- A weather server whose address has changed is picked up again automatically — a failed connection drops the remembered address so the next attempt looks it up afresh.
+- Pressing j or k while typing no longer turns the dashboard carousel out from under the text you are entering.

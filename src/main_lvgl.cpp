@@ -294,6 +294,13 @@ static lv_obj_t *s_tdeckProSleepMsgRest[kTdeckProSleepMsgSlots] = {nullptr};
 // than the first line's body does -- one label cannot indent its second line
 // differently from its first.
 static lv_obj_t *s_tdeckProSleepMsgCont[kTdeckProSleepMsgSlots] = {nullptr};
+#if FEATURE_LOCK_SCREEN
+// The carousel page the message rows live on, when the lock screen managed to
+// build one. nullptr means they are children of the overlay itself and carry
+// kTdeckProMsgTop in their own y -- which is what the Pro always does, and what
+// a band too short for a carousel falls back to.
+static lv_obj_t *s_lockMsgPage = nullptr;
+#endif
 
 // Unread state the overlay is currently showing, plus the coalescing timer that
 // decides when a change is worth a panel refresh. See serviceTdeckProSleepClock.
@@ -2052,6 +2059,16 @@ static void refreshSnrRssiChart(bool force = false);
 // is built long before that and has to be able to name them.
 static void openHomeDashboard();
 static void closeHomeDashboard();
+#if FEATURE_LOCK_SCREEN
+// The lock screen's copy of the dashboard's carousel. Declared here for the
+// same reason: showTdeckProSleepClock() builds the overlay thousands of lines
+// before the page builders, the node collector and the card styling it needs
+// all exist. See the block below openHomeDashboard() for what these do.
+static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height);
+static void      resetLockCarousel();
+static void      refreshLockCarouselPage();
+static void      serviceLockCarousel(uint32_t nowMs);
+#endif
 #endif
 static void openLiveToolsModal();
 static void closeLiveToolsModal();
@@ -7059,7 +7076,14 @@ static void tdeckProRefreshSleepMsgRows() {
     const TdeckProRecentMsg *picked[kTdeckProSleepMsgSlots] = {nullptr};
     const int n = tdeckProSleepHasUnread() ? tdeckProCollectSleepMsgs(picked) : 0;
 
+#if FEATURE_LOCK_SCREEN
+    // Rows on a carousel page are placed from the top of that page, and the
+    // page already sits at kTdeckProMsgTop. Rows straight on the overlay carry
+    // the offset themselves, as they always have.
+    int y = s_lockMsgPage ? 0 : kTdeckProMsgTop;
+#else
     int y = kTdeckProMsgTop;
+#endif
     int linesLeft = kTdeckProMsgTotalLines;
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
         if (i < n && picked[i] && linesLeft > 0) {
@@ -7461,8 +7485,32 @@ static void showTdeckProSleepClock() {
     // Left-aligned, unlike everything above them: this is a list of messages,
     // and centring each row would leave the names in a different place on every
     // line for no gain.
+    lv_obj_t *msgParent = s_tdeckProSleepOverlay;
+#if FEATURE_LOCK_SCREEN
+    // On the lock screen this band is a carousel and the messages are its first
+    // face, so the rows are built onto that page instead of onto the overlay.
+    // Everything below is unchanged by it: the page is full width and sits at
+    // kTdeckProMsgTop, so the x offsets and the row width still mean what they
+    // did, and only the y origin moves -- see tdeckProRefreshSleepMsgRows().
+    //
+    // The Pro never gets here: FEATURE_LOCK_SCREEN excludes it, and its band
+    // stays the fixed message list it has always been.
+    //
+    // The band runs down to the bottom edge, with nothing taken off for a
+    // margin. The message
+    // budget is sized to exactly this: kTdeckProMsgTotalLines and the gaps
+    // between them are chosen per board to run from kTdeckProMsgTop to within a
+    // few pixels of the bottom, so a band any shorter would clip the last row
+    // against the page it now lives in -- where before it was a child of a
+    // full-height overlay and had the whole panel to overhang into. The cards
+    // on the other faces keep their inset regardless: the page inside this
+    // carries kTdeckProBandInset/2 of padding of its own.
+    const int bandH = lv_disp_get_ver_res(NULL) - kTdeckProMsgTop;
+    s_lockMsgPage = buildLockCarousel(s_tdeckProSleepOverlay, kTdeckProMsgTop, bandH);
+    if (s_lockMsgPage) msgParent = s_lockMsgPage;
+#endif
     for (int i = 0; i < kTdeckProSleepMsgSlots; i++) {
-        s_tdeckProSleepMsgBold[i] = lv_label_create(s_tdeckProSleepOverlay);
+        s_tdeckProSleepMsgBold[i] = lv_label_create(msgParent);
         lv_obj_set_style_text_font(s_tdeckProSleepMsgBold[i], tdeckProBoldRowFont(), 0);
         lv_obj_set_style_text_color(s_tdeckProSleepMsgBold[i], sleepOverlayTimeChannelInk(), 0);
         // Pinned rather than inherited. Every position on these rows is computed
@@ -7476,7 +7524,7 @@ static void showTdeckProSleepClock() {
         lv_label_set_long_mode(s_tdeckProSleepMsgBold[i], LV_LABEL_LONG_CLIP);
         lv_obj_add_flag(s_tdeckProSleepMsgBold[i], LV_OBJ_FLAG_HIDDEN);
 
-        s_tdeckProSleepMsgSender[i] = lv_label_create(s_tdeckProSleepOverlay);
+        s_tdeckProSleepMsgSender[i] = lv_label_create(msgParent);
         lv_obj_set_style_text_font(s_tdeckProSleepMsgSender[i], emojiFont(&lv_font_montserrat_12), 0);
         lv_obj_set_style_text_color(s_tdeckProSleepMsgSender[i], sleepOverlayNodeInk(), 0);
         lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgSender[i], 0, 0);
@@ -7485,7 +7533,7 @@ static void showTdeckProSleepClock() {
         lv_label_set_long_mode(s_tdeckProSleepMsgSender[i], LV_LABEL_LONG_CLIP);
         lv_obj_add_flag(s_tdeckProSleepMsgSender[i], LV_OBJ_FLAG_HIDDEN);
 
-        s_tdeckProSleepMsgRest[i] = lv_label_create(s_tdeckProSleepOverlay);
+        s_tdeckProSleepMsgRest[i] = lv_label_create(msgParent);
         lv_obj_set_style_text_font(s_tdeckProSleepMsgRest[i], emojiFont(&lv_font_montserrat_12), 0);
         lv_obj_set_style_text_color(s_tdeckProSleepMsgRest[i], sleepOverlayInk(), 0);
         lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgRest[i], 0, 0);
@@ -7500,7 +7548,7 @@ static void showTdeckProSleepClock() {
         // Line two. The only label that ellipsises -- it holds everything that
         // did not fit on line one, and says so when it cannot show all of that
         // either.
-        s_tdeckProSleepMsgCont[i] = lv_label_create(s_tdeckProSleepOverlay);
+        s_tdeckProSleepMsgCont[i] = lv_label_create(msgParent);
         lv_obj_set_style_text_font(s_tdeckProSleepMsgCont[i], emojiFont(&lv_font_montserrat_12), 0);
         lv_obj_set_style_text_color(s_tdeckProSleepMsgCont[i], sleepOverlayInk(), 0);
         lv_obj_set_style_text_letter_space(s_tdeckProSleepMsgCont[i], 0, 0);
@@ -7540,6 +7588,10 @@ static void hideTdeckProSleepClock() {
         s_tdeckProSleepMsgRest[i] = nullptr;
         s_tdeckProSleepMsgCont[i] = nullptr;
     }
+#if FEATURE_LOCK_SCREEN
+    s_lockMsgPage = nullptr;
+    resetLockCarousel();
+#endif
     s_tdeckProSleepMinuteKey = UINT32_MAX;
     s_tdeckProSleepUnreadKey = UINT64_MAX;
     s_tdeckProSleepUnreadPendingKey = UINT64_MAX;
@@ -7603,6 +7655,15 @@ static void serviceTdeckProSleepClock() {
     // Panel is already on and LVGL is already running: mark it dirty and let
     // the normal refresh timer pick it up.
     updateTdeckProSleepClock();
+#if FEATURE_LOCK_SCREEN
+    // Whatever face the band is showing rides the same minute the clock does:
+    // a chart's newest sample, and a node page's ages, which creep with the
+    // clock rather than with traffic. The messages face is repainted twice on
+    // this tick -- updateTdeckProSleepClock() owns it and this does not know
+    // which face is up -- which is two label writes a minute for a much simpler
+    // rule about who repaints what.
+    refreshLockCarouselPage();
+#endif
     lv_obj_invalidate(s_tdeckProSleepOverlay);
 #endif
 }
@@ -7743,6 +7804,12 @@ static void serviceLockScreen(uint32_t nowMs) {
         exitLockScreen();
         return;
     }
+
+    // Ahead of the timeout below, and deliberately: on the "stay on" setting
+    // that return is the end of this function, and a lock screen left up
+    // forever is exactly the one that should not sit on one face forever.
+    serviceLockCarousel(nowMs);
+
     if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) return;
 
     const uint32_t heldMs = (uint32_t)(nowMs - s_lockScreenSinceMs);
@@ -26553,53 +26620,128 @@ static void openSnrRssiChartModal() {
 // this surface wants, and it reads the same ChartHist rings, so there is no
 // second source of truth — only a second view of the one there is.
 
-static lv_obj_t *s_homeChUtilChart = nullptr;
-static lv_chart_series_t *s_homeChUtilSeries = nullptr;
-static lv_chart_series_t *s_homeAirUtilSeries = nullptr;
-static lv_obj_t *s_homeChUtilValue = nullptr;
-static lv_obj_t *s_homeSnrChart = nullptr;
-static lv_chart_series_t *s_homeSnrSeries = nullptr;
-static lv_chart_series_t *s_homeRssiSeries = nullptr;
-static lv_obj_t *s_homeSnrValue = nullptr;
-static uint32_t s_homeChUtilRenderedSeq = 0;
-static uint32_t s_homeAirUtilRenderedSeq = 0;
-static uint32_t s_homeSnrRenderedSeq = 0;
-static uint32_t s_homeRssiRenderedSeq = 0;
-static uint32_t s_homeGlanceMinuteKey = UINT32_MAX;
-
 // ---- Glance carousel ------------------------------------------------------
-// The chart pair is one of three faces of the same band, not a fixture. The
-// other two answer what the charts cannot -- *who* is out there -- from the two
-// ends of one ordering: what was heard most recently, and what has been silent
-// longest. Three pages rather than three screens because the dashboard has
-// exactly one free strip under the header, and all three belong in it.
+// The chart pair is one face of a band, not a fixture. The others answer what
+// the charts cannot -- *who* is out there -- from the two ends of one ordering:
+// what was heard most recently, and what has been silent longest. Faces of one
+// band rather than screens of their own, because a glance surface has exactly
+// one free strip under its header and all of them belong in it.
 //
-// The page is sticky across a rebuild rather than reset to the charts. Home is
-// pressed to glance at something, and a glance surface that forgets which face
-// you left it on makes you swipe back to it every single time.
-enum HomeDashPage : uint8_t {
-    HOME_DASH_PAGE_CHARTS = 0,
-    HOME_DASH_PAGE_RECENT,
-    HOME_DASH_PAGE_OLDEST,
-    HOME_DASH_PAGE_COUNT
+// Two surfaces run one of these. The home dashboard's is driven by the user --
+// swipe, tap or j/k -- and its page is sticky across a rebuild, because Home is
+// pressed to glance at something and a surface that forgets which face you left
+// it on makes you swipe back to it every single time. The lock screen's is
+// driven by a timer and takes no input at all, because on that screen every
+// input is a dismissal; in exchange it carries a face the dashboard has no use
+// for -- the recent messages that used to be the whole of that band.
+//
+// Instanced rather than shared globals. exitLockScreen() restores whatever was
+// underneath rather than rebuilding it, so the dashboard can be sitting open
+// *behind* a lit lock screen with both carousels built at once. One set of
+// pointers would have the second build overwrite the first's, and the dashboard
+// would come back with its charts pointing at objects LVGL had already freed.
+enum GlancePageKind : uint8_t {
+    GLANCE_PAGE_MESSAGES = 0,   // lock screen only
+    GLANCE_PAGE_CHARTS,
+    GLANCE_PAGE_RECENT,
+    GLANCE_PAGE_OLDEST,
+    GLANCE_PAGE_BOTH_LISTS,     // wide panels: both lists on one page
 };
-static uint8_t   s_homeDashPage = HOME_DASH_PAGE_CHARTS;
-static lv_obj_t *s_homeDashPageHost = nullptr;
-static lv_obj_t *s_homeDashPageObj[HOME_DASH_PAGE_COUNT] = {};
+
+// Messages, charts, and either one paired node page or two single ones.
+static constexpr int kGlancePageMax = 4;
+
 // Rows are built once, at whatever count the band turned out to fit, and
 // refilled in place afterwards -- a repaint must not churn LVGL objects on a
 // surface that repaints once a minute forever. The cap is a ceiling on the
-// array, not the answer: homeDashNodeRowCapacity() decides from real geometry.
+// array, not the answer: glanceNodeRowCapacity() decides from real geometry.
 static constexpr int kHomeDashNodeRowsMax = 12;
-// [0] is the recent page, [1] the oldest one; indexed by page - RECENT.
-static lv_obj_t *s_homeDashNodeRow[2][kHomeDashNodeRowsMax] = {};
-static int       s_homeDashNodeRows[2] = {0, 0};
-// Refilling a node page walks the node table, so it has to be gated: NodeDB has
-// no sequence counter, and asking it "did you move?" at frame rate would be 250
-// entries a tick. The SNR ring is pushed once per received packet, so its seq
-// is the cheap stand-in for "something arrived" -- paired with the minute tick,
-// which covers the ages, since those creep with the clock and not with traffic.
-static uint32_t  s_homeDashNodeSeq = UINT32_MAX;
+
+struct GlanceCarousel {
+    // The band. Every page occupies it exactly and one of them is visible.
+    lv_obj_t *host;
+    lv_obj_t *page[kGlancePageMax];
+    uint8_t   kind[kGlancePageMax];
+    uint8_t   pages;    // how many of the above were actually built
+    uint8_t   at;       // which one is in front
+    bool      themed;   // the dashboard takes the UI theme; the lock screen does not
+
+    lv_obj_t *chUtilChart;
+    lv_obj_t *chUtilValue;
+    lv_obj_t *snrChart;
+    lv_obj_t *snrValue;
+    lv_chart_series_t *chUtilSeries;
+    lv_chart_series_t *airUtilSeries;
+    lv_chart_series_t *snrSeries;
+    lv_chart_series_t *rssiSeries;
+    uint32_t chUtilSeq;
+    uint32_t airUtilSeq;
+    uint32_t snrSeq;
+    uint32_t rssiSeq;
+
+    // [0] is the recent list, [1] the oldest one. Which page each ends up on
+    // depends on the panel's width; the arrays do not move with it.
+    //
+    // Two labels per row rather than one: the name can be a 39-byte long name
+    // and the age is the column these lists exist to show, so they cannot share
+    // a label -- a single one would let a long name push the age off the end of
+    // the card, losing exactly the thing the page is sorted by. The name flexes
+    // and ellipsizes; the age keeps its natural width against the right edge.
+    // Same name/value pairing buildGlanceChartCard() uses for heading and value.
+    lv_obj_t *nodeRow[2][kHomeDashNodeRowsMax];
+    lv_obj_t *nodeAge[2][kHomeDashNodeRowsMax];
+    int       nodeRows[2];
+    // Refilling a node page walks the node table, so it has to be gated: NodeDB
+    // has no sequence counter, and asking it "did you move?" at frame rate would
+    // be 250 entries a tick. The SNR ring is pushed once per received packet, so
+    // its seq is the cheap stand-in for "something arrived" -- paired with the
+    // minute tick, which covers the ages, since those creep with the clock and
+    // not with traffic.
+    uint32_t  nodeSeq;
+};
+
+// Clears every pointer the deleted objects left behind. `at` is deliberately
+// not touched: it is which face to rebuild on, not a child pointer, and each
+// caller decides for itself whether that should survive.
+static void glanceCarouselForget(GlanceCarousel &c) {
+    const uint8_t at = c.at;
+    const bool themed = c.themed;
+    c = GlanceCarousel{};
+    c.at = at;
+    c.themed = themed;
+    c.nodeSeq = UINT32_MAX;
+}
+
+static GlanceCarousel s_homeCarousel;
+static uint32_t s_homeGlanceMinuteKey = UINT32_MAX;
+
+#if FEATURE_LOCK_SCREEN
+// The lock screen's. Built by showTdeckProSleepClock() and torn down with the
+// overlay, so unlike the dashboard's it starts on its first face every time --
+// which is the messages page, the most urgent thing this screen has to say and
+// what the band showed before it turned into a carousel.
+static GlanceCarousel s_lockCarousel;
+// When the band last turned itself. The lock screen takes no input -- every
+// press there dismisses it -- so the only thing that can advance this carousel
+// is the clock.
+static uint32_t s_lockCarouselTurnedMs = 0;
+// Long enough to read a page of node names off without hurrying, short enough
+// that a lock screen left up cycles through everything it knows in about two
+// minutes.
+static constexpr uint32_t kLockCarouselDwellMs = 30000;
+#endif
+
+// Tap anywhere on the band to turn it forward. The e-paper panel is the reason:
+// a swipe there has to be slow enough for a touch controller sampling against a
+// 700 ms refresh to see the whole drag, which makes it a fiddly gesture to land
+// — where a tap is one unambiguous event. The keyboard boards keep a reverse
+// direction through Alt+left/right, so the Pro loses nothing by only going one
+// way on tap, and three pages means any of them is at most two taps off.
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_HOME_CAROUSEL_TAP 1
+#else
+#define HAS_HOME_CAROUSEL_TAP 0
+#endif
 
 static inline bool homeDashboardVisible() { return lvObjValid(s_homeDash); }
 
@@ -26782,24 +26924,10 @@ static void closeHomeDashboard() {
     // Children of the deleted object; LVGL freed them with it, so this is just
     // the bookkeeping that stops anything reaching a dangling pointer.
     s_homeGlance = GlanceHeader{};
-    s_homeChUtilChart = nullptr;
-    s_homeChUtilSeries = nullptr;
-    s_homeAirUtilSeries = nullptr;
-    s_homeChUtilValue = nullptr;
-    s_homeSnrChart = nullptr;
-    s_homeSnrSeries = nullptr;
-    s_homeRssiSeries = nullptr;
-    s_homeSnrValue = nullptr;
     s_homeGlanceMinuteKey = UINT32_MAX;
-    s_homeDashPageHost = nullptr;
-    for (int i = 0; i < HOME_DASH_PAGE_COUNT; i++) s_homeDashPageObj[i] = nullptr;
-    for (int p = 0; p < 2; p++) {
-        for (int r = 0; r < kHomeDashNodeRowsMax; r++) s_homeDashNodeRow[p][r] = nullptr;
-        s_homeDashNodeRows[p] = 0;
-    }
-    s_homeDashNodeSeq = UINT32_MAX;
-    // s_homeDashPage deliberately survives: it is which face to rebuild on, not
-    // a child pointer.
+    // Keeps `at` — which face to rebuild on, not a child pointer. See
+    // glanceCarouselForget().
+    glanceCarouselForget(s_homeCarousel);
 }
 
 // Where the shortcut bar starts, and so how much height the dashboard's content
@@ -26831,10 +26959,16 @@ static int homeDashboardHeight() {
 //
 // The card readings are the strongest text on the card, so they take the ink
 // the header's wordmark and battery do. The headings below stay a step back.
-static inline lv_color_t homeDashInk() { return glancePalette(/*themed=*/true).ink; }
-// Headings and units, a step back from the readings themselves. The e-paper has
-// no step to give: a mid grey thresholds to one of the two colours it has, and
-// which one is not ours to choose.
+// Whose ground this carousel is drawn on decides its ink, for the reason the
+// header's does: the dashboard is a themed screen, the lock screen is a fixed
+// black panel, and the themed ink on a light theme would be dark type on that
+// black.
+static inline lv_color_t glanceInk(bool themed) { return glancePalette(themed).ink; }
+// Headings and units, a step back from the readings themselves. One value for
+// both grounds: this pale blue carries on the lock screen's black and on every
+// theme ground the dashboard uses. The e-paper has no step to give -- a mid grey
+// thresholds to one of the two colours it has, and which one is not ours to
+// choose.
 static inline lv_color_t homeDashMutedInk() {
 #if defined(DEVICE_TDECK_PRO)
     return sleepOverlayInk();
@@ -26851,14 +26985,36 @@ static bool homeDashSideBySide() {
     return lv_disp_get_hor_res(NULL) >= 300;
 }
 
-// How many faces the carousel has on this panel. A wide one carries both node
-// lists on a single page -- same height, half the width each, so twice as many
-// rows are on screen at once instead of costing a swipe to reach the second
-// half -- exactly as it already carries both charts on one. Narrow panels have
-// no width to split and keep the lists on separate pages, which is the same
-// call homeDashSideBySide() makes for the charts and for the same reason.
-static inline int homeDashPageCount() {
-    return homeDashSideBySide() ? (HOME_DASH_PAGE_COUNT - 1) : HOME_DASH_PAGE_COUNT;
+// Records a page as it is built. The face list is built in order rather than
+// indexed by a fixed enum, because the two carousels do not carry the same set:
+// the lock screen has a messages page the dashboard does not, and a wide panel
+// folds the two node lists into one page where a narrow one keeps them apart.
+// An index into `page[]` therefore means nothing on its own -- `kind[]` is what
+// says what is there, and every refresh switches on it.
+// What is in front right now. GLANCE_PAGE_CHARTS for an empty carousel is the
+// harmless answer: refreshGlanceCharts() checks its own pointers.
+static inline GlancePageKind glanceFacing(const GlanceCarousel &c) {
+    if (c.pages == 0 || c.at >= c.pages) return GLANCE_PAGE_CHARTS;
+    return (GlancePageKind)c.kind[c.at];
+}
+
+// Whether a face is worth turning to right now. Only the messages page can come
+// up empty -- the charts always have their axes and a node list always has a
+// heading and something to say, even if that is "Nothing heard yet" -- so it is
+// the one kind that ever answers no. The dashboard has no messages page at all,
+// so this is always true there and costs it one compare per turn.
+static bool glancePageHasContent(const GlanceCarousel &c, int idx) {
+    if (idx < 0 || idx >= (int)c.pages) return false;
+    if ((GlancePageKind)c.kind[idx] != GLANCE_PAGE_MESSAGES) return true;
+    return tdeckProSleepHasUnread();
+}
+
+static lv_obj_t *glanceAddPage(GlanceCarousel &c, lv_obj_t *page, GlancePageKind kind) {
+    if (!page || c.pages >= kGlancePageMax) return page;
+    c.page[c.pages] = page;
+    c.kind[c.pages] = (uint8_t)kind;
+    c.pages++;
+    return page;
 }
 
 // Series colour, or the absence of one. The e-paper has two tones and spends
@@ -26878,6 +27034,9 @@ static inline lv_color_t homeDashSeriesColor(uint32_t litHex) {
 // calls would drift the first time one of them was touched.
 static void homeDashStyleCard(lv_obj_t *card) {
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+#if HAS_HOME_CAROUSEL_TAP
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);   // see buildHomeDashPage()
+#endif
 #if defined(DEVICE_TDECK_PRO)
     // The e-paper build draws the glance in black on white, so the modals'
     // blues would be a dark slab under black text. No fill, black rule.
@@ -26907,6 +27066,12 @@ static lv_obj_t *buildHomeDashPage(lv_obj_t *host, bool row) {
     lv_obj_set_size(page, lv_pct(100), lv_pct(100));
     lv_obj_align(page, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+#if HAS_HOME_CAROUSEL_TAP
+    // Every lv_obj is CLICKABLE by default, which would make this page — not
+    // the host below it — the object a tap lands on. Cleared so the whole band
+    // reads as one tap target rather than a patchwork of them.
+    lv_obj_clear_flag(page, LV_OBJ_FLAG_CLICKABLE);
+#endif
     lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(page, 0, 0);
     lv_obj_set_style_pad_all(page, kTdeckProBandInset / 2, 0);
@@ -26921,8 +27086,8 @@ static lv_obj_t *buildHomeDashPage(lv_obj_t *host, bool row) {
 // One of the two chart cards. Returns the card; the chart and its value label
 // come back through the out-parameters so the caller keeps the pointers it
 // needs and this keeps the styling in one place.
-static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
-                                   lv_obj_t **chartOut, lv_obj_t **valueOut) {
+static lv_obj_t *buildGlanceChartCard(GlanceCarousel &c, lv_obj_t *row, const char *title,
+                                      lv_obj_t **chartOut, lv_obj_t **valueOut) {
     lv_obj_t *card = lv_obj_create(row);
     // Grows along whichever axis the row runs, so one card definition serves
     // both the side-by-side and the stacked arrangement.
@@ -26957,6 +27122,11 @@ static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
     lv_label_set_text(heading, title);
 
     lv_obj_t *chart = lv_chart_create(card);
+#if HAS_HOME_CAROUSEL_TAP
+    // lv_chart does not clear CLICKABLE the way lv_label does, so without this
+    // the two charts would be holes in the band's tap target.
+    lv_obj_clear_flag(chart, LV_OBJ_FLAG_CLICKABLE);
+#endif
     lv_obj_set_width(chart, lv_pct(100));
     // Sits below the labels in both arrangements, because LVGL appends children
     // and they were made first. The only one that grows, too: the label row is
@@ -26988,7 +27158,7 @@ static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
 
     lv_obj_t *value = lv_label_create(labelRow);
     lv_obj_set_style_text_font(value, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(value, homeDashInk(), 0);
+    lv_obj_set_style_text_color(value, glanceInk(c.themed), 0);
     lv_label_set_long_mode(value, LV_LABEL_LONG_CLIP);
     lv_label_set_text(value, "--");
     if (labelRow == card) {
@@ -27005,8 +27175,8 @@ static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
     return card;
 }
 
-static void refreshHomeDashCharts(bool force) {
-    if (!lvObjValid(s_homeChUtilChart) || !lvObjValid(s_homeSnrChart)) return;
+static void refreshGlanceCharts(GlanceCarousel &c, bool force) {
+    if (!lvObjValid(c.chUtilChart) || !lvObjValid(c.snrChart)) return;
 
     // Right-aligns the newest sample against the right edge, so a ring that is
     // not yet full grows in from the right rather than sitting in the left
@@ -27026,39 +27196,39 @@ static void refreshHomeDashCharts(bool force) {
         }
     };
 
-    if (force || s_homeChUtilRenderedSeq != s_chUtilHist.seq
-        || s_homeAirUtilRenderedSeq != s_airUtilHist.seq) {
-        fill(s_homeChUtilChart, s_homeChUtilSeries, s_chUtilHist, 0, 100);
-        fill(s_homeChUtilChart, s_homeAirUtilSeries, s_airUtilHist, 0, 100);
-        lv_chart_refresh(s_homeChUtilChart);
-        s_homeChUtilRenderedSeq = s_chUtilHist.seq;
-        s_homeAirUtilRenderedSeq = s_airUtilHist.seq;
+    if (force || c.chUtilSeq != s_chUtilHist.seq
+        || c.airUtilSeq != s_airUtilHist.seq) {
+        fill(c.chUtilChart, c.chUtilSeries, s_chUtilHist, 0, 100);
+        fill(c.chUtilChart, c.airUtilSeries, s_airUtilHist, 0, 100);
+        lv_chart_refresh(c.chUtilChart);
+        c.chUtilSeq = s_chUtilHist.seq;
+        c.airUtilSeq = s_airUtilHist.seq;
 
-        if (lvObjValid(s_homeChUtilValue)) {
+        if (lvObjValid(c.chUtilValue)) {
             char ch[12] = "--", air[12] = "--";
             if (s_chUtilHist.hasLast) snprintf(ch, sizeof(ch), "%.0f%%", (double)s_chUtilHist.lastVal);
             if (s_airUtilHist.hasLast) snprintf(air, sizeof(air), "%.0f%%", (double)s_airUtilHist.lastVal);
             char text[40];
             snprintf(text, sizeof(text), "ch %s   air %s", ch, air);
-            lv_label_set_text(s_homeChUtilValue, text);
+            lv_label_set_text(c.chUtilValue, text);
         }
     }
 
-    if (force || s_homeSnrRenderedSeq != s_snrHist.seq
-        || s_homeRssiRenderedSeq != s_rssiHist.seq) {
-        fill(s_homeSnrChart, s_homeSnrSeries, s_snrHist, -25, 15);
-        fill(s_homeSnrChart, s_homeRssiSeries, s_rssiHist, -130, -30);
-        lv_chart_refresh(s_homeSnrChart);
-        s_homeSnrRenderedSeq = s_snrHist.seq;
-        s_homeRssiRenderedSeq = s_rssiHist.seq;
+    if (force || c.snrSeq != s_snrHist.seq
+        || c.rssiSeq != s_rssiHist.seq) {
+        fill(c.snrChart, c.snrSeries, s_snrHist, -25, 15);
+        fill(c.snrChart, c.rssiSeries, s_rssiHist, -130, -30);
+        lv_chart_refresh(c.snrChart);
+        c.snrSeq = s_snrHist.seq;
+        c.rssiSeq = s_rssiHist.seq;
 
-        if (lvObjValid(s_homeSnrValue)) {
+        if (lvObjValid(c.snrValue)) {
             char snr[12] = "--", rssi[12] = "--";
             if (s_snrHist.hasLast) snprintf(snr, sizeof(snr), "%.1f", (double)s_snrHist.lastVal);
             if (s_rssiHist.hasLast) snprintf(rssi, sizeof(rssi), "%.0f", (double)s_rssiHist.lastVal);
             char text[40];
             snprintf(text, sizeof(text), "snr %s   rssi %s", snr, rssi);
-            lv_label_set_text(s_homeSnrValue, text);
+            lv_label_set_text(c.snrValue, text);
         }
     }
 }
@@ -27079,10 +27249,23 @@ static void homeDashFormatAge(uint32_t lastHeardMs, char *out, size_t cap) {
     else                     snprintf(out, cap, "%lud", (unsigned long)(ageS / 86400UL));
 }
 
+// The name to show for a node: its advertised long name when it has sent one,
+// otherwise the short-name/hex label every other screen falls back to. Same
+// order discoveryNodeLabel() and beaconsSenderLabel() use, and the same
+// utf8util::copyTruncate — a name can carry multi-byte characters, and cutting
+// one in half renders as a replacement glyph.
+static const char *homeDashNodeLabel(const NodeEntry *e, char *buf, size_t cap) {
+    if (e && e->hasName && e->longName[0]) {
+        utf8util::copyTruncate(buf, cap, e->longName);
+        return buf;
+    }
+    return deviceInfoNodeLabel(e, buf, cap);
+}
+
 // How many rows the band holds, from the height it actually got rather than a
 // per-board constant: the same code runs against a 222 px Pager band and a
 // portrait Pro one, and the answer differs by more than a row.
-static int homeDashNodeRowCapacity(int pageH) {
+static int glanceNodeRowCapacity(int pageH) {
     const int lineH = (int)lv_font_get_line_height(&lv_font_montserrat_10);
     if (lineH <= 0) return 0;
     // Card padding top and bottom, the heading line, and the flex gap under it.
@@ -27132,8 +27315,8 @@ static int homeDashCollectNodes(bool oldest, const NodeEntry **out, int want) {
 // on a wide panel both live on one page, on a narrow one they have a page each.
 // `row` says which way the page runs, and so which axis the card grows along;
 // `cardH` is the height it will actually get, which is what decides its rows.
-static void buildHomeDashNodeCard(lv_obj_t *page, int listIdx, const char *title,
-                                  bool row, int cardH) {
+static void buildGlanceNodeCard(GlanceCarousel &c, lv_obj_t *page, int listIdx,
+                                const char *title, bool row, int cardH) {
     lv_obj_t *card = lv_obj_create(page);
     // Same growth rule the chart cards use, so one card definition serves the
     // side-by-side and the stacked arrangement alike.
@@ -27148,61 +27331,164 @@ static void buildHomeDashNodeCard(lv_obj_t *page, int listIdx, const char *title
     lv_obj_set_style_text_color(heading, homeDashMutedInk(), 0);
     lv_label_set_text(heading, title);
 
-    const int rows = homeDashNodeRowCapacity(cardH);
-    s_homeDashNodeRows[listIdx] = rows;
+    const int rows = glanceNodeRowCapacity(cardH);
+    c.nodeRows[listIdx] = rows;
     for (int i = 0; i < rows; i++) {
-        // One label per row carrying name and age together, which is how
-        // buildDeviceInfoLines() renders its rows too. A name/value pair in a
-        // flex row would align the ages into a column, at two extra objects a
-        // row on a surface that is already the heaviest thing on the screen.
-        lv_obj_t *r = lv_label_create(card);
-        lv_obj_set_width(r, lv_pct(100));
-        lv_obj_set_style_text_font(r, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(r, homeDashInk(), 0);
-        lv_label_set_long_mode(r, LV_LABEL_LONG_CLIP);
-        lv_label_set_text(r, "");
-        s_homeDashNodeRow[listIdx][i] = r;
+        lv_obj_t *rowObj = lv_obj_create(card);
+        lv_obj_set_width(rowObj, lv_pct(100));
+        lv_obj_set_height(rowObj, LV_SIZE_CONTENT);
+        lv_obj_clear_flag(rowObj, LV_OBJ_FLAG_SCROLLABLE);
+#if HAS_HOME_CAROUSEL_TAP
+        lv_obj_clear_flag(rowObj, LV_OBJ_FLAG_CLICKABLE);   // see buildHomeDashPage()
+#endif
+        lv_obj_set_style_bg_opa(rowObj, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(rowObj, 0, 0);
+        lv_obj_set_style_pad_all(rowObj, 0, 0);
+        lv_obj_set_style_pad_column(rowObj, 4, 0);
+        lv_obj_set_flex_flow(rowObj, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(rowObj, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        // Takes whatever the age leaves, and ellipsizes rather than clipping:
+        // a name cut mid-word with no mark reads as data loss, "Kitchen Sen..."
+        // reads as a long name.
+        lv_obj_t *nameLbl = lv_label_create(rowObj);
+        // grow alone, no explicit width: that is how buildGlanceChartCard() sizes
+        // its reading label, and the flex pass is what gives LONG_DOT the
+        // bounded width it needs to know where to ellipsize.
+        lv_obj_set_flex_grow(nameLbl, 1);
+        lv_obj_set_style_text_font(nameLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(nameLbl, glanceInk(c.themed), 0);
+        lv_label_set_long_mode(nameLbl, LV_LABEL_LONG_DOT);
+        lv_label_set_text(nameLbl, "");
+
+        // Sized to its own text, so it is never the thing that gets squeezed.
+        lv_obj_t *ageLbl = lv_label_create(rowObj);
+        lv_obj_set_style_text_font(ageLbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(ageLbl, homeDashMutedInk(), 0);
+        lv_label_set_long_mode(ageLbl, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(ageLbl, "");
+
+        c.nodeRow[listIdx][i] = nameLbl;
+        c.nodeAge[listIdx][i] = ageLbl;
     }
 }
 
 // Always refills: every caller has already decided this is worth doing, and the
 // page in front is the only one that is ever asked.
-static void refreshHomeDashNodePage(int pageIdx) {
-    if (pageIdx < 0 || pageIdx > 1) return;
-    const int rows = s_homeDashNodeRows[pageIdx];
+static void refreshGlanceNodeList(GlanceCarousel &c, int listIdx) {
+    if (listIdx < 0 || listIdx > 1) return;
+    const int rows = c.nodeRows[listIdx];
     if (rows <= 0) return;
 
     const NodeEntry *picked[kHomeDashNodeRowsMax] = {};
-    const int n = homeDashCollectNodes(/*oldest=*/pageIdx == 1, picked, rows);
+    const int n = homeDashCollectNodes(/*oldest=*/listIdx == 1, picked, rows);
     for (int i = 0; i < rows; i++) {
-        lv_obj_t *row = s_homeDashNodeRow[pageIdx][i];
+        lv_obj_t *row = c.nodeRow[listIdx][i];
+        lv_obj_t *ageObj = c.nodeAge[listIdx][i];
         if (!lvObjValid(row)) continue;
         if (i >= n) {
             // Said once, on the first empty row, rather than left blank: an
             // empty page reads as something that failed to load.
             lv_label_set_text(row, (i == 0) ? "Nothing heard yet" : "");
+            if (lvObjValid(ageObj)) lv_label_set_text(ageObj, "");
             continue;
         }
-        char idBuf[12], age[12], line[56];
-        const char *name = deviceInfoNodeLabel(picked[i], idBuf, sizeof(idBuf));
+        // Sized for a full long name (NodeEntry::longName is 40 bytes), not the
+        // 12 a hex fallback needs.
+        char nameBuf[48], age[12];
+        lv_label_set_text(row, homeDashNodeLabel(picked[i], nameBuf, sizeof(nameBuf)));
         homeDashFormatAge(picked[i]->lastHeardMs, age, sizeof(age));
-        snprintf(line, sizeof(line), "%s  %s", name, age);
-        lv_label_set_text(row, line);
+        if (lvObjValid(ageObj)) lv_label_set_text(ageObj, age);
     }
 }
 
-// Repaint whatever a given page is carrying. On a wide panel page 1 holds both
-// node lists, so both are refilled; on a narrow one each page holds one.
-static void refreshHomeDashPage(int page) {
-    if (page == HOME_DASH_PAGE_CHARTS) {
-        refreshHomeDashCharts(true);
-        return;
+// The chart face: both cards and all four series in one call. Two carousels
+// build it identically -- only the ground under it differs -- and a second copy
+// of the ranges and the series colours would drift the first time either moved.
+static void glanceBuildChartPage(GlanceCarousel &c, lv_obj_t *host) {
+    lv_obj_t *page = glanceAddPage(c, buildHomeDashPage(host, homeDashSideBySide()),
+                                   GLANCE_PAGE_CHARTS);
+    if (!page) return;
+
+    buildGlanceChartCard(c, page, "CHANNEL UTIL", &c.chUtilChart, &c.chUtilValue);
+    // Same colours the Tools modal uses for the same two series, so the legend
+    // someone learned there still reads here.
+    c.chUtilSeries = lv_chart_add_series(c.chUtilChart, homeDashSeriesColor(0x4FD1C5),
+                                         LV_CHART_AXIS_PRIMARY_Y);
+    c.airUtilSeries = lv_chart_add_series(c.chUtilChart, homeDashSeriesColor(0xF6AD55),
+                                          LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_range(c.chUtilChart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    if (c.chUtilSeries) {
+        lv_chart_set_all_value(c.chUtilChart, c.chUtilSeries, LV_CHART_POINT_NONE);
     }
+    if (c.airUtilSeries) {
+        lv_chart_set_all_value(c.chUtilChart, c.airUtilSeries, LV_CHART_POINT_NONE);
+    }
+
+    buildGlanceChartCard(c, page, "SNR / RSSI", &c.snrChart, &c.snrValue);
+    c.snrSeries = lv_chart_add_series(c.snrChart, homeDashSeriesColor(0x68D391),
+                                      LV_CHART_AXIS_PRIMARY_Y);
+    c.rssiSeries = lv_chart_add_series(c.snrChart, homeDashSeriesColor(0xF687B3),
+                                       LV_CHART_AXIS_SECONDARY_Y);
+    lv_chart_set_range(c.snrChart, LV_CHART_AXIS_PRIMARY_Y, -25, 15);
+    lv_chart_set_range(c.snrChart, LV_CHART_AXIS_SECONDARY_Y, -130, -30);
+    if (c.snrSeries) {
+        lv_chart_set_all_value(c.snrChart, c.snrSeries, LV_CHART_POINT_NONE);
+    }
+    if (c.rssiSeries) {
+        lv_chart_set_all_value(c.snrChart, c.rssiSeries, LV_CHART_POINT_NONE);
+    }
+}
+
+// The node faces. One page carrying both lists where the panel is wide enough
+// to halve -- same height, half the width each, so twice as many rows are on
+// screen at once instead of costing a turn to reach the second half -- and two
+// pages of one list each where it is not. The same call homeDashSideBySide()
+// makes for the charts, and for the same reason.
+static void glanceBuildNodePages(GlanceCarousel &c, lv_obj_t *host, int cardH) {
     if (homeDashSideBySide()) {
-        refreshHomeDashNodePage(0);
-        refreshHomeDashNodePage(1);
+        lv_obj_t *page = buildHomeDashPage(host, true);
+        buildGlanceNodeCard(c, page, 0, "RECENTLY HEARD", true, cardH);
+        buildGlanceNodeCard(c, page, 1, "LONGEST SILENT", true, cardH);
+        glanceAddPage(c, page, GLANCE_PAGE_BOTH_LISTS);
     } else {
-        refreshHomeDashNodePage(page - HOME_DASH_PAGE_RECENT);
+        lv_obj_t *recent = buildHomeDashPage(host, false);
+        buildGlanceNodeCard(c, recent, 0, "RECENTLY HEARD", false, cardH);
+        glanceAddPage(c, recent, GLANCE_PAGE_RECENT);
+
+        lv_obj_t *oldest = buildHomeDashPage(host, false);
+        buildGlanceNodeCard(c, oldest, 1, "LONGEST SILENT", false, cardH);
+        glanceAddPage(c, oldest, GLANCE_PAGE_OLDEST);
+    }
+}
+
+// Repaint whatever the page at `idx` is carrying, whichever face that turned
+// out to be on this panel.
+static void refreshGlancePage(GlanceCarousel &c, int idx) {
+    if (idx < 0 || idx >= (int)c.pages) return;
+    switch ((GlancePageKind)c.kind[idx]) {
+        case GLANCE_PAGE_CHARTS:
+            refreshGlanceCharts(c, true);
+            break;
+        case GLANCE_PAGE_RECENT:
+            refreshGlanceNodeList(c, 0);
+            break;
+        case GLANCE_PAGE_OLDEST:
+            refreshGlanceNodeList(c, 1);
+            break;
+        case GLANCE_PAGE_BOTH_LISTS:
+            refreshGlanceNodeList(c, 0);
+            refreshGlanceNodeList(c, 1);
+            break;
+        case GLANCE_PAGE_MESSAGES:
+#if FEATURE_LOCK_SCREEN
+            // The overlay's own rows, reparented onto this page rather than
+            // copied: one message ring, one set of labels, one place that knows
+            // how to lay a message out across two lines.
+            tdeckProRefreshSleepMsgRows();
+#endif
+            break;
     }
 }
 
@@ -27243,13 +27529,14 @@ static void homeDashSlideDone(lv_anim_t *a) {
 // turn, so a fast double swipe lands somewhere sane rather than leaving a page
 // parked half off screen.
 //
-// No anim teardown needed when the dashboard closes: lv_obj's destructor runs
-// lv_anim_delete(obj, NULL) on every object it frees, children included.
-static void homeDashShowPage(uint8_t page) {
-    if (page >= HOME_DASH_PAGE_COUNT) page = HOME_DASH_PAGE_CHARTS;
-    s_homeDashPage = page;
-    for (int i = 0; i < HOME_DASH_PAGE_COUNT; i++) {
-        lv_obj_t *o = s_homeDashPageObj[i];
+// No anim teardown needed when either surface goes away: lv_obj's destructor
+// runs lv_anim_delete(obj, NULL) on every object it frees, children included.
+static void glanceShowPage(GlanceCarousel &c, uint8_t page) {
+    if (c.pages == 0) return;
+    if (page >= c.pages) page = 0;
+    c.at = page;
+    for (int i = 0; i < (int)c.pages; i++) {
+        lv_obj_t *o = c.page[i];
         if (!lvObjValid(o)) continue;
 #if HAS_HOME_CAROUSEL_ANIM
         // Deleting an animation does not fire its completed_cb, so this cannot
@@ -27262,32 +27549,43 @@ static void homeDashShowPage(uint8_t page) {
     }
 }
 
-// One step round the carousel: +1 is the way a rightward swipe goes (charts ->
-// recent -> oldest -> charts), -1 the other way. Wrapping is the point -- three
-// pages with no ends means neither direction ever dead-stops.
-static void homeDashCarouselGo(int delta) {
-    if (!homeDashboardVisible() || !lvObjValid(s_homeDashPageHost)) return;
-    const int pages = homeDashPageCount();
-    int next = ((int)s_homeDashPage + delta) % pages;
-    if (next < 0) next += pages;
-    if (next == (int)s_homeDashPage) return;
+// One step round the carousel: +1 is the way a rightward swipe goes, -1 the
+// other way. Wrapping is the point -- a ring with no ends means neither
+// direction ever dead-stops.
+static void glanceCarouselGo(GlanceCarousel &c, int delta) {
+    if (!lvObjValid(c.host) || c.pages == 0) return;
+    const int pages = (int)c.pages;
+
+    // Steps until it finds a face with something on it, rather than stepping
+    // once. The messages page is empty whenever nothing is unread, and turning
+    // onto a blank band wastes the turn -- on the lock screen, where the turn
+    // is the whole interaction, it wastes thirty seconds of it. Bounded by the
+    // page count, so if nothing anywhere has anything to show this lands back
+    // where it started instead of spinning.
+    int next = (int)c.at;
+    for (int step = 0; step < pages; step++) {
+        next = (next + delta) % pages;
+        if (next < 0) next += pages;
+        if (glancePageHasContent(c, next)) break;
+    }
+    if (next == (int)c.at) return;
 
     // Filled before it is shown, so the page arrives already carrying its
     // content instead of sliding in blank and populating a frame later. Painted
     // now rather than at the minute tick the header runs on: this is a direct
     // answer to a gesture, and on the Pro a page turn is the one thing an
     // e-paper refresh here is actually worth.
-    refreshHomeDashPage(next);
+    refreshGlancePage(c, next);
 
 #if HAS_HOME_CAROUSEL_ANIM
-    lv_obj_t *from = s_homeDashPageObj[s_homeDashPage];
-    lv_obj_t *to   = s_homeDashPageObj[next];
+    lv_obj_t *from = c.page[c.at];
+    lv_obj_t *to   = c.page[next];
     // The host's width is the slide distance, so it has to be a real number
     // before the animation is built — right after a rebuild it is not yet.
-    lv_obj_update_layout(s_homeDashPageHost);
-    const int32_t w = lv_obj_get_width(s_homeDashPageHost);
+    lv_obj_update_layout(c.host);
+    const int32_t w = lv_obj_get_width(c.host);
     if (w > 0 && lvObjValid(from) && lvObjValid(to)) {
-        homeDashShowPage(s_homeDashPage);   // settle anything mid-flight
+        glanceShowPage(c, c.at);   // settle anything mid-flight
 
         // The motion follows the finger: a rightward swipe carries the page you
         // were on out to the right and brings the next one in from the left.
@@ -27315,14 +27613,28 @@ static void homeDashCarouselGo(int delta) {
         lv_anim_set_completed_cb(&a, nullptr);
         lv_anim_start(&a);
 
-        // Set directly rather than through homeDashShowPage(): that would hide
+        // Set directly rather than through glanceShowPage(): that would hide
         // the outgoing page this instant and there would be nothing to watch.
-        s_homeDashPage = (uint8_t)next;
+        c.at = (uint8_t)next;
         return;
     }
 #endif
-    homeDashShowPage((uint8_t)next);
+    glanceShowPage(c, (uint8_t)next);
 }
+
+// What the dashboard's input paths drive. The lock screen's copy is turned by
+// serviceLockCarousel() and by nothing else.
+static void homeDashCarouselGo(int delta) {
+    if (!homeDashboardVisible()) return;
+    glanceCarouselGo(s_homeCarousel, delta);
+}
+
+#if HAS_HOME_CAROUSEL_TAP
+static void homeDashTapCb(lv_event_t *e) {
+    LV_UNUSED(e);
+    homeDashCarouselGo(+1);
+}
+#endif
 
 static void homeDashGestureCb(lv_event_t *e) {
     LV_UNUSED(e);
@@ -27380,18 +27692,18 @@ static void refreshHomeDashboard(bool force) {
     //
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
-    if (force || minuteRolled) refreshHomeDashPage((int)s_homeDashPage);
+    if (force || minuteRolled) refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
 #else
-    if (s_homeDashPage == HOME_DASH_PAGE_CHARTS) {
-        refreshHomeDashCharts(force);
+    if (glanceFacing(s_homeCarousel) == GLANCE_PAGE_CHARTS) {
+        refreshGlanceCharts(s_homeCarousel, force);
     } else {
         // Two reasons to refill, and nothing walks the node table without one:
         // a packet arrived (the SNR ring's seq moved), or the minute rolled and
         // the ages on screen are now wrong.
-        const bool arrived = (s_snrHist.seq != s_homeDashNodeSeq);
+        const bool arrived = (s_snrHist.seq != s_homeCarousel.nodeSeq);
         if (force || minuteRolled || arrived) {
-            s_homeDashNodeSeq = s_snrHist.seq;
-            refreshHomeDashPage((int)s_homeDashPage);
+            s_homeCarousel.nodeSeq = s_snrHist.seq;
+            refreshGlancePage(s_homeCarousel, (int)s_homeCarousel.at);
         }
     }
 #endif
@@ -27421,6 +27733,10 @@ static void openHomeDashboard() {
         return;
     }
     closeHomeDashboard();   // clears stale child pointers if the screen was rebuilt
+    // Set before anything can return early: this carousel is always the themed
+    // one, and the bail-out below leaves the band unbuilt without leaving the
+    // instance claiming to be the lock screen's.
+    s_homeCarousel.themed = true;
 
     // Where the bar below starts. The charts stop there — but the dashboard
     // itself covers the whole panel, because stopping the *object* there left
@@ -27488,7 +27804,7 @@ static void openHomeDashboard() {
     // same rectangle and one of them is visible. The host owns the geometry
     // that used to be the chart row's, and the chart row becomes page 0 at full
     // size inside it — so nothing about how the two cards lay themselves out
-    // moves. How many pages follow it is homeDashPageCount()'s call.
+    // moves. Which faces follow it is glanceBuildNodePages()' call.
     // Gutters for the carousel arrows. The host is inset by them so no card
     // ever runs under a chevron, and the chevrons sit outside the host — they
     // stay put while the pages slide beneath them, and are never clipped or
@@ -27499,7 +27815,13 @@ static void openHomeDashboard() {
     lv_obj_set_size(pageHost, lv_disp_get_hor_res(NULL) - (2 * arrowGutter), chartsH);
     lv_obj_align(pageHost, LV_ALIGN_TOP_LEFT, arrowGutter, chartsTop);
     lv_obj_clear_flag(pageHost, LV_OBJ_FLAG_SCROLLABLE);
-    s_homeDashPageHost = pageHost;
+    s_homeCarousel.host = pageHost;
+#if HAS_HOME_CAROUSEL_TAP
+    // The host stays clickable while its pages and cards do not, so one handler
+    // here catches a tap anywhere in the band. The arrows sit outside it and are
+    // labels, so they are not tap targets — the whole band is.
+    lv_obj_add_event_cb(pageHost, homeDashTapCb, LV_EVENT_CLICKED, nullptr);
+#endif
 
     // The affordance. Without them page 0 is indistinguishable from the fixed
     // pair of charts this band used to be, and nothing on screen suggests it
@@ -27525,66 +27847,16 @@ static void openHomeDashboard() {
         }
     }
 
-    const bool sideBySide = homeDashSideBySide();
-    lv_obj_t *chartRow = buildHomeDashPage(pageHost, sideBySide);
-
-    buildHomeDashCard(chartRow, "CHANNEL UTIL", &s_homeChUtilChart, &s_homeChUtilValue);
-    // Same colours the Tools modal uses for the same two series, so the legend
-    // someone learned there still reads here.
-    s_homeChUtilSeries = lv_chart_add_series(s_homeChUtilChart, homeDashSeriesColor(0x4FD1C5),
-                                             LV_CHART_AXIS_PRIMARY_Y);
-    s_homeAirUtilSeries = lv_chart_add_series(s_homeChUtilChart, homeDashSeriesColor(0xF6AD55),
-                                              LV_CHART_AXIS_PRIMARY_Y);
-    lv_chart_set_range(s_homeChUtilChart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    if (s_homeChUtilSeries) {
-        lv_chart_set_all_value(s_homeChUtilChart, s_homeChUtilSeries, LV_CHART_POINT_NONE);
-    }
-    if (s_homeAirUtilSeries) {
-        lv_chart_set_all_value(s_homeChUtilChart, s_homeAirUtilSeries, LV_CHART_POINT_NONE);
-    }
-
-    buildHomeDashCard(chartRow, "SNR / RSSI", &s_homeSnrChart, &s_homeSnrValue);
-    s_homeSnrSeries = lv_chart_add_series(s_homeSnrChart, homeDashSeriesColor(0x68D391),
-                                          LV_CHART_AXIS_PRIMARY_Y);
-    s_homeRssiSeries = lv_chart_add_series(s_homeSnrChart, homeDashSeriesColor(0xF687B3),
-                                           LV_CHART_AXIS_SECONDARY_Y);
-    lv_chart_set_range(s_homeSnrChart, LV_CHART_AXIS_PRIMARY_Y, -25, 15);
-    lv_chart_set_range(s_homeSnrChart, LV_CHART_AXIS_SECONDARY_Y, -130, -30);
-    if (s_homeSnrSeries) {
-        lv_chart_set_all_value(s_homeSnrChart, s_homeSnrSeries, LV_CHART_POINT_NONE);
-    }
-    if (s_homeRssiSeries) {
-        lv_chart_set_all_value(s_homeSnrChart, s_homeRssiSeries, LV_CHART_POINT_NONE);
-    }
-
-    s_homeDashPageObj[HOME_DASH_PAGE_CHARTS] = chartRow;
-
+    glanceBuildChartPage(s_homeCarousel, pageHost);
     // A card gets the band less its page's own padding, and that height is what
     // decides how many rows it fits.
-    const int nodeCardH = chartsH - kTdeckProBandInset;
-    if (sideBySide) {
-        // Both lists on one page, side by side like the charts above them. Two
-        // faces instead of three, and twice the rows visible at once.
-        lv_obj_t *nodePage = buildHomeDashPage(pageHost, true);
-        buildHomeDashNodeCard(nodePage, 0, "RECENTLY HEARD", true, nodeCardH);
-        buildHomeDashNodeCard(nodePage, 1, "LONGEST SILENT", true, nodeCardH);
-        s_homeDashPageObj[HOME_DASH_PAGE_RECENT] = nodePage;
-    } else {
-        lv_obj_t *recentPage = buildHomeDashPage(pageHost, false);
-        buildHomeDashNodeCard(recentPage, 0, "RECENTLY HEARD", false, nodeCardH);
-        s_homeDashPageObj[HOME_DASH_PAGE_RECENT] = recentPage;
-
-        lv_obj_t *oldestPage = buildHomeDashPage(pageHost, false);
-        buildHomeDashNodeCard(oldestPage, 1, "LONGEST SILENT", false, nodeCardH);
-        s_homeDashPageObj[HOME_DASH_PAGE_OLDEST] = oldestPage;
-    }
+    glanceBuildNodePages(s_homeCarousel, pageHost, chartsH - kTdeckProBandInset);
 
     // The remembered page can outlive the layout that had it: the Heltec and
     // Wio boards rotate on a setting, and landscape has one fewer face than
     // portrait. Left alone, coming back in landscape on page 2 would show a
     // page this build never made.
-    if ((int)s_homeDashPage >= homeDashPageCount()) s_homeDashPage = HOME_DASH_PAGE_CHARTS;
-    homeDashShowPage(s_homeDashPage);
+    glanceShowPage(s_homeCarousel, s_homeCarousel.at);
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -27593,6 +27865,104 @@ static void openHomeDashboard() {
     lv_obj_move_foreground(s_homeDash);
     homeDashRaiseBar();
 }
+
+#if FEATURE_LOCK_SCREEN
+// ── Lock-screen carousel ─────────────────────────────────────────────────────
+// The same band the dashboard turns, under the lock screen's header, carrying
+// the recent-message rows that used to own that space as its first face.
+//
+// Built from here rather than from showTdeckProSleepClock(), which sits twenty
+// thousand lines above everything this needs -- the page builders, the node
+// collector, the card styling. The overlay reaches in through the forward
+// declarations at the top of the file instead, and hands back the one thing it
+// has to own itself: where to put the message labels.
+//
+// There is no input path. Every press on a locked screen is a dismissal -- see
+// tryExitLockScreenFromInput() -- so a swipe handler here would either fight
+// that or never fire. The band turns on a timer or not at all, which is also
+// why it draws no arrows: those mark a gesture, and there is no gesture to mark.
+
+// Returns the page the message rows should be built into, or nullptr if the
+// band was too short to carry a carousel -- in which case the caller lays the
+// rows out exactly as it always did, straight onto the overlay.
+static lv_obj_t *buildLockCarousel(lv_obj_t *overlay, int top, int height) {
+    glanceCarouselForget(s_lockCarousel);
+    s_lockCarousel.themed = false;   // the fixed palette, like the header above
+    s_lockCarousel.at = 0;           // always opens on the messages face
+    s_lockCarouselTurnedMs = millis();
+
+    // The same defensive floor openHomeDashboard() applies, for the same
+    // reason: this height comes from a per-board constant and a panel
+    // resolution, neither of which this file controls, and a carousel with no
+    // room for a chart is worse than the plain message list it replaced.
+    if (!overlay || height < 48) return nullptr;
+
+    // Full width, unlike the dashboard's inset host: with no arrows there are
+    // no gutters to leave for them, and the message rows keep the exact
+    // geometry they had before -- which is what lets sleepOverlayMsgRowWidth()
+    // go on being right about how wide a message may be.
+    lv_obj_t *host = lv_obj_create(overlay);
+    lv_obj_remove_style_all(host);
+    lv_obj_set_size(host, lv_disp_get_hor_res(NULL), height);
+    lv_obj_align(host, LV_ALIGN_TOP_LEFT, 0, top);
+    lv_obj_clear_flag(host, LV_OBJ_FLAG_SCROLLABLE);
+    s_lockCarousel.host = host;
+
+    // Messages first, because that is what this band was, and what someone
+    // glancing at a locked device is most likely to be looking for. A plain
+    // container rather than buildHomeDashPage(): the rows position themselves
+    // absolutely from the top of their parent, and a flex page with padding of
+    // its own would fight them for the layout.
+    lv_obj_t *msgPage = lv_obj_create(host);
+    lv_obj_remove_style_all(msgPage);
+    lv_obj_set_size(msgPage, lv_pct(100), lv_pct(100));
+    lv_obj_align(msgPage, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(msgPage, LV_OBJ_FLAG_SCROLLABLE);
+    glanceAddPage(s_lockCarousel, msgPage, GLANCE_PAGE_MESSAGES);
+
+    glanceBuildChartPage(s_lockCarousel, host);
+    glanceBuildNodePages(s_lockCarousel, host, height - kTdeckProBandInset);
+
+    // Opens on messages when there are any and on the charts when there are
+    // not, rather than showing an empty band for the first thirty seconds.
+    // Stepped here rather than through glanceCarouselGo() so the first face
+    // simply appears: that would slide, and there is nothing to slide off.
+    uint8_t first = 0;
+    while (first < s_lockCarousel.pages
+           && !glancePageHasContent(s_lockCarousel, first)) {
+        first++;
+    }
+    if (first >= s_lockCarousel.pages) first = 0;
+    glanceShowPage(s_lockCarousel, first);
+    return msgPage;
+}
+
+// Bookkeeping only: every object above was a child of the overlay and LVGL
+// freed them with it. Back to the messages face for the next lock, rather than
+// wherever the timer had got to when the screen was dismissed -- this surface
+// is arrived at, not returned to.
+static void resetLockCarousel() {
+    glanceCarouselForget(s_lockCarousel);
+    s_lockCarousel.at = 0;
+}
+
+// Repaints the face in front. Called on the overlay's minute tick, so a node
+// page's ages creep with the clock above them instead of freezing at whatever
+// they read when the page came round.
+static void refreshLockCarouselPage() {
+    if (!lvObjValid(s_lockCarousel.host)) return;
+    refreshGlancePage(s_lockCarousel, (int)s_lockCarousel.at);
+}
+
+// The only thing that turns this carousel, driven from serviceLockScreen()
+// because that already runs every loop with the clock this wants.
+static void serviceLockCarousel(uint32_t nowMs) {
+    if (!lvObjValid(s_lockCarousel.host) || s_lockCarousel.pages < 2) return;
+    if ((uint32_t)(nowMs - s_lockCarouselTurnedMs) < kLockCarouselDwellMs) return;
+    s_lockCarouselTurnedMs = nowMs;
+    glanceCarouselGo(s_lockCarousel, +1);
+}
+#endif  // FEATURE_LOCK_SCREEN
 #endif  // HAS_HOME_DASHBOARD
 // True when this node's packets have told us it is one hop away. Anything that
 // never carried hop_start is "unknown", not "direct" — see NodeEntry::hasHops.
@@ -36084,37 +36454,6 @@ static void pumpKeyboardInput() {
         if (handleGlobalNavigationKey(k)) continue;
 #endif
 
-#if HAS_HOME_DASHBOARD
-        // The glance carousel, on every board at once. KEY_PREV_CHAN and
-        // KEY_NEXT_CHAN are what the T-Deck trackball's horizontal, the Pager's
-        // wheel and LEFT/RIGHT keys, the M9 and Mesh Deck d-pads and the
-        // Cardputer's arrows all already arrive as, so one branch here is the
-        // whole non-touch story rather than four per-board bindings.
-        //
-        // Deliberately ahead of the M9 fold below, which collapses this pair
-        // into KEY_SCROLL_UP/DN on any surface it does not consider genuinely
-        // two-dimensional. The band is exactly that, and taking the keys here
-        // leaves that list alone.
-        //
-        // Safe to take before the chat screen sees them: chat is not foreground
-        // while the dashboard is up (see chatScreenIsForeground()), so the
-        // channel these would otherwise switch is not one anyone is looking at.
-        if (homeDashboardVisible()) {
-            // The vertical pair as well as the horizontal one, because the
-            // Pager has no horizontal control to offer: its rotary wheel is the
-            // whole of its navigation and emits KEY_SCROLL_UP/DN, and the block
-            // in keyboard.cpp that turns arrows into KEY_PREV_CHAN/NEXT_CHAN is
-            // compiled out on that board (`#if !defined(DEVICE_TLORA_PAGER_TFT)`).
-            // Listening for the horizontal pair alone left the Pager unable to
-            // turn the carousel at all.
-            //
-            // Free to take: nothing on this surface scrolls, so the scroll keys
-            // had no other job here — and until now the wheel was quietly
-            // scrolling the chat screen that is still built underneath.
-            if (k == KEY_NEXT_CHAN || k == KEY_SCROLL_DN) { homeDashCarouselGo(+1); continue; }
-            if (k == KEY_PREV_CHAN || k == KEY_SCROLL_UP) { homeDashCarouselGo(-1); continue; }
-        }
-#endif
 
         // Every modal that feeds keys into a textarea belongs here. Anything
         // left out has its j and k folded into KEY_SCROLL_UP/DN below and then
@@ -36135,6 +36474,44 @@ static void pumpKeyboardInput() {
                              || (s_onboardingModal
                                  && (s_onboardingStage == ONBOARD_STAGE_ENTER_LONG
                                      || s_onboardingStage == ONBOARD_STAGE_ENTER_SHORT));
+#if HAS_HOME_DASHBOARD
+        // The glance carousel, on every board at once. KEY_PREV_CHAN and
+        // KEY_NEXT_CHAN are what the T-Deck trackball's horizontal, the M9 and
+        // Mesh Deck d-pads and the Cardputer's arrows already arrive as, so one
+        // branch here is the whole non-touch story rather than four per-board
+        // bindings.
+        //
+        // The vertical pair too, because the Pager has no horizontal control to
+        // offer: its rotary wheel is the whole of its navigation and emits
+        // KEY_SCROLL_UP/DN, and the block in keyboard.cpp that turns arrows into
+        // KEY_PREV_CHAN/NEXT_CHAN is compiled out on that board
+        // (`#if !defined(DEVICE_TLORA_PAGER_TFT)`). Free to take: nothing on
+        // this surface scrolls, so the scroll keys had no other job here — and
+        // until this existed the wheel was quietly scrolling the chat screen
+        // still built underneath.
+        //
+        // j and k are matched as letters rather than left to remapJkUiKey()
+        // below, which has not run yet at this point in the pipeline. Direction
+        // follows this firmware's own convention, NOT vim's: j is up and so goes
+        // back, k is down and so goes forward — the same way j/k fold onto
+        // KEY_SCROLL_UP/DN everywhere else (see remapJkUiKey).
+        //
+        // Deliberately still ahead of the M9 fold below, which collapses
+        // PREV/NEXT into KEY_SCROLL_UP/DN on any surface it does not consider
+        // two-dimensional. The band is exactly that, and taking the keys here
+        // leaves that list alone.
+        //
+        // Safe to take before the chat screen sees them: chat is not foreground
+        // while the dashboard is up (see chatScreenIsForeground()), so the
+        // channel these would otherwise switch is not one anyone is reading.
+        if (homeDashboardVisible() && !typingContext) {
+            if (k == KEY_NEXT_CHAN || k == KEY_SCROLL_DN
+                || k == 'k' || k == 'K') { homeDashCarouselGo(+1); continue; }
+            if (k == KEY_PREV_CHAN || k == KEY_SCROLL_UP
+                || k == 'j' || k == 'J') { homeDashCarouselGo(-1); continue; }
+        }
+#endif
+
         bool navFromJk = false;
         // True only when the key really was j or k, for the few places that must
         // treat them differently from wheel/arrow input. navFromJk cannot be used
