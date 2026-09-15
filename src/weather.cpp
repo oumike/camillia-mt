@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   // strncasecmp
 
 static volatile WeatherState s_state     = WEATHER_IDLE;
 static volatile int          s_httpCode  = 0;
@@ -18,6 +19,101 @@ static volatile bool         s_taskAlive = false;
 static char   s_server[96];
 static double s_lat = 0, s_lon = 0;
 static bool   s_imperial = false;
+
+// ── Address cache ────────────────────────────────────────────────────────────
+// This exists because resolving a name here could freeze the whole device.
+//
+// WiFiClient::connect(hostname, ...) resolves through
+// WiFiGenericClass::hostByName(), which setConnectTimeout() does not bound.
+// That function takes a *process-wide* DNS lock -- WIFI_DNS_IDLE_BIT in the one
+// Arduino event group -- and when the name does not resolve it holds the lock
+// for up to 15 s. Any other task wanting to resolve anything then waits up to
+// 16 s for the same bit before paying its own 15 s. The UI thread is one of
+// those tasks, so a weather fetch aimed at a server that had gone away stalled
+// the display for as much as half a minute, and again on the next refresh: the
+// dashboard asks for weather on its own, so nobody had to open the screen for
+// it to happen. (The same trap is documented at the state-map fetch in
+// main_lvgl.cpp, which was made dead code rather than fixed.)
+//
+// So the name is resolved at most once per server address and the result kept;
+// every fetch after that connects straight to the address. A failure starts a
+// backoff, because retrying a name that does not resolve is precisely the thing
+// that costs 15 s of everyone else's DNS.
+static char      s_addrFor[sizeof(s_server)] = {0};
+static IPAddress s_addrIp;
+static bool      s_addrValid = false;
+static uint8_t   s_addrFails = 0;
+static uint32_t  s_addrNextTryMs = 0;
+
+// 30 s, doubling to a 15 min ceiling. Long enough that a server which is really
+// gone stops costing anything; short enough that one caused by the Wi-Fi coming
+// up a moment late clears on the next look at the screen.
+static uint32_t weatherBackoffMs(uint8_t fails) {
+    uint32_t ms = 30000UL;
+    for (uint8_t i = 1; i < fails && ms < 900000UL; i++) ms *= 2;
+    return (ms > 900000UL) ? 900000UL : ms;
+}
+
+// Drop the cached address. Called when a connection to it fails: the name may
+// have moved, and holding a dead address would keep the screen broken until the
+// server string changed.
+static void weatherForgetAddress() {
+    s_addrValid = false;
+    s_addrFor[0] = '\0';
+}
+
+// "http://host[:port]" -> host, port. Only http:// is accepted, for the reason
+// the docs give: there is no TLS client on this path.
+static bool weatherSplitServer(const char *server, char *host, size_t cap, uint16_t &port) {
+    if (!server || !host || cap == 0) return false;
+    const char *p = server;
+    if (strncasecmp(p, "http://", 7) == 0)       p += 7;
+    else if (strncasecmp(p, "https://", 8) == 0) return false;
+    port = 80;
+    size_t n = 0;
+    while (*p && *p != '/' && *p != ':' && n + 1 < cap) host[n++] = *p++;
+    host[n] = '\0';
+    if (n == 0) return false;
+    if (*p == ':') {
+        const int v = atoi(p + 1);
+        if (v <= 0 || v > 65535) return false;
+        port = (uint16_t)v;
+    }
+    return true;
+}
+
+// Resolve `host` unless we already hold its address, honouring the backoff.
+// Returns false without touching DNS while the backoff is running -- that is
+// the part that stops the freeze repeating.
+static bool weatherResolve(const char *host, int &errOut) {
+    if (s_addrValid && strcmp(s_addrFor, host) == 0) return true;
+
+    const uint32_t now = millis();
+    if (s_addrFails > 0 && (int32_t)(now - s_addrNextTryMs) < 0) {
+        errOut = WX_ERR_DNS_HOLD;
+        return false;
+    }
+
+    IPAddress ip;
+    // Literal addresses never reach the resolver: IPAddress::fromString()
+    // short-circuits inside hostByName(), and taking that path here keeps a
+    // numeric server out of the backoff bookkeeping entirely.
+    if (!ip.fromString(host)) {
+        if (!WiFi.hostByName(host, ip) || (uint32_t)ip == 0) {
+            if (s_addrFails < 255) s_addrFails++;
+            s_addrNextTryMs = now + weatherBackoffMs(s_addrFails);
+            weatherForgetAddress();
+            errOut = WX_ERR_DNS;
+            return false;
+        }
+    }
+    s_addrIp = ip;
+    strncpy(s_addrFor, host, sizeof(s_addrFor) - 1);
+    s_addrFor[sizeof(s_addrFor) - 1] = '\0';
+    s_addrValid = true;
+    s_addrFails = 0;
+    return true;
+}
 
 // The last good reading, kept across errors on purpose: a stale number with its
 // age on it is more use than a blank screen when a refresh fails.
@@ -106,29 +202,51 @@ static bool weatherParse(char *body, WeatherReading &out) {
 // ── Fetch ────────────────────────────────────────────────────────────────────
 // Plain HTTP by necessity, exactly as losFetch() is and for the same reason.
 static bool weatherFetch(WeatherReading &out) {
-    if (WiFi.status() != WL_CONNECTED) { s_httpCode = -1; return false; }
+    if (WiFi.status() != WL_CONNECTED) { s_httpCode = WX_ERR_NO_WIFI; return false; }
 
-    char base[sizeof(s_server)];
-    strncpy(base, s_server, sizeof(base));
-    base[sizeof(base) - 1] = '\0';
-    size_t blen = strlen(base);
-    while (blen > 0 && base[blen - 1] == '/') base[--blen] = '\0';
+    char host[sizeof(s_server)];
+    uint16_t port = 80;
+    if (!weatherSplitServer(s_server, host, sizeof(host), port)) {
+        s_httpCode = WX_ERR_BAD_URL;
+        return false;
+    }
 
-    char url[sizeof(base) + 64];
-    snprintf(url, sizeof(url), "%s/weather?lat=%.2f&lon=%.2f&units=%c",
-             base, s_lat, s_lon, s_imperial ? 'i' : 'm');
+    int resolveErr = 0;
+    if (!weatherResolve(host, resolveErr)) { s_httpCode = resolveErr; return false; }
 
+    char uri[96];
+    snprintf(uri, sizeof(uri), "/weather?lat=%.2f&lon=%.2f&units=%c",
+             s_lat, s_lon, s_imperial ? 'i' : 'm');
+
+    // Connected by address, on purpose. This is the call that used to resolve,
+    // and the cache above is the whole reason it no longer does -- so nothing on
+    // this path can take the global DNS lock and stall the UI behind it.
     WiFiClient client;
+    if (!client.connect(s_addrIp, port, 5000)) {
+        // The address we hold no longer answers. Drop it so the next attempt
+        // resolves again rather than retrying a host that has moved.
+        weatherForgetAddress();
+        s_httpCode = WX_ERR_CONNECT;
+        return false;
+    }
+
     HTTPClient http;
     http.setReuse(false);
-    http.setConnectTimeout(5000);
     // 20 s, matching LOS. A cold request is proxy -> upstream API, and the
     // reference proxy allows 12 s upstream plus a retry, so a shorter read
     // timeout would abandon requests that were going to succeed. Affordable
     // because this runs on the worker: a slow fetch costs the "Fetching..."
     // label staying up, not UI latency.
     http.setTimeout(20000);
-    if (!http.begin(client, url)) { s_httpCode = -2; return false; }
+    // The hostname, not the address. HTTPClient::connect() returns early when
+    // the client it was handed is already connected, so this never resolves and
+    // never opens a second socket -- it only decides the Host header, and the
+    // reference proxy is a vhost that answers 404 without the right one.
+    if (!http.begin(client, host, port, uri)) {
+        client.stop();
+        s_httpCode = WX_ERR_BEGIN;
+        return false;
+    }
 
     const int code = http.GET();
     s_httpCode = code;
@@ -143,12 +261,12 @@ static bool weatherFetch(WeatherReading &out) {
 
     // One line of a documented contract; anything much larger is not it, and
     // copying it into the parser's buffer would be the wrong response.
-    if (body.length() == 0 || body.length() > 255) { s_httpCode = -5; return false; }
+    if (body.length() == 0 || body.length() > 255) { s_httpCode = WX_ERR_BODY; return false; }
     char buf[256];
     strncpy(buf, body.c_str(), sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
-    if (!weatherParse(buf, out)) { s_httpCode = -6; return false; }
+    if (!weatherParse(buf, out)) { s_httpCode = WX_ERR_PARSE; return false; }
     out.lat = s_lat;
     out.lon = s_lon;
     out.fetchedMs = millis();
@@ -165,7 +283,7 @@ static void weatherTask(void *) {
     } else {
         // -6 is "answered, but not this contract", which is a different thing
         // to tell the user than a transport failure.
-        s_state = (s_httpCode == -6) ? WEATHER_ERR_BADREPLY : WEATHER_ERR_HTTP;
+        s_state = (s_httpCode == WX_ERR_PARSE) ? WEATHER_ERR_BADREPLY : WEATHER_ERR_HTTP;
     }
     s_taskAlive = false;
     vTaskDelete(nullptr);
@@ -176,6 +294,14 @@ bool weatherRequest(const char *server, double lat, double lon, bool imperial) {
     if (!server || !server[0]) { s_state = WEATHER_ERR_NO_SERVER; return false; }
     if (WiFi.status() != WL_CONNECTED) { s_state = WEATHER_ERR_NO_WIFI; return false; }
 
+    // A changed server address invalidates everything cached about the old one,
+    // backoff included: a new address deserves an immediate try, not the
+    // cooldown the previous one earned.
+    if (strncmp(s_server, server, sizeof(s_server) - 1) != 0) {
+        weatherForgetAddress();
+        s_addrFails = 0;
+        s_addrNextTryMs = 0;
+    }
     strncpy(s_server, server, sizeof(s_server));
     s_server[sizeof(s_server) - 1] = '\0';
     // Rounded here, before it leaves: two decimals is about a kilometre, which
@@ -193,7 +319,7 @@ bool weatherRequest(const char *server, double lat, double lon, bool imperial) {
     if (xTaskCreatePinnedToCore(weatherTask, "weather", 6144, nullptr, 1, nullptr, 0) != pdPASS) {
         s_taskAlive = false;
         s_state = WEATHER_ERR_HTTP;
-        s_httpCode = -4;
+        s_httpCode = WX_ERR_TASK;
         return false;
     }
     return true;

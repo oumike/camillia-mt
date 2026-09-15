@@ -59,7 +59,22 @@ struct WeatherReading {
 bool weatherRequest(const char *server, double lat, double lon, bool imperial);
 
 WeatherState weatherState();
-int          weatherHttpCode();   // last HTTP status, or a negative internal code
+int          weatherHttpCode();   // last HTTP status, or one of the codes below
+
+// Our own failure codes, deliberately below anything HTTPClient can return --
+// its errors run -1..-11. They used to overlap, so a refused connection (-1)
+// and "no Wi-Fi" were the same number and weatherHttpCode() could not tell the
+// screen which had happened.
+static constexpr int WX_ERR_NO_WIFI  = -101;
+static constexpr int WX_ERR_BAD_URL  = -102;
+static constexpr int WX_ERR_DNS      = -103;
+static constexpr int WX_ERR_DNS_HOLD = -104;   // in backoff; not even attempted
+static constexpr int WX_ERR_CONNECT  = -105;
+static constexpr int WX_ERR_BEGIN    = -106;
+static constexpr int WX_ERR_BODY     = -107;
+static constexpr int WX_ERR_PARSE    = -108;
+static constexpr int WX_ERR_TASK     = -109;
+
 void         weatherReset();      // back to WEATHER_IDLE, for closing the screen
 
 // The last good reading, if there has ever been one. Returns true even when the

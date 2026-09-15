@@ -28026,8 +28026,19 @@ static void weatherPoll(lv_timer_t *t) {
             break;
         default: {
             const int code = weatherHttpCode();
-            if (code > 0) snprintf(msg, sizeof(msg), "Weather server error (HTTP %d).", code);
-            else          snprintf(msg, sizeof(msg), "Could not reach the weather server.");
+            // A name that will not resolve is worth saying out loud: it points
+            // at the address in Web Config or at DNS on the network, neither of
+            // which "could not reach" would send anyone to look at.
+            if (code > 0) {
+                snprintf(msg, sizeof(msg), "Weather server error (HTTP %d).", code);
+            } else if (code == WX_ERR_DNS || code == WX_ERR_DNS_HOLD) {
+                snprintf(msg, sizeof(msg),
+                         "Can't resolve the weather server.\nCheck the address and DNS.");
+            } else if (code == WX_ERR_NO_WIFI) {
+                snprintf(msg, sizeof(msg), "Wi-Fi needed to fetch conditions.");
+            } else {
+                snprintf(msg, sizeof(msg), "Could not reach the weather server.");
+            }
             break;
         }
     }

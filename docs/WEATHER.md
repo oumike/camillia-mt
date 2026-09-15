@@ -115,12 +115,20 @@ Every failure says which one it is, rather than one generic error:
 | `Weather server not set` | No address in Web Config |
 | `No position` | No GPS fix and no last-known position to fall back on |
 | `Wi-Fi not connected` | The radio is not on a network |
+| `Can't resolve the weather server` | The name does not resolve — check the address, and DNS on the network |
 | `Proxy unreachable` | Nothing answered at that address |
 | `Proxy error (502)` | The proxy answered, but its upstream did not |
 | `Bad response` | Something answered that is not this contract |
 
 A stale cached reading is shown with its age rather than discarded, so a
 failed refresh still leaves you with the last thing that worked.
+
+**A server that has gone away costs one slow refresh, not a run of them.** The
+address is resolved once and then kept, so ordinary refreshes never touch DNS at
+all; if the name stops resolving the screen backs off — 30 seconds, doubling to
+a ceiling of 15 minutes — instead of retrying every time you look at it. Editing
+the address in Web Config clears that backoff immediately, so a corrected
+address is tried at once rather than waiting one out.
 
 ## What leaves the device
 
