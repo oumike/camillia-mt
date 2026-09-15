@@ -8426,10 +8426,31 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
 }
 
 #if defined(DEVICE_WIO_TRACKER_L2)
+// True between the debounced press and release of the top Wake button.
+// powerSaveShouldNap() reads it, because the hold below has to be *timed* and
+// the expander's interrupt cannot hold the CPU up on its own: reading the
+// button is what clears that line, so it is back to idle while the button is
+// still down. Without this a 1500 ms nap lands mid-hold and the two seconds
+// stretch to three and a half — long enough that the user lets go first.
+static bool s_wioWakeButtonHeld = false;
+
+// Short press puts the device away, a two-second hold brings it back. One rule
+// in every state, so the gesture does not depend on which state the user is
+// looking at — and on a dark panel that is the point, because there is nothing
+// there to read it off.
+//
+// The asymmetry is deliberate rather than cosmetic. Putting the device away is
+// cheap to undo and wants the quick gesture; bringing it back is what a pocket
+// does by accident, and a button held for two seconds is the one input a
+// pocket does not produce.
+//
+// "Away" is requestScreenOff(), so it lands on the lock screen where that is
+// enabled and on a dark panel where it is not. "Back" is whichever of the two
+// the device is currently in.
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     static bool rawPressed = false;
     static bool stablePressed = false;
-    static bool sleepTriggered = false;
+    static bool pressHandled = false;
     static uint32_t changedMs = 0;
     static uint32_t holdStartMs = 0;
     static uint32_t nextReadMs = 0;
@@ -8440,7 +8461,13 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     nextReadMs = nowMs + 15;
 
     bool pressed = false;
-    if (!wioTrackerL2IoReadWakeButton(pressed)) return false;
+    if (!wioTrackerL2IoReadWakeButton(pressed)) {
+        // No reading to time a hold against, and keeping the CPU up on a bus
+        // that is not answering would disable power saving for as long as it
+        // stayed unanswered. Let the nap back in.
+        s_wioWakeButtonHeld = false;
+        return false;
+    }
 
     if (pressed != rawPressed) {
         rawPressed = pressed;
@@ -8448,43 +8475,66 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
     }
     if ((uint32_t)(nowMs - changedMs) >= 25 && stablePressed != rawPressed) {
         stablePressed = rawPressed;
+        s_wioWakeButtonHeld = stablePressed;
         if (stablePressed) {
             holdStartMs = nowMs;
-            sleepTriggered = false;
+            pressHandled = false;
         } else {
+            // Release. The short press can only be recognised here: until the
+            // button comes up there is no telling it from a hold that has not
+            // reached two seconds yet.
+            const bool wasShort = holdStartMs != 0
+                && (uint32_t)(nowMs - holdStartMs) < kScreenSleepHoldMs;
+            const bool claimed = pressHandled;
             holdStartMs = 0;
-            sleepTriggered = false;
+            pressHandled = false;
+            const bool uiIsUp = !s_screenAsleep
+#if FEATURE_LOCK_SCREEN
+                && !s_lockScreenActive
+#endif
+                ;
+            // Nothing to put away unless the UI is actually in front of the
+            // user; a short press on the lock screen or a dark panel is
+            // swallowed, which is what makes the hold the only way back in.
+            if (!claimed && wasShort && uiIsUp) {
+                s_lastActivityMs = nowMs;
+                requestScreenOff("Wio Tracker L2 Wake button press");
+                return true;
+            }
         }
     }
 
-    if (!stablePressed || sleepTriggered) return false;
-    if (s_screenAsleep) {
-        // Straight back to the UI, whether the panel went dark from the lock
-        // screen or from a plain sleep. The button means "give me the device";
-        // making it land on the lock screen would give it two meanings
-        // depending on a state the user cannot see from a dark panel.
-        wakeScreen();
-        sleepTriggered = true;
-        Serial.println("[screen] Wio Tracker L2 Wake button");
-        return true;
-    }
+    if (!stablePressed || pressHandled) return false;
+    if (holdStartMs == 0
+        || (uint32_t)(nowMs - holdStartMs) < kScreenSleepHoldMs) return false;
+
+    // Held long enough to mean "give me the device". Both paths below can
+    // refuse while the post-sleep input guard is still running, and neither
+    // latches when it does — a button kept down takes effect the moment the
+    // guard expires rather than needing a second press.
 #if FEATURE_LOCK_SCREEN
-    // A press unlocks — not a hold, which is how you arrived here. Checked
-    // before the activity timestamp below so unlocking does not also count as
-    // the input that restarts the idle timeout; exitLockScreen() does that.
     if (s_lockScreenActive) {
+        // Unlocking is not counted as the input that restarts the idle
+        // timeout; exitLockScreen() does that itself.
         (void)tryExitLockScreenFromInput(nowMs, true);
-        sleepTriggered = true;
+        if (s_lockScreenActive) return false;
+        pressHandled = true;
+        Serial.println("[screen] Wio Tracker L2 Wake button hold, unlocked");
         return true;
     }
 #endif
-    s_lastActivityMs = nowMs;
-    if (holdStartMs != 0
-        && (uint32_t)(nowMs - holdStartMs) >= kScreenSleepHoldMs) {
-        sleepTriggered = true;
-        requestScreenOff("Wio Tracker L2 Wake button hold");
+    if (s_screenAsleep) {
+        if (!tryWakeScreenFromInput(nowMs)) return false;
+        pressHandled = true;
+        Serial.println("[screen] Wio Tracker L2 Wake button hold, woke panel");
         return true;
     }
+
+    // Awake and unlocked already, so there is nothing to bring back. Claim the
+    // press anyway: it keeps the release above from looking for a meaning in a
+    // button the user has simply been resting on.
+    pressHandled = true;
+    s_lastActivityMs = nowMs;
     return false;
 }
 #endif
@@ -46760,6 +46810,12 @@ static bool powerSaveShouldNap() {
         // not survive that -- it drops and has to reconnect, which is both
         // slower than the nap saved and loses whatever was typed to wake it.
         && !bleKeyboardActive()
+#endif
+#if defined(DEVICE_WIO_TRACKER_L2)
+        // The gesture that brings this board back from a dark panel is a
+        // two-second hold, and the loop has to be awake to time it. Only the
+        // hold itself holds the CPU up; an idle dark panel naps as before.
+        && !s_wioWakeButtonHeld
 #endif
         && WiFi.getMode() == WIFI_OFF     // light sleep + active Wi-Fi don't mix
         // Light sleep stops the UART ISR, so the RX FIFO (128 B) overruns after

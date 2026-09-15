@@ -1054,6 +1054,16 @@ panel dismisses it; other keys, touches and controls are swallowed rather than
 acting on the hidden UI. After the configured dwell, the panel enters its normal
 fully-off state and the next wake returns directly to the UI.
 
+**The Wio Tracker L2 is the exception, and splits the two by press length.** Its
+top Wake button locks on a *short press* and needs a *two-second hold* to come
+back — from the lock screen and from a fully dark panel alike, so the gesture
+does not change with a state a dark panel gives you no way to read. A short
+press while locked or dark does nothing. With **Lock Screen** turned off the
+same pair applies to the panel directly: a press puts it out, a hold brings it
+back. The asymmetry is the point — putting the device away is cheap to undo and
+gets the quick gesture, while waking it is what a pocket does by accident, and a
+button held for two seconds is the one input a pocket does not produce.
+
 - **Lock Screen** enables or disables the intermediate screen. Disabled keeps
   the previous direct-to-sleep behavior.
 - **Lock Screen Off** ranges from 5 to 60 minutes in five-minute steps, plus
