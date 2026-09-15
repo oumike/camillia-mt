@@ -1,19 +1,16 @@
 ### New
-- The home dashboard's footer becomes a notification ticker, listing the messages that arrived while you were away — newest first, scrolling if they don't fit, and **No new messages** when there's nothing waiting (Elecrow ThinkNode M9, T-Lora Pager, and T-Deck / Attaky Mesh Deck with the nav bar switched off).
-- The lock screen now shows GPS and Wi-Fi icons next to the battery: satellite count and green with a fix, Wi-Fi struck through when disconnected, an upload arrow while the device is serving its own access point. They update the moment the state changes (on the T-Deck Pro they move with the clock, since every repaint is an e-paper refresh).
-- The home dashboard carries the same GPS/Wi-Fi pair on Heltec V4 and Seeed Wio Tracker L2, whose bottom bar has no status icons of its own.
-- Device info now reports storage: with a card mounted it shows the card's class, size and the clock speed it answered at; with no card it shows how many probes have failed, whether the last one tried every speed or just one, and when the next retry is due. Boards without a slot show their internal flash instead.
+- The charts band on the home screen is now a swipeable carousel: swipe right or left to move between the charts and two new node pages, wrapping around in both directions.
+- New `RECENTLY HEARD` page lists the nodes heard from most recently, newest first, with how long ago each was heard (`45s`, `12m`, `3h`, `2d`).
+- New `LONGEST SILENT` page lists the nodes that have been quiet the longest, oldest first.
+- The carousel also turns with the hardware controls — the T-Lora Pager's rotary wheel and left/right keys, the ThinkNode M9 and Attaky Mesh Deck d-pads, the T-Deck trackball, and the Cardputer arrow keys.
+- Wide screens show both node lists on a single page, side by side, so twice as many nodes fit at once — T-Deck, Mesh Deck, M9, Wio Tracker L2 and the Heltec boards in landscape; the T-Deck Pro and any board in portrait give each list its own page.
+- Small `<` and `>` markers at the edges of the band show that it turns.
+- The page you were last looking at is remembered until the device restarts, so pressing Home brings you back to it instead of always to the charts.
+- The number of node rows adapts to the screen, so taller panels such as the Pager show several more nodes than a portrait T-Deck Pro.
 
 ### Changed
-- The home dashboard follows your chosen UI theme — background, headings and chart cards from the palette, node name in the accent colour — rather than always being a black slab. The lock screen keeps its fixed look on purpose, and the T-Deck Pro stays black-on-white whatever the theme.
-- Picking a theme now reboots the device, the way Orientation already does: the row reads `Theme: <name> - rebooting...` and the whole interface comes back in the new colours a few seconds later.
-- Choosing **AP** in the WiFi picker now actually brings the access point up — it switches the MQTT bridge off, Web Config on, and reports the address to browse to. With the master WiFi row off it changes nothing and says *enable WiFi first*.
-- The nav bar's unread alert lights the whole **Chats** or **DM** cell instead of just the small icon inside it.
-- On boards that can pair a Bluetooth keyboard, the **Web Config** row now sits directly under **Choose WiFi**, with the Bluetooth keyboard rows after it.
-- T-Deck Pro: the nav bar's **DM** cell is an outline envelope and **Chats** gets its speech balloon back, instead of channels showing a bare `#`.
+- Only nodes actually heard from since boot appear in the node lists — entries restored from flash at startup stay out until a packet arrives, and a page with nothing to show says "Nothing heard yet".
+- Pages slide in the direction you swiped on all boards except the T-Deck Pro, which swaps instantly because every animated frame there is a full e-paper refresh.
 
 ### Fixed
-- Messages arriving on the channel chat has selected are no longer silently marked read while you're sitting on the home dashboard — they now raise the unread mark and reach the lock screen previews and the ticker like any other traffic.
-- Elecrow ThinkNode M9, T-Deck and Attaky Mesh Deck: the chat screen's key-hint line no longer wraps onto a second row the footer can't show; it now reads `(H)ome (C)hat C(f)g (D)M (N)odes Too(l)s`, with **A** still opening Actions.
-- The chat footer's key hints no longer run underneath the status icons when a channel is unread.
-- T-Lora Pager: the footer bar spans the full width, so the bottom of the channel list no longer shows through as a strip beside it, and the hint line uses the same short wording as the other keyboard boards.
+- On the T-Lora Pager, turning the wheel on the home screen quietly scrolled the chat screen hidden underneath; it now turns the carousel instead.

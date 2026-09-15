@@ -198,6 +198,49 @@ Every build with a display except the Cardputer opens a **home dashboard**: the
 lock screen's glance header — node name, clock, conditions, date, battery — over
 two charts of the radio's own health, channel utilisation and SNR/RSSI.
 
+**The band under the header is a carousel of three pages.** The charts are the
+first of them; the other two answer who is out there rather than how the radio
+is doing, from the two ends of one ordering:
+
+| Page | What it shows |
+| --- | --- |
+| `CHANNEL UTIL` / `SNR / RSSI` | The two charts, as before |
+| `RECENTLY HEARD` | The nodes heard from most recently, newest first, each with how long ago |
+| `LONGEST SILENT` | The nodes heard from longest ago, oldest first |
+
+A small `<` and `>` sit at the edges of the band to mark that it turns. They are
+a hint, not buttons — the gesture is what drives it.
+
+Swipe **right** to go forward and **left** to go back; it wraps both ways, so
+you are never more than a swipe or two from any page. Off the touch panel it
+turns on **left/right or up/down**, whichever the board has: the T-Lora Pager's
+rotary wheel, the M9's and Mesh Deck's d-pads, the T-Deck's trackball. Nothing
+on this band scrolls, so both axes are free to mean "turn the page". The page slides
+rather than cutting, so you can see which way the carousel went; the T-Deck Pro
+swaps instantly instead, because every animated frame there is a full e-paper
+refresh.
+
+**On a wide enough panel the two node lists share one page**, side by side, the
+same way the two charts already do — so the carousel is two pages rather than
+three and twice as many nodes are on screen at once. That is the same
+measurement the charts use (a panel 300 px or wider), so the T-Deck, Mesh Deck,
+M9, Wio and the Heltec boards in landscape pair them up, while the T-Deck Pro
+and anything in portrait keeps a page each.
+
+**How many rows a node page shows depends on the panel.** The band is whatever
+height is left under the header, and the pages fill it — a 480x222 Pager fits
+several more rows than a portrait T-Deck Pro. Ages read `45s`, `12m`, `3h`,
+`2d`.
+
+Only nodes actually **heard since boot** are listed. Node records restored from
+flash at startup have no last-heard time until a packet arrives, so they are
+left out rather than filling `LONGEST SILENT` with nodes the device has not
+actually met this session. A page with nothing to show says **Nothing heard
+yet** rather than sitting blank.
+
+Which page you left it on is remembered until the device restarts, so pressing
+Home returns you to the one you were reading rather than always to the charts.
+
 **The dashboard follows the UI theme.** Background, header type and the chart
 cards all come from the theme you picked, so it looks like the rest of the
 device rather than a black slab in the middle of a light theme. The node name

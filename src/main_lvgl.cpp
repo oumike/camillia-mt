@@ -26567,6 +26567,40 @@ static uint32_t s_homeSnrRenderedSeq = 0;
 static uint32_t s_homeRssiRenderedSeq = 0;
 static uint32_t s_homeGlanceMinuteKey = UINT32_MAX;
 
+// ---- Glance carousel ------------------------------------------------------
+// The chart pair is one of three faces of the same band, not a fixture. The
+// other two answer what the charts cannot -- *who* is out there -- from the two
+// ends of one ordering: what was heard most recently, and what has been silent
+// longest. Three pages rather than three screens because the dashboard has
+// exactly one free strip under the header, and all three belong in it.
+//
+// The page is sticky across a rebuild rather than reset to the charts. Home is
+// pressed to glance at something, and a glance surface that forgets which face
+// you left it on makes you swipe back to it every single time.
+enum HomeDashPage : uint8_t {
+    HOME_DASH_PAGE_CHARTS = 0,
+    HOME_DASH_PAGE_RECENT,
+    HOME_DASH_PAGE_OLDEST,
+    HOME_DASH_PAGE_COUNT
+};
+static uint8_t   s_homeDashPage = HOME_DASH_PAGE_CHARTS;
+static lv_obj_t *s_homeDashPageHost = nullptr;
+static lv_obj_t *s_homeDashPageObj[HOME_DASH_PAGE_COUNT] = {};
+// Rows are built once, at whatever count the band turned out to fit, and
+// refilled in place afterwards -- a repaint must not churn LVGL objects on a
+// surface that repaints once a minute forever. The cap is a ceiling on the
+// array, not the answer: homeDashNodeRowCapacity() decides from real geometry.
+static constexpr int kHomeDashNodeRowsMax = 12;
+// [0] is the recent page, [1] the oldest one; indexed by page - RECENT.
+static lv_obj_t *s_homeDashNodeRow[2][kHomeDashNodeRowsMax] = {};
+static int       s_homeDashNodeRows[2] = {0, 0};
+// Refilling a node page walks the node table, so it has to be gated: NodeDB has
+// no sequence counter, and asking it "did you move?" at frame rate would be 250
+// entries a tick. The SNR ring is pushed once per received packet, so its seq
+// is the cheap stand-in for "something arrived" -- paired with the minute tick,
+// which covers the ages, since those creep with the clock and not with traffic.
+static uint32_t  s_homeDashNodeSeq = UINT32_MAX;
+
 static inline bool homeDashboardVisible() { return lvObjValid(s_homeDash); }
 
 #if UI_TOUCH_NAV_BAR
@@ -26757,6 +26791,15 @@ static void closeHomeDashboard() {
     s_homeRssiSeries = nullptr;
     s_homeSnrValue = nullptr;
     s_homeGlanceMinuteKey = UINT32_MAX;
+    s_homeDashPageHost = nullptr;
+    for (int i = 0; i < HOME_DASH_PAGE_COUNT; i++) s_homeDashPageObj[i] = nullptr;
+    for (int p = 0; p < 2; p++) {
+        for (int r = 0; r < kHomeDashNodeRowsMax; r++) s_homeDashNodeRow[p][r] = nullptr;
+        s_homeDashNodeRows[p] = 0;
+    }
+    s_homeDashNodeSeq = UINT32_MAX;
+    // s_homeDashPage deliberately survives: it is which face to rebuild on, not
+    // a child pointer.
 }
 
 // Where the shortcut bar starts, and so how much height the dashboard's content
@@ -26808,6 +26851,16 @@ static bool homeDashSideBySide() {
     return lv_disp_get_hor_res(NULL) >= 300;
 }
 
+// How many faces the carousel has on this panel. A wide one carries both node
+// lists on a single page -- same height, half the width each, so twice as many
+// rows are on screen at once instead of costing a swipe to reach the second
+// half -- exactly as it already carries both charts on one. Narrow panels have
+// no width to split and keep the lists on separate pages, which is the same
+// call homeDashSideBySide() makes for the charts and for the same reason.
+static inline int homeDashPageCount() {
+    return homeDashSideBySide() ? (HOME_DASH_PAGE_COUNT - 1) : HOME_DASH_PAGE_COUNT;
+}
+
 // Series colour, or the absence of one. The e-paper has two tones and spends
 // both on ink and paper, so its series are black and told apart by the dash
 // pattern applyTdeckProChartStyle() installs — exactly as the Tools charts do.
@@ -26820,17 +26873,10 @@ static inline lv_color_t homeDashSeriesColor(uint32_t litHex) {
 #endif
 }
 
-// One of the two chart cards. Returns the card; the chart and its value label
-// come back through the out-parameters so the caller keeps the pointers it
-// needs and this keeps the styling in one place.
-static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
-                                   lv_obj_t **chartOut, lv_obj_t **valueOut) {
-    lv_obj_t *card = lv_obj_create(row);
-    // Grows along whichever axis the row runs, so one card definition serves
-    // both the side-by-side and the stacked arrangement.
-    lv_obj_set_flex_grow(card, 1);
-    if (homeDashSideBySide()) lv_obj_set_height(card, lv_pct(100));
-    else                      lv_obj_set_width(card, lv_pct(100));
+// The card look, in one place: the chart pair and the two node pages are the
+// same slab with different contents, and a second copy of these eleven style
+// calls would drift the first time one of them was touched.
+static void homeDashStyleCard(lv_obj_t *card) {
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 #if defined(DEVICE_TDECK_PRO)
     // The e-paper build draws the glance in black on white, so the modals'
@@ -26850,6 +26896,40 @@ static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
+}
+
+// One carousel page: the whole band, transparent, laid out across or down. The
+// chart page and the node pages are the same frame with different cards in it,
+// so they take identical padding and gaps and line up exactly when one slides
+// in over the other.
+static lv_obj_t *buildHomeDashPage(lv_obj_t *host, bool row) {
+    lv_obj_t *page = lv_obj_create(host);
+    lv_obj_set_size(page, lv_pct(100), lv_pct(100));
+    lv_obj_align(page, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(page, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_set_style_pad_all(page, kTdeckProBandInset / 2, 0);
+    lv_obj_set_style_pad_column(page, 4, 0);
+    lv_obj_set_style_pad_row(page, 4, 0);
+    lv_obj_set_flex_flow(page, row ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    return page;
+}
+
+// One of the two chart cards. Returns the card; the chart and its value label
+// come back through the out-parameters so the caller keeps the pointers it
+// needs and this keeps the styling in one place.
+static lv_obj_t *buildHomeDashCard(lv_obj_t *row, const char *title,
+                                   lv_obj_t **chartOut, lv_obj_t **valueOut) {
+    lv_obj_t *card = lv_obj_create(row);
+    // Grows along whichever axis the row runs, so one card definition serves
+    // both the side-by-side and the stacked arrangement.
+    lv_obj_set_flex_grow(card, 1);
+    if (homeDashSideBySide()) lv_obj_set_height(card, lv_pct(100));
+    else                      lv_obj_set_width(card, lv_pct(100));
+    homeDashStyleCard(card);
 
     // Side by side, the card is tall and narrow: heading, chart, value, three
     // rows. Stacked, it is short and wide and has no third row to spare -- on a
@@ -26983,6 +27063,276 @@ static void refreshHomeDashCharts(bool force) {
     }
 }
 
+// ---- Node pages -----------------------------------------------------------
+
+// Compact relative age. The two node pages are lists of "how long ago", so the
+// absolute local timestamp deviceInfoFormatHeard() switches to once NTP has
+// landed is both wider than the column and the wrong question on this surface.
+static void homeDashFormatAge(uint32_t lastHeardMs, char *out, size_t cap) {
+    // Signed delta: millis() wraps at 49 days, and a stamp taken before the
+    // wrap has to read as old rather than as a preposterous age.
+    const int32_t delta = (int32_t)(millis() - lastHeardMs);
+    const uint32_t ageS = (delta <= 0) ? 0u : ((uint32_t)delta / 1000UL);
+    if (ageS < 60UL)         snprintf(out, cap, "%lus", (unsigned long)ageS);
+    else if (ageS < 3600UL)  snprintf(out, cap, "%lum", (unsigned long)(ageS / 60UL));
+    else if (ageS < 86400UL) snprintf(out, cap, "%luh", (unsigned long)(ageS / 3600UL));
+    else                     snprintf(out, cap, "%lud", (unsigned long)(ageS / 86400UL));
+}
+
+// How many rows the band holds, from the height it actually got rather than a
+// per-board constant: the same code runs against a 222 px Pager band and a
+// portrait Pro one, and the answer differs by more than a row.
+static int homeDashNodeRowCapacity(int pageH) {
+    const int lineH = (int)lv_font_get_line_height(&lv_font_montserrat_10);
+    if (lineH <= 0) return 0;
+    // Card padding top and bottom, the heading line, and the flex gap under it.
+    const int avail = pageH - (2 * 3) - lineH - 2;
+    if (avail < lineH) return 0;
+    int rows = avail / (lineH + 2);
+    if (rows > kHomeDashNodeRowsMax) rows = kHomeDashNodeRowsMax;
+    return (rows < 0) ? 0 : rows;
+}
+
+// The two faces read one field from opposite ends: lastHeardMs, which is set
+// when a packet actually arrived. Entries restored from NVS carry 0 -- "not
+// heard since boot" -- and are skipped rather than sorted to the front of
+// "longest silent", where nodes we have simply not met yet would crowd out the
+// real answer. Same rule buildDeviceInfoLines() applies to its Newest/Oldest
+// pair, so the two surfaces cannot disagree about what "heard" means.
+//
+// Selection scan rather than a sort: `want` is a dozen at the very most against
+// a 250-slot table, and this needs no scratch array to sort in.
+static int homeDashCollectNodes(bool oldest, const NodeEntry **out, int want) {
+    int n = 0;
+    const int total = Nodes.count();
+    for (int pick = 0; pick < want; pick++) {
+        const NodeEntry *best = nullptr;
+        for (int i = 0; i < total; i++) {
+            // at(), not getByRank(): rank sorts favourites to the top, which
+            // would quietly bias both pages towards pinned nodes.
+            const NodeEntry *e = Nodes.at(i);
+            if (!e || e->nodeId == 0 || e->lastHeardMs == 0) continue;
+            bool taken = false;
+            for (int j = 0; j < n; j++) {
+                if (out[j] == e) { taken = true; break; }
+            }
+            if (taken) continue;
+            if (!best) { best = e; continue; }
+            const int32_t d = (int32_t)(e->lastHeardMs - best->lastHeardMs);
+            if (oldest ? (d < 0) : (d > 0)) best = e;
+        }
+        if (!best) break;
+        out[n++] = best;
+    }
+    return n;
+}
+
+// One node list as a card. `listIdx` is 0 for the recent list and 1 for the
+// oldest, and indexes the row arrays regardless of which page it ends up on --
+// on a wide panel both live on one page, on a narrow one they have a page each.
+// `row` says which way the page runs, and so which axis the card grows along;
+// `cardH` is the height it will actually get, which is what decides its rows.
+static void buildHomeDashNodeCard(lv_obj_t *page, int listIdx, const char *title,
+                                  bool row, int cardH) {
+    lv_obj_t *card = lv_obj_create(page);
+    // Same growth rule the chart cards use, so one card definition serves the
+    // side-by-side and the stacked arrangement alike.
+    lv_obj_set_flex_grow(card, 1);
+    if (row) lv_obj_set_height(card, lv_pct(100));
+    else     lv_obj_set_width(card, lv_pct(100));
+    homeDashStyleCard(card);
+
+    lv_obj_t *heading = lv_label_create(card);
+    lv_obj_set_width(heading, lv_pct(100));
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(heading, homeDashMutedInk(), 0);
+    lv_label_set_text(heading, title);
+
+    const int rows = homeDashNodeRowCapacity(cardH);
+    s_homeDashNodeRows[listIdx] = rows;
+    for (int i = 0; i < rows; i++) {
+        // One label per row carrying name and age together, which is how
+        // buildDeviceInfoLines() renders its rows too. A name/value pair in a
+        // flex row would align the ages into a column, at two extra objects a
+        // row on a surface that is already the heaviest thing on the screen.
+        lv_obj_t *r = lv_label_create(card);
+        lv_obj_set_width(r, lv_pct(100));
+        lv_obj_set_style_text_font(r, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(r, homeDashInk(), 0);
+        lv_label_set_long_mode(r, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(r, "");
+        s_homeDashNodeRow[listIdx][i] = r;
+    }
+}
+
+// Always refills: every caller has already decided this is worth doing, and the
+// page in front is the only one that is ever asked.
+static void refreshHomeDashNodePage(int pageIdx) {
+    if (pageIdx < 0 || pageIdx > 1) return;
+    const int rows = s_homeDashNodeRows[pageIdx];
+    if (rows <= 0) return;
+
+    const NodeEntry *picked[kHomeDashNodeRowsMax] = {};
+    const int n = homeDashCollectNodes(/*oldest=*/pageIdx == 1, picked, rows);
+    for (int i = 0; i < rows; i++) {
+        lv_obj_t *row = s_homeDashNodeRow[pageIdx][i];
+        if (!lvObjValid(row)) continue;
+        if (i >= n) {
+            // Said once, on the first empty row, rather than left blank: an
+            // empty page reads as something that failed to load.
+            lv_label_set_text(row, (i == 0) ? "Nothing heard yet" : "");
+            continue;
+        }
+        char idBuf[12], age[12], line[56];
+        const char *name = deviceInfoNodeLabel(picked[i], idBuf, sizeof(idBuf));
+        homeDashFormatAge(picked[i]->lastHeardMs, age, sizeof(age));
+        snprintf(line, sizeof(line), "%s  %s", name, age);
+        lv_label_set_text(row, line);
+    }
+}
+
+// Repaint whatever a given page is carrying. On a wide panel page 1 holds both
+// node lists, so both are refilled; on a narrow one each page holds one.
+static void refreshHomeDashPage(int page) {
+    if (page == HOME_DASH_PAGE_CHARTS) {
+        refreshHomeDashCharts(true);
+        return;
+    }
+    if (homeDashSideBySide()) {
+        refreshHomeDashNodePage(0);
+        refreshHomeDashNodePage(1);
+    } else {
+        refreshHomeDashNodePage(page - HOME_DASH_PAGE_RECENT);
+    }
+}
+
+// A page turn is the one moment this surface has anything worth animating: a
+// slide says which way the carousel went, and a hard cut cannot. Every board
+// gets it except the Pro, where each animated frame is a full e-paper refresh —
+// the same reason HAS_HOME_TICKER leaves that board out of the scrolling ticker.
+// There the swap stays instant, which on a panel that repaints in ~700 ms is
+// not a downgrade but the only sane behaviour.
+#if defined(DEVICE_TDECK_PRO)
+#define HAS_HOME_CAROUSEL_ANIM 0
+#else
+#define HAS_HOME_CAROUSEL_ANIM 1
+#endif
+
+#if HAS_HOME_CAROUSEL_ANIM
+// Long enough to read the direction off, short enough that it is a response
+// rather than a transition to sit through.
+static constexpr uint32_t kHomeDashSlideMs = 180;
+
+static void homeDashSlideXCb(void *obj, int32_t v) {
+    lv_obj_t *o = (lv_obj_t *)obj;
+    if (lvObjValid(o)) lv_obj_set_x(o, v);
+}
+
+// The page that just left, once it is off screen: hidden, and put back at x=0
+// so the next turn finds every page where it expects to.
+static void homeDashSlideDone(lv_anim_t *a) {
+    lv_obj_t *o = (lv_obj_t *)a->var;
+    if (!lvObjValid(o)) return;
+    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(o, 0);
+}
+#endif
+
+// The instant setter, and the thing that settles a slide still in flight: every
+// page ends at x=0 with exactly one of them visible. Called before starting a
+// turn, so a fast double swipe lands somewhere sane rather than leaving a page
+// parked half off screen.
+//
+// No anim teardown needed when the dashboard closes: lv_obj's destructor runs
+// lv_anim_delete(obj, NULL) on every object it frees, children included.
+static void homeDashShowPage(uint8_t page) {
+    if (page >= HOME_DASH_PAGE_COUNT) page = HOME_DASH_PAGE_CHARTS;
+    s_homeDashPage = page;
+    for (int i = 0; i < HOME_DASH_PAGE_COUNT; i++) {
+        lv_obj_t *o = s_homeDashPageObj[i];
+        if (!lvObjValid(o)) continue;
+#if HAS_HOME_CAROUSEL_ANIM
+        // Deleting an animation does not fire its completed_cb, so this cannot
+        // re-enter through homeDashSlideDone().
+        lv_anim_delete(o, homeDashSlideXCb);
+        lv_obj_set_x(o, 0);
+#endif
+        if (i == (int)page) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+        else                lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// One step round the carousel: +1 is the way a rightward swipe goes (charts ->
+// recent -> oldest -> charts), -1 the other way. Wrapping is the point -- three
+// pages with no ends means neither direction ever dead-stops.
+static void homeDashCarouselGo(int delta) {
+    if (!homeDashboardVisible() || !lvObjValid(s_homeDashPageHost)) return;
+    const int pages = homeDashPageCount();
+    int next = ((int)s_homeDashPage + delta) % pages;
+    if (next < 0) next += pages;
+    if (next == (int)s_homeDashPage) return;
+
+    // Filled before it is shown, so the page arrives already carrying its
+    // content instead of sliding in blank and populating a frame later. Painted
+    // now rather than at the minute tick the header runs on: this is a direct
+    // answer to a gesture, and on the Pro a page turn is the one thing an
+    // e-paper refresh here is actually worth.
+    refreshHomeDashPage(next);
+
+#if HAS_HOME_CAROUSEL_ANIM
+    lv_obj_t *from = s_homeDashPageObj[s_homeDashPage];
+    lv_obj_t *to   = s_homeDashPageObj[next];
+    // The host's width is the slide distance, so it has to be a real number
+    // before the animation is built — right after a rebuild it is not yet.
+    lv_obj_update_layout(s_homeDashPageHost);
+    const int32_t w = lv_obj_get_width(s_homeDashPageHost);
+    if (w > 0 && lvObjValid(from) && lvObjValid(to)) {
+        homeDashShowPage(s_homeDashPage);   // settle anything mid-flight
+
+        // The motion follows the finger: a rightward swipe carries the page you
+        // were on out to the right and brings the next one in from the left.
+        // Children are clipped to the host, so neither is ever drawn outside
+        // the band.
+        const int32_t outTo  = (delta > 0) ? w : -w;
+        const int32_t inFrom = -outTo;
+
+        lv_obj_set_x(to, inFrom);
+        lv_obj_clear_flag(to, LV_OBJ_FLAG_HIDDEN);
+
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_duration(&a, kHomeDashSlideMs);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&a, homeDashSlideXCb);
+
+        lv_anim_set_var(&a, from);
+        lv_anim_set_values(&a, 0, outTo);
+        lv_anim_set_completed_cb(&a, homeDashSlideDone);
+        lv_anim_start(&a);
+
+        lv_anim_set_var(&a, to);
+        lv_anim_set_values(&a, inFrom, 0);
+        lv_anim_set_completed_cb(&a, nullptr);
+        lv_anim_start(&a);
+
+        // Set directly rather than through homeDashShowPage(): that would hide
+        // the outgoing page this instant and there would be nothing to watch.
+        s_homeDashPage = (uint8_t)next;
+        return;
+    }
+#endif
+    homeDashShowPage((uint8_t)next);
+}
+
+static void homeDashGestureCb(lv_event_t *e) {
+    LV_UNUSED(e);
+    const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    // Vertical gestures are deliberately left alone. Nothing on this band
+    // scrolls, but claiming them would swallow whatever is put here next.
+    if (dir == LV_DIR_RIGHT)     homeDashCarouselGo(+1);
+    else if (dir == LV_DIR_LEFT) homeDashCarouselGo(-1);
+}
+
 static void refreshHomeDashboard(bool force) {
     if (!homeDashboardVisible()) return;
 
@@ -27016,19 +27366,34 @@ static void refreshHomeDashboard(bool force) {
     }
 #endif
 
+    // Only the face in front is repainted. The other two are refilled from the
+    // same rings and the same node table the moment they come round, so keeping
+    // them current while they are hidden is work nobody can see.
 #if defined(DEVICE_TDECK_PRO)
     // E-paper, and this is the boot screen. A chart redraw here is a panel
     // refresh — ~700 ms of parked loop() and real battery — and the chart
     // sequences move on every packet received, so following them would have the
     // Pro repainting itself all day while nobody is looking at it. It gets the
     // charts on the header's cadence instead: once a minute, in the refresh the
-    // clock was going to cost anyway.
+    // clock was going to cost anyway. The node pages ride the same minute for
+    // the same reason.
     //
     // The Tools chart modals keep their per-packet updates. You open those to
     // watch the radio; this one opens itself.
-    if (force || minuteRolled) refreshHomeDashCharts(true);
+    if (force || minuteRolled) refreshHomeDashPage((int)s_homeDashPage);
 #else
-    refreshHomeDashCharts(force);
+    if (s_homeDashPage == HOME_DASH_PAGE_CHARTS) {
+        refreshHomeDashCharts(force);
+    } else {
+        // Two reasons to refill, and nothing walks the node table without one:
+        // a packet arrived (the SNR ring's seq moved), or the minute rolled and
+        // the ages on screen are now wrong.
+        const bool arrived = (s_snrHist.seq != s_homeDashNodeSeq);
+        if (force || minuteRolled || arrived) {
+            s_homeDashNodeSeq = s_snrHist.seq;
+            refreshHomeDashPage((int)s_homeDashPage);
+        }
+    }
 #endif
 }
 
@@ -27082,6 +27447,17 @@ static void openHomeDashboard() {
     // still built underneath, and on a board with a touch panel a press would
     // otherwise land on a button nobody can see.
     lv_obj_add_flag(s_homeDash, LV_OBJ_FLAG_CLICKABLE);
+    // One handler for the whole carousel, and the flag clear that makes it
+    // reachable. LVGL's indev_gesture() walks *up* from the pressed object for
+    // as long as each one HAS LV_OBJ_FLAG_GESTURE_BUBBLE, and delivers to the
+    // first that does not. LVGL sets that flag on every object with a parent,
+    // so leaving it on here sent every swipe past the dashboard to the root
+    // screen — the first parentless object above it — and this callback never
+    // ran. Clearing it on the dashboard alone makes it the place the walk
+    // stops: children (charts, cards, node rows) still bubble up to it, and it
+    // ends here rather than at the screen.
+    lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(s_homeDash, homeDashGestureCb, LV_EVENT_GESTURE, nullptr);
 
     buildGlanceHeader(s_homeDash, s_homeGlance, !homeDashFooterShowsStatus(),
                       /*themed=*/true);
@@ -27108,19 +27484,49 @@ static void openHomeDashboard() {
         return;
     }
 
-    lv_obj_t *chartRow = lv_obj_create(s_homeDash);
-    lv_obj_set_size(chartRow, lv_pct(100), chartsH);
-    lv_obj_align(chartRow, LV_ALIGN_TOP_LEFT, 0, chartsTop);
-    lv_obj_clear_flag(chartRow, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_opa(chartRow, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(chartRow, 0, 0);
-    lv_obj_set_style_pad_all(chartRow, kTdeckProBandInset / 2, 0);
-    lv_obj_set_style_pad_column(chartRow, 4, 0);
-    lv_obj_set_style_pad_row(chartRow, 4, 0);
-    lv_obj_set_flex_flow(chartRow,
-                         homeDashSideBySide() ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(chartRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
+    // The band under the header is a carousel host now: every page occupies the
+    // same rectangle and one of them is visible. The host owns the geometry
+    // that used to be the chart row's, and the chart row becomes page 0 at full
+    // size inside it — so nothing about how the two cards lay themselves out
+    // moves. How many pages follow it is homeDashPageCount()'s call.
+    // Gutters for the carousel arrows. The host is inset by them so no card
+    // ever runs under a chevron, and the chevrons sit outside the host — they
+    // stay put while the pages slide beneath them, and are never clipped or
+    // carried off screen with one.
+    const int arrowGutter = 11;
+    lv_obj_t *pageHost = lv_obj_create(s_homeDash);
+    lv_obj_remove_style_all(pageHost);
+    lv_obj_set_size(pageHost, lv_disp_get_hor_res(NULL) - (2 * arrowGutter), chartsH);
+    lv_obj_align(pageHost, LV_ALIGN_TOP_LEFT, arrowGutter, chartsTop);
+    lv_obj_clear_flag(pageHost, LV_OBJ_FLAG_SCROLLABLE);
+    s_homeDashPageHost = pageHost;
+
+    // The affordance. Without them page 0 is indistinguishable from the fixed
+    // pair of charts this band used to be, and nothing on screen suggests it
+    // turns. Labels rather than buttons: they mark the gesture instead of
+    // offering a second way to perform it, and a tap target here would sit over
+    // the pages and complicate what the swipe handler sees.
+    {
+        const int arrowY = chartsTop
+            + (chartsH - (int)lv_font_get_line_height(&lv_font_montserrat_12)) / 2;
+        for (int side = 0; side < 2; side++) {
+            lv_obj_t *arrow = lv_label_create(s_homeDash);
+            lv_obj_set_style_text_font(arrow, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(arrow, homeDashMutedInk(), 0);
+#if !defined(DEVICE_TDECK_PRO)
+            // A step back from the headings, so they read as a hint rather than
+            // competing with the cards. Not on the Pro: partial opacity there
+            // dithers into a chequer of the two tones it has.
+            lv_obj_set_style_text_opa(arrow, LV_OPA_60, 0);
+#endif
+            lv_label_set_text(arrow, side == 0 ? LV_SYMBOL_LEFT : LV_SYMBOL_RIGHT);
+            lv_obj_align(arrow, side == 0 ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
+                         side == 0 ? 1 : -1, arrowY);
+        }
+    }
+
+    const bool sideBySide = homeDashSideBySide();
+    lv_obj_t *chartRow = buildHomeDashPage(pageHost, sideBySide);
 
     buildHomeDashCard(chartRow, "CHANNEL UTIL", &s_homeChUtilChart, &s_homeChUtilValue);
     // Same colours the Tools modal uses for the same two series, so the legend
@@ -27150,6 +27556,35 @@ static void openHomeDashboard() {
     if (s_homeRssiSeries) {
         lv_chart_set_all_value(s_homeSnrChart, s_homeRssiSeries, LV_CHART_POINT_NONE);
     }
+
+    s_homeDashPageObj[HOME_DASH_PAGE_CHARTS] = chartRow;
+
+    // A card gets the band less its page's own padding, and that height is what
+    // decides how many rows it fits.
+    const int nodeCardH = chartsH - kTdeckProBandInset;
+    if (sideBySide) {
+        // Both lists on one page, side by side like the charts above them. Two
+        // faces instead of three, and twice the rows visible at once.
+        lv_obj_t *nodePage = buildHomeDashPage(pageHost, true);
+        buildHomeDashNodeCard(nodePage, 0, "RECENTLY HEARD", true, nodeCardH);
+        buildHomeDashNodeCard(nodePage, 1, "LONGEST SILENT", true, nodeCardH);
+        s_homeDashPageObj[HOME_DASH_PAGE_RECENT] = nodePage;
+    } else {
+        lv_obj_t *recentPage = buildHomeDashPage(pageHost, false);
+        buildHomeDashNodeCard(recentPage, 0, "RECENTLY HEARD", false, nodeCardH);
+        s_homeDashPageObj[HOME_DASH_PAGE_RECENT] = recentPage;
+
+        lv_obj_t *oldestPage = buildHomeDashPage(pageHost, false);
+        buildHomeDashNodeCard(oldestPage, 1, "LONGEST SILENT", false, nodeCardH);
+        s_homeDashPageObj[HOME_DASH_PAGE_OLDEST] = oldestPage;
+    }
+
+    // The remembered page can outlive the layout that had it: the Heltec and
+    // Wio boards rotate on a setting, and landscape has one fewer face than
+    // portrait. Left alone, coming back in landscape on page 2 would show a
+    // page this build never made.
+    if ((int)s_homeDashPage >= homeDashPageCount()) s_homeDashPage = HOME_DASH_PAGE_CHARTS;
+    homeDashShowPage(s_homeDashPage);
 
     s_homeGlanceMinuteKey = UINT32_MAX;   // force the first header paint
     refreshHomeDashboard(true);
@@ -35636,6 +36071,38 @@ static void pumpKeyboardInput() {
         // destination, never something that could be typed.
 #if HAS_GLOBAL_NAV_SHORTCUTS
         if (handleGlobalNavigationKey(k)) continue;
+#endif
+
+#if HAS_HOME_DASHBOARD
+        // The glance carousel, on every board at once. KEY_PREV_CHAN and
+        // KEY_NEXT_CHAN are what the T-Deck trackball's horizontal, the Pager's
+        // wheel and LEFT/RIGHT keys, the M9 and Mesh Deck d-pads and the
+        // Cardputer's arrows all already arrive as, so one branch here is the
+        // whole non-touch story rather than four per-board bindings.
+        //
+        // Deliberately ahead of the M9 fold below, which collapses this pair
+        // into KEY_SCROLL_UP/DN on any surface it does not consider genuinely
+        // two-dimensional. The band is exactly that, and taking the keys here
+        // leaves that list alone.
+        //
+        // Safe to take before the chat screen sees them: chat is not foreground
+        // while the dashboard is up (see chatScreenIsForeground()), so the
+        // channel these would otherwise switch is not one anyone is looking at.
+        if (homeDashboardVisible()) {
+            // The vertical pair as well as the horizontal one, because the
+            // Pager has no horizontal control to offer: its rotary wheel is the
+            // whole of its navigation and emits KEY_SCROLL_UP/DN, and the block
+            // in keyboard.cpp that turns arrows into KEY_PREV_CHAN/NEXT_CHAN is
+            // compiled out on that board (`#if !defined(DEVICE_TLORA_PAGER_TFT)`).
+            // Listening for the horizontal pair alone left the Pager unable to
+            // turn the carousel at all.
+            //
+            // Free to take: nothing on this surface scrolls, so the scroll keys
+            // had no other job here — and until now the wheel was quietly
+            // scrolling the chat screen that is still built underneath.
+            if (k == KEY_NEXT_CHAN || k == KEY_SCROLL_DN) { homeDashCarouselGo(+1); continue; }
+            if (k == KEY_PREV_CHAN || k == KEY_SCROLL_UP) { homeDashCarouselGo(-1); continue; }
+        }
 #endif
 
         // Every modal that feeds keys into a textarea belongs here. Anything
