@@ -258,6 +258,7 @@ struct GlanceHeader {
 #if HAS_WEATHER
     lv_obj_t *wxDesc;   // conditions, opposite the node name
     lv_obj_t *wxTemp;   // temperature, opposite the clock
+    lv_obj_t *wxRule;   // the divider between the two columns, when there are two
 #endif
     // What the two icons above are currently showing, from glanceStatusIcons-
     // Key(). The clock and the battery are worth a repaint once a minute; GPS
@@ -7176,6 +7177,41 @@ static void paintGlanceStatusIcons(GlanceHeader &w) {
 
 // Repaint a glance header from the current clock, weather, battery and config.
 // The caller decides when this runs; this decides what it says.
+#if HAS_WEATHER
+// Where the node name and the clock sit, which depends on whether there is
+// anything to put beside them. With a reading they are the left half of a
+// two-column hero block, the sky and the temperature mirroring them on the
+// right. Without one that column is empty, and a pair still pinned to the left
+// edge reads as a layout with something missing from it rather than as a
+// layout — so they take the whole width and centre, the way the builds with no
+// weather support at all have always drawn them.
+//
+// Both offsets are the ones buildGlanceHeader() would have used, kept here
+// rather than duplicated at the two call sites: this is the only code that
+// decides where these two labels go.
+static void alignGlanceHero(GlanceHeader &w, bool wxShown) {
+    if (!lvObjValid(w.node) || !lvObjValid(w.time)) return;
+    // The divider only means something while there are two columns to divide.
+    // Centred with nothing to its right it would read as the panel being split
+    // down the middle for no reason.
+    if (lvObjValid(w.wxRule)) {
+        if (wxShown) lv_obj_clear_flag(w.wxRule, LV_OBJ_FLAG_HIDDEN);
+        else         lv_obj_add_flag(w.wxRule, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (wxShown) {
+        lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_LEFT, 0);
+        lv_obj_align(w.node, LV_ALIGN_TOP_LEFT,
+                     kTdeckProBandInset, kTdeckProNodeTop);
+        lv_obj_align(w.time, LV_ALIGN_TOP_LEFT,
+                     kTdeckProBandInset, kTdeckProTimeTop);
+    } else {
+        lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(w.node, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
+        lv_obj_align(w.time, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
+    }
+}
+#endif
+
 static void updateGlanceHeader(GlanceHeader &w) {
     if (!w.node || !w.time || !w.date) return;
 
@@ -7224,6 +7260,10 @@ static void updateGlanceHeader(GlanceHeader &w) {
 
     const bool wxFresh = weatherLatest(wx) && weatherAgeMs() < kWeatherGlanceMaxAgeMs;
     if (lvObjValid(w.wxTemp) && lvObjValid(w.wxDesc)) {
+        // Read before the flag is touched below: the label's own hidden state
+        // is what the header is currently laid out for, so it answers "has this
+        // changed" without a second field to keep in step with it.
+        const bool wasShown = !lv_obj_has_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
         if (wxFresh) {
             char t[16];
             snprintf(t, sizeof(t), "%d%s", wx.temp, wx.tempUnit);
@@ -7238,6 +7278,10 @@ static void updateGlanceHeader(GlanceHeader &w) {
             lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(w.wxDesc, LV_OBJ_FLAG_HIDDEN);
         }
+        // The hero pair moves with it. Only on a change: an align call
+        // invalidates the object, and on the Pro's e-paper that is a real
+        // refresh to spend once a minute on a layout that has not moved.
+        if (wxFresh != wasShown) alignGlanceHero(w, wxFresh);
     }
 #endif
 
@@ -7357,13 +7401,13 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_font(w.node, kSleepOverlayNodeFont, 0);
     lv_obj_set_style_text_color(w.node, pal.nodeInk, 0);
 #if HAS_WEATHER
-    // Left half of the hero block, with conditions opposite it. Two rows, each
+    // Left half of the hero block when there is a reading to sit opposite it,
+    // and the middle of the panel when there is not. Two rows either way, each
     // with a small label and a large one: node name over the clock on this
-    // side, sky over the temperature on the other.
-    lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_LEFT, 0);
+    // side, sky over the temperature on the other. Placed by alignGlanceHero()
+    // below, once both labels of the pair exist — it owns that choice, and it
+    // is remade whenever the reading comes or goes.
     lv_label_set_long_mode(w.node, LV_LABEL_LONG_DOT);
-    lv_obj_align(w.node, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProNodeTop);
 #else
     lv_obj_set_style_text_align(w.node, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(w.node, LV_LABEL_LONG_DOT);
@@ -7374,9 +7418,6 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_font(w.time, kSleepOverlayTimeFont, 0);
     lv_obj_set_style_text_color(w.time, pal.clockInk, 0);
 #if HAS_WEATHER
-    lv_obj_align(w.time, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProTimeTop);
-
     // The opposite column. Same two rows, mirrored: the sky on the node's row,
     // the temperature on the clock's.
     w.wxDesc = lv_label_create(parent);
@@ -7395,6 +7436,46 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_align(w.wxTemp, LV_ALIGN_TOP_RIGHT,
                  -kTdeckProBandInset, kTdeckProTimeTop);
     lv_obj_add_flag(w.wxTemp, LV_OBJ_FLAG_HIDDEN);
+
+    // The seam between the two columns. Same ink, same weight and the same
+    // e-paper exemption as the rule under the wordmark above -- one divider
+    // idiom on this header, turned on its side.
+    //
+    // It spans the hero block exactly: from the top of the node name's line box
+    // to the bottom of the clock's, which is the taller of the two columns in
+    // every layout (the temperature's face is never larger than the clock's).
+    // Measured from the fonts rather than given a constant, because the six
+    // layouts put these rows in six different places.
+    //
+    // Cleared before the guard below, not left to the guard: showTdeckProSleep-
+    // Clock() rebuilds the overlay without resetting the struct, so every field
+    // here has to be assigned on every path or it keeps a pointer into the
+    // header that was just deleted.
+    w.wxRule = nullptr;
+    const int heroH = (kTdeckProTimeTop - kTdeckProNodeTop)
+                    + (int)lv_font_get_line_height(kSleepOverlayTimeFont);
+    if (heroH > 1) {
+        w.wxRule = lv_obj_create(parent);
+        lv_obj_set_width(w.wxRule, 1);
+        lv_obj_set_height(w.wxRule, heroH);
+        lv_obj_clear_flag(w.wxRule, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(w.wxRule, 0, 0);
+        lv_obj_set_style_radius(w.wxRule, 0, 0);
+        lv_obj_set_style_pad_all(w.wxRule, 0, 0);
+        lv_obj_set_style_bg_color(w.wxRule, pal.ink, 0);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_bg_opa(w.wxRule, LV_OPA_COVER, 0);
+#else
+        lv_obj_set_style_bg_opa(w.wxRule, LV_OPA_40, 0);
+#endif
+        lv_obj_align(w.wxRule, LV_ALIGN_TOP_MID, 0, kTdeckProNodeTop);
+        lv_obj_add_flag(w.wxRule, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Centred to start with, because the three labels above start hidden. The
+    // first repaint that finds a fresh reading moves the pair left; until then
+    // a header with no weather is drawn as one that never had any.
+    alignGlanceHero(w, /*wxShown=*/false);
 #else
     lv_obj_align(w.time, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
 #endif

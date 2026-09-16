@@ -555,6 +555,13 @@ conditions only — no forecast.
   send nothing at all, leave the Weather Server field empty
 - A reading that fails to refresh is kept and shown with its age rather than
   discarded, so a dropped Wi-Fi connection leaves you the last thing that worked
+- **The lock screen and home dashboard show the reading beside the clock**, sky
+  on the node name's row and temperature on the clock's, with a **vertical rule
+  down the middle** separating the two columns. With no reading — never fetched,
+  no server set, or the cached one too old to believe — that half is empty, so
+  the rule disappears and the node name and clock **centre on the panel**
+  instead of staying pinned to the left with dead space beside them. Both move
+  back when a reading lands
 - Every failure names what to change: no server set, no position, no Wi-Fi, the
   proxy unreachable, or the proxy answering with something that is not weather
 - Available on every board. The Cardputer has no Utilities tab in its lite web
