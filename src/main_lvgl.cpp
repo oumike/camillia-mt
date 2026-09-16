@@ -26876,6 +26876,42 @@ static constexpr uint32_t kLockCarouselDwellMs = 30000;
 
 static inline bool homeDashboardVisible() { return lvObjValid(s_homeDash); }
 
+// True only when the dashboard is also the surface on top. homeDashboardVisible()
+// answers existence, and the two part company the moment a full-screen view is
+// opened over a dashboard that was never closed. That is not a corner case: the
+// letter shortcuts in the chat fall-through (N for Nodes, F for Config, D, L, A)
+// call their openers directly instead of going through prepareGlobalNavigation(),
+// which is the only thing that closes the dashboard on the way somewhere else.
+// So the modal lands on top and s_homeDash is still alive underneath it.
+//
+// Asked by z-order rather than by naming the surfaces that can cover the
+// dashboard. A list would have to be complete to be correct, and an entry left
+// out of it costs exactly what this function exists to prevent: keys silently
+// swallowed on a screen nobody thought to add. Every surface that can cover the
+// dashboard is a child of s_rootScreen built after it, so "is anything stacked
+// above" is the same question asked in a way that cannot fall behind.
+//
+// The bar is the one deliberate exception. homeDashRaiseBar() puts it above the
+// dashboard on purpose and it is meant to be visible there, so it is not
+// something covering anything. Hidden siblings are skipped for the same reason:
+// they cover nothing either.
+static bool homeDashboardIsForeground() {
+    if (!homeDashboardVisible()) return false;
+    lv_obj_t *parent = lv_obj_get_parent(s_homeDash);
+    if (!parent) return false;
+
+    const int32_t dashIdx = lv_obj_get_index(s_homeDash);
+    if (dashIdx < 0) return false;
+    const uint32_t childCount = lv_obj_get_child_count(parent);
+    for (uint32_t i = (uint32_t)dashIdx + 1; i < childCount; i++) {
+        lv_obj_t *above = lv_obj_get_child(parent, (int32_t)i);
+        if (!above || above == s_chatShortcutBar) continue;
+        if (lv_obj_has_flag(above, LV_OBJ_FLAG_HIDDEN)) continue;
+        return false;
+    }
+    return true;
+}
+
 #if UI_TOUCH_NAV_BAR
 // Which of the two glance surfaces the shared bar should be lighting. Home and
 // Chats are one bar's worth of cells over two screens that swap without the bar
@@ -36635,7 +36671,17 @@ static void pumpKeyboardInput() {
         // Safe to take before the chat screen sees them: chat is not foreground
         // while the dashboard is up (see chatScreenIsForeground()), so the
         // channel these would otherwise switch is not one anyone is reading.
-        if (homeDashboardVisible() && !typingContext) {
+        //
+        // Foreground, not merely alive. Only the chat screen underneath was
+        // considered when this branch was written, and nothing accounted for a
+        // full-screen view opened on *top* of a live dashboard — which is what
+        // N and F do, since they reach their openers without passing through
+        // prepareGlobalNavigation(). Guarded on existence alone, this took all
+        // six navigation tokens away from Nodes and Config before either
+        // handler could see one, and on the M9 those letters are the only route
+        // in: neither screen has a button there, the board has no touch, and the
+        // device boots onto the dashboard. Both screens simply would not scroll.
+        if (homeDashboardIsForeground() && !typingContext) {
             if (k == KEY_NEXT_CHAN || k == KEY_SCROLL_DN
                 || k == 'k' || k == 'K') { homeDashCarouselGo(+1); continue; }
             if (k == KEY_PREV_CHAN || k == KEY_SCROLL_UP
