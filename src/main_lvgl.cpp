@@ -2829,8 +2829,6 @@ enum CfgActionId {
     CFG_ACTION_NAV_BAR,
     #endif
     CFG_ACTION_BATT_CAL,
-    CFG_ACTION_ANNOUNCE,
-    CFG_ACTION_TELEMETRY,
     CFG_ACTION_NEIGHBOR_INFO,
     CFG_ACTION_MESH_BEACON,
     CFG_ACTION_SNF_CLIENT,
@@ -4692,12 +4690,6 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                 snprintf(buf, bufLen, "Battery Calibration: %s",
                          battTrimText((int)s_cfg.battCalTrim, trimBuf, sizeof(trimBuf)));
             }
-            break;
-        case CFG_ACTION_ANNOUNCE:
-            snprintf(buf, bufLen, "Send NODEINFO Broadcast");
-            break;
-        case CFG_ACTION_TELEMETRY:
-            snprintf(buf, bufLen, "Send Telemetry Now");
             break;
         case CFG_ACTION_NEIGHBOR_INFO:
             snprintf(buf, bufLen, "Neighborhood Info: %s", s_cfg.neighborInfoEnabled ? "On" : "Off");
@@ -11419,8 +11411,6 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ARCHIVE_NODES;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SHOW_ARCHIVED;
 #endif
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_ANNOUNCE;
-    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_TELEMETRY;
     // Mildest first: keeping the pinned contacts is the common case, and the
     // total wipe sits below it.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_CLEAR_NODES_KEEP_FAVS;
@@ -14890,6 +14880,11 @@ static constexpr int kChanModalCellPct = (kChanModalCols > 1) ? 49 : 100;
 //     Discovery |
 // (Cardputer has neither Discovery nor MQTT, leaving it SNR/RSSI and ChUtil in
 // the left column with Beacons alone in the right.)
+//
+// Announce is last on the grid and is the one entry that is not a screen: it
+// transmits instead of opening something. It sits at the end so the tools that
+// do open a screen keep the positions people have learned, and because an
+// action is the thing you least want to land on by overshooting.
 enum LiveTool : uint8_t {
     LIVE_TOOL_LIVE = 0,
     LIVE_TOOL_SNR,
@@ -14904,6 +14899,7 @@ enum LiveTool : uint8_t {
 #if FEATURE_MQTT_MONITOR
     LIVE_TOOL_MQTT,
 #endif
+    LIVE_TOOL_ANNOUNCE,
     LIVE_TOOL_COUNT
 };
 static constexpr int kLiveToolRowsPerCol =
@@ -14922,6 +14918,7 @@ static constexpr char kLiveToolShortcuts[LIVE_TOOL_COUNT] = {
 #if FEATURE_MQTT_MONITOR
     'M',
 #endif
+    'A',
 };
 
 // ── Live traffic filter ──────────────────────────────────────────────────────
@@ -25815,6 +25812,50 @@ static bool liveToolEnabled(int tool) {
     return true;
 }
 
+// One press, both announcements — the pair that used to be "Send NODEINFO
+// Broadcast" and "Send Telemetry Now" at the bottom of Config. They are
+// together here because they were never really separate in use: telling the
+// mesh who you are and what your battery is doing is one act of introducing
+// yourself, and anyone who pressed one went on to press the other.
+//
+// Both calls are kept rather than collapsed to the announce alone, which does
+// already nudge telemetry along (see the forceAnnounce block in
+// serviceNodeAnnounce). That nudge is conditional: it only clears the telemetry
+// timer when telDeviceEnabled is set, whereas webCfgQueueTelemetry() forces a
+// device packet whichever way that setting is left. Dropping it would quietly
+// make this button do less than the old Config row did on exactly the builds
+// that had periodic telemetry turned off.
+static constexpr uint32_t kToolAnnounceCooldownMs = 30000;
+static uint32_t s_toolAnnounceNextMs = 0;
+
+// Deliberately not a disabled row: the grid is built once when Tools opens, so
+// a row greyed out on that basis would still claim to be unavailable thirty
+// seconds later when it was not. Answering the press with the time left is
+// honest at the moment it is read, and needs nothing repainting.
+static void liveToolsAnnounceNow() {
+    const uint32_t now = millis();
+    // Signed difference, so this stays correct across the millis() wrap — and
+    // it needs no "never pressed" sentinel, because a zero deadline is simply
+    // one that every real now has already passed.
+    if ((int32_t)(now - s_toolAnnounceNextMs) < 0) {
+        const uint32_t leftMs = s_toolAnnounceNextMs - now;
+        char msg[64];
+        // Rounded up: a press with 200 ms left should not be answered with "0s".
+        snprintf(msg, sizeof(msg), "Just announced. Try again in %us.",
+                 (unsigned)((leftMs + 999) / 1000));
+        openCfgActionMessageModal(msg);
+        return;
+    }
+
+    webCfgQueueAnnounce();
+    webCfgQueueTelemetry();
+    // Armed on the press, not on the transmission. The main loop may hold both
+    // for a radio that is not ready yet, and a user who cannot see that should
+    // not be able to stack up queued announcements by pressing again.
+    s_toolAnnounceNextMs = now + kToolAnnounceCooldownMs;
+    openCfgActionMessageModal("NODEINFO + telemetry queued.");
+}
+
 // Opening a tool drops Tools rather than stacking it underneath, so backing out
 // of a chart lands on whatever Tools was opened over: Live when it was opened
 // from there, the chat screen when it was reached from the nav bar or L.
@@ -25840,6 +25881,10 @@ static void liveToolsActivate(int tool) {
 #if FEATURE_MQTT_MONITOR
         case LIVE_TOOL_MQTT:      openMqttMonitorModal();  break;
 #endif
+        // Transmits rather than opening anything. Tools is already closed by
+        // the time this runs, so the popup it raises stands on whatever Tools
+        // was opened over, and dismissing it lands there.
+        case LIVE_TOOL_ANNOUNCE:  liveToolsAnnounceNow();  break;
         default: break;
     }
 }
@@ -25916,6 +25961,7 @@ static void openLiveToolsModal() {
 #if FEATURE_MQTT_MONITOR
         "MQTT",
 #endif
+        "Announce",
     };
 #else
     lv_obj_t *hint = lv_label_create(s_liveToolsModal);
@@ -25937,6 +25983,7 @@ static void openLiveToolsModal() {
 #if FEATURE_MQTT_MONITOR
         "(M)QTT",
 #endif
+        "(A)nnounce",
     };
 #endif
 
@@ -34172,18 +34219,6 @@ static void performCfgAction(int actionId) {
             openCfgVolumeModal();       // previews audibly, no reboot
             break;
 #endif
-
-        case CFG_ACTION_ANNOUNCE:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ANNOUNCE");
-            webCfgQueueAnnounce();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "NODEINFO broadcast queued.");
-            break;
-
-        case CFG_ACTION_TELEMETRY:
-            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec TELEMETRY");
-            webCfgQueueTelemetry();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Telemetry TX queued.");
-            break;
 
         case CFG_ACTION_NEIGHBOR_INFO:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NEIGHBOR_INFO");

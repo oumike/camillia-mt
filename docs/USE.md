@@ -106,8 +106,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   want to abandon a message. The Pager has no Alt — its modifier layer is
   Sym/Shift — so it has no equivalent.
 - Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
-  T opens the Tools modal (SNR/RSSI, ChUtil and Beacons everywhere, plus
-  Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
+  T opens the Tools modal (SNR/RSSI, ChUtil, Beacons and Announce everywhere,
+  plus Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
   S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
   restarts the count and S sends the top 5 to a channel
 
@@ -643,11 +643,32 @@ standing next to you.
   LongFast`, `Wait 43s before sending again`, or
   `Nothing recorded yet - nothing to send`
 
+### Announce
+
+Introduces this node to the mesh: a NODEINFO broadcast (with position, when
+location sharing is on) and a telemetry packet, from one press. This replaces
+the *Send NODEINFO Broadcast* and *Send Telemetry Now* rows that used to sit at
+the bottom of the Config screen — they were always used together, so they are
+one action now.
+
+- Open from Live → Tools → Announce (**A**). It is the last cell on the grid
+- There is nothing to look at: it transmits and reports back with a popup,
+  `NODEINFO + telemetry queued.` Any key (or a tap) dismisses it
+- Telemetry is sent whether or not periodic telemetry is enabled, matching what
+  the old *Send Telemetry Now* row did
+- **One announce per 30 seconds.** A press inside that window is refused and says
+  how long is left — `Just announced. Try again in 12s.` Both packets are
+  broadcasts, and holding the key should not be a way to flood the mesh
+- The clock starts on the press, not on the transmission. If the radio is not
+  ready the packets stay queued and go out when it is, and pressing again in the
+  meantime will not stack up more of them
+
 ![Live screen](screenshots/RiCa_screen_20260730_195834.png)
 
 ## Config screen
 
-Config includes Web Config controls, export and import, the theme picker, announce, and reset actions.
+Config includes Web Config controls, export and import, the theme picker, and
+reset actions. Announcing to the mesh has moved to Live → Tools → Announce.
 
 - Open from the main screen (C on keyboard builds, Config bottom-nav button on Heltec)
 - Navigate action rows with Up and Down input. The list wraps: going up from
