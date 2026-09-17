@@ -1931,6 +1931,8 @@ static void onCfgActionRowPressed(lv_event_t *e);
 static void openCfgColorPickerModal();
 static void openCfgNodeNameModal();
 static void closeCfgNodeNameModal();
+static void closeCfgPresetModal();
+static void openCfgPresetModal();
 static void openCfgBrightnessModal();
 static void openCfgScreenTimeoutModal();
 static const char *screenTimeoutName(uint32_t secs);
@@ -2793,6 +2795,7 @@ static void setLabelTextEmojiSafe(lv_obj_t *label, const char *text) {
 enum CfgActionId {
     CFG_ACTION_WEBCFG = 0,
     CFG_ACTION_NODE_NAME,
+    CFG_ACTION_PRESET,
 #if HAS_VNC_HOST
     CFG_ACTION_VNC_HOST,
 #endif
@@ -4610,6 +4613,16 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      s_cfg.nodeLong[0]  ? s_cfg.nodeLong  : "unset",
                      s_cfg.nodeShort[0] ? s_cfg.nodeShort : "----");
             break;
+        case CFG_ACTION_PRESET:
+            // "Custom" rather than a preset name when loraUsePreset is false:
+            // modemPreset still holds the last preset in that state (it is what
+            // Custom was edited away from), so naming it here would report a
+            // preset the radio is not actually running.
+            snprintf(buf, bufLen, "Preset (%s)",
+                     !s_cfg.loraUsePreset ? "Custom"
+                       : kPresets[s_cfg.modemPreset < PRESET_COUNT
+                                  ? s_cfg.modemPreset : PRESET_LONG_FAST].name);
+            break;
         case CFG_ACTION_EXPORT:
             snprintf(buf, bufLen, "Export Config");
             break;
@@ -6119,6 +6132,11 @@ static constexpr uint32_t kUiRefreshTickMs = 30;
 
 #if LOOP_LATENCY_DEBUG
 // One UI tick. Anything longer than this has dropped a frame by definition.
+//
+// Only governs which phases are listed individually; the measured/unmeasured
+// totals on the same line count every phase regardless, which is what makes an
+// iteration assembled entirely from sub-threshold costs visible at all. Drop it
+// to ~5 temporarily when one of those needs breaking down.
 static constexpr uint32_t kLoopPhaseWarnMs = 30;
 static constexpr uint32_t kLoopReportMs = 15000;
 
@@ -6128,12 +6146,29 @@ struct LoopPhaseStat {
     uint32_t overCount;
     uint32_t totalOverMs;
 };
-static LoopPhaseStat s_loopPhases[20];
+// Sized for every LOOP_PHASE tag in loop() with headroom. At the lowered
+// threshold far more of them qualify, and loopPhaseNote() silently drops any
+// phase past the end of this array -- which would look exactly like the phase
+// being cheap.
+static LoopPhaseStat s_loopPhases[48];
 static int s_loopPhaseCount = 0;
 static uint32_t s_loopReportLastMs = 0;
 static uint32_t s_loopWorstTotalMs = 0;
+// How much of the worst pass was spent inside instrumented phases. The gap
+// between this and the total is time in code no LOOP_PHASE covers, which is the
+// difference between "one of these calls is slow" and "we are not looking in
+// the right place at all".
+static uint32_t s_loopWorstMeasuredMs = 0;
+static uint32_t s_loopMeasuredThisPass = 0;
+
+// Start-of-pass reset for the measured-time accumulator. A function so the
+// no-debug build can compile it away with everything else.
+static void loopPhaseBeginPass() { s_loopMeasuredThisPass = 0; }
 
 static void loopPhaseNote(const char *name, uint32_t ms) {
+    // Counted before the threshold, so the measured total includes the many
+    // small costs that are the whole reason this figure exists.
+    s_loopMeasuredThisPass += ms;
     if (ms < kLoopPhaseWarnMs) return;          // only the interesting ones
     for (int i = 0; i < s_loopPhaseCount; i++) {
         if (s_loopPhases[i].name == name) {     // literals, so pointer compare
@@ -6149,7 +6184,10 @@ static void loopPhaseNote(const char *name, uint32_t ms) {
 
 // Called at the end of loop(); prints only when the window caught something.
 static void loopPhaseReport(uint32_t nowMs, uint32_t loopMs) {
-    if (loopMs > s_loopWorstTotalMs) s_loopWorstTotalMs = loopMs;
+    if (loopMs > s_loopWorstTotalMs) {
+        s_loopWorstTotalMs = loopMs;
+        s_loopWorstMeasuredMs = s_loopMeasuredThisPass;
+    }
     if (s_loopReportLastMs == 0) s_loopReportLastMs = nowMs;
     if ((uint32_t)(nowMs - s_loopReportLastMs) < kLoopReportMs) return;
     s_loopReportLastMs = nowMs;
@@ -6158,8 +6196,11 @@ static void loopPhaseReport(uint32_t nowMs, uint32_t loopMs) {
     // whole did even though nothing single-handedly caused it — a loop that is
     // slow from many small costs looks healthy phase by phase.
     if (s_loopPhaseCount > 0 || s_loopWorstTotalMs >= kLoopPhaseWarnMs) {
-        Serial.printf("[loop] worst %lums | over %lums:",
+        Serial.printf("[loop] worst %lums (%lums in phases, %lums unmeasured) | over %lums:",
                       (unsigned long)s_loopWorstTotalMs,
+                      (unsigned long)s_loopWorstMeasuredMs,
+                      (unsigned long)(s_loopWorstTotalMs > s_loopWorstMeasuredMs
+                                      ? s_loopWorstTotalMs - s_loopWorstMeasuredMs : 0),
                       (unsigned long)kLoopPhaseWarnMs);
         for (int i = 0; i < s_loopPhaseCount; i++) {
             Serial.printf(" %s=%lums x%lu (%lums total)",
@@ -6173,6 +6214,7 @@ static void loopPhaseReport(uint32_t nowMs, uint32_t loopMs) {
     }
     s_loopPhaseCount = 0;
     s_loopWorstTotalMs = 0;
+    s_loopWorstMeasuredMs = 0;
 }
 
 // Wraps a statement and records how long it took. __VA_ARGS__ so assignments
@@ -6184,6 +6226,7 @@ static void loopPhaseReport(uint32_t nowMs, uint32_t loopMs) {
     } while (0)
 #else
 #define LOOP_PHASE(tag, ...) do { __VA_ARGS__; } while (0)
+static inline void loopPhaseBeginPass() {}
 static inline void loopPhaseNote(const char *, uint32_t) {}
 static inline void loopPhaseReport(uint32_t, uint32_t) {}
 #endif
@@ -11262,6 +11305,10 @@ static void initCfgActions() {
     // on the mesh sees — and after onboarding this screen is the only place it
     // can be changed without the web form.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NODE_NAME;
+    // Directly under the name for the same reason the name is first: both are
+    // what the rest of the mesh sees of this node, and a node on the wrong
+    // preset is invisible to it entirely.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_PRESET;
 
     // The radios themselves, each with whatever picks what it talks to.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_WIFI_TOGGLE;
@@ -18111,6 +18158,293 @@ static void openCfgWifiPickerModal(bool forOnboarding) {
 // of the mesh knows untouched.
 static void onboardingDeriveShortFromLong(const char *longName, char *shortOut, size_t shortLen);
 
+// ── Config -> Preset ─────────────────────────────────────────────────────────
+// The device's own modem preset, changed from the device. Until now the only
+// way to move a node off its preset was the web form, which needs a second
+// machine on the same network; this is the route that needs neither.
+//
+// Committing reboots, which is why the row sits behind a modal rather than
+// cycling in place like the On/Off rows do: a preset change is a different
+// radio configuration, and half of it applied is a node that hears nothing.
+//
+// Only presets this radio can actually run are offered. presetUsableOnThisRadio()
+// excludes the 15.6 kHz Tiny pair on hardware without both a TCXO and an SX126x,
+// which would otherwise accept the setting, reconfigure, and go silent -- the
+// one failure mode a picker must not be able to produce.
+static lv_obj_t *s_cfgPresetBackdrop = nullptr;
+static lv_obj_t *s_cfgPresetModal = nullptr;
+static lv_obj_t *s_cfgPresetRows[PRESET_COUNT] = {};
+static uint8_t   s_cfgPresetChoices[PRESET_COUNT] = {};
+static int       s_cfgPresetCount = 0;
+static int       s_cfgPresetSelection = 0;
+
+static void closeCfgPresetModal() {
+    if (lvObjValid(s_cfgPresetBackdrop)) {
+        lv_obj_del(s_cfgPresetBackdrop);
+    } else if (lvObjValid(s_cfgPresetModal)) {
+        lv_obj_del(s_cfgPresetModal);
+    }
+    s_cfgPresetBackdrop = nullptr;
+    s_cfgPresetModal = nullptr;
+    memset(s_cfgPresetRows, 0, sizeof(s_cfgPresetRows));
+    s_cfgPresetCount = 0;
+    s_cfgPresetSelection = 0;
+}
+
+static void refreshCfgPresetSelection() {
+    if (!s_cfgPresetModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < s_cfgPresetCount; i++) {
+        lv_obj_t *row = s_cfgPresetRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_cfgPresetSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+    return;
+#endif
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < s_cfgPresetCount; i++) {
+        lv_obj_t *row = s_cfgPresetRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_cfgPresetSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    }
+}
+
+// Applies the preset and restarts. Does not return.
+static void cfgPresetCommit(int idx) {
+    if (idx < 0 || idx >= s_cfgPresetCount) return;
+    const uint8_t preset = s_cfgPresetChoices[idx];
+
+    // Taken before the modal goes, since closing clears the choice table.
+    const char *name = kPresets[preset].name;
+
+    // Already on it: nothing to write and nothing worth a reboot for. Closing
+    // is the whole response -- rebooting to arrive where we already are would
+    // look like the picker had misunderstood.
+    if (s_cfg.loraUsePreset && s_cfg.modemPreset == preset) {
+        closeCfgPresetModal();
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Preset already %s.", name);
+        refreshCfgModal();
+        return;
+    }
+
+    closeCfgPresetModal();
+
+    s_cfg.modemPreset = preset;
+    // Picking a preset is also how you leave custom modem settings. Without
+    // this the custom BW/SF/CR would stay in force and the row would name a
+    // preset the radio is not running.
+    s_cfg.loraUsePreset = true;
+    // Re-derives loraFreq/BW/SF/CR from region + preset, and coerces anything
+    // this radio cannot be tuned to.
+    applyPresetParams(s_cfg);
+    persistConfigToPrefs();
+
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Preset: %s - rebooting...", name);
+    refreshCfgModal();
+    // Paint the status before going, exactly as the MQTT toggle does: a device
+    // that reboots with no explanation reads as a crash.
+    lv_timer_handler();
+    delay(1000);
+    flushPersistentState();   // settings and transcripts must land before we go
+    ESP.restart();
+}
+
+static void onCfgPresetRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_cfgPresetCount) return;
+    // A tap commits here, unlike the Discovery picker where it only selects.
+    // The costs are the other way round: there a stray tap parks the node off
+    // its own mesh for five minutes with no further confirmation, while this
+    // announces what it did and is undone by picking the previous row again.
+    s_cfgPresetSelection = idx;
+    refreshCfgPresetSelection();
+    cfgPresetCommit(idx);
+}
+
+static void openCfgPresetModal() {
+    if (!s_rootScreen) return;
+    if (s_cfgPresetModal || s_cfgPresetBackdrop) return;
+
+    s_cfgPresetCount = 0;
+    s_cfgPresetSelection = 0;
+    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
+        if (!presetUsableOnThisRadio(i)) continue;
+        // Start on the one in force, so Enter without moving is a no-op rather
+        // than a reboot onto whatever happened to be first.
+        if (s_cfg.loraUsePreset && s_cfg.modemPreset == i) {
+            s_cfgPresetSelection = s_cfgPresetCount;
+        }
+        s_cfgPresetChoices[s_cfgPresetCount++] = i;
+    }
+    if (s_cfgPresetCount == 0) return;   // no radio can do this, but be safe
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_cfgPresetBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgPresetBackdrop, w, h);
+    lv_obj_align(s_cfgPresetBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgPresetBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgPresetBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgPresetBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgPresetBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgPresetBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgPresetBackdrop, 0, 0);
+    // Tapping outside is the close gesture on the touch-only builds, which have
+    // no close key to press.
+    lv_obj_add_event_cb(s_cfgPresetBackdrop,
+                        [](lv_event_t *e) {
+                            if (lv_event_get_target_obj(e) != s_cfgPresetBackdrop) return;
+                            closeCfgPresetModal();
+                        },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_cfgPresetModal = lv_obj_create(s_cfgPresetBackdrop);
+    lv_obj_set_size(s_cfgPresetModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgPresetModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgPresetModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgPresetModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgPresetModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_cfgPresetModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_cfgPresetModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_cfgPresetModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_cfgPresetModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_cfgPresetModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgPresetModal, 1, 0);
+    lv_obj_set_style_pad_all(s_cfgPresetModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgPresetModal, 5, 0);
+    lv_obj_set_flex_flow(s_cfgPresetModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgPresetModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgPresetBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_cfgPresetModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Modem preset");
+
+    // Says the two things that are not undoable by looking: that choosing
+    // restarts the device, and that the mesh has to agree for any of it to work.
+    lv_obj_t *warn = lv_label_create(s_cfgPresetModal);
+    lv_obj_set_width(warn, lv_pct(100));
+    lv_obj_set_style_text_font(warn, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(warn, hintColor, 0);
+    lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(warn, "Reboots on selection. Only nodes on the same preset "
+                            "can hear each other.");
+
+    lv_obj_t *list = lv_obj_create(s_cfgPresetModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    // Capped so the hint below stays on screen rather than scrolling away with
+    // the rows on the shorter panels.
+    lv_obj_set_style_max_height(list, (h > 150) ? (h - 104) : LV_SIZE_CONTENT, 0);
+    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    setupVScroll(list);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_set_style_pad_right(list, 2, 0);
+
+    for (int i = 0; i < s_cfgPresetCount; i++) {
+        const uint8_t idx = s_cfgPresetChoices[i];
+        const PresetParams &p = kPresets[idx];
+        const bool current = s_cfg.loraUsePreset && s_cfg.modemPreset == idx;
+
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_cfgPresetRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onCfgPresetRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        // Marked in the text as well as by the highlight: the highlight also
+        // means "where the selection is", and those part company the moment
+        // anyone presses Down.
+        if (current) lv_label_set_text_fmt(name, "%s  (current)", p.name);
+        else         lv_label_set_text(name, p.name);
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            // The on-air channel name is the part that has to match the rest of
+            // the mesh, so it leads.
+            lv_label_set_text_fmt(desc, "%s  SF%u  %.0f kHz",
+                                  p.channelName, (unsigned)p.sf, (double)p.bw);
+        }
+    }
+
+    lv_obj_t *hint = lv_label_create(s_cfgPresetModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    // No close key to name on these builds; the backdrop is the way out.
+    lv_label_set_text(hint, "Tap a preset to apply. Tap outside to cancel.");
+#else
+    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Cancel", modalCloseKeyLabel());
+#endif
+
+    refreshCfgPresetSelection();
+}
+
 static void closeCfgNodeNameModal() {
     if (lvObjValid(s_cfgNodeNameBackdrop)) {
         lv_obj_del(s_cfgNodeNameBackdrop);
@@ -18449,6 +18783,7 @@ static void closeCfgModal() {
     s_cfgFilter[0] = '\0';
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
+    closeCfgPresetModal();
 #if HAS_BLE_KEYBOARD
     closeCfgBleKbdModal();
 #endif
@@ -34129,6 +34464,12 @@ static void performCfgAction(int actionId) {
             openCfgNodeNameModal();
             break;
 
+        case CFG_ACTION_PRESET:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec PRESET");
+            showActionPopup = false;   // the modal is the whole interaction
+            openCfgPresetModal();
+            break;
+
         case CFG_ACTION_CHAT_COLORS:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec CHAT_COLORS");
             showActionPopup = false;   // row already reads On/Off; applies live
@@ -37475,6 +37816,33 @@ static void pumpKeyboardInput() {
             if (next != s_fontSizeSelection) {
                 s_fontSizeSelection = next;
                 refreshFontSizeSelection();
+            }
+            continue;
+        }
+
+        // Above the Config block because it is drawn above the Config screen:
+        // while the picker is up it owns the keys, and nothing may reach the
+        // row list underneath it.
+        if (s_cfgPresetModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgPresetModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                cfgPresetCommit(s_cfgPresetSelection);   // reboots; does not return
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_cfgPresetSelection + delta;
+                if (next < 0) next = 0;
+                if (next > s_cfgPresetCount - 1) next = s_cfgPresetCount - 1;
+                if (next != s_cfgPresetSelection) {
+                    s_cfgPresetSelection = next;
+                    refreshCfgPresetSelection();
+                }
             }
             continue;
         }
@@ -47512,6 +47880,14 @@ void loop() {
     s_cfgDebugLog = s_cfg.debugAcks || s_cfg.debugMessages || s_cfg.debugGps;
 
     uint32_t now = millis();
+    // Fixed for the whole pass, so the profiler can measure the whole pass.
+    // Kept separate from `now`, which is deliberately re-read further down.
+    const uint32_t loopStartMs = now;
+    // Cleared here rather than in loopPhaseReport(), which several early
+    // returns below skip entirely. Reset at the end, those passes carried their
+    // phase time into the next one and the measured total could then exceed the
+    // iteration it claimed to describe -- 3875ms "in phases" of a 2257ms pass.
+    loopPhaseBeginPass();
 
     // Sample loop-iteration rate once per second as a lightweight CPU-activity
     // proxy for the hidden system-stats screen (no direct CPU-load counter
@@ -47542,16 +47918,16 @@ void loop() {
 #if defined(DEVICE_MESH_DECK)
     // Front buttons live on an I2C expander, so they need polling. Kept out of
     // the key path on purpose — see meshDeckPollButtons().
-    meshDeckPollButtons();
-    meshDeckServiceLed();
+    LOOP_PHASE("md:buttons", meshDeckPollButtons());
+    LOOP_PHASE("md:led", meshDeckServiceLed());
 #endif
 #if HAS_KB_BLINK
-    serviceKbBlink();
+    LOOP_PHASE("kbblink", serviceKbBlink());
 #endif
 
-    serviceCpuScaling();
+    LOOP_PHASE("cpuscale", serviceCpuScaling());
     LOOP_PHASE("serial", serviceSerialCommands());
-    bootstrapStateMapsIfMissing();
+    LOOP_PHASE("statemaps", bootstrapStateMapsIfMissing());
 #if HAS_VNC_HOST
     // A connected browser is an active operator. Wake once on connect and keep
     // the panel/UI timers alive so remote input is never swallowed by the
@@ -47567,8 +47943,8 @@ void loop() {
 #if HAS_BLE_KEYBOARD
     // Auto-repeat and the pairing bookkeeping. Must run before the key pump so
     // a synthesized repeat is picked up in the same pass it was generated.
-    bleKeyboardService(now);
-    syncBleKbdPairingToConfig();
+    LOOP_PHASE("ble:kbd", bleKeyboardService(now));
+    LOOP_PHASE("ble:pair", syncBleKbdPairingToConfig());
     // Hand web config its low-latency radio back the moment the keyboard
     // releases modem sleep. Done on the falling edge here rather than in the
     // toggle handler because the stack comes down on the worker task, and
@@ -47599,11 +47975,11 @@ void loop() {
     if (webCfgRunning()) {
         LOOP_PHASE("web", webCfgLoop());
 #if HAS_VNC_HOST
-        serviceWebVncToggle();
+        LOOP_PHASE("web:vnc", serviceWebVncToggle());
 #endif
-        serviceWebChatSend();
-        serviceWebSnfRequest();
-        serviceWebManualTime();
+        LOOP_PHASE("web:chat", serviceWebChatSend());
+        LOOP_PHASE("web:snf", serviceWebSnfRequest());
+        LOOP_PHASE("web:time", serviceWebManualTime());
         // Idle auto-stop. Mirrors the manual CFG_ACTION_WEBCFG disable exactly:
         // the flag is cleared and persisted too, so the device doesn't come
         // back showing "Enabled" for a server that is no longer listening.
@@ -47616,7 +47992,7 @@ void loop() {
             liveFeedAddLine("[web] config stopped (idle)", TFT_ORANGE);
         }
     }
-    if (s_sysStatsModal) refreshSysStatsModal(false);
+    if (s_sysStatsModal) LOOP_PHASE("sysstats", refreshSysStatsModal(false));
     bool meshChanged = false;
     if (s_radioReady) {
         LOOP_PHASE("rx", meshChanged = pollMeshRx());
@@ -47634,7 +48010,7 @@ void loop() {
     // Mirrored every pass so a web save / YAML import / factory reset can never
     // leave the duty cycle out of step with config, the same way
     // nodeArchiveSetEnabled() below does.
-    gpsSetDutyCycle(s_cfg.gpsDutyCycleEnabled, s_cfg.gpsPollIntervalS);
+    LOOP_PHASE("gps:duty", gpsSetDutyCycle(s_cfg.gpsDutyCycleEnabled, s_cfg.gpsPollIntervalS));
     LOOP_PHASE("gps", gpsLoop());
     LOOP_PHASE("timesync", serviceAutoTimeSync(now));
     LOOP_PHASE("gpstime", serviceGpsTimeSync(now));
@@ -47688,29 +48064,33 @@ void loop() {
         (uint32_t)(now - s_lastActivityMs) >= kPersistInputIdleMs;
     LOOP_PHASE("persist:chan", Channels.servicePersistence(now, inputIdle));
     LOOP_PHASE("persist:dm", DMs.servicePersistence(now, inputIdle));
-    serviceEmojiPickerRepeat(now);
-    serviceTracerouteTimeout();
+    LOOP_PHASE("emoji:rpt", serviceEmojiPickerRepeat(now));
+    LOOP_PHASE("traceroute", serviceTracerouteTimeout());
 #if FEATURE_DISCOVERY
     // Runs regardless of which surface is open: a sweep outlives its modal.
-    serviceDiscoverySweep();
+    LOOP_PHASE("discovery", serviceDiscoverySweep());
 #endif
     // Append any nodes evicted from the full node table to the SD archive.
     // Placed before the screen-sleep return below so archiving keeps working
     // with the display off. No-op unless an eviction actually queued something.
     // Mirror the user preference into node_db each pass so it can never drift
     // from config (web save, YAML import, and factory reset all land here).
-    nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled);
-    nodeArchiveFlush();
+    LOOP_PHASE("archive:set", nodeArchiveSetEnabled(s_cfg.nodeArchiveEnabled));
+    LOOP_PHASE("archive:flush", nodeArchiveFlush());
     // Same reason, same place: web save, YAML import and factory reset all land
     // here, and every module that prints a time reads this mirror.
-    liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H);
+    LOOP_PHASE("clockfmt", liveClockSet12Hour(s_cfg.clockFormat == CLOCK_FORMAT_12H));
 
+    // Refreshed on purpose: the screen-timeout comparisons below want a current
+    // reading, and reusing the loop's start time here would age them by however
+    // long this pass has already taken. It is no longer what the profiler
+    // measures against -- see loopPhaseReport() at the end.
     now = millis();
 #if FEATURE_LOCK_SCREEN
     // Runs before the idle check below and returns early through it: while the
     // lock screen is up the panel's fate belongs to lockScreenOffSecs, not to
     // the screen timeout that put it there.
-    serviceLockScreen(now);
+    LOOP_PHASE("lockscreen", serviceLockScreen(now));
 #endif
     if (!s_screenAsleep && s_cfg.screenOnSecs > 0
 #if FEATURE_LOCK_SCREEN
@@ -47760,7 +48140,7 @@ void loop() {
 #endif
         // The touch poll normally rides on LVGL's indev timer, which no longer
         // runs here — without this, a tap could not wake the display.
-        serviceTouchWakeWhileAsleep();
+        LOOP_PHASE("touchwake", serviceTouchWakeWhileAsleep());
         if (!powerSaveShouldNap() || !enterLightNap()) delay(5);
         return;   // loop re-enters and polls input/RX/announces on wake
     }
@@ -47855,11 +48235,20 @@ void loop() {
 #if defined(DEVICE_TDECK_PRO)
     if (einkRefreshDueNow()) LOOP_PHASE("eink", lcd.serviceRefresh());
 #endif
-    serviceBacklightWake();
+    LOOP_PHASE("backlight", serviceBacklightWake());
 
     // Whole-iteration cost, and the periodic report. Placed before the delay so
     // the fixed 5 ms pace is not counted as work.
-    loopPhaseReport(millis(), millis() - now);
+    //
+    // Measured from loopStartMs rather than `now`. `now` is re-read part way
+    // down this function for the screen-timeout checks, so measuring against it
+    // timed only the part of the pass after that point -- roughly the last
+    // third. Everything before it (keys, rx, gps, and every tx:/ann: phase) was
+    // invisible to this figure, which is how one window could report
+    // "worst 11ms" while reporting gps=317ms on the same line, and why this
+    // said 131ms during a pass the web server separately measured as busy for
+    // 1673 ms. The per-phase numbers were always right; only the total was not.
+    loopPhaseReport(millis(), millis() - loopStartMs);
 
     delay(5);
 }
