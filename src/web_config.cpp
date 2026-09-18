@@ -3911,6 +3911,7 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     html += "<label>Lock Screen Off<select name='lock_screen_off'>";
     {
         static const struct { uint32_t secs; const char *label; } kOffs[] = {
+            {   30, "30 sec" }, {   60, "1 min"  }, {  120, "2 min"  },
             {  300, "5 min"  }, {  600, "10 min" }, {  900, "15 min" },
             { 1200, "20 min" }, { 1500, "25 min" }, { 1800, "30 min" },
             { 2100, "35 min" }, { 2400, "40 min" }, { 2700, "45 min" },

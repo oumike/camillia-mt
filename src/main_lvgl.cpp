@@ -13956,6 +13956,12 @@ static void openCfgScreenTimeoutModal() {
 // its own — and a list you scroll through should not open on it.
 struct LockScreenOffOption { uint32_t secs; const char *label; };
 static const LockScreenOffOption kLockScreenOffs[] = {
+    // Three short steps below the five-minute grid. A lock screen is a glance
+    // surface, and half a minute of it is a reasonable thing to want; going
+    // straight from 30 sec to 5 min would make the slider useless in between.
+    {   30, "30 sec" },
+    {   60, "1 min"  },
+    {  120, "2 min"  },
     {  300, "5 min"  },
     {  600, "10 min" },
     {  900, "15 min" },
@@ -13981,7 +13987,8 @@ static const char *lockScreenOffName(uint32_t secs) {
         if (kLockScreenOffs[i].secs == secs) return kLockScreenOffs[i].label;
     }
     static char buf[16];
-    snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
+    if (secs < 60U) snprintf(buf, sizeof(buf), "%u sec", (unsigned)secs);
+    else            snprintf(buf, sizeof(buf), "%u min", (unsigned)(secs / 60));
     return buf;
 }
 

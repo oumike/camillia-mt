@@ -1128,8 +1128,8 @@ UI, in two taps.
 
 - **Lock Screen** enables or disables the intermediate screen. Disabled keeps
   the previous direct-to-sleep behavior.
-- **Lock Screen Off** ranges from 5 to 60 minutes in five-minute steps, plus
-  **Stay on**. The default is 5 minutes.
+- **Lock Screen Off** starts at **30 sec**, then 1 and 2 min, then 5 to 60
+  minutes in five-minute steps, plus **Stay on**. The default is 5 minutes.
 - Both settings are available in on-device Config and web config.
 - Cardputer keeps direct screen sleep and does not show these settings.
 - T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper

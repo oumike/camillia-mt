@@ -732,7 +732,7 @@ static inline uint8_t cfgCoerceBrightness(int pct) {
 // every path that touches this field. Everything else is clamped to 5..60
 // minutes and snapped to a five-minute step, so the on-device slider, the web
 // form and a hand-edited YAML file cannot disagree about what is storable.
-#define LOCK_SCREEN_OFF_SECS_MIN  300U     // 5 min
+#define LOCK_SCREEN_OFF_SECS_MIN  30U      // 30 sec
 #define LOCK_SCREEN_OFF_SECS_MAX  3600U    // 60 min
 #define LOCK_SCREEN_OFF_NEVER     0U
 
@@ -740,6 +740,17 @@ static inline uint32_t cfgCoerceLockScreenOffSecs(uint32_t secs) {
     if (secs == LOCK_SCREEN_OFF_NEVER) return LOCK_SCREEN_OFF_NEVER;
     if (secs < LOCK_SCREEN_OFF_SECS_MIN) return LOCK_SCREEN_OFF_SECS_MIN;
     if (secs > LOCK_SCREEN_OFF_SECS_MAX) return LOCK_SCREEN_OFF_SECS_MAX;
+    // Below five minutes the ladder is three hand-picked steps rather than a
+    // regular interval, so snapping has to choose the nearest of them. Rounding
+    // to the five-minute grid the way the rest of the range does would push
+    // every one of them straight back up to 5 min, which is the setting they
+    // exist to get away from.
+    if (secs < 300U) {
+        if (secs <= 45U)  return 30U;
+        if (secs <= 90U)  return 60U;
+        if (secs <= 210U) return 120U;
+        return 300U;
+    }
     return ((secs + 150U) / 300U) * 300U;
 }
 

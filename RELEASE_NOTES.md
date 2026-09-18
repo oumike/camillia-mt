@@ -11,6 +11,7 @@
 - Waking to the lock screen no longer marks the selected channel or an open DM as read.
 - The **Power button is now the screen key on the Attaky Mesh Deck**: a tap cycles dark panel → lock screen → UI → dark, and the BOOT button does the same. There is no hold gesture on this board, because roughly two seconds on the Power button cuts power in hardware.
 - The Mesh Deck's top-right shoulder button (BTN_R2), which used to sleep and wake the panel, is now unbound.
+- **Lock Screen Off** now starts at 30 sec, with 1 min and 2 min below the old five-minute floor, on the device and in web config alike.
 - Confirmation dialogs scroll when their text is long — the d-pad, arrow keys and J/K move it — so the Yes and No buttons can no longer be pushed off the panel.
 
 ### Fixed
