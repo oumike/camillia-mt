@@ -114,6 +114,10 @@
 // with lv_tick_set_cb(millis) — see uiInit() in main_lvgl.cpp.
 
 // Widgets the UI actually builds. Everything else stays at its default.
+// Stated rather than left to the internal default. It was already being pulled
+// in as lv_slider's dependency, which is a silent reason for a widget to exist —
+// the SD scan's progress bar uses it directly now.
+#define LV_USE_BAR 1
 #define LV_USE_CHART 1
 #define LV_USE_SCALE 1
 

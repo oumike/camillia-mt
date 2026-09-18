@@ -916,6 +916,12 @@ void sdForceRescan();
 // this never probes the bus, so UI/web paths can ask cheaply and repeatedly.
 bool sdCardMounted();
 
+// Forgets that the card is mounted, so the next sdBegin() does the real thing
+// rather than returning early on sdReady. This module owns that flag and the
+// board-specific mount behind it; storageUnmount() owns the other half. Only
+// the SD format calls this, after rewriting the filesystem out from under both.
+void sdMarkUnmounted();
+
 // What the last mount attempt found, for the Device Info screen. Everything
 // here is state the probe already keeps; reading it touches neither the bus nor
 // the cooldown, so a screen can ask whenever it repaints.

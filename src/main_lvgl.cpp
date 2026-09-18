@@ -475,6 +475,10 @@ static int s_cfgNodeNameFocus = 0;
 // Yes/No confirmation dialog layered over the CFG modal for destructive actions.
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
 static lv_obj_t *s_cfgConfirmModal = nullptr;
+// The message box inside it. Held because the dialog's text is scrollable now --
+// the SD scan names the files it is about to delete and can run past the bottom
+// of the panel -- and the key path has to have something to scroll.
+static lv_obj_t *s_cfgConfirmScroll = nullptr;
 static lv_obj_t *s_otaPromptBackdrop = nullptr;
 static lv_obj_t *s_otaPromptModal = nullptr;
 #if HAS_STATE_MAPS
@@ -1312,6 +1316,14 @@ static int s_cfgConfirmAction = -1;
 // pending answer belongs to a CFG_ACTION row.
 typedef void (*CfgConfirmFn)(int);
 static CfgConfirmFn s_cfgConfirmFn = nullptr;
+// An optional third answer, beside Yes and No. Only the SD scan uses it -- its
+// dialog offers Format as well as Delete -- and every other caller leaves it
+// null and gets the two-button dialog it always had. Here rather than up with
+// the other confirm-dialog handles, because CfgConfirmFn is not a type until
+// the line above.
+static CfgConfirmFn s_cfgConfirmAltFn = nullptr;
+static char         s_cfgConfirmAltLabel[16] = {0};
+static char         s_cfgConfirmAltKey = 0;
 static int          s_cfgConfirmFnArg = 0;
 // Copied rather than pointed at: the caller's buffer is usually a local.
 static char         s_cfgConfirmText[96] = {0};
@@ -1520,6 +1532,45 @@ static constexpr uint32_t kPersistInputIdleMs = 250UL;
 static constexpr uint32_t kScreenWakeInputDelayMs = 3000UL;
 static constexpr uint32_t kScreenSleepHoldMs = 2000UL;
 static uint32_t s_screenWakeBlockedUntilMs = 0;
+
+// ── Wake button ──────────────────────────────────────────────────────────────
+// Compiled on every board, unlike the servicing below it (HAS_WAKE_BUTTON):
+// powerSaveShouldNap() reads the count, and a board with no wake button simply
+// never moves it off zero.
+//
+// Debounce and hold timing for a board's dedicated screen/wake button. One
+// instance per physical button, handed the raw level each poll by
+// serviceWakeButton(), which decides between the tap and the hold and
+// dispatches to wakeButtonTap()/wakeButtonHold().
+//
+// Declared up here with the rest of the screen state rather than beside that
+// code: the Mesh Deck polls its button off an I2C expander from a function that
+// sits well above where the servicing lives, and it needs the complete type to
+// keep an instance.
+struct WakeButtonPoll {
+    bool     rawPressed    = false;
+    bool     stablePressed = false;
+    uint32_t changedMs     = 0;
+    uint32_t holdStartMs   = 0;   // 0 while the button is up
+    bool     claimed       = false;   // this press has already been acted on
+};
+// Long enough to reject contact bounce, short enough that the Mesh Deck's 40 ms
+// expander poll confirms a press on its very next read rather than the one
+// after.
+static constexpr uint32_t kWakeButtonDebounceMs = 25UL;
+
+// How many wake buttons are down right now. powerSaveShouldNap() refuses while
+// this is non-zero, because the hold has to be *timed* and the loop has to be
+// awake to do it. A nap is up to NAP_MAX_MS (1500 ms), so one landing mid-hold
+// stretches the two seconds to three and a half -- long enough that the user
+// lets go first and the gesture appears not to work.
+//
+// The GPIO buttons are covered twice over: enterLightNap() already refuses to
+// sleep on an asserted wake line. The expander buttons are why this exists --
+// reading them is what clears their shared interrupt line, so it is back to
+// idle while the button is still down and nothing else would hold the CPU up.
+// A count rather than a flag because more than one board has two of them.
+static uint8_t s_wakeButtonsHeld = 0;
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
 static bool s_tdeckTrackballHoldActive = false;
 static bool s_tdeckTrackballHoldTriggered = false;
@@ -1938,9 +1989,14 @@ static void performCfgAction(int actionId);
 // stay open behind the dialog -- the reason the WiFi delete above had to build
 // a dialog of its own rather than use this one.
 static void openCfgConfirmModal(int actionId, const char *text = nullptr,
-                                CfgConfirmFn fn = nullptr, int fnArg = 0);
+                                CfgConfirmFn fn = nullptr, int fnArg = 0,
+                                const char *altLabel = nullptr,
+                                CfgConfirmFn altFn = nullptr);
 static void closeCfgConfirmModal();
-static void openCfgActionMessageModal(const char *msg);
+// `title` overrides the default "Action Result" heading, for the callers that
+// are not reporting the result of a Config action -- the OTA boot notice, and
+// the SD card warning below it.
+static void openCfgActionMessageModal(const char *msg, const char *title = nullptr);
 static void closeCfgActionMessageModal();
 static void onCfgActionMessageBackdropPressed(lv_event_t *e);
 static void onCfgActionRowPressed(lv_event_t *e);
@@ -2421,6 +2477,19 @@ static void bootSplashStatusEnd();
 static bool useCompactVerticalHeltecSelector();
 static bool pollUserButton(uint32_t nowMs);
 static bool tryWakeScreenFromInput(uint32_t nowMs);
+#if HAS_WAKE_BUTTON
+// The wake button's debounce and its gestures. Defined with the panel
+// sleep/wake code far below; declared here because the Mesh Deck reads its
+// button off an expander from a function above that.
+static bool serviceWakeButtonDebounce(WakeButtonPoll &st, bool pressed,
+                                      uint32_t nowMs);
+#if HAS_WAKE_BUTTON_HOLD
+static bool serviceWakeButton(WakeButtonPoll &st, bool pressed, uint32_t nowMs,
+                              const char *reason);
+#else
+static bool wakeButtonToggleTap(uint32_t nowMs, const char *reason);
+#endif
+#endif
 #if defined(DEVICE_WIO_TRACKER_L2)
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs);
 #endif
@@ -2895,6 +2964,9 @@ enum CfgActionId {
     CFG_ACTION_CLEAR_NODES_KEEP_FAVS,
     CFG_ACTION_CLEAR_NODES,
     CFG_ACTION_FACTORY_RESET,
+#if HAS_SD_MALWARE_SCAN
+    CFG_ACTION_SD_SCAN,
+#endif
     // Sizes s_cfgActions. Not an action — keep it last.
     CFG_ACTION__COUNT,
 };
@@ -4865,6 +4937,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
         case CFG_ACTION_FACTORY_RESET:
             snprintf(buf, bufLen, "Factory Reset");
             break;
+#if HAS_SD_MALWARE_SCAN
+        case CFG_ACTION_SD_SCAN:
+            snprintf(buf, bufLen, "Scan SD Card for Malware%s",
+                     sdCardMounted() ? "" : " (no card)");
+            break;
+#endif
         default:
             snprintf(buf, bufLen, "(unknown)");
             break;
@@ -4880,6 +4958,11 @@ static bool cfgActionDisabled(int actionId) {
         case CFG_ACTION_MQTT_TOGGLE: return !s_cfg.wifiEnabled;
         // Nothing to ask for with the client switched off.
         case CFG_ACTION_SNF_REQUEST:  return !s_cfg.snfClientEnabled;
+#if HAS_SD_MALWARE_SCAN
+        // Nothing to look at. The row stays visible rather than disappearing:
+        // "no card" is the answer to the question someone opened this to ask.
+        case CFG_ACTION_SD_SCAN: return !sdCardMounted();
+#endif
         case CFG_ACTION_WEBCFG:
             return !s_cfg.wifiEnabled || s_cfg.mqttEnabled;
 #if HAS_VNC_HOST
@@ -8237,14 +8320,17 @@ static void meshDeckPollButtons() {
         return;
     }
 
-    // Fresh press edges across the whole port, active low.
-    const uint8_t pressed = (uint8_t)(~p0 & (uint8_t)(s_mdBtnPrev));
-    s_mdBtnPrev = p0;
-    if (!pressed) return;
-
-    // BTN_R2 (P06) is the screen key: second from the right along the top edge,
-    // between BTN_L1 and the hardware Power button, which is where wadamesh puts
-    // sleep/wake on this board.
+    // POWER_BTN (P07) is the screen key on this board: a tap cycles dark panel ->
+    // lock screen -> UI -> dark. Tap only, because ~2 s on this pin cuts power
+    // in hardware and the hold every other board unlocks with would land on top
+    // of that -- see BTN_POWER_BIT in hw_mesh_deck.h. It acts on the press
+    // rather than the release for the same reason: there is no hold to wait for,
+    // and a release is not something a power-cut hold ever produces.
+    //
+    // Debounced through the shared wake-button state even though the hold half
+    // is unused, because the other half of that state is what keeps the CPU out
+    // of a light-sleep nap while the button is down. Without it the poll that
+    // confirms the press would be a full nap later than the one that saw it.
     //
     // Handled here rather than folded into the key path below, and returning
     // before it: every key there wakes the panel as a side effect, so a press
@@ -8255,20 +8341,22 @@ static void meshDeckPollButtons() {
     // made mid-nap registers when the nap ends rather than immediately. That is
     // why the BOOT button keeps this job as well (see pollUserButton): it is a
     // real GPIO and the board's only input that works while the CPU is down.
-    if (pressed & (1u << BTN_R2_BIT)) {
-#if FEATURE_LOCK_SCREEN
-        if (s_lockScreenActive) {
-            (void)tryExitLockScreenFromInput(now, true);
-            return;
-        }
-#endif
-        if (s_screenAsleep) {
-            (void)tryWakeScreenFromInput(now);
-        } else {
-            requestScreenOff("BTN_R2");
-        }
-        return;
+    static WakeButtonPoll s_mdScreenBtn;
+    const bool screenBtnDown = (p0 & (uint8_t)(1u << BTN_POWER_BIT)) == 0;   // active low
+    bool screenBtnActed = false;
+    if (serviceWakeButtonDebounce(s_mdScreenBtn, screenBtnDown, now)
+        && s_mdScreenBtn.stablePressed) {
+        screenBtnActed = wakeButtonToggleTap(now, "Power button");
     }
+
+    // Fresh press edges across the whole port, active low. The Power button is
+    // masked out: it has had its say above, and leaving it in would have the
+    // edge path act on the same press a second time.
+    const uint8_t pressed =
+        (uint8_t)(~p0 & (uint8_t)(s_mdBtnPrev) & (uint8_t)~(1u << BTN_POWER_BIT));
+    s_mdBtnPrev = p0;
+    if (screenBtnActed) return;
+    if (!pressed) return;
 
     // The D-pad folds onto the same navigation tokens the keyboard produces, so
     // it drives every screen exactly as j/k and the arrows already do — no
@@ -8546,6 +8634,74 @@ static void wakeScreen() {
     Serial.println("[screen] woke");
 }
 
+#if FEATURE_LOCK_SCREEN && (HAS_WAKE_BUTTON || defined(DEVICE_M9))
+// Brings a dark panel back up onto the lock screen rather than onto the UI.
+// This is the tap half of the wake button's two gestures -- and on the M9, of
+// the d-pad centre's, which the controller splits into two key codes for us: glancing at the clock
+// and at what has arrived should not cost the user their unlock, and it is the
+// most a press made in a pocket can reach.
+//
+// Deliberately not wakeScreen() followed by enterLockScreen(). That order comes
+// up on the UI first and runs noteUiVisibleAgain() on the way, which marks the
+// selected channel and any open DM as read -- for a screen the user is not
+// being shown, which is the one thing the lock screen exists not to do. The
+// panel bring-up below is wakeScreen()'s, line for line; what follows it is not.
+static void wakeToLockScreen(const char *reason) {
+    if (!s_screenAsleep || s_lockScreenActive) return;
+
+    // Full clock first: the overlay build and repaint that follow on this same
+    // loop pass should run at speed.
+    applyCpuMhz(kCpuMhzActive);
+
+    // SLPOUT, then straight back to a dark backlight -- the controller still
+    // holds the pre-sleep frame of the UI across SLPIN/SLPOUT, and lighting it
+    // before the overlay is drawn would flash the chat screen at someone who
+    // asked for the lock screen. serviceBacklightWake() lights it after the
+    // repaint lands.
+    displayDev().wakeup();
+    displayDev().setBrightness(0);
+    const uint32_t panelWakeStartMs = millis();
+    setTouchSleep(false);
+    const uint32_t settledMs = millis() - panelWakeStartMs;
+    if (settledMs < kPanelWakeSettleMs) delay(kPanelWakeSettleMs - settledMs);
+
+    s_screenAsleep = false;
+    s_backlightPendingOn = true;
+    s_preSleepDimmed = false;
+    // Stays dark: nothing on this screen takes typing.
+    setPagerKeyboardBacklight(false);
+
+    // Set before the overlay is built, so that applyBrightness() -- reached
+    // through serviceBacklightWake() once the repaint has landed -- resolves to
+    // lockScreenBrightness rather than to the UI's own level.
+    s_lockScreenActive = true;
+    s_lockScreenSinceMs = millis();
+    // Same guard enterLockScreen() sets, for the same reason: the press that
+    // brought this screen up must not also be read as the input that dismisses
+    // it. It does not latch -- a button held through it unlocks the moment it
+    // expires rather than needing a second press.
+    s_screenWakeBlockedUntilMs = s_lockScreenSinceMs + kScreenWakeInputDelayMs;
+
+    showTdeckProSleepClock();
+    // The panel's RAM no longer holds anything valid (on the Wio Tracker L2
+    // setSleep(false) reruns the whole controller init), and the overlay is a
+    // fresh object tree either way. Mark the lot dirty while the backlight is
+    // still down.
+    if (s_rootScreen) lv_obj_invalidate(s_rootScreen);
+
+    serviceCpuScaling();
+
+    if (s_cfg.lockScreenOffSecs == LOCK_SCREEN_OFF_NEVER) {
+        Serial.printf("[screen] woke to lock screen (%s), staying on\n",
+                      reason ? reason : "");
+    } else {
+        Serial.printf("[screen] woke to lock screen (%s), panel out in %lus\n",
+                      reason ? reason : "",
+                      (unsigned long)s_cfg.lockScreenOffSecs);
+    }
+}
+#endif  // FEATURE_LOCK_SCREEN && (HAS_WAKE_BUTTON || DEVICE_M9)
+
 // Lights the backlight once the panel has settled and the loop has repainted.
 // The flag persists until this runs, so a loop pass that bails out early just
 // defers the backlight to the next full pass rather than losing it.
@@ -8573,6 +8729,211 @@ static bool tryWakeScreenFromInput(uint32_t nowMs) {
     wakeScreen();
     return true;
 }
+
+#if HAS_WAKE_BUTTON
+// ── What a board's dedicated wake button means ───────────────────────────────
+// Every board with one routes its press through this pair, so the gesture reads
+// the same on all of them:
+//
+//   tap   -- UI in front of the user: put it away, which lands on the lock
+//            screen where that is enabled and on a dark panel where it is not.
+//            Dark panel: bring the lock screen up. Lock screen already up, or a
+//            dark panel with the lock screen disabled: nothing.
+//   hold  -- two seconds, from the lock screen and from a dark panel alike:
+//            unlock, straight through to the UI.
+//
+// One rule in every state, so the gesture does not depend on which state the
+// user is looking at -- and on a dark panel that is the point, because there is
+// nothing there to read it off. The asymmetry is deliberate rather than
+// cosmetic: putting the device away is cheap to undo and wants the quick
+// gesture, while bringing it back is what a pocket does by accident, and a
+// button held for two seconds is the one input a pocket does not produce. A tap
+// can never reach the UI, so the worst a pocket press costs is a lit lock
+// screen that times itself back out.
+//
+// This is the rule the Wio Tracker L2 already had; the only board-specific part
+// left is how the press is read off the hardware.
+//
+// The Mesh Deck is the exception, and wakeButtonToggleTap() below is what it
+// gets instead: a hardware power-cut sits on its screen button's hold.
+//
+// Returns true when the press was consumed.
+#if HAS_WAKE_BUTTON_HOLD
+static bool wakeButtonTap(uint32_t nowMs, const char *reason) {
+#if FEATURE_LOCK_SCREEN
+    if (s_lockScreenActive) {
+        // Swallowed. The hold is the only way in, from here and from a dark
+        // panel both -- see above.
+        return true;
+    }
+    if (s_screenAsleep) {
+        if (!s_cfg.lockScreenEnabled) return true;
+        // The post-sleep guard, used for exactly what it is there for: a press
+        // that arrives while the panel is on its way out should not turn round
+        // and bring it straight back.
+        if ((int32_t)(nowMs - s_screenWakeBlockedUntilMs) < 0) return true;
+        wakeToLockScreen(reason);
+        return true;
+    }
+#else
+    // No lock screen on this board, so a dark panel has nothing to show short
+    // of the UI itself, and the UI is what the hold is for.
+    if (s_screenAsleep) return true;
+#endif
+    s_lastActivityMs = nowMs;
+    requestScreenOff(reason);
+    return true;
+}
+
+// Returns true once the hold has been acted on, so the caller can stop
+// retrying it. False means "not yet" -- both paths below can refuse while the
+// post-sleep input guard is still running, and neither latches when they do, so
+// a button kept down takes effect the moment the guard expires rather than
+// needing a second press.
+static bool wakeButtonHold(uint32_t nowMs, const char *reason) {
+    const char *what = (reason && reason[0]) ? reason : "wake button";
+#if FEATURE_LOCK_SCREEN
+    if (s_lockScreenActive) {
+        // Not counted as the input that restarts the screen timeout;
+        // exitLockScreen() does that itself.
+        (void)tryExitLockScreenFromInput(nowMs, true);
+        if (s_lockScreenActive) return false;
+        Serial.printf("[screen] %s hold, unlocked\n", what);
+        return true;
+    }
+#endif
+    if (s_screenAsleep) {
+        if (!tryWakeScreenFromInput(nowMs)) return false;
+        Serial.printf("[screen] %s hold, woke panel\n", what);
+        return true;
+    }
+
+    // Awake and unlocked already, so there is nothing to bring back. Claimed
+    // anyway: it keeps the release from being read as a tap -- and the screen
+    // put away -- by someone who has simply been resting on the button.
+    s_lastActivityMs = nowMs;
+    return true;
+}
+#endif  // HAS_WAKE_BUTTON_HOLD
+
+// The debounce on its own. Updates the stable level and returns true when it
+// changed on this call. Split out because on the keyboard boards the BOOT
+// button doubles as Config's Enter key, which wants the press edge without any
+// of the tap/hold meaning -- and must not run a second debounce of its own, or
+// the two would disagree about when the button went down.
+static bool serviceWakeButtonDebounce(WakeButtonPoll &st, bool pressed,
+                                      uint32_t nowMs) {
+    if (pressed != st.rawPressed) {
+        st.rawPressed = pressed;
+        st.changedMs  = nowMs;
+        // Counted on the raw edge rather than the debounced one, deliberately.
+        // On the boards whose button hangs off an I2C expander the CPU is
+        // napping when the press lands, so the first poll after it only ever
+        // starts the debounce -- and if the loop were allowed straight back
+        // into a nap, the poll that confirms the press would be a full
+        // NAP_MAX_MS later, on top of the one the press already waited out.
+        // Blocking from the first read collapses that to one poll interval.
+        // Bounce costs nothing: it flips the count back and forth over a few
+        // milliseconds during which the loop is awake either way.
+        if (pressed) s_wakeButtonsHeld++;
+        else if (s_wakeButtonsHeld) s_wakeButtonsHeld--;
+    }
+    if ((uint32_t)(nowMs - st.changedMs) < kWakeButtonDebounceMs) return false;
+    if (st.stablePressed == st.rawPressed) return false;
+    st.stablePressed = st.rawPressed;
+    return true;
+}
+
+// Undoes a press the hardware can no longer confirm -- the Wio Tracker L2's
+// expander not answering its bus mid-hold. Puts the button back in the up state
+// without running either gesture, and hands the CPU its nap back; leaving the
+// count standing would disable power saving for as long as the bus stayed
+// silent.
+#if defined(DEVICE_WIO_TRACKER_L2)
+static void wakeButtonForceRelease(WakeButtonPoll &st) {
+    if (st.rawPressed && s_wakeButtonsHeld) s_wakeButtonsHeld--;
+    st = WakeButtonPoll{};
+}
+#endif
+
+// The whole gesture in one tap, for a button that cannot carry a hold. Cycles
+// dark panel -> lock screen -> UI -> dark, so every state is still reachable
+// from a screen that gives the user no way to read which one they are in.
+//
+// The Mesh Deck's Power button is the only caller and the reason this exists:
+// ~2 s on that pin cuts power in hardware, which is the same ~2 s that unlocks
+// everywhere else. The cost is the pocket guard -- two taps in a bag reach the
+// UI here, where on every other board no number of taps can. That is the trade
+// a hardware power-cut forces, not a preference.
+//
+// Returns true when the press was consumed.
+#if !HAS_WAKE_BUTTON_HOLD
+static bool wakeButtonToggleTap(uint32_t nowMs, const char *reason) {
+#if FEATURE_LOCK_SCREEN
+    if (s_lockScreenActive) {
+        // Refuses while the entry guard is still running, which is what stops
+        // the tap that raised this screen from dismissing it again.
+        (void)tryExitLockScreenFromInput(nowMs, true);
+        return true;
+    }
+    if (s_screenAsleep) {
+        if (s_cfg.lockScreenEnabled) {
+            if ((int32_t)(nowMs - s_screenWakeBlockedUntilMs) < 0) return true;
+            wakeToLockScreen(reason);
+            return true;
+        }
+        // No intermediate screen to stop at, so the cycle is the two states the
+        // board has. Without this the button would have a dead state and the
+        // panel no way back at all -- this board wakes from neither its
+        // keyboard nor its touch panel.
+        (void)tryWakeScreenFromInput(nowMs);
+        return true;
+    }
+#else
+    if (s_screenAsleep) {
+        (void)tryWakeScreenFromInput(nowMs);
+        return true;
+    }
+#endif
+    s_lastActivityMs = nowMs;
+    requestScreenOff(reason);
+    return true;
+}
+#else
+// Debounces one wake button and tells its two gestures apart. The caller reads
+// the raw level however its hardware requires -- a GPIO, an I2C expander port --
+// and hands it in; everything downstream of that is shared.
+//
+// Returns true when this call consumed the input.
+static bool serviceWakeButton(WakeButtonPoll &st, bool pressed, uint32_t nowMs,
+                              const char *reason) {
+    bool acted = false;
+    if (serviceWakeButtonDebounce(st, pressed, nowMs)) {
+        if (st.stablePressed) {
+            st.holdStartMs = nowMs;
+            st.claimed = false;
+        } else {
+            // Release. The tap can only be recognised here: until the button
+            // comes up there is no telling it from a hold that has not reached
+            // kScreenSleepHoldMs yet.
+            const bool wasTap = !st.claimed
+                && st.holdStartMs != 0
+                && (uint32_t)(nowMs - st.holdStartMs) < kScreenSleepHoldMs;
+            st.holdStartMs = 0;
+            st.claimed = false;
+            if (wasTap) acted = wakeButtonTap(nowMs, reason);
+        }
+    }
+
+    if (!st.stablePressed || st.claimed) return acted;
+    if (st.holdStartMs == 0
+        || (uint32_t)(nowMs - st.holdStartMs) < kScreenSleepHoldMs) return acted;
+
+    st.claimed = wakeButtonHold(nowMs, reason);
+    return acted || st.claimed;
+}
+#endif  // !HAS_WAKE_BUTTON_HOLD
+#endif  // HAS_WAKE_BUTTON
 
 static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
 #if defined(DEVICE_TDECK) && HAS_TRACKBALL && (TBALL_CLICK >= 0)
@@ -8608,37 +8969,15 @@ static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
 }
 
 #if defined(DEVICE_WIO_TRACKER_L2)
-// True between the debounced press and release of the top Wake button.
-// powerSaveShouldNap() reads it, because the hold below has to be *timed* and
-// the expander's interrupt cannot hold the CPU up on its own: reading the
-// button is what clears that line, so it is back to idle while the button is
-// still down. Without this a 1500 ms nap lands mid-hold and the two seconds
-// stretch to three and a half — long enough that the user lets go first.
-static bool s_wioWakeButtonHeld = false;
-
-// Short press puts the device away, a two-second hold brings it back. One rule
-// in every state, so the gesture does not depend on which state the user is
-// looking at — and on a dark panel that is the point, because there is nothing
-// there to read it off.
-//
-// The asymmetry is deliberate rather than cosmetic. Putting the device away is
-// cheap to undo and wants the quick gesture; bringing it back is what a pocket
-// does by accident, and a button held for two seconds is the one input a
-// pocket does not produce.
-//
-// "Away" is requestScreenOff(), so it lands on the lock screen where that is
-// enabled and on a dark panel where it is not. "Back" is whichever of the two
-// the device is currently in.
+// The board's Wake button, on the expander beside the touch controller. Reading
+// it is all that is board-specific here: what a tap and a hold mean is
+// serviceWakeButton()'s, and is shared with every other board that has one.
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
-    static bool rawPressed = false;
-    static bool stablePressed = false;
-    static bool pressHandled = false;
-    static uint32_t changedMs = 0;
-    static uint32_t holdStartMs = 0;
+    static WakeButtonPoll btn;
     static uint32_t nextReadMs = 0;
 
     const bool interruptActive = digitalRead(EXPANDER_INT) == LOW;
-    if (!rawPressed && !stablePressed && !interruptActive) return false;
+    if (!btn.rawPressed && !btn.stablePressed && !interruptActive) return false;
     if ((int32_t)(nowMs - nextReadMs) < 0) return false;
     nextReadMs = nowMs + 15;
 
@@ -8647,77 +8986,11 @@ static bool serviceWioTrackerL2WakeButton(uint32_t nowMs) {
         // No reading to time a hold against, and keeping the CPU up on a bus
         // that is not answering would disable power saving for as long as it
         // stayed unanswered. Let the nap back in.
-        s_wioWakeButtonHeld = false;
+        wakeButtonForceRelease(btn);
         return false;
     }
 
-    if (pressed != rawPressed) {
-        rawPressed = pressed;
-        changedMs = nowMs;
-    }
-    if ((uint32_t)(nowMs - changedMs) >= 25 && stablePressed != rawPressed) {
-        stablePressed = rawPressed;
-        s_wioWakeButtonHeld = stablePressed;
-        if (stablePressed) {
-            holdStartMs = nowMs;
-            pressHandled = false;
-        } else {
-            // Release. The short press can only be recognised here: until the
-            // button comes up there is no telling it from a hold that has not
-            // reached two seconds yet.
-            const bool wasShort = holdStartMs != 0
-                && (uint32_t)(nowMs - holdStartMs) < kScreenSleepHoldMs;
-            const bool claimed = pressHandled;
-            holdStartMs = 0;
-            pressHandled = false;
-            const bool uiIsUp = !s_screenAsleep
-#if FEATURE_LOCK_SCREEN
-                && !s_lockScreenActive
-#endif
-                ;
-            // Nothing to put away unless the UI is actually in front of the
-            // user; a short press on the lock screen or a dark panel is
-            // swallowed, which is what makes the hold the only way back in.
-            if (!claimed && wasShort && uiIsUp) {
-                s_lastActivityMs = nowMs;
-                requestScreenOff("Wio Tracker L2 Wake button press");
-                return true;
-            }
-        }
-    }
-
-    if (!stablePressed || pressHandled) return false;
-    if (holdStartMs == 0
-        || (uint32_t)(nowMs - holdStartMs) < kScreenSleepHoldMs) return false;
-
-    // Held long enough to mean "give me the device". Both paths below can
-    // refuse while the post-sleep input guard is still running, and neither
-    // latches when it does — a button kept down takes effect the moment the
-    // guard expires rather than needing a second press.
-#if FEATURE_LOCK_SCREEN
-    if (s_lockScreenActive) {
-        // Unlocking is not counted as the input that restarts the idle
-        // timeout; exitLockScreen() does that itself.
-        (void)tryExitLockScreenFromInput(nowMs, true);
-        if (s_lockScreenActive) return false;
-        pressHandled = true;
-        Serial.println("[screen] Wio Tracker L2 Wake button hold, unlocked");
-        return true;
-    }
-#endif
-    if (s_screenAsleep) {
-        if (!tryWakeScreenFromInput(nowMs)) return false;
-        pressHandled = true;
-        Serial.println("[screen] Wio Tracker L2 Wake button hold, woke panel");
-        return true;
-    }
-
-    // Awake and unlocked already, so there is nothing to bring back. Claim the
-    // press anyway: it keeps the release above from looking for a meaning in a
-    // button the user has simply been resting on.
-    pressHandled = true;
-    s_lastActivityMs = nowMs;
-    return false;
+    return serviceWakeButton(btn, pressed, nowMs, "Wio Tracker L2 Wake button");
 }
 #endif
 
@@ -8761,6 +9034,51 @@ static bool chatScreenIsForeground() {
 
 static bool pollUserButton(uint32_t nowMs) {
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
+#if !UI_TOUCH_ONLY_PROFILE
+    // Off the touch-only boards this button *is* the screen button, so it gets
+    // the shared tap/hold rule rather than acting on a bare press edge. Its one
+    // extra job -- standing in for Enter on the Config screen -- is checked
+    // first and only while the UI is actually in front of the user, which is
+    // the only state in which that meaning exists.
+    {
+        static WakeButtonPoll screenBtn;
+        const bool pressed =
+            (digitalRead(USER_BUTTON_PIN) == USER_BUTTON_ACTIVE_LEVEL);
+        const bool uiIsUp = !s_screenAsleep
+#if FEATURE_LOCK_SCREEN
+            && !s_lockScreenActive
+#endif
+            ;
+        if (uiIsUp && s_cfgModal) {
+            // Edge-triggered, as it always was: Config's Enter is a press, not
+            // a hold. Fed through the same debounce so the two cannot disagree
+            // about when the button went down.
+            const bool wasDown = screenBtn.stablePressed;
+            (void)serviceWakeButtonDebounce(screenBtn, pressed, nowMs);
+            if (!wasDown && screenBtn.stablePressed) {
+                activateCfgSelection();
+                return true;
+            }
+            return screenBtn.stablePressed;
+        }
+#if !HAS_WAKE_BUTTON_HOLD
+        // This board has no hold gesture anywhere -- see BTN_POWER_BIT in
+        // hw_mesh_deck.h. BOOT is the same screen key as the Power button, on a
+        // pin that can also wake the CPU out of a light-sleep nap, so it has to
+        // mean the same thing: one tap, one step around the cycle. Two buttons
+        // that look identical and behave differently would be worse than the
+        // missing guard.
+        if (serviceWakeButtonDebounce(screenBtn, pressed, nowMs)
+            && screenBtn.stablePressed) {
+            return wakeButtonToggleTap(nowMs, "BOOT button");
+        }
+#else
+        if (serviceWakeButton(screenBtn, pressed, nowMs, "BOOT button")) return true;
+#endif
+        // Held, or resting: nothing else on this board may act on it.
+        if (screenBtn.stablePressed) return true;
+    }
+#else
     static bool userBtnRawPrev = false;
     static bool userBtnStable = false;
     static uint32_t userBtnDebounceMs = 0;
@@ -8777,8 +9095,9 @@ static bool pollUserButton(uint32_t nowMs) {
 #if FEATURE_LOCK_SCREEN
             if (s_lockScreenActive) {
                 // On touch-only boards GPIO0 is the UI action button, not the
-                // display toggle. Elsewhere it is an existing wake gesture.
-                (void)tryExitLockScreenFromInput(nowMs, !UI_TOUCH_ONLY_PROFILE);
+                // display toggle, so it is not a wake gesture and the press is
+                // swallowed like any other input the lock screen eats.
+                (void)tryExitLockScreenFromInput(nowMs, false);
                 return true;
             }
 #endif
@@ -8792,7 +9111,6 @@ static bool pollUserButton(uint32_t nowMs) {
                 activateCfgSelection();
                 return true;
             }
-#if UI_TOUCH_ONLY_PROFILE
             // Innermost surface first. Each entry is the same thing its screen
             // activates on a tap — this button is the Enter key's stand-in on a
             // build that has no Enter key, so the two must not disagree about
@@ -8831,16 +9149,6 @@ static bool pollUserButton(uint32_t nowMs) {
                 chatComposeFromButton();
                 return true;
             }
-#else
-            if (s_screenAsleep) {
-                if (!tryWakeScreenFromInput(nowMs)) {
-                    return true;
-                }
-            } else {
-                requestScreenOff("BOOT button");
-            }
-            return true;
-#endif
         }
     }
 
@@ -8850,44 +9158,16 @@ static bool pollUserButton(uint32_t nowMs) {
         }
         return true;
     }
-#endif
+#endif  // !UI_TOUCH_ONLY_PROFILE
+#endif  // USER_BUTTON_PIN
 
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
-    static bool displayBtnRawPrev = false;
-    static bool displayBtnStable = false;
-    static uint32_t displayBtnDebounceMs = 0;
-
-    bool displayPressed = (digitalRead(DISPLAY_TOGGLE_BUTTON_PIN) == DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL);
-    if (displayPressed != displayBtnRawPrev) {
-        displayBtnRawPrev = displayPressed;
-        displayBtnDebounceMs = nowMs;
-    }
-
-    if ((nowMs - displayBtnDebounceMs) >= 30 && displayPressed != displayBtnStable) {
-        displayBtnStable = displayPressed;
-        if (displayBtnStable) {
-#if FEATURE_LOCK_SCREEN
-            if (s_lockScreenActive) {
-                (void)tryExitLockScreenFromInput(nowMs, true);
-                return true;
-            }
-#endif
-            if (s_screenAsleep) {
-                if (!tryWakeScreenFromInput(nowMs)) {
-                    return true;
-                }
-            } else {
-                requestScreenOff("GPIO35 button");
-            }
-            return true;
-        }
-    }
-
-    if (displayBtnStable && s_screenAsleep) {
-        if (!tryWakeScreenFromInput(nowMs)) {
-            return true;
-        }
-        return true;
+    {
+        static WakeButtonPoll displayBtn;
+        const bool pressed = (digitalRead(DISPLAY_TOGGLE_BUTTON_PIN)
+                              == DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL);
+        if (serviceWakeButton(displayBtn, pressed, nowMs, "GPIO35 button")) return true;
+        if (displayBtn.stablePressed) return true;
     }
 #endif
 
@@ -11536,6 +11816,11 @@ static void initCfgActions() {
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_IMPORT;
 #endif
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FACTORY_RESET;
+#if HAS_SD_MALWARE_SCAN
+    // Under Factory Reset, with the other things that act on stored data rather
+    // than on a setting.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_SD_SCAN;
+#endif
 
     // ── Firmware ─────────────────────────────────────────────────────────────
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -19276,7 +19561,7 @@ static void onCfgActionMessageBackdropPressed(lv_event_t *e) {
     }
 }
 
-static void openCfgActionMessageModal(const char *msg) {
+static void openCfgActionMessageModal(const char *msg, const char *titleText) {
     if (!s_rootScreen) return;
 
     const char *displayMsg = msg;
@@ -19353,7 +19638,7 @@ static void openCfgActionMessageModal(const char *msg) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, titleTextColor, 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(title, "Action Result");
+    lv_label_set_text(title, (titleText && titleText[0]) ? titleText : "Action Result");
 
     lv_obj_t *bodyPanel = lv_obj_create(s_cfgActionMsgModal);
     lv_obj_set_width(bodyPanel, contentW);
@@ -34726,6 +35011,378 @@ static void activateCfgSelection() {
 // Executes a CFG action immediately. Confirmable actions reach here only after
 // the user answers Yes in the confirmation dialog; others come straight from
 // activateCfgSelection.
+#if HAS_SD_MALWARE_SCAN
+// How many files the scan that raised the dialog examined. Handed to the repair
+// so that pressing Yes does not spend a second full walk of the card counting
+// again -- the number is already known and has not changed.
+static uint16_t s_sdScanLastTotal = 0;
+
+// Wider than s_cfgConfirmText: this dialog names files rather than an action,
+// and its box scrolls, so the list is bounded by what is useful to read rather
+// than by what fits on the panel.
+static char s_sdScanConfirmText[512] = {0};
+
+// ── Scan progress ────────────────────────────────────────────────────────────
+// The walk is synchronous and can run for tens of seconds on a full card -- each
+// file is opened and read -- so loop() is not running and nothing else is going
+// to repaint the panel. This modal is driven from the scan's own progress
+// callback, which pumps LVGL itself. Same approach the WiFi scan and the config
+// import already take from inside a Config action.
+//
+// Pumping LVGL from here is safe because of something this board happens to be:
+// the M9 has no touch panel, so a Config row and the confirm dialog's Yes are
+// both reached through pumpKeyboardInput() from loop(), never from inside an
+// LVGL event callback. On a touch board onCfgActionRowPressed() and
+// onCfgConfirmYesPressed() *are* event callbacks, and the lv_timer_handler()
+// below would then be re-entrant. So if HAS_SD_MALWARE_SCAN is ever widened past
+// this board (see config.h), the pump has to move out of the callback and the
+// walk has to be driven a slice at a time from loop() instead.
+static lv_obj_t *s_sdScanBackdrop = nullptr;
+static lv_obj_t *s_sdScanModal    = nullptr;
+static lv_obj_t *s_sdScanBar      = nullptr;
+static lv_obj_t *s_sdScanStatus   = nullptr;
+static lv_obj_t *s_sdScanDetail   = nullptr;
+static uint32_t  s_sdScanLastPaintMs = 0;
+// Set by the progress callback when Back is pressed, read by the two callers so
+// a cancelled run reports as cancelled rather than as "nothing found".
+static bool      s_sdScanCancelled = false;
+
+static void closeSdScanProgressModal() {
+    if (lvObjValid(s_sdScanBackdrop)) {
+        lv_obj_del(s_sdScanBackdrop);
+    } else if (lvObjValid(s_sdScanModal)) {
+        lv_obj_del(s_sdScanModal);
+    }
+    s_sdScanBackdrop = nullptr;
+    s_sdScanModal    = nullptr;
+    s_sdScanBar      = nullptr;
+    s_sdScanStatus   = nullptr;
+    s_sdScanDetail   = nullptr;
+}
+
+static void openSdScanProgressModal(const char *title) {
+    if (!s_rootScreen) return;
+    closeSdScanProgressModal();
+
+    const int screenW = lv_disp_get_hor_res(NULL);
+    const int screenH = lv_disp_get_ver_res(NULL);
+    int modalW = screenW - 28;
+    if (modalW < 180) modalW = screenW - 8;
+    if (modalW > 300) modalW = 300;
+    lv_coord_t contentW = (lv_coord_t)(modalW - 18);
+    if (contentW < 64) contentW = 64;
+
+    const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t modalBg = lightUi ? lv_color_hex(0xEAF1FB) : lv_color_hex(0x0E285B);
+    const lv_color_t modalBorder = lightUi ? lv_color_hex(0x6E8FB8) : lv_color_hex(0x5C86C6);
+    const lv_color_t titleColor = lightUi ? lv_color_hex(0x16233A) : lv_color_hex(0xD9E8FF);
+    const lv_color_t bodyColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
+    const lv_color_t dimColor = lightUi ? lv_color_hex(0x35567E) : lv_color_hex(0xA7C7FF);
+
+    s_sdScanBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_sdScanBackdrop, screenW, screenH);
+    lv_obj_align(s_sdScanBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_sdScanBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    // Clickable, but with no handler: it swallows taps rather than letting them
+    // reach the Config rows underneath, which nothing is servicing anyway while
+    // the walk has the main loop.
+    lv_obj_add_flag(s_sdScanBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_sdScanBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_sdScanBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_sdScanBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_sdScanBackdrop, 0, 0);
+
+    s_sdScanModal = lv_obj_create(s_sdScanBackdrop);
+    lv_obj_set_size(s_sdScanModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_sdScanModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_sdScanModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_sdScanModal, modalBg, 0);
+    lv_obj_set_style_bg_opa(s_sdScanModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_sdScanModal, 1, 0);
+    lv_obj_set_style_border_color(s_sdScanModal, modalBorder, 0);
+    lv_obj_set_style_pad_all(s_sdScanModal, 10, 0);
+    lv_obj_set_style_pad_row(s_sdScanModal, 6, 0);
+    lv_obj_set_flex_flow(s_sdScanModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_sdScanModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *head = lv_label_create(s_sdScanModal);
+    lv_obj_set_width(head, contentW);
+    lv_obj_set_style_text_font(head, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(head, titleColor, 0);
+    lv_obj_set_style_text_align(head, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(head, title);
+
+    s_sdScanStatus = lv_label_create(s_sdScanModal);
+    lv_obj_set_width(s_sdScanStatus, contentW);
+    lv_obj_set_style_text_font(s_sdScanStatus, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_sdScanStatus, bodyColor, 0);
+    lv_label_set_long_mode(s_sdScanStatus, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(s_sdScanStatus, "Counting files on the card...");
+
+    s_sdScanBar = lv_bar_create(s_sdScanModal);
+    lv_obj_set_width(s_sdScanBar, contentW);
+    lv_obj_set_height(s_sdScanBar, 10);
+    lv_bar_set_range(s_sdScanBar, 0, 100);
+    lv_bar_set_value(s_sdScanBar, 0, LV_ANIM_OFF);
+
+    // Which folder the walk is in. Elided rather than wrapped: a deep path would
+    // otherwise resize the modal on every directory change and make the whole
+    // dialog jitter for the length of the scan.
+    s_sdScanDetail = lv_label_create(s_sdScanModal);
+    lv_obj_set_width(s_sdScanDetail, contentW);
+    lv_obj_set_style_text_font(s_sdScanDetail, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_sdScanDetail, dimColor, 0);
+    lv_label_set_long_mode(s_sdScanDetail, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_sdScanDetail, "/");
+
+    lv_obj_t *hint = lv_label_create(s_sdScanModal);
+    lv_obj_set_width(hint, contentW);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, dimColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(hint, "Back = Cancel");
+
+    lv_obj_move_foreground(s_sdScanBackdrop);
+    s_sdScanLastPaintMs = 0;   // so the first callback paints rather than waiting
+    s_sdScanCancelled = false;
+    lv_timer_handler();
+}
+
+// Handed to the storage walk. Throttled: every repaint is a full flush over SPI,
+// and pumping on each of several thousand files would cost more than the reads
+// it is reporting on.
+static bool sdScanProgress(uint16_t done, uint16_t total, uint16_t found,
+                           const char *where) {
+    if (!s_sdScanModal) return true;
+
+    const uint32_t now = millis();
+    if (s_sdScanLastPaintMs != 0 && (uint32_t)(now - s_sdScanLastPaintMs) < 60) return true;
+    s_sdScanLastPaintMs = now;
+
+    // Cancel. loop() is not running -- the walk has the CPU -- so pumpKeyboardInput()
+    // is not going to see this key and it has to be read here instead. Reading
+    // it also consumes it, which is what stops a handful of keys pressed during
+    // a long scan from landing on the Config screen the moment it finishes.
+    const char k = s_keyboard.readKey();
+    if (k != KEY_NONE && isModalCloseKey(k)) {
+        s_sdScanCancelled = true;
+        Serial.println("[sd-scan] cancelled by Back");
+        return false;
+    }
+
+    char buf[72];
+    if (total == 0) {
+        // Counting pass: there is no denominator yet, so the bar stays empty and
+        // the running count is the thing that shows it is alive.
+        snprintf(buf, sizeof(buf), "Counting files... %u found", (unsigned)done);
+        lv_bar_set_value(s_sdScanBar, 0, LV_ANIM_OFF);
+    } else {
+        const uint32_t pct = (uint32_t)done * 100UL / (total ? total : 1);
+        snprintf(buf, sizeof(buf), "Checking %u of %u   %u%%",
+                 (unsigned)done, (unsigned)total, (unsigned)pct);
+        lv_bar_set_value(s_sdScanBar, (int32_t)pct, LV_ANIM_OFF);
+    }
+    lv_label_set_text(s_sdScanStatus, buf);
+
+    if (found) {
+        snprintf(buf, sizeof(buf), "%s   -   %u match%s so far",
+                 (where && where[0]) ? where : "/", (unsigned)found,
+                 (found == 1) ? "" : "es");
+    } else {
+        snprintf(buf, sizeof(buf), "%s", (where && where[0]) ? where : "/");
+    }
+    lv_label_set_text(s_sdScanDetail, buf);
+
+    lv_timer_handler();
+    return true;
+}
+
+// Yes on the export prompt: writes /camillia/config.yaml back onto the card the
+// format just emptied. Offered rather than done automatically, because a config
+// export is the user's copy of their own settings and putting one somewhere is
+// their decision, not a side effect of cleaning a card.
+static void cfgSdExportCommit(int) {
+    const bool ok = cfgExport(s_cfg);
+    openCfgActionMessageModal(
+        ok ? "Configuration exported to /camillia/config.yaml.\n\nThe card is "
+             "formatted and holds nothing else. Chat history, the node database "
+             "and any map tiles were on the old filesystem and are gone."
+           : "Export FAILED. The card formatted, but the configuration could not "
+             "be written back to it - try Export from the Config screen.",
+        "SD Card Format");
+}
+
+// Yes on the format confirmation. Everything below this line is the point of no
+// return, which is why it sits behind two dialogs rather than one.
+static void cfgSdFormatCommit(int) {
+    // Up for the duration: f_mkfs on a large card is not instant, and the
+    // remount after it is a second bus conversation. There is no progress to
+    // report from inside f_mkfs -- it does not call back -- so this is a
+    // "working" panel rather than a bar that would have to lie.
+    openSdScanProgressModal("Formatting SD Card");
+    if (s_sdScanStatus) {
+        lv_label_set_text(s_sdScanStatus, "Writing a new filesystem...");
+    }
+    if (s_sdScanDetail) lv_label_set_text(s_sdScanDetail, "Do not remove the card");
+    lv_timer_handler();
+
+    const bool formatted = storageFormatCard();
+
+    // storageFormatCard() leaves the card unmounted whichever way it went, so
+    // both sides of the mount bookkeeping have to be told before anything asks
+    // for the card again.
+    sdMarkUnmounted();
+    const bool remounted = sdBegin(true);
+    if (remounted) storageFs().mkdir("/camillia");
+
+    closeSdScanProgressModal();
+
+    if (!formatted) {
+        openCfgActionMessageModal(
+            remounted
+                ? "Format FAILED. The card was left as it was and is still "
+                  "mounted.\n\nFormatting it on a PC is the reliable way out."
+                : "Format FAILED, and the card could not be remounted.\n\nReboot "
+                  "the device, or format the card on a PC.",
+            "SD Card Format");
+        return;
+    }
+    if (!remounted) {
+        openCfgActionMessageModal(
+            "The card was formatted but could not be remounted. Reboot the "
+            "device and it should come up clean.",
+            "SD Card Format");
+        return;
+    }
+
+    openCfgConfirmModal(-1,
+                        "Card formatted.\n\nWrite your configuration back to it "
+                        "as /camillia/config.yaml?",
+                        cfgSdExportCommit, 0);
+}
+
+// Format on the scan's dialog. Asks again, and in plainer words: the first
+// dialog was about a handful of matched files, and this is about everything on
+// the card. Someone who arrived here to remove two files should not be able to
+// erase their message history without being told that is what they are doing.
+static void cfgSdFormatAsk(int) {
+    openCfgConfirmModal(-1,
+                        "Format the SD card?\n\nThis erases EVERYTHING on it - "
+                        "chat and DM history, the node database, map tiles and "
+                        "your saved configuration - not just the files the scan "
+                        "matched.\n\nIt cannot be undone.",
+                        cfgSdFormatCommit, 0);
+}
+
+// Yes on the dialog below. Re-walks the card and deletes what it recognises —
+// it is handed no list, so nothing a dialog got wrong can widen what goes.
+static void cfgSdRepairCommit(int) {
+    openSdScanProgressModal("Removing Files");
+    uint16_t failed = 0;
+    const uint16_t removed = storageRepairCard(&failed, sdScanProgress,
+                                               s_sdScanLastTotal);
+    closeSdScanProgressModal();
+
+    char msg[256];
+    if (s_sdScanCancelled) {
+        // Stopping a delete does not put anything back, so this reports what
+        // actually happened rather than treating cancel as "nothing happened".
+        snprintf(msg, sizeof(msg),
+                 "Cancelled after removing %u file%s. The rest were left alone - "
+                 "run the scan again to see what is still there.",
+                 (unsigned)removed, (removed == 1) ? "" : "s");
+    } else if (failed) {
+        snprintf(msg, sizeof(msg),
+                 "Removed %u file%s. %u could not be deleted - the card may be "
+                 "write-protected.\n\nRe-run the scan to check.",
+                 (unsigned)removed, (removed == 1) ? "" : "s", (unsigned)failed);
+    } else if (removed) {
+        snprintf(msg, sizeof(msg),
+                 "Removed %u file%s.\n\nThis card looked clean afterwards, but the "
+                 "scan reads names and headers, not contents - it cannot promise "
+                 "the card is clean. Reformatting is the only answer that can.",
+                 (unsigned)removed, (removed == 1) ? "" : "s");
+    } else {
+        snprintf(msg, sizeof(msg), "%s",
+                 "Nothing was removed. The files may have gone already, or the "
+                 "card may be write-protected.");
+    }
+    openCfgActionMessageModal(msg, "SD Card Scan");
+}
+
+// Runs the scan and reports. Scanning changes nothing, so it needs no
+// confirmation of its own; the confirmation is the one in front of the delete.
+static void cfgSdScanRun() {
+    // sdBegin() rather than a bare mounted-check: it is what every other SD
+    // caller here uses, it is idempotent, and it picks up a card that was put in
+    // after boot. storageMounted() is emphatically not the test -- on this board
+    // the mount happens in config_io.cpp and that flag is never set, so asking
+    // it reported "no card" on a device with a card in it.
+    if (!sdBegin()) {
+        openCfgActionMessageModal("No SD card is mounted.", "SD Card Scan");
+        return;
+    }
+
+    // Six rather than three: the dialog's box scrolls now, so the limit is how
+    // many paths anyone will actually read before answering, not how many fit.
+    // The count above them is the honest total either way.
+    StorageCardSuspect found[6];
+    uint16_t scanned = 0;
+    openSdScanProgressModal("Scanning SD Card");
+    const uint16_t hits =
+        storageScanCard(found, (uint8_t)(sizeof(found) / sizeof(found[0])), &scanned,
+                        sdScanProgress);
+    s_sdScanLastTotal = scanned;
+    // Down before either dialog below goes up: they are separate objects, so
+    // this one would otherwise sit over whichever replaced it.
+    closeSdScanProgressModal();
+
+    // Cancelled: back to the Config screen with nothing in the way. A dialog
+    // here would be a result for a question the user just withdrew, and the one
+    // thing that must not appear is "nothing found" -- the scan did not finish,
+    // so it found nothing only in the sense that it stopped looking.
+    if (s_sdScanCancelled) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "SD scan cancelled");
+        return;
+    }
+
+    if (hits == 0) {
+        char msg[224];
+        snprintf(msg, sizeof(msg),
+                 "Examined %u file%s. Nothing matching Windows malware was "
+                 "found.\n\nThis reads names and file headers, not contents, so "
+                 "it is a good sign rather than a guarantee.",
+                 (unsigned)scanned, (scanned == 1) ? "" : "s");
+        openCfgActionMessageModal(msg, "SD Card Scan");
+        return;
+    }
+
+    const uint8_t listed =
+        (uint8_t)((hits < (sizeof(found) / sizeof(found[0]))) ? hits
+                                                             : sizeof(found) / sizeof(found[0]));
+    int len = snprintf(s_sdScanConfirmText, sizeof(s_sdScanConfirmText),
+                       "Found %u file%s matching Windows malware:\n",
+                       (unsigned)hits, (hits == 1) ? "" : "s");
+    for (uint8_t i = 0; i < listed && len > 0 && (size_t)len < sizeof(s_sdScanConfirmText); i++) {
+        len += snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len,
+                        "\n%s", found[i].path);
+    }
+    if (hits > listed && len > 0 && (size_t)len < sizeof(s_sdScanConfirmText)) {
+        len += snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len,
+                        "\n+%u more", (unsigned)(hits - listed));
+    }
+    if (len > 0 && (size_t)len < sizeof(s_sdScanConfirmText)) {
+        snprintf(s_sdScanConfirmText + len, sizeof(s_sdScanConfirmText) - (size_t)len, "%s",
+                 "\n\nDelete them? Nothing else on the card is touched.\n\n"
+                 "Format erases the whole card instead - the only certain fix.");
+    }
+
+    openCfgConfirmModal(-1, s_sdScanConfirmText, cfgSdRepairCommit, 0,
+                        "(F)ormat", cfgSdFormatAsk);
+}
+#endif  // HAS_SD_MALWARE_SCAN
+
 static void performCfgAction(int actionId) {
     s_cfgConfirmAction = -1;
     s_cfgConfirmMs = 0;
@@ -35571,6 +36228,14 @@ static void performCfgAction(int actionId) {
             flushPersistentState();   // settings and transcripts must land before we go
             ESP.restart();
             break;
+
+#if HAS_SD_MALWARE_SCAN
+        case CFG_ACTION_SD_SCAN:
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec SD_SCAN");
+            showActionPopup = false;   // the scan puts up its own result
+            cfgSdScanRun();
+            break;
+#endif
     }
 
     if (showActionPopup && s_cfgStatus[0]) {
@@ -35587,6 +36252,10 @@ static void closeCfgConfirmModal() {
     }
     s_cfgConfirmBackdrop = nullptr;
     s_cfgConfirmModal = nullptr;
+    s_cfgConfirmScroll = nullptr;
+    s_cfgConfirmAltFn = nullptr;
+    s_cfgConfirmAltLabel[0] = '\0';
+    s_cfgConfirmAltKey = 0;
     s_cfgConfirmPendingAction = -1;
     // Cleared with the dialog, so a later row-based confirm cannot inherit a
     // callback left behind by a picker.
@@ -35610,9 +36279,23 @@ static void cfgConfirmAccept() {
     if (action >= 0) performCfgAction(action);
 }
 
+// The third button. Same shape as cfgConfirmAccept(): the callback is taken
+// before the close, because closing clears it.
+static void cfgConfirmAlt() {
+    CfgConfirmFn fn = s_cfgConfirmAltFn;
+    const int    arg = s_cfgConfirmFnArg;
+    closeCfgConfirmModal();
+    if (fn) fn(arg);
+}
+
 static void cfgConfirmReject() {
     closeCfgConfirmModal();
     refreshCfgModal();
+}
+
+static void onCfgConfirmAltPressed(lv_event_t *e) {
+    LV_UNUSED(e);
+    cfgConfirmAlt();
 }
 
 static void onCfgConfirmYesPressed(lv_event_t *e) {
@@ -35626,13 +36309,34 @@ static void onCfgConfirmNoPressed(lv_event_t *e) {
 }
 
 static void openCfgConfirmModal(int actionId, const char *text,
-                                CfgConfirmFn fn, int fnArg) {
+                                CfgConfirmFn fn, int fnArg,
+                                const char *altLabel, CfgConfirmFn altFn) {
     if (!s_rootScreen || s_cfgConfirmModal || s_cfgConfirmBackdrop) return;
     s_cfgConfirmPendingAction = actionId;
     s_cfgConfirmFn = fn;
     s_cfgConfirmFnArg = fnArg;
 
-    char actionText[96];
+    s_cfgConfirmAltFn = (altLabel && altLabel[0]) ? altFn : nullptr;
+    s_cfgConfirmAltKey = 0;
+    s_cfgConfirmAltLabel[0] = '\0';
+    if (s_cfgConfirmAltFn) {
+        snprintf(s_cfgConfirmAltLabel, sizeof(s_cfgConfirmAltLabel), "%s", altLabel);
+        // The mnemonic, read out of the label the same way "(Y)es" and "(N)o"
+        // carry theirs, so the button and the key it answers to cannot disagree.
+        for (const char *p2 = s_cfgConfirmAltLabel; p2[0] && p2[1] && p2[2]; p2++) {
+            if (p2[0] == '(' && p2[2] == ')') {
+                s_cfgConfirmAltKey = (char)tolower((unsigned char)p2[1]);
+                break;
+            }
+        }
+        if (!s_cfgConfirmAltKey) {
+            s_cfgConfirmAltKey = (char)tolower((unsigned char)s_cfgConfirmAltLabel[0]);
+        }
+    }
+
+    // Sized for the SD scan's dialog, which names the files it is about to
+    // delete. Everything else here is one row label and fits many times over.
+    char actionText[512];
     const bool ownText = (text && text[0]);
     if (ownText) {
         strncpy(actionText, text, sizeof(actionText) - 1);
@@ -35654,6 +36358,9 @@ static void openCfgConfirmModal(int actionId, const char *text,
     const lv_color_t actionTextColor = lightUi ? lv_color_hex(0x13243D) : lv_color_hex(0xFFFFFF);
     const uint32_t noBtnBg = lightUi ? 0xC76565 : 0x6B3030;
     const uint32_t yesBtnBg = lightUi ? 0x429A56 : 0x2F6B30;
+    // Neither the safe answer nor the one the dialog is named after, and the
+    // most destructive thing on the screen: its own colour, not a second green.
+    const uint32_t altBtnBg = lightUi ? 0xB07028 : 0x7A4A12;
     const lv_color_t btnTextColor = lv_color_hex(0xFFFFFF);
 
     // Full-screen backdrop makes the dialog truly modal for touch builds.
@@ -35669,6 +36376,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
 
     s_cfgConfirmModal = lv_obj_create(s_cfgConfirmBackdrop);
     lv_obj_set_size(s_cfgConfirmModal, modalW, LV_SIZE_CONTENT);
+    // Content-sized as before, but no longer allowed off the panel. Long text
+    // grows the box below until this bites; past that the box scrolls and the
+    // dialog stays put, so the buttons cannot be pushed out of reach.
+    lv_obj_set_style_max_height(s_cfgConfirmModal, (lv_coord_t)(h - 12), 0);
     lv_obj_align(s_cfgConfirmModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_cfgConfirmModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_cfgConfirmModal, LV_OBJ_FLAG_CLICKABLE);
@@ -35692,9 +36403,18 @@ static void openCfgConfirmModal(int actionId, const char *text,
                       actionId == CFG_ACTION_CHAT_STYLE ? "Confirm Chat Style" : "Confirm?");
 
     lv_obj_t *actionBox = lv_obj_create(s_cfgConfirmModal);
+    s_cfgConfirmScroll = actionBox;
     lv_obj_set_width(actionBox, lv_pct(100));
     lv_obj_set_height(actionBox, LV_SIZE_CONTENT);
-    lv_obj_clear_flag(actionBox, LV_OBJ_FLAG_SCROLLABLE);
+    // Capped rather than fixed: a one-line confirmation still draws a one-line
+    // box, and only text long enough to crowd the buttons starts scrolling. Half
+    // the panel leaves the title above and the Yes/No row below their room,
+    // which is what the dialog is actually for.
+    lv_coord_t boxMaxH = (lv_coord_t)(h / 2);
+    if (boxMaxH < 44) boxMaxH = 44;
+    lv_obj_set_style_max_height(actionBox, boxMaxH, 0);
+    setupVScroll(actionBox);
+    lv_obj_set_scrollbar_mode(actionBox, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(actionBox, actionBg, 0);
     lv_obj_set_style_bg_opa(actionBox, LV_OPA_60, 0);
     lv_obj_set_style_border_width(actionBox, 1, 0);
@@ -35773,6 +36493,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
     makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
     makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
 #endif
+    if (s_cfgConfirmAltFn) {
+        makeConfirmBtn(btnRow, s_cfgConfirmAltLabel, altBtnBg, btnTextColor,
+                       onCfgConfirmAltPressed);
+    }
 }
 
 // ── Boot firmware-update prompt ───────────────────────────────────────────────
@@ -37525,8 +38249,13 @@ static void pumpKeyboardInput() {
                 mayWake = false;
 #endif
 #if defined(DEVICE_M9)
-                // Same pocket guard used when the panel is fully asleep.
-                mayWake = (k == KEY_ENTER || k == KEY_SLEEP_SCREEN);
+                // The d-pad centre, and only held. This board gets the same
+                // tap/hold split the wake buttons have without anything here
+                // timing a keypress: the controller reports a held centre as
+                // KEY_SLEEP_SCREEN on its own (0xA3) and a tap as KEY_ENTER, so
+                // the two gestures arrive as two different keys. A tap is
+                // swallowed like any other input the lock screen eats.
+                mayWake = (k == KEY_SLEEP_SCREEN);
 #endif
             }
             (void)tryExitLockScreenFromInput(millis(), mayWake);
@@ -37569,6 +38298,25 @@ static void pumpKeyboardInput() {
             if (!fromVnc && k != KEY_ENTER && k != KEY_SLEEP_SCREEN) {
                 continue;
             }
+#if FEATURE_LOCK_SCREEN
+            // Tap versus hold, exactly as on the wake buttons: a tap is worth
+            // the lock screen and no more, and only a held centre
+            // (KEY_SLEEP_SCREEN) goes through to the UI. Without this the
+            // gesture that puts the device away -- a centre hold, which is
+            // requestScreenOff() -- was undone by the lightest press of the same
+            // key, which is the one thing a pocket reliably produces.
+            //
+            // With the lock screen switched off a tap does nothing at all and
+            // the hold is the only way back, which is what the buttons do too.
+            if (!fromVnc && k == KEY_ENTER) {
+                if (s_cfg.lockScreenEnabled
+                    && (int32_t)(millis() - s_screenWakeBlockedUntilMs) >= 0) {
+                    wakeToLockScreen("M9 d-pad centre");
+                    return;
+                }
+                continue;
+            }
+#endif
 #endif
             if (!tryWakeScreenFromInput(millis())) {
                 continue;
@@ -37866,6 +38614,23 @@ static void pumpKeyboardInput() {
         // The CFG confirmation dialog is modal: Y or Enter confirms, N/close
         // cancels, and every other shortcut is swallowed while it's up.
         if (s_cfgConfirmModal) {
+            // Scroll first, answers second. j/k arrive here already folded onto
+            // KEY_SCROLL_UP/DN by remapJkUiKey() further up, so naming the
+            // tokens covers the d-pad, the arrows and the letters at once --
+            // the same set the release-notes reader takes.
+            if (k == KEY_SCROLL_UP || k == KEY_PAGE_UP || k == KEY_PREV_CHAN) {
+                scrollListClamped(s_cfgConfirmScroll, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN || k == KEY_PAGE_DN || k == KEY_NEXT_CHAN) {
+                scrollListClamped(s_cfgConfirmScroll, -18);
+                continue;
+            }
+            if (s_cfgConfirmAltFn && s_cfgConfirmAltKey
+                && tolower((unsigned char)k) == s_cfgConfirmAltKey) {
+                cfgConfirmAlt();
+                continue;
+            }
             if (k == 'y' || k == 'Y' || k == KEY_ENTER) {
                 cfgConfirmAccept();
             } else if (k == 'n' || k == 'N' || isModalCloseKey(k)) {
@@ -47894,7 +48659,7 @@ void setup() {
     openHomeDashboard();
 #endif
     if (s_otaWorkerBootNotice[0]) {
-        openCfgActionMessageModal(s_otaWorkerBootNotice);
+        openCfgActionMessageModal(s_otaWorkerBootNotice, "Update");
         s_otaWorkerBootNotice[0] = '\0';
     }
     s_lastActivityMs = millis();
@@ -48008,12 +48773,10 @@ static bool powerSaveShouldNap() {
         // slower than the nap saved and loses whatever was typed to wake it.
         && !bleKeyboardActive()
 #endif
-#if defined(DEVICE_WIO_TRACKER_L2)
-        // The gesture that brings this board back from a dark panel is a
-        // two-second hold, and the loop has to be awake to time it. Only the
+        // The gesture that brings any of these boards back from a dark panel is
+        // a two-second hold, and the loop has to be awake to time it. Only the
         // hold itself holds the CPU up; an idle dark panel naps as before.
-        && !s_wioWakeButtonHeld
-#endif
+        && s_wakeButtonsHeld == 0
         && WiFi.getMode() == WIFI_OFF     // light sleep + active Wi-Fi don't mix
         // Light sleep stops the UART ISR, so the RX FIFO (128 B) overruns after
         // ~33 ms at 38400 baud and the NMEA stream is shredded. Napping is only

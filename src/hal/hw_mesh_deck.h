@@ -64,12 +64,25 @@
 //   LED: red P10, green P11, blue P12 (active-low, common anode)
 // POWER_BTN is hardware-fixed: a long press (~2 s) cuts power below firmware.
 #define BTN_EXPANDER_ADDR       0x59
-// P06 (BTN_R2) sleeps and wakes the panel — second from the right along the top
-// edge, which is where wadamesh puts it. See meshDeckPollButtons(), which binds
-// it outside the key path so the press cannot wake the screen it just turned
-// off. The BOOT button below does the same job for the case an expander pin
-// cannot cover: waking the CPU out of a light-sleep nap.
-#define BTN_R2_BIT              6      // P06 BTN_R2, screen sleep/wake
+// P07 (POWER_BTN) is the screen button: a tap cycles dark panel -> lock screen
+// -> UI -> dark, which is where a phone puts it and where a hand reaches for it.
+// See meshDeckPollButtons(), which binds it outside the key path so the press
+// cannot wake the screen it just turned off.
+//
+// Tap only, and that is a hardware constraint rather than a preference: the
+// ~2 s hold that unlocks every other board is the same ~2 s that cuts power
+// here, below firmware, so a hold on this pin can only ever end as a shutdown.
+// The trade is that this board's screen button has no pocket guard — two taps
+// in a bag reach the UI, where on every other board no number of taps can.
+//
+// The BOOT button below is the same key on a different pin, and carries the
+// same tap-only cycle rather than the tap/hold rule the other boards give it:
+// two buttons that look alike and behave differently would be worse than the
+// missing guard. It is there for the one case an expander pin cannot cover —
+// waking the CPU out of a light-sleep nap.
+#define BTN_POWER_BIT           7      // P07 POWER_BTN, screen lock/wake
+// P06 (BTN_R2), the top-right shoulder, is deliberately unbound. It used to be
+// the screen key; the Power button took that job.
 
 // Every expander interrupt is aggregated onto this one real GPIO: 0x59's INT
 // chains through 0x58 P17, and 0x58's INTN lands here. Nothing uses it yet —

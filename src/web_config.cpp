@@ -341,6 +341,15 @@ static void redirect(const char *path) {
     server.send(303);
 }
 
+#if HAS_SD_MALWARE_SCAN
+// Last scan's outcome, kept so the Utilities pane can report it and so the
+// delete button only exists while there is something to delete. Declared up
+// here because the pane that renders them is built well above the handlers that
+// set them.
+static char     gSdScanResult[96] = "";
+static uint16_t gSdScanHits = 0;
+#endif
+
 static void setFlashMsg(const char *msg) {
     if (!msg) { gFlashMsg[0] = '\0'; return; }
     strncpy(gFlashMsg, msg, sizeof(gFlashMsg) - 1);
@@ -4777,6 +4786,46 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += webCfgSnfResult();
     }
     html += "</p>";
+
+#if HAS_SD_MALWARE_SCAN
+    // Scanning changes nothing, so the scan button asks nothing. The delete
+    // below it does, and only appears once there is something to delete.
+    html +=
+        "<form method='POST' action='/sd-scan'>"
+        "<button type='submit' style='background:#2563a8'>"
+        "&#128269; Scan SD Card for Malware</button>"
+        "</form>"
+        "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+        "Looks through the card for Windows programs, scripts, shortcuts and "
+        "autorun files &mdash; including a program wearing a harmless-looking "
+        "name, which is caught by its header rather than its extension. None of "
+        "it can run on this device; the risk is the next PC the card goes into. "
+        "Camillia's own <code>/camillia</code> folder is skipped.";
+    if (gSdScanResult[0]) {
+        html += "<br>Last scan: ";
+        html += gSdScanResult;
+    }
+    html += "</p>";
+
+    if (gSdScanHits > 0) {
+        html +=
+            "<form method='POST' action='/sd-repair'"
+            " onsubmit=\"return confirm('Delete the ";
+        html += String((unsigned)gSdScanHits);
+        html +=
+            " file(s) the scan matched? Nothing else on the card is touched, and "
+            "this cannot be undone.')\">"
+            "<button type='submit' style='background:#b03030'>"
+            "&#128465; Delete Matched Files</button>"
+            "</form>"
+            "<p style='font-size:.82em;color:#888;margin:.3em 0 1em'>"
+            "Re-walks the card and deletes only what it still recognises &mdash; it "
+            "is handed no list, so nothing here can be pointed at map tiles, chat "
+            "history or a backup. Reformatting the card is still the only thing "
+            "that can promise it is clean.</p>";
+    }
+#endif
+
     sectionEnd(html, false);
     sendChunk(html);
 
@@ -7944,6 +7993,72 @@ static void handlePostSnfRequest() {
     redirectHomeWithFlash("Replay requested from the Store & Forward router.");
 }
 
+#if HAS_SD_MALWARE_SCAN
+// ── SD card malware scan ──────────────────────────────────────
+
+static void handlePostSdScan() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    // Same call the other SD actions here use. storageMounted() is not it: on
+    // the SPI-SD boards the mount happens in config_io.cpp and never sets that
+    // flag, so it answers "no card" for a card that is present.
+    if (!sdBegin()) {
+        gSdScanHits = 0;
+        snprintf(gSdScanResult, sizeof(gSdScanResult), "no card mounted");
+        redirectHomeWithFlash("SD scan: no card is mounted.");
+        return;
+    }
+
+    uint16_t scanned = 0;
+    gSdScanHits = storageScanCard(nullptr, 0, &scanned);
+    snprintf(gSdScanResult, sizeof(gSdScanResult),
+             "%u file%s examined, %u match%s (see the serial log for names)",
+             (unsigned)scanned, (scanned == 1) ? "" : "s",
+             (unsigned)gSdScanHits, (gSdScanHits == 1) ? "" : "es");
+
+    char flash[96];
+    if (gSdScanHits) {
+        snprintf(flash, sizeof(flash),
+                 "SD scan: %u file(s) match Windows malware.", (unsigned)gSdScanHits);
+    } else {
+        snprintf(flash, sizeof(flash),
+                 "SD scan: nothing matching Windows malware found.");
+    }
+    redirectHomeWithFlash(flash);
+}
+
+static void handlePostSdRepair() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    // Only reachable after a scan found something, and storageRepairCard()
+    // guards itself anyway -- but a card pulled in between would otherwise
+    // report "0 removed", which reads as the feature failing rather than as
+    // there being no card to work on.
+    if (!sdBegin()) {
+        gSdScanHits = 0;
+        snprintf(gSdScanResult, sizeof(gSdScanResult), "no card mounted");
+        redirectHomeWithFlash("SD repair: no card is mounted.");
+        return;
+    }
+
+    uint16_t failed = 0;
+    const uint16_t removed = storageRepairCard(&failed);
+
+    // Re-derived rather than decremented: the button must disappear because a
+    // fresh walk finds nothing, not because a counter was adjusted to say so.
+    uint16_t scanned = 0;
+    gSdScanHits = storageScanCard(nullptr, 0, &scanned);
+    snprintf(gSdScanResult, sizeof(gSdScanResult),
+             "%u removed, %u failed, %u still matching",
+             (unsigned)removed, (unsigned)failed, (unsigned)gSdScanHits);
+
+    char flash[96];
+    snprintf(flash, sizeof(flash),
+             "SD repair: %u removed%s. Reformatting is the only certain fix.",
+             (unsigned)removed,
+             failed ? ", some could not be deleted" : "");
+    redirectHomeWithFlash(flash);
+}
+#endif  // HAS_SD_MALWARE_SCAN
+
 // ── Clear Nodes ───────────────────────────────────────────────
 
 // Delete the on-SD node-database files. Legacy paths: nothing in this firmware
@@ -8566,6 +8681,10 @@ static void registerCommonRoutes() {
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
+#if HAS_SD_MALWARE_SCAN
+    onRoute("/sd-scan",           HTTP_POST, handlePostSdScan);
+    onRoute("/sd-repair",         HTTP_POST, handlePostSdRepair);
+#endif
     onRoute("/clear-nodes",       HTTP_POST, handlePostClearNodes);
 #if HAS_STATE_MAPS
     onRoute("/clear-maps",        HTTP_POST, handlePostClearMaps);

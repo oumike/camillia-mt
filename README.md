@@ -13,6 +13,8 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 - [Configuration](#configuration)
 - [Releases](#releases)
 - [Use of AI](#use-of-ai)
+- [Support](#support)
+- [Acknowledgments](#acknowledgments)
 - [License](#license)
 - [Usage and Controls Guide (docs/USE.md)](docs/USE.md)
 - [Build and Flash Guide (docs/BUILD.md)](docs/BUILD.md)
@@ -140,6 +142,45 @@ off the stable channel.
 Hello!  I've been a developer professionally since about 2001 working on a large list of technologies.  I've created this project in my spare time so I could contribute to my favorite new hobby (mesh networking) and try out coding with an AI partner (Claude).  Lots of this code has been touched by AI but as I go through the process I'm reviewing the code.  AI is tool, and like any other tool can be used well or used poorly.
 
 This project is a bit more than a proof of concept but not something that has any commercial value.  I'm doing this for fun and to learn.  Feel free to contribute, use or ignore.
+
+## Support
+
+Camillia is free and stays free — this is a hobby project, not a product. If it
+has been useful to you and you feel like buying me a coffee, the tip jar is at
+**<https://buymeacoffee.com/oumike>**. Entirely optional, and nothing in the
+firmware is gated behind it.
+
+## Acknowledgments
+
+### wadamesh
+
+A large thank you to [**wadamesh**](https://github.com/ALLFATHER-BV/wadamesh)
+and its authors. It is genuinely good software, and it has been generous
+software — both in what it makes available and in how freely it has been shared.
+Camillia is better for it.
+
+Concretely, wadamesh has been a reference for how these boards are meant to
+behave. Where this firmware and wadamesh run on the same hardware, Camillia
+tries to put things where wadamesh already puts them, so that anyone moving
+between the two is not relearning the device — the Mesh Deck's button layout and
+the placement of sleep/wake on it are the clearest example, and the source
+comments say so at the call sites.
+
+The SD card scan is theirs in spirit too. When Elecrow disclosed that some
+ThinkNode M9 cards had shipped carrying a Windows worm, wadamesh shipped **SD
+Scan** — which finds Windows programs, scripts, shortcuts and autorun files on a
+card and removes them once you confirm. Camillia's M9 scan follows the same
+reasoning, including the idea of looking for a real `MZ` program header rather
+than trusting file extensions. If you want a tool built for the job rather than
+a feature bolted onto a mesh radio, go and use theirs.
+
+wadamesh is GPL-3.0, the same license family this project uses.
+
+### Everyone else
+
+Thanks also to the Meshtastic project, and to the maintainers of the libraries
+this firmware stands on — LVGL, RadioLib, Arduino-ESP32, LovyanGFX and nanopb
+among them.
 
 ## License
 

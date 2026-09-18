@@ -181,6 +181,36 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #  define UI_TOUCH_ONLY_PROFILE 0
 #endif
 
+// ── Dedicated screen / wake button ───────────────────────────────────────────
+// True on the boards that have a physical button whose job is the screen: the
+// side toggle, the BOOT button where nothing else has claimed it, or the Wio
+// Tracker L2's Wake button on its expander. Those buttons share one rule -- tap
+// to put the device away or to glance at the lock screen, hold to unlock -- and
+// this is what compiles that rule in.
+//
+// On the touch-only boards GPIO0 is the UI action button rather than a screen
+// key, so it does not count; those boards wake from the panel instead. The
+// Heltec R8 has neither and comes out false, which is correct: touch is its
+// only wake gesture.
+#if (defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0) && !UI_TOUCH_ONLY_PROFILE) \
+    || (defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)) \
+    || defined(DEVICE_WIO_TRACKER_L2)
+#  define HAS_WAKE_BUTTON 1
+#else
+#  define HAS_WAKE_BUTTON 0
+#endif
+
+// Whether that button can carry the two-second hold that unlocks. The Mesh Deck
+// is the one board where it cannot: its screen key is the Power button, and ~2 s
+// on that pin cuts power below firmware. It gets a tap-only cycle instead --
+// dark panel, lock screen, UI, dark -- on both the Power button and the BOOT
+// button that mirrors it. See BTN_POWER_BIT in hw_mesh_deck.h.
+#if HAS_WAKE_BUTTON && !defined(DEVICE_MESH_DECK)
+#  define HAS_WAKE_BUTTON_HOLD 1
+#else
+#  define HAS_WAKE_BUTTON_HOLD 0
+#endif
+
 // ── Bottom icon nav bar ──────────────────────────────────────────────────────
 // Wider than UI_TOUCH_ONLY_PROFILE: a bar of tap targets is worth having on
 // anything you can tap, so the test is the panel, not the absence of a

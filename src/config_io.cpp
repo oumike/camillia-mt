@@ -1146,6 +1146,11 @@ void cfgInitDefaults(RhinoConfig &cfg) {
 // ── SD init ──────────────────────────────────────────────────
 bool sdCardMounted() { return sdReady || storageMounted(); }
 
+void sdMarkUnmounted() {
+    sdReady = false;
+    sdForceRescan();   // a remount now is a deliberate one; no cooldown applies
+}
+
 static bool sdBeginProbe() {
     if (storageMounted()) {
         sdReady = true;

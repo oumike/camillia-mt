@@ -363,6 +363,11 @@ channel raises nothing.
 
 ### Attaky Mesh Deck (mesh-deck)
 
+- **The Power button is the screen key.** A tap cycles dark panel → lock screen
+  → UI → dark; the BOOT button does the same. Tap only — roughly two seconds on
+  the Power button cuts power in hardware, so this board has no hold-to-unlock.
+  See [Lock screen](#lock-screen). The top-right shoulder button (BTN_R2), which
+  used to sleep and wake the panel, is now unbound
 - Alt+H returns directly to chat from Config, filters, nested pickers, and the
   other device surfaces. It closes things; it does not open the channel
   selector — H alone does that, and leaving the channel list open on this board
@@ -1077,20 +1082,49 @@ held without power, so a band that redrew itself every 30 seconds would be
 spending battery on refreshes nobody asked for.
 
 The normal **Screen Timeout** and each board's existing screen-off gesture enter
-the lock screen. The same deliberate input that wakes that board from a dark
-panel dismisses it; other keys, touches and controls are swallowed rather than
-acting on the hidden UI. After the configured dwell, the panel enters its normal
-fully-off state and the next wake returns directly to the UI.
+the lock screen. Keys, touches and controls that are not that board's wake
+gesture are swallowed rather than acting on the hidden UI. After the configured
+dwell, the panel enters its normal fully-off state.
 
-**The Wio Tracker L2 is the exception, and splits the two by press length.** Its
-top Wake button locks on a *short press* and needs a *two-second hold* to come
-back — from the lock screen and from a fully dark panel alike, so the gesture
-does not change with a state a dark panel gives you no way to read. A short
-press while locked or dark does nothing. With **Lock Screen** turned off the
-same pair applies to the panel directly: a press puts it out, a hold brings it
-back. The asymmetry is the point — putting the device away is cheap to undo and
-gets the quick gesture, while waking it is what a pocket does by accident, and a
+#### The wake button: tap to glance, hold to unlock
+
+**Every board with a dedicated screen button splits the two by press length.**
+That is the Wio Tracker L2's top Wake button, the side button on the Heltec
+expansion boards, and the BOOT button everywhere it is not already the UI's
+action button.
+
+| Press | Dark panel | Lock screen | UI in front of you |
+| --- | --- | --- | --- |
+| **Tap** | Brings the lock screen up | Nothing | Puts the device away |
+| **Hold** (2 s) | Unlocks, straight to the UI | Unlocks | Nothing |
+
+One rule in every state, so the gesture does not change with a state a dark
+panel gives you no way to read. **A tap can never reach the UI** — the most a
+press in a pocket can cost you is a lit lock screen that times itself back out.
+The asymmetry is the point: putting the device away is cheap to undo and gets
+the quick gesture, while waking it is what a pocket does by accident, and a
 button held for two seconds is the one input a pocket does not produce.
+
+With **Lock Screen** turned off, the same pair applies to the panel directly: a
+tap puts it out, a hold brings it back, and a tap on a dark panel does nothing.
+
+**The M9's d-pad centre follows the same rule**, because its controller reports
+a tap and a hold as two different keys — so a tap raises the lock screen and only
+a two-second hold reaches the UI. That matters on this board more than most: a
+centre hold is also what puts the device away, and without the split the lightest
+press of the same key undid it.
+
+Other touch panels and keyboards are unchanged. Where a board wakes from a tap on
+the screen or from a key — the T-Deck's trackball click — that input still goes
+straight through to the UI in one press.
+
+**The Mesh Deck is the exception, and has no hold gesture at all.** Its screen
+key is the **Power button**, where roughly two seconds cuts power in hardware,
+below firmware — the same two seconds that unlocks everywhere else. So a tap
+there cycles through the states instead: dark panel → lock screen → UI → dark.
+Its BOOT button is the same key on a different pin and behaves identically. The
+trade is that this is the one board where a stray press in a bag can reach the
+UI, in two taps.
 
 - **Lock Screen** enables or disables the intermediate screen. Disabled keeps
   the previous direct-to-sleep behavior.
@@ -1101,6 +1135,83 @@ button held for two seconds is the one input a pocket does not produce.
 - T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
   holds that image without a lit backlight, so it does not use the dwell timer
   and does not rotate its band.
+
+### Scan SD Card for Malware (ThinkNode M9)
+
+**Config &rarr; Scan SD Card for Malware**, directly under Factory Reset, and
+**web config &rarr; Utilities &rarr; Diagnostics**. Nothing runs on its own — the
+scan happens when you ask for it.
+
+It walks the card looking for the files a Windows storage worm leaves behind:
+
+| What it matches | Why |
+| --- | --- |
+| `autorun.inf` | Hijacks what opening the card does in Explorer |
+| `.exe` `.pif` `.com` `.scr` `.bat` `.cmd` `.cpl` `.msi` `.vbs` `.vbe` `.js` `.jse` `.wsf` `.wsh` `.hta` | Windows programs and scripts |
+| `.lnk` | Windows shortcuts — these masquerade as folders |
+| Any file at all opening with an `MZ` header | A Windows program wearing a harmless-looking name, caught by its header rather than its extension |
+
+Camillia's own `/camillia` folder is skipped — every file in it was written by
+this firmware. The walk is bounded (4 folders deep, 4000 files) so a card full of
+map tiles cannot turn this into a several-minute wait.
+
+**A progress dialog stays up for the duration**, because the scan opens and reads
+every file and that is not quick. It counts the card first — a fast pass that
+only reads folder listings — so the bar has a real total to fill against rather
+than just spinning. While it runs you get the file count, the percentage, the
+folder currently being walked, and a running tally of matches. The same dialog
+appears for the delete.
+
+**Back cancels it** and drops you straight back on the Config screen with no
+dialog — a result for a question you just withdrew is not worth reading, and
+"nothing found" would be actively misleading, since a cancelled scan stopped
+looking rather than finished looking. Cancelling a *delete* reports what it got
+through, because stopping does not put back what has already gone.
+
+**None of it can run on the radio.** An ESP32 cannot execute a Windows binary,
+which is exactly what makes the device a useful place to look at a card that is
+not safe to open anywhere else. The risk is the next PC the card goes into.
+
+**If it finds something, it asks before deleting anything.** On the device that
+is a Yes/No dialog naming the files; in web config it is a browser confirmation.
+The dialog's message scrolls — **the d-pad, the arrow keys and J/K move it** —
+so a long list never pushes the Yes and No buttons off the panel.
+Answering yes re-walks the card and deletes only what it still recognises — the
+delete is handed no list, so there is no path by which it can be pointed at map
+tiles, chat history or a backup. Folders are never removed.
+
+**It cannot promise the card is clean afterwards.** It reads names and file
+headers, not contents. Formatting is the only answer that can — which is why the
+dialog offers it as a third button.
+
+#### Format
+
+**Format** on the scan's dialog rewrites the card's filesystem from scratch. It
+asks a second time first, in plainer words, because the first dialog was about a
+handful of matched files and this is about everything:
+
+> This erases EVERYTHING on it — chat and DM history, the node database, map
+> tiles and your saved configuration — not just the files the scan matched.
+
+That is a real format, not a sweep that deletes files, so nothing survives it and
+a damaged filesystem is repaired along the way. The card is unmounted, rewritten,
+remounted, and `/camillia` recreated.
+
+**Afterwards it offers to write your configuration back** as
+`/camillia/config.yaml`. Offered rather than done: a config export is your copy
+of your own settings, and where it lives is your decision rather than a side
+effect of cleaning a card. Everything else that was on the card — transcripts,
+the node database, map tiles — was on the old filesystem and is gone.
+
+This exists because of Elecrow's September 2026 advisory for the ThinkNode M9,
+whose bundled cards were contaminated during factory map-data flashing — a hidden
+`autorun.inf` at the card root launching a dropper when the card is opened in
+Explorer. That is why the feature is on the M9 and nowhere else, though nothing
+in the check is M9-specific.
+
+If you would rather use a tool built for the job,
+[wadamesh](https://github.com/ALLFATHER-BV/wadamesh) ships **SD Scan**, which is
+where this approach came from.
 
 ### Notification sound
 

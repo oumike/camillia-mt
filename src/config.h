@@ -399,6 +399,21 @@
 #define FEATURE_LOCK_SCREEN 0
 #endif
 
+// SD card malware scan: a user-run check for Windows programs, scripts,
+// shortcuts and autorun files sitting on the card, with a confirmed delete.
+//
+// Scoped to the ThinkNode M9 because that is the board Elecrow's September 2026
+// advisory names: its bundled cards were contaminated during factory map-data
+// flashing with a hidden autorun.inf launching a dropper on Explorer's open and
+// explore verbs. Nothing in the check is M9-specific and any card that has been
+// in an infected PC can pick this up, so this gate is about where the problem is
+// known to be rather than about where the code would work.
+#if defined(DEVICE_M9)
+#define HAS_SD_MALWARE_SCAN 1
+#else
+#define HAS_SD_MALWARE_SCAN 0
+#endif
+
 // Boards that build the glance overlay — clock, node name, battery, date and
 // the recent-message preview rows — whatever they then do with it. The Pro
 // leaves it on a sleeping panel; the lock screen boards light it for a while
