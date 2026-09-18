@@ -2112,6 +2112,9 @@ static void closeDiscoveryPresetModal();
 // Puts the radio back on the node's own preset. `aborted` is true when the scan
 // did not run its window out — the screen was closed, or a save retuned under it.
 static void discoveryEndPresetScan(bool aborted);
+// Frames waiting out their contention jitter are addressed to the preset they
+// were heard on; a retune under them would put them on the air of another mesh.
+static void dropPendingRebroadcasts();
 #endif
 static void openBeaconsModal();
 #if HAS_WEATHER
@@ -15447,6 +15450,16 @@ static uint8_t  s_presetScanPreset = 0;        // PRESET_* being scanned
 // looked exactly like finds. They are excluded by transport, not by timing.
 static uint32_t s_presetScanResultFromMs = 0;
 static uint8_t  s_presetScanResultPreset = 0;
+// Where that window *closes*: millis() at the moment the radio left the scanned
+// preset, or 0 while it is still parked there.
+//
+// The second half of the same fix. s_presetScanResultFromMs is deliberately
+// left set after a scan ends so the finding survives being read — but on its
+// own it is an open-ended "at or after", so once the radio came home every node
+// heard on this node's own preset walked straight into a list headed with
+// somebody else's. The scan is a question about five minutes of air, and it has
+// two ends.
+static uint32_t s_presetScanResultToMs = 0;
 // What the radio has to go back to. Snapshotted rather than re-derived on the
 // way out: re-deriving would depend on applyPresetParams() reaching the same
 // answer it reached at boot, and a restore has no business being that clever.
@@ -15471,6 +15484,21 @@ static uint8_t   s_presetPickChoices[PRESET_COUNT] = {};
 static int       s_presetPickCount = 0;
 static int       s_presetPickSelection = 0;
 #endif  // FEATURE_DISCOVERY
+
+// True while a preset scan has the radio parked on a mesh this node does not
+// live on. Everything that would otherwise carry traffic between the two reads
+// it: MQTT downlink injection, MQTT uplink, flood relaying and our own periodic
+// announces.
+//
+// The scan retunes to *listen*, and that has to be the whole of it. A relay or
+// an uplink sends the foreign mesh's packets somewhere it never agreed to go;
+// an injected downlink or an announce puts our side's traffic on their air, and
+// then Discovery reports the mixture back as a finding on their preset.
+#if FEATURE_DISCOVERY
+static inline bool discoveryRadioParked() { return s_presetScanActive; }
+#else
+static inline bool discoveryRadioParked() { return false; }
+#endif
 
 
 static lv_obj_t *s_chanCfgBackdrop = nullptr;
@@ -30585,7 +30613,12 @@ static inline bool discoveryHeardFrom(const NodeEntry &e) {
     // one gate scopes DIRECT, the hop buckets and the no-distance bucket alike.
     if (s_presetScanResultFromMs != 0) {
         if (e.lastHeardViaMqtt) return false;
-        return (int32_t)(e.lastHeardMs - s_presetScanResultFromMs) >= 0;
+        if ((int32_t)(e.lastHeardMs - s_presetScanResultFromMs) < 0) return false;
+        // And not after the radio came home: the result stays on screen once the
+        // scan ends, and without this the node table's own preset refills it.
+        if (s_presetScanResultToMs != 0 &&
+            (int32_t)(e.lastHeardMs - s_presetScanResultToMs) > 0) return false;
+        return true;
     }
     // Kept out of the radio groups: it has its own below. A node last seen over
     // the bridge has no SNR of ours and no hop count it earned on our air, so
@@ -30606,6 +30639,7 @@ static const char *discoveryPresetLabel(uint8_t preset);
 // it answered.
 static void discoveryClearPresetScanView() {
     s_presetScanResultFromMs = 0;
+    s_presetScanResultToMs = 0;
     s_presetScanResultPreset = 0;
 }
 
@@ -30619,6 +30653,39 @@ static inline bool discoveryViaMqtt(const NodeEntry &e) {
     if (!e.lastHeardViaMqtt) return false;
     if (s_discoveryClearedMs == 0) return true;
     return (int32_t)(e.lastHeardMs - s_discoveryClearedMs) >= 0;
+}
+
+// A neighbor report this screen is willing to draw. The same two rules the node
+// groups follow, asked of the report's own arrival rather than of the node it
+// names — HEARD ABOUT is built entirely out of these, and it was the one group
+// with no transport gate at all on it. A NeighborInfo that arrives over the
+// bridge lists a bridged mesh's links, so while a preset scan is on screen it
+// was filling the scan's own result with nodes from the preset the radio just
+// left: the exact "MQTT traffic on LongFast while scanning MediumSlow" the
+// node groups had already been taught to refuse.
+static inline bool discoveryReportUsable(const NeighborReport &r) {
+    if (r.nodeId == 0) return false;
+    if (s_presetScanResultFromMs != 0) {
+        if (r.viaMqtt) return false;
+        if ((int32_t)(r.updatedMs - s_presetScanResultFromMs) < 0) return false;
+        if (s_presetScanResultToMs != 0 &&
+            (int32_t)(r.updatedMs - s_presetScanResultToMs) > 0) return false;
+        return true;
+    }
+    // Outside a scan, the same line discoveryHeardFrom() draws for nodes: with
+    // the bridge on, what came off the broker is not what the radio can reach.
+    return !(r.viaMqtt && s_cfg.mqttEnabled);
+}
+
+// Live reports Discovery would actually draw, which is what its counters have to
+// say — Nodes.neighborReportCount() counts the table, filters and all.
+static int discoveryUsableReportCount() {
+    int n = 0;
+    for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
+        const NeighborReport *rep = Nodes.neighborReportAt(r);
+        if (rep && discoveryReportUsable(*rep)) n++;
+    }
+    return n;
 }
 
 // Direct as Discovery counts it: one hop away, and heard since the last clear.
@@ -30784,7 +30851,7 @@ static void discoveryBuildHeardAbout(lv_obj_t *col) {
 
     for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
         const NeighborReport *rep = Nodes.neighborReportAt(r);
-        if (!rep) continue;
+        if (!rep || !discoveryReportUsable(*rep)) continue;
         for (int j = 0; j < rep->count; j++) {
             const uint32_t id = rep->ids[j];
             if (id == 0 || id == s_myNodeId) continue;
@@ -30859,7 +30926,7 @@ static void discoveryBuildColumns() {
                  discoveryPresetLabel(s_presetScanResultPreset), onPreset);
     } else {
         snprintf(summary, sizeof(summary), "%d node(s), %d report(s)",
-                 Nodes.count(), Nodes.neighborReportCount());
+                 Nodes.count(), discoveryUsableReportCount());
     }
     discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
 
@@ -30985,7 +31052,7 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
     }
     f.printf("  \"uptimeMs\": %lu,\n", (unsigned long)millis());
     f.printf("  \"counts\": {\"nodes\": %d, \"reports\": %d},\n",
-             total, Nodes.neighborReportCount());
+             total, discoveryUsableReportCount());
 
     // direct
     bool first = true;
@@ -31030,7 +31097,7 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
     f.print("  \"heardAbout\": [\n");
     for (int r = 0; r < MAX_NEIGHBOR_REPORTS; r++) {
         const NeighborReport *rep = Nodes.neighborReportAt(r);
-        if (!rep) continue;
+        if (!rep || !discoveryReportUsable(*rep)) continue;
         for (int j = 0; j < rep->count; j++) {
             const uint32_t id = rep->ids[j];
             if (id == 0 || id == s_myNodeId) continue;
@@ -31053,10 +31120,11 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
         if (!first) f.print(",\n");
         first = false;
         f.printf("    {\"id\": \"!%08lX\", \"intervalS\": %lu, \"ageMs\": %lu, "
-                 "\"neighbors\": [",
+                 "\"viaMqtt\": %s, \"neighbors\": [",
                  (unsigned long)rep->nodeId,
                  (unsigned long)rep->intervalS,
-                 (unsigned long)(millis() - rep->updatedMs));
+                 (unsigned long)(millis() - rep->updatedMs),
+                 rep->viaMqtt ? "true" : "false");
         for (int j = 0; j < rep->count; j++) {
             f.printf("%s{\"id\": \"!%08lX\", \"snr\": %.2f}",
                      (j == 0) ? "" : ", ",
@@ -31093,12 +31161,21 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
 //
 // Nothing here is destructive: nodes reappear as they transmit, and reports as
 // each node makes its next NeighborInfo broadcast.
-static void discoveryClear() {
+//
+// `keepScanView` is the preset scan's case and the reason this takes a flag at
+// all: a scan clears the screen as part of *starting*, and the scoping it set a
+// few lines earlier has to survive its own wipe. Without it the clear reset
+// s_presetScanResultFromMs to 0 the instant the scan began — so the screen spent
+// the whole five minutes back on the unscoped view, drawing the VIA MQTT group
+// and everything else the broker delivered while the radio sat on somebody
+// else's preset. That is the bug: not the scan filter failing, the scan filter
+// being switched off immediately after being switched on.
+static void discoveryClear(bool keepScanView = false) {
     const int droppedReports = Nodes.clearNeighbors();
     // Beacons are not touched here: they live on the Beacons tool now, and they
     // arrive far too rarely to be worth throwing away with a screen that is
     // deliberately about the last few minutes.
-    discoveryClearPresetScanView();   // a Clear is a new question
+    if (!keepScanView) discoveryClearPresetScanView();   // a Clear is a new question
     s_discoveryClearedMs = millis();
     if (s_discoveryClearedMs == 0) s_discoveryClearedMs = 1;   // 0 means "never cleared"
 
@@ -31262,6 +31339,7 @@ static void discoveryTuneToPreset(uint8_t preset) {
     // Same slot arithmetic applyPresetParams() runs, read straight out of the
     // preset table instead of through the config struct.
     const float freq = regionSlotFreq(s_cfg.region, p.bw, p.channelName);
+    dropPendingRebroadcasts();   // framed for the preset we are leaving
     Radio.reconfigure(freq, p.bw, p.sf, p.cr, s_cfg.loraPower);
 }
 
@@ -31281,6 +31359,7 @@ static void discoveryEndPresetScan(bool aborted) {
         recomputeChannelHashes();
         s_presetScanRenamedChan = false;
     }
+    dropPendingRebroadcasts();   // and the ones framed for the preset we are leaving
     if (s_radioReady) {
         Radio.reconfigure(s_presetScanPrevFreq, s_presetScanPrevBw,
                           s_presetScanPrevSf, s_presetScanPrevCr, s_cfg.loraPower);
@@ -31292,6 +31371,10 @@ static void discoveryEndPresetScan(bool aborted) {
     uint32_t now = millis();
     if (now == 0) now = 1;
     s_discoverySweepEndedMs = now;
+    // Closes the result window at the same instant. Everything the radio hears
+    // from here is on this node's own preset again, and the list on screen is
+    // still headed with the scanned one.
+    s_presetScanResultToMs = now;
 
     Serial.printf("[discovery] preset scan %s (%s) - radio back on %.4f MHz\n",
                   aborted ? "aborted" : "done",
@@ -31327,6 +31410,7 @@ static void discoveryStartPresetScan(uint8_t preset) {
     uint32_t scanFrom = millis();
     if (scanFrom == 0) scanFrom = 1;          // 0 is the "not scoped" sentinel
     s_presetScanResultFromMs = scanFrom;
+    s_presetScanResultToMs = 0;               // open until the radio comes home
     s_presetScanResultPreset = preset;
     s_presetScanPreset = preset;
     discoveryTuneToPreset(preset);
@@ -31345,7 +31429,7 @@ static void discoveryStartPresetScan(uint8_t preset) {
     // listed alongside them. The clear watermark does it without touching the
     // node table — see discoveryClear(). The results stay on screen after the
     // radio comes home, which is the point of running the scan at all.
-    discoveryClear();
+    discoveryClear(/*keepScanView=*/true);
 
     uint32_t now = millis();
     if (now == 0) now = 1;   // 0 is the "no sweep in flight" sentinel
@@ -31461,7 +31545,7 @@ static void refreshDiscoveryModal(bool force) {
     // Telemetry and NeighborInfo — precisely the packets that refill this
     // screen. So the scan is the price of the screen being live at all. It is
     // one cheap pass over the node table, and only while the modal is open.
-    uint32_t sig = (uint32_t)Nodes.neighborReportCount() * 7919u
+    uint32_t sig = (uint32_t)discoveryUsableReportCount() * 7919u
                  + s_discoveryClearedMs;
     const int total = Nodes.count();
     for (int i = 0; i < total; i++) {
@@ -43427,6 +43511,18 @@ static PendingRebroadcast *allocPendingRebroadcast() {
     return nullptr;
 }
 
+#if FEATURE_DISCOVERY
+// Empty the queue. Called on both edges of a preset scan's retune, because a
+// queued frame is a packet already framed for the preset it was heard on: sent
+// after the radio moved, it lands on a mesh that never carried it, under a
+// channel hash computed for somewhere else. Up to 150 ms of jitter is exactly
+// the window a retune fits inside. Dropping is the honest outcome — a relay is
+// discretionary, and the mesh it belonged to has other nodes in it.
+static void dropPendingRebroadcasts() {
+    for (uint8_t i = 0; i < kMaxPendingRebroadcast; i++) s_pendingRebroadcast[i].active = false;
+}
+#endif  // FEATURE_DISCOVERY
+
 // Re-transmit a freshly received packet verbatim (hop limit decremented) so it
 // propagates across the mesh. Caller guarantees the packet is new (passed
 // isDuplicate) and not from us. The original on-air payload is relayed as-is
@@ -43549,14 +43645,22 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
         }
     }
 
-    // Managed flood: relay new traffic onward before handling it locally.
-    maybeRebroadcastPacket(pkt);
+    // Managed flood: relay new traffic onward before handling it locally. Held
+    // while a preset scan has the radio parked: relaying there makes this node a
+    // router on a mesh it is visiting for five minutes, and a downlinked MQTT
+    // packet relayed from that perch puts one mesh's traffic on another's air.
+    if (!discoveryRadioParked()) maybeRebroadcastPacket(pkt);
 
     // Native MQTT uplink: mirror packets heard on a known, named, uplink-enabled
     // channel up to the broker. Never re-publish packets that arrived via MQTT
     // (via_mqtt flag) — that would form an MQTT→RF→MQTT loop with downlink.
+    // Nor packets heard while a preset scan has the radio parked on a foreign
+    // mesh: they are not this node's mesh to mirror, and channel 0 is wearing
+    // the scanned preset's name for the duration, so they would be published
+    // under a channel_id this node does not normally speak on.
     if (pkt.chanIdx >= 0 && pkt.chanIdx < MESH_CHANNELS &&
         !(pkt.hdr.flags & 0x10) &&
+        !discoveryRadioParked() &&
         CHANNEL_KEYS[pkt.chanIdx].name[0] &&
         CHANNEL_KEYS[pkt.chanIdx].uplinkEnabled) {
         mqttBridgePublish(pkt, CHANNEL_KEYS[pkt.chanIdx].name);
@@ -44100,7 +44204,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                 // nodes we have heard about but never heard from. Discovery is
                 // built on it; nothing else consumes it, which is why storing it
                 // goes away with Discovery rather than costing RAM for nothing.
-                Nodes.updateNeighbors(pkt.hdr.from, n);
+                Nodes.updateNeighbors(pkt.hdr.from, n, (pkt.hdr.flags & 0x10) != 0);
 #endif
                 debugLogMessages("[neighborinfo] from=!%08lx node=!%08lx neighbors=%u interval=%lus\n",
                                  (unsigned long)pkt.hdr.from,
@@ -44253,6 +44357,14 @@ static bool s_mqttDownlinkUiDirty = false;
 // downlink flag. Called from mqttBridgeLoop() on the main loop.
 static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
                                size_t cipherLen, const char *chanName) {
+    // Nothing from the broker enters the RX pipeline while a preset scan has the
+    // radio parked on another preset. The bridge keeps its session — dropping a
+    // downlink costs one packet, where dropping the session costs a reconnect —
+    // but an injected packet updates the node table, feeds Discovery's neighbor
+    // graph and is a candidate for rebroadcast, all of it attributed to a window
+    // that is supposed to describe five minutes of one foreign preset's air.
+    if (discoveryRadioParked()) return;
+
     // Loop guard: ignore our own packets echoed back by the broker. The dedup
     // check (against RF-heard copies and duplicate MQTT copies) is left to
     // processMeshPacket() below — isDuplicate() records as a side effect, so
@@ -44814,6 +44926,12 @@ static uint32_t mapReportOnlineLocalNodes(uint32_t nowMs) {
 
 static void serviceMapReport(uint32_t nowMs) {
     if (!s_cfg.mqttEnabled || !s_cfg.mqttMapReport) return;
+    // Held while a preset scan has the radio parked, for the same reason the
+    // uplink is: the report is stamped with the primary channel's name, and
+    // channel 0 is wearing the scanned preset's name for the duration. It would
+    // tell the map this node lives on a preset it is only visiting. The interval
+    // is not consumed here, so it goes out as soon as the radio is home.
+    if (discoveryRadioParked()) return;
     if (!announceDue(nowMs, s_nextMapReportMs, kMapReportIntervalS)) return;
 
     // Not connected yet: come back on the next tick rather than burning the
@@ -48591,7 +48709,12 @@ void loop() {
 #else
     const bool holdAnnounceForLocate = false;
 #endif
-    if (!holdAnnounceForLocate) {
+    // A parked radio holds them too. A scan sends exactly one broadcast, by
+    // design; a position or telemetry announce that lands while it is parked
+    // puts this node's traffic on a mesh it does not live on — and gets mirrored
+    // to the broker under the scan's temporary channel name on the way out.
+    // Nothing is lost: the announce is still due when the radio comes home.
+    if (!holdAnnounceForLocate && !discoveryRadioParked()) {
         LOOP_PHASE("ann:nodeinfo", serviceNodeInfoAnnounce(now));
         LOOP_PHASE("ann:telemetry", serviceTelemetryAnnounce(now));
         LOOP_PHASE("ann:neighbor", serviceNeighborInfoAnnounce(now));

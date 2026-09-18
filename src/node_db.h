@@ -77,6 +77,14 @@ struct NeighborReport {
     uint32_t nodeId;                     // reporter; 0 = empty slot
     uint32_t updatedMs;                  // millis() of the last report
     uint32_t intervalS;                  // reporter's advertised broadcast interval
+    // How the report reached us: the via_mqtt flag of the packet that carried
+    // it. The same reading NodeEntry::lastHeardViaMqtt holds, kept for the same
+    // reason — a report that arrived over the broker describes links our radio
+    // never heard, and while a preset scan has the radio parked elsewhere it
+    // describes a different mesh entirely. Stored rather than dropped at ingest
+    // because only Discovery reads these, and it is the thing that knows which
+    // question is currently on screen.
+    bool     viaMqtt;
     uint8_t  count;
     uint32_t ids[MESH_NEIGHBOR_MAX];
     // Quarter-dB, as Meshtastic puts SNR on the wire. Whole dB would lose a
@@ -150,8 +158,11 @@ public:
 #if FEATURE_DISCOVERY
     // Record a NEIGHBORINFO_APP report. reporterId is the packet sender; the
     // payload's own node_id wins when it is set, matching how Meshtastic
-    // attributes a report that reached it through a relay.
-    void updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n);
+    // attributes a report that reached it through a relay. viaMqtt is the
+    // carrying packet's via_mqtt flag, stored with the report so the reader can
+    // tell a link we could have heard from one the broker told us about.
+    void updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n,
+                         bool viaMqtt);
 
     // Iteration over live reports. Expired ones are skipped, so the index space
     // is sparse: check for null rather than assuming a contiguous run.

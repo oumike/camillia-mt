@@ -388,6 +388,13 @@ bool MeshRadio::reconfigure(float freq, float bw, uint8_t sf, uint8_t cr, uint8_
     if (state != RADIOLIB_ERR_NONE) ok = false;
     state = _radio.setOutputPower(power);
     if (state != RADIOLIB_ERR_NONE) ok = false;
+    // Discard anything the ISR latched before the retune. Those bytes were
+    // demodulated on the settings we are leaving, and the buffer is only read
+    // back in pollRx() afterwards — where the packet would be handed up as if it
+    // had arrived on the new ones. That is how a Discovery preset scan can open
+    // with a packet from the preset it just left. Same discard transmit() makes
+    // before it keys up.
+    _rxFlag = false;
     state = _armRx();
     if (state != RADIOLIB_ERR_NONE) ok = false;
 

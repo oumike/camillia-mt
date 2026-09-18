@@ -1126,7 +1126,8 @@ bool NodeDB::_neighborExpired(const NeighborReport &r, uint32_t nowMs) {
     return (uint32_t)(nowMs - r.updatedMs) > (uint32_t)lifetimeMs;
 }
 
-void NodeDB::updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n) {
+void NodeDB::updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n,
+                             bool viaMqtt) {
     uint32_t id = n.nodeId ? n.nodeId : reporterId;
     if (id == 0) return;
 
@@ -1161,6 +1162,7 @@ void NodeDB::updateNeighbors(uint32_t reporterId, const NeighborInfoPayload &n) 
     slot->nodeId = id;
     slot->updatedMs = now;
     slot->intervalS = n.nodeBroadcastIntervalS;
+    slot->viaMqtt = viaMqtt;
     for (int i = 0; i < (int)n.neighborCount && slot->count < MESH_NEIGHBOR_MAX; i++) {
         uint32_t neighborId = n.neighbors[i].nodeId;
         if (neighborId == 0 || neighborId == id) continue;
