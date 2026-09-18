@@ -2101,11 +2101,22 @@ Primary usage is keyboard.
 Primary usage is touch.
 
 - **Landscape or portrait is a setting, not a build.** Config → **Orientation**
-  switches between them; it confirms first and then reboots, because the panel
-  rotation is fixed when the display comes up. A fresh device is landscape.
+  opens a picker listing **Landscape**, **Portrait** and **Portrait 180**, with
+  the one in force marked *(current)*. Choosing any other asks to confirm and
+  then reboots, because the panel rotation is fixed when the display comes up;
+  choosing the current one just closes. A fresh device is landscape.
+  The two portraits are a half turn apart: which one you want depends on where
+  the cable leaves the case and which hand is holding it, so it is a choice
+  rather than something the firmware picks. Web Config → **Orientation** offers
+  the same three as a dropdown.
   There is no separate vertical firmware any more — `heltec-v4-vertical` still
   exists as a build target, but it produces the same firmware with the portrait
   default pre-set, for units coming off the old separate vertical build
+- The **Wio Tracker L2** has the same setting, in both Config → **Orientation**
+  and Web Config → **Orientation**. It shares this board's 240x320 panel, so
+  both shapes lay out identically; only the rotation values differ, because the
+  Wio's panel carries its own rotation offset. There is no seeded
+  `wio-tracker-l2-vertical` target — the setting is the only route
 - Bottom touch nav provides Home, DM, Nodes, Live, Config, and Help, in that
   order left to right
 - **An unread DM lights the nav bar's DM icon**, which blinks amber until you

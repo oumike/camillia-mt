@@ -117,8 +117,42 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #  define HAS_RUNTIME_ORIENTATION 1
 #  define TFT_ROTATION_LANDSCAPE  3
 #  define TFT_ROTATION_PORTRAIT   0
+#elif defined(DEVICE_WIO_TRACKER_L2)
+// Same 240x320 panel as the Heltec, so every layout number the runtime path
+// already carries for both shapes applies here unchanged -- this board needed
+// only its own pair of rotations.
+//
+// Those are NOT the Heltec's, because this panel sets offset_rotation=1 and
+// LovyanGFX adds that to the logical rotation below. So logical 0 is internal
+// 1 (320x240, the landscape this board has always run, and the value the
+// TFT_ROTATION_DEFAULT chain above still gives it), and logical 1 is internal
+// 2 -- the 240x320 portrait this panel ran before it was turned landscape, per
+// the note beside TFT_ROTATION_DEFAULT. Logical 3 is the same portrait upside
+// down, so if the panel comes up inverted this is the one line to change.
+//
+// The GT911 carries its own offset_rotation (TOUCH_OFFSET_ROTATION=2); LGFX
+// composes that with whatever the display is set to, so touch tracks the
+// rotation rather than needing a second pair of values here.
+#  define HAS_RUNTIME_ORIENTATION 1
+#  define TFT_ROTATION_LANDSCAPE  0
+#  define TFT_ROTATION_PORTRAIT   1
 #else
 #  define HAS_RUNTIME_ORIENTATION 0
+#endif
+
+#if HAS_RUNTIME_ORIENTATION
+// The second portrait, 180 degrees from the first. Derived rather than given
+// per board: a half turn is always two quarter turns on from whatever that
+// board calls portrait, so every board with runtime orientation gets this for
+// free and cannot get it inconsistent with its own TFT_ROTATION_PORTRAIT.
+//
+// Why two portraits at all: which way up portrait wants to be depends on where
+// the cable leaves the case and which hand is holding it, and that is a
+// property of the moment rather than of the board. Landscape has the same
+// question, but it already has an answer baked into each board's
+// TFT_ROTATION_LANDSCAPE, chosen so the screen sits the right way up relative
+// to that board's buttons.
+#  define TFT_ROTATION_PORTRAIT_180  (((TFT_ROTATION_PORTRAIT) + 2) & 3)
 #endif
 
 // ── Channel list presentation ────────────────────────────────────────────────

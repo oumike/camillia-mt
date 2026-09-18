@@ -1082,6 +1082,9 @@ void NodeDB::updateFromPacket(const MeshPacket &pkt) {
     if (!e) return;   // table full of favorites
     e->lastHeardMs = pkt.rxMs;
     _sortDirty = true;   // recency is a ranking key
+    // Bit 4 of the header flags is via_mqtt (mesh_proto.h:51). Recorded on every
+    // packet so it always describes the latest sighting rather than latching.
+    e->lastHeardViaMqtt = (pkt.hdr.flags & 0x10) != 0;
     e->snr         = pkt.snr;
     // Routing ACK/NAK can arrive on a fallback channel and should not drive
     // future DM channel selection.

@@ -38,6 +38,15 @@ struct NodeEntry {
     bool     hasPubKey;
     bool     pkiNoChannel;    // temporarily suppress PKI DM attempts after NO_CHANNEL(6)
     bool     legacyDmNoChannel; // peer returned NO_CHANNEL for channel-encrypted DM
+    // How the most recent packet reached us. RAM only, like the two below: it
+    // describes this boot's last sighting, and a value restored from NVS would
+    // claim a transport that has not been used since.
+    //
+    // Note it is the LAST sighting, not "has ever been heard over MQTT". A node
+    // that is genuinely on our mesh and also bridged will flip back to false
+    // the moment we hear it on the radio again, which is the useful reading:
+    // Discovery is asking what is reachable now, not what once was.
+    bool     lastHeardViaMqtt;
     uint32_t lastSentInfoMs;  // millis() when we last sent our NODEINFO to this node (RAM only)
     uint32_t lastPosMs;       // millis() when we last processed a POSITION packet for this node (RAM only)
     uint32_t lastPersistMs;   // throttles NVS writes for hot update paths

@@ -1308,6 +1308,13 @@ static char s_cfgStatus[96] = "";
 static bool s_cfgOtaInstallArmed = false;
 static char s_cfgOtaLatestTag[48] = "";
 static int s_cfgConfirmAction = -1;
+// Set only by the callback form of openCfgConfirmModal(); null means the
+// pending answer belongs to a CFG_ACTION row.
+typedef void (*CfgConfirmFn)(int);
+static CfgConfirmFn s_cfgConfirmFn = nullptr;
+static int          s_cfgConfirmFnArg = 0;
+// Copied rather than pointed at: the caller's buffer is usually a local.
+static char         s_cfgConfirmText[96] = {0};
 static uint32_t s_cfgConfirmMs = 0;
 static uint32_t s_cfgLastActivateMs = 0;
 static uint32_t s_cfgLastScrollMs = 0;
@@ -1922,7 +1929,16 @@ static void openCfgModal();
 static void closeCfgModal();
 static void activateCfgSelection();
 static void performCfgAction(int actionId);
-static void openCfgConfirmModal(int actionId);
+// A confirm that is not about a Config row: `text` is shown verbatim and `fn`
+// runs on Yes instead of performCfgAction(). Everything that reboots as a
+// result of a config change goes through this, whether it started as a row or
+// as a selection inside a picker.
+//
+// Answering No leaves whatever is underneath alone, which is what lets a picker
+// stay open behind the dialog -- the reason the WiFi delete above had to build
+// a dialog of its own rather than use this one.
+static void openCfgConfirmModal(int actionId, const char *text = nullptr,
+                                CfgConfirmFn fn = nullptr, int fnArg = 0);
 static void closeCfgConfirmModal();
 static void openCfgActionMessageModal(const char *msg);
 static void closeCfgActionMessageModal();
@@ -1932,6 +1948,15 @@ static void openCfgColorPickerModal();
 static void openCfgNodeNameModal();
 static void closeCfgNodeNameModal();
 static void closeCfgPresetModal();
+#if HAS_RUNTIME_ORIENTATION
+static void closeCfgOrientModal();
+static void openCfgOrientModal();
+#endif
+#if HAS_RUNTIME_ORIENTATION
+// Defined with the orientation state far below; the Config row label is
+// built long before that, and is the one caller that comes first.
+static inline const char *uiOrientName(uint8_t o);
+#endif
 static void openCfgPresetModal();
 static void openCfgBrightnessModal();
 static void openCfgScreenTimeoutModal();
@@ -4644,7 +4669,7 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
 #if HAS_RUNTIME_ORIENTATION
         case CFG_ACTION_ORIENTATION:
             snprintf(buf, bufLen, "Orientation: %s",
-                     s_cfg.uiOrientation ? "Portrait" : "Landscape");
+                     uiOrientName(s_cfg.uiOrientation));
             break;
 #endif
         case CFG_ACTION_BATT_DISPLAY:
@@ -4893,14 +4918,16 @@ static const char *cfgDeviceRoleName(uint8_t role) {
 }
 
 static bool cfgActionNeedsConfirm(int actionId) {
+    // Orientation used to be here: it rebooted the instant it was pressed, so
+    // it had to say so first. It opens a picker now, and the picker names every
+    // destination and says it reboots -- so the confirm had become a second
+    // question on top of a deliberate choice, which is the kind people learn to
+    // dismiss without reading.
     return
-#if HAS_RUNTIME_ORIENTATION
-        // Here for a different reason than the rest: not destructive, it simply
-        // cannot take effect without a restart, and a row that reboots the
-        // device the instant it is pressed should say so first.
-        actionId == CFG_ACTION_ORIENTATION ||
-#endif
-        actionId == CFG_ACTION_EXPORT
+        // Reboots to apply, and the load-time invariant re-derives the
+        // MQTT/web-config exclusion on the way back up.
+        actionId == CFG_ACTION_MQTT_TOGGLE
+        || actionId == CFG_ACTION_EXPORT
         || actionId == CFG_ACTION_IMPORT
         || actionId == CFG_ACTION_OTA_UPDATE
     || actionId == CFG_ACTION_CLEAR_MSGS
@@ -6469,9 +6496,40 @@ static void applyBrightness() {
 // Changing it takes a reboot, which is what makes a plain cached bool correct
 // here: nothing can move it between boots, so no consumer has to re-read it.
 #if HAS_RUNTIME_ORIENTATION
-static bool s_uiPortrait = (ORIENTATION_SEED_PORTRAIT != 0);
+// 0 = landscape, 1 = portrait, 2 = portrait turned 180 degrees. A code rather
+// than a bool because there are three answers now -- but only the panel
+// rotation tells 1 and 2 apart: both are the same 240x320 shape, so every
+// layout decision in this file still asks the yes/no question through
+// uiPortrait() and none of them had to learn about the second portrait.
+enum : uint8_t {
+    UI_ORIENT_LANDSCAPE    = 0,
+    UI_ORIENT_PORTRAIT     = 1,
+    UI_ORIENT_PORTRAIT_180 = 2,
+    UI_ORIENT_COUNT        = 3,
+};
+static uint8_t s_uiOrient = (ORIENTATION_SEED_PORTRAIT != 0) ? UI_ORIENT_PORTRAIT
+                                                             : UI_ORIENT_LANDSCAPE;
 
-static inline bool uiPortrait() { return s_uiPortrait; }
+static inline bool uiPortrait() { return s_uiOrient != UI_ORIENT_LANDSCAPE; }
+
+// What the panel is actually turned to. The only consumer is the setRotation()
+// call in setup(); everything else wants the shape, not the angle.
+static inline uint8_t uiRotationValue() {
+    switch (s_uiOrient) {
+        case UI_ORIENT_PORTRAIT:     return TFT_ROTATION_PORTRAIT;
+        case UI_ORIENT_PORTRAIT_180: return TFT_ROTATION_PORTRAIT_180;
+        default:                     return TFT_ROTATION_LANDSCAPE;
+    }
+}
+
+// One name per code, for the Config row, the confirm dialog and the boot log.
+static inline const char *uiOrientName(uint8_t o) {
+    switch (o) {
+        case UI_ORIENT_PORTRAIT:     return "Portrait";
+        case UI_ORIENT_PORTRAIT_180: return "Portrait 180";
+        default:                     return "Landscape";
+    }
+}
 
 // Called before lcd.init(). Reads the key, or — on a device that has never had
 // one — takes this build's seed and writes it, so the flag becomes the device's
@@ -6486,12 +6544,17 @@ static void loadBootOrientation() {
     }
     const uint8_t stored = p.getUChar("uiOrient", 0xFF);
     if (stored == 0xFF) {
-        p.putUChar("uiOrient", (uint8_t)(s_uiPortrait ? 1 : 0));
+        p.putUChar("uiOrient", s_uiOrient);
         Serial.printf("[orient] no key yet - seeded %s from this build\n",
-                      s_uiPortrait ? "portrait" : "landscape");
+                      uiOrientName(s_uiOrient));
     } else {
-        s_uiPortrait = (stored != 0);
-        Serial.printf("[orient] %s\n", s_uiPortrait ? "portrait" : "landscape");
+        // Anything outside the enum degrades to portrait rather than being
+        // ignored: every value this key has ever held that was not zero meant
+        // portrait, so an older build meeting a newer code lands on the right
+        // shape instead of silently flipping the panel back to landscape.
+        s_uiOrient = (stored < UI_ORIENT_COUNT) ? stored
+                   : (stored != 0 ? UI_ORIENT_PORTRAIT : UI_ORIENT_LANDSCAPE);
+        Serial.printf("[orient] %s\n", uiOrientName(s_uiOrient));
     }
     p.end();
 }
@@ -9040,7 +9103,8 @@ static void persistConfigToPrefs() {
     const size_t wrote = p.putBytes(kCfgBlobKey, s_cfgBlobBuf, sizeof(s_cfgBlobBuf));
     // Read during early boot, before the blob is unpacked, so they stay keys.
 #if HAS_RUNTIME_ORIENTATION
-    p.putUChar("uiOrient", (uint8_t)(s_cfg.uiOrientation ? 1 : 0));
+    p.putUChar("uiOrient", (uint8_t)(s_cfg.uiOrientation < UI_ORIENT_COUNT
+                                     ? s_cfg.uiOrientation : UI_ORIENT_LANDSCAPE));
 #endif
     p.putBool("wifiForceAp", wifiForceApMode());
     p.putBool("webCfgEnabled", s_webCfgEnabled);
@@ -9231,7 +9295,7 @@ static void applyLoadedConfigInvariants() {
     // is actually running, so the key that drove setRotation() this boot is the
     // one that wins — otherwise a vertical unit would show "Landscape" in
     // settings and export it to YAML while plainly being portrait.
-    s_cfg.uiOrientation = uiPortrait() ? 1 : 0;
+    s_cfg.uiOrientation = s_uiOrient;
 #endif
     if (!s_cfg.wifiEnabled) {
         s_cfg.mqttEnabled = false;
@@ -12616,6 +12680,33 @@ static void refreshCfgColorPickerModal() {
 }
 
 // navIdx: 0 = reset to adaptive default (0xFF); 1..N = palette entry (navIdx-1).
+// The colour a row would apply, for the confirm sentence. Mirrors the naming
+// in applyCfgColorSelection() below rather than duplicating its assignment.
+static const char *cfgColorNavName(int navIdx) {
+    if (navIdx <= 0) return "Default";
+    return kUserMsgColors[navIdx - 1].name;
+}
+
+static void applyCfgColorSelection(int navIdx);
+
+// Applying a message colour reboots, so it asks first. The picker stays open
+// behind the dialog; No returns to it.
+static void cfgColorAsk(int navIdx) {
+    if (navIdx < 0 || navIdx >= kUserMsgColorNavCount) return;
+    const uint8_t want = (navIdx == 0) ? 0xFF : (uint8_t)(navIdx - 1);
+    if (s_cfg.userMsgColor == want) {   // nothing to change, nothing to ask
+        closeCfgColorPickerModal();
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                 "My Message Color: %s (unchanged)", cfgColorNavName(navIdx));
+        refreshCfgModal();
+        return;
+    }
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             "Set message colour to %s and reboot?", cfgColorNavName(navIdx));
+    openCfgConfirmModal(-1, s_cfgConfirmText,
+                        [](int i) { applyCfgColorSelection(i); }, navIdx);
+}
+
 static void applyCfgColorSelection(int navIdx) {
     if (navIdx < 0 || navIdx >= kUserMsgColorNavCount) return;
     const char *name;
@@ -12639,7 +12730,7 @@ static void applyCfgColorSelection(int navIdx) {
 static void onCfgColorRowPressed(lv_event_t *e) {
     int navIdx = (int)(intptr_t)lv_event_get_user_data(e);
     s_cfgColorSelection = navIdx;
-    applyCfgColorSelection(navIdx);
+    cfgColorAsk(navIdx);
 }
 
 static void onCfgColorBackdropPressed(lv_event_t *e) {
@@ -14304,6 +14395,24 @@ static void rebuildThemeRows() {
     refreshThemeSelection();
 }
 
+static void applyThemeSelection(int idx);
+
+// Applying a theme reboots, so it asks first. The unchanged case is answered
+// by applyThemeSelection() itself, which already has a no-change branch.
+static void cfgThemeAsk(int idx) {
+    if (idx < 0 || idx >= s_themeVisibleCount) return;
+    UiThemeChoice p;
+    if (!uiThemeChoiceAt(s_themeVisible[idx], p)) return;
+    if (p.theme == s_cfg.uiTheme && p.mode == s_cfg.uiMode) {
+        applyThemeSelection(idx);   // says "(unchanged)" and closes; no reboot
+        return;
+    }
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             "Switch to theme %s and reboot?", p.name);
+    openCfgConfirmModal(-1, s_cfgConfirmText,
+                        [](int i) { applyThemeSelection(i); }, idx);
+}
+
 static void applyThemeSelection(int idx) {
     // idx addresses the visible (filtered) rows, not the full theme list.
     if (idx < 0 || idx >= s_themeVisibleCount) return;
@@ -14343,7 +14452,7 @@ static void applyThemeSelection(int idx) {
 static void onThemeRowPressed(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     s_themeSelection = idx;
-    applyThemeSelection(idx);
+    cfgThemeAsk(idx);
 }
 
 static void onThemeBackdropPressed(lv_event_t *e) {
@@ -15327,6 +15436,17 @@ static uint32_t s_discoverySweepEndedMs = 0;
 // name, both restored by discoveryEndPresetScan().
 static bool     s_presetScanActive = false;
 static uint8_t  s_presetScanPreset = 0;        // PRESET_* being scanned
+// While non-zero, the screen is reporting one preset scan rather than the node
+// table at large, and "heard" narrows to "heard over the radio at or after this
+// millis()". Kept set after the scan ends so the result is still on screen when
+// the user reads it; cleared by a normal sweep or by Clear.
+//
+// This is the fix for a scan reporting nodes that were never on the scanned
+// preset. The window alone is not enough: the MQTT bridge keeps running while
+// the radio is parked, so nodes arriving from the broker land inside it and
+// looked exactly like finds. They are excluded by transport, not by timing.
+static uint32_t s_presetScanResultFromMs = 0;
+static uint8_t  s_presetScanResultPreset = 0;
 // What the radio has to go back to. Snapshotted rather than re-derived on the
 // way out: re-deriving would depend on applyPresetParams() reaching the same
 // answer it reached at boot, and a restore has no business being that clever.
@@ -18262,6 +18382,22 @@ static void cfgPresetCommit(int idx) {
     ESP.restart();
 }
 
+// Names the destination and asks, instead of committing. The picker stays open
+// underneath, so No lands back on the list rather than on the Config screen.
+static void cfgPresetAsk(int idx) {
+    if (idx < 0 || idx >= s_cfgPresetCount) return;
+    const uint8_t preset = s_cfgPresetChoices[idx];
+    // Already the one in force: nothing to confirm, and the commit says so.
+    if (s_cfg.loraUsePreset && s_cfg.modemPreset == preset) {
+        cfgPresetCommit(idx);
+        return;
+    }
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             "Switch to %s and reboot?", kPresets[preset].name);
+    openCfgConfirmModal(-1, s_cfgConfirmText,
+                        [](int i) { cfgPresetCommit(i); }, idx);
+}
+
 static void onCfgPresetRowPressed(lv_event_t *e) {
     const int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= s_cfgPresetCount) return;
@@ -18271,7 +18407,7 @@ static void onCfgPresetRowPressed(lv_event_t *e) {
     // announces what it did and is undone by picking the previous row again.
     s_cfgPresetSelection = idx;
     refreshCfgPresetSelection();
-    cfgPresetCommit(idx);
+    cfgPresetAsk(idx);
 }
 
 static void openCfgPresetModal() {
@@ -18355,6 +18491,16 @@ static void openCfgPresetModal() {
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(title, "Modem preset");
 
+#if UI_TOUCH_ONLY_PROFILE
+    // A corner X, because the backdrop tap is a gesture you have to already
+    // know about and this modal is one you may well want to leave without
+    // choosing anything -- every row in it reboots the device. Reserving the
+    // row first keeps the floating button from hanging over the warning below.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_cfgPresetModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgPresetModal(); });
+#endif
+
     // Says the two things that are not undoable by looking: that choosing
     // restarts the device, and that the mesh has to agree for any of it to work.
     lv_obj_t *warn = lv_label_create(s_cfgPresetModal);
@@ -18363,8 +18509,8 @@ static void openCfgPresetModal() {
     lv_obj_set_style_text_color(warn, hintColor, 0);
     lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(warn, "Reboots on selection. Only nodes on the same preset "
-                            "can hear each other.");
+    lv_label_set_text(warn, "Asks first, then reboots. Only nodes on the same "
+                            "preset can hear each other.");
 
     lv_obj_t *list = lv_obj_create(s_cfgPresetModal);
     lv_obj_remove_style_all(list);
@@ -18436,14 +18582,289 @@ static void openCfgPresetModal() {
     lv_obj_set_style_text_color(hint, hintColor, 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    // No close key to name on these builds; the backdrop is the way out.
-    lv_label_set_text(hint, "Tap a preset to apply. Tap outside to cancel.");
+    // Just what a tap does now: the corner X above says how to leave, so this
+    // no longer has to carry that too. Tapping the backdrop still works for
+    // anyone who already reaches for it.
+    lv_label_set_text(hint, "Tap a preset to apply.");
 #else
     lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Cancel", modalCloseKeyLabel());
 #endif
 
     refreshCfgPresetSelection();
 }
+
+#if HAS_RUNTIME_ORIENTATION
+// ── Config -> Orientation ────────────────────────────────────────────────────
+// Three ways up, shown at once. This replaced a row that cycled through them:
+// cycling is fine for two states, but with three it makes reaching the last one
+// cost two reboots, and it can only ever say where you are rather than where
+// you could go. A picker says both, and costs one reboot from anywhere.
+//
+// It also retires the confirm dialog that row needed. That dialog existed to
+// answer "what will pressing this do", which a list of named destinations
+// answers by existing -- and a confirm on top of a deliberate choice is the
+// kind of second question people learn to dismiss without reading.
+//
+// Deliberately a sibling of the preset picker above rather than a shared
+// widget. They look alike today, but this one has a fixed three-entry list that
+// never filters and needs no scrolling, and the resemblance is not worth
+// coupling two modals whose contents have nothing to do with each other.
+static lv_obj_t *s_cfgOrientBackdrop = nullptr;
+static lv_obj_t *s_cfgOrientModal = nullptr;
+static lv_obj_t *s_cfgOrientRows[UI_ORIENT_COUNT] = {};
+static int       s_cfgOrientSelection = 0;
+
+static void closeCfgOrientModal() {
+    if (lvObjValid(s_cfgOrientBackdrop)) {
+        lv_obj_del(s_cfgOrientBackdrop);
+    } else if (lvObjValid(s_cfgOrientModal)) {
+        lv_obj_del(s_cfgOrientModal);
+    }
+    s_cfgOrientBackdrop = nullptr;
+    s_cfgOrientModal = nullptr;
+    memset(s_cfgOrientRows, 0, sizeof(s_cfgOrientRows));
+    s_cfgOrientSelection = 0;
+}
+
+static void refreshCfgOrientSelection() {
+    if (!s_cfgOrientModal) return;
+#if defined(DEVICE_TDECK_PRO)
+    for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
+        lv_obj_t *row = s_cfgOrientRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_cfgOrientSelection);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+    }
+    return;
+#endif
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
+    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
+    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
+    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
+    for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
+        lv_obj_t *row = s_cfgOrientRows[i];
+        if (!row) continue;
+        const bool sel = (i == s_cfgOrientSelection);
+        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
+        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
+    }
+}
+
+// Applies the orientation and restarts. Does not return unless it was already
+// the one in force.
+static void cfgOrientCommit(int idx) {
+    if (idx < 0 || idx >= (int)UI_ORIENT_COUNT) return;
+    const uint8_t want = (uint8_t)idx;
+
+    // Nothing to write and nothing worth a reboot for. Rebooting to arrive
+    // where we already are would read as the picker having misunderstood.
+    if (s_cfg.uiOrientation == want) {
+        closeCfgOrientModal();
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Already %s.", uiOrientName(want));
+        refreshCfgModal();
+        return;
+    }
+
+    closeCfgOrientModal();
+    s_cfg.uiOrientation = want;
+    // Straight to NVS, not the debounced flush: the reboot below would
+    // otherwise beat the write and the device would come back the way it went
+    // down. persistConfigToPrefs() writes the standalone uiOrient key that
+    // loadBootOrientation() reads on the way up.
+    persistConfigToPrefs();
+    snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s - rebooting...", uiOrientName(want));
+    refreshCfgModal();
+    lv_timer_handler();
+    delay(900);
+    flushPersistentState();   // transcripts too, before we go
+    ESP.restart();
+}
+
+// See cfgPresetAsk(): names where Yes goes, and leaves the picker underneath.
+static void cfgOrientAsk(int idx) {
+    if (idx < 0 || idx >= (int)UI_ORIENT_COUNT) return;
+    if (s_cfg.uiOrientation == (uint8_t)idx) {   // nothing to confirm
+        cfgOrientCommit(idx);
+        return;
+    }
+    snprintf(s_cfgConfirmText, sizeof(s_cfgConfirmText),
+             "Switch to %s and reboot?", uiOrientName((uint8_t)idx));
+    openCfgConfirmModal(-1, s_cfgConfirmText,
+                        [](int i) { cfgOrientCommit(i); }, idx);
+}
+
+static void onCfgOrientRowPressed(lv_event_t *e) {
+    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= (int)UI_ORIENT_COUNT) return;
+    s_cfgOrientSelection = idx;
+    refreshCfgOrientSelection();
+    cfgOrientAsk(idx);
+}
+
+static void openCfgOrientModal() {
+    if (!s_rootScreen) return;
+    if (s_cfgOrientModal || s_cfgOrientBackdrop) return;
+
+    s_cfgOrientSelection = (s_cfg.uiOrientation < UI_ORIENT_COUNT)
+                               ? (int)s_cfg.uiOrientation : 0;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+    int modalW = w - 24;
+    if (modalW < 170) modalW = w - 8;
+    if (modalW > 300) modalW = 300;
+
+    s_cfgOrientBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_cfgOrientBackdrop, w, h);
+    lv_obj_align(s_cfgOrientBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgOrientBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgOrientBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_cfgOrientBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_cfgOrientBackdrop, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(s_cfgOrientBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_cfgOrientBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_cfgOrientBackdrop,
+                        [](lv_event_t *e) {
+                            if (lv_event_get_target_obj(e) != s_cfgOrientBackdrop) return;
+                            closeCfgOrientModal();
+                        },
+                        LV_EVENT_CLICKED, nullptr);
+
+    s_cfgOrientModal = lv_obj_create(s_cfgOrientBackdrop);
+    lv_obj_set_size(s_cfgOrientModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_cfgOrientModal, (h > 40) ? (h - 16) : LV_SIZE_CONTENT, 0);
+    lv_obj_align(s_cfgOrientModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_cfgOrientModal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cfgOrientModal, LV_OBJ_FLAG_CLICKABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_cfgOrientModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_cfgOrientModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_cfgOrientModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_cfgOrientModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_cfgOrientModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_cfgOrientModal, 1, 0);
+    lv_obj_set_style_pad_all(s_cfgOrientModal, 8, 0);
+    lv_obj_set_style_pad_row(s_cfgOrientModal, 5, 0);
+    lv_obj_set_flex_flow(s_cfgOrientModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_cfgOrientModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_move_foreground(s_cfgOrientBackdrop);
+
+#if defined(DEVICE_TDECK_PRO)
+    const lv_color_t titleColor = lv_color_make(0, 0, 0);
+    const lv_color_t hintColor  = lv_color_make(0, 0, 0);
+    const lv_color_t rowColor   = lv_color_make(0, 0, 0);
+#else
+    const lv_color_t titleColor = lv_color_hex(0xD9E8FF);
+    const lv_color_t hintColor  = lv_color_hex(0xA7C7FF);
+    const lv_color_t rowColor   = (s_cfg.uiMode == UI_MODE_LIGHT)
+                                      ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
+#endif
+
+    lv_obj_t *title = lv_label_create(s_cfgOrientModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, titleColor, 0);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(title, "Screen orientation");
+
+#if UI_TOUCH_ONLY_PROFILE
+    // Same corner X as the preset picker, and for the same reason: every row
+    // here reboots, so leaving without choosing has to be obvious.
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_cfgOrientModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeCfgOrientModal(); });
+#endif
+
+    lv_obj_t *warn = lv_label_create(s_cfgOrientModal);
+    lv_obj_set_width(warn, lv_pct(100));
+    lv_obj_set_style_text_font(warn, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(warn, hintColor, 0);
+    lv_obj_set_style_text_align(warn, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(warn, LV_LABEL_LONG_WRAP);
+    // The panel rotation is fixed when the display comes up, which is the whole
+    // reason this cannot just take effect.
+    lv_label_set_text(warn, "Asks first, then reboots.");
+
+    lv_obj_t *list = lv_obj_create(s_cfgOrientModal);
+    lv_obj_remove_style_all(list);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(list, LV_OBJ_FLAG_SCROLLABLE);   // three rows always fit
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(list, 4, 0);
+
+    // Shapes rather than angles: "240x320" is checkable against what is in your
+    // hand, where "rotation 3" is only meaningful next to the source.
+    static const char *kOrientDesc[UI_ORIENT_COUNT] = {
+        "Wide", "Tall", "Tall, turned 180",
+    };
+
+    for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
+        const bool current = (s_cfg.uiOrientation == (uint8_t)i);
+        lv_obj_t *row = lv_btn_create(list);
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_remove_style_all(row);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+#endif
+        s_cfgOrientRows[i] = row;
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_pad_all(row, 5, 0);
+        lv_obj_set_style_pad_row(row, 1, 0);
+        lv_obj_set_style_shadow_width(row, 0, 0);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_START);
+        lv_obj_add_event_cb(row, onCfgOrientRowPressed, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
+
+        lv_obj_t *name = lv_label_create(row);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name, rowColor, 0);
+        // Marked in the text as well as by the highlight: the highlight also
+        // means "where the selection is", and those part company the moment
+        // anyone presses Down.
+        if (current) lv_label_set_text_fmt(name, "%s  (current)", uiOrientName((uint8_t)i));
+        else         lv_label_set_text(name, uiOrientName((uint8_t)i));
+
+        if (kModalRowDescriptions) {
+            lv_obj_t *desc = lv_label_create(row);
+            lv_obj_set_style_text_font(desc, &lv_font_montserrat_10, 0);
+            lv_obj_set_style_text_color(desc, rowColor, 0);
+#if defined(DEVICE_TDECK_PRO)
+            lv_obj_set_style_text_opa(desc, LV_OPA_COVER, 0);
+#else
+            lv_obj_set_style_text_opa(desc, LV_OPA_70, 0);
+#endif
+            lv_label_set_text(desc, kOrientDesc[i]);
+        }
+    }
+
+    lv_obj_t *hint = lv_label_create(s_cfgOrientModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, hintColor, 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+#if UI_TOUCH_ONLY_PROFILE
+    lv_label_set_text(hint, "Tap one to apply.");
+#else
+    lv_label_set_text_fmt(hint, "Move  Enter=Apply  %s=Cancel", modalCloseKeyLabel());
+#endif
+
+    refreshCfgOrientSelection();
+}
+#endif  // HAS_RUNTIME_ORIENTATION
 
 static void closeCfgNodeNameModal() {
     if (lvObjValid(s_cfgNodeNameBackdrop)) {
@@ -18784,6 +19205,9 @@ static void closeCfgModal() {
     closeCfgWifiPickerModal();
     closeCfgNodeNameModal();
     closeCfgPresetModal();
+#if HAS_RUNTIME_ORIENTATION
+    closeCfgOrientModal();
+#endif
 #if HAS_BLE_KEYBOARD
     closeCfgBleKbdModal();
 #endif
@@ -30156,6 +30580,43 @@ static uint32_t s_discoveryClearedMs = 0;
 // clear. Signed difference so the comparison survives the millis() wrap.
 static inline bool discoveryHeardFrom(const NodeEntry &e) {
     if (e.nodeId == 0 || e.lastHeardMs == 0) return false;
+    // Showing a preset scan: only what the radio itself heard while it was
+    // parked there counts. Every group in this modal funnels through here, so
+    // one gate scopes DIRECT, the hop buckets and the no-distance bucket alike.
+    if (s_presetScanResultFromMs != 0) {
+        if (e.lastHeardViaMqtt) return false;
+        return (int32_t)(e.lastHeardMs - s_presetScanResultFromMs) >= 0;
+    }
+    // Kept out of the radio groups: it has its own below. A node last seen over
+    // the bridge has no SNR of ours and no hop count it earned on our air, so
+    // listing it under DIRECT or "2 HOPS" states something we did not measure.
+    // hasHops in particular survives from an earlier RF sighting, which is how
+    // a bridged node could appear as a direct neighbour.
+    if (e.lastHeardViaMqtt && s_cfg.mqttEnabled) return false;
+    if (s_discoveryClearedMs == 0) return true;
+    return (int32_t)(e.lastHeardMs - s_discoveryClearedMs) >= 0;
+}
+
+// Defined with the preset-scan block far below; the summary line and the group
+// builders above it are the callers that come first.
+static const char *discoveryPresetLabel(uint8_t preset);
+
+// Leaves the preset-scan view. Called wherever the screen goes back to asking
+// about the node table at large, so a scan result cannot outlive the question
+// it answered.
+static void discoveryClearPresetScanView() {
+    s_presetScanResultFromMs = 0;
+    s_presetScanResultPreset = 0;
+}
+
+// Nodes whose most recent packet came from the broker rather than the air.
+// Only meaningful with the bridge on, and never while a preset scan's result is
+// what is being shown -- MQTT is not on the scanned preset by definition.
+static inline bool discoveryViaMqtt(const NodeEntry &e) {
+    if (!s_cfg.mqttEnabled) return false;
+    if (s_presetScanResultFromMs != 0) return false;
+    if (e.nodeId == 0 || e.lastHeardMs == 0) return false;
+    if (!e.lastHeardViaMqtt) return false;
     if (s_discoveryClearedMs == 0) return true;
     return (int32_t)(e.lastHeardMs - s_discoveryClearedMs) >= 0;
 }
@@ -30354,6 +30815,25 @@ static void discoveryBuildHeardAbout(lv_obj_t *col) {
     discoverySectionFinish(s, "  (none)");
 }
 
+// Nodes the broker told us about. A separate group rather than a marker on the
+// existing rows: these are reachable over the internet, not over the radio, and
+// the whole question this screen answers is what the radio can get to.
+static void discoveryBuildViaMqtt(lv_obj_t *col) {
+    if (!s_cfg.mqttEnabled) return;       // nothing bridged, nothing to say
+    if (s_presetScanResultFromMs != 0) return;   // not on the scanned preset
+    DiscoverySection s = { col, "VIA MQTT", 0 };
+    const int total = Nodes.count();
+    char label[kDiscoveryNameMax];
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if (!discoveryViaMqtt(*e)) continue;
+        discoveryNodeLabel(*e, label, sizeof(label));
+        discoverySectionRow(s, "  %s\n", label);
+    }
+    discoverySectionFinish(s, "  (none)");
+}
+
 // Rebuilds every column's contents. The summary rides on the DIRECT column,
 // which is column 0 on every layout.
 static void discoveryBuildColumns() {
@@ -30364,14 +30844,29 @@ static void discoveryBuildColumns() {
 
     // Counts sit here rather than on the status line, which belongs to the
     // sweep: a refusal message must not cost the user the summary.
-    char summary[48];
-    snprintf(summary, sizeof(summary), "%d node(s), %d report(s)",
-             Nodes.count(), Nodes.neighborReportCount());
+    char summary[64];
+    if (s_presetScanResultFromMs != 0) {
+        // Nodes.count() is the whole table, which is exactly what this line must
+        // not say while the screen is scoped to one scan.
+        int onPreset = 0;
+        const int total = Nodes.count();
+        for (int i = 0; i < total; i++) {
+            const NodeEntry *e = Nodes.at(i);
+            if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+            if (discoveryHeardFrom(*e)) onPreset++;
+        }
+        snprintf(summary, sizeof(summary), "%s: %d node(s) heard",
+                 discoveryPresetLabel(s_presetScanResultPreset), onPreset);
+    } else {
+        snprintf(summary, sizeof(summary), "%d node(s), %d report(s)",
+                 Nodes.count(), Nodes.neighborReportCount());
+    }
     discoveryMakeLabel(s_discoveryColBoxes[kDiscoveryColDirect], summary, false);
 
     discoveryBuildDirect(s_discoveryColBoxes[kDiscoveryColDirect]);
     discoveryBuildDistance(s_discoveryColBoxes[kDiscoveryColDistance]);
     discoveryBuildHeardAbout(s_discoveryColBoxes[kDiscoveryColHeard]);
+    discoveryBuildViaMqtt(s_discoveryColBoxes[kDiscoveryColHeard]);
 }
 
 static void discoverySetStatus(const char *text) {
@@ -30603,6 +31098,7 @@ static void discoveryClear() {
     // Beacons are not touched here: they live on the Beacons tool now, and they
     // arrive far too rarely to be worth throwing away with a screen that is
     // deliberately about the last few minutes.
+    discoveryClearPresetScanView();   // a Clear is a new question
     s_discoveryClearedMs = millis();
     if (s_discoveryClearedMs == 0) s_discoveryClearedMs = 1;   // 0 means "never cleared"
 
@@ -30681,6 +31177,9 @@ static void discoveryStartSweep() {
         discoverySetStatus(why);
         return;
     }
+    // Asking about our own preset again, so the scan-scoped view has to go --
+    // otherwise the sweep would fill a list still filtered to someone else's.
+    discoveryClearPresetScanView();
 
     const bool ok = Channels.sendDiscoverySweep(s_myNodeId,
                                                 s_cfg.nodeLong,
@@ -30822,6 +31321,13 @@ static void discoveryStartPresetScan(uint8_t preset) {
     // goes home before the failure is reported, so a refused scan never leaves
     // the node parked somewhere it does not live.
     s_presetScanActive = true;
+    // From here the screen reports this scan and nothing else. Set at the start
+    // rather than at the end so the list is already scoped while it fills, and
+    // deliberately left set afterwards -- the result has to survive being read.
+    uint32_t scanFrom = millis();
+    if (scanFrom == 0) scanFrom = 1;          // 0 is the "not scoped" sentinel
+    s_presetScanResultFromMs = scanFrom;
+    s_presetScanResultPreset = preset;
     s_presetScanPreset = preset;
     discoveryTuneToPreset(preset);
 
@@ -30873,8 +31379,25 @@ static void serviceDiscoverySweep() {
     const uint32_t elapsedMs = millis() - s_discoverySweepStartedMs;
     if (elapsedMs < windowMs) return;
 
-    int found = Nodes.count() - s_discoverySweepBaseNodes;
-    if (found < 0) found = 0;   // the table evicts; a shrinking count is not -2 nodes
+    int found;
+    if (s_presetScanActive) {
+        // Counted by who was actually heard, not by how much the table grew.
+        // The delta counted anything that arrived during the window, and the
+        // MQTT bridge keeps delivering while the radio is parked elsewhere --
+        // which is how a scan reported nodes that were never on that preset.
+        // discoveryHeardFrom() is already scoped to the scan, so this agrees
+        // with the list by construction rather than by coincidence.
+        found = 0;
+        const int total = Nodes.count();
+        for (int i = 0; i < total; i++) {
+            const NodeEntry *e = Nodes.at(i);
+            if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+            if (discoveryHeardFrom(*e)) found++;
+        }
+    } else {
+        found = Nodes.count() - s_discoverySweepBaseNodes;
+        if (found < 0) found = 0;   // the table evicts; a shrinking count is not -2 nodes
+    }
     s_discoverySweepStartedMs = 0;
 
     char msg[72];
@@ -30883,7 +31406,7 @@ static void serviceDiscoverySweep() {
         // those four are on another mesh entirely.
         const uint8_t scanned = s_presetScanPreset;
         discoveryEndPresetScan(/*aborted=*/false);
-        snprintf(msg, sizeof(msg), "%s: %d found (%lus)",
+        snprintf(msg, sizeof(msg), "%s: %d on preset (%lus)",
                  discoveryPresetLabel(scanned), found,
                  (unsigned long)(elapsedMs / 1000UL));
     } else {
@@ -34412,22 +34935,11 @@ static void performCfgAction(int actionId) {
             break;
 
 #if HAS_RUNTIME_ORIENTATION
-        case CFG_ACTION_ORIENTATION: {
+        case CFG_ACTION_ORIENTATION:
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec ORIENTATION");
-            s_cfg.uiOrientation = (uint8_t)(s_cfg.uiOrientation ? 0 : 1);
-            // Straight to NVS, not the debounced flush: the reboot below would
-            // otherwise beat the write and the device would come back the way
-            // it went down. persistConfigToPrefs() writes the standalone
-            // uiOrient key that loadBootOrientation() reads on the way up.
-            persistConfigToPrefs();
-            snprintf(s_cfgStatus, sizeof(s_cfgStatus), "%s - rebooting...",
-                     s_cfg.uiOrientation ? "Portrait" : "Landscape");
-            refreshCfgModal();
-            lv_timer_handler();
-            delay(900);
-            flushPersistentState();   // transcripts too, before we go
-            ESP.restart();
-        } break;
+            showActionPopup = false;   // the modal is the whole interaction
+            openCfgOrientModal();
+            break;
 #endif
 
         case CFG_ACTION_UNITS:
@@ -34992,16 +35504,25 @@ static void closeCfgConfirmModal() {
     s_cfgConfirmBackdrop = nullptr;
     s_cfgConfirmModal = nullptr;
     s_cfgConfirmPendingAction = -1;
+    // Cleared with the dialog, so a later row-based confirm cannot inherit a
+    // callback left behind by a picker.
+    s_cfgConfirmFn = nullptr;
+    s_cfgConfirmFnArg = 0;
+    s_cfgConfirmText[0] = '\0';
 }
 
 // Yes: run the pending action. No/cancel: just close the dialog, returning to
 // the CFG screen underneath.
 static void cfgConfirmAccept() {
     int action = s_cfgConfirmPendingAction;
+    // Taken before the close, which clears them.
+    CfgConfirmFn fn = s_cfgConfirmFn;
+    const int    arg = s_cfgConfirmFnArg;
     if (action == CFG_ACTION_OTA_UPDATE) {
         Serial.println("[ota-worker] confirm accepted for firmware update");
     }
     closeCfgConfirmModal();
+    if (fn) { fn(arg); return; }        // most of these do not return
     if (action >= 0) performCfgAction(action);
 }
 
@@ -35020,22 +35541,21 @@ static void onCfgConfirmNoPressed(lv_event_t *e) {
     cfgConfirmReject();
 }
 
-static void openCfgConfirmModal(int actionId) {
+static void openCfgConfirmModal(int actionId, const char *text,
+                                CfgConfirmFn fn, int fnArg) {
     if (!s_rootScreen || s_cfgConfirmModal || s_cfgConfirmBackdrop) return;
     s_cfgConfirmPendingAction = actionId;
+    s_cfgConfirmFn = fn;
+    s_cfgConfirmFnArg = fnArg;
 
     char actionText[96];
-    cfgActionLabel(actionId, actionText, sizeof(actionText));
-#if HAS_RUNTIME_ORIENTATION
-    if (actionId == CFG_ACTION_ORIENTATION) {
-        // The row says what the panel is now, which is the wrong thing to put
-        // under "Confirm?" — it reads as asking you to confirm the status quo.
-        // The dialog says what pressing Yes does instead.
-        snprintf(actionText, sizeof(actionText), "Switch to %s and reboot",
-                 s_cfg.uiOrientation ? "Landscape" : "Portrait");
+    const bool ownText = (text && text[0]);
+    if (ownText) {
+        strncpy(actionText, text, sizeof(actionText) - 1);
+        actionText[sizeof(actionText) - 1] = '\0';
+    } else {
+        cfgActionLabel(actionId, actionText, sizeof(actionText));
     }
-#endif
-
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
     int modalW = lv_disp_get_hor_res(NULL) - 40;
@@ -35106,7 +35626,10 @@ static void openCfgConfirmModal(int actionId) {
     lv_obj_set_style_text_color(q, actionTextColor, 0);
     lv_obj_set_style_text_align(q, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(q, LV_LABEL_LONG_WRAP);
-    if (actionId == CFG_ACTION_CHAT_STYLE) {
+    // "Action: <row label>" reads correctly for a row, and wrongly for a
+    // sentence someone wrote for this dialog. Chat Style was the first caller
+    // to supply its own wording and got a special case; ownText generalises it.
+    if (ownText || actionId == CFG_ACTION_CHAT_STYLE) {
         lv_label_set_text(q, actionText);
     } else {
         lv_label_set_text_fmt(q, "Action: %s", actionText);
@@ -37426,7 +37949,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                applyCfgColorSelection(s_cfgColorSelection);
+                cfgColorAsk(s_cfgColorSelection);
                 continue;
             }
             int next = s_cfgColorSelection;
@@ -37482,7 +38005,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                applyThemeSelection(s_themeSelection);
+                cfgThemeAsk(s_themeSelection);
                 continue;
             }
             // Space arms the filter and is never part of it. Until it is armed
@@ -37820,6 +38343,33 @@ static void pumpKeyboardInput() {
             continue;
         }
 
+#if HAS_RUNTIME_ORIENTATION
+        // Same placement and shape as the preset picker below.
+        if (s_cfgOrientModal) {
+            if (isModalCloseKey(k)) {
+                closeCfgOrientModal();
+                continue;
+            }
+            if (k == KEY_ENTER || k == KEY_ROLLER) {
+                cfgOrientAsk(s_cfgOrientSelection);
+                continue;
+            }
+            int delta = 0;
+            if (k == KEY_SCROLL_UP)      delta = invertScrollNav ? 1 : -1;
+            else if (k == KEY_SCROLL_DN) delta = invertScrollNav ? -1 : 1;
+            if (delta != 0) {
+                int next = s_cfgOrientSelection + delta;
+                if (next < 0) next = 0;
+                if (next > (int)UI_ORIENT_COUNT - 1) next = (int)UI_ORIENT_COUNT - 1;
+                if (next != s_cfgOrientSelection) {
+                    s_cfgOrientSelection = next;
+                    refreshCfgOrientSelection();
+                }
+            }
+            continue;
+        }
+#endif
+
         // Above the Config block because it is drawn above the Config screen:
         // while the picker is up it owns the keys, and nothing may reach the
         // row list underneath it.
@@ -37829,7 +38379,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                cfgPresetCommit(s_cfgPresetSelection);   // reboots; does not return
+                cfgPresetAsk(s_cfgPresetSelection);
                 continue;
             }
             int delta = 0;
@@ -46902,8 +47452,7 @@ void setup() {
     // displayDev().width()/height() further down, so the rotation set here is
     // what every layout below is built against. The touch driver normalises to
     // panel-native coordinates and lets LGFX rotate them, so it follows too.
-    displayDev().setRotation(uiPortrait() ? TFT_ROTATION_PORTRAIT
-                                          : TFT_ROTATION_LANDSCAPE);
+    displayDev().setRotation(uiRotationValue());
 #else
     displayDev().setRotation(TFT_ROTATION_DEFAULT);
 #endif

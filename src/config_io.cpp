@@ -1540,7 +1540,10 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     out += "    units: "; out += (cfg.displayUnits ? "IMPERIAL" : "METRIC"); out += "\n";
     snprintf(tmp, sizeof(tmp), "    compassNorthTop: %s\n", cfg.compassNorthTop ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    flipScreen: %s\n",      cfg.flipScreen      ? "true" : "false"); out += tmp;
-    out += "    orientation: "; out += (cfg.uiOrientation ? "PORTRAIT" : "LANDSCAPE"); out += "\n";
+    out += "    orientation: ";
+    out += (cfg.uiOrientation == 2 ? "PORTRAIT_180"
+            : cfg.uiOrientation == 1 ? "PORTRAIT" : "LANDSCAPE");
+    out += "\n";
     snprintf(tmp, sizeof(tmp), "    splashMelodyEnabled: %s\n", cfg.splashMelodyEnabled ? "true" : "false"); out += tmp;
     snprintf(tmp, sizeof(tmp), "    volume: %u\n", (unsigned)cfg.volumePct); out += tmp;
     // Per-unit hardware trim, so it rides along with a config backup/restore of
@@ -2145,7 +2148,8 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "units"))           cfg.displayUnits    = !strcmp(val,"IMPERIAL") ? 1 : 0;
                 else if (!strcmp(key, "compassNorthTop")) cfg.compassNorthTop = (!strcmp(val,"true"));
                 else if (!strcmp(key, "flipScreen"))      cfg.flipScreen      = (!strcmp(val,"true"));
-                else if (!strcmp(key, "orientation"))     cfg.uiOrientation   = !strcmp(val,"PORTRAIT") ? 1 : 0;
+                else if (!strcmp(key, "orientation"))     cfg.uiOrientation   =
+                        !strcmp(val, "PORTRAIT_180") ? 2 : (!strcmp(val, "PORTRAIT") ? 1 : 0);
                 else if (!strcmp(key, "splashMelodyEnabled")) cfg.splashMelodyEnabled = (!strcmp(val,"true"));
                 else if (!strcmp(key, "volume"))          cfg.volumePct = cfgCoerceVolume(atoi(val));
                 else if (!strcmp(key, "batteryCalTrim"))  cfg.battCalTrim = cfgCoerceBattCalTrim(atoi(val));

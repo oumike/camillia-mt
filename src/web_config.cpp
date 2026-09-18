@@ -3296,7 +3296,13 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     }
     sendChunk(html);
 
-    html += "<form method='POST' action='/save'>";
+    // Saving reboots to apply (handlePostSave), so it asks first, like every
+    // other restarting action on this page. The one exception it cannot see
+    // from here is a font-size-only change, which applies without restarting --
+    // the wording hedges rather than promising a reboot that may not happen.
+    html += "<form method='POST' action='/save'"
+            " onsubmit=\"return confirm('Saving may restart the device to apply "
+            "these changes. Continue?')\">";
 
     // ── Node Identity ─────────────────────────────────────────
     section(html, lite, "Node Identity", true);
@@ -3860,13 +3866,19 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     // Same position as the on-device Config screen: after the lock-screen rows,
     // at the end of the run of settings about what the panel itself does.
     {
+        // Two portraits, a half turn apart. Which one is right depends on
+        // where the cable leaves the case and which hand is holding it, so it
+        // is a choice rather than something the firmware can pick.
         html += "<label>Orientation<select name='orientation'>"
                 "<option value='0'";
-        if (!gCfg->uiOrientation) html += " selected";
+        if (gCfg->uiOrientation == 0) html += " selected";
         html += ">Landscape</option>"
                 "<option value='1'";
-        if (gCfg->uiOrientation) html += " selected";
+        if (gCfg->uiOrientation == 1) html += " selected";
         html += ">Portrait</option>"
+                "<option value='2'";
+        if (gCfg->uiOrientation == 2) html += " selected";
+        html += ">Portrait (180&deg;)</option>"
                 "</select></label>";
         html += "<p style='font-size:.82em;color:#888;margin:.1em 0 .5em'>"
                 "Which way up the display runs. The panel is rotated once at "
@@ -4620,7 +4632,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         // /save instead.
         html += "<hr style='margin:1.4em 0;border:0;border-top:1px solid #3a4553'>"
                 "<h3 style='margin:.2em 0 .4em'>Restore Config</h3>"
-                "<form method='POST' action='/import' enctype='multipart/form-data'>"
+                "<form method='POST' action='/import' enctype='multipart/form-data'"
+                " onsubmit=\"return confirm('This will replace your settings with "
+                "the uploaded file and reboot the device. Continue?')\">"
                 "<label>Import a YAML config file"
                 "<input type='file' name='f' accept='.yaml,.yml'></label>"
                 "<button type='submit' style='width:100%;margin-top:.6em'>"
@@ -4867,6 +4881,8 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "color:#fff;border-radius:3px;text-decoration:none;font-size:.95em'>"
         "&#11015; Export Config</a></p>"
         "<form method='POST' action='/import' enctype='multipart/form-data'"
+        " onsubmit=\"return confirm('This will replace your settings with the "
+        "uploaded file and reboot the device. Continue?')\""
         " style='margin-top:.6em'>"
         "<label>Import a YAML config file.</label>  "
         "<input type='file' name='f' accept='.yaml,.yml'"
@@ -6963,15 +6979,23 @@ static void handlePostSave() {
     if (server.hasArg("brightness")) {
         gCfg->brightness = cfgCoerceBrightness(server.arg("brightness").toInt());
     }
-#if FEATURE_LOCK_SCREEN
 #if HAS_RUNTIME_ORIENTATION
+    // Gated on HAS_RUNTIME_ORIENTATION alone, matching the control that renders
+    // it. It used to sit inside the FEATURE_LOCK_SCREEN block below, which is
+    // true on both boards that have runtime orientation today and so never bit
+    // -- but the two settings are unrelated, and a board with one and not the
+    // other would have rendered the select and silently discarded the answer.
+    //
     // hasArg-guarded like brightness: a lite page that does not render the
     // control must not be read as a request to set it to zero.
     if (server.hasArg("orientation")) {
-        gCfg->uiOrientation = (server.arg("orientation").toInt() != 0) ? 1 : 0;
+        // Clamped rather than trusted: this arrives from a form post, and a
+        // value past the end would be written to NVS and read back next boot.
+        const long o = server.arg("orientation").toInt();
+        gCfg->uiOrientation = (uint8_t)((o >= 0 && o <= 2) ? o : 0);
     }
 #endif
-
+#if FEATURE_LOCK_SCREEN
     // hasArg-guarded for the same reason as brightness above.
     if (server.hasArg("lock_brightness")) {
         gCfg->lockScreenBrightness =
