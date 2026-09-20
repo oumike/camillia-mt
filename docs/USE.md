@@ -121,7 +121,11 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - Trackball Up/Down follows the same Up/Down behavior as J/K
 - Modal close key is Backspace (Esc is also accepted)
 - Compose close behavior: Backspace on an empty compose closes the compose modal
-- Trackball click hold for 2 seconds puts the screen to sleep
+- Trackball click hold for 2 seconds puts the screen to sleep, or raises the
+  lock screen when one is enabled
+- A trackball **click** is what brings it back — it is this board's only wake
+  gesture, so rolling the ball, a key or a tap on the panel will not do it. See
+  [Lock screen](#lock-screen)
 
 ### LilyGo T-Deck Pro (tdeck-pro)
 
@@ -156,6 +160,9 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - DM modal: Wheel Click swaps focus between conversation and message panels
 - Modal close key is Backspace (Esc is also accepted)
 - Compose close behavior: Backspace on an empty compose closes the compose modal
+- **BOOT is the screen button**: a tap puts the device away or raises the lock
+  screen, a two-second hold unlocks. The wheel click and any keyboard key also
+  unlock; rolling the wheel does not. See [Lock screen](#lock-screen)
 
 ### M5Stack Cardputer + Cap LoRa/GPS (cardputer-cap)
 
@@ -1084,10 +1091,59 @@ The T-Deck Pro has no carousel here. Its sleep screen is a static e-paper image
 held without power, so a band that redrew itself every 30 seconds would be
 spending battery on refreshes nobody asked for.
 
-The normal **Screen Timeout** and each board's existing screen-off gesture enter
-the lock screen. Keys, touches and controls that are not that board's wake
-gesture are swallowed rather than acting on the hidden UI. After the configured
-dwell, the panel enters its normal fully-off state.
+#### Locking: what puts it up
+
+Locking is the middle of three display states, and a separate setting governs
+each step into the next:
+
+| From | What moves it on | To |
+| --- | --- | --- |
+| UI | **Screen Timeout**, or the board's screen-off gesture | Lock screen |
+| Lock screen | **Lock Screen Off**, the dwell | Dark panel |
+| Either | the board's unlock gesture | UI |
+
+**Screen Timeout** is unchanged and still means what it always did — how long
+the UI stays up with no input. With the lock screen enabled, what it arrives at
+is the lock screen rather than a dark panel. **Lock Screen Off** then decides how
+long that lit screen lasts before the panel goes out for real; on **Stay on** it
+never ends on its own.
+
+Each board's existing screen-off gesture does the same thing immediately: a tap
+of the screen button, a held trackball click on the T-Deck, a held d-pad centre
+on the M9. They are listed under
+[What unlocks each board](#what-unlocks-each-board).
+
+**Nothing else raises the lock screen, and nothing but input takes it down.** A
+message arriving while the device is locked never lights the panel — it only
+changes what the carousel has to show the next time you look — and no timer,
+packet or alert unlocks anything.
+
+#### While it is up
+
+- **Every input that is not that board's unlock gesture is swallowed.** Keys,
+  taps, the trackball, the touch panel and the UI's action button all stop at
+  the overlay rather than reaching the screen underneath, so a press in a pocket
+  cannot send a message or open a surface you did not ask for.
+- **Nothing is marked read.** Traffic arriving on the channel the UI happens to
+  have selected underneath, or in an open DM, stays unread and still raises its
+  mark — a conversation nobody can see is not one anybody is reading. Unlocking
+  is what clears the mark for whatever is in front of you again.
+- **The device will not light-sleep.** The panel is lit and the clock has to go
+  on ticking, so the CPU stays out of the naps it would take with the screen
+  dark. That cost is the whole reason **Lock Screen Off** exists, and why its
+  default is five minutes rather than **Stay on**.
+- **The keyboard backlight stays off** on the boards that have one — nothing on
+  this screen takes typing — and comes back with the UI.
+- **The keyboard-backlight unread blink waits for the panel to go out.** On the
+  T-Deck and T-Lora Pager a lit lock screen postpones it, and it starts when the
+  dwell ends. The Mesh Deck's RGB LEDs are unaffected and go on blinking for
+  unread throughout. See [Light timeout](#light-timeout).
+- **The panel runs at the lock screen's own brightness level**, not the UI's,
+  and not whatever fraction the pre-sleep dim had reached on the way in — see
+  [Lock screen brightness](#lock-screen-brightness).
+- **Unlocking restarts the screen timeout** from zero, so the UI you come back
+  to gets its full idle time instead of dropping straight onto the lock screen
+  again.
 
 #### The wake button: tap to glance, hold to unlock
 
@@ -1121,12 +1177,74 @@ Other touch panels and keyboards are unchanged. Where a board wakes from a tap o
 the screen or from a key — the T-Deck's trackball click — that input still goes
 straight through to the UI in one press.
 
+#### What unlocks each board
+
+These are the gestures each board already used for the screen; what the lock
+screen adds is the tap/hold split on the boards with a screen button. Anything
+not listed here is swallowed while the device is locked.
+
+| Board | Puts the device away | Unlocks |
+| --- | --- | --- |
+| **T-Deck** | Trackball click held 2 s | Trackball **click**. Rolling the ball does not, and neither do the keys or the touch panel |
+| **T-Lora Pager** | Tap BOOT | Hold BOOT 2 s, the **wheel click**, or any key on the keyboard. Rolling the wheel does not |
+| **Attaky Mesh Deck** | Tap the **R** shoulder button, or tap BOOT | Hold either for 2 s. Keys and the touch panel do not |
+| **ThinkNode M9** | Hold the d-pad centre, or tap BOOT | Hold the d-pad centre 2 s, or hold BOOT 2 s. A centre **tap** only raises the lock screen, and every other key is swallowed |
+| **Heltec V4 + TFT** | Tap the expansion's side button | Hold it 2 s, or **tap the panel** anywhere. GPIO0 is the UI's action button on this board rather than a screen key, so it does not unlock |
+| **Heltec R8 + TFT** | — (no screen button) | **Tap the panel** — touch is this board's only wake gesture |
+| **Wio Tracker L2** | Tap the top **Wake** button | Hold it 2 s. Touch is not a wake gesture here |
+| **Cardputer** | Tap BOOT | No lock screen: the panel sleeps directly, and a BOOT hold or any key brings it back |
+| **T-Deck Pro** | Tap BOOT | No lock screen either — the e-paper sleep screen is the sleeping state. Hold BOOT 2 s to wake |
+
+**A browser VNC session counts as someone looking at the screen.** While one is
+connected the lock screen is dismissed and kept down, the panel and its timers
+stay awake, and keys typed into VNC are exempt from the per-board restrictions
+above — a remote viewer pressed them deliberately. See
+[Browser VNC](#browser-vnc).
+
+#### The first three seconds
+
+The lock screen ignores input for **three seconds** after it appears. The press
+that raised it is usually still being released, and without that window the same
+press would read as the input dismissing it. The guard does not latch: a button
+held through it unlocks the moment it expires rather than needing a second
+press. The same three seconds cover a panel on its way out, which is why a press
+landing just after the screen goes dark does not bring it straight back.
+
+#### Lock screen brightness
+
+The lock screen has its own backlight level, separate from the one the UI runs
+at. A glance surface is read from across a room for two seconds at a time and
+does not need the level you chose for reading messages — and on a lit LCD that
+difference is most of what the lock screen costs in battery.
+
+- The default is **10%**, the dimmest step there is.
+- On-device: **Config → Brightness** opens two sliders, the screen level and the
+  lock-screen level, both previewing live. [Brightness](#brightness) covers how
+  each board moves between the two rows.
+- Web config: **Lock Screen Brightness**, beside Brightness under **Display**.
+- Cardputer and T-Deck Pro have no lock screen and show one slider only.
+
+The level is applied on the way in and again on the way out, so the lock screen
+never inherits the pre-sleep dim and the UI never comes back at the glance
+level.
+
+#### The settings
+
 - **Lock Screen** enables or disables the intermediate screen. Disabled keeps
-  the previous direct-to-sleep behavior.
+  the previous direct-to-sleep behavior exactly: the timeout and the screen-off
+  gesture both put the panel straight out, and no overlay is ever built.
 - **Lock Screen Off** starts at **30 sec**, then 1 and 2 min, then 5 to 60
   minutes in five-minute steps, plus **Stay on**. The default is 5 minutes.
-- Both settings are available in on-device Config and web config.
-- Cardputer keeps direct screen sleep and does not show these settings.
+- All three — Lock Screen, Lock Screen Off and the lock-screen brightness — are
+  available in on-device Config and in web config under **Display**.
+- **Turning Lock Screen off while it is up takes it down immediately**, rather
+  than at the next timeout: off means off now. That is only reachable from web
+  config, since the device's own Config screen is behind the lock screen.
+- All three travel with an exported config, under `display:` as `lockScreen`,
+  `lockScreenOffSecs` and `lockScreenBrightness` — see
+  [Backing up settings](#backing-up-settings).
+- Cardputer keeps direct screen sleep and does not show these settings: its
+  240x135 panel and first-boot heap budget cannot carry the overlay.
 - T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
   holds that image without a lit backlight, so it does not use the dwell timer
   and does not rotate its band.
@@ -1723,9 +1841,11 @@ setting a glance level is largely about comparing it against the screen level.
   you opened with
 
 The default matches whatever brightness the board has always used, so an
-unconfigured device looks unchanged. Web Config offers the same setting as a
-slider under **Display**, and the value is included in YAML export/import as
-`display.brightness`.
+unconfigured device looks unchanged; the lock-screen level defaults to **10%**.
+Web Config offers both as sliders under **Display** — **Brightness** and **Lock
+Screen Brightness** — and they are included in YAML export/import as
+`display.brightness` and `display.lockScreenBrightness`. What the second one is
+for is described under [Lock screen brightness](#lock-screen-brightness).
 
 ### Web Config
 
@@ -2336,7 +2456,9 @@ Primary usage is keyboard plus the d-pad and the dedicated function row.
 
 - Dedicated buttons open Chat, Home (the dashboard), DMs, Tools and Map from
   anywhere; Chat pressed on the chat screen opens the channel list
-- Holding the d-pad centre sleeps the screen
+- Holding the d-pad centre sleeps the screen — or raises the lock screen, which
+  a held centre then unlocks. A centre tap never reaches the UI; it only brings
+  the lock screen up. See [Lock screen](#lock-screen)
 - D-pad Up/Down navigates, Left/Right switches channels or hops columns —
   except in the New Message box, where the d-pad moves the text cursor
   (Left/Right by a character, Up/Down by a line), and on the Brightness screen,
