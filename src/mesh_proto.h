@@ -61,6 +61,10 @@ enum PortNum : uint32_t {
     POSITION_APP     = 3,
     NODEINFO_APP     = 4,
     ROUTING_APP      = 5,    // ACK/NAK packets (Meshtastic PortNum_ROUTING_APP)
+    ADMIN_APP        = 6,    // Remote administration (AdminMessage). Client only:
+                             //   Camillia administers other nodes and does not
+                             //   serve the other half -- see issue #89.
+
     STORE_FORWARD_APP = 65,  // Store and Forward module (replayed messages)
     TELEMETRY_APP    = 67,
     NEIGHBORINFO_APP = 71,
@@ -289,6 +293,16 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
 
 // Encode a unicast TEXT_MESSAGE_APP Data message with explicit Data.dest/source.
 // Use for DM interoperability with peers that validate decoded destination fields.
+// Data { portnum = ADMIN_APP, payload = <AdminMessage>, dest, source } plus
+// want_response for a read. The admin payload is built by admin_proto; this only
+// wraps it in the Data envelope every portnum shares.
+//
+// dest/source are set for the same reason a DM sets them: a PKI packet carries
+// no channel, so these are what tells the far end who the exchange is between.
+size_t encodeAdminData(const uint8_t *admin, size_t adminLen,
+                       uint32_t fromNode, uint32_t toNode, bool wantResponse,
+                       uint8_t *buf, size_t bufLen);
+
 size_t encodeTextMessageUnicast(const char *text,
                                 uint32_t fromNode, uint32_t toNode,
                                 uint8_t *buf, size_t bufLen,

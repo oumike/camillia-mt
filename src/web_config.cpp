@@ -5,6 +5,8 @@
 #endif
 #include "mesh_channel_plan.h"
 #include "base64_util.h"
+#include "mesh_proto.h"   // myPubKey, for the identity chip in the header
+#include "admin_peers.h"
 #include "web_icon.h"
 #include "node_db.h"
 #include "channel_mgr.h"
@@ -617,6 +619,10 @@ static const char kHead[] =
            ".metric-good{color:#8ef2b8;border-color:#3e8f66}"
            ".metric-warn{color:#ffd181;border-color:#a57a2d}"
            ".metric-bad{color:#ff9f9f;border-color:#a75454}"
+           ".key-chip{cursor:pointer;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+               "color:var(--muted)}"
+           ".key-chip:hover{color:var(--text);border-color:var(--accent)}"
+           ".key-chip.copied{color:#8ef2b8;border-color:#3e8f66}"
         ".tab-btn{margin:0;padding:.45em 1em;background:var(--panel-2);color:var(--text);"
              "border:1px solid var(--line);border-radius:999px;cursor:pointer;font-size:.9em;font-weight:600}"
         ".tab-btn.active{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}"
@@ -1049,6 +1055,21 @@ static const char kLoraReadout[] =
         "</div>";
 
 static const char kFontModal[] =
+#if HAS_ADMIN_TERMINAL
+        "<div class='modal-back' id='adminModal' onclick='if(event.target===this)adminClose()'>"
+        "<div class='modal-card' style='width:min(46em,94vw)'>"
+        "<h3 id='admin-title'>Remote Admin</h3>"
+        "<div id='admin-log' style='height:22em;overflow-y:auto;background:var(--panel-2);"
+            "border:1px solid var(--line);border-radius:6px;padding:.5em;"
+            "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8em;"
+            "white-space:pre-wrap;word-break:break-word'></div>"
+        "<div style='display:flex;gap:.4em;margin-top:.6em'>"
+            "<input id='admin-line' placeholder='help' autocomplete='off' style='flex:1'"
+                " onkeydown='if(event.key===\"Enter\"){event.preventDefault();adminSend();}'>"
+            "<button type='button' onclick='adminSend()'>Send</button>"
+            "<button type='button' onclick='adminClose()'>Close</button>"
+        "</div></div></div>"
+#endif
         "<div class='modal-back' id='fsModal' onclick='if(event.target===this)fsClose()'>"
         "<div class='modal-card'><h3>Font Size</h3>"
         "<button type='button' class='modal-opt' onclick='fsPick(0,\"Small\")'>"
@@ -2961,6 +2982,15 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
     } else {
         snprintf(battChip, sizeof(battChip), "BAT %u%%", (unsigned)battPct);
     }
+    // Our own public key, base64, for the header chip. It is the first thing
+    // remote administration needs -- it goes in the other node's
+    // security.admin_key -- and until now it existed only inside the YAML
+    // export, which is a strange place to have to go to read your own identity.
+    char pubKeyB64[48] = "";
+    bool havePubKey = false;
+    for (int i = 0; i < 32 && !havePubKey; i++) havePubKey = (myPubKey[i] != 0);
+    if (havePubKey) base64Encode(myPubKey, 32, pubKeyB64);
+
     char gpsChip[48];
     if (!gpsEn) snprintf(gpsChip, sizeof(gpsChip), "GPS OFF");
     else if (gpsFix) snprintf(gpsChip, sizeof(gpsChip), "GPS FIX %u", (unsigned)gpsSat);
@@ -3292,7 +3322,22 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 #if HAS_VNC_HOST
     html += "<button type='button' class='tab-btn' id='tab-btn-remote' onclick=\"switchTab('remote')\">Remote</button>";
 #endif
-        html += "</div><div class='tab-metrics'><span class='metric-chip ";
+        html += "</div>";
+        if (havePubKey) {
+            // Left of the row: .tab-metrics carries margin-left:auto, so
+            // anything emitted before it stays packed against the tabs rather
+            // than drifting right with the battery and GPS chips.
+            html += "<button type='button' class='metric-chip key-chip' id='pubkey-chip'"
+                    " data-key='";
+            html += pubKeyB64;
+            html += "' onclick='copyPubKey(this)' title='Copy the public key of this node'>"
+                    "KEY ";
+            // Enough of it to recognise, not so much that it crowds the tabs.
+            // The whole key travels in data-key; this is only the label.
+            html += String(pubKeyB64).substring(0, 10);
+            html += "&hellip;</button>";
+        }
+        html += "<div class='tab-metrics'><span class='metric-chip ";
         html += battCls;
         html += "'>";
         html += battChip;
@@ -4829,6 +4874,64 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
 
     sectionEnd(html, false);
     sendChunk(html);
+
+#if HAS_ADMIN_TERMINAL
+    // ── Remote Admin ──────────────────────────────────────────────
+    // Peers are added and proved here rather than from a node's menu: a node
+    // menu offering "claim admin over this stranger" invites unauthorized admin
+    // packets across the mesh and the broker.
+    section(html, false, "Remote Admin", true);
+    html +=
+        "<p style='font-size:.82em;color:#888;margin:.1em 0 .8em'>"
+        "Administer another Meshtastic node over LoRa or MQTT. The remote must "
+        "carry this node's public key in its <code>security.admin_key</code> &mdash; "
+        "copy it from the chip at the top of this page. A peer stays hidden until "
+        "a probe proves the remote actually accepts us, which is what the "
+        "<em>Verify</em> button does.</p>";
+
+    html += "<form method='POST' action='/admin-peers' style='display:flex;gap:.4em;"
+            "flex-wrap:wrap;align-items:center;margin-bottom:.6em'>"
+            "<input type='hidden' name='action' value='add'>"
+            "<input name='node' placeholder='!a1b2c3d4' style='max-width:12em'>"
+            "<button type='submit'>Add peer</button></form>";
+
+    if (AdminPeerList.count() == 0) {
+        html += "<p style='font-size:.82em;color:#888'>No admin peers yet.</p>";
+    } else {
+        html += "<table style='width:100%;font-size:.84em;border-collapse:collapse'>"
+                "<tr><th align='left'>Node</th><th align='left'>State</th>"
+                "<th align='left'>Last proved</th><th></th></tr>";
+        for (int i = 0; i < AdminPeerList.count(); i++) {
+            const AdminPeer *p2 = AdminPeerList.at(i);
+            if (!p2) continue;
+            char idbuf[16];
+            snprintf(idbuf, sizeof(idbuf), "!%08lx", (unsigned long)p2->nodeId);
+            html += "<tr><td><code>"; html += idbuf; html += "</code></td><td>";
+            html += AdminPeers::stateName(p2->state);
+            html += "</td><td>";
+            html += AdminPeers::transportName(p2->lastTransport);
+            html += "</td><td align='right'>";
+            // Terminal only for a confirmed peer -- the same gate the device
+            // applies to its actions-modal row, decided once, server side.
+            if (p2->state == ADMIN_PEER_CONFIRMED) {
+                html += "<button type='button' onclick=\"adminOpen('";
+                html += idbuf;
+                html += "')\">Terminal</button> ";
+            }
+            html += "<form method='POST' action='/admin-peer-verify' style='display:inline'>"
+                    "<input type='hidden' name='node' value='"; html += idbuf;
+            html += "'><button type='submit'>Verify</button></form> "
+                    "<form method='POST' action='/admin-peers' style='display:inline'"
+                    " onsubmit=\"return confirm('Remove this admin peer?')\">"
+                    "<input type='hidden' name='action' value='remove'>"
+                    "<input type='hidden' name='node' value='"; html += idbuf;
+            html += "'><button type='submit'>Remove</button></form></td></tr>";
+        }
+        html += "</table>";
+    }
+    sectionEnd(html, false);
+    sendChunk(html);
+#endif
 
 #if HAS_STATE_MAPS
     // ── Maps Download ─────────────────────────────────────────────
@@ -6605,6 +6708,79 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "function startRemotePolling(){pollRemote();if(!remotePollTimer)remotePollTimer=setInterval(pollRemote,1000);}"
                         "function stopRemotePolling(){if(remotePollTimer){clearInterval(remotePollTimer);remotePollTimer=null;}remoteFrameSync(false);}"
 #endif
+                        // Copying the public key. navigator.clipboard is a
+                        // secure-context API and this page is served over plain
+                        // http, so it is absent in most of the cases that
+                        // matter -- the execCommand path below is the one that
+                        // actually runs, and the prompt is there for the
+                        // browsers that refuse both.
+#if HAS_ADMIN_TERMINAL
+                        // The terminal polls only while it is open, and only
+                        // repaints when the session's revision moves -- the same
+                        // shape /chat-data uses, for the same reason: this runs
+                        // against a radio, not a server.
+                        "var adminNode='',adminTimer=null,adminRev=-1;"
+                        "function adminOpen(id){"
+                            "adminNode=id;adminRev=-1;"
+                            "document.getElementById('admin-title').textContent='Remote Admin '+id;"
+                            "document.getElementById('admin-log').textContent='';"
+                            "document.getElementById('adminModal').classList.add('open');"
+                            "document.getElementById('admin-line').focus();"
+                            "adminPost('');"
+                            "if(!adminTimer)adminTimer=setInterval(adminPoll,1200);"
+                        "}"
+                        "function adminClose(){"
+                            "document.getElementById('adminModal').classList.remove('open');"
+                            "if(adminTimer){clearInterval(adminTimer);adminTimer=null;}"
+                        "}"
+                        "function adminRender(d){"
+                            "if(d.rev===adminRev)return;adminRev=d.rev;"
+                            "var box=document.getElementById('admin-log');"
+                            "var cls=['#8fb8ff','#a7c7ff','#8ef2b8','#ff9f9f','#e8e8e8'];"
+                            "box.innerHTML='';"
+                            "d.lines.forEach(function(l){"
+                                "var s=document.createElement('div');"
+                                "s.style.color=cls[l.k]||cls[4];s.textContent=l.t;box.appendChild(s);"
+                            "});"
+                            "box.scrollTop=box.scrollHeight;"
+                            "var t=document.getElementById('admin-line');"
+                            "t.placeholder=d.confirm?'type confirm':(d.busy?'waiting...':'help');"
+                        "}"
+                        "function adminPoll(){"
+                            "fetch('/admin-data').then(function(r){return r.json();})"
+                                ".then(adminRender).catch(function(){});"
+                        "}"
+                        "function adminPost(line){"
+                            "fetch('/admin-send',{method:'POST',"
+                                "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                                "body:'node='+encodeURIComponent(adminNode)+'&line='+encodeURIComponent(line)})"
+                                ".then(function(r){return r.ok?r.json():null;})"
+                                ".then(function(d){if(d)adminRender(d);}).catch(function(){});"
+                        "}"
+                        "function adminSend(){"
+                            "var t=document.getElementById('admin-line');"
+                            "var v=t.value;t.value='';adminPost(v);"
+                        "}"
+#endif
+                        "function copyPubKey(el){"
+                            "var k=el.getAttribute('data-key');"
+                            "var done=function(){"
+                                "var t=el.textContent;el.classList.add('copied');el.textContent='KEY COPIED';"
+                                "setTimeout(function(){el.textContent=t;el.classList.remove('copied');},1200);"
+                            "};"
+                            "if(navigator.clipboard&&window.isSecureContext){"
+                                "navigator.clipboard.writeText(k).then(done).catch(function(){fallbackCopy(k,done);});"
+                            "}else{fallbackCopy(k,done);}"
+                        "}"
+                        "function fallbackCopy(text,done){"
+                            "var ta=document.createElement('textarea');"
+                            "ta.value=text;ta.setAttribute('readonly','');"
+                            "ta.style.position='fixed';ta.style.top='-1000px';"
+                            "document.body.appendChild(ta);ta.select();"
+                            "var okc=false;try{okc=document.execCommand('copy');}catch(e){okc=false;}"
+                            "document.body.removeChild(ta);"
+                            "if(okc){done();}else{window.prompt('Public key (copy with Ctrl/Cmd+C):',text);}"
+                        "}"
                         "function switchTab(tab){"
                             "var isCfg=(tab==='config');"
                             "var isWifi=(tab==='wifi');"
@@ -7994,6 +8170,115 @@ static void handlePostSnfRequest() {
     redirectHomeWithFlash("Replay requested from the Store & Forward router.");
 }
 
+#if HAS_ADMIN_TERMINAL
+// ── Remote admin ──────────────────────────────────────────────
+// The browser shares the device's one session rather than running a rival with
+// its own key: opening the terminal here on a node the device already has open
+// continues the same conversation.
+
+static void handleGetAdminData() {
+    if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
+
+    // Shaped like /chat-data: the client sends the revision it last rendered and
+    // gets nothing back when there is nothing new, so an open terminal is cheap
+    // to poll.
+    String out = "{\"open\":";
+    out += webCfgAdminSessionOpen() ? "true" : "false";
+    out += ",\"node\":\"";
+    char idbuf[16];
+    snprintf(idbuf, sizeof(idbuf), "!%08lx", (unsigned long)webCfgAdminNodeId());
+    out += idbuf;
+    out += "\",\"rev\":";
+    out += String((unsigned long)webCfgAdminRevision());
+    out += ",\"busy\":";
+    out += webCfgAdminBusy() ? "true" : "false";
+    out += ",\"confirm\":";
+    out += webCfgAdminAwaitingConfirm() ? "true" : "false";
+    out += ",\"lines\":[";
+    const int n = webCfgAdminLineCount();
+    for (int i = 0; i < n; i++) {
+        uint8_t kind = 0;
+        const char *text = webCfgAdminLine(i, kind);
+        if (!text) continue;
+        if (i) out += ",";
+        out += "{\"k\":";
+        out += String((int)kind);
+        out += ",\"t\":\"";
+        for (const char *c = text; *c; c++) {
+            if (*c == '"' || *c == '\\') { out += '\\'; out += *c; }
+            else if ((uint8_t)*c < 0x20)   { out += ' '; }
+            else                           { out += *c; }
+        }
+        out += "\"}";
+    }
+    out += "]}";
+    server.send(200, "application/json", out);
+}
+
+static void handlePostAdminSend() {
+    if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
+    const String line = server.arg("line");
+    const String node = server.arg("node");
+    if (node.length()) {
+        const uint32_t id = (uint32_t)strtoul(
+            node.startsWith("!") ? node.c_str() + 1 : node.c_str(), nullptr, 16);
+        // Opening is gated on the peer being CONFIRMED, in one place shared with
+        // the device, so a hand-made POST cannot reach a node the UI would not
+        // have offered.
+        if (id && !webCfgAdminOpen(id)) {
+            server.send(403, "text/plain", "not an administerable peer");
+            return;
+        }
+    }
+    webCfgAdminSubmit(line.c_str());
+    handleGetAdminData();
+}
+
+static void handlePostAdminPeers() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    const String action = server.arg("action");
+    const String node = server.arg("node");
+    const uint32_t id = (uint32_t)strtoul(
+        node.startsWith("!") ? node.c_str() + 1 : node.c_str(), nullptr, 16);
+    if (!id) { redirectHomeWithFlash("Admin peers: bad node id."); return; }
+
+    char flash[96];
+    if (action == "add") {
+        snprintf(flash, sizeof(flash), AdminPeerList.add(id)
+                 ? "Admin peer !%08lx added - verify it next."
+                 : "Admin peer !%08lx: already listed, or the list is full.",
+                 (unsigned long)id);
+    } else if (action == "remove") {
+        snprintf(flash, sizeof(flash), AdminPeerList.remove(id)
+                 ? "Admin peer !%08lx removed." : "Admin peer !%08lx was not listed.",
+                 (unsigned long)id);
+    } else {
+        snprintf(flash, sizeof(flash), "Admin peers: unknown action.");
+    }
+    redirectHomeWithFlash(flash);
+}
+
+static void handlePostAdminPeerVerify() {
+    if (!isLoggedIn()) { redirect("/login"); return; }
+    const String node = server.arg("node");
+    const uint32_t id = (uint32_t)strtoul(
+        node.startsWith("!") ? node.c_str() + 1 : node.c_str(), nullptr, 16);
+    char flash[96];
+    if (!id || !AdminPeerList.find(id)) {
+        snprintf(flash, sizeof(flash), "Admin peers: !%08lx is not listed.",
+                 (unsigned long)id);
+    } else if (webCfgAdminVerify(id)) {
+        snprintf(flash, sizeof(flash),
+                 "Probing !%08lx - the result lands in the terminal.",
+                 (unsigned long)id);
+    } else {
+        snprintf(flash, sizeof(flash), "Could not probe !%08lx (no public key?).",
+                 (unsigned long)id);
+    }
+    redirectHomeWithFlash(flash);
+}
+#endif  // HAS_ADMIN_TERMINAL
+
 #if HAS_SD_MALWARE_SCAN
 // ── SD card malware scan ──────────────────────────────────────
 
@@ -8682,6 +8967,14 @@ static void registerCommonRoutes() {
     onRoute("/wifi-forget",       HTTP_POST, handlePostWifiForget);
     onRoute("/wifi-use",          HTTP_POST, handlePostWifiUse);
     onRoute("/snf-request",       HTTP_POST, handlePostSnfRequest);
+#if HAS_ADMIN_TERMINAL
+    // Registered here only: the AP-lite page gets none of these, same heap rule
+    // as chat and the live feed.
+    onRoute("/admin-data",        HTTP_GET,  handleGetAdminData);
+    onRoute("/admin-send",        HTTP_POST, handlePostAdminSend);
+    onRoute("/admin-peers",       HTTP_POST, handlePostAdminPeers);
+    onRoute("/admin-peer-verify", HTTP_POST, handlePostAdminPeerVerify);
+#endif
 #if HAS_SD_MALWARE_SCAN
     onRoute("/sd-scan",           HTTP_POST, handlePostSdScan);
     onRoute("/sd-repair",         HTTP_POST, handlePostSdRepair);

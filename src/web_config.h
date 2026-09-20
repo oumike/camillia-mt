@@ -82,6 +82,25 @@ bool webCfgTakeSnfRequest();
 void webCfgSetSnfResult(const char *msg);
 const char *webCfgSnfResult();   // "" until a request has been attempted
 
+#if HAS_ADMIN_TERMINAL
+// The remote admin session lives in main_lvgl.cpp beside the transport it
+// drives; these are how the web terminal reaches it. There is one session, not
+// one per UI -- the browser continues whatever the device already had open
+// rather than racing it for the remote's session key.
+bool        webCfgAdminSessionOpen();
+uint32_t    webCfgAdminNodeId();
+uint32_t    webCfgAdminRevision();
+bool        webCfgAdminBusy();
+bool        webCfgAdminAwaitingConfirm();
+int         webCfgAdminLineCount();
+const char *webCfgAdminLine(int i, uint8_t &kind);
+// Opens on a node, or returns false when it is not a confirmed peer. Safe to
+// call on the node already open: it is then a no-op rather than a reset.
+bool        webCfgAdminOpen(uint32_t nodeId);
+void        webCfgAdminSubmit(const char *line);
+bool        webCfgAdminVerify(uint32_t nodeId);
+#endif
+
 // Pending "set the clock to this" request from the config form, drained on the
 // main loop where the system clock is owned. Fields are local wall-clock time in
 // 24-hour form. Returns false when nothing is queued.

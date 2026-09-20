@@ -200,17 +200,6 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #  define HAS_WAKE_BUTTON 0
 #endif
 
-// Whether that button can carry the two-second hold that unlocks. The Mesh Deck
-// is the one board where it cannot: its screen key is the Power button, and ~2 s
-// on that pin cuts power below firmware. It gets a tap-only cycle instead --
-// dark panel, lock screen, UI, dark -- on both the Power button and the BOOT
-// button that mirrors it. See BTN_POWER_BIT in hw_mesh_deck.h.
-#if HAS_WAKE_BUTTON && !defined(DEVICE_MESH_DECK)
-#  define HAS_WAKE_BUTTON_HOLD 1
-#else
-#  define HAS_WAKE_BUTTON_HOLD 0
-#endif
-
 // ── Bottom icon nav bar ──────────────────────────────────────────────────────
 // Wider than UI_TOUCH_ONLY_PROFILE: a bar of tap targets is worth having on
 // anything you can tap, so the test is the panel, not the absence of a

@@ -363,11 +363,14 @@ channel raises nothing.
 
 ### Attaky Mesh Deck (mesh-deck)
 
-- **The Power button is the screen key.** A tap cycles dark panel → lock screen
-  → UI → dark; the BOOT button does the same. Tap only — roughly two seconds on
-  the Power button cuts power in hardware, so this board has no hold-to-unlock.
-  See [Lock screen](#lock-screen). The top-right shoulder button (BTN_R2), which
-  used to sleep and wake the panel, is now unbound
+- **The R button is the screen key** — the rightmost of the shoulder pair along
+  the top edge. It takes the same tap/hold rule as every other board: tap to put
+  the device away or raise the lock screen, hold two seconds to unlock. The BOOT
+  button does the same job on a pin that can also wake the CPU out of a
+  light-sleep nap. See [Lock screen](#lock-screen)
+- **The hardware Power button is deliberately left alone.** A long press there
+  cuts power below firmware at roughly the same two seconds that unlocks, so a
+  hold on that pin could only ever end as a shutdown
 - Alt+H returns directly to chat from Config, filters, nested pickers, and the
   other device surfaces. It closes things; it does not open the channel
   selector — H alone does that, and leaving the channel list open on this board
@@ -1118,14 +1121,6 @@ Other touch panels and keyboards are unchanged. Where a board wakes from a tap o
 the screen or from a key — the T-Deck's trackball click — that input still goes
 straight through to the UI in one press.
 
-**The Mesh Deck is the exception, and has no hold gesture at all.** Its screen
-key is the **Power button**, where roughly two seconds cuts power in hardware,
-below firmware — the same two seconds that unlocks everywhere else. So a tap
-there cycles through the states instead: dark panel → lock screen → UI → dark.
-Its BOOT button is the same key on a different pin and behaves identically. The
-trade is that this is the one board where a stray press in a bag can reach the
-UI, in two taps.
-
 - **Lock Screen** enables or disables the intermediate screen. Disabled keeps
   the previous direct-to-sleep behavior.
 - **Lock Screen Off** starts at **30 sec**, then 1 and 2 min, then 5 to 60
@@ -1212,6 +1207,77 @@ in the check is M9-specific.
 If you would rather use a tool built for the job,
 [wadamesh](https://github.com/ALLFATHER-BV/wadamesh) ships **SD Scan**, which is
 where this approach came from.
+
+### Remote administration
+
+**Camillia can administer another Meshtastic node** — read its configuration,
+change settings, reboot it — from a terminal opened on that node. It is a client
+only: it administers others and does not serve the other half, so nothing here
+lets anyone administer *your* device.
+
+#### Before anything works
+
+The remote must carry **this node's public key** in its `security.admin_key`.
+Web config shows that key as a chip at the top of the page — click it to copy.
+Without that, every command comes back `not authorized`, which is the system
+working correctly.
+
+#### The gate
+
+A node has to be an **admin peer** before a terminal can be opened on it, and
+peers are added in **web config → Utilities → Remote Admin**, never from a node's
+menu. That is deliberate: a node menu offering "claim admin over this stranger"
+would invite unauthorized admin packets across the mesh and the broker.
+
+| State | Meaning | Terminal |
+| --- | --- | --- |
+| Not listed | — | hidden |
+| `pending` | added, never proved | hidden |
+| `confirmed` | a probe came back with a session key | **available** |
+| `denied` | the remote refused us | hidden |
+
+**Verify** runs the probe. It is a real authorization test rather than a guess:
+an unauthorized sender gets a refusal where an authorized one gets an answer. A
+refusal on any later command demotes the peer and closes the terminal; a
+*timeout* never does, because out of range and "not authorized" are different
+things. Confirmed peers are re-proved after a reboot — the remote may have been
+reconfigured while this device was off.
+
+#### The terminal
+
+On the device it is the **(A)dmin** row in a node's actions menu, which is only
+built for a confirmed peer. In web config it is the **Terminal** button beside
+the peer. Both drive the same session, so opening the browser on a node the
+device already has open continues that conversation rather than starting a rival
+one.
+
+Type `help` for the command table. Reads (`info`, `owner`, `config lora`,
+`channel 0`) are safe; writes announce what they are doing:
+
+```
+!a1b2c3d4 [rf] > set lora hop_limit 5
+· fetching lora config
+· splicing hop_limit = 5
+· sent id 3f2a91c4 via rf
+✓ ack (rf)
+```
+
+**That read is not decoration.** Writing one setting replaces the remote's whole
+configuration block, so every write reads the block first and changes one field
+inside the bytes that came back — anything the remote carries that this firmware
+has never heard of survives untouched. A read that fails never becomes a write.
+
+**Destructive commands** — `reboot`, `shutdown`, `reset` — need the word
+`confirm` on the next line *and* a fresh session key, and are never retried
+automatically.
+
+#### Transports
+
+`transport rf`, `transport mqtt`, or `auto` (the default), which prefers the
+radio when the node was heard on it recently and falls back to the broker. MQTT
+rides Meshtastic's `PKI` pseudo-channel and needs the remote to have downlink
+enabled on some channel. Replies are accepted from either transport regardless
+of how the request went out.
 
 ### Notification sound
 

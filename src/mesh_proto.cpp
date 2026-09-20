@@ -818,6 +818,43 @@ size_t encodeTextMessage(const char *text, uint8_t *buf, size_t bufLen,
     return n;
 }
 
+size_t encodeAdminData(const uint8_t *admin, size_t adminLen,
+                       uint32_t fromNode, uint32_t toNode, bool wantResponse,
+                       uint8_t *buf, size_t bufLen) {
+    if (!admin || !adminLen || !buf) return 0;
+    size_t n = 0;
+
+    // field 1: portnum
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, ADMIN_APP);
+
+    // field 2: payload
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, adminLen);
+    if (n + adminLen > bufLen) return 0;
+    memcpy(buf + n, admin, adminLen);
+    n += adminLen;
+
+    // field 3: want_response. Reads set it; a write is answered by a routing ACK
+    // rather than an admin reply, so asking for one there would be a request the
+    // far end is never going to satisfy.
+    if (wantResponse) {
+        if (n + 2 > bufLen) return 0;
+        n += pbWriteVarint(buf + n, (3 << 3) | 0);
+        n += pbWriteVarint(buf + n, 1);
+    }
+
+    if (n + 10 > bufLen) return 0;
+    // field 4: dest, fixed32
+    buf[n++] = (4 << 3) | 5;
+    memcpy(buf + n, &toNode, 4); n += 4;
+    // field 5: source, fixed32
+    buf[n++] = (5 << 3) | 5;
+    memcpy(buf + n, &fromNode, 4); n += 4;
+
+    return n;
+}
+
 size_t encodeTextMessageUnicast(const char *text,
                                 uint32_t fromNode, uint32_t toNode,
                                 uint8_t *buf, size_t bufLen,
@@ -1614,6 +1651,7 @@ const char *portnumName(uint32_t p) {
         case POSITION_APP:      return "POSITION";
         case NODEINFO_APP:      return "NODEINFO";
         case ROUTING_APP:       return "ROUTING";
+        case ADMIN_APP:         return "ADMIN";
         case TELEMETRY_APP:     return "TELEMETRY";
         case TRACEROUTE_APP:    return "TRACEROUTE";
         case NEIGHBORINFO_APP:  return "NEIGHBORINFO";

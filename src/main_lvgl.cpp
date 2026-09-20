@@ -9,6 +9,8 @@
 #include "base64_util.h"
 #include "channel_mgr.h"
 #include "config_io.h"
+#include "admin_client.h"
+#include "admin_peers.h"
 #include "hal/display.h"
 #include "hal/xl9555.h"
 #if defined(DEVICE_WIO_TRACKER_L2)
@@ -474,6 +476,19 @@ static lv_obj_t *s_cfgNodeNameStatus = nullptr;
 static int s_cfgNodeNameFocus = 0;
 // Yes/No confirmation dialog layered over the CFG modal for destructive actions.
 static lv_obj_t *s_cfgConfirmBackdrop = nullptr;
+#if HAS_ADMIN_TERMINAL
+// The remote admin terminal's handles. Up here with the other modal pointers
+// rather than beside the code that builds them: the keyboard pump asks whether
+// this modal is up, and it sits well above that.
+static lv_obj_t *s_adminBackdrop = nullptr;
+static lv_obj_t *s_adminModal    = nullptr;
+static lv_obj_t *s_adminScroll   = nullptr;
+static lv_obj_t *s_adminInput    = nullptr;
+static lv_obj_t *s_adminTitle    = nullptr;
+#if UI_TOUCH_ONLY_PROFILE
+static lv_obj_t *s_adminKeyboard = nullptr;
+#endif
+#endif
 static lv_obj_t *s_cfgConfirmModal = nullptr;
 // The message box inside it. Held because the dialog's text is scrollable now --
 // the SD scan names the files it is about to delete and can run past the bottom
@@ -1109,7 +1124,20 @@ static constexpr int kNodesActionDelete = kNodesActionBaseCount;
 // Delete goes last on every board, after whichever of Locate and LOS this one
 // has. Appending rather than inserting is what keeps kMsgActionNodeMap — which
 // indexes this list by position — pointing at the same actions it always did.
+#if HAS_ADMIN_TERMINAL
+// Admin appends after Delete for that same reason. Unlike Locate, LOS and
+// Delete, which grey out, this row is not built at all unless the peer is
+// confirmed: a disabled "Admin" on a stranger's node is an invitation to try,
+// and trying means unauthorized admin packets across the mesh and the broker.
+static constexpr int kNodesActionAdmin = kNodesActionDelete + 1;
+static constexpr int kNodesActionCount = kNodesActionAdmin + 1;
+// Set when the menu opens, from AdminPeerList. The row exists only while true,
+// which is why activeActionCount() rather than kNodesActionCount is what every
+// navigation and shortcut path counts against.
+static bool s_nodesActionAdminEnabled = false;
+#else
 static constexpr int kNodesActionCount = kNodesActionDelete + 1;
+#endif
 static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
@@ -1131,6 +1159,9 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // destructive action, which is why it opens a confirmation rather than
     // doing anything.
     'E',
+#if HAS_ADMIN_TERMINAL
+    'A',
+#endif
 };
 #if HAS_NODE_LOCATE
 // Named because three places have to agree on which row Locate is: the disabled
@@ -1219,7 +1250,14 @@ static bool s_nodesActionMsgMode = false;
 static uint32_t s_nodesActionPacketId = 0;
 
 static inline int activeActionCount() {
-    return s_nodesActionMsgMode ? kMsgActionCount : kNodesActionCount;
+    if (s_nodesActionMsgMode) return kMsgActionCount;
+#if HAS_ADMIN_TERMINAL
+    // Admin is last, so "not built" is exactly one fewer row. Navigation, the
+    // shortcut table and the click handler all count against this and need no
+    // special case of their own.
+    if (!s_nodesActionAdminEnabled) return kNodesActionCount - 1;
+#endif
+    return kNodesActionCount;
 }
 static inline const char *activeActionShortcuts() {
     return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
@@ -1956,6 +1994,14 @@ static void refreshChatAlertIndicator();
 static void layoutHeaderInlineItems();
 static void refreshChannelGlow(bool force = false);
 static void pumpKeyboardInput();
+#if HAS_ADMIN_TERMINAL
+// The remote admin terminal. Defined with the transport it drives, far below;
+// the node actions modal opens it and sits well above that.
+static void openAdminTerminalModal(uint32_t nodeId);
+static void closeAdminTerminalModal();
+static bool adminTerminalHandleKey(char k);
+static void refreshAdminTranscript();
+#endif
 static void openComposePrompt(uint32_t replyPacketId = 0,
                               const char *replyText = nullptr,
                               bool allowSelectedReplyFallback = true);
@@ -2483,12 +2529,8 @@ static bool tryWakeScreenFromInput(uint32_t nowMs);
 // button off an expander from a function above that.
 static bool serviceWakeButtonDebounce(WakeButtonPoll &st, bool pressed,
                                       uint32_t nowMs);
-#if HAS_WAKE_BUTTON_HOLD
 static bool serviceWakeButton(WakeButtonPoll &st, bool pressed, uint32_t nowMs,
                               const char *reason);
-#else
-static bool wakeButtonToggleTap(uint32_t nowMs, const char *reason);
-#endif
 #endif
 #if defined(DEVICE_WIO_TRACKER_L2)
 static bool serviceWioTrackerL2WakeButton(uint32_t nowMs);
@@ -8320,17 +8362,15 @@ static void meshDeckPollButtons() {
         return;
     }
 
-    // POWER_BTN (P07) is the screen key on this board: a tap cycles dark panel ->
-    // lock screen -> UI -> dark. Tap only, because ~2 s on this pin cuts power
-    // in hardware and the hold every other board unlocks with would land on top
-    // of that -- see BTN_POWER_BIT in hw_mesh_deck.h. It acts on the press
-    // rather than the release for the same reason: there is no hold to wait for,
-    // and a release is not something a power-cut hold ever produces.
+    // BTN_R2 (P06) is the screen key: the R button, rightmost of the shoulder
+    // pair along the top edge. It takes the same tap/hold rule as every other
+    // board's wake button -- which needs the button's *level* every poll, not
+    // just its press edge, because the hold has to be timed. Serviced ahead of
+    // the edge work below for that reason: a poll with no fresh edges in it is
+    // still a poll that has to advance a hold in progress.
     //
-    // Debounced through the shared wake-button state even though the hold half
-    // is unused, because the other half of that state is what keeps the CPU out
-    // of a light-sleep nap while the button is down. Without it the poll that
-    // confirms the press would be a full nap later than the one that saw it.
+    // The hardware Power button (P07) is left alone; see hw_mesh_deck.h for why
+    // a hold there is unusable.
     //
     // Handled here rather than folded into the key path below, and returning
     // before it: every key there wakes the panel as a side effect, so a press
@@ -8342,18 +8382,15 @@ static void meshDeckPollButtons() {
     // why the BOOT button keeps this job as well (see pollUserButton): it is a
     // real GPIO and the board's only input that works while the CPU is down.
     static WakeButtonPoll s_mdScreenBtn;
-    const bool screenBtnDown = (p0 & (uint8_t)(1u << BTN_POWER_BIT)) == 0;   // active low
-    bool screenBtnActed = false;
-    if (serviceWakeButtonDebounce(s_mdScreenBtn, screenBtnDown, now)
-        && s_mdScreenBtn.stablePressed) {
-        screenBtnActed = wakeButtonToggleTap(now, "Power button");
-    }
+    const bool screenBtnDown = (p0 & (uint8_t)(1u << BTN_R2_BIT)) == 0;   // active low
+    const bool screenBtnActed = serviceWakeButton(s_mdScreenBtn, screenBtnDown, now,
+                                                  "BTN_R2");
 
-    // Fresh press edges across the whole port, active low. The Power button is
-    // masked out: it has had its say above, and leaving it in would have the
-    // edge path act on the same press a second time.
+    // Fresh press edges across the whole port, active low. BTN_R2 is masked out:
+    // it has had its say above, and leaving it in would have the edge path act
+    // on the same press a second time.
     const uint8_t pressed =
-        (uint8_t)(~p0 & (uint8_t)(s_mdBtnPrev) & (uint8_t)~(1u << BTN_POWER_BIT));
+        (uint8_t)(~p0 & (uint8_t)(s_mdBtnPrev) & (uint8_t)~(1u << BTN_R2_BIT));
     s_mdBtnPrev = p0;
     if (screenBtnActed) return;
     if (!pressed) return;
@@ -8754,11 +8791,7 @@ static bool tryWakeScreenFromInput(uint32_t nowMs) {
 // This is the rule the Wio Tracker L2 already had; the only board-specific part
 // left is how the press is read off the hardware.
 //
-// The Mesh Deck is the exception, and wakeButtonToggleTap() below is what it
-// gets instead: a hardware power-cut sits on its screen button's hold.
-//
 // Returns true when the press was consumed.
-#if HAS_WAKE_BUTTON_HOLD
 static bool wakeButtonTap(uint32_t nowMs, const char *reason) {
 #if FEATURE_LOCK_SCREEN
     if (s_lockScreenActive) {
@@ -8814,7 +8847,6 @@ static bool wakeButtonHold(uint32_t nowMs, const char *reason) {
     s_lastActivityMs = nowMs;
     return true;
 }
-#endif  // HAS_WAKE_BUTTON_HOLD
 
 // The debounce on its own. Updates the stable level and returns true when it
 // changed on this call. Split out because on the keyboard boards the BOOT
@@ -8856,50 +8888,6 @@ static void wakeButtonForceRelease(WakeButtonPoll &st) {
 }
 #endif
 
-// The whole gesture in one tap, for a button that cannot carry a hold. Cycles
-// dark panel -> lock screen -> UI -> dark, so every state is still reachable
-// from a screen that gives the user no way to read which one they are in.
-//
-// The Mesh Deck's Power button is the only caller and the reason this exists:
-// ~2 s on that pin cuts power in hardware, which is the same ~2 s that unlocks
-// everywhere else. The cost is the pocket guard -- two taps in a bag reach the
-// UI here, where on every other board no number of taps can. That is the trade
-// a hardware power-cut forces, not a preference.
-//
-// Returns true when the press was consumed.
-#if !HAS_WAKE_BUTTON_HOLD
-static bool wakeButtonToggleTap(uint32_t nowMs, const char *reason) {
-#if FEATURE_LOCK_SCREEN
-    if (s_lockScreenActive) {
-        // Refuses while the entry guard is still running, which is what stops
-        // the tap that raised this screen from dismissing it again.
-        (void)tryExitLockScreenFromInput(nowMs, true);
-        return true;
-    }
-    if (s_screenAsleep) {
-        if (s_cfg.lockScreenEnabled) {
-            if ((int32_t)(nowMs - s_screenWakeBlockedUntilMs) < 0) return true;
-            wakeToLockScreen(reason);
-            return true;
-        }
-        // No intermediate screen to stop at, so the cycle is the two states the
-        // board has. Without this the button would have a dead state and the
-        // panel no way back at all -- this board wakes from neither its
-        // keyboard nor its touch panel.
-        (void)tryWakeScreenFromInput(nowMs);
-        return true;
-    }
-#else
-    if (s_screenAsleep) {
-        (void)tryWakeScreenFromInput(nowMs);
-        return true;
-    }
-#endif
-    s_lastActivityMs = nowMs;
-    requestScreenOff(reason);
-    return true;
-}
-#else
 // Debounces one wake button and tells its two gestures apart. The caller reads
 // the raw level however its hardware requires -- a GPIO, an I2C expander port --
 // and hands it in; everything downstream of that is shared.
@@ -8932,7 +8920,7 @@ static bool serviceWakeButton(WakeButtonPoll &st, bool pressed, uint32_t nowMs,
     st.claimed = wakeButtonHold(nowMs, reason);
     return acted || st.claimed;
 }
-#endif  // !HAS_WAKE_BUTTON_HOLD
+
 #endif  // HAS_WAKE_BUTTON
 
 static bool serviceTdeckTrackballSleepHold(uint32_t nowMs) {
@@ -9061,20 +9049,7 @@ static bool pollUserButton(uint32_t nowMs) {
             }
             return screenBtn.stablePressed;
         }
-#if !HAS_WAKE_BUTTON_HOLD
-        // This board has no hold gesture anywhere -- see BTN_POWER_BIT in
-        // hw_mesh_deck.h. BOOT is the same screen key as the Power button, on a
-        // pin that can also wake the CPU out of a light-sleep nap, so it has to
-        // mean the same thing: one tap, one step around the cycle. Two buttons
-        // that look identical and behave differently would be worse than the
-        // missing guard.
-        if (serviceWakeButtonDebounce(screenBtn, pressed, nowMs)
-            && screenBtn.stablePressed) {
-            return wakeButtonToggleTap(nowMs, "BOOT button");
-        }
-#else
         if (serviceWakeButton(screenBtn, pressed, nowMs, "BOOT button")) return true;
-#endif
         // Held, or resting: nothing else on this board may act on it.
         if (screenBtn.stablePressed) return true;
     }
@@ -25767,6 +25742,15 @@ static void executeNodesActionSelection() {
     }
 #endif
 
+#if HAS_ADMIN_TERMINAL
+    if (s_nodesActionAdminEnabled && s_nodesActionSelection == kNodesActionAdmin) {
+        const uint32_t peer = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        openAdminTerminalModal(peer);
+        return;
+    }
+#endif
+
     if (s_nodesActionSelection == kNodesActionDelete) {
         // Greyed rows keep the highlight but do nothing when activated, same as
         // Locate and LOS below.
@@ -26032,6 +26016,12 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         s_nodesActionLosEnabled = peerHasPos && nodeLosSelfPosition(dummyLat, dummyLon);
     }
 #endif
+#if HAS_ADMIN_TERMINAL
+    // Node mode only. In message mode this index space belongs to the reaction
+    // rows (kMsgActionNodeMap), and a terminal is not something a tapback menu
+    // should be able to reach.
+    s_nodesActionAdminEnabled = !msgMode && AdminPeerList.mayAdminister(nodeId);
+#endif
     #if UI_TOUCH_ONLY_PROFILE
         const char *kActionLabels[kNodesActionCount] = {
         "Traceroute",
@@ -26047,6 +26037,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "LOS",
     #endif
         "Delete",
+    #if HAS_ADMIN_TERMINAL
+        "Admin",
+    #endif
         };
     #else
         const char *kActionLabels[kNodesActionCount] = {
@@ -26063,6 +26056,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "LO(S)",
 #endif
         "Del(e)te",
+#if HAS_ADMIN_TERMINAL
+        "(A)dmin",
+#endif
     };
     #endif
 #if defined(DEVICE_TDECK_PRO)
@@ -38365,7 +38361,11 @@ static void pumpKeyboardInput() {
         // dropped by the printable-character branch, so those two letters
         // silently cannot be typed — which is exactly what happened to the WiFi
         // password and channel name/PSK fields.
-        bool typingContext = (s_composeModal && !s_emojiPickerModal)
+        bool typingContext =
+#if HAS_ADMIN_TERMINAL
+            (s_adminModal != nullptr) ||
+#endif
+            (s_composeModal && !s_emojiPickerModal)
                              || (s_dmNodePickerModal && s_dmNodeFilterOpen)
                              || s_cfgWifiPassModal
                              || s_cfgNodeNameModal
@@ -39510,6 +39510,16 @@ static void pumpKeyboardInput() {
 
         // The hidden stats screen is modal: any key dismisses it (after a brief
         // guard so the key-repeat from the 5th (I) doesn't close it instantly).
+#if HAS_ADMIN_TERMINAL
+        // First, and it takes everything. A terminal that let stray letters
+        // through to the chat screen underneath would be unusable, and the
+        // command line is where every key means something already.
+        if (s_adminModal) {
+            adminTerminalHandleKey(k);
+            continue;
+        }
+#endif
+
         if (s_sysStatsModal) {
             if ((uint32_t)(millis() - s_sysStatsOpenedMs) >= 300UL) {
                 closeSysStatsModal();
@@ -43996,6 +44006,392 @@ static void appendLiveRxEncrypted(const MeshPacket &pkt) {
     liveFeedAddPrefixed(timePrefix, line, TFT_DARKGREY, 0, false);
 }
 
+#if HAS_ADMIN_TERMINAL
+// ── Remote admin transport ───────────────────────────────────────────────────
+// One session at a time, shared by the device terminal and the web terminal:
+// opening the browser onto a node the device already has open continues the same
+// conversation rather than starting a rival one with its own session key.
+static AdminClient::Session s_adminSession;
+
+// PKI only, on both transports. The target accepts a remote admin message when
+// it is pki_encrypted and our public key is in its security.admin_key -- a
+// channel-key path exists upstream but needs a deprecated setting that ships
+// off, and would put admin commands under a key every channel member holds.
+static uint32_t adminSendPacket(uint32_t nodeId, AdminClient::Transport via,
+                                const uint8_t *payload, size_t len, void *) {
+    NodeEntry *node = Nodes.find(nodeId);
+    if (!node || !node->hasPubKey) {
+        Serial.printf("[admin] !%08lx has no public key - cannot send\n",
+                      (unsigned long)nodeId);
+        return 0;
+    }
+
+    // A read asks for a reply; a write is answered by a routing ACK only.
+    const bool wantResponse = AdminProto::isReadRequest(payload, len);
+
+    uint8_t proto[256];
+    const size_t protoLen = encodeAdminData(payload, len, s_myNodeId, nodeId,
+                                            wantResponse, proto, sizeof(proto));
+    if (!protoLen) return 0;
+
+    const uint32_t packetId = nextMeshPacketId();
+    MeshHdr hdr = {};
+    hdr.to    = nodeId;
+    hdr.from  = s_myNodeId;
+    hdr.id    = packetId;
+    hdr.channel = 0;   // PKI marker: channel 0 is not a channel-key hash
+    hdr.flags = meshOriginHopFlagsForChannel(node->chanIdx, 1 << 3);   // want_ack
+    hdr.relay_node = (uint8_t)(s_myNodeId & 0xFF);
+
+    uint8_t cipher[288];
+    if (!encryptPki(packetId, s_myNodeId, node->pubKey, proto, protoLen, cipher)) {
+        Serial.println("[admin] PKI encrypt failed");
+        return 0;
+    }
+    const size_t payloadLen = protoLen + 12;   // ciphertext + tag(8) + extraNonce(4)
+
+    if (via == AdminClient::TRANSPORT_MQTT) {
+        // The broker path rides the PKI pseudo-channel. mqttBridgePublishRaw
+        // already takes an arbitrary channel name and builds
+        // <root>/2/e/PKI/<gateway id>, so the send half needs nothing new.
+        if (!mqttBridgeConnected()) return 0;
+        mqttBridgePublishRaw(hdr, cipher, payloadLen, "PKI");
+        Serial.printf("[admin] sent id %08lx to !%08lx via mqtt\n",
+                      (unsigned long)packetId, (unsigned long)nodeId);
+        return packetId;
+    }
+
+    uint8_t frame[sizeof(MeshHdr) + 288];
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, payloadLen);
+    if (!Radio.transmit(frame, sizeof(MeshHdr) + payloadLen)) {
+        Serial.println("[admin] radio TX failed");
+        return 0;
+    }
+    Serial.printf("[admin] sent id %08lx to !%08lx via rf\n",
+                  (unsigned long)packetId, (unsigned long)nodeId);
+    return packetId;
+}
+
+// "Heard on the radio recently" for the AUTO transport. Ten minutes is the same
+// order as the node list's own idea of recent, and the question being asked is
+// only "is RF plausible", not "is it guaranteed".
+static bool adminRfRecent(uint32_t nodeId, void *) {
+    const NodeEntry *n = Nodes.find(nodeId);
+    if (!n || !n->lastHeardMs) return false;
+    if (n->lastHeardViaMqtt) return false;
+    return (uint32_t)(millis() - n->lastHeardMs) < 600000UL;
+}
+
+static bool adminMqttUp(void *) { return mqttBridgeConnected(); }
+
+static uint32_t adminEpochNow(void *) {
+    // Same floor the rest of this file uses to mean "the clock has actually been
+    // set": pushing an unset clock to a remote is worse than refusing to.
+    const time_t now = time(nullptr);
+    return (now >= 1700000000) ? (uint32_t)now : 0;
+}
+
+static AdminClient::Hooks adminHooks() {
+    AdminClient::Hooks h{};
+    h.send = adminSendPacket;
+    h.rfRecent = adminRfRecent;
+    h.mqttUp = adminMqttUp;
+    h.epochNow = adminEpochNow;
+    h.ctx = nullptr;
+    return h;
+}
+
+// Opening and closing are the UI's business, but both UIs do it identically, so
+// the rule about the gate lives here rather than twice over.
+static bool adminOpenSession(uint32_t nodeId) {
+    if (!AdminPeerList.mayAdminister(nodeId)) {
+        Serial.printf("[admin] refusing !%08lx - not confirmed\n", (unsigned long)nodeId);
+        return false;
+    }
+    return s_adminSession.open(nodeId, adminHooks());
+}
+
+// A 33/37 NAK closes the session from inside; the peer list is demoted here,
+// because the session does not own it.
+static void adminNoteUnauthorized(uint32_t nodeId) {
+    AdminPeerList.deny(nodeId);
+}
+#endif  // HAS_ADMIN_TERMINAL
+
+#if HAS_ADMIN_TERMINAL
+// ── Terminal modal ───────────────────────────────────────────────────────────
+// Transcript above, one input line below. The transcript is the session's ring
+// buffer rendered; nothing is stored here that the session does not already own,
+// so closing the window costs the screen and not the conversation -- the remote
+// holds its session key for 300 s and reopening continues where this left off.
+// Command history, walked with up/down. Small: this is a terminal for a handful
+// of commands, not a shell.
+static constexpr int kAdminHistory = 8;
+static char s_adminHist[kAdminHistory][AdminClient::kLineLen] = {};
+static int  s_adminHistCount = 0;
+static int  s_adminHistPos = -1;    // -1 = editing a fresh line
+static uint32_t s_adminRenderedRev = 0;
+
+static lv_color_t adminLineColor(uint8_t kind) {
+#if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(kind);
+    return lv_color_make(0, 0, 0);   // one-bit panel: everything is ink
+#else
+    switch (kind) {
+        case AdminClient::LINE_ECHO: return lv_color_hex(0x8FB8FF);
+        case AdminClient::LINE_INFO: return lv_color_hex(0xA7C7FF);
+        case AdminClient::LINE_OK:   return lv_color_hex(0x8EF2B8);
+        case AdminClient::LINE_ERR:  return lv_color_hex(0xFF9F9F);
+        default:                     return lv_color_hex(0xFFFFFF);
+    }
+#endif
+}
+
+static void refreshAdminTranscript() {
+    if (!s_adminScroll || !lvObjValid(s_adminScroll)) return;
+    // Repainted whole rather than appended to: the session's buffer is a ring,
+    // so once it wraps there is no "new lines only" that is still correct.
+    // Forty labels is cheap next to getting the wrap wrong.
+    if (s_adminSession.revision() == s_adminRenderedRev) return;
+    s_adminRenderedRev = s_adminSession.revision();
+
+    lv_obj_clean(s_adminScroll);
+    for (int i = 0; i < s_adminSession.lineCount(); i++) {
+        const AdminClient::Line *ln = s_adminSession.line(i);
+        if (!ln) continue;
+        lv_obj_t *lbl = lv_label_create(s_adminScroll);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_color(lbl, adminLineColor(ln->kind), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(lbl, ln->text);
+    }
+    lv_obj_scroll_to_y(s_adminScroll, LV_COORD_MAX, LV_ANIM_OFF);
+
+    if (s_adminTitle && lvObjValid(s_adminTitle)) {
+        const AdminClient::Transport t = s_adminSession.transport();
+        lv_label_set_text_fmt(s_adminTitle, "!%08lx [%s]%s",
+                              (unsigned long)s_adminSession.nodeId(),
+                              t == AdminClient::TRANSPORT_RF ? "rf"
+                                : t == AdminClient::TRANSPORT_MQTT ? "mqtt" : "auto",
+                              s_adminSession.awaitingConfirm() ? "  CONFIRM?" : "");
+    }
+}
+
+static void closeAdminTerminalModal() {
+    if (lvObjValid(s_adminBackdrop)) {
+        lv_obj_del(s_adminBackdrop);
+    } else if (lvObjValid(s_adminModal)) {
+        lv_obj_del(s_adminModal);
+    }
+    s_adminBackdrop = nullptr;
+    s_adminModal = nullptr;
+    s_adminScroll = nullptr;
+    s_adminInput = nullptr;
+    s_adminTitle = nullptr;
+#if UI_TOUCH_ONLY_PROFILE
+    s_adminKeyboard = nullptr;
+#endif
+    s_adminHistPos = -1;
+    s_adminRenderedRev = 0;
+    // The session is deliberately left open. The remote's key is good for five
+    // minutes and reopening inside that window should not cost a round trip.
+    s_lastActivityMs = millis();
+}
+
+static void adminSubmitCurrentLine() {
+    if (!s_adminInput || !lvObjValid(s_adminInput)) return;
+    const char *text = lv_textarea_get_text(s_adminInput);
+    if (!text) return;
+
+    if (text[0]) {
+        // Newest first, de-duplicated against the immediately previous entry so
+        // repeating a command does not fill the history with it.
+        if (!s_adminHistCount || strcmp(s_adminHist[0], text) != 0) {
+            for (int i = kAdminHistory - 1; i > 0; i--) {
+                memcpy(s_adminHist[i], s_adminHist[i - 1], AdminClient::kLineLen);
+            }
+            snprintf(s_adminHist[0], AdminClient::kLineLen, "%s", text);
+            if (s_adminHistCount < kAdminHistory) s_adminHistCount++;
+        }
+    }
+    s_adminHistPos = -1;
+
+    s_adminSession.submit(text, millis());
+    lv_textarea_set_text(s_adminInput, "");
+    refreshAdminTranscript();
+
+    // `exit`, or an unauthorized NAK, closes the session from underneath us.
+    if (!s_adminSession.isOpen()) closeAdminTerminalModal();
+}
+
+static void adminRecallHistory(int delta) {
+    if (!s_adminInput || !lvObjValid(s_adminInput) || !s_adminHistCount) return;
+    int pos = s_adminHistPos + delta;
+    if (pos < -1) pos = -1;
+    if (pos >= s_adminHistCount) pos = s_adminHistCount - 1;
+    s_adminHistPos = pos;
+    lv_textarea_set_text(s_adminInput, pos < 0 ? "" : s_adminHist[pos]);
+}
+
+#if UI_TOUCH_ONLY_PROFILE
+static void onAdminKeyboardEvent(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY)  adminSubmitCurrentLine();
+    if (code == LV_EVENT_CANCEL) closeAdminTerminalModal();
+}
+#endif
+
+static void onAdminBackdropPressed(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) != s_adminBackdrop) return;
+    closeAdminTerminalModal();
+}
+
+static void openAdminTerminalModal(uint32_t nodeId) {
+    if (!s_rootScreen || s_adminModal) return;
+    // The gate, applied here as well as at the row: the row is what a user sees,
+    // this is what a stray call would have to get past.
+    if (!adminOpenSession(nodeId)) return;
+
+    const int w = lv_disp_get_hor_res(NULL);
+    const int h = lv_disp_get_ver_res(NULL);
+
+    s_adminBackdrop = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_adminBackdrop, w, h);
+    lv_obj_align(s_adminBackdrop, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(s_adminBackdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_adminBackdrop, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(s_adminBackdrop, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(s_adminBackdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_adminBackdrop, 0, 0);
+    lv_obj_set_style_pad_all(s_adminBackdrop, 0, 0);
+    lv_obj_add_event_cb(s_adminBackdrop, onAdminBackdropPressed, LV_EVENT_CLICKED, nullptr);
+
+    s_adminModal = lv_obj_create(s_adminBackdrop);
+    lv_obj_set_size(s_adminModal, w - 8, h - 8);
+    lv_obj_align(s_adminModal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(s_adminModal, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_adminModal, LV_OBJ_FLAG_SCROLLABLE);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_adminModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_adminModal, lv_color_make(0, 0, 0), 0);
+#else
+    lv_obj_set_style_bg_color(s_adminModal, lv_color_hex(0x0A0A18), 0);
+    lv_obj_set_style_border_color(s_adminModal, lv_color_hex(0x5C86C6), 0);
+#endif
+    lv_obj_set_style_bg_opa(s_adminModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_adminModal, 1, 0);
+    lv_obj_set_style_pad_all(s_adminModal, 4, 0);
+    lv_obj_set_style_pad_row(s_adminModal, 2, 0);
+    lv_obj_set_flex_flow(s_adminModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_adminModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    s_adminTitle = lv_label_create(s_adminModal);
+    lv_obj_set_width(s_adminTitle, lv_pct(100));
+    lv_obj_set_style_text_font(s_adminTitle, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(s_adminTitle, adminLineColor(AdminClient::LINE_INFO), 0);
+    lv_label_set_text(s_adminTitle, "");
+
+    s_adminScroll = lv_obj_create(s_adminModal);
+    lv_obj_set_width(s_adminScroll, lv_pct(100));
+    lv_obj_set_flex_grow(s_adminScroll, 1);
+    setupVScroll(s_adminScroll);
+    lv_obj_set_scrollbar_mode(s_adminScroll, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_bg_opa(s_adminScroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_adminScroll, 0, 0);
+    lv_obj_set_style_pad_all(s_adminScroll, 0, 0);
+    lv_obj_set_style_pad_right(s_adminScroll, 2, 0);
+    lv_obj_set_flex_flow(s_adminScroll, LV_FLEX_FLOW_COLUMN);
+
+    s_adminInput = lv_textarea_create(s_adminModal);
+    lv_obj_set_width(s_adminInput, lv_pct(100));
+    lv_textarea_set_one_line(s_adminInput, true);
+    lv_textarea_set_max_length(s_adminInput, AdminClient::kLineLen - 1);
+    lv_textarea_set_placeholder_text(s_adminInput, "help");
+    lv_obj_set_style_text_font(s_adminInput, &lv_font_montserrat_10, 0);
+
+#if UI_TOUCH_ONLY_PROFILE
+    s_adminKeyboard = lv_keyboard_create(s_adminModal);
+    configureOnScreenKeyboard(s_adminKeyboard);
+    lv_keyboard_set_textarea(s_adminKeyboard, s_adminInput);
+    lv_obj_add_event_cb(s_adminKeyboard, onAdminKeyboardEvent, LV_EVENT_READY, nullptr);
+    lv_obj_add_event_cb(s_adminKeyboard, onAdminKeyboardEvent, LV_EVENT_CANCEL, nullptr);
+#endif
+
+    lv_obj_move_foreground(s_adminBackdrop);
+    s_adminRenderedRev = 0;
+    refreshAdminTranscript();
+}
+
+// Physical keys, for the boards that have them. Returns true when the key was
+// consumed -- which is every key while this modal is up, because a terminal that
+// let stray letters reach the chat screen underneath would be unusable.
+static bool adminTerminalHandleKey(char k) {
+    if (!s_adminModal || !s_adminInput || !lvObjValid(s_adminInput)) return false;
+
+    if (k == KEY_ENTER) { adminSubmitCurrentLine(); return true; }
+    if (isModalCloseKey(k) && !lv_textarea_get_text(s_adminInput)[0]) {
+        // Close on an empty line only: with text in it the close key is a
+        // backspace, which is what someone mid-command means by it.
+        closeAdminTerminalModal();
+        return true;
+    }
+    if (isBackspaceKey(k)) { lv_textarea_delete_char(s_adminInput); return true; }
+    if (k == KEY_SCROLL_UP)  { adminRecallHistory(+1); return true; }
+    if (k == KEY_SCROLL_DN)  { adminRecallHistory(-1); return true; }
+    if (k == KEY_PAGE_UP)    { scrollListClamped(s_adminScroll, 24); return true; }
+    if (k == KEY_PAGE_DN)    { scrollListClamped(s_adminScroll, -24); return true; }
+    if ((uint8_t)k >= 0x20 && (uint8_t)k < 0x7F) {
+        lv_textarea_add_char(s_adminInput, (uint32_t)(uint8_t)k);
+        return true;
+    }
+    return true;   // swallow everything else
+}
+#endif  // HAS_ADMIN_TERMINAL
+
+#if HAS_ADMIN_TERMINAL
+// ── Web terminal accessors ───────────────────────────────────────────────────
+// Declared in web_config.h. The web terminal drives the same session the device
+// does; nothing here keeps state of its own.
+bool webCfgAdminSessionOpen() { return s_adminSession.isOpen(); }
+uint32_t webCfgAdminNodeId()  { return s_adminSession.nodeId(); }
+uint32_t webCfgAdminRevision(){ return s_adminSession.revision(); }
+bool webCfgAdminBusy()        { return s_adminSession.busy(); }
+bool webCfgAdminAwaitingConfirm() { return s_adminSession.awaitingConfirm(); }
+int  webCfgAdminLineCount()   { return s_adminSession.lineCount(); }
+
+const char *webCfgAdminLine(int i, uint8_t &kind) {
+    const AdminClient::Line *l = s_adminSession.line(i);
+    if (!l) { kind = 0; return nullptr; }
+    kind = l->kind;
+    return l->text;
+}
+
+bool webCfgAdminOpen(uint32_t nodeId) {
+    // Already on this node: leave it alone. Reopening would clear the transcript
+    // the operator is reading and, worse, look like a fresh session while the
+    // remote still holds the old one.
+    if (s_adminSession.isOpen() && s_adminSession.nodeId() == nodeId) return true;
+    return adminOpenSession(nodeId);
+}
+
+void webCfgAdminSubmit(const char *line) {
+    if (!line || !s_adminSession.isOpen()) return;
+    s_adminSession.submit(line, millis());
+    // The device modal, if it is up, is looking at the same buffer.
+    if (s_adminModal) refreshAdminTranscript();
+}
+
+bool webCfgAdminVerify(uint32_t nodeId) {
+    if (!webCfgAdminOpen(nodeId)) return false;
+    s_adminSession.submit("verify", millis());
+    if (s_adminModal) refreshAdminTranscript();
+    return true;
+}
+#endif  // HAS_ADMIN_TERMINAL
+
 static bool sendRoutingResult(uint32_t toNodeId, uint32_t requestId, uint32_t errorReason) {
     if (!Radio.isReady()) return false;
     if (toNodeId == 0 || toNodeId == 0xFFFFFFFF || requestId == 0) return false;
@@ -44253,7 +44649,13 @@ static bool rebroadcastModeAllows(const MeshPacket &pkt) {
             switch (pkt.portnum) {
                 case TEXT_MESSAGE_APP: case POSITION_APP: case NODEINFO_APP:
                 case ROUTING_APP: case TELEMETRY_APP: case NEIGHBORINFO_APP:
-                case TRACEROUTE_APP: case MESH_BEACON_APP: return true;
+                case TRACEROUTE_APP: case MESH_BEACON_APP:
+                // ADMIN_APP is in upstream Router.cpp's core-portnum list. It is
+                // here for the same reason the others are: this is about what we
+                // relay for the rest of the mesh, not about what we ourselves
+                // send -- and dropping it would quietly break someone else's
+                // remote administration wherever we are the only path.
+                case ADMIN_APP: return true;
                 default: return false;
             }
         default: // ALL / ALL_SKIP_DECODING — relay raw regardless of decode
@@ -44865,6 +45267,22 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             }
 
             bool isAck = (errorReason == 0);
+#if HAS_ADMIN_TERMINAL
+            // A write is answered by this and nothing else, so the session's
+            // notion of "done" lives here rather than in the ADMIN_APP arm.
+            if (s_adminSession.isOpen() && s_adminSession.nodeId() == pkt.hdr.from) {
+                const uint32_t peer = s_adminSession.nodeId();
+                s_adminSession.onRouting(pkt.requestId, errorReason,
+                                         (pkt.hdr.flags & 0x10) ? AdminClient::TRANSPORT_MQTT
+                                                                : AdminClient::TRANSPORT_RF,
+                                         millis());
+                // The session closes itself on 33/37; demoting the peer is this
+                // side's job, because the session does not own the list.
+                if (AdminClient::errorMeansUnauthorized(errorReason)) {
+                    adminNoteUnauthorized(peer);
+                }
+            }
+#endif
             bool dmRoutingMatched = DMs.handleRoutingResult(pkt.hdr.from, pkt.requestId, errorReason);
             tracerouteProgressOnRouting(pkt.hdr.from,
                                         pkt.requestId,
@@ -44939,6 +45357,30 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             appendLiveRxSummary(pkt, chanIdx, "N");
             return false;
         }
+
+#if HAS_ADMIN_TERMINAL
+        case ADMIN_APP: {
+            // Client only: we administer other nodes and do not serve the other
+            // half, so the only admin traffic we act on is a reply to something
+            // we sent. Anything else is somebody else's conversation passing
+            // through -- relayed by the rebroadcast path, ignored here.
+            //
+            // RF needs nothing extra: handleRx() already PKI-decrypts a
+            // hdr.channel == 0 packet from a known key and fills in requestId.
+            // via_mqtt is flags bit 4 (see MeshHdr), not a member.
+            const AdminClient::Transport via = (pkt.hdr.flags & 0x10)
+                ? AdminClient::TRANSPORT_MQTT : AdminClient::TRANSPORT_RF;
+            if (pkt.requestId && addressedToMe) {
+                s_adminSession.onAdminReply(pkt.requestId, pkt.payload, pkt.payloadLen,
+                                            via, millis());
+            }
+            if (wantsAck && addressedToMe) {
+                (void)sendRoutingResult(pkt.hdr.from, pkt.hdr.id, 0);
+            }
+            appendLiveRxSummary(pkt, chanIdx, "A");
+            return false;
+        }
+#endif
 
         case POSITION_APP: {
             PositionInfo p = {};
@@ -45143,6 +45585,40 @@ static void mqttDownlinkInject(const MeshHdr &hdr, const uint8_t *cipher,
     // calling it here would make that check drop the packet.
     if (s_myNodeId != 0 && hdr.from == s_myNodeId) {
         Serial.println("[mqtt] downlink drop: own packet echoed back");
+        return;
+    }
+
+    // PKI traffic rides a pseudo-channel named "PKI" at <root>/2/e/PKI/<gateway>,
+    // with ServiceEnvelope.channel_id = "PKI". It resolves against no local
+    // channel and its hdr.channel is 0 -- which is the PKI marker itself -- so
+    // the two rules below would drop every one of these. Narrowed to packets
+    // addressed to us, which is upstream's own isToUs rule for this topic.
+    //
+    // Deliberate side effect: PKI direct messages over MQTT start working. They
+    // were silently discarded by these same two lines, not by anything that
+    // meant to reject them.
+    const bool isPkiEnvelope = chanName && !strcmp(chanName, "PKI");
+    if (isPkiEnvelope) {
+        if (s_myNodeId == 0 || hdr.to != s_myNodeId) {
+            Serial.println("[mqtt] downlink drop: PKI packet not addressed to us");
+            return;
+        }
+        Serial.printf("[mqtt] downlink inject: PKI from=%08lx\n",
+                      (unsigned long)hdr.from);
+        MeshPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.hdr = hdr;
+        pkt.rxMs = millis();
+        pkt.chanIdx = -1;
+        pkt.decrypted = false;
+        if (cipherLen > 0 && cipherLen <= sizeof(pkt.rawCipher)) {
+            memcpy(pkt.rawCipher, cipher, cipherLen);
+            pkt.rawLen = cipherLen;
+        }
+        // Decryption is handleRx()'s job: it already does the PKI path for a
+        // hdr.channel == 0 packet from a node whose key we hold, which is
+        // exactly this. Handing it the ciphertext keeps one implementation.
+        processMeshPacket(pkt);
         return;
     }
 
@@ -48597,6 +49073,9 @@ void setup() {
     bootSplashStatus("Messages");
     DMs.init();
     Ignored.init();
+#if HAS_ADMIN_TERMINAL
+    AdminPeerList.init();
+#endif
     // Before init(), which loads persisted history itself. Set unconditionally:
     // it is a no-op unless the node ID actually moved. The move it replays may
     // have been recorded on an earlier boot — deriveNodeId() persists it, so a
@@ -49362,6 +49841,12 @@ void loop() {
     LOOP_PHASE("kbblink", serviceKbBlink());
 #endif
 
+#if HAS_ADMIN_TERMINAL
+    // Drives the 30 s request timeout even with the window shut -- a command
+    // sent and then dismissed still has to stop being outstanding.
+    LOOP_PHASE("admin", s_adminSession.service(now));
+    if (s_adminModal) refreshAdminTranscript();
+#endif
     LOOP_PHASE("cpuscale", serviceCpuScaling());
     LOOP_PHASE("serial", serviceSerialCommands());
     LOOP_PHASE("statemaps", bootstrapStateMapsIfMissing());

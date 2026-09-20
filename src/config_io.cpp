@@ -1,6 +1,7 @@
 #include "config_io.h"
 #include "mesh_channel_plan.h"
 #include "mesh_proto.h"      // myPubKey / myPrivKey — node identity in the backup
+#include "admin_peers.h"
 #include "base64_util.h"
 #include "utf8_utils.h"
 #include "ignore_list.h"
@@ -1790,6 +1791,23 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
         out += tmp;
     }
     out += "\n";
+
+#if HAS_ADMIN_TERMINAL
+    // Nodes this device may administer, same one-line hex list. Only the IDs
+    // travel: the state is a claim about a live key exchange with a particular
+    // remote, and a backup restored onto another device -- or onto this one a
+    // month later -- has proved nothing. Every imported peer starts at PENDING
+    // and earns its way back, which AdminPeers::replace() enforces.
+    out += "admin_peers: ";
+    for (int i = 0; i < AdminPeerList.count(); i++) {
+        const AdminPeer *p = AdminPeerList.at(i);
+        if (!p) continue;
+        if (i > 0) out += ",";
+        snprintf(tmp, sizeof(tmp), "%08lx", (unsigned long)p->nodeId);
+        out += tmp;
+    }
+    out += "\n";
+#endif
 }
 
 // Set by the parse below when an import carried a complete identity keypair, so
@@ -1964,6 +1982,29 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                     }
                     Ignored.replace(ids, n);
                 }
+#if HAS_ADMIN_TERMINAL
+                else if (!strcmp(key, "admin_peers")) {
+                    AdminPeer peers[AdminPeers::kMax];
+                    int n = 0;
+                    const char *cur = val;
+                    while (*cur && n < AdminPeers::kMax) {
+                        while (*cur == ' ' || *cur == ',') cur++;
+                        if (!*cur) break;
+                        if (*cur == '!') cur++;
+                        if (cur[0] == '0' && (cur[1] == 'x' || cur[1] == 'X')) cur += 2;
+                        char *endp = nullptr;
+                        unsigned long v = strtoul(cur, &endp, 16);
+                        if (endp == cur) break;
+                        if (v != 0 && v != 0xFFFFFFFFUL) {
+                            peers[n] = AdminPeer{ (uint32_t)v, ADMIN_PEER_PENDING,
+                                                  ADMIN_VIA_NONE, 0, 0 };
+                            n++;
+                        }
+                        cur = endp;
+                    }
+                    AdminPeerList.replace(peers, n);
+                }
+#endif
             }
         } else if (indent == 2) {
             if (!hasVal) {

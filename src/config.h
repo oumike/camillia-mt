@@ -414,6 +414,15 @@
 #define HAS_SD_MALWARE_SCAN 0
 #endif
 
+// Remote administration terminal (issue #89): a client for Meshtastic's
+// ADMIN_APP, reached from a node's actions modal and from web config.
+//
+// On everywhere for now. It exists as a gate because the feature's flash cost
+// lands against the Heltec pair's ~154 KB of headroom, which is the tightest in
+// the fleet -- if tools/flash_headroom.py disagrees after the UI lands, this is
+// the lever that drops a board rather than the feature.
+#define HAS_ADMIN_TERMINAL 1
+
 // Boards that build the glance overlay — clock, node name, battery, date and
 // the recent-message preview rows — whatever they then do with it. The Pro
 // leaves it on a sleeping panel; the lock screen boards light it for a while
