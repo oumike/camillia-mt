@@ -1039,8 +1039,11 @@ The device info panel is scrollable with the keyboard on every keyboard build:
 
 ### Lock screen
 
-Every backlit build except Cardputer can show a lock screen before putting the
-panel fully to sleep. It uses a black background with the time and channel in
+Nine of the eleven builds can show a lock screen before putting the panel fully
+to sleep: `tdeck`, `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`,
+`mesh-deck`, `m9`, `wio-tracker-l2`, `heltec-r8` and `heltec-r8-vertical`. The
+two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
+under [Locking and unlocking, build by build](#locking-and-unlocking-build-by-build). It uses a black background with the time and channel in
 blue, node names in green, and message text in white. The current date, battery
 reading and newest unread message previews remain visible while it is active.
 
@@ -1110,8 +1113,8 @@ never ends on its own.
 
 Each board's existing screen-off gesture does the same thing immediately: a tap
 of the screen button, a held trackball click on the T-Deck, a held d-pad centre
-on the M9. They are listed under
-[What unlocks each board](#what-unlocks-each-board).
+on the M9. Each build's own gestures are listed under
+[Locking and unlocking, build by build](#locking-and-unlocking-build-by-build).
 
 **Nothing else raises the lock screen, and nothing but input takes it down.** A
 message arriving while the device is locked never lights the panel — it only
@@ -1134,10 +1137,10 @@ packet or alert unlocks anything.
   default is five minutes rather than **Stay on**.
 - **The keyboard backlight stays off** on the boards that have one — nothing on
   this screen takes typing — and comes back with the UI.
-- **The keyboard-backlight unread blink waits for the panel to go out.** On the
-  T-Deck and T-Lora Pager a lit lock screen postpones it, and it starts when the
-  dwell ends. The Mesh Deck's RGB LEDs are unaffected and go on blinking for
-  unread throughout. See [Light timeout](#light-timeout).
+- **The keyboard-backlight unread blink waits for the panel to go out.** On
+  `tdeck` and `tlora-pager-tft` a lit lock screen postpones it, and it starts
+  when the dwell ends. `mesh-deck`'s RGB LEDs are unaffected and go on blinking
+  for unread throughout. See [Light timeout](#light-timeout).
 - **The panel runs at the lock screen's own brightness level**, not the UI's,
   and not whatever fraction the pre-sleep dim had reached on the way in — see
   [Lock screen brightness](#lock-screen-brightness).
@@ -1147,10 +1150,12 @@ packet or alert unlocks anything.
 
 #### The wake button: tap to glance, hold to unlock
 
-**Every board with a dedicated screen button splits the two by press length.**
-That is the Wio Tracker L2's top Wake button, the side button on the Heltec
-expansion boards, and the BOOT button everywhere it is not already the UI's
-action button.
+**Every build with a dedicated screen button splits the two by press length.**
+That is `wio-tracker-l2`'s top Wake button, `heltec-v4`'s side button on the
+expansion, and the BOOT button on `tlora-pager-tft`, `cardputer-cap`,
+`tdeck-pro`, `mesh-deck` and `m9` — every build where BOOT is not already the
+UI's action button. The two without one are `tdeck`, which uses its trackball
+click instead, and `heltec-r8`, which has only its touch panel.
 
 | Press | Dark panel | Lock screen | UI in front of you |
 | --- | --- | --- | --- |
@@ -1167,39 +1172,138 @@ button held for two seconds is the one input a pocket does not produce.
 With **Lock Screen** turned off, the same pair applies to the panel directly: a
 tap puts it out, a hold brings it back, and a tap on a dark panel does nothing.
 
-**The M9's d-pad centre follows the same rule**, because its controller reports
-a tap and a hold as two different keys — so a tap raises the lock screen and only
-a two-second hold reaches the UI. That matters on this board more than most: a
+**`m9`'s d-pad centre follows the same rule**, because its controller reports a
+tap and a hold as two different keys — so a tap raises the lock screen and only a
+two-second hold reaches the UI. That matters on this build more than most: a
 centre hold is also what puts the device away, and without the split the lightest
 press of the same key undid it.
 
-Other touch panels and keyboards are unchanged. Where a board wakes from a tap on
-the screen or from a key — the T-Deck's trackball click — that input still goes
-straight through to the UI in one press.
+Everywhere else a build's existing wake input is unchanged, and still goes
+straight through to the UI in one press: a tap on the panel on `heltec-v4` and
+`heltec-r8`, a trackball click on `tdeck`, a wheel click or any key on
+`tlora-pager-tft`. The section below gives each build in full.
 
-#### What unlocks each board
+#### Locking and unlocking, build by build
 
-These are the gestures each board already used for the screen; what the lock
-screen adds is the tap/hold split on the boards with a screen button. Anything
-not listed here is swallowed while the device is locked.
+Every build target is listed, the two without a lock screen included. **Away** is
+what puts the device away on demand; **Screen Timeout** does the same thing on
+its own everywhere. **Unlock** is the complete list for that build — anything
+not named under it is swallowed while the device is locked, reaching neither the
+UI underneath nor the lock screen itself.
 
-| Board | Puts the device away | Unlocks |
-| --- | --- | --- |
-| **T-Deck** | Trackball click held 2 s | Trackball **click**. Rolling the ball does not, and neither do the keys or the touch panel |
-| **T-Lora Pager** | Tap BOOT | Hold BOOT 2 s, the **wheel click**, or any key on the keyboard. Rolling the wheel does not |
-| **Attaky Mesh Deck** | Tap the **R** shoulder button, or tap BOOT | Hold either for 2 s. Keys and the touch panel do not |
-| **ThinkNode M9** | Hold the d-pad centre, or tap BOOT | Hold the d-pad centre 2 s, or hold BOOT 2 s. A centre **tap** only raises the lock screen, and every other key is swallowed |
-| **Heltec V4 + TFT** | Tap the expansion's side button | Hold it 2 s, or **tap the panel** anywhere. GPIO0 is the UI's action button on this board rather than a screen key, so it does not unlock |
-| **Heltec R8 + TFT** | — (no screen button) | **Tap the panel** — touch is this board's only wake gesture |
-| **Wio Tracker L2** | Tap the top **Wake** button | Hold it 2 s. Touch is not a wake gesture here |
-| **Cardputer** | Tap BOOT | No lock screen: the panel sleeps directly, and a BOOT hold or any key brings it back |
-| **T-Deck Pro** | Tap BOOT | No lock screen either — the e-paper sleep screen is the sleeping state. Hold BOOT 2 s to wake |
+**`tdeck` — LilyGo T-Deck**
+
+- Lock screen: **yes**.
+- Away: hold the **trackball click** for 2 seconds.
+- Unlock: a **trackball click**.
+- Ignored: rolling the trackball, every keyboard key, and the touch panel.
+- This build has no screen button, so it has no tap/hold split: the click is one
+  press in both directions, and the hold on the same click is what locks.
+- Its keyboard backlight's unread blink waits for the dwell to end and the panel
+  to go genuinely out.
+
+**`tdeck-pro` — LilyGo T-Deck Pro**
+
+- Lock screen: **no**. The e-paper sleep screen *is* the sleeping state here —
+  the panel holds that image at zero power, so there is nothing to time out of,
+  no dwell to set and no carousel to turn.
+- Away: tap **BOOT**.
+- Unlock: hold **BOOT** for 2 seconds. A tap on a sleeping panel does nothing.
+- Ignored: keys and the touch panel.
+- Lock Screen and Lock Screen Off are absent from Config and web config, and
+  Brightness is a single slider.
+
+**`tlora-pager-tft` — LilyGo T-Lora Pager TFT**
+
+- Lock screen: **yes**.
+- Away: tap **BOOT**.
+- Unlock: hold **BOOT** 2 seconds, the **wheel click**, or **any key** on the
+  keyboard.
+- Ignored: rolling the wheel. It has no touch panel.
+- Its keyboard backlight's unread blink waits for the dwell to end, as on the
+  T-Deck.
+
+**`cardputer-cap` — M5Stack Cardputer + Cap LoRa/GPS**
+
+- Lock screen: **no** — the 240x135 panel and this build's first-boot heap
+  budget cannot carry the overlay, so the panel sleeps directly.
+- Away: tap the **G0** button (BOOT).
+- Unlock: hold **G0** for 2 seconds, or press **any key**.
+- Lock Screen, Lock Screen Off and the lock-screen brightness slider are all
+  absent from Config and web config.
+
+**`heltec-v4` — Heltec WiFi LoRa 32 V4 + TFT expansion**
+
+- Lock screen: **yes**.
+- Away: tap the expansion's **side button**.
+- Unlock: hold the side button 2 seconds, **tap the panel** anywhere, or press
+  any key on a paired Bluetooth keyboard.
+- Ignored while locked: the **USER button on GPIO0**. On the touch-first builds
+  that button is the UI's action button — the Enter key's stand-in — not a
+  screen key, so it cannot put the device away and is swallowed by the lock
+  screen. From a fully dark panel it does wake the UI, since by then there is no
+  glance surface left to protect.
+- A tap on the panel has no tap/hold split of its own: from the lock screen it
+  unlocks, and from a dark panel it goes straight to the UI.
+
+**`heltec-v4-vertical`** — not a second firmware: `heltec-v4` with the
+first-boot orientation seeded to portrait. Locking is identical in every
+respect.
+
+**`mesh-deck` — Attaky Mesh Deck**
+
+- Lock screen: **yes**.
+- Away: tap the **R** shoulder button, or tap **BOOT**.
+- Unlock: hold either for 2 seconds.
+- Ignored: every keyboard key, and the touch panel.
+- The hardware **Power** button is deliberately not bound: a hold there cuts
+  power below firmware at roughly the same two seconds that would unlock, so it
+  could only ever end as a shutdown.
+- Its three RGB LEDs go on blinking for unread while the lock screen is lit —
+  unlike the keyboard-backlight builds, they do not wait for the panel to go
+  out.
+
+**`m9` — Elecrow ThinkNode M9**
+
+- Lock screen: **yes**.
+- Away: hold the **d-pad centre**, or tap **BOOT**.
+- Unlock: hold the **d-pad centre** 2 seconds, or hold **BOOT** 2 seconds.
+- A centre **tap** raises the lock screen and never reaches the UI. The
+  controller reports a tap and a hold as two different keys, which is what lets
+  this build have the split without the firmware timing a keypress.
+- Ignored: every other key. It has no touch panel.
+
+**`wio-tracker-l2` — Seeed Wio Tracker L2**
+
+- Lock screen: **yes**.
+- Away: tap the top **Wake** button.
+- Unlock: hold the **Wake** button for 2 seconds.
+- Ignored: the touch panel, which is not a wake gesture on this build at all —
+  neither from the lock screen nor from a dark one — and the USER button on
+  GPIO0, which is the UI's action button here as on the Heltecs. That button
+  still wakes a fully dark panel straight to the UI.
+
+**`heltec-r8` — Heltec WiFi LoRa 32 V4-R8 + Expansion Kit V2**
+
+- Lock screen: **yes**.
+- Away: **Screen Timeout only.** The Expansion Kit V2 carries no side button and
+  the V4's GPIO35 does not exist on the R8 mainboard, so this is the one build
+  with no on-demand way to put the device away.
+- Unlock: **tap the panel**, or press any key on a paired Bluetooth keyboard.
+  Touch is this build's only hardware wake gesture, and it unlocks in one tap —
+  from a dark panel it goes straight to the UI.
+- Ignored while locked: the USER button on GPIO0 — the UI's action button here
+  too. It still wakes a fully dark panel to the UI.
+
+**`heltec-r8-vertical`** — `heltec-r8` with the portrait first-boot seed, and
+otherwise identical.
 
 **A browser VNC session counts as someone looking at the screen.** While one is
 connected the lock screen is dismissed and kept down, the panel and its timers
-stay awake, and keys typed into VNC are exempt from the per-board restrictions
-above — a remote viewer pressed them deliberately. See
-[Browser VNC](#browser-vnc).
+stay awake, and keys typed into VNC are exempt from the per-build restrictions
+above — a remote viewer pressed them deliberately. That holds on every build
+with a lock screen, since the only one without a VNC host is `cardputer-cap`,
+which has no lock screen either. See [Browser VNC](#browser-vnc).
 
 #### The first three seconds
 
@@ -1222,7 +1326,8 @@ difference is most of what the lock screen costs in battery.
   lock-screen level, both previewing live. [Brightness](#brightness) covers how
   each board moves between the two rows.
 - Web config: **Lock Screen Brightness**, beside Brightness under **Display**.
-- Cardputer and T-Deck Pro have no lock screen and show one slider only.
+- `cardputer-cap` and `tdeck-pro` have no lock screen and show one slider only.
+  The other nine builds show both.
 
 The level is applied on the way in and again on the way out, so the lock screen
 never inherits the pre-sleep dim and the UI never comes back at the glance
@@ -1243,11 +1348,13 @@ level.
 - All three travel with an exported config, under `display:` as `lockScreen`,
   `lockScreenOffSecs` and `lockScreenBrightness` — see
   [Backing up settings](#backing-up-settings).
-- Cardputer keeps direct screen sleep and does not show these settings: its
-  240x135 panel and first-boot heap budget cannot carry the overlay.
-- T-Deck Pro keeps its existing black-on-white e-paper sleep screen. E-paper
+- `cardputer-cap` keeps direct screen sleep and does not show these settings:
+  its 240x135 panel and first-boot heap budget cannot carry the overlay.
+- `tdeck-pro` keeps its existing black-on-white e-paper sleep screen. E-paper
   holds that image without a lit backlight, so it does not use the dwell timer
   and does not rotate its band.
+- `heltec-v4-vertical` and `heltec-r8-vertical` are the two base builds with a
+  portrait first-boot seed, so they carry these settings unchanged.
 
 ### Scan SD Card for Malware (ThinkNode M9)
 
