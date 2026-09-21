@@ -576,7 +576,43 @@ struct RhinoConfig {
     // 4-aligned struct, so the stored blob carries three bytes past it that the
     // load memcpy's straight over anything placed there.
     uint8_t  _reservedPad13[3];
+
+    // ── Stored-config epoch ──────────────────────────────────────────────────
+    // Which set of one-shot migrations the stored settings have already been
+    // through. Not the blob *format* version — that is kCfgBlobVersion in
+    // main_lvgl.cpp, and bumping it throws every setting away. This is for the
+    // narrower case where the layout is fine but the meaning of a field has
+    // changed and an existing device needs fixing up once.
+    //
+    // How it tells old from new is the append-only rule working in reverse. A
+    // blob written before this field existed simply stops short of it, so
+    // loadConfigFromPrefs() plants CFG_EPOCH_UNSET here before the memcpy and
+    // anything that does not overwrite it is by definition a pre-epoch blob.
+    // A blob written since carries its own value and comes back as it went in.
+    // cfgInitDefaults() sets CFG_EPOCH_CURRENT, because a fresh config has
+    // nothing to migrate and every migration's outcome is already its default.
+    //
+    // Safe at the end: _reservedPad13 above consumes the old struct's trailing
+    // padding, so this starts at exactly the previous sizeof(RhinoConfig).
+    uint8_t  cfgEpoch;
+    // For whoever appends next: cfgEpoch is one byte at the end of a 4-aligned
+    // struct, so the stored blob carries three bytes past it that the load
+    // memcpy's straight over anything placed there. Same trap as every pad
+    // above.
+    uint8_t  _reservedPad14[3];
 };
+
+// ── Stored-config epochs ─────────────────────────────────────────────────────
+// 0 is reserved and never assigned: it is what a blob that predates cfgEpoch
+// reads as, which is exactly the signal the migrations need.
+#define CFG_EPOCH_UNSET   0
+// 1 — the nav bar became a setting on the boards with no touch panel (issue
+// #92). Their stored navBarEnabled was written as true by every build before
+// this one, and must not come back as a bar switching itself on.
+#define CFG_EPOCH_NAV_BAR 1
+// Bump this, and add a case to cfgMigrateStoredConfig(), whenever a stored
+// field needs fixing up once on an upgrade.
+#define CFG_EPOCH_CURRENT CFG_EPOCH_NAV_BAR
 
 // ── Position precision (imprecise location) ──────────────────────────────────
 // Meshtastic's imprecise-location scheme, and deliberately bit-compatible with

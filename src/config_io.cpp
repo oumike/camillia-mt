@@ -1133,6 +1133,11 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.notifyLedEnabled   = MY_NOTIFY_LED_ENABLED;
     cfg.invertScroll       = MY_INVERT_SCROLL;
     cfg.navBarEnabled      = (bool)MY_NAV_BAR_ENABLED;
+    // A config built from defaults has nothing to migrate: every migration's
+    // outcome is what the default above already is. Stamping it current here is
+    // what keeps cfgMigrateStoredConfig() off a fresh install — and what gets
+    // the epoch written into the blob the first time anything is saved.
+    cfg.cfgEpoch           = CFG_EPOCH_CURRENT;
     cfg.notifyLedColorChannel = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_CHANNEL);
     cfg.notifyLedColorDm      = cfgCoerceNotifyLedColor(MY_NOTIFY_LED_COLOR_DM);
     cfg.kbBlinkEnabled     = (bool)MY_KB_BLINK_ENABLED;

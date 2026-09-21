@@ -201,20 +201,29 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #endif
 
 // ── Bottom icon nav bar ──────────────────────────────────────────────────────
-// Wider than UI_TOUCH_ONLY_PROFILE: a bar of tap targets is worth having on
-// anything you can tap, so the test is the panel, not the absence of a
-// keyboard. That takes in the touch-only boards and the two that have both a
-// keyboard and a touch panel (T-Deck, Mesh Deck).
+// Every board builds the bar. This used to test HAS_TOUCH, on the reasoning
+// that a bar of tap targets is only worth having on something you can tap —
+// but nothing about the bar is useless without a finger: it names every
+// destination, it carries the GPS/WiFi cluster, it takes the unread marks, and
+// on the M9 and the Pager its cells are genuinely clickable from the pointer the
+// browser Remote registers. The keyboard boards with no panel simply start with
+// it switched off — see MY_NAV_BAR_ENABLED in config.h — which is the footer
+// they have always drawn; turning it on is the user's call. Issue #92.
 //
-// Board-capability driven rather than a list of DEVICE_ names, so a new board
-// with a touch panel gets the bar by declaring HAS_TOUCH and nothing else.
-// Where the board has a keyboard as well the bar is a preference — see
-// HAS_NAV_BAR_TOGGLE in config.h — and where it does not, taps are the only way
-// off a screen and the bar is not negotiable.
-#if UI_TOUCH_ONLY_PROFILE || HAS_TOUCH
-#  define UI_TOUCH_NAV_BAR 1
-#else
+// So this is no longer a capability test. That question moved wholesale to
+// HAS_NAV_BAR_TOGGLE in config.h, which asks whether there is a keyboard to fall
+// back on and therefore whether the bar is a preference or the only way off a
+// screen.
+//
+// Kept as a macro rather than deleted, for two reasons: it gates a good deal of
+// code that has nothing to build without it, and a board can still opt out by
+// defining UI_NO_NAV_BAR in its hw_*.h. That is the escape hatch if an
+// environment cannot afford the flash — the bar, its cells, its status cluster
+// and its settings row all compile out and that board keeps its key-hint strip.
+#if defined(UI_NO_NAV_BAR)
 #  define UI_TOUCH_NAV_BAR 0
+#else
+#  define UI_TOUCH_NAV_BAR 1
 #endif
 
 // ── Screen mirror (VNC host) ─────────────────────────────────────────────────

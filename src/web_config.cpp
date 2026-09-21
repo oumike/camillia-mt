@@ -4293,9 +4293,12 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "<option value='0'"; if (!gCfg->navBarEnabled) html += " selected"; html += ">Disabled</option>"
             "</select></label>";
     html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
-            "Row of tappable icons along the bottom of the screen - Home, "
-            "DM, Nodes, Live, Config, Help. Disabled restores the keyboard "
-            "shortcut hints that used to sit there. The keys work either way.</p>";
+            "Row of icons along the bottom of the screen - Home, Chats, DM, "
+            "Nodes, Tools, Config, Help - carrying the GPS and Wi-Fi readouts "
+            "and the unread marks. Disabled restores the keyboard shortcut "
+            "hints that sit there instead. The keys reach every one of them "
+            "either way; where the board has a touch panel or a browser Remote, "
+            "the cells are clickable too. Takes effect immediately, no reboot.</p>";
 #endif
 #if HAS_AUDIO_ALERTS
     html += "<label>Splash Melody<select name='splash_melody'>"

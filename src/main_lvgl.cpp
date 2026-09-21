@@ -9577,6 +9577,50 @@ static int removeLegacyChannelKeys() {
     return n;
 }
 
+// ── One-shot fix-ups for settings already in NVS ─────────────────────────────
+// Runs on the blob path only, after the stored bytes are in s_cfg and before
+// applyLoadedConfigInvariants() coerces them. The difference between the two is
+// worth keeping straight: invariants run on every load and clamp values that
+// could be nonsense whatever wrote them, while this runs once per device and
+// changes a value that was perfectly valid under the meaning it was written
+// with.
+//
+// s_cfg.cfgEpoch is CFG_EPOCH_UNSET here when the stored blob predates the
+// field — see the note on it in config_io.h. Each migration is therefore
+// written as "if the device has not been through epoch N yet", and the epoch is
+// stamped current at the end.
+static void cfgMigrateStoredConfig() {
+#if HAS_NAV_BAR_TOGGLE && !HAS_TOUCH
+    // Issue #92. The bar is new to this board, and the right fresh-install state
+    // is off — but cfgInitDefaults() has always written navBarEnabled into the
+    // blob on every board, including the ones that could not draw a bar at all,
+    // and what it wrote was true. Left alone, every Cardputer, M9 and Pager in
+    // the field would read that true back out and come up with a bar it was
+    // never asked for, on the boards least able to spare the pixels.
+    //
+    // So it is forced off once, which is the "make it a decision in the diff"
+    // half of the ticket. The cost is an early adopter who had already put
+    // navBar: true in an imported YAML losing that setting a single time; the
+    // alternative is every other owner of these three boards being handed a
+    // layout change by an update, which is the worse trade.
+    if (s_cfg.cfgEpoch < CFG_EPOCH_NAV_BAR && s_cfg.navBarEnabled) {
+        s_cfg.navBarEnabled = false;
+        Serial.println("[cfg] migrate: nav bar forced off once (issue #92) - "
+                       "this board's stored value predates the setting");
+    }
+#endif
+
+    if (s_cfg.cfgEpoch != CFG_EPOCH_CURRENT) {
+        s_cfg.cfgEpoch = CFG_EPOCH_CURRENT;
+        // Debounced rather than written here: this runs inside the boot-time
+        // load with NVS open read-only, and the flush is a synchronous flash
+        // write. Recording it matters — until the epoch is stored, every boot
+        // re-runs the migration above, which would undo the setting the moment
+        // a user switched the bar on and rebooted without anything else saving.
+        markConfigDirty();
+    }
+}
+
 // Cross-setting rules every load path must finish with, whichever storage
 // format it read: MQTT needs WiFi, the MQTT bridge and the web-config portal
 // are mutually exclusive, and the radio parameters are always re-derived from
@@ -9683,7 +9727,14 @@ static void loadConfigFromPrefs() {
         // Append-only rule: a shorter blob fills the front of the struct and
         // any field added since keeps its default.
         const size_t copy = (payload < sizeof(RhinoConfig)) ? payload : sizeof(RhinoConfig);
+        // Planted before the copy, not after: a blob written before cfgEpoch
+        // existed stops short of it, so whatever is sitting here afterwards is
+        // the signal cfgMigrateStoredConfig() reads. cfgInitDefaults() left it
+        // at CFG_EPOCH_CURRENT, which would have read as "already migrated" on
+        // exactly the devices that have not been.
+        s_cfg.cfgEpoch = CFG_EPOCH_UNSET;
         memcpy(&s_cfg, buf + sizeof(hdr), copy);
+        cfgMigrateStoredConfig();
         applyLoadedConfigInvariants();
         snprintf(s_cfgLoadReport, sizeof(s_cfgLoadReport),
                  "blob ok: got=%u copied=%u/%u wifiSsid=\"%s\" forceAp=%d",
@@ -13874,13 +13925,20 @@ struct ScreenTimeoutOption {
 };
 
 static const ScreenTimeoutOption kScreenTimeouts[] = {
-    {  15, "15 sec" },
-    {  30, "30 sec" },
-    {  60, "1 min"  },
-    { 120, "2 min"  },
-    { 300, "5 min"  },
-    { 600, "10 min" },
-    {   0, "Never"  },
+    {   15, "15 sec" },
+    {   30, "30 sec" },
+    {   60, "1 min"  },
+    {  120, "2 min"  },
+    {  300, "5 min"  },
+    {  600, "10 min" },
+    // A device on a bench is watched rather than carried, and the only thing
+    // above ten minutes used to be Never — which is a different decision, not a
+    // longer one. These two also stop the slider quietly shortening a browser-set
+    // value: 1800 opened on 10 min and was written back as 600 the moment the
+    // user saved, even if they had only come to look (issue #93).
+    { 1800, "30 min" },
+    { 3600, "60 min" },
+    {    0, "Never"  },
 };
 static constexpr int kScreenTimeoutCount =
     (int)(sizeof(kScreenTimeouts) / sizeof(kScreenTimeouts[0]));
@@ -48163,20 +48221,47 @@ static void buildUi() {
     const int panelMargin = 2;
     const int chatGap = 0;
     const int chatHeaderH = 22;
+#if HAS_NAV_BAR_TOGGLE
+    // The bar costs this board more than any other: 28 px of a 135 px panel
+    // against the 12 the hint strip takes, out of the shortest message list of
+    // any build. It is still the same 28 rather than a Cardputer-sized variant,
+    // because a shorter bar here would be a second set of cell metrics to keep
+    // right and the whole point of the setting is that the bar looks the way it
+    // looks. Off is the default, and off is the screen that shipped.
+    const int chatLegendH = bottomNavEnabled() ? kBottomNavHeight : 12;
+#else
     const int chatLegendH = 12;
+#endif
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
     const int chatX = panelMargin;
     const int chatW = screenW - panelMargin * 2;
     const int chatY = panelMargin + chatHeaderH + chatGap;
+#if UI_TOUCH_NAV_BAR
+    // Flush with the bottom edge with the bar up, so the margin is not
+    // subtracted — the same arithmetic the boards above do, for the same
+    // reason: there is nothing below the bar to leave room for.
+    const int chatH = bottomNavEnabled()
+                      ? (screenH - chatY - kBottomNavHeight - 3)
+                      : (screenH - panelMargin - chatY - chatLegendH - 3);
+#else
     const int chatH = screenH - panelMargin - chatY - chatLegendH - 3;
+#endif
 #else
     const int panelMargin = 6;
     const int panelW = 89;
     const int panelH = lv_disp_get_ver_res(NULL) - panelMargin * 2;
     const int chatGap = 6;
     const int chatHeaderH = 25;
+#if HAS_NAV_BAR_TOGGLE
+    // Same two states as the boards above: 28 px of icon cells with the bar on,
+    // the old 14 px text strip with it off. This is the board with the most
+    // room for it — 480 px wide, and its hint line already reads as a nav bar
+    // in words.
+    const int chatLegendH = bottomNavEnabled() ? kBottomNavHeight : 14;
+#else
     const int chatLegendH = 14;
+#endif
 
     // Worked out before the panel is built rather than after, because on the
     // boards whose key-hint bar spans the whole display the panel has to know
@@ -48184,7 +48269,19 @@ static void buildUi() {
     const int chatX = panelMargin + panelW + chatGap;
     const int chatW = lv_disp_get_hor_res(NULL) - chatX - panelMargin;
     const int chatY = panelMargin + chatHeaderH + chatGap;
+#if UI_TOUCH_NAV_BAR
+    // With the bar up it sits flush with the bottom edge, so the bottom margin
+    // panelH reserves is not subtracted; with it off this is the expression it
+    // has always been, written out rather than in terms of panelH so the two
+    // states read side by side.
+    const int chatH = bottomNavEnabled()
+                      ? (lv_disp_get_ver_res(NULL) - chatY - kBottomNavHeight - 3)
+                      : (panelH - chatHeaderH - chatGap - chatLegendH - 3);
+#else
     const int chatH = panelH - chatHeaderH - chatGap - chatLegendH - 3;
+#endif
+    // Where the footer starts, whichever footer it is. The channel list stops
+    // here, so it follows the bar up and down without a second calculation.
     const int legendTop = chatY + chatH + 3;
 
 #if defined(DEVICE_TLORA_PAGER_TFT)
@@ -48671,14 +48768,24 @@ static void buildUi() {
         lv_obj_set_size(s_chatShortcutBar, legendBarW, kBottomNavHeight);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     } else {
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        // Edge to edge. The chat column is only part of this display's width,
+        // so a bar that stopped where the column does left the bottom of the
+        // channel list showing beside it — a strip of a different screen along
+        // the bottom edge, under a footer that looked like it had been cut
+        // short. Inside the else since issue #92: this board draws the icon bar
+        // now too, and that one is placed by the branch above.
+        legendBarW = lv_disp_get_hor_res(NULL);
+        lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
+        lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, 0, chatY + chatH + 3);
+#else
         lv_obj_set_size(s_chatShortcutBar, chatW, chatLegendH);
         lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, chatX, chatY + chatH + 3);
+#endif
     }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
-    // Edge to edge. The chat column is only part of this display's width, so a
-    // bar that stopped where the column does left the bottom of the channel
-    // list showing beside it — a strip of a different screen along the bottom
-    // edge, under a footer that looked like it had been cut short.
+    // Edge to edge, for the reason spelled out above. Only reachable on a build
+    // that has opted out of the bar entirely (UI_NO_NAV_BAR).
     legendBarW = lv_disp_get_hor_res(NULL);
     lv_obj_set_size(s_chatShortcutBar, legendBarW, chatLegendH);
     lv_obj_align(s_chatShortcutBar, LV_ALIGN_TOP_LEFT, 0, chatY + chatH + 3);

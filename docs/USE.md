@@ -62,11 +62,34 @@ Typical flow on keyboard builds: pick a channel, press **Enter** to move the
 cursor into that channel's messages, scroll to a message to select it, then press
 **Space** to compose (a reply if a row is selected, otherwise a new message).
 
-On every board with a touch panel, the bottom navigation bar is **icon-only**.
-The keyboard shortcuts that reach the same screens still work on the builds that
-have a keyboard — they are listed below and on the Help screen — but they are
-not printed beside the icons, and switching the bar off (Config → Nav Bar) still
+The bottom navigation bar is **icon-only** on every board that draws it. The
+keyboard shortcuts that reach the same screens still work on the builds that have
+a keyboard — they are listed below and on the Help screen — but they are not
+printed beside the icons, and switching the bar off (Config → Nav Bar) still
 brings back the key-hint strip under the chat.
+
+**Every keyboard board can have the bar; what differs is the default.** On
+`tdeck`, `tdeck-pro` and `mesh-deck` it is **on** out of the box, which is what
+those boards have always shown. On `cardputer-cap`, `m9` and `tlora-pager-tft` it
+is **off** out of the box — a fresh install there is the key-hint strip, down to
+the pixel — and Config → **Nav Bar**, or **Bottom Nav Bar** in web config, turns
+it on. It redraws immediately either way, with no reboot.
+
+On the touch-only boards (`heltec-v4*`, `heltec-r8*`, `wio-tracker-l2`) the bar
+is the only way off a screen, so there is no setting and no key-hint strip to go
+back to.
+
+A note for the three boards the bar is new to: it costs more than the strip it
+replaces. The bar is 28 px against the strip's 14 — 12 on the Cardputer — and
+the strip is where the M9's and the Cardputer's shortcuts are written down, so
+turning the bar on trades that text for icons. The **Help** screen still lists
+every key, which is the answer to "what was the key for Nodes again" once the
+hints are gone. The Cardputer feels the height most: 28 px is a fifth of its
+135 px panel.
+
+If your board has the browser **Remote** (M9 and T-Lora Pager do), the bar's
+cells are clickable there even though the device itself has no touch panel — the
+Remote forwards its clicks to the panel as a real pointer.
 
 ## Keyboard shortcuts by build
 
@@ -277,29 +300,30 @@ The lock screen is deliberately not themed — it is what the device looks like
 with the UI put away, and stays white-on-black (black-on-white on the T-Deck
 Pro's e-paper, which has no colour to give either screen).
 
-**The footer becomes a notification ticker.** On the boards whose footer is a
-key-hint strip — M9, T-Lora Pager, and T-Deck or Mesh Deck with the nav bar
-switched off — the hints are replaced while the dashboard is up by the messages
-that have arrived: newest first, as `14:32 #general Alice: body`, up to three of
+**The footer becomes a notification ticker.** This follows the footer rather
+than the board: wherever the footer is a key-hint strip — which is every board
+with the nav bar switched off, and on the M9 and T-Lora Pager that is the
+default — the hints are replaced while the dashboard is up by the messages that
+have arrived: newest first, as `14:32 #general Alice: body`, up to three of
 them, scrolling if they do not fit. The hints name keys that belong to the chat
 screen, so they were only ever noise here.
 
 With nothing unread it reads **No new messages** and does not scroll. Leaving
 the dashboard puts the key hints straight back.
 
-Boards whose footer is the touch nav bar have no text row to use, so they keep
-the bar as it is; the T-Deck Pro keeps the plain hidden hints, because a
-scrolling label is an animation and every frame of one is a full e-paper
-refresh.
+Boards whose footer is the nav bar have no text row to use, so they keep the bar
+as it is — including the M9 and the Pager once the bar is switched on there,
+which trades the ticker away for it. The T-Deck Pro keeps the plain hidden hints,
+because a scrolling label is an animation and every frame of one is a full
+e-paper refresh.
 
 GPS and Wi-Fi icons appear in the dashboard's top band **only on the touch-only
 boards** (Heltec, Wio), where the bar along the bottom is icon buttons with no
 room for status and the chat screen's own copy is covered by the dashboard.
 Everywhere else that bar is already showing them a few centimetres below, so the
 dashboard leaves them out rather than putting the same two icons on screen
-twice. Turning the nav bar off on a board that has the setting brings back the
-key-hint strip, which carries the icons too — the dashboard follows whichever is
-actually there. The
+twice. The key-hint strip carries the icons too, so the dashboard follows
+whichever footer is actually there rather than asking which board it is on. The
 shortcut bar or nav bar stays along the bottom; on keyboard builds the chat
 screen's key hints are hidden while it is up, because they describe a screen you
 are not looking at. **The device boots onto it.**
@@ -327,7 +351,8 @@ How you reach it depends on the board:
   next-channel on that keyboard, and the pair of channel chords straddle Alt+D
   on the physical home row. Plain F still opens Config, as does the nav bar
 - **Cardputer** has no dashboard. Its 240x135 panel does not build the glance
-  header this is made of
+  header this is made of — so its footer is never the ticker, and the nav bar
+  simply replaces the key hints there full-time
 
 On the T-Deck Pro the charts update once a minute rather than on every packet.
 A redraw there is an e-paper refresh, and this screen opens itself.
@@ -335,9 +360,9 @@ A redraw there is an e-paper refresh, and this screen opens itself.
 ## Unread indicators
 
 Unread messages are marked in two places, and which one you get depends on
-whether the bottom nav bar is showing. On the boards where the bar is a setting
-(Config &rarr; **Nav Bar**) the alert follows the setting, not the board — turn
-the bar on and the mark moves onto it:
+whether the bottom nav bar is showing. On every board with a keyboard the bar is
+a setting (Config &rarr; **Nav Bar**), and the alert follows the setting, not the
+board — turn the bar on and the mark moves onto it:
 
 - **With the nav bar** — the **Chats** cell blinks for unread channel traffic
   and the **DM** cell blinks for unread private messages, on the same half-second

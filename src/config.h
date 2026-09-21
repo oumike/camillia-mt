@@ -585,19 +585,35 @@
 
 // ── Bottom icon nav bar (optional) ───────────────────────────────────────────
 // Where the nav bar is one of two ways to get around rather than the only one,
-// it is a setting. That means a board with a keyboard *and* a touch panel — the
-// T-Deck and the Mesh Deck today. On a touch-only board there is nothing to
-// fall back to, so the bar is not negotiable and no toggle is offered.
-// UI_TOUCH_NAV_BAR / UI_TOUCH_ONLY_PROFILE live in hal/board.h, which config.h
-// has already pulled in by this point.
+// it is a setting. That is every board with a keyboard, panel or no panel: the
+// keys reach every destination on it either way, so the bar is a preference
+// about what the bottom of the screen looks like. On a touch-only board there is
+// nothing to fall back to, so the bar is not negotiable and no toggle is
+// offered. UI_TOUCH_NAV_BAR / UI_TOUCH_ONLY_PROFILE live in hal/board.h, which
+// config.h has already pulled in by this point.
 #if UI_TOUCH_NAV_BAR && !UI_TOUCH_ONLY_PROFILE
 #define HAS_NAV_BAR_TOGGLE 1
 #else
 #define HAS_NAV_BAR_TOGGLE 0
 #endif
-// On by default: the bar shipped on before it was optional, and this keeps a
-// device that upgrades looking like the release it upgraded from.
+// The default splits on whether the board has ever drawn the bar.
+//
+// On where it has (T-Deck, T-Deck Pro, Mesh Deck): the bar shipped on before it
+// was optional, and this keeps a device that upgrades looking like the release
+// it upgraded from.
+//
+// Off where it has not (Cardputer, M9, Pager — issue #92). A fresh install on
+// those is the key-hint strip they draw today, down to the pixel; the bar
+// is something the user goes and switches on. Note that this default only
+// reaches a *fresh* config — a device upgrading into this firmware has
+// navBarEnabled sitting in its stored blob from back when the field was written
+// unconditionally, and cfgMigrateStoredConfig() in main_lvgl.cpp is what stops
+// that leaking through as a bar switched on by itself.
+#if HAS_TOUCH
 #define MY_NAV_BAR_ENABLED 1
+#else
+#define MY_NAV_BAR_ENABLED 0
+#endif
 
 // A notification LED that blinks while messages are unread. Only the Mesh Deck
 // has one wired (RGB cathodes on expander 0x59 P10..P12, driven by
