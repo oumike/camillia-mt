@@ -603,6 +603,38 @@ const NotifyLightTimeoutOption kNotifyLightTimeouts[] = {
 const int kNotifyLightTimeoutCount =
     (int)(sizeof(kNotifyLightTimeouts) / sizeof(kNotifyLightTimeouts[0]));
 
+// ── M9 keypad auto-light ───────────────────────────────────────────────
+// Brightness the companion controller uses for its own keypress auto-light, not
+// an on/off switch -- the host cannot light these LEDs. See KB_REG_BACKLIGHT in
+// hal/hw_m9.h.
+//
+// Off is last rather than first, matching every other stepped list here: it is
+// the answer you go to deliberately, and it is the expensive one to undo, since
+// the controller keeps the auto-light disabled until the next power cycle.
+const KbBacklightOption kKbBacklightLevels[] = {
+    {  64, "Low"    },
+    { 160, "Medium" },
+    { 255, "High"   },
+    {   0, "Off"    },
+};
+const int kKbBacklightLevelCount =
+    (int)(sizeof(kKbBacklightLevels) / sizeof(kKbBacklightLevels[0]));
+
+const char *kbBacklightLevelName(uint8_t level) {
+    for (int i = 0; i < kKbBacklightLevelCount; i++) {
+        if (kKbBacklightLevels[i].level == level) return kKbBacklightLevels[i].label;
+    }
+    // A value from a hand-edited YAML. Named for what it is rather than snapped
+    // to a label it does not have -- the row should not claim "Medium" for 200.
+    return "Custom";
+}
+
+uint8_t cfgCoerceKbBacklightLevel(int level) {
+    if (level <= 0) return 0;      // an exact 0, or nonsense, means off
+    if (level > 255) return 255;
+    return (uint8_t)level;         // any 1..255 is a real brightness; keep it
+}
+
 const char *notifyLightTimeoutName(uint16_t secs) {
     for (int i = 0; i < kNotifyLightTimeoutCount; i++) {
         if (kNotifyLightTimeouts[i].secs == secs) return kNotifyLightTimeouts[i].label;
@@ -1084,6 +1116,10 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     strncpy(cfg.weatherServer, MY_WEATHER_SERVER, sizeof(cfg.weatherServer) - 1);
     cfg.weatherServer[sizeof(cfg.weatherServer) - 1] = '\0';
     cfg.kbBacklightEnabled = true;
+    // Full brightness, which is what the controller does on its own before
+    // anything writes this register -- so a fresh device behaves as it always
+    // did, and only a deliberate change alters the keypad.
+    cfg.kbBacklightLevel   = MY_KB_BACKLIGHT_LEVEL;
     cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
@@ -1677,6 +1713,8 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // unreachable on a board whose only way to be configured is this file.
     out += "    losElevServer: "; out += cfg.losElevServer; out += "\n";
     out += "    weatherServer: "; out += cfg.weatherServer; out += "\n";
+    snprintf(tmp, sizeof(tmp), "    keypadLightLevel: %u\n",
+             (unsigned)cfg.kbBacklightLevel); out += tmp;
     out += "    keyboardBacklight: ";
     out += cfg.kbBacklightEnabled ? "true" : "false";
     out += "\n";
@@ -2219,6 +2257,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 else if (!strcmp(key, "notifyLedColorChannel")) cfg.notifyLedColorChannel = parseNotifyLedColor(val);
                 else if (!strcmp(key, "notifyLedColorDm")) cfg.notifyLedColorDm = parseNotifyLedColor(val);
                 else if (!strcmp(key, "keyboardBacklight")) cfg.kbBacklightEnabled = parseBoolValue(val);
+                else if (!strcmp(key, "keypadLightLevel")) cfg.kbBacklightLevel = cfgCoerceKbBacklightLevel(atoi(val));
                 else if (!strcmp(key, "keyboardBlinkEnabled")) cfg.kbBlinkEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "keyboardBlinkChannelFlashes"))
                     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(atoi(val));

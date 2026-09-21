@@ -102,6 +102,10 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - C opens Config
 - N opens Nodes
 - L opens Live
+- P opens Help — the key list, the transport symbols and what the nav cells do.
+  P rather than H, which is Home on the boards with a dashboard and the channel
+  selector on the ones without, and rather than `?`, which needs Shift on every
+  one of these keyboards
 - A opens Channel Actions — M mutes/unmutes the channel, L toggles whether this
   node broadcasts its position on it (Share Location in Config gates all channels)
 - In the DM list, D deletes the selected conversation. A confirmation dialog
@@ -136,6 +140,11 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 ### LilyGo T-Deck (tdeck)
 
+- **Keyboard Light** (Config, and in web config) sets the backlight's resting
+  brightness: Low, Medium, High or Off. Off is what this board has always done —
+  the keyboard stayed dark and lit only to flag an unread message. Notification
+  blinks work at any level: they pulse away from whatever you pick and settle
+  back on it
 - H toggles the channel selector
 - Alt+H returns directly to chat on keyboard-controller firmware with LilyGo's
   five-byte raw-matrix mode (2025-06-12 or newer). It closes things; it does not
@@ -152,6 +161,9 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 
 ### LilyGo T-Deck Pro (tdeck-pro)
 
+- **Keyboard Light** (Config, and in web config) sets how bright the keyboard is
+  when it is lit. **Alt+B** still turns it on and off; this is only how bright
+  "on" is, and it defaults to full, which is what the board has always done
 - Uses the same letter shortcuts as T-Deck: H opens the channel selector, J/K
   navigate, and D/C/N/L/A open the shared device surfaces.
 - Shift and Symbol select the printed upper/symbol layers. Alt+E/F/S/X provide
@@ -225,6 +237,25 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - **Nodes has no dedicated button on this board.** Five destinations and four
   buttons, and the roster is the one that is looked up rather than lived in —
   N reaches it from the keyboard, as does Tools' own list
+- **The keypad light cannot be held on, and there is no shortcut for it.** The
+  LEDs belong to the keyboard's companion controller, not to this firmware. That
+  controller lights them for about ten seconds after a keypress and then puts
+  them out again, which is the whole of the behaviour — a keypad that seems to
+  light inconsistently is that timeout, not a fault. The one register the host
+  can write (`KB_REG_BACKLIGHT`) sets how bright that auto-light is; writing 255
+  lights nothing on its own, so there is no setting this firmware could offer
+  that would keep the keypad lit. Verified on hardware against the early
+  ESP32-S2 controller. The T-Deck Pro's **Alt+B** has no equivalent here
+- **Keyboard Light** (Config, and in web config) sets how bright that auto-light
+  is: Low, Medium, High or Off. It is the one part of the keypad light this
+  firmware can control. **Off** stops the controller lighting the keypad at all,
+  and it stays off until the device is next power-cycled — so turning it back up
+  takes effect after a power cycle, not immediately. Every other change applies
+  at once. The level is written again at each boot, because the controller comes
+  up at its own default rather than yours
+- **Ctrl opens the emoji tray while composing**, with the glyph inserted at the
+  cursor. The key did nothing at all before. The keyboard's own symbol layer is
+  the controller's business and is unaffected
 
 ## Home dashboard
 
@@ -342,11 +373,26 @@ How you reach it depends on the board:
 - **Keyboard boards** — **H** on the chat screen, or the **Alt+H / Sym+H**
   chord. **C** is the chat screen (a second C opens the channel list, where the
   board has a dropdown rather than an anchored list), and **F** is Config, which
-  used to be C. D, N and L are unchanged
+  used to be C. D, N and L are unchanged, and **P** is Help
 - The **Alt+C chord** goes to chat *without* opening the channel list. That is
   deliberate: the chord is the reflexive "get me out of here" gesture, and
   binding it to the channel list is what once had the Mesh Deck dropping
   keystrokes. A plain C, typed on purpose, still opens the list
+- **Every nav-bar destination has an Alt chord**, on the keyboards that have an
+  Alt of their own: Alt+H (Home), Alt+C (Chat), Alt+F (Config), Alt+D, Alt+N,
+  Alt+L (Tools) and Alt+P (Help). A chord reaches its destination from anywhere
+  — out of a filter, a picker or a text field, where the plain letter would be
+  typed instead. Plain P still means what it means on the screen you are on,
+  such as (P)reset inside Discovery, because the keyboard resolves Alt before
+  the letter is read
+- Which boards: **T-Deck**, **Mesh Deck** and **Cardputer** share one chord
+  table; the **T-Deck Pro** has its own, identical except that Config has no
+  chord there (Alt+F is next-channel on that keyboard — plain F still opens
+  Config, as does the nav bar). On the **Cardputer** there is no dashboard, so
+  Alt+H means "close everything and get back to chat", and Config is Alt+C
+  rather than Alt+F. The **Pager** has no Alt at all, and the **M9**'s keyboard
+  controller resolves Alt before the firmware sees it — on those two the plain
+  letters on the chat screen are the way in, plus the M9's dedicated buttons
 - **T-Deck Pro exception**: Config has no Alt chord there. Alt+F is already
   next-channel on that keyboard, and the pair of channel chords straddle Alt+D
   on the physical home row. Plain F still opens Config, as does the nav bar
@@ -1936,6 +1982,32 @@ or a tap outside dismisses the tray without sending.
   bottom edge: it fills all but a few pixels of the screen, so the tap-outside
   gesture the other builds rely on has almost nothing left to aim at
 
+To **insert** an emoji into a message you are already typing — as opposed to
+sending one on its own — the tray opens in insert mode instead, and the glyph
+you pick lands at the cursor. It stays open, because picking several in a row is
+the usual case; a close key dismisses it.
+
+- **T-Deck** — press the **microphone key**, between M and Enter. Nothing on
+  this board records audio, so that key did nothing at all before. It is
+  invisible to the ordinary key path (the keyboard's own controller swallows it,
+  exactly as it swallows Alt), so the firmware reads it straight off the key
+  matrix while a message is open
+- **T-Deck / T-Deck Pro / Mesh Deck** — tap the 😀 button beside the message box
+- **T-Lora Pager** — the same button, reached by the wheel: roll forward to walk
+  the caret through what you have typed, and the detent after the last character
+  steps onto the button. **Enter** there opens the tray. Rolling back, or typing
+  anything at all, returns to the message
+- **Mesh Deck** — also the **far-left key of the bottom row**, which had no
+  meaning before. Or press the **symbol key** twice: the first press opens the
+  symbol tray, the second swaps it for emoji, and a third closes it. A close key
+  gets out from either tray, so there is nothing to cycle past
+- **M9** — press **Ctrl**. It opens the tray and does not close it again; use
+  the close key for that
+- Picking an emoji leaves the tray up, because picking several in a row is the
+  usual case — so a brief **😀 added** appears at the foot of the tray to confirm
+  the glyph went into the message behind it
+- **Touch builds** — the 😀 button beside Cancel / Send, as above
+
 The web-config composer can also send any emoji your browser can type.
 
 ### Message Actions
@@ -2612,14 +2684,20 @@ Primary usage is touch.
   opens its node actions
 - **Every popup that a keyboard build closes with Backspace has an X in its
   top-right corner here instead** — the same button, in the same place, on
-  every one of them: Channels, Device Info, Action Result, Help, Release Notes,
-  Bluetooth Keyboard, the emoji tray, Channel Actions, the Tools and Live
-  Filter pickers, Locate, Line of Sight, the traceroute progress popup, the New
-  DM node picker and the hidden system-stats screen. The full-screen tools —
-  the SNR/RSSI and Channel Utilization charts, Beacons, Discovery and the MQTT
-  monitor — put the same X at the right end of their header bar, with their own
-  actions to its left. Where a popup also dismissed on a tap outside it, that
-  still works
+  every one of them: Channels, Device Info, Action Result, Release Notes,
+  Bluetooth Keyboard, the emoji tray, Channel Actions, the Live Filter picker,
+  Locate, Line of Sight, the traceroute progress popup, the New DM node picker
+  and the hidden system-stats screen. The full-screen tools — the SNR/RSSI and
+  Channel Utilization charts, Beacons, Discovery and the MQTT monitor — put the
+  same X at the right end of their header bar, with their own actions to its
+  left. Where a popup also dismissed on a tap outside it, that still works
+- **Tools and Help are screens, not popups.** Both own a cell on the nav bar, so
+  both carry the bar with their own cell lit, and every other cell still works
+  from inside them. Tools used to be a picker on a dimming backdrop: the bar
+  behind it was greyed out and a tap aimed at Nodes only closed Tools. That
+  backdrop is gone, and with it tap-outside-to-close — Tools now closes the way
+  Nodes and Config do, by the corner X, the close key, Home, or a second tap on
+  the wrench. Help closes the same ways, plus a second tap on the ?
 - **Every popup that stages a value before committing has a Cancel/Save row**,
   in the same place and the same shape — the Brightness, Battery Trim, Location
   Precision and Light Timeout sliders, Notification Sound (whose commit reads

@@ -600,7 +600,48 @@ struct RhinoConfig {
     // memcpy's straight over anything placed there. Same trap as every pad
     // above.
     uint8_t  _reservedPad14[3];
+
+    // ── M9 keypad auto-light brightness ────────────────────────────────────
+    // How bright the M9's companion controller lights the keypad after a
+    // keypress, 0..255, written to KB_REG_BACKLIGHT. Not an on/off control and
+    // deliberately not named like one: the LEDs belong to that controller, which
+    // lights them for ~10 s per keypress and cannot be told to hold them on. See
+    // the note on KB_REG_BACKLIGHT in hal/hw_m9.h.
+    //
+    // 0 is a real setting rather than "unset": it disables the auto-light
+    // altogether, and does so until the next power cycle, which is why the UI
+    // says as much when it is chosen.
+    //
+    // Unconditional rather than #if defined(DEVICE_M9), like notifyLedEnabled and
+    // kbBlinkEnabled above, so the blob layout does not differ between boards.
+    //
+    // Safe at the end: _reservedPad14 above consumes the struct's trailing
+    // padding, so this starts at exactly the previous sizeof(RhinoConfig) and an
+    // upgrading device keeps the compiled default rather than reading a zero --
+    // which matters here more than usual, since zero is the one value that turns
+    // the keypad light off until the device is power-cycled.
+    uint8_t  kbBacklightLevel;
+    // For whoever appends next: kbBacklightLevel is one byte at the end of a
+    // 4-aligned struct, so the stored blob carries three bytes past it that the
+    // load memcpy's straight over anything placed there.
+    uint8_t  _reservedPad15[3];
 };
+
+// ── Keypad auto-light levels ──────────────────────────────────────────
+// Four stops rather than a free 0..255: the value sets the brightness of a light
+// that comes on by itself for a few seconds, and nobody needs to tell those
+// apart at single-step resolution.
+struct KbBacklightOption {
+    uint8_t     level;
+    const char *label;
+};
+extern const KbBacklightOption kKbBacklightLevels[];
+extern const int kKbBacklightLevelCount;
+
+// Label for a stored value, listed or not, so a hand-edited YAML renders.
+const char *kbBacklightLevelName(uint8_t level);
+// Nearest listed stop, for anything arriving from outside.
+uint8_t cfgCoerceKbBacklightLevel(int level);
 
 // ── Stored-config epochs ─────────────────────────────────────────────────────
 // 0 is reserved and never assigned: it is what a blob that predates cfgEpoch

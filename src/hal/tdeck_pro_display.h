@@ -72,7 +72,14 @@ public:
         memset(_sentMono, 0xFF, kMonoBytes);
 
         SPI.begin(TFT_SPI_SCK, TFT_SPI_MISO, TFT_SPI_MOSI, TFT_CS);
-        _epd.init(115200, true, 2, false, SPI,
+        // 0, not a baud rate: GxEPD2 reads this argument as "turn diagnostics
+        // on" rather than as a console setting. Non-zero made it print a
+        // _PowerOn and _Update_Part timing line for every panel refresh -- which
+        // on e-paper is every screen change, several lines a second while the UI
+        // is busy -- and call Serial.begin() a second time underneath a console
+        // this firmware had already opened. Panel timing is available from the
+        // loop phase report when it is wanted.
+        _epd.init(0, true, 2, false, SPI,
                   SPISettings(TFT_SPI_WRITE_HZ, MSBFIRST, SPI_MODE0));
         _epd.setRotation(TFT_ROTATION_DEFAULT);
         _epd.epd2.setBusyCallback(&LGFX_TDeck::busyCallback);

@@ -1,5 +1,6 @@
 #include "web_config.h"
 #include "ble_keyboard.h"   // coexistence holds Wi-Fi modem sleep on
+#include "keyboard.h"       // keyboardSetKeypadBacklight(), applied on save
 #if HAS_VNC_HOST
 #include "vnc_host.h"
 #endif
@@ -4287,6 +4288,35 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             "clock restarts on each new message, and reading the message stops it "
             "immediately either way. Never means it keeps reminding until read.</p>";
 #endif
+#if HAS_KB_BACKLIGHT_LEVEL
+    html += "<label>Keyboard Light<select name='keypad_light'>";
+    for (int i = 0; i < kKbBacklightLevelCount; i++) {
+        snprintf(tmp, sizeof(tmp), "<option value='%u'%s>%s</option>",
+                 (unsigned)kKbBacklightLevels[i].level,
+                 (gCfg->kbBacklightLevel == kKbBacklightLevels[i].level) ? " selected" : "",
+                 kKbBacklightLevels[i].label);
+        html += tmp;
+    }
+    html += "</select></label>";
+    html += "<p style='font-size:.8em;color:var(--muted);margin:.2em 0 0'>"
+#if defined(DEVICE_M9)
+            "How brightly the keypad lights itself after a keypress. The keypad "
+            "LEDs belong to the keyboard's own controller, which lights them for "
+            "about ten seconds at a time - this sets how bright that is, and "
+            "cannot hold them on. Off stops it lighting at all, and the keyboard "
+            "then stays dark until the device is next power-cycled.</p>";
+#elif defined(DEVICE_TDECK_PRO)
+            "How brightly the keyboard is lit. Alt+B still turns it on and off - "
+            "this is how bright \"on\" is. Notification blinks still work at any "
+            "level: they pulse away from whatever you pick and settle back on "
+            "it.</p>";
+#else
+            "How brightly the keyboard stays lit. Off is what this board has "
+            "always done - the backlight rested dark and lit only to flag an "
+            "unread message. Notification blinks still work at any level: they "
+            "pulse away from whatever you pick and settle back on it.</p>";
+#endif
+#endif
 #if HAS_NAV_BAR_TOGGLE
     html += "<label>Bottom Nav Bar<select name='nav_bar'>"
             "<option value='1'"; if ( gCfg->navBarEnabled) html += " selected"; html += ">Enabled</option>"
@@ -7521,6 +7551,16 @@ static void handlePostSave() {
     if (server.hasArg("nav_bar")) {
         gCfg->navBarEnabled = server.arg("nav_bar").toInt() != 0;
     }
+#if HAS_KB_BACKLIGHT_LEVEL
+    // hasArg-guarded like the two above: the control only exists on the one
+    // board that has this, and an absent field would otherwise read back as 0 --
+    // which here means switching the keypad light off until a power cycle.
+    if (server.hasArg("keypad_light")) {
+        gCfg->kbBacklightLevel =
+            cfgCoerceKbBacklightLevel(server.arg("keypad_light").toInt());
+        keyboardSetKeypadBacklight(gCfg->kbBacklightLevel);
+    }
+#endif
 #if defined(DEVICE_MESH_DECK)
     // Legacy compatibility for older cached pages that still post notify_led:
     // the new model is per-type control, so turning the old global toggle off

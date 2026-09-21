@@ -49,6 +49,34 @@
 // dashboard instead (HAS_HOME_DASHBOARD): with two glance-and-read surfaces
 // there has to be a code for each, and "Home" could only keep one of them.
 #define KEY_OPEN_CHAT   0x94
+// Alt+P. Help is a nav destination with a cell of its own, so it gets a chord
+// like the rest of them. P rather than H, which is Home wherever there is a
+// dashboard, or the channel list where there is not — and rather than a
+// question mark, which is a Shift layer away on every one of these keyboards.
+#define KEY_OPEN_HELP   0x95
+
+
+// A key whose only job is the emoji tray. The Mesh Deck has one: the far-left
+// key of its bottom row, matrix position left[4][0], which this firmware mapped
+// to KEY_NONE because the published key list gives it no meaning and nothing
+// else wanted it. A dead key on a 48-key matrix is worth more as a way to reach
+// the emoji tray than as nothing at all.
+//
+// Acted on only while a compose box is open, which is the same scope the mic key
+// above has. Outside compose it stays as dead as it was.
+#define KEY_EMOJI_PICKER 0x96
+
+// The M9's control key. It opens the emoji tray inside a message -- see the
+// compose key handling in main_lvgl.cpp. The keyboard's own symbol layer is the
+// controller's business and this side never sees it, so Ctrl carries no meaning
+// here that the tray has to be pressed past.
+//
+// Raised from raw 0x88 and 0x90, the two codes this board sends that Elecrow's
+// key list does not name. One of them is Ctrl -- confirmed by the key working
+// when they are mapped and not when they are dropped -- and the other has no
+// meaning here either way. `keys` on the serial console will separate them if it
+// ever matters.
+#define KEY_M9_CTRL 0x97
 
 // The key currently held down (mapped code), or KEY_NONE when nothing is held,
 // plus how long it has been down. Pager builds report this from real press/
@@ -72,6 +100,9 @@ void     meshDeckKeyboardSetLedColor(uint8_t color, bool on);
 // the outside, and a board's controller revision can move a scancode. This turns
 // the guess into a reading. Off by default; toggled by the "keys" serial command.
 void     keyboardSetKeyTrace(bool on);
+// M9 keypad auto-light brightness, 0..255. A no-op on every other board; see the
+// definition in keyboard.cpp for why this is not an on/off control.
+void     keyboardSetKeypadBacklight(uint8_t level);
 bool     keyboardKeyTrace();
 
 char     keyboardHeldKey();
@@ -98,6 +129,19 @@ uint32_t keyboardLastKeyMs();
 // than an error. There is no way to read the level back — the C3 answers reads
 // with key data only — so callers own whatever they last set.
 void tdeckKeyboardSetBacklight(uint8_t duty);
+// Prints which matrix bits are held, for identifying a key the keyboard's own
+// controller never reports as a character -- the mic key, as it turns out, and
+// Alt before it. `keys matrix` on the serial console runs it.
+void tdeckKeyboardProbeRawMatrix(uint32_t ms);
+// True once per press of the microphone key (C0/R6), which the keyboard's own
+// controller never reports as a character. Polls the key matrix, so only call it
+// where the answer is wanted -- it costs an I2C round trip and briefly puts the
+// controller in raw mode. Throttled and IRQ-guarded internally; see the
+// definition. A no-op returning false on every other board.
+bool keyboardMicPressed();
+#endif
+#if !defined(DEVICE_TDECK)
+static inline bool keyboardMicPressed() { return false; }
 #endif
 
 class TDeckKeyboard {

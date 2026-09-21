@@ -648,6 +648,75 @@
 #else
 #define HAS_KB_BLINK 0
 #endif
+
+// The other half of that note, and the only keypad-light control the M9 does
+// have: KB_REG_BACKLIGHT sets how bright its controller's own keypress
+// auto-light is. That is a setting worth offering even though "hold the keypad
+// lit" is not -- it is the difference between a keypad that flares in a dark
+// room and one that does not, and 0 switches the auto-light off altogether.
+//
+// M9 only on purpose. The other backlit boards drive a GPIO they own outright
+// (KB_BL) and get a plain on/off from kbBacklightEnabled instead; offering them
+// a brightness they cannot vary would be a row that does nothing.
+// The T-Deck joins it for a different reason: its keyboard backlight is a real
+// 0..255 duty owned by the keyboard's own ESP32-C3 and set over I2C
+// (tdeckKeyboardSetBacklight), and until now nothing rested it anywhere but
+// dark -- it lit only for notification blinks. The level chosen here becomes its
+// resting brightness, which the blink pulses away from and returns to.
+//
+// Not the T-Deck Pro or the Pager: both drive a plain KB_BL GPIO with
+// digitalWrite, so all they have is on and off. They keep kbBacklightEnabled,
+// which is a bool and says so.
+// An emoji button in the compose row, on the keyboard builds where something can
+// aim at it: the ones with a touch panel, plus the Pager, whose wheel steps onto
+// it. The touch-only builds have carried this button all along and build it in
+// their own branch of openComposePrompt().
+//
+// Not the M9 or the Cardputer: no panel and no pointer, so a button there would
+// be something you can see and not reach. Both have a key instead -- Ctrl on the
+// M9, and the Cardputer reaches the tray from the chat screen.
+#if !UI_TOUCH_ONLY_PROFILE && (HAS_TOUCH || defined(DEVICE_TLORA_PAGER_TFT))
+#define HAS_COMPOSE_EMOJI_BTN 1
+#else
+#define HAS_COMPOSE_EMOJI_BTN 0
+#endif
+
+// Which boards have a keyboard light with a brightness rather than a state.
+//
+// M9: KB_REG_BACKLIGHT sets how bright its controller's own keypress
+// auto-light is -- see hal/hw_m9.h. T-Deck: a real 0..255 duty owned by the
+// keyboard's ESP32-C3 and set over I2C. T-Deck Pro: a plain GPIO, driven with
+// LEDC instead of digitalWrite (KB_BL_PWM_CH in hal/hw_tdeck_pro.h), where the
+// level is how bright "lit" is and Alt+B still decides lit or dark -- that
+// toggle is the gesture you reach for in the dark and should not have to ask
+// how bright.
+//
+// Not the Pager: the same plain GPIO, but no keyboard-light gesture to hang a
+// brightness off and a blink that only runs while the device is asleep. It
+// keeps kbBacklightEnabled, a bool, and says so.
+#if defined(DEVICE_M9) || defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
+#define HAS_KB_BACKLIGHT_LEVEL 1
+#else
+#define HAS_KB_BACKLIGHT_LEVEL 0
+#endif
+// Defaults differ because the two boards rest in different places, and in both
+// cases the default is "what this board already did".
+//
+// M9: full brightness, which is what its controller uses for the auto-light
+// before anything writes the register. Off (0) there would be a firmware update
+// darkening a keypad nobody asked it to.
+//
+// T-Deck: off, because its backlight has always rested dark and only lit for a
+// blink. Anything else would be an update switching a light on.
+//
+// T-Deck Pro: full, because Alt+B already decides whether the keyboard is lit
+// at all and it has always come up lit at whatever the pin could give. The
+// level is only how bright that is, so full is "unchanged".
+#if defined(DEVICE_TDECK)
+#define MY_KB_BACKLIGHT_LEVEL 0
+#else
+#define MY_KB_BACKLIGHT_LEVEL 255
+#endif
 #define MY_KB_BLINK_ENABLED 1
 // Flashes per notification cycle. DMs get the longer pattern: with no
 // notification LED on either board, length is what distinguishes them.

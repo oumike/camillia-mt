@@ -63,7 +63,19 @@
 #define KB_ADDR                0x34
 #define KB_INT                   15
 #define KB_INT_ACTIVE_LEVEL     LOW
+// Keyboard backlight. A plain GPIO, unlike the T-Deck's I2C-owned one -- so
+// brightness here means driving it with LEDC rather than asking a controller.
+//
+// Channel 1 because 0 is the frontlight (TFT_BL_PWM_CH above) and this board has
+// no buzzer (BOARD_BUZZER -1), so nothing else on it competes for a channel.
+// 12 kHz matches the frontlight: well clear of audible, and far below anything
+// an LED driver would struggle with.
+//
+// Once attached, the pin belongs to LEDC -- digitalWrite() on it does nothing.
+// Every write goes through keyboardSetKeypadBacklight().
 #define KB_BL                    42
+#define KB_BL_PWM_CH              1
+#define KB_BL_FREQ            12000
 
 // The touch controller may report as CST328 or CST3530.
 #define HAS_TOUCH                 1

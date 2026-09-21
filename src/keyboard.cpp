@@ -24,6 +24,12 @@ static char altNavShortcut(char k) {
         case 'd': case 'D': return KEY_OPEN_DMS;
         case 'n': case 'N': return KEY_OPEN_NODES;
         case 'l': case 'L': return KEY_OPEN_TOOLS;
+        // Help. Plain P means other things on the screens that bind it —
+        // (P)reset in Discovery — but a chord never reaches them: the driver has
+        // resolved Alt by the time this returns, so what travels on is a
+        // destination rather than a letter. Exactly how Alt+C coexists with
+        // Discovery's own (C)lear.
+        case 'p': case 'P': return KEY_OPEN_HELP;
 #if HAS_HOME_DASHBOARD
         case 'c': case 'C': return KEY_OPEN_CHAT;
         case 'f': case 'F': return KEY_OPEN_CONFIG;
@@ -60,6 +66,37 @@ static TwoWire &keyboardBus() {
     return Wire1;
 #else
     return Wire;
+#endif
+}
+
+// Sets how bright the M9's controller lights the keypad after a keypress. It
+// does not light them: the LEDs are the controller's and it runs its own ~10 s
+// auto-light (see KB_REG_BACKLIGHT in hal/hw_m9.h). 0 switches that auto-light
+// off, and the controller keeps it off until the next power cycle -- so raising
+// it again from 0 does nothing until the device has been power-cycled, which is
+// what the settings row says.
+//
+// Defined on every board and a no-op off the M9, so callers need no guard of
+// their own. Failures are logged rather than retried: this is a cosmetic setting
+// on the bus the key reads share, and a retry loop here would cost keystrokes.
+void keyboardSetKeypadBacklight(uint8_t level) {
+#if defined(DEVICE_M9)
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission((uint8_t)KB_ADDR);
+    bus.write((uint8_t)KB_REG_BACKLIGHT);
+    bus.write(level);
+    const int rc = bus.endTransmission();
+    Serial.printf("[kb-bl] m9 keypad auto-light level=%u ack=%d\n",
+                  (unsigned)level, rc);
+#elif defined(DEVICE_TDECK)
+    // A real backlight duty here, not an auto-light brightness: this is the
+    // level the keyboard rests at until something changes it.
+    tdeckKeyboardSetBacklight(level);
+#elif defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
+    // The pin belongs to LEDC from begin(), so this is the only way to move it.
+    ledcWrite(KB_BL_PWM_CH, level);
+#else
+    (void)level;
 #endif
 }
 
@@ -304,7 +341,11 @@ const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
     {KEY_NONE, KEY_NONE, KEY_NONE},
     {KEY_NONE, KEY_NONE, KEY_NONE},
     {' ', ' ', ' '},
-    {KEY_NONE, KEY_NONE, '0'},
+    // The microphone key, keyNum 34, measured with the key trace. Nothing on
+    // this board records audio and the tap layer here was empty, so it opens
+    // the emoji tray while a message is open; KEY_EMOJI_PICKER is ignored
+    // everywhere else. The Sym layer keeps its '0'.
+    {KEY_EMOJI_PICKER, KEY_NONE, '0'},
     {KEY_NONE, KEY_NONE, KEY_NONE},
 };
 #else
@@ -449,6 +490,10 @@ char tloraTranslateKey(uint8_t keyNum) {
         else if (keyNum == 18) nav = KEY_OPEN_DMS;
         else if (keyNum == 24) nav = KEY_OPEN_NODES;
         else if (keyNum == 12) nav = KEY_OPEN_TOOLS;
+        // Help, matching Alt+P in the shared table. 1='p' -- this keyboard's map
+        // starts at the top-right of the matrix, so p is index 0 and not the
+        // tenth entry it is on the boards whose map starts at q.
+        else if (keyNum == 1) nav = KEY_OPEN_HELP;
 #if HAS_HOME_DASHBOARD
         // C is chat here as everywhere else. Config does NOT move to F on this
         // board: F is keyNum 17, which is already Alt+next-channel, and the two
@@ -554,6 +599,16 @@ void tloraDrainController() {
             if (ev == 0) break;
             bool pressed = (ev & 0x80) != 0;
             uint8_t keyNum = ev & 0x7F;
+            // Every event the controller reports, press and release alike, and
+            // before anything filters them. The Pager and the Pro return through
+            // tloraReadMappedKey() long before readKey()'s own trace line, so
+            // `keys` used to be silent on both -- which reads as "this key sends
+            // nothing" when it may only mean nothing was listening.
+            if (sKeyTrace) {
+                Serial.printf("[kb] tca ev=0x%02X keyNum=%u %s\n",
+                              (unsigned)ev, (unsigned)keyNum,
+                              pressed ? "down" : "up");
+            }
 
             // Every press counts as typing activity, modifiers included, so the
             // e-paper build can tell a burst is still in flight even when the
@@ -709,7 +764,12 @@ static const char kMdKeymapLeft[5][5] = {
     {'q', 'w', 'e', 'r', 't'},
     {'a', 's', 'd', 'f', 'g'},
     {MD_KEY_SHIFT, 'z', 'x', 'c', 'v'},
-    {KEY_NONE, KEY_TAB, MD_KEY_ALT, ',', ' '},
+    // [4][0] is the far-left key of the bottom row. Attaky's key list gives it
+    // no meaning and it sat as KEY_NONE -- a physical key that did nothing. It
+    // opens the emoji tray inside a message now, which is the one thing this
+    // matrix had no room to reach: the symbol key on the right half already
+    // carries punctuation, and every letter is spoken for.
+    {KEY_EMOJI_PICKER, KEY_TAB, MD_KEY_ALT, ',', ' '},
 };
 static const char kMdKeymapRight[5][5] = {
     {'6', '7', '8', '9', '0'},
@@ -972,6 +1032,111 @@ void tdeckKeyboardSetBacklight(uint8_t duty) {
     (void)Wire.endTransmission();
 }
 
+// Names whichever matrix bits are held, for finding a key the C3 does not report
+// as a character. The mic key is one: with the key trace on it prints nothing at
+// all, because the controller swallows it exactly as it swallows Alt -- which is
+// why reading the matrix is the only way to see either of them.
+//
+// Samples for `ms` and reports every bit it saw set, so the key can simply be
+// held down while this runs. Bounded and one-shot on purpose: it flips the
+// controller between raw and key mode on every sample, which drops characters,
+// so it is a thing you ask for rather than a thing left running.
+void tdeckKeyboardProbeRawMatrix(uint32_t ms) {
+    if (!sTdeckKeyboardRawModeSupported) {
+        Serial.println("[kb-probe] raw matrix mode not supported by this keyboard firmware");
+        return;
+    }
+    Serial.printf("[kb-probe] hold the key now - sampling for %lu ms\n",
+                  (unsigned long)ms);
+
+    uint8_t seen[5] = {};
+    const uint32_t until = millis() + ms;
+    while ((int32_t)(millis() - until) < 0) {
+        Wire.beginTransmission(KB_ADDR);
+        Wire.write(TDECK_KB_MODE_RAW_CMD);
+        if (Wire.endTransmission() == 0) {
+            uint8_t matrix[5] = {};
+            const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
+            uint8_t readCount = 0;
+            while (Wire.available() && readCount < sizeof(matrix)) {
+                matrix[readCount++] = (uint8_t)Wire.read();
+            }
+            if (count == sizeof(matrix) && readCount == sizeof(matrix)) {
+                for (uint8_t i = 0; i < sizeof(matrix); i++) seen[i] |= matrix[i];
+            }
+        }
+        Wire.beginTransmission(KB_ADDR);
+        Wire.write(TDECK_KB_MODE_KEY_CMD);
+        (void)Wire.endTransmission();
+        delay(20);
+    }
+
+    bool any = false;
+    for (uint8_t col = 0; col < sizeof(seen); col++) {
+        for (uint8_t row = 0; row < 8; row++) {
+            if (seen[col] & (1u << row)) {
+                Serial.printf("[kb-probe] held: C%u/R%u   (matrix[%u] bit %u)\n",
+                              col, row, col, row);
+                any = true;
+            }
+        }
+    }
+    if (!any) Serial.println("[kb-probe] nothing held - this key is not in the matrix scan");
+    Serial.printf("[kb-probe] raw bytes seen: %02X %02X %02X %02X %02X\n",
+                  seen[0], seen[1], seen[2], seen[3], seen[4]);
+    // For reference, so the answer can be read against a key that is known.
+    Serial.println("[kb-probe] (Alt is C0/R4 on this keyboard)");
+}
+
+// The mic key, measured with `keys matrix`: C0/R6, one row from Alt's C0/R4.
+// Like Alt it is never reported as a character -- the C3 keeps both to itself --
+// so the matrix is the only place it exists, and it needs an edge rather than a
+// key code: there is no byte to switch on.
+//
+// Two things keep the cost of looking off the typing path. The poll is throttled,
+// and it is skipped entirely while the keyboard IRQ is asserted, which is the
+// controller saying it has a character waiting -- flipping it into raw mode at
+// that moment is what would drop the character. Between them, the bus sees this
+// only in the gaps, and only while the caller asks (compose).
+static bool tdeckKeyboardMicPressedEdge() {
+    static bool     wasHeld = false;
+    static uint32_t lastPollMs = 0;
+
+    if (!sTdeckKeyboardRawModeSupported) return false;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastPollMs) < 90) return false;
+#if (KB_INT >= 0)
+    if (digitalRead(KB_INT) == KB_INT_ACTIVE_LEVEL) return false;
+#endif
+    lastPollMs = now;
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_RAW_CMD);
+    if (Wire.endTransmission() != 0) return false;
+
+    uint8_t matrix[5] = {};
+    const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
+    uint8_t readCount = 0;
+    while (Wire.available() && readCount < sizeof(matrix)) {
+        matrix[readCount++] = (uint8_t)Wire.read();
+    }
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_KEY_CMD);
+    (void)Wire.endTransmission();
+
+    if (count != sizeof(matrix) || readCount != sizeof(matrix)) return false;
+
+    const bool held = (matrix[0] & (1u << 6)) != 0;
+    const bool edge = held && !wasHeld;   // the press, not the hold
+    wasHeld = held;
+    return edge;
+}
+
+bool keyboardMicPressed() {
+    return tdeckKeyboardMicPressedEdge();
+}
+
 static bool tdeckKeyboardAltHeldRaw() {
     if (!sTdeckKeyboardRawModeSupported) return false;
 
@@ -1068,7 +1233,14 @@ void TDeckKeyboard::begin() {
 #if (KB_INT >= 0)
     pinMode(KB_INT, (KB_INT_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
-#if defined(KB_BL) && (KB_BL >= 0)
+#if defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
+    // LEDC rather than a plain output, so this backlight has a brightness and
+    // not just a state. Lit at full here, before any setting is loaded, exactly
+    // as digitalWrite(HIGH) used to -- boot applies the stored level later.
+    ledcSetup(KB_BL_PWM_CH, KB_BL_FREQ, 8);
+    ledcAttachPin(KB_BL, KB_BL_PWM_CH);
+    ledcWrite(KB_BL_PWM_CH, 255);
+#elif defined(KB_BL) && (KB_BL >= 0)
     pinMode(KB_BL, OUTPUT);
     digitalWrite(KB_BL, HIGH);
 #endif
@@ -1482,8 +1654,8 @@ char TDeckKeyboard::readKey() {
     char mapped = mapKey(raw);
 #if defined(DEVICE_TDECK)
     // Order matters: altNavShortcut() first, so the I2C raw-matrix read below
-    // only happens for the five letters that could be a chord. Probing on every
-    // keystroke would put a bus round-trip in the middle of typing.
+    // only happens for the handful of letters that could be a chord. Probing on
+    // every keystroke would put a bus round-trip in the middle of typing.
     const char altNav = altNavShortcut(mapped);
     if (altNav != KEY_NONE && tdeckKeyboardAltHeldRaw()) mapped = altNav;
 #endif
@@ -1740,11 +1912,19 @@ char TDeckKeyboard::mapKey(uint8_t raw) {
 #endif
         case 0x84: return KEY_OPEN_TOOLS;    // GPS-area button below Back
         case 0x85: return KEY_OPEN_DISCOVERY;  // dedicated Map button
-        // Dedicated M9 functions have no Camillia binding yet. Their raw values
-        // overlap this driver's synthetic navigation codes, so drop them.
+        // Ctrl. Confirmed on hardware: with these mapped, Ctrl opens the emoji
+        // tray; with them dropped it does nothing. Which of the two it is has
+        // not been separated yet -- both are mapped, and whichever is not Ctrl
+        // has no other meaning here, so it costs nothing to carry.
+        //
+        // Both were dropped before this, with a note that their values overlap
+        // the driver's synthetic codes. That still matters and is handled by
+        // mapping them to a code of our own rather than letting them fall
+        // through as characters: 0x88 raw is KEY_FN_ENTER's value, and returning
+        // it unchanged would have made Ctrl press Fn+Enter.
         case 0x88:
         case 0x90:
-            return KEY_NONE;
+            return KEY_M9_CTRL;
         default: break;
     }
 #endif

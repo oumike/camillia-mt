@@ -384,6 +384,27 @@ static inline void clearNavBarStatusIcons() {
     s_navStatusDm = nullptr;
     s_navStatusChan = nullptr;
 }
+
+// The backstop that makes forgetting the call above survivable. Every screen
+// carrying a bar has to null these as it closes, and that is a rule a new screen
+// can only obey by knowing about it: Weather has carried a bar since long before
+// Tools and Help did and never nulled them, and Tools and Help arrived with the
+// same omission. The symptom is not subtle — refreshHeaderStatus() runs a few
+// times a second and writes straight into the freed label, which is a
+// LoadProhibited panic within a second of closing the screen.
+//
+// LVGL raises LV_EVENT_DELETE while the object is still addressable, so this
+// fires before the allocator can hand the memory to anything else. That is what
+// distinguishes it from the lv_obj_is_valid() check the note above rules out.
+//
+// Guarded on identity rather than nulling unconditionally: if a new cluster is
+// ever built before the old one is deleted, the statics already point at the new
+// box, and an unconditional clear here would null the live pointers on the old
+// one's way out. Every current caller tears down before it builds, so this
+// guard costs a comparison and removes a whole ordering assumption.
+static void onNavStatusClusterDeleted(lv_event_t *e) {
+    if (lv_event_get_target_obj(e) == s_navStatusBox) clearNavBarStatusIcons();
+}
 #else
 static inline void clearNavBarStatusIcons() {}
 #endif
@@ -411,6 +432,20 @@ static uint32_t s_emojiPickerRepeatLastMs = 0;
 // (reply_id + emoji flag) on that message instead of a standalone message.
 static uint32_t s_emojiPickerTapbackId = 0;
 static lv_obj_t *s_composeCharCount = nullptr;
+#if HAS_COMPOSE_EMOJI_BTN
+// The emoji button that sits to the right of the message box, on every keyboard
+// build where something can aim at it. A tap is the whole story on the boards
+// with a touch panel.
+static lv_obj_t *s_composeEmojiBtn = nullptr;
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// Whether the wheel has stepped onto that button. The Pager is the one board
+// here reaching it without a finger: it has no touch panel and no spare key, so
+// the caret walks right through the message and the detent past the last
+// character moves to the button instead of doing nothing. Enter there opens the
+// tray.
+static bool      s_composeEmojiFocused = false;
+#endif
 static lv_obj_t *s_cfgModal = nullptr;
 static lv_obj_t *s_cfgActionList = nullptr;
 static lv_obj_t *s_cfgInfoList = nullptr;
@@ -2992,6 +3027,9 @@ enum CfgActionId {
     #if HAS_LIGHT_NOTIFY
     CFG_ACTION_NOTIFY_LIGHT_TIMEOUT,
     #endif
+    #if HAS_KB_BACKLIGHT_LEVEL
+    CFG_ACTION_KB_BACKLIGHT_LEVEL,
+    #endif
     CFG_ACTION_SPLASH_MELODY,
     CFG_ACTION_OTA_UPDATE,
     CFG_ACTION_OTA_CHANNEL,
@@ -4910,6 +4948,12 @@ static const char *cfgActionLabel(int actionId, char *buf, size_t bufLen) {
                      notifyLightTimeoutName(s_cfg.notifyLightTimeoutS));
             break;
         #endif
+        #if HAS_KB_BACKLIGHT_LEVEL
+        case CFG_ACTION_KB_BACKLIGHT_LEVEL:
+            snprintf(buf, bufLen, "Keyboard Light: %s",
+                     kbBacklightLevelName(s_cfg.kbBacklightLevel));
+            break;
+        #endif
         case CFG_ACTION_SPLASH_MELODY:
             snprintf(buf, bufLen, "Splash Melody: %s", s_cfg.splashMelodyEnabled ? "On" : "Off");
             break;
@@ -6251,8 +6295,16 @@ static inline bool tdeckProKeyboardBacklightEnabled() {
 #endif
 
 static void setPagerKeyboardBacklight(bool on) {
-#if (defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)) \
-    && defined(KB_BL) && (KB_BL >= 0)
+#if defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
+    // Alt+B still decides lit or dark; the Keyboard Light setting decides how
+    // bright "lit" is. Two settings for one light only looks like one too many
+    // until you have used the toggle -- it is the gesture you reach for in the
+    // dark, and it should not have to ask how bright.
+    //
+    // digitalWrite() would do nothing here: the pin is LEDC's from begin().
+    keyboardSetKeypadBacklight(on ? cfgCoerceKbBacklightLevel((int)s_cfg.kbBacklightLevel)
+                                  : 0);
+#elif defined(DEVICE_TLORA_PAGER_TFT) && defined(KB_BL) && (KB_BL >= 0)
     digitalWrite(KB_BL, on ? HIGH : LOW);
 #else
     LV_UNUSED(on);
@@ -8498,7 +8550,12 @@ static bool kbBlinkAllowedNow() {
 static void kbBlinkSetLit(bool lit) {
     s_kbBlinkLit = lit;
 #if defined(DEVICE_TDECK)
-    tdeckKeyboardSetBacklight(lit ? kKbBlinkDuty : 0);
+    // Unlit is the user's resting level, not 0. This board used to rest dark
+    // with no say in it, so "off" was the only thing the dark half of a blink
+    // could mean; now that the keyboard has a level of its own, a blink has to
+    // pulse away from it and land back on it, or every notification would leave
+    // the keyboard darker than the user set it.
+    tdeckKeyboardSetBacklight(lit ? kKbBlinkDuty : s_cfg.kbBacklightLevel);
 #elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
     setPagerKeyboardBacklight(lit);
 #else
@@ -10633,6 +10690,12 @@ static void closeComposePrompt() {
     s_composeInput = nullptr;
     s_composeKeyboard = nullptr;
     s_composeCharCount = nullptr;
+#if HAS_COMPOSE_EMOJI_BTN
+    s_composeEmojiBtn = nullptr;
+#endif
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    s_composeEmojiFocused = false;
+#endif
     s_composeTitle = nullptr;
     s_composeTarget = COMPOSE_TARGET_CHANNEL;
     s_composeDmNodeId = 0;
@@ -10807,6 +10870,47 @@ static void serviceEmojiPickerRepeat(uint32_t nowMs) {
     emojiPickerStep(s_emojiPickerRepeatDelta);
 }
 
+// A second's worth of "that went in", for the one case where the thing that
+// changed is hidden behind the thing that changed it: the emoji tray stays open
+// after a pick, so the glyph lands in a message box nobody can see. Without this
+// a successful insert and a dead key look identical.
+//
+// Parented to the tray rather than the screen, so it cannot outlive what it is
+// reporting on -- closing the tray takes the toast with it, and LVGL cancels the
+// pending delete along with the object. Non-clickable, so it never eats a tap
+// meant for the cell underneath it.
+static void showEmojiInsertToast(const char *glyph) {
+    if (!lvObjValid(s_emojiPickerModal) || !glyph || !glyph[0]) return;
+
+    lv_obj_t *toast = lv_obj_create(s_emojiPickerModal);
+    if (!toast) return;   // out of pool: the insert still happened, say nothing
+    lv_obj_remove_style_all(toast);
+    lv_obj_add_flag(toast, LV_OBJ_FLAG_FLOATING);
+    lv_obj_clear_flag(toast, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(toast, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(toast, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_set_style_radius(toast, 6, 0);
+    lv_obj_set_style_pad_hor(toast, 8, 0);
+    lv_obj_set_style_pad_ver(toast, 3, 0);
+    lv_obj_set_style_bg_color(toast, lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(toast, 1, 0);
+    lv_obj_set_style_border_color(toast, lv_color_hex(0x8FB5E6), 0);
+
+    lv_obj_t *lbl = lv_label_create(toast);
+    if (lbl) {
+        lv_obj_set_style_text_font(lbl, emojiFont(&lv_font_montserrat_12), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s added", glyph);
+        setLabelTextEmojiSafe(lbl, buf);
+        lv_obj_center(lbl);
+    }
+    lv_obj_move_foreground(toast);
+    lv_obj_delete_delayed(toast, 900);
+}
+
 static void emojiPickerActivate(int idx) {
     if (idx < 0 || idx >= s_pickerCount) return;
     if (s_emojiPickerSendMode) {
@@ -10819,6 +10923,11 @@ static void emojiPickerActivate(int idx) {
     if (s_composeInput) {
         lv_textarea_add_text(s_composeInput, s_pickerTray[idx]);
         updateComposeCharCount();
+        // Only where the tray stays up. The symbol tray closes on the way out
+        // below, which puts the message back on screen with the character in it
+        // -- that is its own confirmation, and a toast over a closing panel
+        // would be telling you something you can already see.
+        if (s_pickerTray != kSymbolTray) showEmojiInsertToast(s_pickerTray[idx]);
     }
 
     // The symbol tray is one-shot: pick a symbol and you are back in the message
@@ -11133,6 +11242,31 @@ static void composeSetTitle(bool isReply) {
     snprintf(text, sizeof(text), "%s: %s", kind, chan);
     lv_label_set_text(s_composeTitle, text);
 }
+
+#if defined(DEVICE_TLORA_PAGER_TFT)
+// Paints the emoji button for the current focus, and puts the caret back where
+// it belongs. The textarea keeps its own cursor visible only while it is the
+// thing being driven -- two lit carets on one row reads as two selections.
+static void refreshComposeEmojiFocus() {
+    if (!lvObjValid(s_composeEmojiBtn)) return;
+    const bool on = s_composeEmojiFocused;
+    lv_obj_set_style_bg_color(s_composeEmojiBtn,
+                              on ? lvColorFrom565(s_ui.selectAccent)
+                                 : lv_color_hex(0x16386F), 0);
+    lv_obj_set_style_bg_opa(s_composeEmojiBtn, on ? LV_OPA_COVER : LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_composeEmojiBtn, on ? 2 : 1, 0);
+    lv_obj_set_style_border_color(s_composeEmojiBtn,
+                                  on ? lv_color_hex(0xE8F1FF) : lv_color_hex(0x4C76BA), 0);
+    if (lvObjValid(s_composeInput)) {
+        // showTextareaCursor() styles the caret on LV_PART_CURSOR with no state
+        // dependency, so a focus state would not touch it -- its opacity is the
+        // thing to move. Two lit carets on one row read as two selections.
+        lv_obj_set_style_border_opa(s_composeInput,
+                                    on ? LV_OPA_TRANSP : LV_OPA_COVER,
+                                    LV_PART_CURSOR);
+    }
+}
+#endif
 
 static void openComposePrompt(uint32_t replyPacketId,
                               const char *replyText,
@@ -11469,6 +11603,30 @@ static void openComposePrompt(uint32_t replyPacketId,
     composeInputHost = composeCenterBand;
 #endif
 
+#if HAS_COMPOSE_EMOJI_BTN
+    // The box and the emoji button share a row, so the button sits to the right
+    // of the message rather than under it. Built after the centre band on the
+    // boards that have one, and parented to whatever host that left behind, so
+    // the two arrangements compose instead of fighting over the same variable.
+    //
+    // The row takes the vertical slack its parent has; the box takes the
+    // horizontal slack inside the row, which keeps the button a fixed width at
+    // the right-hand end however tall the modal ends up.
+    lv_obj_t *composeInputRow = lv_obj_create(composeInputHost);
+    lv_obj_set_width(composeInputRow, lv_pct(100));
+    lv_obj_set_flex_grow(composeInputRow, 1);
+    lv_obj_set_style_min_height(composeInputRow, composeInputH, 0);
+    lv_obj_clear_flag(composeInputRow, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(composeInputRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(composeInputRow, 0, 0);
+    lv_obj_set_style_pad_all(composeInputRow, 0, 0);
+    lv_obj_set_style_pad_column(composeInputRow, 4, 0);
+    lv_obj_set_flex_flow(composeInputRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(composeInputRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    composeInputHost = composeInputRow;
+#endif
+
     s_composeInput = lv_textarea_create(composeInputHost);
     if (!s_composeInput) {
         logLvglMemDiag("compose open aborted (low LVGL mem)");
@@ -11486,11 +11644,13 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_obj_set_style_pad_bottom(
         s_composeModal,
         (lv_coord_t)(lv_font_get_line_height(&lv_font_montserrat_10) + composeModalBottomPad), 0);
-    lv_obj_set_style_min_height(s_composeInput, composeInputH, 0);
+    // The row is the thing that grows vertically now; the box fills it and takes
+    // the horizontal slack beside the button.
+    lv_obj_set_height(s_composeInput, lv_pct(100));
     lv_obj_set_flex_grow(s_composeInput, 1);
 #endif
-#if defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9)
+#if (defined(DEVICE_TDECK) || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
+     || defined(DEVICE_M9)) && !HAS_COMPOSE_EMOJI_BTN
     // composeInputH is the FLOOR now, not the exact height. It used to be both:
     // min and max were pinned to it, so the centre band grew to take the slack
     // the title and reply row left and then handed none of it to the box —
@@ -11525,6 +11685,42 @@ static void openComposePrompt(uint32_t replyPacketId,
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
     showTextareaCursor(s_composeInput);
     lv_obj_add_event_cb(s_composeInput, onComposeInputChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+
+#if HAS_COMPOSE_EMOJI_BTN
+    // The emoji button, at the right-hand end of the row the box shares. Narrow
+    // and fixed width: the message is what should get the space.
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    s_composeEmojiFocused = false;
+#endif
+    s_composeEmojiBtn = lv_btn_create(composeInputRow);
+    if (s_composeEmojiBtn) {
+        lv_obj_set_width(s_composeEmojiBtn, 30);
+        lv_obj_set_height(s_composeEmojiBtn, lv_pct(100));
+        lv_obj_set_style_radius(s_composeEmojiBtn, 4, 0);
+        lv_obj_set_style_pad_all(s_composeEmojiBtn, 0, 0);
+        lv_obj_set_style_shadow_width(s_composeEmojiBtn, 0, 0);
+        // Clickable as well as wheel-reachable. This board has no touch panel,
+        // but the browser Remote registers a real pointer and forwards taps.
+        lv_obj_add_event_cb(s_composeEmojiBtn,
+                            [](lv_event_t *) { openEmojiPicker(/*sendMode=*/false); },
+                            LV_EVENT_CLICKED, nullptr);
+
+        lv_obj_t *emojiLbl = lv_label_create(s_composeEmojiBtn);
+        lv_obj_set_style_text_font(emojiLbl, emojiFont(&lv_font_montserrat_16), 0);
+        setLabelTextEmojiSafe(emojiLbl, "\U0001F600");
+        lv_obj_center(emojiLbl);
+#if defined(DEVICE_TLORA_PAGER_TFT)
+        // Only the Pager paints a focus: it is the one board here reaching this
+        // button with something other than a finger.
+        refreshComposeEmojiFocus();
+#else
+        lv_obj_set_style_bg_color(s_composeEmojiBtn, lv_color_hex(0x16386F), 0);
+        lv_obj_set_style_bg_opa(s_composeEmojiBtn, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(s_composeEmojiBtn, 1, 0);
+        lv_obj_set_style_border_color(s_composeEmojiBtn, lv_color_hex(0x4C76BA), 0);
+#endif
+    }
+#endif
 
     lv_obj_t *hint = lv_label_create(s_composeModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -11778,6 +11974,11 @@ static void initCfgActions() {
     // it — the Cardputer arguably most of all.
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_FONT_SIZE;
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_BRIGHTNESS;
+    #if HAS_KB_BACKLIGHT_LEVEL
+    // Next to the screen brightness, because they are the same question asked
+    // about the two lit surfaces this board has.
+    s_cfgActions[s_cfgActionCount++] = CFG_ACTION_KB_BACKLIGHT_LEVEL;
+    #endif
     // Decides what the bottom of every screen looks like; set once to taste.
     #if HAS_NAV_BAR_TOGGLE
     s_cfgActions[s_cfgActionCount++] = CFG_ACTION_NAV_BAR;
@@ -13909,6 +14110,71 @@ static void openCfgLightTimeoutModal() {
 }
 #endif  // HAS_LIGHT_NOTIFY
 
+#if HAS_KB_BACKLIGHT_LEVEL
+static const char *cfgKbBacklightLabelFor(int idx) {
+    if (idx < 0 || idx >= kKbBacklightLevelCount) idx = 0;
+    return kKbBacklightLevels[idx].label;
+}
+
+// Pushes the stored level at the hardware, by whatever route this board takes.
+// The Pro is the one that cannot simply be told a number: Alt+B owns whether the
+// keyboard is lit at all, so the level has to arrive through that gate or a
+// change here would light a keyboard the user had turned off.
+static void applyKbBacklightSetting() {
+#if defined(DEVICE_TDECK_PRO)
+    setPagerKeyboardBacklight(tdeckProKeyboardBacklightEnabled());
+#else
+    keyboardSetKeypadBacklight(s_cfg.kbBacklightLevel);
+#endif
+}
+
+static void cfgKbBacklightApply(int idx) {
+    if (idx < 0 || idx >= kKbBacklightLevelCount) idx = 0;
+    const uint8_t was = s_cfg.kbBacklightLevel;
+    s_cfg.kbBacklightLevel = kKbBacklightLevels[idx].level;
+    persistConfigToPrefs();
+    applyKbBacklightSetting();
+
+    LV_UNUSED(was);
+    if (s_cfg.kbBacklightLevel == 0) {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard light off");
+#if defined(DEVICE_M9)
+    } else if (was == 0) {
+        // M9 only, and the one change that does not take effect now: its
+        // controller keeps the auto-light disabled until the next power cycle,
+        // so the register write lands and nothing happens until then. Said here
+        // rather than left to be discovered as a setting that failed.
+        //
+        // The T-Deck has no such rule -- its backlight is a plain duty the
+        // keyboard applies immediately, in either direction.
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus),
+                 "Keyboard light %s - after a power cycle",
+                 kbBacklightLevelName(s_cfg.kbBacklightLevel));
+#endif
+    } else {
+        snprintf(s_cfgStatus, sizeof(s_cfgStatus), "Keyboard light %s",
+                 kbBacklightLevelName(s_cfg.kbBacklightLevel));
+    }
+}
+
+static void openCfgKbBacklightModal() {
+    int startIdx = 0;
+    for (int i = 0; i < kKbBacklightLevelCount; i++) {
+        if (kKbBacklightLevels[i].level == s_cfg.kbBacklightLevel) { startIdx = i; break; }
+    }
+    static const CfgSliderPicker kSpec = {
+        "Keyboard Light",
+        kKbBacklightLevelCount,
+        cfgKbBacklightLabelFor,
+        cfgKbBacklightApply,
+        "low",
+        "off",
+    };
+    openCfgSliderModal(&kSpec, startIdx);
+}
+#endif  // HAS_KB_BACKLIGHT_LEVEL
+
+
 
 // ── Screen timeout ───────────────────────────────────────────────────────────
 // How long the panel stays lit with no input before it sleeps. Same ordered
@@ -15482,7 +15748,6 @@ static int       s_liveFilterSelection = LIVE_FILTER_ALL;
 static constexpr int kLiveFilterRowsPerCol =
     (LIVE_FILTER_COUNT + kChanModalCols - 1) / kChanModalCols;
 
-static lv_obj_t *s_liveToolsBackdrop = nullptr;
 static lv_obj_t *s_liveToolsModal    = nullptr;
 static lv_obj_t *s_liveToolsRows[LIVE_TOOL_COUNT] = {};
 static int       s_liveToolsSelection = LIVE_TOOL_LIVE;
@@ -20195,6 +20460,9 @@ static void openSysStatsModal() {
 
 static void closeLegendModal() {
     lvObjDeleteSafe(s_legendModal);
+    // As above: Help carries a bar since issue #95, so it owns a status cluster
+    // that dies with it.
+    clearNavBarStatusIcons();
     refreshChatComposeButtonState();
 }
 
@@ -20729,6 +20997,9 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     const int statusBoxW = 2 + (int)szGps.x + 7 + (int)szWifi.x + 2;
 
     lv_obj_t *box = lv_obj_create(bar);
+    // See onNavStatusClusterDeleted(): this is what keeps the statics below from
+    // outliving the objects they name when a screen closes without clearing them.
+    lv_obj_add_event_cb(box, onNavStatusClusterDeleted, LV_EVENT_DELETE, nullptr);
     lv_obj_set_size(box, statusBoxW, lv_pct(100));
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
@@ -20792,7 +21063,17 @@ static void appendHeltecBottomNav(lv_obj_t *parent, int activeTarget) {
     lv_obj_set_style_pad_all(spacer, 0, 0);
 
     lv_obj_t *bar = lv_obj_create(parent);
+    // FLOATING as well as IGNORE_LAYOUT. IGNORE_LAYOUT alone keeps the flex
+    // column from placing the bar, but it does not keep the bar still when the
+    // parent scrolls — LVGL translates every ordinary child by the scroll
+    // offset, so on a screen whose body can scroll (Help on the Cardputer, whose
+    // key list cannot fit 135 px at any font size) the bar would slide off the
+    // bottom edge with the content. FLOATING pins it to the parent's content
+    // area instead, which is the same thing appendHeltecCloseX() does with the
+    // corner X and for the same reason. A no-op on the screens whose panel does
+    // not scroll, which is all of the others.
     lv_obj_add_flag(bar, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(bar, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_width(bar, lv_disp_get_hor_res(NULL));
     lv_obj_set_height(bar, navBarHeight);
     // BOTTOM_LEFT anchor with negative x cancels parent pad+border on the left,
@@ -21272,12 +21553,16 @@ static lv_color_t tftColorToLv(uint16_t c) {
 }
 
 static void closeLiveToolsModal() {
-    if (lvObjValid(s_liveToolsBackdrop)) {
-        lv_obj_del(s_liveToolsBackdrop);       // takes the modal and rows with it
-    } else if (lvObjValid(s_liveToolsModal)) {
-        lv_obj_del(s_liveToolsModal);
+    // One object now. Tools used to be a panel inside a dimming backdrop, which
+    // meant deleting the backdrop and letting it take the panel with it; it is a
+    // full screen carrying its own nav bar since issue #94, so the panel is the
+    // root of the tree and the bar is a child of it.
+    if (lvObjValid(s_liveToolsModal)) {
+        lv_obj_del(s_liveToolsModal);          // takes the rows and the bar with it
     }
-    s_liveToolsBackdrop = nullptr;
+    // The bar took its status cluster with it. Every screen that carries one owes
+    // this; see onNavStatusClusterDeleted() for what happens when it is missed.
+    clearNavBarStatusIcons();
     s_liveToolsModal = nullptr;
     memset(s_liveToolsRows, 0, sizeof(s_liveToolsRows));
     s_liveToolsSelection = LIVE_TOOL_LIVE;     // first enabled tool
@@ -26777,6 +27062,12 @@ static void openLiveModal() {
     closeCfgModal();
     closeLegendModal();
     closeChannelActionsModal();
+    // Tools too, since issue #94: it is a full screen with a working nav bar
+    // now, so this is reachable by tapping a cell from inside it. It used to be
+    // unreachable — Tools was a card on a backdrop that swallowed the tap — and
+    // without this Tools would stay alive and allocated underneath, and reappear
+    // when this screen closed.
+    if (s_liveToolsModal) closeLiveToolsModal();
 
     Channels.get(CHAN_LIVE).scrollOff = 0;
     s_lastRenderedLiveCount = -1;
@@ -27093,11 +27384,6 @@ static void onLiveToolRowPressed(lv_event_t *e) {
     liveToolsActivate((int)(intptr_t)lv_event_get_user_data(e));
 }
 
-static void onLiveToolsBackdropPressed(lv_event_t *e) {
-    if (lv_event_get_target_obj(e) != s_liveToolsBackdrop) return;
-    closeLiveToolsModal();
-}
-
 static void openLiveToolsModal() {
     // Deliberately no s_liveModal requirement any more. Tools is its own
     // destination now — the nav bar and the L key come straight here — and every
@@ -27108,25 +27394,38 @@ static void openLiveToolsModal() {
 
     s_liveToolsSelection = LIVE_TOOL_LIVE;
 
-    const int w = lv_disp_get_hor_res(NULL);
-    const int h = lv_disp_get_ver_res(NULL);
-    const int modalW = min(kChanModalMaxW, w - 14);
+    // Same guard openLiveModal() takes, and for the same reason: Tools now
+    // builds a nav bar of its own on top of the grid, so it allocates more than
+    // it used to, and LV_ASSERT_MALLOC resets the device rather than failing.
+    // The close above has already freed anything Tools itself had open.
+    {
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 6144) {
+            logLvglMemDiag("openLiveToolsModal aborted (low LVGL mem)");
+            return;
+        }
+    }
 
-    s_liveToolsBackdrop = lv_obj_create(s_rootScreen);
-    lv_obj_set_size(s_liveToolsBackdrop, w, h);
-    lv_obj_align(s_liveToolsBackdrop, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_clear_flag(s_liveToolsBackdrop, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_liveToolsBackdrop, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(s_liveToolsBackdrop, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(s_liveToolsBackdrop, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(s_liveToolsBackdrop, 0, 0);
-    lv_obj_set_style_pad_all(s_liveToolsBackdrop, 0, 0);
-    lv_obj_add_event_cb(s_liveToolsBackdrop, onLiveToolsBackdropPressed, LV_EVENT_CLICKED, nullptr);
+    const int modalW = lv_disp_get_hor_res(NULL);
+    const int modalH = lv_disp_get_ver_res(NULL);
 
-    s_liveToolsModal = lv_obj_create(s_liveToolsBackdrop);
-    lv_obj_set_size(s_liveToolsModal, modalW, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(s_liveToolsModal,
-                                (h > 40) ? (h - 2 * kChanModalPad) : LV_SIZE_CONTENT, 0);
+    // A screen, not a popup (issue #94). Tools owns a cell on the nav bar, so it
+    // has to be the kind of thing a cell leads to: full bleed, its own copy of
+    // the bar, its own cell lit, every other cell still one tap away. It used to
+    // be a centered card on a 50%-black backdrop, which dimmed the bar it should
+    // have been lighting and swallowed taps aimed at it — a tap on Nodes closed
+    // Tools instead of opening Nodes.
+    //
+    // border_width 1 and pad_all 4 are not cosmetic here: appendHeltecBottomNav()
+    // measures its offsets against exactly those two numbers to put the bar on
+    // the display edges. See the padInset/borderInset pair there.
+    //
+    // Losing tap-outside-to-close goes with the backdrop and is the point rather
+    // than a regression: Tools now closes the three ways its neighbours do — the
+    // corner X, the close key, Home — plus a second tap on its own cell.
+    s_liveToolsModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_liveToolsModal, modalW, modalH);
     lv_obj_align(s_liveToolsModal, LV_ALIGN_CENTER, 0, 0);
     lv_obj_clear_flag(s_liveToolsModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_liveToolsModal, LV_OBJ_FLAG_CLICKABLE);
@@ -27134,15 +27433,27 @@ static void openLiveToolsModal() {
     lv_obj_set_style_bg_opa(s_liveToolsModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_liveToolsModal, 1, 0);
     lv_obj_set_style_border_color(s_liveToolsModal, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_liveToolsModal, kChanModalPad, 0);
+    // 4, not kChanModalPad. appendHeltecBottomNav() cancels exactly pad 4 plus a
+    // 1 px border to put its bar on the display edges, and kChanModalPad is 3 on
+    // the Cardputer and 8 on the Pager and the 320 px boards — either would
+    // leave the bar inset or overhanging by the difference. The grid does not
+    // care: it is a fixed-width centered block, so the panel's own padding no
+    // longer decides its width.
+    lv_obj_set_style_pad_all(s_liveToolsModal, 4, 0);
     lv_obj_set_style_pad_row(s_liveToolsModal, kChanModalGap, 0);
     lv_obj_set_flex_flow(s_liveToolsModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_liveToolsModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_move_foreground(s_liveToolsBackdrop);
+
+    // The panel went full bleed; the grid did not. This is the content width the
+    // cells were laid out against and the one people have learned the positions
+    // in, so it stays a centered block rather than spreading to fill a 480 px
+    // Pager. kChanModalCellPct below is a percentage of this, not of the panel.
+    const int toolsContentW =
+        min(kChanModalMaxW, lv_disp_get_hor_res(NULL) - 14) - 2 * kChanModalPad;
 
     lv_obj_t *title = lv_label_create(s_liveToolsModal);
-    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_width(title, toolsContentW);
     lv_obj_set_style_text_font(title, kChanModalTitleFont, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
@@ -27165,7 +27476,7 @@ static void openLiveToolsModal() {
     };
 #else
     lv_obj_t *hint = lv_label_create(s_liveToolsModal);
-    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_width(hint, toolsContentW);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
@@ -27191,7 +27502,7 @@ static void openLiveToolsModal() {
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
     lv_obj_t *grid = lv_obj_create(s_liveToolsModal);
-    lv_obj_set_width(grid, lv_pct(100));
+    lv_obj_set_width(grid, toolsContentW);
     lv_obj_set_height(grid, LV_SIZE_CONTENT);
     lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
@@ -27258,6 +27569,14 @@ static void openLiveToolsModal() {
     appendHeltecCloseX(s_liveToolsModal,
                        [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); });
 #endif
+
+    // Last, so the bar's layout spacer is the final child of the flex column and
+    // the grid above is not pushed under the bar. Same ordering rule Nodes, DM
+    // and Config follow, and the reason it is spelled out on each of them.
+    //
+    // A no-op where the bar is switched off, which is what leaves Tools looking
+    // as it does today on a keyboard board with no bar — minus the backdrop.
+    appendHeltecBottomNav(s_liveToolsModal, HELTEC_NAV_TOOLS);
 
     refreshLiveToolsSelection();
 }
@@ -29845,6 +30164,10 @@ static void weatherPoll(lv_timer_t *t) {
 static void closeWeatherModal() {
     if (s_weatherTimer) { lv_timer_del(s_weatherTimer); s_weatherTimer = nullptr; }
     if (lvObjValid(s_weatherModal)) lv_obj_del(s_weatherModal);
+    // Weather has carried a bar, and therefore a status cluster, since long
+    // before Tools and Help did -- and never nulled these. Same crash, reachable
+    // from Tools -> Weather -> close.
+    clearNavBarStatusIcons();
     s_weatherModal = nullptr;
     s_weatherStatus = nullptr;
     s_weatherBody = nullptr;
@@ -33912,6 +34235,12 @@ static void openDmModal() {
     closeCfgModal();
     closeLegendModal();
     closeChannelActionsModal();
+    // Tools too, since issue #94: it is a full screen with a working nav bar
+    // now, so this is reachable by tapping a cell from inside it. It used to be
+    // unreachable — Tools was a card on a backdrop that swallowed the tap — and
+    // without this Tools would stay alive and allocated underneath, and reappear
+    // when this screen closed.
+    if (s_liveToolsModal) closeLiveToolsModal();
 
     int modalW = lv_disp_get_hor_res(NULL);
     int modalH = lv_disp_get_ver_res(NULL);
@@ -34143,6 +34472,12 @@ static void openNodesModal() {
     closeCfgModal();
     closeLegendModal();
     closeChannelActionsModal();
+    // Tools too, since issue #94: it is a full screen with a working nav bar
+    // now, so this is reachable by tapping a cell from inside it. It used to be
+    // unreachable — Tools was a card on a backdrop that swallowed the tap — and
+    // without this Tools would stay alive and allocated underneath, and reappear
+    // when this screen closed.
+    if (s_liveToolsModal) closeLiveToolsModal();
     nodesPanelWifiEnter();
 
     // This modal frame + row list can be large; bail out before lv_obj_create
@@ -34668,31 +35003,42 @@ static void openLegendModal() {
         s_legendModal = nullptr;
     }
     if (!s_rootScreen || s_legendModal) return;
-    closeDmModal();
 
-    int modalW = lv_disp_get_hor_res(NULL) - 24;
-    int modalH = 132;
-#if UI_TOUCH_ONLY_PROFILE
-    // Shorter than it was: the corner X floats, so the panel no longer has to
-    // find a row for a footer button — it only pays the 11px the title row
-    // grows by to sit level with the X.
-    modalH = 126;
-    // Portrait wraps the legend body into more lines, so it needs the extra
-    // height even without the button.
-    if (uiPortrait()) modalH = 142;
+    // Help replaces the screen you were on rather than floating over it (issue
+    // #95). It used to close only DM, which made it the one nav destination that
+    // stacked: tap Nodes then ?, and Help landed as a card over the roster with
+    // the Nodes cell still lit on the bar underneath it. Every other cell on that
+    // bar replaces the screen, and now this one does too.
+    //
+    // Innermost first, the same order and the same reason as the Home/Chat
+    // teardown in onHeltecBottomNavPressed(): a menu opened from one of these
+    // screens has to go before the screen it was opened from. The matching
+    // closeLegendModal() calls in the other openers are the symmetric other half
+    // of this rather than a one-way rule.
+    if (s_composeModal) closeComposePrompt();
+    if (s_liveToolsModal) closeLiveToolsModal();
+#if HAS_WEATHER
+    closeWeatherModal();
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK)
-    modalH = 146;
-#endif
-#if HAS_HOME_DASHBOARD && !UI_TOUCH_ONLY_PROFILE
-    // The key list gained a ninth row when Home, Chat and Config became three
-    // entries instead of two. Clamped to the panel, because the Pager is 222 px
-    // tall and this is measured against 480x222 as readily as 320x240.
-    modalH += 14;
-    const int legendMaxH = lv_disp_get_ver_res(NULL) - 16;
-    if (modalH > legendMaxH) modalH = legendMaxH;
-#endif
-    if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
+    if (s_nodesActionModal) closeNodesActionMenu();
+    if (s_channelActionsModal) closeChannelActionsModal();
+    if (s_cfgModal) closeCfgModal();
+    closeDmModal();
+    if (s_nodesModal) closeNodesModal();
+    if (s_liveModal) closeLiveModal();
+
+    // Same guard openLiveModal() takes: Help builds a nav bar of its own now, so
+    // it allocates more than the old card did, and LV_ASSERT_MALLOC resets the
+    // device rather than failing. The closes above have already freed whatever
+    // was on screen.
+    {
+        lv_mem_monitor_t mem;
+        lv_mem_monitor(&mem);
+        if (mem.free_biggest_size < 6144) {
+            logLvglMemDiag("openLegendModal aborted (low LVGL mem)");
+            return;
+        }
+    }
 
 #if defined(DEVICE_TDECK)
     const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
@@ -34702,27 +35048,43 @@ static void openLegendModal() {
     const lv_font_t *legendBodyFont = &lv_font_montserrat_10;
 #endif
 
+    // A screen, not a card. Help owns the last cell on the nav bar, so it has to
+    // be the kind of thing a cell leads to — full bleed, its own copy of the bar,
+    // its own cell lit.
+    //
+    // This is what retires the height ladder that used to stand here: 132 by
+    // default, 126 touch-only landscape, 142 touch-only portrait, 146 on the
+    // Pager and T-Deck, +14 once the key list gained a ninth row, then clamped to
+    // ver_res - 16 because the Pager is only 222 px tall, and a scrollbar on the
+    // Cardputer because none of it was enough there. That pile was the symptom:
+    // the key list had outgrown the card. A full screen has the room it was being
+    // squeezed for, on every panel, with no per-board arithmetic at all.
+    //
+    // Full bleed on every board, including one with the nav bar switched off and
+    // therefore no ? cell to light. One layout is the whole point — the ladder
+    // above existed regardless of the bar, and so did the content that outgrew it.
+    //
+    // border_width 1 and pad_all 4 are load-bearing: appendHeltecBottomNav()
+    // cancels exactly those two to put its bar on the display edges.
     s_legendModal = lv_obj_create(s_rootScreen);
-    lv_obj_set_size(s_legendModal, modalW, modalH);
+    lv_obj_set_size(s_legendModal, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
     lv_obj_align(s_legendModal, LV_ALIGN_CENTER, 0, 0);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
+    // Kept scrollable as insurance rather than because it is expected to scroll:
+    // the full screen is taller than the card it replaces on every board, so the
+    // body should now fit outright. Clipping a key list is a worse failure than
+    // an unused scrollbar, and LV_SCROLLBAR_MODE_AUTO draws nothing when the
+    // content fits.
     lv_obj_add_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
     setupVScroll(s_legendModal);
     lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_AUTO);
-#else
-    lv_obj_clear_flag(s_legendModal, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(s_legendModal, LV_SCROLLBAR_MODE_OFF);
-#endif
     lv_obj_set_style_bg_color(s_legendModal, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_legendModal, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_legendModal, 1, 0);
     lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
-    lv_obj_set_style_pad_all(s_legendModal, 6, 0);
+    lv_obj_set_style_pad_all(s_legendModal, 4, 0);
     lv_obj_set_style_pad_row(s_legendModal, 4, 0);
 #if UI_TOUCH_ONLY_PROFILE
-    lv_obj_set_style_pad_bottom(s_legendModal, 8, 0);
     lv_obj_set_style_pad_row(s_legendModal, 5, 0);
-    if (uiPortrait()) lv_obj_set_style_pad_bottom(s_legendModal, 10, 0);
 #endif
     lv_obj_set_flex_flow(s_legendModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_legendModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -34747,7 +35109,10 @@ static void openLegendModal() {
         "Home is the dashboard; Chats is the messages, and its icon\n"
         "blinks when a channel has something unread.\n"
 #else
-        "Use bottom buttons for Home, DM, Nodes, Live, Config, Help.\n"
+        // Unreachable today — both touch-only boards get FEATURE_LOCK_SCREEN and
+        // so HAS_HOME_DASHBOARD — but it named the cells as they were two
+        // changes ago: Live left the bar for Tools, and Chats joined it.
+        "Bottom buttons: Chats, DM, Nodes, Tools, Config, Help.\n"
 #endif
         "\n"
         "Transport Symbols:\n"
@@ -34781,6 +35146,8 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(N) Nodes\n"
         "(L) Tools (Live, charts)\n"
+        "(A) Channel Actions\n"
+        "(P) Help (this screen)\n"
         "(E) Emoji\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages");
@@ -34789,8 +35156,10 @@ static void openLegendModal() {
         "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Tools (Live, charts)\n"
+        "(A) Channel Actions\n"
+        "(H) Channel selector\n"
+        "(P) Help (this screen)\n"
         "(E) Emoji\n"
-        "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages");
 #endif
@@ -34843,6 +35212,8 @@ static void openLegendModal() {
         "(D) Direct Messages\n"
         "(N) Nodes\n"
         "(L) Tools (Live, charts)\n"
+        "(A) Channel Actions\n"
+        "(P) Help (this screen)\n"
         "(E) Emoji\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages\n"
@@ -34851,8 +35222,10 @@ static void openLegendModal() {
         "(C) Configuration\n"
         "(N) Nodes\n"
         "(L) Tools (Live, charts)\n"
+        "(A) Channel Actions\n"
+        "(H) Channel selector\n"
+        "(P) Help (this screen)\n"
         "(E) Emoji\n"
-        "(H) Help\n"
         "(Space) Compose/Reply\n"
         "(Enter) Focus Messages\n"
 #endif
@@ -34872,8 +35245,17 @@ static void openLegendModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, legendBodyFont, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text(hint, "Backspace to close Help");
+    // modalCloseKeyLabel(), not a literal "Backspace": the Cardputer sets
+    // kModalCloseUsesEscape, so isModalCloseKey() there accepts Esc and nothing
+    // else — this line was naming a key that does not close anything on the one
+    // board whose users most need the reminder.
+    lv_label_set_text_fmt(hint, "%s to close Help", modalCloseKeyLabel());
 #endif
+
+    // Last, so the bar's layout spacer is the final child of the flex column and
+    // the key list above is not pushed under the bar — the same ordering rule
+    // Nodes, DM and Config follow. A no-op where the bar is switched off.
+    appendHeltecBottomNav(s_legendModal, HELTEC_NAV_LEGEND);
 
     refreshChatComposeButtonState();
 }
@@ -34891,6 +35273,12 @@ static void openCfgModal() {
     closeNodesModal();
     closeLegendModal();
     closeChannelActionsModal();
+    // Tools too, since issue #94: it is a full screen with a working nav bar
+    // now, so this is reachable by tapping a cell from inside it. It used to be
+    // unreachable — Tools was a card on a backdrop that swallowed the tap — and
+    // without this Tools would stay alive and allocated underneath, and reappear
+    // when this screen closed.
+    if (s_liveToolsModal) closeLiveToolsModal();
 
     initCfgActions();
     s_cfgSelection = 0;
@@ -36110,6 +36498,14 @@ static void performCfgAction(int actionId) {
             if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec NOTIFY_LIGHT_TIMEOUT");
             showActionPopup = false;   // the picker is the feedback
             openCfgLightTimeoutModal();
+        } break;
+#endif
+
+#if HAS_KB_BACKLIGHT_LEVEL
+        case CFG_ACTION_KB_BACKLIGHT_LEVEL: {
+            if (s_cfgDebugLog) Serial.println("[lvgl-cfg] exec KB_BACKLIGHT_LEVEL");
+            showActionPopup = false;   // the picker is the feedback
+            openCfgKbBacklightModal();
         } break;
 #endif
 
@@ -38061,6 +38457,11 @@ static bool prepareGlobalNavigation() {
     closeLiveModal();
     closeNodesModal();
     closeLegendModal();
+    // Tools belongs on this list since issue #94 made it a full screen rather
+    // than a card on a backdrop: this function's contract is that nothing is
+    // left standing behind the destination, and a Tools screen left underneath
+    // would reappear when that destination closed.
+    closeLiveToolsModal();
     closeChannelActionsModal();
     setChannelDropdownVisible(false);
 
@@ -38110,6 +38511,15 @@ static void openNavConfigShortcut() {
     // reopens it clean. That also makes Alt+C from inside a Config sub-picker
     // a way back to the top of Config rather than a no-op.
     openCfgModal();
+}
+
+static void openNavHelpShortcut() {
+    if (!prepareGlobalNavigation()) return;
+    closeDmModal();
+    // Same reopen-clean shape as Config above, and for the same reason:
+    // prepareGlobalNavigation() closes Help on its way through, so the chord is
+    // a way back to Help rather than a no-op when Help is already what is up.
+    openLegendModal();
 }
 
 #if HAS_HOME_DASHBOARD && UI_CHANNEL_LIST_DROPDOWN
@@ -38264,12 +38674,16 @@ static bool handleGlobalNavigationKey(char key) {
         openNavConfigShortcut();
         return true;
     }
+    if (key == KEY_OPEN_HELP) {
+        openNavHelpShortcut();
+        return true;
+    }
     return false;
 }
 #endif  // HAS_GLOBAL_NAV_SHORTCUTS
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT)
+    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
 // Alt+H is "close everything and get back to chat", and it deliberately does
 // NOT open the channel list the way the M9's dedicated Home button does.
 //
@@ -38496,11 +38910,18 @@ static void pumpKeyboardInput() {
         s_lastActivityMs = millis();
 
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_TLORA_PAGER_TFT)
-    if (k == KEY_OPEN_HOME) {
+    || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_CARDPUTER_LORA_HAT)
+        // The Cardputer belongs on this list and was missing from it, which made
+        // Alt+H a dead key on that board alone: altNavShortcut() raised
+        // KEY_OPEN_HOME, nothing here caught it, and handleGlobalNavigationKey()
+        // could not either -- its KEY_OPEN_HOME branch sits inside
+        // #if HAS_HOME_DASHBOARD, and the Cardputer is the one board without a
+        // dashboard. The !HAS_HOME_DASHBOARD half of openKeyboardHomeShortcut()
+        // was written for exactly this board and had never been reachable.
+        if (k == KEY_OPEN_HOME) {
             openKeyboardHomeShortcut();
-        continue;
-    }
+            continue;
+        }
 #endif
 #if defined(DEVICE_TDECK_PRO)
         if (k == KEY_TOGGLE_KB_BACKLIGHT) {
@@ -39941,16 +40362,47 @@ static void pumpKeyboardInput() {
                 closeEmojiPicker();
                 continue;
             }
-#if defined(DEVICE_MESH_DECK)
-            // The symbol key toggles: pressing it again dismisses the tray it
-            // opened. Without this it is swallowed by the catch-all below, so
-            // the only way out is the close key — an odd asymmetry for a key
-            // whose whole job is showing and hiding this panel.
+            // The symbol key cycles rather than toggles: symbols, then emoji,
+            // then closed. Pressing it a second time used to dismiss the tray,
+            // which left the emoji tray unreachable from inside a message on a
+            // keyboard with no other spare key -- and reaching for a picture
+            // after reaching for a symbol is the same reflex, one press further.
+            // The close key still dismisses from either tray, so nothing has to
+            // be cycled past to get out.
+            //
+            // Only the Mesh Deck raises KEY_SYMBOL today; the guard is gone
+            // because the code is board-independent and this is the behaviour
+            // any board with a symbol key should get.
             if (k == KEY_SYMBOL) {
+                if (s_pickerTray == kSymbolTray) {
+                    // Rebuilt rather than re-pointed: the two trays have
+                    // different cell fonts, column counts and hint text, all
+                    // decided in openEmojiPicker().
+                    closeEmojiPicker();
+                    openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/false);
+                } else {
+                    closeEmojiPicker();
+                }
+                continue;
+            }
+            // The key that opened the tray also dismisses it -- but only where
+            // that key is known to arrive once per press.
+            //
+            // The M9's Ctrl is deliberately not on this list. Mapped as a toggle
+            // it made the tray unusable, and open-only fixed it -- which is what
+            // confirms the controller reports that key more than once per press.
+            // As a toggle, the second report closed the tray, the third reopened
+            // it, and every Enter or d-pad press in between landed on a panel
+            // that was being torn down and rebuilt -- which looks exactly like
+            // "the picker opens but nothing selects". Opening is idempotent
+            // (openEmojiPicker() returns early when one is already up) and a
+            // repeat that reaches here simply falls through to the delta chain
+            // below, scores nothing, and is swallowed. The close key still
+            // dismisses, as it does from either tray.
+            if (k == KEY_EMOJI_PICKER) {
                 closeEmojiPicker();
                 continue;
             }
-#endif
             if (k == KEY_ENTER || k == KEY_ROLLER) {
                 emojiPickerActivate(s_emojiPickerSelection);
                 continue;
@@ -39997,6 +40449,20 @@ static void pumpKeyboardInput() {
         // lv_textarea_delete_char(), both cursor-relative, so insert-in-the-
         // middle and backspace-in-the-middle come free once the caret can move.
         if (s_composeModal && s_composeInput) {
+#if defined(DEVICE_M9)
+            // Control opens the emoji tray, first press. The key produced
+            // nothing here before -- the driver dropped its code outright -- so
+            // there is no prior meaning to press past, and nothing is lost by
+            // swallowing it.
+            //
+            // Open-only, never a toggle: see the note in the tray's own key
+            // block. This line is only reached with no tray up, and a repeat
+            // that arrives once one is open is handled there.
+            if (k == KEY_M9_CTRL) {
+                openEmojiPicker(/*sendMode=*/false);
+                continue;
+            }
+#endif
 #if defined(DEVICE_M9) || defined(DEVICE_MESH_DECK)
             // D-pad: Left/Right by a character, Up/Down by a display line. The
             // compose box is multi-line on both boards
@@ -40028,10 +40494,50 @@ static void pumpKeyboardInput() {
             // Only the wheel reaches this — j/k stay literal characters in a
             // typing context, so they never fold onto KEY_SCROLL_UP/DN while a
             // compose box is open.
+            if (s_composeEmojiFocused) {
+                if (k == KEY_ENTER) {
+                    // Enter on the button opens the tray rather than sending the
+                    // message -- the one key this board has, doing what the
+                    // thing under the caret says it does.
+                    s_composeEmojiFocused = false;
+                    refreshComposeEmojiFocus();
+                    openEmojiPicker(/*sendMode=*/false);
+                    continue;
+                }
+                if (k != KEY_SCROLL_UP && k != KEY_SCROLL_DN) {
+                    // Anything else is the user going back to writing: a letter,
+                    // a backspace, the close key. Hand focus back to the message
+                    // and let the key fall through to the handlers below, so the
+                    // character it stands for is not swallowed getting there.
+                    s_composeEmojiFocused = false;
+                    refreshComposeEmojiFocus();
+                }
+            }
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 const bool forward = (k == KEY_SCROLL_UP) ? invertScrollNav : !invertScrollNav;
+                if (s_composeEmojiFocused) {
+                    // On the button: forward has nowhere further to go, back
+                    // returns to the message with the caret where it was left.
+                    if (!forward) {
+                        s_composeEmojiFocused = false;
+                        refreshComposeEmojiFocus();
+                    }
+                    continue;
+                }
                 if (forward) {
+                    // "Did the caret actually move?" rather than "is it at the
+                    // end?". The same question, but asked in a way that needs no
+                    // UTF-8 length arithmetic -- lv_textarea_cursor_right() is a
+                    // no-op at the end of the text, so an unchanged position is
+                    // exactly the case where the next detent should leave the
+                    // message and land on the button.
+                    const uint32_t before = lv_textarea_get_cursor_pos(s_composeInput);
                     lv_textarea_cursor_right(s_composeInput);
+                    if (lv_textarea_get_cursor_pos(s_composeInput) == before
+                        && lvObjValid(s_composeEmojiBtn)) {
+                        s_composeEmojiFocused = true;
+                        refreshComposeEmojiFocus();
+                    }
                 } else {
                     lv_textarea_cursor_left(s_composeInput);
                 }
@@ -40063,6 +40569,15 @@ static void pumpKeyboardInput() {
                         // Mesh Deck's symbol key. Insert-mode tray, so the
                         // picked character lands in the box being typed.
                         openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+                        break;
+                    // The Mesh Deck's dead bottom-left key. The T-Deck's mic
+                    // key reaches the same place without a case here: its
+                    // controller never reports it, so it is polled off the key
+                    // matrix in loop() instead of arriving as a key at all.
+                    case KEY_EMOJI_PICKER:
+                        // Insert mode: the glyph lands in the message being
+                        // typed rather than being sent on its own.
+                        openEmojiPicker(/*sendMode=*/false);
                         break;
                     case KEY_BACKSPACE:
                     case KEY_BACKSPACE_HOLD:
@@ -40382,6 +40897,15 @@ static void pumpKeyboardInput() {
                         // Mesh Deck's symbol key. Insert-mode tray, so the
                         // picked character lands in the box being typed.
                         openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+                        break;
+                    // The Mesh Deck's dead bottom-left key. The T-Deck's mic
+                    // key reaches the same place without a case here: its
+                    // controller never reports it, so it is polled off the key
+                    // matrix in loop() instead of arriving as a key at all.
+                    case KEY_EMOJI_PICKER:
+                        // Insert mode: the glyph lands in the message being
+                        // typed rather than being sent on its own.
+                        openEmojiPicker(/*sendMode=*/false);
                         break;
                     case KEY_BACKSPACE:
                     case KEY_BACKSPACE_HOLD:
@@ -41199,6 +41723,24 @@ static void pumpKeyboardInput() {
 #endif
             } else if (k == 'n' || k == 'N') {
                 openNodesModal();
+            } else if (k == 'p' || k == 'P') {
+                // Help. The one nav cell that had no letter of its own: H is
+                // Home wherever there is a dashboard and the channel list where
+                // there is not, and "?" is a Shift layer away on every one of
+                // these keyboards.
+                //
+                // Outside the HAS_HOME_DASHBOARD split above on purpose — P is
+                // free either way, so the Cardputer gets the same key as every
+                // other board rather than one of its own to remember.
+                //
+                // Straight to the opener, like D, N, L and F beside it, rather
+                // than through openNavHelpShortcut(). The shortcut is what the
+                // Alt+P chord takes, because a chord arrives from anywhere and
+                // has to tear down whatever that was; here chat is already the
+                // foreground surface, and openLegendModal() closes the rest
+                // itself. C and H go the other way only because they mean more
+                // than "open this" — the channel list and the dashboard.
+                openLegendModal();
             } else if (k == 'e' || k == 'E') {
                 // Quick emoji: opens the tray; picking sends a one-emoji message
                 // to the active channel (see sendQuickEmoji / emojiPickerActivate).
@@ -41221,6 +41763,21 @@ static void pumpKeyboardInput() {
             // Touch-first build: Enter keeps its original new-message behavior.
             } else if (k == KEY_ENTER
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
+#if HAS_HOME_DASHBOARD
+                // Not from the dashboard. Compose belongs to the chat screen:
+                // the dashboard is a glance surface with no channel in front of
+                // you, and a message box opening over it is something you did
+                // not ask for. It used to open here as a new message, with the
+                // title naming the channel it would go to -- but explaining
+                // which conversation you have accidentally started is not as
+                // good as not starting one.
+                //
+                // Swallowed rather than let fall through, so the key cannot pick
+                // up a second meaning further down.
+                if (homeDashboardIsForeground()) {
+                    // deliberately nothing
+                } else
+#endif
                 if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
@@ -41233,6 +41790,8 @@ static void pumpKeyboardInput() {
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
                 if (!s_cardputerMainChatPanelFocused) {
                     // In nav focus, the channel selector flow owns activation.
+                    // No dashboard guard here: this branch is the Cardputer's
+                    // alone, and that is the one board with no home dashboard.
                 } else if (s_pagerChatCursorMode && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
@@ -41241,17 +41800,25 @@ static void pumpKeyboardInput() {
 #else
             } else if (k == ' '
                        && s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS) {
-                // A selected reply target survives leaving the chat screen, and
-                // Space on the home dashboard should not quietly turn into a
-                // reply to a message that is not in front of you. There it is
-                // always a new message; the title says which channel it is going
-                // to, because nothing else on that screen does.
 #if HAS_HOME_DASHBOARD
-                const bool replyFromHere = !homeDashboardVisible();
-#else
-                const bool replyFromHere = true;
+                // Not from the dashboard. Compose belongs to the chat screen:
+                // the dashboard is a glance surface with no conversation in
+                // front of you, and a message box opening over it is not what
+                // the key was pressed for.
+                //
+                // It used to open here as a new message rather than a reply, on
+                // the reasoning that a stale reply target from the chat screen
+                // would be worse -- which was solving the wrong half. Naming the
+                // channel in the title explained which conversation you had
+                // accidentally started; not starting one is better.
+                //
+                // Swallowed rather than allowed to fall through, so Space cannot
+                // pick up some other meaning further down.
+                if (homeDashboardIsForeground()) {
+                    // deliberately nothing
+                } else
 #endif
-                if (replyFromHere && s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
+                if (s_selectedMsgReplyPacketId != 0 && s_selectedMsgText[0]) {
                     openComposePrompt(s_selectedMsgReplyPacketId, s_selectedMsgText);
                 } else {
                     openComposePrompt(0, nullptr);
@@ -41308,6 +41875,9 @@ static void pumpKeyboardInput() {
                 // compose the space bar opens from the chat view — the DM and
                 // Nodes screens each have their own copy of this switch.
                 openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+                break;
+            case KEY_EMOJI_PICKER:
+                openEmojiPicker(/*sendMode=*/false);
                 break;
             case KEY_BACKSPACE:
             case KEY_BACKSPACE_HOLD:
@@ -49391,6 +49961,17 @@ static void handleSerialCommandLine(char *line) {
         return;
     }
 
+#if defined(DEVICE_TDECK)
+    // For the keys the trace above cannot see. The keyboard's own controller
+    // swallows some of them -- Alt, and the mic key -- so they never arrive as a
+    // character and the only way to identify one is to read the matrix while it
+    // is held.
+    if (strcmp(line, "keys matrix") == 0) {
+        tdeckKeyboardProbeRawMatrix(5000);
+        return;
+    }
+#endif
+
 #if HAS_GPS
     if (strcmp(line, "gps") == 0 || strcmp(line, "gps status") == 0) {
         gpsDebugReport();
@@ -49824,12 +50405,20 @@ void setup() {
     // The panel came up at the hardware default above, before any config
     // existed; now that it's loaded, honour the user's level.
     applyBrightness();
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDECK_PRO) && !HAS_KB_BACKLIGHT_LEVEL
     // Same reasoning for the keyboard, and the same place: boot lit it
     // unconditionally before any setting was loaded, so a keyboard the user had
     // turned dark came back on at every reboot and every flash. This is the
     // first moment the answer is known.
     setPagerKeyboardBacklight(tdeckProKeyboardBacklightEnabled());
+#endif
+#if HAS_KB_BACKLIGHT_LEVEL
+    // And the M9's keypad, which is a brightness rather than a switch. Written
+    // at every boot rather than only when it changes, because it is the
+    // controller that holds this value and the controller has just been power-
+    // cycled along with everything else -- it comes up at its own default, not
+    // at ours. That is also what makes Off survive a reboot as the user set it.
+    applyKbBacklightSetting();
 #endif
     drawBootSplash();   // sets the first status itself and holds, dots ticking
     // Lets the splash keep animating through web config's station-connect wait,
@@ -50707,6 +51296,20 @@ void loop() {
     }
 #endif
     LOOP_PHASE("keys", pumpKeyboardInput());
+
+#if defined(DEVICE_TDECK)
+    // The microphone key, which the keyboard controller swallows rather than
+    // reporting -- so it cannot arrive through pumpKeyboardInput() above with
+    // every other key, and is asked for separately here.
+    //
+    // Only while a message is open, which is the whole of what it does and also
+    // what keeps the poll off the bus the rest of the time. Second press closes
+    // the tray again, matching every other way in.
+    if (s_composeModal && keyboardMicPressed()) {
+        if (s_emojiPickerModal) closeEmojiPicker();
+        else                    openEmojiPicker(/*sendMode=*/false);
+    }
+#endif
     LOOP_PHASE("ui", processPendingUiRebuild());
     // lv_timer_handler() deliberately runs below the screen-asleep gate now —
     // there is nothing to draw with the panel in SLPIN, and its indev timer
