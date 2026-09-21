@@ -5064,6 +5064,32 @@ static bool cfgActionNeedsConfirm(int actionId) {
         || actionId == CFG_ACTION_FACTORY_RESET;
 }
 
+// The sentence the confirmation asks. Returns false for the actions that are
+// happy quoting their own row label, which is most of them.
+//
+// This exists because the default is wrong for a *toggle*. Quoting the label
+// works while the label is a verb -- "Export Config", "Factory Reset" -- but a
+// toggle's label is a state readout, so the dialog ends up naming the state
+// being left while Yes applies the state being entered. With the bridge off,
+// "MQTT Bridge: Off" reads as "turn it off?" and Yes turns it on.
+//
+// A hook rather than a special case inside the one caller: any toggle added to
+// cfgActionNeedsConfirm() later inherits exactly the same bug, and this is the
+// place a fix for it already exists.
+static bool cfgActionConfirmSentence(int actionId, char *buf, size_t bufLen) {
+    switch (actionId) {
+        case CFG_ACTION_MQTT_TOGGLE:
+            // Phrased from the destination, and it names the reboot -- which the
+            // row does and the old prompt never mentioned, leaving the reboot to
+            // arrive as a surprise after the one question the user was asked.
+            snprintf(buf, bufLen, "Turn MQTT Bridge %s and reboot?",
+                     s_cfg.mqttEnabled ? "off" : "on");
+            return true;
+        default:
+            return false;
+    }
+}
+
 static void cfgDebugSelection(const char *tag, int actionId) {
     if (!s_cfgDebugLog) return;
     char actionText[80];
@@ -6216,7 +6242,12 @@ static bool runOtaWorkerModeIfRequested() {
 }
 
 #if defined(DEVICE_TDECK_PRO)
-static bool s_tdeckProKeyboardBacklightEnabled = true;
+// Reads the persisted setting rather than keeping a copy. It used to be a plain
+// bool initialised to true, which meant a keyboard deliberately turned dark came
+// back lit after every reboot and every flash.
+static inline bool tdeckProKeyboardBacklightEnabled() {
+    return s_cfg.kbBacklightEnabled;
+}
 #endif
 
 static void setPagerKeyboardBacklight(bool on) {
@@ -8448,7 +8479,7 @@ static bool     s_kbBlinkDismissedByActivity = true;
 
 static bool kbBlinkRestingLit() {
 #if defined(DEVICE_TDECK_PRO)
-    return !s_screenAsleep && s_tdeckProKeyboardBacklightEnabled;
+    return !s_screenAsleep && tdeckProKeyboardBacklightEnabled();
 #else
     return false;
 #endif
@@ -8599,14 +8630,18 @@ static void serviceKbBlink() {
 
 #if defined(DEVICE_TDECK_PRO)
 static void toggleTdeckProKeyboardBacklight() {
-    s_tdeckProKeyboardBacklightEnabled = !s_tdeckProKeyboardBacklightEnabled;
+    s_cfg.kbBacklightEnabled = !s_cfg.kbBacklightEnabled;
+    // Saved on the toggle, not at shutdown: this board has no clean shutdown --
+    // it is put down, or the battery runs out -- so anything not written here
+    // is not written at all.
+    markConfigDirty();
 #if HAS_KB_BLINK
     kbBlinkRelease(false);
 #else
-    setPagerKeyboardBacklight(!s_screenAsleep && s_tdeckProKeyboardBacklightEnabled);
+    setPagerKeyboardBacklight(!s_screenAsleep && tdeckProKeyboardBacklightEnabled());
 #endif
     Serial.printf("[kb-bl] T-Deck Pro %s\n",
-                  s_tdeckProKeyboardBacklightEnabled ? "on" : "off");
+                  tdeckProKeyboardBacklightEnabled() ? "on" : "off");
 }
 #endif
 
@@ -20236,7 +20271,7 @@ static int navBarActiveTarget(lv_obj_t *bar) {
 }
 #endif  // UI_TOUCH_NAV_BAR
 
-#if UI_TOUCH_ONLY_PROFILE
+#if UI_TOUCH_NAV_BAR
 // The DM cell's glyph, for every nav bar that currently exists — the chat
 // screen's, plus one on whatever full-screen modal is sitting over it. Recorded
 // as the bars are built rather than searched for at blink time: the blink runs
@@ -20274,6 +20309,18 @@ static void navCellApplyInk(lv_obj_t *label, bool lit) {
     }
 
     if (lit) {
+#if defined(DEVICE_TDECK_PRO)
+        // The border carries it, not a fill. Amber is not a colour this panel
+        // has, but filling the cell instead turns it into a black box: the glyph
+        // is buried in it and the result reads as a blot rather than a mark. So
+        // the cell keeps its white face and thickens its edge -- past the 2 px
+        // an *active* cell already uses, so "there is something here" and "you
+        // are here" stay tellable apart.
+        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cell, 3, 0);
+        lv_obj_set_style_border_color(cell, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_text_color(label, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_bg_color(cell, lv_color_hex(0xF4D35E), 0);
         lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(cell, lv_color_hex(0xF4D35E), 0);
@@ -20281,12 +20328,17 @@ static void navCellApplyInk(lv_obj_t *label, bool lit) {
         // theme (see applyUiThemePalette), so the ink that has to read on it is
         // the same everywhere too.
         lv_obj_set_style_text_color(label, lv_color_make(0x16, 0x23, 0x3A), 0);
+#endif
     } else {
         const intptr_t tag = (intptr_t)lv_obj_get_user_data(cell);
         const int target = (tag == 0) ? kNavBarNoActive : (int)(tag - 1);
         navBarStyleCell(cell, target != kNavBarNoActive
                               && target == navBarActiveTarget(lv_obj_get_parent(cell)));
+#if defined(DEVICE_TDECK_PRO)
+        lv_obj_set_style_text_color(label, lv_color_make(0, 0, 0), 0);
+#else
         lv_obj_set_style_text_color(label, lv_color_hex(0xD9E8FF), 0);
+#endif
     }
 }
 
@@ -20331,7 +20383,7 @@ static void navDmIconRegister(lv_obj_t *label) {
     s_navDmIcons[0] = label;   // all live: the oldest gives way
     navDmApplyInk(label, s_navDmLit);
 }
-#endif
+#endif  // UI_TOUCH_NAV_BAR
 
 #if UI_TOUCH_NAV_BAR
 // How a nav cell says "you are here". Pulled out of the build loop because the
@@ -20345,10 +20397,18 @@ static void navBarStyleCell(lv_obj_t *btn, bool isActive) {
     lv_obj_set_style_border_width(btn, isActive ? 2 : 1, 0);
     lv_obj_set_style_border_color(btn, lv_color_make(0, 0, 0), 0);
 #else
+    // Theme tokens, not the fixed blues these used to be. The bar was the one
+    // surface that stayed navy on a red or green theme, which read as a piece of
+    // another firmware sitting under the chat.
+    //
+    // selectBg/tabIdle rather than the raw values: the active cell is doing what
+    // a selected row does and the rest are doing what an inactive tab does, so
+    // they take the tokens that already mean those things on every theme.
     lv_obj_set_style_bg_color(
         btn,
-        (s_cfg.uiMode == UI_MODE_LIGHT) ? chatPanelBackgroundColor()
-                                        : (isActive ? lv_color_hex(0x2A4E8F) : lv_color_hex(0x16386F)),
+        (s_cfg.uiMode == UI_MODE_LIGHT)
+            ? chatPanelBackgroundColor()
+            : lvColorFrom565(isActive ? s_ui.selectBg : s_ui.tabIdle),
         0);
     lv_obj_set_style_bg_opa(btn, isActive ? LV_OPA_80 : LV_OPA_60, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
@@ -20560,10 +20620,11 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
         // lists them, and turning the bar off still brings back the key-hint
         // strip under the chat.
         lv_obj_center(label);
-#if UI_TOUCH_ONLY_PROFILE
+        // Registered on every board that draws this bar, not just the
+        // touch-only ones: where the bar is a setting, the alert follows the
+        // setting rather than the board.
         if (kItems[i].target == HELTEC_NAV_DM) navDmIconRegister(label);
         if (kItems[i].target == HELTEC_NAV_CHAT) navChatIconRegister(label);
-#endif
     }
 #else
     LV_UNUSED(bar);
@@ -20589,10 +20650,25 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
                                   lv_obj_t **chanOut) {
     if (!bar) return;
 
-    // Fits "GPS 12" plus the wifi, envelope and channel glyphs at montserrat_10.
-    // Eight wider than it was: the channel bell is new, and the alternative was
-    // letting it overhang the box's left edge into the button beside it.
-    const int statusBoxW = 76;
+    // Measured, not chosen. This cluster is only ever built as part of the nav
+    // bar, and with the bar up the unread alert lives on the Chats and DM cells
+    // (issue #91) -- so the envelope and bell this box used to reserve room for
+    // are gone, and the width they held would otherwise sit on the bar as dead
+    // space with the buttons crowded beside it.
+    //
+    // Measuring rather than subtracting a guess from the old 76: the answer
+    // depends on the font, and a number picked by eye is one that quietly stops
+    // fitting the first time a glyph or a font changes. "GPS 12" is the widest
+    // ordinary reading -- "GPS SEARCH 12" exists but is allowed to sit under the
+    // button edge, which is what the old width did too.
+    lv_point_t szGps = {0, 0}, szWifi = {0, 0};
+    lv_text_get_size(&szGps, "GPS 12", &lv_font_montserrat_10, 0, 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    lv_text_get_size(&szWifi, LV_SYMBOL_WIFI, &lv_font_montserrat_10, 0, 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    // 2 right margin + gps + 7 gap + wifi + 2 left margin, matching the
+    // alignments below.
+    const int statusBoxW = 2 + (int)szGps.x + 7 + (int)szWifi.x + 2;
 
     lv_obj_t *box = lv_obj_create(bar);
     lv_obj_set_size(box, statusBoxW, lv_pct(100));
@@ -20611,28 +20687,19 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     lv_obj_set_style_text_color(wifi, lv_color_hex(0xBFD6FF), 0);
     lv_obj_align_to(wifi, gps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 
-    lv_obj_t *dm = lv_label_create(box);
-    lv_obj_set_style_text_font(dm, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(dm, lv_color_hex(0xF4D35E), 0);
-    lv_label_set_text(dm, LV_SYMBOL_ENVELOPE);
-    lv_obj_align_to(dm, wifi, LV_ALIGN_OUT_LEFT_MID, -5, 0);
-    lv_obj_add_flag(dm, LV_OBJ_FLAG_HIDDEN);
-
-    // Unread channel traffic, left of the DM envelope. A bell rather than a
-    // second envelope: the two blink on the same phase and sit 5 px apart, so
-    // they have to be told apart by shape, not by position.
-    lv_obj_t *chan = lv_label_create(box);
-    lv_obj_set_style_text_font(chan, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(chan, lv_color_hex(0xF4D35E), 0);
-    lv_label_set_text(chan, LV_SYMBOL_BELL);
-    lv_obj_align_to(chan, dm, LV_ALIGN_OUT_LEFT_MID, -4, 0);
-    lv_obj_add_flag(chan, LV_OBJ_FLAG_HIDDEN);
+    // No envelope and no bell. They were the unread indicators for a bar that
+    // did not carry them on its cells; it does now, and building two labels that
+    // can never be shown would be reserving the width all over again.
+    //
+    // The out-params are still filled -- with null -- because the refreshers
+    // hold these handles and setDmAlertVisible() is null-safe. That keeps the
+    // callers free of a second rule about when the handles exist.
 
     if (boxOut)  *boxOut  = box;
     if (gpsOut)  *gpsOut  = gps;
     if (wifiOut) *wifiOut = wifi;
-    if (dmOut)   *dmOut   = dm;
-    if (chanOut) *chanOut = chan;
+    if (dmOut)   *dmOut   = nullptr;
+    if (chanOut) *chanOut = nullptr;
 }
 #endif
 
@@ -26020,7 +26087,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     // Node mode only. In message mode this index space belongs to the reaction
     // rows (kMsgActionNodeMap), and a terminal is not something a tapback menu
     // should be able to reach.
-    s_nodesActionAdminEnabled = !msgMode && AdminPeerList.mayAdminister(nodeId);
+    s_nodesActionAdminEnabled = !msgMode && AdminPeerList.mayOpenTerminal(nodeId);
 #endif
     #if UI_TOUCH_ONLY_PROFILE
         const char *kActionLabels[kNodesActionCount] = {
@@ -35004,7 +35071,11 @@ static void activateCfgSelection() {
     }
 
     if (cfgActionNeedsConfirm(actionId)) {
-        openCfgConfirmModal(actionId);
+        if (cfgActionConfirmSentence(actionId, s_cfgConfirmText, sizeof(s_cfgConfirmText))) {
+            openCfgConfirmModal(actionId, s_cfgConfirmText);
+        } else {
+            openCfgConfirmModal(actionId);
+        }
         return;
     }
 
@@ -36349,8 +36420,11 @@ static void openCfgConfirmModal(int actionId, const char *text,
     }
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
-    int modalW = lv_disp_get_hor_res(NULL) - 40;
-    if (modalW < 160) modalW = lv_disp_get_hor_res(NULL) - 8;
+    // 40 px of margin is comfortable on a 320 px panel and a fifth of a 240 px
+    // one -- and a fifth of the panel, on this dialog, comes straight out of
+    // the button row. The narrow boards give up the margin instead.
+    int modalW = w - (w <= 260 ? 16 : 40);
+    if (modalW < 160) modalW = w - 8;
     if (modalW > 300) modalW = 300;
 
     const bool lightUi = (s_cfg.uiMode == UI_MODE_LIGHT);
@@ -36449,7 +36523,28 @@ static void openCfgConfirmModal(int actionId, const char *text,
     lv_obj_set_style_bg_opa(btnRow, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(btnRow, 0, 0);
     lv_obj_set_style_pad_all(btnRow, 0, 0);
-    lv_obj_set_style_pad_column(btnRow, 14, 0);
+
+    // Divided, not wished for. Two buttons at the old fixed 84 px with a 14 px
+    // gap want 182 px, and a 240 px panel offers this row 180 -- which is why
+    // Yes and No each lost a sliver off the outside edge. Add the optional
+    // third button and the row wants 280 in the same 180.
+    //
+    // So the row is measured: whatever the modal's content box is, minus the
+    // gaps, divided by however many buttons this dialog ended up with. 84 stays
+    // the ceiling, so nothing changes on a panel that always had the room.
+    const int btnCount = s_cfgConfirmAltFn ? 3 : 2;
+    const int rowW     = modalW - 2 * 10;            // the modal's own padding
+    int btnGap = 14;
+    if (rowW < btnCount * 84 + (btnCount - 1) * btnGap) btnGap = 6;
+    int btnMinW = (rowW - (btnCount - 1) * btnGap) / btnCount;
+    if (btnMinW > 84) btnMinW = 84;
+    // No lower clamp. Integer division already guarantees the row fits, and a
+    // floor is the one thing that could put it back over the edge -- on a panel
+    // narrow enough to hit it, a cramped button beats a missing one. Nothing in
+    // the fleet is that narrow today; this is here so it stays true if
+    // something is.
+
+    lv_obj_set_style_pad_column(btnRow, btnGap, 0);
     lv_obj_set_flex_flow(btnRow, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(btnRow, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
@@ -36458,7 +36553,8 @@ static void openCfgConfirmModal(int actionId, const char *text,
                              const char *text,
                              uint32_t bgColor,
                              lv_color_t txtColor,
-                             lv_event_cb_t cb) {
+                             lv_event_cb_t cb,
+                             int minW) {
         lv_obj_t *btn = lv_btn_create(parent);
     #if defined(DEVICE_TDECK_PRO)
         LV_UNUSED(bgColor);
@@ -36467,7 +36563,10 @@ static void openCfgConfirmModal(int actionId, const char *text,
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     #endif
         lv_obj_set_height(btn, 36);
-        lv_obj_set_style_min_width(btn, 84, 0);
+        lv_obj_set_style_min_width(btn, minW, 0);
+        // Grows to the share it was measured for rather than to its text, so
+        // the row lands on the arithmetic above instead of near it.
+        lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_style_radius(btn, 4, 0);
     #if defined(DEVICE_TDECK_PRO)
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
@@ -36485,20 +36584,26 @@ static void openCfgConfirmModal(int actionId, const char *text,
     #else
         lv_obj_set_style_text_color(lbl, txtColor, 0);
     #endif
+        // Bounded by the button so a caller's own alt label -- "(F)ormat and
+        // erase" is a real one -- shortens instead of pushing its button wide
+        // and the row off the panel.
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
         return btn;
     };
 #if UI_TOUCH_ONLY_PROFILE
-    makeConfirmBtn(btnRow, "No", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
-    makeConfirmBtn(btnRow, "Yes", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
+    makeConfirmBtn(btnRow, "No", noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
+    makeConfirmBtn(btnRow, "Yes", yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
 #else
-    makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed);
-    makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed);
+    makeConfirmBtn(btnRow, "(N)o", noBtnBg, btnTextColor, onCfgConfirmNoPressed, btnMinW);
+    makeConfirmBtn(btnRow, "(Y)es", yesBtnBg, btnTextColor, onCfgConfirmYesPressed, btnMinW);
 #endif
     if (s_cfgConfirmAltFn) {
         makeConfirmBtn(btnRow, s_cfgConfirmAltLabel, altBtnBg, btnTextColor,
-                       onCfgConfirmAltPressed);
+                       onCfgConfirmAltPressed, btnMinW);
     }
 }
 
@@ -43843,40 +43948,60 @@ static void setDmAlertVisible(lv_obj_t *label, bool visible) {
 }
 
 static void refreshDmAlertIndicator() {
-    // 500 ms on / 500 ms off blink; derived from the free-running millis()
-    // counter so we don't need to persist a phase across calls. Both envelopes
-    // read the same clock, so the one on a modal's nav bar blinks in step with
-    // the chat screen's rather than on a phase of its own.
-    const bool visible = DMs.hasUnread() && (((millis() / 500UL) & 1UL) == 0UL);
-#if UI_TOUCH_ONLY_PROFILE
-    // These boards light the nav bar's DM cell rather than the header envelope.
-    // The bar is always on screen here and is where the tap has to land anyway,
-    // so the alert and the way to answer it become one control instead of a
-    // mark in one corner and a button in another.
-    //
-    // The header envelope is still built — other things in that bar are laid
-    // out relative to it — but it never shows.
-    setDmAlertVisible(s_chatDmAlert, false);
+    const bool unread = DMs.hasUnread();
+    // 500 ms on / 500 ms off, derived from the free-running millis() counter so
+    // no phase has to be persisted across calls. Every indicator reads the same
+    // clock, so where two are showing they blink together rather than chasing
+    // each other.
+    const bool blink = unread && (((millis() / 500UL) & 1UL) == 0UL);
+
+#if UI_TOUCH_NAV_BAR
+    // Where the bar is up, the alert goes on the cell that answers it. This is
+    // a runtime question, not a build-time one: on the boards where the bar is a
+    // setting it has to follow the setting, or turning the bar on leaves the
+    // mark in the footer corner and the button it refers to at the other end of
+    // the screen -- and both saying it at once is the same thing twice, a few
+    // pixels apart.
+    const bool onNav = bottomNavEnabled();
+#if defined(DEVICE_TDECK_PRO)
+    // Held, not blinked. Every flip is a full e-paper refresh: at 2 Hz that is
+    // visibly slow, costs real battery, and would leave the bar flickering for
+    // as long as anything is unread. Marked until the conversation is opened
+    // says the same thing and costs one refresh.
+    const bool cellLit = onNav && unread;
+#else
+    const bool cellLit = onNav && blink;
+#endif
 
     // Only when it changes. This runs every loop pass, and re-asserting the
     // same colour would invalidate the label on every one of them.
     static bool primed = false;
-    if (visible != s_navDmLit || !primed) {
-        s_navDmLit = visible;
+    if (cellLit != s_navDmLit || !primed) {
+        s_navDmLit = cellLit;
         primed = true;
         for (int i = 0; i < kNavDmIconSlots; i++) {
             if (s_navDmIcons[i] && !lv_obj_is_valid(s_navDmIcons[i])) {
                 s_navDmIcons[i] = nullptr;   // its bar went with a closed modal
                 continue;
             }
-            navDmApplyInk(s_navDmIcons[i], visible);
+            navDmApplyInk(s_navDmIcons[i], cellLit);
         }
     }
-#else
-    setDmAlertVisible(s_chatDmAlert, visible);
+
+    if (onNav) {
+        // The footer envelope is still built -- other things in that strip are
+        // laid out relative to it -- but with the bar up it never shows.
+        setDmAlertVisible(s_chatDmAlert, false);
 #if HAS_NAV_BAR_TOGGLE
-    setDmAlertVisible(s_navStatusDm, visible);
+        setDmAlertVisible(s_navStatusDm, false);
 #endif
+        return;
+    }
+#endif  // UI_TOUCH_NAV_BAR
+
+    setDmAlertVisible(s_chatDmAlert, blink);
+#if HAS_NAV_BAR_TOGGLE
+    setDmAlertVisible(s_navStatusDm, blink);
 #endif
 }
 
@@ -43889,29 +44014,42 @@ static void refreshDmAlertIndicator() {
 // cells wide has no room to spend on a status icon that repeats what one of the
 // cells could say itself. Boards without one get the bell beside the envelope.
 static void refreshChatAlertIndicator() {
-    const bool visible = anyChannelNeedsAttention() && (((millis() / 500UL) & 1UL) == 0UL);
-#if UI_TOUCH_ONLY_PROFILE
-    setDmAlertVisible(s_chatChanAlert, false);
+    const bool unread = anyChannelNeedsAttention();
+    const bool blink = unread && (((millis() / 500UL) & 1UL) == 0UL);
 
-    // Only on change, for the reason the DM copy gives: this runs every loop
-    // pass and re-asserting a colour invalidates the label every time.
+#if UI_TOUCH_NAV_BAR
+    const bool onNav = bottomNavEnabled();
+#if defined(DEVICE_TDECK_PRO)
+    const bool cellLit = onNav && unread;   // held, for the reason the DM copy gives
+#else
+    const bool cellLit = onNav && blink;
+#endif
+
     static bool primed = false;
-    if (visible != s_navChatLit || !primed) {
-        s_navChatLit = visible;
+    if (cellLit != s_navChatLit || !primed) {
+        s_navChatLit = cellLit;
         primed = true;
         for (int i = 0; i < kNavDmIconSlots; i++) {
             if (s_navChatIcons[i] && !lv_obj_is_valid(s_navChatIcons[i])) {
                 s_navChatIcons[i] = nullptr;   // its bar went with a closed modal
                 continue;
             }
-            navChatApplyInk(s_navChatIcons[i], visible);
+            navChatApplyInk(s_navChatIcons[i], cellLit);
         }
     }
-#else
-    setDmAlertVisible(s_chatChanAlert, visible);
+
+    if (onNav) {
+        setDmAlertVisible(s_chatChanAlert, false);
 #if HAS_NAV_BAR_TOGGLE
-    setDmAlertVisible(s_navStatusChan, visible);
+        setDmAlertVisible(s_navStatusChan, false);
 #endif
+        return;
+    }
+#endif  // UI_TOUCH_NAV_BAR
+
+    setDmAlertVisible(s_chatChanAlert, blink);
+#if HAS_NAV_BAR_TOGGLE
+    setDmAlertVisible(s_navStatusChan, blink);
 #endif
 }
 
@@ -44092,12 +44230,21 @@ static uint32_t adminEpochNow(void *) {
     return (now >= 1700000000) ? (uint32_t)now : 0;
 }
 
+static bool adminPeerAt(int index, uint32_t &nodeId, const char *&state, void *) {
+    const AdminPeer *p = AdminPeerList.at(index);
+    if (!p) return false;
+    nodeId = p->nodeId;
+    state = AdminPeers::stateName(p->state);
+    return true;
+}
+
 static AdminClient::Hooks adminHooks() {
     AdminClient::Hooks h{};
     h.send = adminSendPacket;
     h.rfRecent = adminRfRecent;
     h.mqttUp = adminMqttUp;
     h.epochNow = adminEpochNow;
+    h.peerAt = adminPeerAt;
     h.ctx = nullptr;
     return h;
 }
@@ -44105,8 +44252,9 @@ static AdminClient::Hooks adminHooks() {
 // Opening and closing are the UI's business, but both UIs do it identically, so
 // the rule about the gate lives here rather than twice over.
 static bool adminOpenSession(uint32_t nodeId) {
-    if (!AdminPeerList.mayAdminister(nodeId)) {
-        Serial.printf("[admin] refusing !%08lx - not confirmed\n", (unsigned long)nodeId);
+    if (!AdminPeerList.mayOpenTerminal(nodeId)) {
+        Serial.printf("[admin] refusing !%08lx - not a listed peer\n",
+                      (unsigned long)nodeId);
         return false;
     }
     return s_adminSession.open(nodeId, adminHooks());
@@ -44148,6 +44296,176 @@ static lv_color_t adminLineColor(uint8_t kind) {
 #endif
 }
 
+// The transcript's font and how many characters fit across it. Measured at
+// open and held, because every line drawn needs the same answer and the panel
+// does not change size while the modal is up.
+static const lv_font_t *s_adminFont = &lv_font_montserrat_10;
+static int              s_adminCols = 40;
+
+// Average advance of the transcript's alphabet, rounded up.
+//
+// Rounded up on purpose: the count it feeds is a budget, and a budget that is a
+// character too small costs one early break, while one that is a character too
+// large overruns the panel -- which is the ragged edge this is here to stop.
+static int adminAvgCharW(const lv_font_t *font) {
+    static const char kSample[] = "abcdefghijklmnopqrstuvwxyz0123456789 .=_";
+    lv_point_t sz = {0, 0};
+    lv_text_get_size(&sz, kSample, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+    const int n = (int)(sizeof(kSample) - 1);
+    if (n <= 0 || sz.x <= 0) return 6;
+    return ((int)sz.x + n - 1) / n;
+}
+
+// The largest font that still leaves the terminal usably wide.
+//
+// Measured rather than chosen per board: this fleet runs from a 240 px panel to
+// a 480 px one across eleven environments, and a table of device names is a
+// table that goes stale the next time one is added. A terminal is judged on its
+// column count -- below about 52 the session's `key = value` replies wrap on
+// nearly every line -- so the rule is "biggest font that still clears 52", with
+// montserrat_10 as the floor for the panels where nothing does.
+static const lv_font_t *adminPickFont(int availW, int &colsOut) {
+    static const lv_font_t *const kCandidates[] = {
+        &lv_font_montserrat_14,
+        &lv_font_montserrat_12,
+        &lv_font_montserrat_10,
+    };
+    constexpr int kWantCols = 52;
+    constexpr int kLast = (int)(sizeof(kCandidates) / sizeof(kCandidates[0])) - 1;
+
+    for (int i = 0; i <= kLast; i++) {
+        const int cw = adminAvgCharW(kCandidates[i]);
+        const int cols = cw > 0 ? availW / cw : 0;
+        if (cols >= kWantCols || i == kLast) {
+            colsOut = cols > 8 ? cols : 8;
+            return kCandidates[i];
+        }
+    }
+    colsOut = 8;
+    return &lv_font_montserrat_10;
+}
+
+// A two character gutter naming what kind of line this is.
+//
+// The colour panels answer this with adminLineColor and need nothing here. The
+// Pro cannot: it is one bit, so echo, info, ok and error all resolve to the
+// same black and the transcript arrives as an undifferentiated wall of text
+// with no way to tell what you typed from what came back.
+//
+// Two characters because the echo already carries "> " from the session, so
+// that is the width the rest have to match to line up under it. PLAIN gets
+// blanks rather than a mark -- it is the body of whatever OK line came before
+// it, and marking a continuation as its own thing is the confusion this is
+// meant to remove.
+static const char *adminKindGutter(uint8_t kind) {
+#if defined(DEVICE_TDECK_PRO)
+    switch (kind) {
+        case AdminClient::LINE_ECHO: return "";     // already "> " in the text
+        case AdminClient::LINE_INFO: return "- ";
+        case AdminClient::LINE_OK:   return "+ ";
+        case AdminClient::LINE_ERR:  return "! ";
+        default:                     return "  ";
+    }
+#else
+    LV_UNUSED(kind);
+    return "";
+#endif
+}
+
+// One transcript line, broken to fit and emitted as one label per visual row.
+//
+// Done here rather than left to LV_LABEL_LONG_WRAP because LVGL restarts a
+// wrapped row flush left, which makes the tail of a long reply look like a new
+// entry -- on a 40 column panel half the transcript reads as lines nobody sent.
+// Continuations carry a two space hanging indent instead, so a wrapped line
+// stays one line to the eye.
+//
+// Breaks at the last space in the window when there is one worth using, and
+// mid-token when there is not: a 64 character public key has no spaces in it
+// and still has to go somewhere. LONG_WRAP stays on each row as a backstop --
+// the budget is an average-width estimate, so a row of unusually wide glyphs
+// can still need LVGL to break it, and wrapping beats clipping when it does.
+static void adminEmitLine(lv_obj_t *parent, const char *text, uint8_t kind) {
+    const int cols = s_adminCols;
+    constexpr int kIndent = 2;
+
+    // Bound once so the arithmetic below never has to consider null.
+    const char  *t   = text ? text : "";
+    const size_t len = strlen(t);
+    // Same width as the continuation indent by construction, so a wrapped line
+    // lands exactly under the first character of the one it continues.
+    const char  *gut = adminKindGutter(kind);
+    const int    gutLen = (int)strlen(gut);
+    size_t pos = 0;
+    bool first = true;
+    char buf[AdminClient::kLineLen + kIndent + 1];
+
+    do {
+        int budget = cols - (first ? gutLen : kIndent);
+        if (budget < 4) budget = 4;
+
+        size_t take = len - pos;
+        if (take > (size_t)budget) {
+            take = (size_t)budget;
+            size_t brk = 0;
+            for (size_t i = take; i > 0; i--) {
+                if (t[pos + i - 1] == ' ') { brk = i; break; }
+            }
+            // Only if it leaves a reasonable amount on this row. A space in the
+            // first few characters would break after one word and hand the rest
+            // of the panel back empty.
+            if (brk > (size_t)(budget / 3)) take = brk - 1;   // drop the space
+        }
+
+        int n = 0;
+        if (first) { memcpy(buf, gut, (size_t)gutLen); n = gutLen; }
+        else       { buf[0] = ' '; buf[1] = ' '; n = kIndent; }
+        if (take > sizeof(buf) - 1 - (size_t)n) take = sizeof(buf) - 1 - (size_t)n;
+        // Neither branch above can reach zero with budget >= 4, but the loop
+        // only terminates because `take` advances `pos`, and that is too much
+        // to rest on arithmetic nobody will re-check.
+        if (take == 0 && pos < len) take = 1;
+        memcpy(buf + n, t + pos, take);
+        buf[n + take] = '\0';
+
+        lv_obj_t *lbl = lv_label_create(parent);
+        lv_obj_set_width(lbl, lv_pct(100));
+        lv_obj_set_style_text_font(lbl, s_adminFont, 0);
+        lv_obj_set_style_text_color(lbl, adminLineColor(kind), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(lbl, buf);
+
+        pos += take;
+        while (pos < len && t[pos] == ' ') pos++;   // eat the break
+        first = false;
+    } while (pos < len);
+}
+
+#if defined(DEVICE_TDECK_PRO)
+// Width of the scroll arrow column. Two thumb-sized targets on a 240 px panel:
+// wide enough to hit without a stylus, narrow enough that the transcript keeps
+// the columns the wrap budget was measured against.
+static constexpr int kAdminArrowW = 26;
+
+// Paged rather than nudged. E-paper spends most of a second on every refresh,
+// so a scroll that moves a line at a time costs a full repaint per line; three
+// quarters of a screen keeps a couple of lines of overlap for the eye to land
+// on and asks the panel for one refresh to do it.
+static void onAdminScrollArrow(lv_event_t *e) {
+    if (!s_adminScroll || !lvObjValid(s_adminScroll)) return;
+    const int dir = (int)(intptr_t)lv_event_get_user_data(e);
+    int page = lv_obj_get_height(s_adminScroll) * 3 / 4;
+    if (page < 16) page = 16;
+    // Through scrollListClamped, not lv_obj_scroll_by: the raw call is
+    // unbounded and runs off the end of the transcript into blank space, which
+    // on a panel that takes most of a second to repaint is a very slow way to
+    // find out you were already at the bottom. Its sign convention is this
+    // one -- positive dy reveals what is above, which is what Up means.
+    scrollListClamped(s_adminScroll, (lv_coord_t)(dir * page));
+    s_lastActivityMs = millis();
+}
+#endif
+
 static void refreshAdminTranscript() {
     if (!s_adminScroll || !lvObjValid(s_adminScroll)) return;
     // Repainted whole rather than appended to: the session's buffer is a ring,
@@ -44160,19 +44478,22 @@ static void refreshAdminTranscript() {
     for (int i = 0; i < s_adminSession.lineCount(); i++) {
         const AdminClient::Line *ln = s_adminSession.line(i);
         if (!ln) continue;
-        lv_obj_t *lbl = lv_label_create(s_adminScroll);
-        lv_obj_set_width(lbl, lv_pct(100));
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(lbl, adminLineColor(ln->kind), 0);
-        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(lbl, ln->text);
+        adminEmitLine(s_adminScroll, ln->text, ln->kind);
     }
     lv_obj_scroll_to_y(s_adminScroll, LV_COORD_MAX, LV_ANIM_OFF);
 
     if (s_adminTitle && lvObjValid(s_adminTitle)) {
         const AdminClient::Transport t = s_adminSession.transport();
-        lv_label_set_text_fmt(s_adminTitle, "!%08lx [%s]%s",
-                              (unsigned long)s_adminSession.nodeId(),
+        // The name, falling back the way the rest of the UI does. A hex id is
+        // nine characters of the title row spent on something the operator
+        // already knows -- they picked the node to open it.
+        const NodeEntry *n = Nodes.find(s_adminSession.nodeId());
+        char who[24];
+        if (n && n->longName[0])        snprintf(who, sizeof(who), "%s", n->longName);
+        else if (n && n->shortName[0])  snprintf(who, sizeof(who), "%s", n->shortName);
+        else snprintf(who, sizeof(who), "!%08lx", (unsigned long)s_adminSession.nodeId());
+
+        lv_label_set_text_fmt(s_adminTitle, "%s  %s%s", who,
                               t == AdminClient::TRANSPORT_RF ? "rf"
                                 : t == AdminClient::TRANSPORT_MQTT ? "mqtt" : "auto",
                               s_adminSession.awaitingConfirm() ? "  CONFIRM?" : "");
@@ -44290,12 +44611,43 @@ static void openAdminTerminalModal(uint32_t nodeId) {
 
     s_adminTitle = lv_label_create(s_adminModal);
     lv_obj_set_width(s_adminTitle, lv_pct(100));
+    // Always the small font, whatever the transcript ended up with: this is one
+    // status row, and on the narrow panels every pixel it gives back is a line
+    // of transcript.
     lv_obj_set_style_text_font(s_adminTitle, &lv_font_montserrat_10, 0);
+    lv_label_set_long_mode(s_adminTitle, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_adminTitle, adminLineColor(AdminClient::LINE_INFO), 0);
     lv_label_set_text(s_adminTitle, "");
 
-    s_adminScroll = lv_obj_create(s_adminModal);
+    // On the Pro the transcript shares its row with a pair of scroll arrows,
+    // so it gets a row container to sit in; everywhere else it is the row.
+    //
+    // The arrows exist because this is the one board where the obvious keys are
+    // already spoken for: j and k are letters the moment there is a text field
+    // on screen, and the Pro's terminal always has one.
+    lv_obj_t *scrollParent = s_adminModal;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_t *body = lv_obj_create(s_adminModal);
+    lv_obj_set_width(body, lv_pct(100));
+    lv_obj_set_flex_grow(body, 1);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(body, 0, 0);
+    lv_obj_set_style_pad_all(body, 0, 0);
+    lv_obj_set_style_pad_column(body, 2, 0);
+    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    scrollParent = body;
+#endif
+
+    s_adminScroll = lv_obj_create(scrollParent);
+#if defined(DEVICE_TDECK_PRO)
+    // In a row, flex_grow divides the width and the height is the row's.
+    lv_obj_set_height(s_adminScroll, lv_pct(100));
+#else
     lv_obj_set_width(s_adminScroll, lv_pct(100));
+#endif
     lv_obj_set_flex_grow(s_adminScroll, 1);
     setupVScroll(s_adminScroll);
     lv_obj_set_scrollbar_mode(s_adminScroll, LV_SCROLLBAR_MODE_AUTO);
@@ -44304,13 +44656,100 @@ static void openAdminTerminalModal(uint32_t nodeId) {
     lv_obj_set_style_pad_all(s_adminScroll, 0, 0);
     lv_obj_set_style_pad_right(s_adminScroll, 2, 0);
     lv_obj_set_flex_flow(s_adminScroll, LV_FLEX_FLOW_COLUMN);
+    // pad_all does not touch pad_row, and the default theme's row gap is set
+    // for cards rather than for text -- left alone it put several blank pixels
+    // between every line of the transcript, which on a 240 px panel is most of
+    // a row given away per line. A terminal wants its lines touching.
+    lv_obj_set_style_pad_row(s_adminScroll, 0, 0);
+    lv_obj_set_style_text_line_space(s_adminScroll, 0, 0);
+
+#if defined(DEVICE_TDECK_PRO)
+    {
+        lv_obj_t *arrows = lv_obj_create(body);
+        lv_obj_set_width(arrows, kAdminArrowW);
+        lv_obj_set_height(arrows, lv_pct(100));
+        lv_obj_clear_flag(arrows, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_opa(arrows, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(arrows, 0, 0);
+        lv_obj_set_style_pad_all(arrows, 0, 0);
+        lv_obj_set_style_pad_row(arrows, 2, 0);
+        lv_obj_set_flex_flow(arrows, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(arrows, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        struct { const char *glyph; int dir; } kArrows[] = {
+            { LV_SYMBOL_UP,   +1 },
+            { LV_SYMBOL_DOWN, -1 },
+        };
+        for (size_t i = 0; i < sizeof(kArrows) / sizeof(kArrows[0]); i++) {
+            lv_obj_t *b = lv_btn_create(arrows);
+            lv_obj_remove_style_all(b);
+            lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_width(b, lv_pct(100));
+            lv_obj_set_flex_grow(b, 1);
+            // Outlined, not filled: a filled button on a one-bit panel is a
+            // black block, and the glyph inside it disappears.
+            lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(b, 1, 0);
+            lv_obj_set_style_border_color(b, lv_color_make(0, 0, 0), 0);
+            lv_obj_set_style_radius(b, 0, 0);
+            lv_obj_set_style_pad_all(b, 0, 0);
+            lv_obj_add_event_cb(b, onAdminScrollArrow, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)kArrows[i].dir);
+
+            lv_obj_t *g = lv_label_create(b);
+            lv_obj_set_style_text_font(g, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(g, lv_color_make(0, 0, 0), 0);
+            lv_label_set_text(g, kArrows[i].glyph);
+            lv_obj_center(g);
+        }
+    }
+#endif
+
+    // Measured against the width the lines will actually be drawn in: the
+    // modal's content box, less the scrollbar gutter reserved just above, less
+    // the arrow column where there is one. Getting this wrong is not cosmetic
+    // -- it is the budget every line is broken to.
+    {
+        int availW = (w - 8) - 2 * 4 - 2;
+#if defined(DEVICE_TDECK_PRO)
+        availW -= kAdminArrowW + 2;   // the column and the row gap before it
+#endif
+        s_adminFont = adminPickFont(availW, s_adminCols);
+    }
+
+#if defined(DEVICE_TDECK_PRO)
+    // A seam between the transcript and the line being typed. Same rule idiom
+    // as the sleep header's, turned on its side.
+    //
+    // Only on the Pro because only the Pro needs it: the colour panels tell the
+    // two apart by ink -- the transcript is blue and green and red against a
+    // dark card, the textarea is a lighter well -- and on a one-bit panel all
+    // of that collapses to black on white, leaving the input as one more row of
+    // text under the last reply.
+    {
+        lv_obj_t *seam = lv_obj_create(s_adminModal);
+        lv_obj_set_width(seam, lv_pct(100));
+        lv_obj_set_height(seam, 1);
+        lv_obj_clear_flag(seam, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(seam, 0, 0);
+        lv_obj_set_style_radius(seam, 0, 0);
+        lv_obj_set_style_pad_all(seam, 0, 0);
+        lv_obj_set_style_bg_color(seam, lv_color_make(0, 0, 0), 0);
+        lv_obj_set_style_bg_opa(seam, LV_OPA_COVER, 0);
+    }
+#endif
 
     s_adminInput = lv_textarea_create(s_adminModal);
     lv_obj_set_width(s_adminInput, lv_pct(100));
     lv_textarea_set_one_line(s_adminInput, true);
     lv_textarea_set_max_length(s_adminInput, AdminClient::kLineLen - 1);
     lv_textarea_set_placeholder_text(s_adminInput, "help");
-    lv_obj_set_style_text_font(s_adminInput, &lv_font_montserrat_10, 0);
+    // The same font the echo will be drawn in, so a typed line does not change
+    // size when it lands in the transcript. The theme's textarea padding is
+    // sized for a form field; here it was costing more height than the text.
+    lv_obj_set_style_text_font(s_adminInput, s_adminFont, 0);
+    lv_obj_set_style_pad_all(s_adminInput, 2, 0);
 
 #if UI_TOUCH_ONLY_PROFILE
     s_adminKeyboard = lv_keyboard_create(s_adminModal);
@@ -44352,6 +44791,184 @@ static bool adminTerminalHandleKey(char k) {
 #endif  // HAS_ADMIN_TERMINAL
 
 #if HAS_ADMIN_TERMINAL
+// ── Boot probe of favourites ─────────────────────────────────────────────────
+// Once per boot, ask each favourite node whether it will take administration
+// from us, so the terminal is offered on the ones that will without anyone
+// having to go and find out by hand.
+//
+// Favourites rather than the whole node table, and that is the whole safety
+// argument: a favourite is a short, deliberate, user-curated list. Probing
+// everything we have ever heard would put an admin packet in front of every
+// stranger on the mesh once per reboot, which is traffic they never asked for
+// and a fair description of scanning.
+//
+// Sequential, never concurrent: one probe outstanding at a time, spaced, so a
+// device with a dozen favourites does not key up twelve times in a row on a
+// mesh that has other users. It runs on its own state rather than through
+// Session, so it cannot clobber a transcript the user is reading -- and it
+// stands aside entirely while a terminal is open.
+namespace {
+
+constexpr uint32_t kAdminProbeStartDelayMs = 45000;   // let the radio and node table settle
+constexpr uint32_t kAdminProbeGapMs        = 8000;    // between one probe and the next
+constexpr uint32_t kAdminProbeTimeoutMs    = 30000;   // matches the session's
+
+struct AdminBootProbe {
+    bool     done;          // the sweep has finished for this boot
+    bool     started;
+    int      rank;          // where the walk has reached in the node table
+    uint32_t nextAtMs;
+    uint32_t pendingId;     // packet id outstanding, 0 for none
+    uint32_t pendingNode;
+    uint32_t sentAtMs;
+    uint8_t  probed;
+    uint8_t  confirmed;
+};
+
+AdminBootProbe s_adminProbe{};
+
+// The rescan button's cooldown. Separate from the sweep's own timers: those
+// pace the packets inside one sweep, this paces how often a sweep may be
+// started. `used` rather than a zero sentinel so the first press after boot is
+// judged on its own merits and not on how close millis() still is to zero.
+constexpr uint32_t kAdminRescanCooldownMs = 30000;
+uint32_t s_adminRescanAtMs = 0;
+bool     s_adminRescanUsed = false;
+
+}  // namespace
+
+// Tells an open session what a probe just found out about its own peer.
+//
+// The sweep and the terminal can be pointed at the same node at the same time,
+// and the sweep is the one that gets the answer: the probe's reply is matched
+// by packet id, so it never reaches the session's own handler. Without this an
+// operator mid-session would learn that their grant had been revoked from the
+// next write failing, several commands later.
+//
+// Silent for any other node -- a sweep across a dozen favourites has no
+// business narrating itself into someone's terminal.
+static void adminProbeTellSession(uint32_t nodeId, bool authorised) {
+    if (!s_adminSession.isOpen() || s_adminSession.nodeId() != nodeId) return;
+    if (authorised) {
+        s_adminSession.notify(AdminClient::LINE_INFO,
+                              "re-verified: this node still accepts us");
+    } else {
+        s_adminSession.notify(AdminClient::LINE_ERR,
+                              "this node no longer accepts administration from us");
+    }
+    if (s_adminModal) refreshAdminTranscript();
+}
+
+// Called from the RX arms. Returns true when the packet belonged to the probe,
+// so the session is not also handed a reply that was never its request.
+static bool adminProbeOnReply(uint32_t requestId, const uint8_t *payload, size_t len,
+                              AdminClient::Transport via) {
+    if (!s_adminProbe.pendingId || s_adminProbe.pendingId != requestId) return false;
+
+    AdminProto::Response r;
+    const bool authorised = decodeResponse(payload, len, r) && r.hasPasskey;
+    if (authorised) {
+        // A session passkey is the proof: an unauthorized sender never gets one.
+        AdminPeerList.add(s_adminProbe.pendingNode);   // no-op when already listed
+        AdminPeerList.confirm(s_adminProbe.pendingNode,
+                              via == AdminClient::TRANSPORT_MQTT ? ADMIN_VIA_MQTT : ADMIN_VIA_RF,
+                              adminEpochNow(nullptr));
+        s_adminProbe.confirmed++;
+    }
+    adminProbeTellSession(s_adminProbe.pendingNode, authorised);
+    s_adminProbe.pendingId = 0;
+    s_adminProbe.pendingNode = 0;
+    return true;
+}
+
+static bool adminProbeOnRouting(uint32_t requestId, uint32_t errorReason) {
+    if (!s_adminProbe.pendingId || s_adminProbe.pendingId != requestId) return false;
+    if (AdminClient::errorMeansUnauthorized(errorReason)) {
+        // Recorded rather than ignored: "this node refuses us" is worth knowing
+        // and worth showing on the peers screen, and it stops the terminal being
+        // offered on a node that will only ever say no.
+        AdminPeerList.add(s_adminProbe.pendingNode);
+        AdminPeerList.deny(s_adminProbe.pendingNode);
+        adminProbeTellSession(s_adminProbe.pendingNode, false);
+    }
+    // Every other outcome -- an ack, a no-route, a duty-cycle refusal -- leaves
+    // the peer exactly as it was. Only 33/37 mean anything about authorization.
+    s_adminProbe.pendingId = 0;
+    s_adminProbe.pendingNode = 0;
+    return true;
+}
+
+static void serviceAdminBootProbe(uint32_t nowMs) {
+    if (s_adminProbe.done || !s_radioReady) return;
+
+    // Not while one of the operator's own commands is in flight: that is the
+    // case where a probe would be a second admin exchange competing with the
+    // first, and the operator's command is what the airtime is for.
+    //
+    // busy(), not isOpen(). A session deliberately outlives its window -- the
+    // remote holds its key for 300 s and reopening inside that window should
+    // not cost a round trip -- so isOpen() stays true long after the terminal
+    // has been closed, and gating on it meant the first terminal of a boot
+    // stopped the sweep for the rest of that boot. Between commands there is
+    // nothing to collide with.
+    if (s_adminSession.busy()) return;
+
+    if (!s_adminProbe.started) {
+        s_adminProbe.started = true;
+        s_adminProbe.nextAtMs = nowMs + kAdminProbeStartDelayMs;
+        return;
+    }
+
+    if (s_adminProbe.pendingId) {
+        if ((uint32_t)(nowMs - s_adminProbe.sentAtMs) < kAdminProbeTimeoutMs) return;
+        // Silence is not a refusal -- out of range, asleep, or a broker that is
+        // down all look like this -- so the peer is left exactly as it was.
+        Serial.printf("[admin-probe] !%08lx did not answer\n",
+                      (unsigned long)s_adminProbe.pendingNode);
+        s_adminProbe.pendingId = 0;
+        s_adminProbe.pendingNode = 0;
+        s_adminProbe.nextAtMs = nowMs + kAdminProbeGapMs;
+        return;
+    }
+
+    if ((int32_t)(nowMs - s_adminProbe.nextAtMs) < 0) return;
+
+    // Next favourite with a public key. No key means PKI is impossible, which
+    // means the answer is already known without asking.
+    while (s_adminProbe.rank < Nodes.count()) {
+        NodeEntry *n = Nodes.getByRank(s_adminProbe.rank);
+        s_adminProbe.rank++;
+        if (!n || !n->favorite || !n->hasPubKey || !n->nodeId) continue;
+
+        uint8_t msg[64];
+        const size_t len = AdminProto::encodeGetRequest(
+            msg, sizeof(msg), AdminProto::GET_DEVICE_METADATA_REQUEST, 1);
+        const uint32_t id = adminSendPacket(n->nodeId,
+                                            adminRfRecent(n->nodeId, nullptr)
+                                                ? AdminClient::TRANSPORT_RF
+                                                : AdminClient::TRANSPORT_MQTT,
+                                            msg, len, nullptr);
+        if (!id) {
+            // Could not send -- no route today. Try the next one rather than
+            // stalling the sweep on it.
+            s_adminProbe.nextAtMs = nowMs + kAdminProbeGapMs;
+            return;
+        }
+        s_adminProbe.pendingId = id;
+        s_adminProbe.pendingNode = n->nodeId;
+        s_adminProbe.sentAtMs = nowMs;
+        s_adminProbe.probed++;
+        Serial.printf("[admin-probe] asking !%08lx\n", (unsigned long)n->nodeId);
+        return;
+    }
+
+    s_adminProbe.done = true;
+    Serial.printf("[admin-probe] sweep done: %u favourite%s asked, %u confirmed\n",
+                  (unsigned)s_adminProbe.probed,
+                  s_adminProbe.probed == 1 ? "" : "s",
+                  (unsigned)s_adminProbe.confirmed);
+}
+
 // ── Web terminal accessors ───────────────────────────────────────────────────
 // Declared in web_config.h. The web terminal drives the same session the device
 // does; nothing here keeps state of its own.
@@ -44385,10 +45002,90 @@ void webCfgAdminSubmit(const char *line) {
 }
 
 bool webCfgAdminVerify(uint32_t nodeId) {
-    if (!webCfgAdminOpen(nodeId)) return false;
-    s_adminSession.submit("verify", millis());
-    if (s_adminModal) refreshAdminTranscript();
+    // Through the probe, not the session. The session refuses to open on a peer
+    // that is not already CONFIRMED -- which is every peer worth verifying, so
+    // routing Verify through it made the button useless on exactly the rows that
+    // needed it. The probe has no such gate, because it is the thing that
+    // decides whether the gate opens.
+    if (s_adminProbe.pendingId) return false;   // one outstanding at a time
+    NodeEntry *n = Nodes.find(nodeId);
+    if (!n || !n->hasPubKey) return false;      // PKI is the only path in
+
+    uint8_t msg[64];
+    const size_t len = AdminProto::encodeGetRequest(
+        msg, sizeof(msg), AdminProto::GET_DEVICE_METADATA_REQUEST, 1);
+    const uint32_t id = adminSendPacket(nodeId,
+                                        adminRfRecent(nodeId, nullptr)
+                                            ? AdminClient::TRANSPORT_RF
+                                            : AdminClient::TRANSPORT_MQTT,
+                                        msg, len, nullptr);
+    if (!id) return false;
+
+    // Handed to the same state the boot sweep uses, so the reply and the NAK are
+    // read by one piece of code rather than two that could disagree.
+    s_adminProbe.pendingId = id;
+    s_adminProbe.pendingNode = nodeId;
+    s_adminProbe.sentAtMs = millis();
+    Serial.printf("[admin-probe] verify asked !%08lx\n", (unsigned long)nodeId);
     return true;
+}
+
+int webCfgAdminRescanFavorites(uint32_t &waitSecs) {
+    waitSecs = 0;
+
+    // No session gate. A session outlives the window it was opened in, so
+    // "is a session open" was answering a question nobody asked -- it refused
+    // the button for five minutes after a terminal had been closed, and there
+    // is no terminal on screen to be interrupted. The sweep itself stands aside
+    // for a command actually in flight; that is where the conflict is.
+
+    // Thirty seconds between sweeps. The limit is on the button, not on the
+    // sweep itself -- a sweep is a packet every 8 s for as long as the
+    // favourites last, and letting someone restart it from the top on every
+    // click is how one browser tab turns into a node that will not stop
+    // transmitting. The cooldown is measured from the last *accepted* press, so
+    // holding the button down does not extend it.
+    const uint32_t nowMs = millis();
+    if (s_adminRescanUsed) {
+        const uint32_t since = nowMs - s_adminRescanAtMs;
+        if (since < kAdminRescanCooldownMs) {
+            waitSecs = (kAdminRescanCooldownMs - since + 999) / 1000;
+            return ADMIN_RESCAN_COOLING;
+        }
+    }
+
+    // Is there anything to ask? A favourite with no public key can never answer
+    // a PKI admin request, so a sweep over none of them would report "started"
+    // and then do nothing visible for the rest of the minute.
+    int candidates = 0;
+    for (int i = 0; i < Nodes.count(); i++) {
+        const NodeEntry *n = Nodes.getByRank(i);
+        if (n && n->favorite && n->hasPubKey && n->nodeId) candidates++;
+    }
+    if (candidates == 0) return ADMIN_RESCAN_NOTHING;
+
+    s_adminRescanUsed = true;
+    s_adminRescanAtMs = nowMs;
+
+    // Rewind the sweep. `started` stays true and nextAtMs is now, so this one
+    // begins on the next loop pass rather than after the 45 s settling delay the
+    // boot sweep wants -- the radio and the node table are long since settled by
+    // the time anyone is clicking buttons in a browser.
+    //
+    // pendingId is deliberately left alone. A probe already in flight belongs to
+    // a request that has not been answered yet; the service loop waits it out
+    // and then walks from the top, which costs one extra spacing gap and keeps
+    // the invariant that only one admin packet is ever outstanding.
+    s_adminProbe.done      = false;
+    s_adminProbe.started   = true;
+    s_adminProbe.rank      = 0;
+    s_adminProbe.nextAtMs  = nowMs;
+    s_adminProbe.probed    = 0;
+    s_adminProbe.confirmed = 0;
+
+    Serial.printf("[admin-probe] rescan requested: %d favourite%s to ask\n",
+                  candidates, candidates == 1 ? "" : "s");
+    return candidates;
 }
 #endif  // HAS_ADMIN_TERMINAL
 
@@ -45268,9 +45965,12 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
             bool isAck = (errorReason == 0);
 #if HAS_ADMIN_TERMINAL
-            // A write is answered by this and nothing else, so the session's
-            // notion of "done" lives here rather than in the ADMIN_APP arm.
-            if (s_adminSession.isOpen() && s_adminSession.nodeId() == pkt.hdr.from) {
+            // The boot sweep first: its packets are not the session's, and a
+            // NAK for one must not close a terminal open on a different node.
+            if (!adminProbeOnRouting(pkt.requestId, errorReason)
+                // A write is answered by this and nothing else, so the session's
+                // notion of "done" lives here rather than in the ADMIN_APP arm.
+                && s_adminSession.isOpen() && s_adminSession.nodeId() == pkt.hdr.from) {
                 const uint32_t peer = s_adminSession.nodeId();
                 s_adminSession.onRouting(pkt.requestId, errorReason,
                                          (pkt.hdr.flags & 0x10) ? AdminClient::TRANSPORT_MQTT
@@ -45370,7 +46070,8 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
             // via_mqtt is flags bit 4 (see MeshHdr), not a member.
             const AdminClient::Transport via = (pkt.hdr.flags & 0x10)
                 ? AdminClient::TRANSPORT_MQTT : AdminClient::TRANSPORT_RF;
-            if (pkt.requestId && addressedToMe) {
+            if (pkt.requestId && addressedToMe
+                && !adminProbeOnReply(pkt.requestId, pkt.payload, pkt.payloadLen, via)) {
                 s_adminSession.onAdminReply(pkt.requestId, pkt.payload, pkt.payloadLen,
                                             via, millis());
             }
@@ -47991,6 +48692,8 @@ static void buildUi() {
     lv_obj_set_style_border_width(s_chatShortcutBar, 1, 0);
     lv_obj_set_style_border_color(s_chatShortcutBar, lv_color_make(0, 0, 0), 0);
 #else
+    // panelBg/divider, the same tokens every other panel on this screen takes,
+    // so the bar belongs to the theme rather than staying navy under it.
     lv_obj_set_style_bg_color(s_chatShortcutBar, lv_color_hex(0x0E285B), 0);
     lv_obj_set_style_bg_opa(s_chatShortcutBar, LV_OPA_60, 0);
     lv_obj_set_style_border_width(s_chatShortcutBar, 1, 0);
@@ -49014,6 +49717,13 @@ void setup() {
     // The panel came up at the hardware default above, before any config
     // existed; now that it's loaded, honour the user's level.
     applyBrightness();
+#if defined(DEVICE_TDECK_PRO)
+    // Same reasoning for the keyboard, and the same place: boot lit it
+    // unconditionally before any setting was loaded, so a keyboard the user had
+    // turned dark came back on at every reboot and every flash. This is the
+    // first moment the answer is known.
+    setPagerKeyboardBacklight(tdeckProKeyboardBacklightEnabled());
+#endif
     drawBootSplash();   // sets the first status itself and holds, dots ticking
     // Lets the splash keep animating through web config's station-connect wait,
     // which is in another translation unit and blocks for up to ten seconds.
@@ -49845,6 +50555,7 @@ void loop() {
     // Drives the 30 s request timeout even with the window shut -- a command
     // sent and then dismissed still has to stop being outstanding.
     LOOP_PHASE("admin", s_adminSession.service(now));
+    LOOP_PHASE("adminprobe", serviceAdminBootProbe(now));
     if (s_adminModal) refreshAdminTranscript();
 #endif
     LOOP_PHASE("cpuscale", serviceCpuScaling());

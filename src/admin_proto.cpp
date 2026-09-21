@@ -44,6 +44,18 @@ size_t writeStringField(uint8_t *buf, size_t cap, size_t off, uint32_t field,
     return writeBytesField(buf, cap, off, field, (const uint8_t *)s, strlen(s));
 }
 
+size_t writeSfixed32Field(uint8_t *buf, size_t cap, size_t off, uint32_t field,
+                          int32_t v) {
+    off = writeTag(buf, cap, off, field, WT_32BIT);
+    if (!off || off + 4 > cap) return 0;
+    const uint32_t u = (uint32_t)v;
+    buf[off++] = (uint8_t)(u & 0xFF);
+    buf[off++] = (uint8_t)((u >> 8) & 0xFF);
+    buf[off++] = (uint8_t)((u >> 16) & 0xFF);
+    buf[off++] = (uint8_t)((u >> 24) & 0xFF);
+    return off;
+}
+
 size_t readVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val) {
     val = 0;
     int shift = 0;
@@ -321,6 +333,40 @@ const char *fieldName(uint32_t field) {
         case SESSION_PASSKEY:              return "session_passkey";
         default:                           return "unknown";
     }
+}
+
+namespace {
+struct BlockName { const char *name; uint32_t block; };
+const BlockName kModuleBlocks[] = {
+    { "mqtt",         MODULE_MQTT         },
+    { "serial",       MODULE_SERIAL       },
+    { "extnotif",     MODULE_EXTNOTIF     },
+    { "storeforward", MODULE_STOREFORWARD },
+    { "rangetest",    MODULE_RANGETEST    },
+    { "telemetry",    MODULE_TELEMETRY    },
+    { "cannedmsg",    MODULE_CANNEDMSG    },
+    { "audio",        MODULE_AUDIO        },
+    { "remotehw",     MODULE_REMOTEHW     },
+    { "neighborinfo", MODULE_NEIGHBORINFO },
+    { "ambient",      MODULE_AMBIENT      },
+    { "detection",    MODULE_DETECTION    },
+    { "paxcounter",   MODULE_PAXCOUNTER   },
+};
+}  // namespace
+
+const char *moduleBlockName(uint32_t block) {
+    for (const auto &b : kModuleBlocks) {
+        if (b.block == block) return b.name;
+    }
+    return "unknown";
+}
+
+uint32_t moduleBlockFromName(const char *name) {
+    if (!name) return 0;
+    for (const auto &b : kModuleBlocks) {
+        if (!strcmp(name, b.name)) return b.block;
+    }
+    return 0;
 }
 
 const char *configBlockName(uint32_t block) {

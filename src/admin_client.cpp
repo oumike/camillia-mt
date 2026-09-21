@@ -108,10 +108,81 @@ bool parseValue(const SettableField &f, const char *text, uint64_t &out) {
     return true;
 }
 
+// ── Rendering a response ─────────────────────────────────────────────────────
+// Field numbers taken from meshtastic/protobufs rather than memory; a wrong one
+// here only misreports, but misreporting a remote's configuration is how someone
+// changes the wrong setting next.
+//
+// Named fields where a name is worth having, and a numbered dump for everything
+// else. The dump is the important half: a Config block carries fields this
+// firmware has never heard of, and the alternative to printing them as numbers
+// is not printing them at all -- which would make the terminal quietly lie about
+// what is on the remote.
+enum FieldKind : uint8_t { F_STR, F_UINT, F_BOOL, F_BYTES };
+
+struct NamedField {
+    uint32_t   field;
+    const char *name;
+    FieldKind  kind;
+};
+
+const NamedField kDeviceMetadata[] = {
+    { 1,  "firmware",      F_STR  },
+    { 2,  "state version", F_UINT },
+    { 3,  "can shutdown",  F_BOOL },
+    { 4,  "wifi",          F_BOOL },
+    { 5,  "bluetooth",     F_BOOL },
+    { 6,  "ethernet",      F_BOOL },
+    { 7,  "role",          F_UINT },
+    { 8,  "position flags",F_UINT },
+    { 9,  "hw model",      F_UINT },
+    { 10, "remote hw",     F_BOOL },
+    { 11, "PKC",           F_BOOL },
+    { 12, "excluded mods", F_UINT },
+    { 14, "xeddsa",        F_BOOL },
+};
+
+const NamedField kOwner[] = {
+    { 1, "id",         F_STR   },
+    { 2, "long name",  F_STR   },
+    { 3, "short name", F_STR   },
+    { 5, "hw model",   F_UINT  },
+    { 6, "licensed",   F_BOOL  },
+    { 7, "role",       F_UINT  },
+    { 8, "public key", F_BYTES },
+    { 9, "unmessagable", F_BOOL },
+};
+
+// Channel { index, settings{...}, role }. The settings are unwrapped one level
+// so the reading is flat rather than "settings: 24 bytes".
+const NamedField kChannelSettings[] = {
+    { 1, "channel num", F_UINT  },
+    { 2, "psk",         F_BYTES },
+    { 3, "name",        F_STR   },
+    { 4, "id",          F_UINT  },
+    { 5, "uplink",      F_BOOL  },
+    { 6, "downlink",    F_BOOL  },
+    { 8, "use aead",    F_BOOL  },
+};
+
+const NamedField *namedTableFor(uint32_t responseField, size_t &count) {
+    switch (responseField) {
+        case GET_DEVICE_METADATA_RESPONSE:
+            count = sizeof(kDeviceMetadata) / sizeof(kDeviceMetadata[0]);
+            return kDeviceMetadata;
+        case GET_OWNER_RESPONSE:
+            count = sizeof(kOwner) / sizeof(kOwner[0]);
+            return kOwner;
+        default:
+            count = 0;
+            return nullptr;
+    }
+}
+
 // ── Help ─────────────────────────────────────────────────────────────────────
 const char *kHelp[] = {
     "Meta   help [cmd]  whoami  session  transport [rf|mqtt|auto]",
-    "       verify  clear  exit",
+    "       peers  verify  clear  exit",
     "Read   info                 firmware, hardware, role",
     "       owner                names, id, public key",
     "       config <block>       device position power network display",
@@ -153,6 +224,53 @@ const HelpDetail kHelpDetail[] = {
     { "verify",    "verify - re-runs the authorization probe." },
     { "whoami",    "whoami - the node this terminal is pointed at." },
 };
+
+// One field, formatted for a terminal line. `name` is null for an unnamed field,
+// which prints as its number so it is at least visible.
+void formatField(char *out, size_t outLen, const char *name, uint32_t number,
+                 int wtype, uint64_t varint, const uint8_t *bytes, size_t bytesLen,
+                 FieldKind kind, bool named) {
+    char label[24];
+    if (named && name) snprintf(label, sizeof(label), "%s", name);
+    else               snprintf(label, sizeof(label), "field %lu", (unsigned long)number);
+
+    if (wtype == WT_VARINT) {
+        if (named && kind == F_BOOL) {
+            snprintf(out, outLen, "  %s: %s", label, varint ? "yes" : "no");
+        } else {
+            snprintf(out, outLen, "  %s: %llu", label, (unsigned long long)varint);
+        }
+        return;
+    }
+    if (wtype != WT_LEN || !bytes) {
+        snprintf(out, outLen, "  %s: ?", label);
+        return;
+    }
+
+    // A string unless the table says otherwise, or unless the bytes are not
+    // printable -- a PSK and a public key are length-delimited too, and dumping
+    // raw key material into a transcript as mojibake helps nobody.
+    bool printable = bytesLen > 0;
+    for (size_t i = 0; i < bytesLen && printable; i++) {
+        if (bytes[i] < 0x20 || bytes[i] > 0x7E) printable = false;
+    }
+    if (named && kind == F_BYTES) printable = false;
+
+    if (printable) {
+        const size_t room = outLen > 24 ? outLen - 24 : 0;
+        const size_t n = bytesLen < room ? bytesLen : room;
+        snprintf(out, outLen, "  %s: %.*s", label, (int)n, (const char *)bytes);
+    } else if (bytesLen == 0) {
+        snprintf(out, outLen, "  %s: (empty)", label);
+    } else {
+        // Length plus the first few bytes: enough to tell "set" from "not set"
+        // and one key from another, without putting the whole thing on screen.
+        snprintf(out, outLen, "  %s: %u bytes %02x%02x%02x%s",
+                 label, (unsigned)bytesLen, bytes[0],
+                 bytesLen > 1 ? bytes[1] : 0, bytesLen > 2 ? bytes[2] : 0,
+                 bytesLen > 3 ? "..." : "");
+    }
+}
 
 int tokenize(char *line, char **argv, int maxArgs) {
     int argc = 0;
@@ -201,6 +319,11 @@ void Session::close() {
 const Line *Session::line(int i) const {
     if (!_lines || i < 0 || i >= _lineCount) return nullptr;
     return &_lines[(_lineHead + i) % kMaxLines];
+}
+
+void Session::notify(LineKind kind, const char *text) {
+    if (!_open || !text) return;
+    print((uint8_t)kind, "%s", text);
 }
 
 void Session::print(uint8_t kind, const char *fmt, ...) {
@@ -329,48 +452,164 @@ void Session::onAdminReply(uint32_t requestId, const uint8_t *payload, size_t le
 
     // A read-modify-write's GET has come back: splice the one field and send the
     // whole block straight back, unchanged in every other respect.
-    if (_pending.splicePending && r.field == GET_CONFIG_RESPONSE && r.payload) {
-        // r.payload is a Config message; the block we asked for is the field
-        // inside it that the oneof selected.
-        int wt = 0; const uint8_t *blockPtr = nullptr; size_t blockLen = 0; uint64_t v = 0;
-        if (!findField(r.payload, r.payloadLen, _pending.spliceBlock, wt, blockPtr, blockLen, v)
-            || wt != WT_LEN) {
-            print(LINE_ERR, "reply carried no %s block",
-                  configBlockName(_pending.spliceBlock));
-            _pending = Pending{};
-            return;
+    if (_pending.splicePending && r.payload) {
+        // The bytes to rewrite: a Config block inside the reply, or the reply's
+        // own message where there is no enclosing block (the owner record).
+        const uint8_t *src = r.payload;
+        size_t srcLen = r.payloadLen;
+        if (_pending.spliceBlock) {
+            int wt = 0; uint64_t v = 0;
+            if (!findField(r.payload, r.payloadLen, _pending.spliceBlock, wt, src, srcLen, v)
+                || wt != WT_LEN) {
+                print(LINE_ERR, "reply carried no %s block",
+                      configBlockName(_pending.spliceBlock));
+                _pending = Pending{};
+                return;
+            }
         }
 
         uint8_t spliced[kMaxPayload];
-        const size_t sn = spliceVarint(blockPtr, blockLen, _pending.spliceField,
-                                       _pending.spliceValue, spliced, sizeof(spliced));
+        const size_t sn = _pending.spliceIsText
+            ? spliceBytes(src, srcLen, _pending.spliceField,
+                          (const uint8_t *)_pending.spliceText,
+                          strlen(_pending.spliceText), spliced, sizeof(spliced))
+            : spliceVarint(src, srcLen, _pending.spliceField,
+                           _pending.spliceValue, spliced, sizeof(spliced));
         if (!sn) { print(LINE_ERR, "splice failed - nothing sent"); _pending = Pending{}; return; }
 
-        // Rebuild Config { <block> = spliced }, then set_config { Config }.
-        uint8_t cfg[kMaxPayload];
-        const size_t cn = writeBytesField(cfg, sizeof(cfg), 0, _pending.spliceBlock,
-                                          spliced, sn);
+        // Re-wrap in the block it came out of, where there was one.
+        uint8_t wrapped[kMaxPayload];
+        const uint8_t *body = spliced;
+        size_t bodyLen = sn;
+        if (_pending.spliceBlock) {
+            bodyLen = writeBytesField(wrapped, sizeof(wrapped), 0,
+                                      _pending.spliceBlock, spliced, sn);
+            if (!bodyLen) { print(LINE_ERR, "too large - nothing sent"); _pending = Pending{}; return; }
+            body = wrapped;
+        }
+
+        const uint32_t setField = _pending.spliceSetField;
         uint8_t msg[kMaxPayload];
-        size_t mn = cn ? encodeBytesCommand(msg, sizeof(msg), SET_CONFIG, cfg, cn,
-                                            _passkeyLen ? _passkey : nullptr, _passkeyLen)
-                       : 0;
-        if (!mn) { print(LINE_ERR, "set_config too large - nothing sent"); _pending = Pending{}; return; }
+        const size_t mn = encodeBytesCommand(msg, sizeof(msg), setField, body, bodyLen,
+                                             _passkeyLen ? _passkey : nullptr, _passkeyLen);
+        if (!mn) { print(LINE_ERR, "%s too large - nothing sent", fieldName(setField)); _pending = Pending{}; return; }
 
         print(LINE_INFO, "splicing %s", _pending.spliceLabel);
-        const uint32_t block = _pending.spliceBlock;
         _pending = Pending{};
-        if (!sendEncoded(msg, mn, SET_CONFIG, false, false, nowMs)) return;
-        (void)block;
+        sendEncoded(msg, mn, setField, false, false, nowMs);
         return;
     }
 
     print(LINE_OK, "%s (%s)", fieldName(r.field), viaName);
-    if (r.payload && r.payloadLen) {
-        print(LINE_PLAIN, "  %u bytes", (unsigned)r.payloadLen);
-    } else if (r.varint) {
-        print(LINE_PLAIN, "  %llu", (unsigned long long)r.varint);
-    }
+    renderPayload(r);
     _pending = Pending{};
+}
+
+void Session::renderMessage(const uint8_t *buf, size_t len,
+                            const void *tableV, size_t tableCount, int depth) {
+    const NamedField *table = (const NamedField *)tableV;
+    if (!buf) return;
+
+    size_t i = 0;
+    int printed = 0;
+    while (i < len) {
+        uint64_t tag = 0;
+        i = readVarint(buf, len, i, tag);
+        if (!i) break;
+        const uint32_t f = (uint32_t)(tag >> 3);
+        const int wt = (int)(tag & 0x07);
+
+        uint64_t varint = 0;
+        const uint8_t *bytes = nullptr;
+        size_t bytesLen = 0;
+        if (wt == WT_VARINT) {
+            if (!readVarint(buf, len, i, varint)) break;
+        } else if (wt == WT_LEN) {
+            uint64_t sz = 0;
+            const size_t j = readVarint(buf, len, i, sz);
+            if (!j || j + (size_t)sz > len) break;
+            bytes = buf + j;
+            bytesLen = (size_t)sz;
+        }
+
+        const NamedField *nf = nullptr;
+        for (size_t k = 0; k < tableCount; k++) {
+            if (table[k].field == f) { nf = &table[k]; break; }
+        }
+
+        char line[kLineLen];
+        formatField(line, sizeof(line), nf ? nf->name : nullptr, f, wt, varint,
+                    bytes, bytesLen, nf ? nf->kind : F_UINT, nf != nullptr);
+        print(LINE_PLAIN, "%s", line);
+        printed++;
+
+        i = skipValue(buf, len, i, wt);
+        if (!i) break;
+    }
+    if (!printed && depth == 0) print(LINE_PLAIN, "  (empty)");
+}
+
+void Session::renderPayload(const Response &r) {
+    if (!r.payload || !r.payloadLen) {
+        if (r.varint) print(LINE_PLAIN, "  %llu", (unsigned long long)r.varint);
+        return;
+    }
+
+    size_t count = 0;
+    const NamedField *table = namedTableFor(r.field, count);
+    if (table) {
+        renderMessage(r.payload, r.payloadLen, table, count, 0);
+        return;
+    }
+
+    if (r.field == GET_CHANNEL_RESPONSE) {
+        // Channel { index=1, settings=2, role=3 }. The settings are unwrapped so
+        // the reading is flat rather than "settings: 24 bytes".
+        int wt = 0; const uint8_t *sub = nullptr; size_t subLen = 0; uint64_t v = 0;
+        if (findField(r.payload, r.payloadLen, 1, wt, sub, subLen, v) && wt == WT_VARINT) {
+            print(LINE_PLAIN, "  index: %llu", (unsigned long long)v);
+        }
+        if (findField(r.payload, r.payloadLen, 3, wt, sub, subLen, v) && wt == WT_VARINT) {
+            // 0 disabled, 1 primary, 2 secondary.
+            print(LINE_PLAIN, "  role: %s",
+                  v == 1 ? "primary" : v == 2 ? "secondary" : "disabled");
+        }
+        if (findField(r.payload, r.payloadLen, 2, wt, sub, subLen, v) && wt == WT_LEN) {
+            renderMessage(sub, subLen, kChannelSettings,
+                          sizeof(kChannelSettings) / sizeof(kChannelSettings[0]), 1);
+        }
+        return;
+    }
+
+    if (r.field == GET_CONFIG_RESPONSE || r.field == GET_MODULE_CONFIG_RESPONSE) {
+        // Config/ModuleConfig is a oneof: one block inside. Name the block, then
+        // dump its fields by number -- there is no name table for these, and
+        // numbers next to values are still the remote's configuration where
+        // "62 bytes" is not.
+        size_t i = 0;
+        while (i < r.payloadLen) {
+            uint64_t tag = 0;
+            i = readVarint(r.payload, r.payloadLen, i, tag);
+            if (!i) break;
+            const uint32_t blk = (uint32_t)(tag >> 3);
+            const int wt = (int)(tag & 0x07);
+            if (wt == WT_LEN) {
+                uint64_t sz = 0;
+                const size_t j = readVarint(r.payload, r.payloadLen, i, sz);
+                if (!j || j + (size_t)sz > r.payloadLen) break;
+                print(LINE_PLAIN, "  %s:",
+                      r.field == GET_CONFIG_RESPONSE ? configBlockName(blk)
+                                                     : moduleBlockName(blk));
+                renderMessage(r.payload + j, (size_t)sz, nullptr, 0, 1);
+            }
+            i = skipValue(r.payload, r.payloadLen, i, wt);
+            if (!i) break;
+        }
+        return;
+    }
+
+    // Anything else: by number, so it is at least legible.
+    renderMessage(r.payload, r.payloadLen, nullptr, 0, 0);
 }
 
 // ── Command dispatch ─────────────────────────────────────────────────────────
@@ -473,6 +712,20 @@ bool Session::cmdMeta(int argc, char **argv, uint32_t nowMs) {
               eff == TRANSPORT_RF ? "rf" : "mqtt");
         return true;
     }
+    if (!strcmp(c, "peers")) {
+        if (!_hooks.peerAt) { print(LINE_ERR, "no peer list here"); return true; }
+        int shown = 0;
+        for (int i = 0; i < 32; i++) {
+            uint32_t id = 0;
+            const char *state = nullptr;
+            if (!_hooks.peerAt(i, id, state, _hooks.ctx)) break;
+            print(LINE_PLAIN, "  !%08lx  %s%s", (unsigned long)id,
+                  state ? state : "?", id == _nodeId ? "  <- this session" : "");
+            shown++;
+        }
+        if (!shown) print(LINE_PLAIN, "  (none)");
+        return true;
+    }
     if (!strcmp(c, "clear")) {
         _lineCount = 0; _lineHead = 0; _revision++;
         return true;
@@ -513,12 +766,9 @@ bool Session::cmdRead(int argc, char **argv, uint32_t nowMs) {
     }
     if (!strcmp(c, "module")) {
         if (argc < 2) { print(LINE_ERR, "module <block>"); return true; }
-        // ModuleConfig block numbers are the request enum directly; the parser
-        // keeps them numeric rather than inventing a second name table that
-        // could disagree with upstream.
-        const long b = strtol(argv[1], nullptr, 10);
-        if (b <= 0 || b > 20) { print(LINE_ERR, "module <1-20>"); return true; }
-        const size_t n = encodeGetRequest(msg, sizeof(msg), GET_MODULE_CONFIG_REQUEST, (uint64_t)b);
+        const uint32_t b = moduleBlockFromName(argv[1]);
+        if (!b) { print(LINE_ERR, "unknown module: %s", argv[1]); return true; }
+        const size_t n = encodeGetRequest(msg, sizeof(msg), GET_MODULE_CONFIG_REQUEST, b);
         sendEncoded(msg, n, GET_MODULE_CONFIG_REQUEST, false, true, nowMs);
         return true;
     }
@@ -539,16 +789,45 @@ bool Session::cmdWrite(int argc, char **argv, uint32_t nowMs) {
 
     if (!strcmp(c, "set")) {
         if (argc < 4) { print(LINE_ERR, "set <block> <field> <value>"); return true; }
+
+        // set owner long|short <text>. Checked before the block lookup because
+        // the owner is a User record, not part of Config -- but the same rule
+        // applies: set_owner replaces the whole record, so the name we are not
+        // changing has to survive, and that means reading first.
+        if (!strcmp(argv[1], "owner")) {
+            const bool isLong = !strcmp(argv[2], "long");
+            if (!isLong && strcmp(argv[2], "short")) {
+                print(LINE_ERR, "set owner long|short <text>");
+                return true;
+            }
+            const char *text = argv[3];
+            if (!text[0]) { print(LINE_ERR, "a name cannot be empty"); return true; }
+            if (!isLong && strlen(text) > 4) {
+                print(LINE_ERR, "a short name is at most 4 characters");
+                return true;
+            }
+
+            const size_t on = encodeGetRequest(msg, sizeof(msg), GET_OWNER_REQUEST, 1);
+            print(LINE_INFO, "fetching owner");
+            if (!sendEncoded(msg, on, GET_OWNER_REQUEST, false, true, nowMs)) return true;
+            _pending.splicePending = true;
+            _pending.spliceBlock = 0;               // the User record itself
+            _pending.spliceField = isLong ? 2 : 3;  // User.long_name / short_name
+            _pending.spliceSetField = SET_OWNER;
+            _pending.spliceIsText = true;
+            snprintf(_pending.spliceText, sizeof(_pending.spliceText), "%s", text);
+            snprintf(_pending.spliceLabel, sizeof(_pending.spliceLabel),
+                     "%s name = %s", isLong ? "long" : "short", text);
+            return true;
+        }
+
         const uint32_t block = configBlockFromName(argv[1]);
         if (!block) { print(LINE_ERR, "unknown block: %s", argv[1]); return true; }
         const SettableField *f = findSettable(block, argv[2]);
         if (!f) { print(LINE_ERR, "%s has no settable field %s", argv[1], argv[2]); return true; }
-        if (f->kind == V_STRING) {
-            print(LINE_ERR, "string fields are not spliced yet (%s)", f->name);
-            return true;
-        }
+
         uint64_t value = 0;
-        if (!parseValue(*f, argv[3], value)) {
+        if (f->kind != V_STRING && !parseValue(*f, argv[3], value)) {
             print(LINE_ERR, "bad value for %s: %s", f->name, argv[3]);
             return true;
         }
@@ -562,7 +841,10 @@ bool Session::cmdWrite(int argc, char **argv, uint32_t nowMs) {
         _pending.splicePending = true;
         _pending.spliceBlock = block;
         _pending.spliceField = f->field;
+        _pending.spliceSetField = SET_CONFIG;
+        _pending.spliceIsText = (f->kind == V_STRING);
         _pending.spliceValue = value;
+        snprintf(_pending.spliceText, sizeof(_pending.spliceText), "%s", argv[3]);
         snprintf(_pending.spliceLabel, sizeof(_pending.spliceLabel), "%s = %s",
                  f->name, argv[3]);
         return true;
@@ -581,6 +863,62 @@ bool Session::cmdWrite(int argc, char **argv, uint32_t nowMs) {
             : (add ? SET_IGNORED_NODE  : REMOVE_IGNORED_NODE);
         const size_t n = encodeVarintCommand(msg, sizeof(msg), field, id, _passkey, _passkeyLen);
         sendEncoded(msg, n, field, false, false, nowMs);
+        return true;
+    }
+
+    // fixedpos <lat> <lon> [alt] | fixedpos clear
+    //
+    // set_fixed_position carries a Position, and unlike set_config it is not a
+    // read-modify-write: the remote is being told where it is, and a fixed
+    // position has no other fields worth preserving.
+    if (!strcmp(c, "fixedpos")) {
+        if (argc < 2) { print(LINE_ERR, "fixedpos <lat> <lon> [alt] | fixedpos clear"); return true; }
+        if (!passkeyFresh(nowMs)) { print(LINE_ERR, "no fresh session key - run `info` first"); return true; }
+
+        if (!strcmp(argv[1], "clear")) {
+            const size_t n = encodeVarintCommand(msg, sizeof(msg), REMOVE_FIXED_POSITION, 1,
+                                                 _passkey, _passkeyLen);
+            sendEncoded(msg, n, REMOVE_FIXED_POSITION, false, false, nowMs);
+            return true;
+        }
+        if (argc < 3) { print(LINE_ERR, "fixedpos <lat> <lon> [alt]"); return true; }
+
+        char *endLat = nullptr, *endLon = nullptr;
+        const double lat = strtod(argv[1], &endLat);
+        const double lon = strtod(argv[2], &endLon);
+        if (!endLat || *endLat || !endLon || *endLon) {
+            print(LINE_ERR, "lat and lon must be decimal degrees");
+            return true;
+        }
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            print(LINE_ERR, "lat is -90..90, lon is -180..180");
+            return true;
+        }
+        long alt = 0;
+        if (argc >= 4) {
+            char *endAlt = nullptr;
+            alt = strtol(argv[3], &endAlt, 10);
+            if (!endAlt || *endAlt) { print(LINE_ERR, "altitude must be whole metres"); return true; }
+        }
+
+        // Meshtastic stores degrees scaled by 1e7 in an sfixed32. Rounding
+        // rather than truncating: truncation biases every position toward the
+        // equator and the prime meridian by up to a centimetre, which is
+        // harmless but wrong for no reason.
+        const int32_t latI = (int32_t)(lat * 1e7 + (lat >= 0 ? 0.5 : -0.5));
+        const int32_t lonI = (int32_t)(lon * 1e7 + (lon >= 0 ? 0.5 : -0.5));
+
+        uint8_t pos[48];
+        size_t pn = writeSfixed32Field(pos, sizeof(pos), 0, 1, latI);
+        pn = writeSfixed32Field(pos, sizeof(pos), pn, 2, lonI);
+        if (argc >= 4) pn = writeVarintField(pos, sizeof(pos), pn, 3, (uint64_t)(int64_t)alt);
+        if (!pn) { print(LINE_ERR, "encode failed"); return true; }
+
+        const size_t n = encodeBytesCommand(msg, sizeof(msg), SET_FIXED_POSITION,
+                                            pos, pn, _passkey, _passkeyLen);
+        if (!n) { print(LINE_ERR, "encode failed"); return true; }
+        print(LINE_INFO, "fixing position at %s, %s", argv[1], argv[2]);
+        sendEncoded(msg, n, SET_FIXED_POSITION, false, false, nowMs);
         return true;
     }
 

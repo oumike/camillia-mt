@@ -99,6 +99,22 @@ const char *webCfgAdminLine(int i, uint8_t &kind);
 bool        webCfgAdminOpen(uint32_t nodeId);
 void        webCfgAdminSubmit(const char *line);
 bool        webCfgAdminVerify(uint32_t nodeId);
+
+// Restarts the favourites sweep on demand -- the same walk the boot probe does,
+// so a node that was off or out of range at boot can be picked up without a
+// reboot. Rate limited; `waitSecs` is filled with the remainder when it is.
+//
+// Returns the number of favourites it will ask, or one of these:
+//
+// Deliberately not gated on a terminal being open. A session outlives the
+// window it was opened in by design, so "a session exists" says nothing about
+// whether anyone is looking at one; the sweep stands aside for a command
+// actually in flight instead.
+enum {
+    ADMIN_RESCAN_COOLING = -1,  // too soon; waitSecs says how soon
+    ADMIN_RESCAN_NOTHING = -2,  // no favourite carries a public key
+};
+int         webCfgAdminRescanFavorites(uint32_t &waitSecs);
 #endif
 
 // Pending "set the clock to this" request from the config form, drained on the

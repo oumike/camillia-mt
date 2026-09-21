@@ -7,6 +7,7 @@
 #include "base64_util.h"
 #include "mesh_proto.h"   // myPubKey, for the identity chip in the header
 #include "admin_peers.h"
+#include "admin_client.h"   // the help text, which is the firmware's, not the page's
 #include "web_icon.h"
 #include "node_db.h"
 #include "channel_mgr.h"
@@ -1054,11 +1055,33 @@ static const char kLoraReadout[] =
         "background:var(--panel-2);color:var(--text);border-radius:4px;min-width:5em;text-align:center'>—</span></label>"
         "</div>";
 
-static const char kFontModal[] =
 #if HAS_ADMIN_TERMINAL
+// Emitted at body level, after every tab panel has closed -- NOT inside one.
+// .tab-panel is display:none unless it is the active tab, and a fixed overlay
+// inside a hidden ancestor does not render however much .open it is given. The
+// terminal is opened from Utilities, so parenting it to the Config panel is
+// exactly the case that fails.
+static const char kAdminModal[] =
         "<div class='modal-back' id='adminModal' onclick='if(event.target===this)adminClose()'>"
-        "<div class='modal-card' style='width:min(46em,94vw)'>"
-        "<h3 id='admin-title'>Remote Admin</h3>"
+        // Two cards in a row, but only once there are two. On its own the
+        // terminal centres like every other modal on this page -- pinning it
+        // left made it look pushed aside by a card that was not there.
+        //
+        // When `help` opens the second card the row switches to flex-start, so
+        // the terminal steps left and the table appears beside it rather than
+        // both of them sliding to make room. Wrapping rather than a fixed pair,
+        // so a phone stacks them instead of squeezing both.
+        "<div id='admin-row' style='display:flex;gap:.8em;align-items:flex-start;"
+            "flex-wrap:wrap;justify-content:center;width:100%;padding:0 2vw'>"
+        "<div class='modal-card' style='width:min(42em,92vw);margin:0'>"
+        "<div style='display:flex;align-items:center;gap:.6em;margin:.1em 0 .6em'>"
+        "<h3 id='admin-title' style='margin:0;flex:1;min-width:0;overflow:hidden;"
+            "text-overflow:ellipsis;white-space:nowrap'>Remote Admin</h3>"
+        // The same panel `help` opens, reachable without knowing to type it.
+        // Idempotent, so pressing it with the panel already up just refetches.
+        "<button type='button' onclick='adminHelpShow()'"
+            " title='Show the command list'>Help</button>"
+        "</div>"
         "<div id='admin-log' style='height:22em;overflow-y:auto;background:var(--panel-2);"
             "border:1px solid var(--line);border-radius:6px;padding:.5em;"
             "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8em;"
@@ -1068,8 +1091,21 @@ static const char kFontModal[] =
                 " onkeydown='if(event.key===\"Enter\"){event.preventDefault();adminSend();}'>"
             "<button type='button' onclick='adminSend()'>Send</button>"
             "<button type='button' onclick='adminClose()'>Close</button>"
-        "</div></div></div>"
+        "</div></div>"
+        // The help card. display:none until `help` is typed, so the terminal has
+        // the full width until there is something to put beside it.
+        "<div class='modal-card' id='admin-help-card' style='width:min(30em,92vw);"
+            "margin:0;display:none'>"
+        "<h3>Commands</h3>"
+        "<pre id='admin-help' style='margin:0;font-size:.74em;line-height:1.45;"
+            "white-space:pre-wrap;word-break:break-word'></pre>"
+        "<button type='button' style='margin-top:.6em' onclick='adminHelpHide()'>"
+            "Hide</button>"
+        "</div>"
+        "</div></div>";
 #endif
+
+static const char kFontModal[] =
         "<div class='modal-back' id='fsModal' onclick='if(event.target===this)fsClose()'>"
         "<div class='modal-card'><h3>Font Size</h3>"
         "<button type='button' class='modal-opt' onclick='fsPick(0,\"Small\")'>"
@@ -3250,6 +3286,20 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
             buf += "' onclick='toggleNodeFavorite(this)'>";
             buf += n->favorite ? "Unfavorite" : "Favorite";
             buf += "</button>";
+#if HAS_ADMIN_TERMINAL
+            // Beside Favorite, for any listed peer the remote has not refused --
+            // the same mayOpenTerminal() the device's actions modal and the
+            // peers table ask, decided once, server side.
+            //
+            // Not built at all for anything else, rather than rendered disabled:
+            // a greyed "Admin" on a stranger's node is an invitation to try, and
+            // trying means an unauthorized admin packet across the mesh.
+            if (AdminPeerList.mayOpenTerminal(n->nodeId)) {
+                buf += "<button type='button' class='chat-mini' onclick=\"adminOpen('";
+                buf += idBuf;
+                buf += "')\">Admin</button>";
+            }
+#endif
             buf += "</div>";   // .node-head
             buf += "<div class='node-meta'><b>ID:</b> ";
             buf += idBuf;
@@ -4885,49 +4935,119 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         "<p style='font-size:.82em;color:#888;margin:.1em 0 .8em'>"
         "Administer another Meshtastic node over LoRa or MQTT. The remote must "
         "carry this node's public key in its <code>security.admin_key</code> &mdash; "
-        "copy it from the chip at the top of this page. A peer stays hidden until "
-        "a probe proves the remote actually accepts us, which is what the "
-        "<em>Verify</em> button does.</p>";
+        "copy it from the chip at the top of this page. Favourite nodes are "
+        "probed once per boot, so anything that accepts us turns up here on its "
+        "own; <em>Verify</em> asks again."
+        "<br><span style='color:#8ef2b8;font-weight:700'>(C)</span> confirmed &mdash; "
+        "the remote answered and accepts us. "
+        "<span style='color:#ffd181;font-weight:700'>(U)</span> unconfirmed &mdash; "
+        "listed but not yet proved.</p>";
 
-    html += "<form method='POST' action='/admin-peers' style='display:flex;gap:.4em;"
-            "flex-wrap:wrap;align-items:center;margin-bottom:.6em'>"
-            "<input type='hidden' name='action' value='add'>"
-            "<input name='node' placeholder='!a1b2c3d4' style='max-width:12em'>"
-            "<button type='submit'>Add peer</button></form>";
+    // Above the table rather than in it. Verify asks one peer that is already
+    // listed; this asks every favourite, which is the only way a node that was
+    // off at boot -- and so was never listed at all -- gets in.
+    html +=
+        "<p style='margin:.1em 0 .9em'>"
+        "<button type='button' onclick='adminRescan(this)'>Scan favourites</button> "
+        "<span id='admin-rescan-msg' style='font-size:.82em;color:#888'></span>"
+        "<br><span style='font-size:.78em;color:#888'>"
+        "Asks every favourite node with a public key whether it accepts "
+        "administration from this device, one every few seconds. Results appear "
+        "in the table as they arrive &mdash; reload to see them. "
+        "Available once every 30 seconds.</span></p>";
 
-    if (AdminPeerList.count() == 0) {
-        html += "<p style='font-size:.82em;color:#888'>No admin peers yet.</p>";
-    } else {
-        html += "<table style='width:100%;font-size:.84em;border-collapse:collapse'>"
-                "<tr><th align='left'>Node</th><th align='left'>State</th>"
-                "<th align='left'>Last proved</th><th></th></tr>";
+    // Only peers that are, or may still turn out to be, administerable. A peer
+    // the remote has actually refused is dropped from the table rather than
+    // shown greyed: this list answers "what can I administer", and a row that
+    // can only ever say no is not part of that answer.
+    {
+        int shown = 0;
+        String rows;
         for (int i = 0; i < AdminPeerList.count(); i++) {
             const AdminPeer *p2 = AdminPeerList.at(i);
-            if (!p2) continue;
+            if (!p2 || p2->state == ADMIN_PEER_DENIED) continue;
+
             char idbuf[16];
             snprintf(idbuf, sizeof(idbuf), "!%08lx", (unsigned long)p2->nodeId);
-            html += "<tr><td><code>"; html += idbuf; html += "</code></td><td>";
-            html += AdminPeers::stateName(p2->state);
-            html += "</td><td>";
-            html += AdminPeers::transportName(p2->lastTransport);
-            html += "</td><td align='right'>";
-            // Terminal only for a confirmed peer -- the same gate the device
-            // applies to its actions-modal row, decided once, server side.
-            if (p2->state == ADMIN_PEER_CONFIRMED) {
-                html += "<button type='button' onclick=\"adminOpen('";
-                html += idbuf;
-                html += "')\">Terminal</button> ";
+
+            // The name, falling back the way the rest of the UI does: long,
+            // then short, then the id -- which is all a node heard only as a
+            // relayed packet ever gives us.
+            const NodeEntry *n = Nodes.find(p2->nodeId);
+            const char *name = nullptr;
+            if (n) {
+                if (n->longName[0])       name = n->longName;
+                else if (n->shortName[0]) name = n->shortName;
             }
-            html += "<form method='POST' action='/admin-peer-verify' style='display:inline'>"
-                    "<input type='hidden' name='node' value='"; html += idbuf;
-            html += "'><button type='submit'>Verify</button></form> "
-                    "<form method='POST' action='/admin-peers' style='display:inline'"
-                    " onsubmit=\"return confirm('Remove this admin peer?')\">"
-                    "<input type='hidden' name='action' value='remove'>"
-                    "<input type='hidden' name='node' value='"; html += idbuf;
-            html += "'><button type='submit'>Remove</button></form></td></tr>";
+
+            const bool confirmed = (p2->state == ADMIN_PEER_CONFIRMED);
+            rows += "<tr><td>";
+            if (name) {
+                // Set over the air by whoever owns that node, so it is escaped
+                // rather than pasted into the markup.
+                for (const char *c = name; *c; c++) {
+                    switch (*c) {
+                        case '<': rows += "&lt;";   break;
+                        case '>': rows += "&gt;";   break;
+                        case '&': rows += "&amp;";  break;
+                        case '"': rows += "&quot;"; break;
+                        case '\'': rows += "&#39;"; break;
+                        default:  rows += *c;       break;
+                    }
+                }
+            } else {
+                rows += "<code>"; rows += idbuf; rows += "</code>";
+            }
+            rows += "</td><td><span style='font-weight:700;color:";
+            rows += confirmed ? "#8ef2b8" : "#ffd181";
+            rows += "' title='";
+            rows += confirmed ? "Confirmed - the remote accepts administration from this device"
+                              : "Unconfirmed - listed but not yet proved";
+            rows += "'>(";
+            rows += confirmed ? "C" : "U";
+            rows += ")</span></td><td>";
+            // When, not how. lastVerified is epoch seconds, written by confirm()
+            // from the device clock -- which may not have been set at the time,
+            // and is 0 for a peer that has never answered. Both read as "never"
+            // rather than as 1970.
+            if (p2->lastVerified >= 1700000000UL) {
+                const time_t when = (time_t)p2->lastVerified;
+                struct tm lt;
+                char whenBuf[24] = "";
+                if (localtime_r(&when, &lt)) {
+                    strftime(whenBuf, sizeof(whenBuf), "%Y-%m-%d %H:%M", &lt);
+                }
+                rows += whenBuf[0] ? whenBuf : "never";
+            } else {
+                rows += "never";
+            }
+            rows += "</td><td align='right'>";
+            // Offered on unproved peers too: an unproved peer is one nobody has
+            // asked yet, and after a reboot that is every peer. The worst an
+            // attempt costs is one refused packet to a node already on the list.
+            rows += "<button type='button' onclick=\"adminOpen('";
+            rows += idbuf;
+            rows += "')\">Terminal</button> ";
+            // A plain button, not a form: submitting would reload the page and
+            // land back on the Config tab. The probe takes up to 30 s anyway, so
+            // there is nothing for a reload to show even if it kept its place.
+            rows += "<button type='button' onclick=\"adminVerify('";
+            rows += idbuf;
+            rows += "',this)\">Verify</button></td></tr>";
+            shown++;
         }
-        html += "</table>";
+
+        if (shown == 0) {
+            html += "<p style='font-size:.82em;color:#888'>"
+                    "Nothing to administer yet. Favourite a node that carries this "
+                    "device's public key and it will be probed on the next boot.</p>";
+        } else {
+            html += "<table style='width:100%;font-size:.84em;border-collapse:collapse'>"
+                    "<tr><th align='left'>Node</th><th align='left'></th>"
+                    "<th align='left'>Last proved</th><th></th></tr>";
+            html += rows;
+            html += "</table>";
+        }
     }
     sectionEnd(html, false);
     sendChunk(html);
@@ -5917,6 +6037,11 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
         html += String(vncHostPort());
         html += "/' style='display:none'></iframe></div></div>";
 #endif
+#if HAS_ADMIN_TERMINAL
+        // Body level, outside every panel -- see kAdminModal.
+        sendChunk(html);
+        sendFlash(kAdminModal);
+#endif
         html += "<script>"
                         "var nodeMap=null;"
                         "var nodeMarkerLayer=null;"
@@ -6722,6 +6847,9 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                         "var adminNode='',adminTimer=null,adminRev=-1;"
                         "function adminOpen(id){"
                             "adminNode=id;adminRev=-1;"
+                            // The id until the first reply carries the name.
+                            // Rewritten rather than left blank so a reopen never
+                            // shows the previous node's title.
                             "document.getElementById('admin-title').textContent='Remote Admin '+id;"
                             "document.getElementById('admin-log').textContent='';"
                             "document.getElementById('adminModal').classList.add('open');"
@@ -6730,10 +6858,16 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                             "if(!adminTimer)adminTimer=setInterval(adminPoll,1200);"
                         "}"
                         "function adminClose(){"
+                            "adminHelpHide();"
                             "document.getElementById('adminModal').classList.remove('open');"
                             "if(adminTimer){clearInterval(adminTimer);adminTimer=null;}"
                         "}"
                         "function adminRender(d){"
+                            // Before the revision gate: the name can arrive on a
+                            // poll that has no new lines, and the title is not
+                            // part of the transcript the revision tracks.
+                            "document.getElementById('admin-title').textContent="
+                                "'Remote Admin '+(d.name||d.node);"
                             "if(d.rev===adminRev)return;adminRev=d.rev;"
                             "var box=document.getElementById('admin-log');"
                             "var cls=['#8fb8ff','#a7c7ff','#8ef2b8','#ff9f9f','#e8e8e8'];"
@@ -6757,9 +6891,83 @@ static void sendConfigPage(const char *msg = "", bool lite = false) {
                                 ".then(function(r){return r.ok?r.json():null;})"
                                 ".then(function(d){if(d)adminRender(d);}).catch(function(){});"
                         "}"
+                        // Verify reports on the button itself. The probe is a
+                        // radio round trip of up to 30 s, so the honest answer
+                        // now is "asked", and the badge changes on the next
+                        // reload rather than under the cursor.
+                        "function adminVerify(id,btn){"
+                            "var was=btn.textContent;btn.disabled=true;btn.textContent='Asking...';"
+                            "fetch('/admin-peer-verify',{method:'POST',"
+                                "headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+                                "body:'node='+encodeURIComponent(id)})"
+                                ".then(function(r){return r.text().then(function(t){return {ok:r.ok,t:t};});})"
+                                ".then(function(r){"
+                                    "btn.textContent=r.ok?'Asked':r.t;"
+                                    "setTimeout(function(){btn.disabled=false;btn.textContent=was;},"
+                                        "r.ok?30000:4000);"
+                                "})"
+                                ".catch(function(){btn.disabled=false;btn.textContent=was;});"
+                        "}"
+                        // Rescan runs the whole favourites sweep, so its
+                        // button counts the cooldown down in place. The server
+                        // is the one that enforces it -- this only saves the
+                        // user a click that was going to be refused -- and a
+                        // 429 hands back the remainder, which is what a page
+                        // reloaded mid-cooldown uses to pick the count back up.
+                        "function adminRescanCool(btn,secs){"
+                            "btn.disabled=true;"
+                            "(function tick(){"
+                                "if(secs<=0){btn.disabled=false;btn.textContent='Scan favourites';return;}"
+                                "btn.textContent='Scan favourites ('+secs+'s)';"
+                                "secs--;setTimeout(tick,1000);"
+                            "})();"
+                        "}"
+                        "function adminRescan(btn){"
+                            "var out=document.getElementById('admin-rescan-msg');"
+                            "btn.disabled=true;btn.textContent='Starting...';"
+                            "fetch('/admin-rescan',{method:'POST'})"
+                                ".then(function(r){return r.text().then(function(t){"
+                                    "return {ok:r.ok,code:r.status,t:t};});})"
+                                ".then(function(r){"
+                                    "out.textContent=r.t;"
+                                    "if(r.ok){adminRescanCool(btn,30);return;}"
+                                    // The remainder is in the message; 30 is the
+                                    // safe fallback when it is not parseable.
+                                    "var m=r.code===429?/(\\d+)s/.exec(r.t):null;"
+                                    "adminRescanCool(btn,m?parseInt(m[1],10):0);"
+                                "})"
+                                ".catch(function(){"
+                                    "out.textContent='Could not reach the device';"
+                                    "btn.disabled=false;btn.textContent='Scan favourites';"
+                                "});"
+                        "}"
+                        "function adminHelpHide(){"
+                            "document.getElementById('admin-help-card').style.display='none';"
+                            "document.getElementById('admin-row').style.justifyContent='center';"
+                        "}"
+                        // The row only moves once the text is in hand. Shifting
+                        // left and then failing the fetch would leave the
+                        // terminal off-centre next to nothing.
+                        "function adminHelpShow(){"
+                            "var card=document.getElementById('admin-help-card');"
+                            "fetch('/admin-help').then(function(r){return r.text();})"
+                                ".then(function(t){"
+                                    "document.getElementById('admin-help').textContent=t;"
+                                    "card.style.display='';"
+                                    "document.getElementById('admin-row').style"
+                                        ".justifyContent='flex-start';"
+                                "}).catch(function(){});"
+                        "}"
+                        // A bare `help` opens the panel beside the terminal and
+                        // never reaches the radio -- the table is the firmware's
+                        // own, so there is nothing to ask the remote. `help <cmd>`
+                        // still goes through, since that answer is one line and
+                        // belongs in the transcript with the rest of the session.
                         "function adminSend(){"
                             "var t=document.getElementById('admin-line');"
-                            "var v=t.value;t.value='';adminPost(v);"
+                            "var v=t.value;t.value='';"
+                            "if(v.trim()==='help'){adminHelpShow();return;}"
+                            "adminPost(v);"
                         "}"
 #endif
                         "function copyPubKey(el){"
@@ -8188,6 +8396,30 @@ static void handleGetAdminData() {
     char idbuf[16];
     snprintf(idbuf, sizeof(idbuf), "!%08lx", (unsigned long)webCfgAdminNodeId());
     out += idbuf;
+
+    // The name the rest of the UI would show for this node: long, then short,
+    // then nothing -- the browser falls back to the id, which is all a node
+    // heard only as a relayed packet ever gives us.
+    //
+    // Resolved here rather than passed in from the button that opened the
+    // terminal: it is set over the air by whoever owns that node, so it needs
+    // escaping, and the escaping already exists on this path. It also means a
+    // browser attaching to a session the device opened gets the name too.
+    out += "\",\"name\":\"";
+    {
+        const NodeEntry *n = Nodes.find(webCfgAdminNodeId());
+        const char *name = nullptr;
+        if (n) {
+            if (n->longName[0])       name = n->longName;
+            else if (n->shortName[0]) name = n->shortName;
+        }
+        for (const char *c = name ? name : ""; *c; c++) {
+            if (*c == '"' || *c == '\\') { out += '\\'; out += *c; }
+            else if ((uint8_t)*c < 0x20)   { out += ' '; }
+            else                           { out += *c; }
+        }
+    }
+
     out += "\",\"rev\":";
     out += String((unsigned long)webCfgAdminRevision());
     out += ",\"busy\":";
@@ -8215,6 +8447,20 @@ static void handleGetAdminData() {
     server.send(200, "application/json", out);
 }
 
+// The command table, served from the firmware rather than duplicated in the
+// page. One help text for the device terminal and the browser was the point of
+// putting the parser in admin_client; a copy here would drift the first time a
+// command changed.
+static void handleGetAdminHelp() {
+    if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
+    String out;
+    for (int i = 0; i < AdminClient::Session::helpLineCount(); i++) {
+        out += AdminClient::Session::helpLine(i);
+        out += "\n";
+    }
+    server.send(200, "text/plain", out);
+}
+
 static void handlePostAdminSend() {
     if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
     const String line = server.arg("line");
@@ -8234,48 +8480,61 @@ static void handlePostAdminSend() {
     handleGetAdminData();
 }
 
-static void handlePostAdminPeers() {
-    if (!isLoggedIn()) { redirect("/login"); return; }
-    const String action = server.arg("action");
+// Answers with a line of text rather than a redirect. A redirect would reload
+// the page and drop the user back on the Config tab, which is where the tab
+// state resets to -- losing their place to report the result of a probe that has
+// not even happened yet.
+static void handlePostAdminPeerVerify() {
+    if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
     const String node = server.arg("node");
     const uint32_t id = (uint32_t)strtoul(
         node.startsWith("!") ? node.c_str() + 1 : node.c_str(), nullptr, 16);
-    if (!id) { redirectHomeWithFlash("Admin peers: bad node id."); return; }
 
-    char flash[96];
-    if (action == "add") {
-        snprintf(flash, sizeof(flash), AdminPeerList.add(id)
-                 ? "Admin peer !%08lx added - verify it next."
-                 : "Admin peer !%08lx: already listed, or the list is full.",
-                 (unsigned long)id);
-    } else if (action == "remove") {
-        snprintf(flash, sizeof(flash), AdminPeerList.remove(id)
-                 ? "Admin peer !%08lx removed." : "Admin peer !%08lx was not listed.",
-                 (unsigned long)id);
-    } else {
-        snprintf(flash, sizeof(flash), "Admin peers: unknown action.");
+    if (!id || !AdminPeerList.find(id)) {
+        server.send(404, "text/plain", "not listed");
+        return;
     }
-    redirectHomeWithFlash(flash);
+    if (!webCfgAdminVerify(id)) {
+        // Either another probe is still out, or the node has no public key --
+        // which is the one case that will never come good however often it is
+        // asked, because PKI is the only path the remote accepts.
+        server.send(409, "text/plain",
+                    "busy, or that node has sent us no public key");
+        return;
+    }
+    server.send(200, "text/plain", "probing");
 }
 
-static void handlePostAdminPeerVerify() {
-    if (!isLoggedIn()) { redirect("/login"); return; }
-    const String node = server.arg("node");
-    const uint32_t id = (uint32_t)strtoul(
-        node.startsWith("!") ? node.c_str() + 1 : node.c_str(), nullptr, 16);
-    char flash[96];
-    if (!id || !AdminPeerList.find(id)) {
-        snprintf(flash, sizeof(flash), "Admin peers: !%08lx is not listed.",
-                 (unsigned long)id);
-    } else if (webCfgAdminVerify(id)) {
-        snprintf(flash, sizeof(flash),
-                 "Probing !%08lx - the result lands in the terminal.",
-                 (unsigned long)id);
-    } else {
-        snprintf(flash, sizeof(flash), "Could not probe !%08lx (no public key?).",
-                 (unsigned long)id);
+// Restarts the favourites sweep. Same answer shape as Verify -- a line of text,
+// not a redirect -- so the page keeps the tab the user is standing on.
+static void handlePostAdminRescan() {
+    if (!isLoggedIn()) { server.send(401, "text/plain", "auth"); return; }
+
+    uint32_t waitSecs = 0;
+    const int r = webCfgAdminRescanFavorites(waitSecs);
+    char msg[96];
+    switch (r) {
+        case ADMIN_RESCAN_COOLING:
+            snprintf(msg, sizeof(msg), "Too soon \xe2\x80\x94 try again in %lus",
+                     (unsigned long)waitSecs);
+            // 429 rather than 409: this one comes good on its own, and saying so
+            // in the status is what lets the page treat it as a wait instead of
+            // an error worth reporting twice.
+            server.send(429, "text/plain", msg);
+            return;
+        case ADMIN_RESCAN_NOTHING:
+            server.send(409, "text/plain",
+                        "No favourite node has sent us a public key");
+            return;
+        default:
+            break;
     }
-    redirectHomeWithFlash(flash);
+    // The sweep is paced at one node every few seconds, so this reports what it
+    // set going rather than what it found. The table shows the results as they
+    // land, on the next reload.
+    snprintf(msg, sizeof(msg), "Asking %d favourite%s\xe2\x80\xa6",
+             r, r == 1 ? "" : "s");
+    server.send(200, "text/plain", msg);
 }
 #endif  // HAS_ADMIN_TERMINAL
 
@@ -8971,9 +9230,10 @@ static void registerCommonRoutes() {
     // Registered here only: the AP-lite page gets none of these, same heap rule
     // as chat and the live feed.
     onRoute("/admin-data",        HTTP_GET,  handleGetAdminData);
+    onRoute("/admin-help",        HTTP_GET,  handleGetAdminHelp);
     onRoute("/admin-send",        HTTP_POST, handlePostAdminSend);
-    onRoute("/admin-peers",       HTTP_POST, handlePostAdminPeers);
     onRoute("/admin-peer-verify", HTTP_POST, handlePostAdminPeerVerify);
+    onRoute("/admin-rescan",      HTTP_POST, handlePostAdminRescan);
 #endif
 #if HAS_SD_MALWARE_SCAN
     onRoute("/sd-scan",           HTTP_POST, handlePostSdScan);

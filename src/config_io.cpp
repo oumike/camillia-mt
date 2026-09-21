@@ -1083,6 +1083,7 @@ void cfgInitDefaults(RhinoConfig &cfg) {
     cfg.losElevServer[0] = '\0';
     strncpy(cfg.weatherServer, MY_WEATHER_SERVER, sizeof(cfg.weatherServer) - 1);
     cfg.weatherServer[sizeof(cfg.weatherServer) - 1] = '\0';
+    cfg.kbBacklightEnabled = true;
     cfg.timeSource         = TIME_SOURCE_AUTO;
     cfg.mqttEnabled        = MY_MQTT_ENABLED;
     strncpy(cfg.mqttServer,  MY_MQTT_SERVER, sizeof(cfg.mqttServer) - 1);
@@ -1671,6 +1672,9 @@ void cfgToYaml(const RhinoConfig &cfg, String &out) {
     // unreachable on a board whose only way to be configured is this file.
     out += "    losElevServer: "; out += cfg.losElevServer; out += "\n";
     out += "    weatherServer: "; out += cfg.weatherServer; out += "\n";
+    out += "    keyboardBacklight: ";
+    out += cfg.kbBacklightEnabled ? "true" : "false";
+    out += "\n";
     snprintf(tmp, sizeof(tmp), "    webCfgIdleTimeoutS: %lu\n",
              (unsigned long)cfg.webCfgIdleTimeoutS);                          out += tmp;
     out += "    timeSource: ";
@@ -2209,6 +2213,7 @@ bool cfgImportFromBuf(const char *buf, size_t len, RhinoConfig &cfg) {
                 }
                 else if (!strcmp(key, "notifyLedColorChannel")) cfg.notifyLedColorChannel = parseNotifyLedColor(val);
                 else if (!strcmp(key, "notifyLedColorDm")) cfg.notifyLedColorDm = parseNotifyLedColor(val);
+                else if (!strcmp(key, "keyboardBacklight")) cfg.kbBacklightEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "keyboardBlinkEnabled")) cfg.kbBlinkEnabled = parseBoolValue(val);
                 else if (!strcmp(key, "keyboardBlinkChannelFlashes"))
                     cfg.kbBlinkChanFlashes = cfgCoerceKbFlashes(atoi(val));

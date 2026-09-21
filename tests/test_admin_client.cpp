@@ -255,7 +255,163 @@ static void testTranscriptRingAndRevision() {
     s.close();
 }
 
+// notify(): what the favourites sweep uses to tell an open session that the
+// peer it is talking to has stopped accepting us. The operator has to find that
+// out among their command receipts, not from the next write failing.
+static void testNotifyLandsInTheTranscript() {
+    Fake f; Session s;
+    // Refused before there is anywhere to put it: a sweep runs whether or not
+    // anyone has a terminal open, so this is the ordinary case, not an edge.
+    s.notify(LINE_ERR, "dropped on the floor");
+    ok(s.lineCount() == 0, "notify on a closed session is a no-op");
+
+    s.open(1, hooksFor(f));
+    const uint32_t before = s.revision();
+    s.notify(LINE_ERR, "this node no longer accepts administration from us");
+    ok(transcriptHas(s, "no longer accepts"), "notify reaches the transcript");
+    ok(s.revision() > before, "notify bumps the revision so both UIs repaint");
+    s.close();
+}
+
+// The renderer: a reply has to show the remote's settings, not its byte count.
+static void testInfoRendersFields() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+    s.submit("info", 1000);
+
+    // DeviceMetadata { firmware_version="2.7.1", canShutdown=true, role=2 }
+    uint8_t meta[96];
+    size_t mn = writeStringField(meta, sizeof(meta), 0, 1, "2.7.1");
+    mn = writeVarintField(meta, sizeof(meta), mn, 3, 1);
+    mn = writeVarintField(meta, sizeof(meta), mn, 7, 2);
+    mn = writeVarintField(meta, sizeof(meta), mn, 777, 42);   // one we have no name for
+
+    uint8_t resp[160];
+    const size_t rn = writeBytesField(resp, sizeof(resp), 0,
+                                      GET_DEVICE_METADATA_RESPONSE, meta, mn);
+    s.onAdminReply(f.sent[0].id, resp, rn, TRANSPORT_RF, 2000);
+
+    ok(transcriptHas(s, "firmware: 2.7.1"), "a string field renders by name");
+    ok(transcriptHas(s, "can shutdown: yes"), "a bool renders as yes/no");
+    ok(transcriptHas(s, "role: 2"), "a numeric field renders its value");
+    ok(transcriptHas(s, "field 777: 42"),
+       "a field with no name still renders, by number");
+    ok(!transcriptHas(s, "bytes"), "the byte count is gone");
+    s.close();
+}
+
+static void testConfigResponseNamesItsBlock() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+    s.submit("config lora", 1000);
+    auto resp = loraResponse(nullptr, 0);
+    s.onAdminReply(f.sent[0].id, resp.data(), resp.size(), TRANSPORT_RF, 2000);
+    ok(transcriptHas(s, "lora:"), "a config reply names its block");
+    ok(transcriptHas(s, "field 8: 3"), "and dumps the block's fields by number");
+    s.close();
+}
+
+// The commands that were advertised but not wired. Each asserts it now reaches
+// the radio rather than printing "unknown command".
+static void testPreviouslyUnwiredCommands() {
+    Fake f; Session s; s.open(1, hooksFor(f));
+
+    // Mint a session key: every write below needs one.
+    s.submit("info", 1000);
+    const uint8_t key[8] = { 5,5,5,5,5,5,5,5 };
+    uint8_t resp[64];
+    size_t rn = writeVarintField(resp, sizeof(resp), 0, GET_DEVICE_METADATA_RESPONSE, 1);
+    rn = writeBytesField(resp, sizeof(resp), rn, SESSION_PASSKEY, key, sizeof(key));
+    s.onAdminReply(f.sent[0].id, resp, rn, TRANSPORT_RF, 1100);
+    size_t sent = f.sent.size();
+
+    // module by name, not by number
+    s.submit("module telemetry", 1200);
+    ok(f.sent.size() == sent + 1, "module <name> sends");
+    Response r;
+    decodeResponse(f.sent.back().payload.data(), f.sent.back().payload.size(), r);
+    ok(r.field == GET_MODULE_CONFIG_REQUEST && r.varint == 6,
+       "module telemetry asks for block 6");
+    // A read is finished by its *reply*, not by the routing ack -- an ack only
+    // says the packet landed, and the answer is still on its way. Answering with
+    // an ack alone would leave the session busy until the 30 s timeout.
+    {
+        uint8_t mr[48];
+        const size_t mn = writeBytesField(mr, sizeof(mr), 0, GET_MODULE_CONFIG_RESPONSE,
+                                          (const uint8_t *)"\x32\x00", 2);
+        s.onAdminReply(f.sent.back().id, mr, mn, TRANSPORT_RF, 1250);
+    }
+    ok(!s.busy(), "a reply clears the read");
+    sent = f.sent.size();
+
+    // fixedpos: a Position with sfixed32 coordinates
+    s.submit("fixedpos 51.5 -0.12 35", 1300);
+    ok(f.sent.size() == sent + 1, "fixedpos sends");
+    Response rp;
+    decodeResponse(f.sent.back().payload.data(), f.sent.back().payload.size(), rp);
+    ok(rp.field == SET_FIXED_POSITION, "fixedpos is set_fixed_position");
+    ok(rp.hasPasskey, "fixedpos carries the session key");
+    ok(rp.payload && rp.payloadLen >= 5, "fixedpos carries a Position");
+    if (rp.payload && rp.payloadLen >= 5) {
+        // latitude_i is sfixed32, so the tag is (1<<3)|5 and four bytes follow,
+        // little-endian. findField() deliberately does not report 32-bit fields,
+        // which is why this reads the bytes rather than asking for field 1.
+        ok(rp.payload[0] == ((1 << 3) | 5), "latitude_i is wire type 5, not a varint");
+        const int32_t latI = (int32_t)((uint32_t)rp.payload[1]
+                                       | ((uint32_t)rp.payload[2] << 8)
+                                       | ((uint32_t)rp.payload[3] << 16)
+                                       | ((uint32_t)rp.payload[4] << 24));
+        ok(latI == 515000000, "latitude_i is degrees x 1e7");
+    }
+    s.onRouting(f.sent.back().id, 0, TRANSPORT_RF, 1350);
+    sent = f.sent.size();
+
+    // fixedpos clear
+    s.submit("fixedpos clear", 1400);
+    Response rc;
+    decodeResponse(f.sent.back().payload.data(), f.sent.back().payload.size(), rc);
+    ok(rc.field == REMOVE_FIXED_POSITION, "fixedpos clear removes it");
+    s.onRouting(f.sent.back().id, 0, TRANSPORT_RF, 1450);
+    sent = f.sent.size();
+
+    // set owner reads the User record before replacing it
+    s.submit("set owner long Hello", 1500);
+    ok(f.sent.size() == sent + 1, "set owner sends");
+    Response ro;
+    decodeResponse(f.sent.back().payload.data(), f.sent.back().payload.size(), ro);
+    ok(ro.field == GET_OWNER_REQUEST, "set owner reads first");
+    ok(s.busy(), "and is waiting on that read");
+
+    // Answer with a User carrying a short name that must survive.
+    uint8_t user[64];
+    size_t un = writeStringField(user, sizeof(user), 0, 2, "Old Name");
+    un = writeStringField(user, sizeof(user), un, 3, "ON");
+    uint8_t ownerResp[96];
+    const size_t on = writeBytesField(ownerResp, sizeof(ownerResp), 0,
+                                      GET_OWNER_RESPONSE, user, un);
+    s.onAdminReply(f.sent.back().id, ownerResp, on, TRANSPORT_RF, 1600);
+
+    Response rs;
+    decodeResponse(f.sent.back().payload.data(), f.sent.back().payload.size(), rs);
+    ok(rs.field == SET_OWNER, "and then writes set_owner");
+    const uint8_t *nm; size_t nmLen; uint64_t nv; int nw;
+    ok(findField(rs.payload, rs.payloadLen, 2, nw, nm, nmLen, nv)
+       && nmLen == 5 && !memcmp(nm, "Hello", 5), "long name changed");
+    ok(findField(rs.payload, rs.payloadLen, 3, nw, nm, nmLen, nv)
+       && nmLen == 2 && !memcmp(nm, "ON", 2), "short name survived");
+
+    // The write is outstanding until its ack; without this the next line is
+    // refused as busy and never reaches the length rule being tested.
+    s.onRouting(f.sent.back().id, 0, TRANSPORT_RF, 1650);
+    ok(!s.busy(), "a routing ack completes set_owner");
+
+    s.submit("set owner short TOOLONG", 1700);
+    ok(transcriptHas(s, "at most 4"), "an over-long short name is refused");
+    s.close();
+}
+
 int main() {
+    testPreviouslyUnwiredCommands();
+    testInfoRendersFields();
+    testConfigResponseNamesItsBlock();
     testOpenAndHelp();
     testReadSends();
     testAutoPrefersMqttWhenNoRf();
@@ -267,6 +423,7 @@ int main() {
     testAckClosesAWrite();
     testBusyRefusesASecondLine();
     testTranscriptRingAndRevision();
+    testNotifyLandsInTheTranscript();
 
     printf("%s  %d checks, %d failed\n", g_fail ? "FAILED" : "ok", g_run, g_fail);
     return g_fail ? 1 : 0;

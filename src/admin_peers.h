@@ -48,10 +48,29 @@ public:
     int              count() const { return _count; }
     const AdminPeer *at(int i) const;
 
-    // True only for CONFIRMED. The single question every UI gate asks, so the
-    // rule lives in one place and cannot drift between the device and the
-    // browser.
-    bool mayAdminister(uint32_t nodeId) const;
+    // Whether a terminal may be opened on this node. The single question every
+    // UI gate asks, so the rule lives in one place and cannot drift between the
+    // device and the browser.
+    //
+    // Listed and not refused -- which is PENDING as well as CONFIRMED, not
+    // CONFIRMED alone. An unproved peer is one nobody has asked yet, and after a
+    // reboot that is *every* peer, because init() demotes them all: waiting for
+    // the boot sweep before the terminal reappears made the feature look broken
+    // for the first minute of every boot. Opening on an unproved peer risks one
+    // refused packet to a node already on the list; the remote answers 33 or 37,
+    // the session closes and the peer is recorded DENIED.
+    //
+    // DENIED still says no. That one has been asked and answered, and a terminal
+    // on it could only ever repeat the question.
+    //
+    // Deliberately not "any node": a menu offering a terminal on a stranger is
+    // how unauthorized admin packets end up sprayed across the mesh, which is
+    // the thing the peer list exists to prevent.
+    bool mayOpenTerminal(uint32_t nodeId) const;
+
+    // True only for CONFIRMED -- a probe actually came back. What the badge
+    // reports, and the honest answer to "is this proved".
+    bool isConfirmed(uint32_t nodeId) const;
 
     // Adds at PENDING. Returns false when already present or the list is full.
     bool add(uint32_t nodeId);

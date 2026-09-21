@@ -88,6 +88,11 @@ size_t writeBytesField(uint8_t *buf, size_t cap, size_t off, uint32_t field,
                        const uint8_t *data, size_t len);
 size_t writeStringField(uint8_t *buf, size_t cap, size_t off, uint32_t field,
                         const char *s);
+// Position.latitude_i / longitude_i are sfixed32, not varints: four bytes
+// little-endian, wire type 5. Written as a varint they decode as a different
+// number entirely, which on a fixed position means a point somewhere else.
+size_t writeSfixed32Field(uint8_t *buf, size_t cap, size_t off, uint32_t field,
+                          int32_t v);
 
 // Reads one varint. Returns the offset after it, or 0 if the buffer ends first.
 size_t readVarint(const uint8_t *buf, size_t len, size_t off, uint64_t &val);
@@ -164,6 +169,27 @@ bool isReadRequest(const uint8_t *buf, size_t len);
 // Human name for an AdminMessage field, for the transcript. "unknown" for
 // anything outside the table above.
 const char *fieldName(uint32_t field);
+
+// ModuleConfig oneof blocks, the values get_module_config_request takes.
+// Verified against meshtastic/protobufs module_config.proto.
+enum ModuleBlock : uint32_t {
+    MODULE_MQTT           = 1,
+    MODULE_SERIAL         = 2,
+    MODULE_EXTNOTIF       = 3,
+    MODULE_STOREFORWARD   = 4,
+    MODULE_RANGETEST      = 5,
+    MODULE_TELEMETRY      = 6,
+    MODULE_CANNEDMSG      = 7,
+    MODULE_AUDIO          = 8,
+    MODULE_REMOTEHW       = 9,
+    MODULE_NEIGHBORINFO   = 10,
+    MODULE_AMBIENT        = 11,
+    MODULE_DETECTION      = 12,
+    MODULE_PAXCOUNTER     = 13,
+};
+
+const char *moduleBlockName(uint32_t block);
+uint32_t    moduleBlockFromName(const char *name);
 
 // Human name for a Config block, and the reverse for the command parser.
 // blockFromName() returns 0 for an unrecognised name, which is not a valid

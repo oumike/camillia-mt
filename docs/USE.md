@@ -134,6 +134,10 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - Shift and Symbol select the printed upper/symbol layers. Alt+E/F/S/X provide
   Up/Right/Left/Down, Alt+Q sends Esc, Alt+H returns to chat, and Alt+B toggles
   the keyboard backlight.
+- **The backlight setting survives a reboot and a flash.** It is saved the moment
+  you press Alt+B rather than at shutdown — this board has no clean shutdown, so
+  anything not written then is not written at all — and applied again as soon as
+  settings load at boot. A keyboard you turned dark comes back dark.
 - Modal close and empty-compose behavior match T-Deck: Backspace closes, with
   Esc also accepted.
 - There is no trackball. Use the keyboard navigation above or the touchscreen.
@@ -331,7 +335,9 @@ A redraw there is an e-paper refresh, and this screen opens itself.
 ## Unread indicators
 
 Unread messages are marked in two places, and which one you get depends on
-whether the board draws the bottom nav bar:
+whether the bottom nav bar is showing. On the boards where the bar is a setting
+(Config &rarr; **Nav Bar**) the alert follows the setting, not the board — turn
+the bar on and the mark moves onto it:
 
 - **With the nav bar** — the **Chats** cell blinks for unread channel traffic
   and the **DM** cell blinks for unread private messages, on the same half-second
@@ -339,10 +345,20 @@ whether the board draws the bottom nav bar:
   control. **The whole cell flashes**, not just the glyph inside it: on a bar of
   icon buttons a recoloured 14 px symbol is easy to miss, and a button that
   changes colour is not
-- **Without it** — two glyphs sit at the right-hand end of the shortcut bar,
+- **Without it** — two glyphs sit at the right-hand end of the key-hint footer,
   beside the GPS and Wi-Fi readouts: a **bell** for channels and an **envelope**
   for DMs. Different shapes, because they blink together and sit a few pixels
   apart
+
+With the bar up, the status cluster at its right-hand end is now just GPS and
+Wi-Fi — the envelope and bell are gone from it, since the cells say the same
+thing — and the buttons grow into the width they were holding.
+
+**On the T-Deck Pro the cell is held, not blinked**, and it is marked with a
+heavier border rather than a fill. Every flip is a full e-paper refresh: at twice
+a second that is visibly slow and a real cost in battery, so the cell stays
+marked until the conversation is opened. The border rather than a fill because a
+filled cell on a one-bit panel is a black box with the glyph buried in it.
 
 Either way the mark clears as soon as you open the conversation, and a muted
 channel raises nothing.
@@ -1450,9 +1466,26 @@ working correctly.
 #### The gate
 
 A node has to be an **admin peer** before a terminal can be opened on it, and
-peers are added in **web config → Utilities → Remote Admin**, never from a node's
-menu. That is deliberate: a node menu offering "claim admin over this stranger"
-would invite unauthorized admin packets across the mesh and the broker.
+peers are not added by hand — **favourite nodes are probed once per boot**, and
+the ones that accept us turn up in **web config → Utilities → Remote Admin** on
+their own.
+
+Favourites rather than everything heard: that is a short, deliberate list, where
+probing the whole node table would put an admin packet in front of every stranger
+on the mesh once per reboot. Only favourites carrying our public key are asked at
+all — PKI is the only path the remote accepts, so a node without a key can never
+be administered from here whatever its own settings say. The sweep is sequential
+and spaced, starts well after boot, and stands aside entirely while a terminal is
+open.
+
+The list shows each peer by name, a state badge — green **(C)** confirmed, the
+remote answered and accepts us; yellow **(U)** unconfirmed, listed but not yet
+proved — and when it last answered. A peer that has never answered, or that
+answered while the device clock was unset, reads **never**. **Verify** asks again without leaving the page — the probe is a radio
+round trip of up to 30 seconds, so the button reports that it asked and the badge
+changes on the next reload. A node the remote has actually refused is dropped
+from the list rather than shown greyed: this list answers "what can I
+administer", and a row that can only ever say no is not part of that answer.
 
 | State | Meaning | Terminal |
 | --- | --- | --- |
@@ -1470,9 +1503,23 @@ reconfigured while this device was off.
 
 #### The terminal
 
-On the device it is the **(A)dmin** row in a node's actions menu, which is only
-built for a confirmed peer. In web config it is the **Terminal** button beside
-the peer. Both drive the same session, so opening the browser on a node the
+On the device it is the **(A)dmin** row in a node's actions menu. In web config
+there are two ways in: the **Terminal** button beside the peer in Utilities, and
+an **Admin** button on the node's card in the Nodes tab.
+
+All three appear for any **listed** peer the remote has not refused — unconfirmed
+included. An unconfirmed peer is one nobody has asked yet, and after a reboot
+that is every peer, so waiting for the sweep before the terminal reappeared made
+it look broken for the first minute of every boot. Trying costs one refused
+packet to a node already on your list; if the remote says no, the session closes
+and the peer is recorded as refused.
+
+They are **not** offered on unlisted nodes, and are never rendered disabled: a
+greyed "Admin" on a stranger's node is an invitation to try, and trying there
+means an unauthorized admin packet across the mesh.
+
+Typing `help` in the browser opens the command table in a panel beside the
+terminal, so it is readable while commands are being typed. Both drive the same session, so opening the browser on a node the
 device already has open continues that conversation rather than starting a rival
 one.
 
@@ -2524,8 +2571,9 @@ Primary usage is touch.
 - Bottom touch nav provides Home, DM, Nodes, Live, Config, and Help, in that
   order left to right
 - **An unread DM lights the nav bar's DM icon**, which blinks amber until you
-  open it. Keyboard builds blink a small envelope in the header instead; here
-  the alert sits on the button that answers it, which is always on screen
+  open it. Boards that can turn the bar off fall back to a small envelope in the
+  footer when it is off; here the bar is not optional, so the alert always sits
+  on the button that answers it
 - Actions is not in the nav. On the chat screen it shares the strip under the
   conversation with New Message, one third and two thirds respectively; no other
   screen offers it, since there is no conversation there for it to act on

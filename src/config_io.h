@@ -559,6 +559,23 @@ struct RhinoConfig {
     // and keeps the compiled default, which is what lets the default above be a
     // real address rather than only reaching fresh installs.
     char     weatherServer[96];
+
+    // ── Keyboard backlight ───────────────────────────────────────────────────
+    // Whether the lit keyboard is on, for the boards that have one and let the
+    // user turn it off (the T-Deck Pro's Alt+B today). It was a plain runtime
+    // bool that reset to on at every boot, so a device deliberately set dark
+    // came back lit after a reboot or a flash -- which on a board people carry
+    // in a pocket is the setting they most wanted kept.
+    //
+    // Safe at the end: weatherServer is a char[96], a multiple of 4, so the
+    // struct has no trailing padding for this to land in and an upgraded device
+    // keeps the compiled default. On rather than off, which is what every build
+    // before this setting came up as.
+    bool     kbBacklightEnabled;
+    // For whoever appends next: kbBacklightEnabled is one byte at the end of a
+    // 4-aligned struct, so the stored blob carries three bytes past it that the
+    // load memcpy's straight over anything placed there.
+    uint8_t  _reservedPad13[3];
 };
 
 // ── Position precision (imprecise location) ──────────────────────────────────

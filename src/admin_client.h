@@ -42,6 +42,11 @@ struct Hooks {
     // unset, which is fine -- it is display only.
     uint32_t (*epochNow)(void *ctx);
 
+    // The admin peer list, for the `peers` command. Returns false past the end.
+    // A hook rather than a direct call so this module stays free of NVS and the
+    // node table, exactly as it stays free of the radio.
+    bool (*peerAt)(int index, uint32_t &nodeId, const char *&state, void *ctx);
+
     void *ctx;
 };
 
@@ -105,6 +110,14 @@ public:
     Transport transport() const { return _transport; }
     bool      busy() const { return _pending.active; }
 
+    // Puts a line in the transcript that the session did not ask for.
+    //
+    // The favourites sweep uses it: when a probe discovers that the peer this
+    // session is talking to has stopped accepting us, the operator should find
+    // out among their command receipts rather than on whatever they type next.
+    // Bumps the revision like any other line, so both terminals repaint.
+    void notify(LineKind kind, const char *text);
+
     // True while the previous line was a destructive command awaiting the word
     // `confirm`. The UI shows it in the prompt so the state is never invisible.
     bool awaitingConfirm() const { return _confirm.armed; }
@@ -125,11 +138,18 @@ private:
         bool     destructive;  // never auto-retried, never on a refreshed key
         bool     isRead;       // reads mint the passkey; writes consume it
         // For a read-modify-write, what to do with the response.
+        //
+        // Two shapes share this: a Config block (get_config -> splice -> set_config)
+        // and the owner record (get_owner -> splice -> set_owner). The owner has
+        // no enclosing block, which is what spliceBlock == 0 means.
         bool     splicePending;
-        uint32_t spliceBlock;  // Config block being edited
-        uint32_t spliceField;  // field inside it
+        uint32_t spliceBlock;   // Config block being edited; 0 = the message itself
+        uint32_t spliceField;   // field inside it
+        uint32_t spliceSetField;// the AdminMessage field the result is sent as
+        bool     spliceIsText;
         uint64_t spliceValue;
-        char     spliceLabel[24];
+        char     spliceText[40];
+        char     spliceLabel[32];
     };
 
     struct ConfirmArm {
@@ -157,6 +177,12 @@ private:
     uint32_t  _revision = 0;
 
     void print(uint8_t kind, const char *fmt, ...);
+    // Walks a response payload and prints it, a field per line. Named where a
+    // name exists, numbered where one does not -- an unknown field is still on
+    // the remote, so it still gets a line.
+    void renderPayload(const AdminProto::Response &r);
+    void renderMessage(const uint8_t *buf, size_t len,
+                       const void *table, size_t tableCount, int depth);
     Transport resolveTransport() const;
     bool sendEncoded(const uint8_t *buf, size_t len, uint32_t field,
                      bool destructive, bool isRead, uint32_t nowMs);

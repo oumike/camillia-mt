@@ -56,7 +56,12 @@ const AdminPeer *AdminPeers::at(int i) const {
     return &_peers[i];
 }
 
-bool AdminPeers::mayAdminister(uint32_t nodeId) const {
+bool AdminPeers::mayOpenTerminal(uint32_t nodeId) const {
+    const AdminPeer *p = find(nodeId);
+    return p && p->state != ADMIN_PEER_DENIED;
+}
+
+bool AdminPeers::isConfirmed(uint32_t nodeId) const {
     const AdminPeer *p = find(nodeId);
     return p && p->state == ADMIN_PEER_CONFIRMED;
 }
