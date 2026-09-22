@@ -132,12 +132,14 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   as an ordinary Backspace, so the chord is only worth reaching for when you
   want to abandon a message. The Pager has no Alt — its modifier layer is
   Sym/Shift — so it has no equivalent.
-- Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
-  T opens the Tools modal (SNR/RSSI, ChUtil, Beacons and Announce everywhere,
-  plus Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C
-  cancels the sweep or scan while one is running and clears the list when none
-  is, S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
-  restarts the count and S sends the top 5 to a channel
+- Live screen shortcuts: C clears the log and F filters the feed by traffic type
+- **L opens Tools** — the grid holding Live, the SNR/RSSI and ChUtil charts,
+  Beacons and Announce on every board, plus Discovery, Weather and MQTT where
+  the board has them. S, U, D, B, W, M or A jumps straight to one
+- Inside Discovery: W sweeps and P picks a preset to scan — both ask how long to
+  listen first. C cancels a sweep or scan while one is running and clears the
+  list when none is, and S saves a snapshot to SD. Inside Beacons: C clears.
+  Inside MQTT Monitor: C restarts the count and S sends the top 5 to a channel
 
 ### LilyGo T-Deck (tdeck)
 
@@ -507,19 +509,16 @@ Builds: `heltec-v4`, `heltec-v4-vertical`
 
 Live shows decoded RX and TX traffic with per-traffic coloring.
 
-- Open from the main screen (L on keyboard builds, Live bottom-nav button on Heltec)
+- **Live is reached through Tools**, which is its own destination now: **L** on
+  keyboard builds, the wrench cell on the nav bar, or the **Alt+L** chord. Live
+  is the first row of the Tools grid
 - Scroll with Up and Down input
 - Press C to clear the log
 - Press F for the traffic filter (on Heltec, the filter button in the Live
   header) — see [Traffic filter](#traffic-filter) below
-- Press T for Tools (on Heltec, the Tools button in the Live header) — a
-  two-column picker holding the SNR/RSSI chart, the channel-utilization chart,
-  Discovery, Beacons, and the MQTT Monitor. Enter opens the selected tool, and
-  S, U, D, B or M jumps straight to one. Backing out of a tool returns to Live,
-  not to Tools.
-- The MQTT cell is only built on boards with WiFi compiled in (so: not
-  Cardputer), and is only live while WiFi is switched on in config. With WiFi
-  off the row reads `MQTT - WiFi off` and does not open.
+- Backing out of Live, or out of any other tool, returns to the chat screen.
+  Tools closes itself on the way into whatever you picked, so there is no
+  half-way house to come back to
 
 ### Traffic filter
 
@@ -568,7 +567,11 @@ neighbor report.
   before. Cancelling does not hand back a fresh sweep straight away: the
   broadcast has already gone out, so the usual cooldown still applies
 - **Both Sweep and a preset scan ask how long to listen first** — 30 sec, 1, 2,
-  5, 10 or 15 min. A sweep opens on 1 min and a scan on 5, which is what they
+  5, 10, 15 or 30 min, or 1, 2 or 6 hours. **A long preset scan is not the same
+  as a long sweep:** a scan parks the radio on the foreign preset for the whole
+  window, so the node is deaf to its own mesh until it ends. Six hours of that
+  is six hours of messages on your own channels that never arrive, and nothing
+  afterwards will tell you what you missed. A sweep costs only the wait. A sweep opens on 1 min and a scan on 5, which is what they
   used to be fixed at, and each remembers what you last chose for it. The window
   cannot be changed once a run has started: it is what decides when the results
   are called final. A sweep that cannot run right now says so before it asks
@@ -1987,11 +1990,11 @@ one-glyph message, then the tray closes. On the channel view it goes to the
 active channel; on the DM view it goes to the selected conversation. A close key
 or a tap outside dismisses the tray without sending.
 
-- **T-Deck / Pager / Cardputer** — press **E** on the chat/DM screen
-- **Heltec (touch)** — while composing, tap the 😀 button next to Cancel / Send
-  to insert emoji into the message. The tray has a **Close** button along its
-  bottom edge: it fills all but a few pixels of the screen, so the tap-outside
-  gesture the other builds rely on has almost nothing left to aim at
+- **Keyboard builds** — press **E** on the chat/DM screen
+- **Heltec / Wio (touch-only)** — the 😀 button beside Cancel / Send. The tray
+  has a **Close** button along its bottom edge: it fills all but a few pixels of
+  the screen, so the tap-outside gesture the other builds rely on has almost
+  nothing left to aim at
 
 To **insert** an emoji into a message you are already typing — as opposed to
 sending one on its own — the tray opens in insert mode instead, and the glyph

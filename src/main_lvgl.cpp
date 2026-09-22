@@ -16015,12 +16015,30 @@ struct DiscoveryDurationOption {
     const char *label;
 };
 static const DiscoveryDurationOption kDiscoveryDurations[] = {
-    {  30000UL, "30 sec" },
-    {  60000UL, "1 min"  },
-    { 120000UL, "2 min"  },
-    { 300000UL, "5 min"  },
-    { 600000UL, "10 min" },
-    { 900000UL, "15 min" },
+    {    30000UL, "30 sec" },
+    {    60000UL, "1 min"  },
+    {   120000UL, "2 min"  },
+    {   300000UL, "5 min"  },
+    {   600000UL, "10 min" },
+    {   900000UL, "15 min" },
+    // The long end, for leaving a board somewhere and coming back to it. A
+    // sweep at these lengths is cheap -- the one broadcast has already gone out
+    // and the rest is listening -- so the cost is only the screen staying on.
+    //
+    // A PRESET SCAN AT THESE LENGTHS IS NOT CHEAP, and the difference is worth
+    // being blunt about: a scan parks the radio on a foreign preset for the
+    // whole window, so the node is deaf to its own mesh for as long as it runs.
+    // Six hours of that is six hours of missed messages on your own channels,
+    // and nothing on the device will tell you afterwards what you did not hear.
+    // The picker offers it because surveying a quiet band genuinely needs it;
+    // the row is not a mistake, but it is not the one to reach for by default.
+    //
+    // 6 h is 21,600,000 ms, comfortably inside the uint32_t these are held in
+    // and inside the ~49-day wrap of the millis() subtraction that times them.
+    {  1800000UL, "30 min" },
+    {  3600000UL, "1 hour" },
+    {  7200000UL, "2 hours"},
+    { 21600000UL, "6 hours"},
 };
 static constexpr int kDiscoveryDurationCount =
     (int)(sizeof(kDiscoveryDurations) / sizeof(kDiscoveryDurations[0]));
@@ -16097,6 +16115,14 @@ static lv_obj_t *s_discoveryList = nullptr;
 // whole state: it is one control doing whichever of the two the screen is
 // currently able to mean, exactly as the C key is.
 static lv_obj_t *s_discoveryClearLabel = nullptr;
+// The key-hint line, held for the same reason: the word it gives C has to follow
+// what C currently does. Declared on every build so the teardown paths can null
+// it without a guard; only the keyboard builds ever create one.
+static lv_obj_t *s_discoveryHintLabel = nullptr;
+// What the button and the hint were last told to say. Compared rather than the
+// label text, so the two cannot disagree and neither is rewritten on a tick
+// where nothing changed -- lv_label_set_text() invalidates.
+static bool      s_discoveryActionsShowCancel = false;
 static lv_obj_t *s_discoveryColBoxes[kDiscoveryCols] = {};
 // 0 = no sweep in flight. Survives the modal closing so a sweep cannot be
 // restarted by closing and reopening, and so its result is there on return.
@@ -31373,6 +31399,7 @@ static void closeDiscoveryModal() {
     s_discoveryStatusLabel = nullptr;
     s_discoveryList = nullptr;
     s_discoveryClearLabel = nullptr;
+    s_discoveryHintLabel = nullptr;
     memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
     s_discoveryRenderedSig = 0;
     // s_discoverySweepStartedMs is deliberately left alone: a sweep already on
@@ -32180,10 +32207,46 @@ static void discoveryEndPresetScan(bool aborted) {
                   (double)s_presetScanPrevFreq);
 }
 
+// Elapsed/total for a window that can now be six hours. "43/21600s" is complete
+// and unreadable; the unit is dropped down to whatever keeps the number small.
+static void discoveryFormatDuration(char *out, size_t cap, uint32_t secs) {
+    if (secs < 60) {
+        snprintf(out, cap, "%lus", (unsigned long)secs);
+    } else if (secs < 3600) {
+        snprintf(out, cap, "%lum", (unsigned long)(secs / 60UL));
+    } else if (secs % 3600UL == 0) {
+        snprintf(out, cap, "%luh", (unsigned long)(secs / 3600UL));
+    } else {
+        snprintf(out, cap, "%luh%02lum",
+                 (unsigned long)(secs / 3600UL),
+                 (unsigned long)((secs % 3600UL) / 60UL));
+    }
+}
+
 // Is something in flight that a stop gesture should stop, rather than clear?
 static bool discoveryRunInFlight() {
     return s_presetScanActive || s_discoverySweepStartedMs != 0;
 }
+
+#if !UI_TOUCH_ONLY_PROFILE
+// The key-hint line. A function rather than two literals, because the C entry
+// has to name whichever of its two jobs is live and the build path and the
+// refresh path must not word it differently.
+static void discoverySetHintText() {
+    if (!lvObjValid(s_discoveryHintLabel)) return;
+    const char *cWord = discoveryRunInFlight() ? "Cancel" : "Clear";
+#if HAS_FILE_STORAGE
+    lv_label_set_text_fmt(s_discoveryHintLabel,
+                          "W = Sweep   P = Preset   C = %s   S = Save   %s = Back",
+                          cWord, modalCloseKeyLabel());
+#else
+    lv_label_set_text_fmt(s_discoveryHintLabel,
+                          "W = Sweep   P = Preset   C = %s   %s = Back",
+                          cWord, modalCloseKeyLabel());
+#endif
+}
+#endif
+
 
 // Ends a sweep or a scan early, keeping whatever it has already collected. The
 // results are not thrown away: a run cut short has still heard what it heard,
@@ -32340,6 +32403,7 @@ static void refreshDiscoveryModal(bool force) {
         s_discoveryStatusLabel = nullptr;
         s_discoveryList = nullptr;
         s_discoveryClearLabel = nullptr;
+        s_discoveryHintLabel = nullptr;
         memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
         return;
     }
@@ -32351,31 +32415,44 @@ static void refreshDiscoveryModal(bool force) {
     if (s_discoverySweepStartedMs != 0) {
         const uint32_t elapsedS = (millis() - s_discoverySweepStartedMs) / 1000UL;
         char msg[72];
+        char sofar[12];
+        char total[12];
+        discoveryFormatDuration(sofar, sizeof(sofar), elapsedS);
         if (s_presetScanActive) {
-            snprintf(msg, sizeof(msg), "Scanning %s %lu/%lus",
-                     discoveryPresetLabel(s_presetScanPreset),
-                     (unsigned long)elapsedS,
-                     (unsigned long)(s_discoveryPresetScanWindowMs / 1000UL));
+            discoveryFormatDuration(total, sizeof(total),
+                                    s_discoveryPresetScanWindowMs / 1000UL);
+            snprintf(msg, sizeof(msg), "Scanning %s %s/%s",
+                     discoveryPresetLabel(s_presetScanPreset), sofar, total);
         } else {
-            // Counts up to the chosen window now, so a 15-minute sweep does not
-            // look like a one-minute sweep that has overrun.
-            snprintf(msg, sizeof(msg), "Sweeping... %lu/%lus",
-                     (unsigned long)elapsedS,
-                     (unsigned long)(s_discoverySweepWindowMs / 1000UL));
+            // Counts up to the chosen window, so a six-hour sweep does not look
+            // like a one-minute sweep that has badly overrun.
+            discoveryFormatDuration(total, sizeof(total),
+                                    s_discoverySweepWindowMs / 1000UL);
+            snprintf(msg, sizeof(msg), "Sweeping... %s/%s", sofar, total);
         }
         discoverySetStatus(msg);
     } else if (!s_discoveryStatus[0]) {
         discoverySetStatus("Ready");
     }
 
-    // Retitled beside the status line, on the same tick and for the same reason:
-    // both are answering "what is this screen doing right now". Set only when it
-    // changes -- lv_label_set_text() invalidates, and this runs on the UI tick.
-    if (lvObjValid(s_discoveryClearLabel)) {
-        const char *want = discoveryRunInFlight() ? "Cancel" : "Clear";
-        const char *have = lv_label_get_text(s_discoveryClearLabel);
-        if (!have || strcmp(have, want) != 0) {
-            lv_label_set_text(s_discoveryClearLabel, want);
+    // The button and the key hint both describe what C does, so they are
+    // retitled together and from one condition -- two conditions would be two
+    // chances for the screen to offer a button and a hint that disagree.
+    //
+    // Beside the status line, on the same tick and for the same reason: all
+    // three are answering "what is this screen doing right now". Gated on the
+    // answer having changed, because this runs on the UI tick and
+    // lv_label_set_text() invalidates.
+    {
+        const bool cancels = discoveryRunInFlight();
+        if (cancels != s_discoveryActionsShowCancel) {
+            s_discoveryActionsShowCancel = cancels;
+            if (lvObjValid(s_discoveryClearLabel)) {
+                lv_label_set_text(s_discoveryClearLabel, cancels ? "Cancel" : "Clear");
+            }
+#if !UI_TOUCH_ONLY_PROFILE
+            discoverySetHintText();
+#endif
         }
     }
 
@@ -32516,7 +32593,7 @@ static void openDiscoveryDurationModal(uint8_t preset) {
         discoveryDurationLabelFor,
         discoveryDurationApply,
         "30 sec",
-        "15 min",
+        "6 hours",
     };
     static const CfgSliderPicker kScanSpec = {
         "Scan For",
@@ -32524,7 +32601,7 @@ static void openDiscoveryDurationModal(uint8_t preset) {
         discoveryDurationLabelFor,
         discoveryDurationApply,
         "30 sec",
-        "15 min",
+        "6 hours",
     };
     openCfgSliderModal((preset == kDiscoveryNoPresetPending) ? &kSweepSpec : &kScanSpec,
                        startIdx);
@@ -32881,8 +32958,11 @@ static void openDiscoveryModal() {
     // Built with whichever word is true right now: a plain sweep survives closing
     // and reopening this screen, so the modal can be built with one in flight.
     // refreshDiscoveryModal() keeps it honest from there.
+    // Seeded here, not left at whatever the last modal left behind, so the first
+    // refresh tick does not think nothing has changed and skip both labels.
+    s_discoveryActionsShowCancel = discoveryRunInFlight();
     s_discoveryClearLabel = makeDiscoveryBtn(
-        actionRow, discoveryRunInFlight() ? "Cancel" : "Clear", [](lv_event_t *e) {
+        actionRow, s_discoveryActionsShowCancel ? "Cancel" : "Clear", [](lv_event_t *e) {
             LV_UNUSED(e);
             // The same two meanings as the C key, for the same reason -- see the
             // note there. This is the only way in on a build with no keyboard.
@@ -32989,13 +33069,8 @@ static void openDiscoveryModal() {
 #else
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
 #endif
-#if HAS_FILE_STORAGE
-    lv_label_set_text_fmt(hint, "W = Sweep   P = Preset   C = Clear   S = Save   %s = Back",
-                          modalCloseKeyLabel());
-#else
-    lv_label_set_text_fmt(hint, "W = Sweep   P = Preset   C = Clear   %s = Back",
-                          modalCloseKeyLabel());
-#endif
+    s_discoveryHintLabel = hint;
+    discoverySetHintText();
 #endif
 
     refreshDiscoveryModal(true);
