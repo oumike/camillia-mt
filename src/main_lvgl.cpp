@@ -426,6 +426,12 @@ static int s_emojiPickerCols = 1;
 // stepped. Driven from the loop because a held key produces no further key
 // events to hang this off; see serviceEmojiPickerRepeat.
 static int      s_emojiPickerRepeatDelta = 0;
+// Whether stepping runs off one end of the grid onto the other. Set when the
+// tray is built, from the board: it is a property of what is driving the
+// selection rather than of the tray itself. A wheel has no ends to stop at --
+// stopping dead at the last cell is the wheel telling you it is broken -- where
+// a d-pad's edges are real and running off them would lose your place.
+static bool     s_emojiPickerWrap = false;
 static uint32_t s_emojiPickerRepeatLastMs = 0;
 // Packet id the pick reacts to. Non-zero when the tray was opened in send mode
 // with the chat cursor sitting on a message: the pick then goes out as a tapback
@@ -10840,10 +10846,16 @@ static void sendQuickEmoji(const char *emoji, uint32_t tapbackId = 0) {
 // Moves the tray cursor by delta, clamped. Shared by key handling and the
 // hold-to-repeat service.
 static void emojiPickerStep(int delta) {
-    if (delta == 0) return;
+    if (delta == 0 || s_pickerCount <= 0) return;
     int nxt = s_emojiPickerSelection + delta;
-    if (nxt < 0) nxt = 0;
-    if (nxt >= s_pickerCount) nxt = s_pickerCount - 1;
+    if (s_emojiPickerWrap) {
+        // Modulo rather than a clamp, and written to survive a negative: C's %
+        // keeps the sign of the dividend, so -1 % 32 is -1 rather than 31.
+        nxt = ((nxt % s_pickerCount) + s_pickerCount) % s_pickerCount;
+    } else {
+        if (nxt < 0) nxt = 0;
+        if (nxt >= s_pickerCount) nxt = s_pickerCount - 1;
+    }
     if (nxt == s_emojiPickerSelection) return;
     s_emojiPickerSelection = nxt;
     refreshEmojiPickerSelection();
@@ -10967,6 +10979,7 @@ static void closeEmojiPicker() {
     s_emojiPickerModal = nullptr;
     s_emojiPickerTapbackId = 0;
     s_emojiPickerRepeatDelta = 0;
+    s_emojiPickerWrap = false;
 }
 
 // DIAGNOSTIC (emoji-picker OOM): scrolling the tray aborts inside
@@ -10996,6 +11009,14 @@ static void openEmojiPicker(bool sendMode, bool symbolTray) {
     if (symbolTray) sendMode = false;
     s_emojiPickerSendMode = sendMode;
     s_emojiPickerSelection = 0;
+#if defined(DEVICE_TLORA_PAGER_TFT)
+    // Every control on this board is one-dimensional -- the wheel, and the two
+    // keys that alias it -- so the grid is one long line to all of them and
+    // every one of them wraps. See s_emojiPickerWrap.
+    s_emojiPickerWrap = true;
+#else
+    s_emojiPickerWrap = false;
+#endif
     // Cursor parked on a chat message → this pick reacts to it. The DM screen has
     // no per-message cursor, so a stale chat selection must never target there.
     s_emojiPickerTapbackId = (sendMode && !s_dmModal) ? s_selectedMsgReplyPacketId : 0;
@@ -15979,6 +16000,42 @@ static constexpr uint32_t kDiscoverySweepCooldownMs = 15000UL;
 // and Telemetry broadcasts. That is where most of the picture comes from.
 static constexpr uint32_t kDiscoveryPresetScanWindowMs = 300000UL;   // 5 minutes
 
+// Both windows are now a question rather than a constant: the two above are the
+// defaults the picker opens on, and what actually times a run is the pair of
+// runtime values below.
+//
+// The reason to ask is that neither number is right for every job. A sweep in a
+// room with three nodes is over in fifteen seconds; a scan of a foreign preset
+// on a quiet band is mostly waiting for a periodic broadcast that may be minutes
+// away. The old fixed minute and five minutes were reasonable middles, and a
+// reasonable middle is exactly what someone with a specific mesh in front of
+// them does not need.
+struct DiscoveryDurationOption {
+    uint32_t    ms;
+    const char *label;
+};
+static const DiscoveryDurationOption kDiscoveryDurations[] = {
+    {  30000UL, "30 sec" },
+    {  60000UL, "1 min"  },
+    { 120000UL, "2 min"  },
+    { 300000UL, "5 min"  },
+    { 600000UL, "10 min" },
+    { 900000UL, "15 min" },
+};
+static constexpr int kDiscoveryDurationCount =
+    (int)(sizeof(kDiscoveryDurations) / sizeof(kDiscoveryDurations[0]));
+
+// What the run in flight is timed against. Seeded from the constants above, so
+// a device that never opens the picker behaves exactly as it did.
+static uint32_t s_discoverySweepWindowMs     = kDiscoverySweepWindowMs;
+static uint32_t s_discoveryPresetScanWindowMs = kDiscoveryPresetScanWindowMs;
+
+// Which run the picker is standing in front of: a preset index, or this
+// sentinel for a plain sweep. The slider's apply() takes only an index, so the
+// thing it is about has to be parked here between opening and committing.
+static constexpr uint8_t kDiscoveryNoPresetPending = 0xFF;
+static uint8_t s_discoveryPendingPreset = kDiscoveryNoPresetPending;
+
 // Meshtastic's *polite* channel-utilization threshold (airtime.h:70-72); its
 // hard refusal is 40%. A sweep is discretionary and asks others to transmit, so
 // it is held to the polite one. Measured locally by Radio.channelUtilPercent()
@@ -16036,6 +16093,10 @@ static constexpr size_t kDiscoveryNameMax = (kDiscoveryCols == 1) ? 29 : 19;
 static lv_obj_t *s_discoveryModal = nullptr;
 static lv_obj_t *s_discoveryStatusLabel = nullptr;
 static lv_obj_t *s_discoveryList = nullptr;
+// The label on the Clear/Cancel button. Held because its text is the button's
+// whole state: it is one control doing whichever of the two the screen is
+// currently able to mean, exactly as the C key is.
+static lv_obj_t *s_discoveryClearLabel = nullptr;
 static lv_obj_t *s_discoveryColBoxes[kDiscoveryCols] = {};
 // 0 = no sweep in flight. Survives the modal closing so a sweep cannot be
 // restarted by closing and reopening, and so its result is there on return.
@@ -31311,6 +31372,7 @@ static void closeDiscoveryModal() {
     lvObjDeleteSafe(s_discoveryModal);
     s_discoveryStatusLabel = nullptr;
     s_discoveryList = nullptr;
+    s_discoveryClearLabel = nullptr;
     memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
     s_discoveryRenderedSig = 0;
     // s_discoverySweepStartedMs is deliberately left alone: a sweep already on
@@ -32118,6 +32180,37 @@ static void discoveryEndPresetScan(bool aborted) {
                   (double)s_presetScanPrevFreq);
 }
 
+// Is something in flight that a stop gesture should stop, rather than clear?
+static bool discoveryRunInFlight() {
+    return s_presetScanActive || s_discoverySweepStartedMs != 0;
+}
+
+// Ends a sweep or a scan early, keeping whatever it has already collected. The
+// results are not thrown away: a run cut short has still heard what it heard,
+// and someone who wanted the list gone has Clear for that -- which is the whole
+// reason this is a separate verb rather than a longer Clear.
+static void discoveryCancelRun() {
+    if (s_presetScanActive) {
+        // Takes the sweep window and the retune with it; see the abort path
+        // there. That function says nothing to the user, so the status is ours.
+        discoveryEndPresetScan(/*aborted=*/true);
+        discoverySetStatus("Scan cancelled");
+        return;
+    }
+    if (s_discoverySweepStartedMs == 0) return;
+    s_discoverySweepStartedMs = 0;
+
+    // The cooldown runs from here, exactly as it would had the window closed on
+    // its own. Cancelling stops us listening; it does not un-ask the question --
+    // the broadcast has gone out and every node within three hops is already
+    // composing a reply. Letting a cancel hand back a fresh sweep immediately
+    // would make it the way to bypass the rate limit.
+    uint32_t now = millis();
+    if (now == 0) now = 1;
+    s_discoverySweepEndedMs = now;
+    discoverySetStatus("Sweep cancelled");
+}
+
 // Retunes to `preset`, sweeps it, and leaves serviceDiscoverySweep() to bring
 // the radio home when the window closes.
 static void discoveryStartPresetScan(uint8_t preset) {
@@ -32194,8 +32287,8 @@ static void serviceDiscoverySweep() {
         return;
     }
     if (s_discoverySweepStartedMs == 0) return;
-    const uint32_t windowMs = s_presetScanActive ? kDiscoveryPresetScanWindowMs
-                                                 : kDiscoverySweepWindowMs;
+    const uint32_t windowMs = s_presetScanActive ? s_discoveryPresetScanWindowMs
+                                                 : s_discoverySweepWindowMs;
     const uint32_t elapsedMs = millis() - s_discoverySweepStartedMs;
     if (elapsedMs < windowMs) return;
 
@@ -32246,6 +32339,7 @@ static void refreshDiscoveryModal(bool force) {
         s_discoveryModal = nullptr;
         s_discoveryStatusLabel = nullptr;
         s_discoveryList = nullptr;
+        s_discoveryClearLabel = nullptr;
         memset(s_discoveryColBoxes, 0, sizeof(s_discoveryColBoxes));
         return;
     }
@@ -32261,13 +32355,28 @@ static void refreshDiscoveryModal(bool force) {
             snprintf(msg, sizeof(msg), "Scanning %s %lu/%lus",
                      discoveryPresetLabel(s_presetScanPreset),
                      (unsigned long)elapsedS,
-                     (unsigned long)(kDiscoveryPresetScanWindowMs / 1000UL));
+                     (unsigned long)(s_discoveryPresetScanWindowMs / 1000UL));
         } else {
-            snprintf(msg, sizeof(msg), "Sweeping... (%lus)", (unsigned long)elapsedS);
+            // Counts up to the chosen window now, so a 15-minute sweep does not
+            // look like a one-minute sweep that has overrun.
+            snprintf(msg, sizeof(msg), "Sweeping... %lu/%lus",
+                     (unsigned long)elapsedS,
+                     (unsigned long)(s_discoverySweepWindowMs / 1000UL));
         }
         discoverySetStatus(msg);
     } else if (!s_discoveryStatus[0]) {
         discoverySetStatus("Ready");
+    }
+
+    // Retitled beside the status line, on the same tick and for the same reason:
+    // both are answering "what is this screen doing right now". Set only when it
+    // changes -- lv_label_set_text() invalidates, and this runs on the UI tick.
+    if (lvObjValid(s_discoveryClearLabel)) {
+        const char *want = discoveryRunInFlight() ? "Cancel" : "Clear";
+        const char *have = lv_label_get_text(s_discoveryClearLabel);
+        if (!have || strcmp(have, want) != 0) {
+            lv_label_set_text(s_discoveryClearLabel, want);
+        }
     }
 
     // Rebuilding tears down and recreates every label in the columns, so it is
@@ -32350,14 +32459,85 @@ static void refreshDiscoveryPresetSelection() {
     }
 }
 
+// ── How long to listen ───────────────────────────────────────────────────────
+// Asked before the run starts rather than after, because neither a sweep nor a
+// scan can be lengthened once it is going: the window is what decides when the
+// results are called final.
+static const char *discoveryDurationLabelFor(int idx) {
+    if (idx < 0 || idx >= kDiscoveryDurationCount) idx = 0;
+    return kDiscoveryDurations[idx].label;
+}
+
+static void discoveryDurationApply(int idx) {
+    if (idx < 0 || idx >= kDiscoveryDurationCount) idx = 0;
+    const uint32_t chosen = kDiscoveryDurations[idx].ms;
+    const uint8_t preset = s_discoveryPendingPreset;
+    s_discoveryPendingPreset = kDiscoveryNoPresetPending;   // consumed either way
+
+    if (preset == kDiscoveryNoPresetPending) {
+        s_discoverySweepWindowMs = chosen;
+        discoveryStartSweep();          // refuses, with a reason, when it must
+    } else {
+        s_discoveryPresetScanWindowMs = chosen;
+        discoveryStartPresetScan(preset);
+    }
+    refreshDiscoveryModal(true);
+}
+
+// `preset` is kDiscoveryNoPresetPending for a plain sweep, or the preset a scan
+// is about to retune to. Opens on whatever that kind of run last used, which is
+// the board's own default until someone changes it.
+static void openDiscoveryDurationModal(uint8_t preset) {
+    // Refusals first. A sweep can be turned down for channel utilization, for
+    // the minimum gap since the last one, or for the cooldown after one closed,
+    // and none of those become less true for being asked about afterwards --
+    // being made to choose a duration and only then told "not yet" is a worse
+    // answer than "not yet". discoveryStartSweep() checks again when it runs;
+    // this is the same check moved in front of the question, not a substitute.
+    if (preset == kDiscoveryNoPresetPending) {
+        char why[72];
+        if (!discoverySweepAllowed(why, sizeof(why))) {
+            discoverySetStatus(why);
+            refreshDiscoveryModal(true);
+            return;
+        }
+    }
+    s_discoveryPendingPreset = preset;
+    const uint32_t current = (preset == kDiscoveryNoPresetPending)
+                                 ? s_discoverySweepWindowMs
+                                 : s_discoveryPresetScanWindowMs;
+    int startIdx = 0;
+    for (int i = 0; i < kDiscoveryDurationCount; i++) {
+        if (kDiscoveryDurations[i].ms == current) { startIdx = i; break; }
+    }
+    static const CfgSliderPicker kSweepSpec = {
+        "Sweep For",
+        kDiscoveryDurationCount,
+        discoveryDurationLabelFor,
+        discoveryDurationApply,
+        "30 sec",
+        "15 min",
+    };
+    static const CfgSliderPicker kScanSpec = {
+        "Scan For",
+        kDiscoveryDurationCount,
+        discoveryDurationLabelFor,
+        discoveryDurationApply,
+        "30 sec",
+        "15 min",
+    };
+    openCfgSliderModal((preset == kDiscoveryNoPresetPending) ? &kSweepSpec : &kScanSpec,
+                       startIdx);
+}
+
 static void discoveryPresetPickCommit() {
     if (s_presetPickSelection < 0 || s_presetPickSelection >= s_presetPickCount) return;
     const uint8_t preset = s_presetPickChoices[s_presetPickSelection];
-    // Closed before the scan starts, so the status line the scan writes is on
-    // the screen the user is looking at rather than behind this modal.
+    // Closed before the next modal opens, so the status line the scan writes
+    // ends up on the screen the user is looking at rather than behind this one.
     closeDiscoveryPresetModal();
-    discoveryStartPresetScan(preset);   // refuses, with a reason, when it must
-    refreshDiscoveryModal(true);
+    // How long, then go. The scan itself starts from discoveryDurationApply().
+    openDiscoveryDurationModal(preset);
 }
 
 static void onDiscoveryPresetRowPressed(lv_event_t *e) {
@@ -32588,7 +32768,7 @@ static void openDiscoveryModal() {
     const bool sweepIsCurrent = s_discoverySweepStartedMs != 0
         || (s_discoveryLastSweepMs != 0
             && (uint32_t)(millis() - s_discoveryLastSweepMs)
-                   < kDiscoverySweepWindowMs + kDiscoverySweepMinGapMs);
+                   < s_discoverySweepWindowMs + kDiscoverySweepMinGapMs);
     if (!sweepIsCurrent) s_discoveryStatus[0] = '\0';
 
     int modalW = lv_disp_get_hor_res(NULL);
@@ -32665,7 +32845,10 @@ static void openDiscoveryModal() {
     lv_obj_set_flex_align(actionRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text, lv_event_cb_t cb) {
+    // Returns the label rather than the button: the only caller that keeps a
+    // handle wants to retitle it later, and the button itself never changes.
+    auto makeDiscoveryBtn = [](lv_obj_t *parent, const char *text,
+                               lv_event_cb_t cb) -> lv_obj_t * {
         lv_obj_t *btn = lv_btn_create(parent);
         lv_obj_set_height(btn, 22);
         lv_obj_set_flex_grow(btn, 1);
@@ -32682,11 +32865,12 @@ static void openDiscoveryModal() {
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8F1FF), 0);
         lv_label_set_text(lbl, text);
         lv_obj_center(lbl);
+        return lbl;
     };
     makeDiscoveryBtn(actionRow, "Sweep", [](lv_event_t *e) {
         LV_UNUSED(e);
-        discoveryStartSweep();
-        refreshDiscoveryModal(true);
+        // Asks how long first; the sweep starts from discoveryDurationApply().
+        openDiscoveryDurationModal(kDiscoveryNoPresetPending);
     });
     // The keyboard boards reach this with P; on a touch-only build a button is
     // the only way in.
@@ -32694,11 +32878,18 @@ static void openDiscoveryModal() {
         LV_UNUSED(e);
         openDiscoveryPresetModal();
     });
-    makeDiscoveryBtn(actionRow, "Clear", [](lv_event_t *e) {
-        LV_UNUSED(e);
-        discoveryClear();
-        refreshDiscoveryModal(true);
-    });
+    // Built with whichever word is true right now: a plain sweep survives closing
+    // and reopening this screen, so the modal can be built with one in flight.
+    // refreshDiscoveryModal() keeps it honest from there.
+    s_discoveryClearLabel = makeDiscoveryBtn(
+        actionRow, discoveryRunInFlight() ? "Cancel" : "Clear", [](lv_event_t *e) {
+            LV_UNUSED(e);
+            // The same two meanings as the C key, for the same reason -- see the
+            // note there. This is the only way in on a build with no keyboard.
+            if (discoveryRunInFlight()) discoveryCancelRun();
+            else                        discoveryClear();
+            refreshDiscoveryModal(true);
+        });
 #if HAS_FILE_STORAGE
     // Same reasoning as the S key on the keyboard builds: the question is
     // whether a file can be saved, not whether a card slot exists. These boards
@@ -40417,7 +40608,23 @@ static void pumpKeyboardInput() {
             // them into channel keys further down, but the tray is handled
             // first), and ';' / '.' have already become KEY_SCROLL_UP/DN.
             int delta = 0;
-#if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TLORA_PAGER_TFT)
+            // The wheel is one axis, so the grid reads to it as one long line:
+            // a detent forward is the next cell, which runs along the row and
+            // continues at the left of the one below; back is the reverse, up
+            // the row and on to the right-hand end of the one above. Both ends
+            // wrap, because a wheel has no ends to stop at -- stopping dead at
+            // the last cell is the wheel telling you it is broken.
+            //
+            // Direction through invertScrollNav, the same expression the chat
+            // and compose caret take on this board, so the detent that steps a
+            // selection forward everywhere else steps forward here too.
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
+                const bool forward = (k == KEY_SCROLL_UP) ? invertScrollNav
+                                                          : !invertScrollNav;
+                delta = forward ? 1 : -1;
+            }
+#elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO)
             if (navFromJk && k == KEY_SCROLL_UP)       delta = -1;
             else if (navFromJk && k == KEY_SCROLL_DN)  delta = 1;
             else if (k == KEY_SCROLL_UP)               delta = -s_emojiPickerCols;
@@ -41134,8 +41341,10 @@ static void pumpKeyboardInput() {
             // transmits, so it is also the one worth not putting under a finger
             // that was reaching for something else.
             if (k == 'w' || k == 'W') {
-                discoveryStartSweep();          // refuses, with a reason, when it must
-                refreshDiscoveryModal(true);
+                // Asks how long first. The sweep itself starts from
+                // discoveryDurationApply(), which is also where the refusal
+                // reasons are still surfaced.
+                openDiscoveryDurationModal(kDiscoveryNoPresetPending);
                 continue;
             }
             // (P)reset opens the picker rather than starting anything: the scan
@@ -41144,8 +41353,15 @@ static void pumpKeyboardInput() {
                 openDiscoveryPresetModal();
                 continue;
             }
+            // C stops a run while one is going, and clears when none is. The
+            // two never compete for it: with a sweep or a scan in flight the
+            // list is still filling, so clearing it is not what the key is for,
+            // and a second press once the run has stopped clears as it always
+            // did. One key, whichever of the two the screen is currently able
+            // to mean.
             if (k == 'c' || k == 'C') {
-                discoveryClear();
+                if (discoveryRunInFlight()) discoveryCancelRun();
+                else                        discoveryClear();
                 refreshDiscoveryModal(true);
                 continue;
             }

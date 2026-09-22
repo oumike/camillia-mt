@@ -134,8 +134,9 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
   Sym/Shift — so it has no equivalent.
 - Live modal shortcuts: C clears the log, F filters the feed by traffic type, and
   T opens the Tools modal (SNR/RSSI, ChUtil, Beacons and Announce everywhere,
-  plus Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C clears,
-  S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
+  plus Discovery and MQTT except on Cardputer). Inside Discovery: W sweeps, C
+  cancels the sweep or scan while one is running and clears the list when none
+  is, S saves a snapshot to SD. Inside Beacons: C clears. Inside MQTT Monitor: C
   restarts the count and S sends the top 5 to a channel
 
 ### LilyGo T-Deck (tdeck)
@@ -561,6 +562,16 @@ nodes we have only ever heard *about*, because a neighbor listed them in its own
 neighbor report.
 
 - Open from Live → Tools → Discovery
+- **C stops a run early.** While a sweep or a preset scan is going, C cancels it
+  and keeps whatever it has already heard — a scan also retunes the radio back
+  to your own preset on the way out. With nothing running, C clears the list as
+  before. Cancelling does not hand back a fresh sweep straight away: the
+  broadcast has already gone out, so the usual cooldown still applies
+- **Both Sweep and a preset scan ask how long to listen first** — 30 sec, 1, 2,
+  5, 10 or 15 min. A sweep opens on 1 min and a scan on 5, which is what they
+  used to be fixed at, and each remembers what you last chose for it. The window
+  cannot be changed once a run has started: it is what decides when the results
+  are called final. A sweep that cannot run right now says so before it asks
 - Scroll with Up and Down input
 - Results are laid out to suit the panel: three columns on the T-Lora Pager
   (direct / distance / heard about), two on the T-Deck and Mesh Deck (heard
