@@ -20579,8 +20579,29 @@ static void onHeltecBottomNavPressed(lv_event_t *e) {
             else openLiveModal();
             break;
         case HELTEC_NAV_TOOLS:
-            if (s_liveToolsModal) closeLiveToolsModal();
-            else openLiveToolsModal();
+            if (s_liveToolsModal) {
+                closeLiveToolsModal();
+                break;
+            }
+            // Clear the screens this cell can be tapped from before opening
+            // Tools, as openNavToolsShortcut() does for the keyboard route.
+            // Left standing, they stay under whatever tool is picked next, and
+            // their key handlers run ahead of every tool surface's in
+            // pumpKeyboardInput() and end in an unconditional continue — so
+            // Discovery opened this way from Nodes, DMs or Config showed its
+            // W/P/C/S hints while every one of those keys went to the screen
+            // underneath. Live stays: its handler sits below the tools', and
+            // backing out of a tool opened from Live is meant to land there.
+#if HAS_WEATHER
+            closeWeatherModal();
+#endif
+            if (s_nodesActionModal) closeNodesActionMenu();
+            if (s_channelActionsModal) closeChannelActionsModal();
+            if (s_legendModal) closeLegendModal();
+            if (s_cfgModal) closeCfgModal();
+            if (s_dmModal) closeDmModal();
+            if (s_nodesModal) closeNodesModal();
+            openLiveToolsModal();
             break;
         case HELTEC_NAV_ACTIONS:
             if (s_channelActionsModal) closeChannelActionsModal();
