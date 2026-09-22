@@ -39274,6 +39274,23 @@ static void pumpKeyboardInput() {
                 || k == 'k' || k == 'K') { homeDashCarouselGo(+1); continue; }
             if (k == KEY_PREV_CHAN || k == KEY_SCROLL_UP
                 || k == 'j' || k == 'J') { homeDashCarouselGo(-1); continue; }
+            // Activation does nothing here, and that is the whole behaviour.
+            // The dashboard is a glance surface: no row sits under a cursor, no
+            // message is in front of you, and nothing on it opens.
+            //
+            // Swallowed rather than left to fall through, which is the bug.
+            // Down in the chat fall-through these three drive the chat cursor
+            // and the composer against the chat screen that is still built
+            // underneath — so from the dashboard a press put a message box, or
+            // Message Actions, over a conversation nobody was reading. Reported
+            // on the M9, where the d-pad centre and Enter are the same byte on
+            // the wire (0x0D) and the centre is the obvious thing to press; the
+            // Pager's wheel click and Tab reach the same code the same way.
+            //
+            // This is Space's fix arriving through a different key — see the
+            // Space branch in the chat fall-through, which says the same thing
+            // at more length. Compose belongs to the chat screen.
+            if (k == KEY_ENTER || k == KEY_ROLLER || k == KEY_TAB) continue;
         }
 #endif
 
