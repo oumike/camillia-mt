@@ -1,3 +1,5 @@
 ### Fixed
-- Pressing Enter or the d-pad centre on the dashboard no longer opens a message composer or the Message Actions menu on top of whatever conversation was last open — the dashboard now ignores those presses (Elecrow ThinkNode M9, where the d-pad centre and Enter are the same key).
-- The wheel click and Tab key on the dashboard no longer trigger the same stray composer or Message Actions popup (T-Lora Pager TFT).
+- Action buttons across the UI — Discovery's Sweep/Preset/Clear/Save row, chat's New Message and Actions, the Nodes filter and the DM composer — stayed dark navy on the light themes while their labels went near-black, leaving them unreadable; they now follow the theme like the rest of the UI.
+- The range labels under a settings slider (such as "30 sec ↔ 6 hours") came out near-white on a near-white panel on the light themes and were effectively invisible.
+- Opening Tools from the bottom nav bar while on Nodes, DMs or Config left that screen underneath the tool, so a tool like Discovery showed its W/P/C/S hints but every one of those keys went to the screen behind it; the nav bar now clears the screen first, as the keyboard shortcut already did. Affects the boards that always draw the bar (Heltec V4, Wio Tracker L2) and any board with it switched on.
+- Lock screen glance cards were drawn in the UI theme's colours instead of the lock screen's fixed palette, so on a light theme they appeared as pale slabs with grey headings against the black lock panel.

@@ -4342,7 +4342,21 @@ static lv_color_t themedColorHex(uint32_t rgb) {
         case 0x102750: mapped = s_ui.tabIdle; break;
         case 0x102B61:
         case 0x1E355F: mapped = s_ui.inputBg; break;
-        case 0x123266: mapped = s_ui.panelStrong; break;
+        // Both are the same thing: a surface raised off the panel. 0x123266 is
+        // the idle row, 0x16386F the button face -- every action button in the
+        // UI is drawn in it (Discovery's Sweep/Preset/Clear/Save row, chat's
+        // New Message and Actions, the Nodes filter, the DM composer).
+        //
+        // 0x16386F was not in this table at all, which is the bug. Its labels
+        // are 0xE8F1FF/0xD9E8FF, which map to s_ui.textMain and so flip to near
+        // black on a light theme -- while the button face, unmapped, stayed the
+        // dark navy authored for the dark themes. Black on navy: the buttons
+        // were there and could be pressed, and nothing on them could be read.
+        //
+        // Visible on the touch builds first because those are the boards whose
+        // buttons are the only way in; the same faces are drawn on every board.
+        case 0x123266:
+        case 0x16386F: mapped = s_ui.panelStrong; break;
         case 0x2A4E8F: mapped = s_ui.selectBg; break;
         case 0x2A4FB4: mapped = s_ui.tabActive; break;
         case 0x2B4D8C:
@@ -14031,7 +14045,18 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         lv_obj_t *ends = lv_label_create(s_cfgSliderModal);
         lv_obj_set_width(ends, lv_pct(100));
         lv_obj_set_style_text_font(ends, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(ends, lv_color_hex(0x8FB5E6), 0);
+        // A text colour, not a line colour. This was 0x8FB5E6, which
+        // themedColorHex() maps to s_ui.dividerHi -- panelAlt blended a third of
+        // the way toward the accent. On a dark theme that lands pale and reads
+        // fine, which is why it survived; on a light one panelAlt is already
+        // near-white, so the blend came out as near-white text on the
+        // near-white panel behind it and "30 sec <-> 6 hours" all but vanished.
+        //
+        // 0xD9E8FF is s_ui.textMain, the same ink the title above uses: near
+        // black on a light theme, near white on a dark one. Hard-coding black
+        // would have fixed the light themes by breaking every dark one, since
+        // this modal is one surface whose colour the theme decides.
+        lv_obj_set_style_text_color(ends, lv_color_hex(0xD9E8FF), 0);
         lv_obj_set_style_text_align(ends, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text_fmt(ends, "%s  <->  %s", spec->leftEnd, spec->rightEnd);
     }
@@ -28805,16 +28830,39 @@ static int homeDashboardHeight() {
 // black panel, and the themed ink on a light theme would be dark type on that
 // black.
 static inline lv_color_t glanceInk(bool themed) { return glancePalette(themed).ink; }
+
+// The rest of the carousel's colours, which glancePalette() does not carry: the
+// card slab, its edge, the chart ground and the heading ink. Both surfaces want
+// the same look and disagree only about where the colour comes from.
+//
+// On the dashboard it comes from the theme. Every lv_color_hex() in this file
+// is themedColorHex() (see the #define beside it), so 0x0E285B is really
+// s_ui.panelBg and 0x335D9D really s_ui.divider -- which is right there, and is
+// how the cards follow the rest of the themed UI.
+//
+// On the lock screen nothing may be themed. That panel is a fixed black
+// whatever the theme says, and on a light theme panelBg is near-white and
+// textDim a dark grey: the cards came up as pale slabs carrying grey headings,
+// on black, which is what this fixes. themed=false takes the literal bytes --
+// the colours these constants were authored as, and what the lock screen drew
+// before the palette existed.
+static inline lv_color_t glanceColor(bool themed, uint32_t rgb) {
+    if (themed) return themedColorHex(rgb);
+    return lv_color_make((uint8_t)((rgb >> 16) & 0xFF),
+                         (uint8_t)((rgb >> 8) & 0xFF),
+                         (uint8_t)(rgb & 0xFF));
+}
 // Headings and units, a step back from the readings themselves. One value for
 // both grounds: this pale blue carries on the lock screen's black and on every
 // theme ground the dashboard uses. The e-paper has no step to give -- a mid grey
 // thresholds to one of the two colours it has, and which one is not ours to
 // choose.
-static inline lv_color_t homeDashMutedInk() {
+static inline lv_color_t homeDashMutedInk(bool themed) {
 #if defined(DEVICE_TDECK_PRO)
+    LV_UNUSED(themed);
     return sleepOverlayInk();
 #else
-    return lv_color_hex(0xA7C7FF);
+    return glanceColor(themed, 0xA7C7FF);
 #endif
 }
 
@@ -28873,7 +28921,8 @@ static inline lv_color_t homeDashSeriesColor(uint32_t litHex) {
 // The card look, in one place: the chart pair and the two node pages are the
 // same slab with different contents, and a second copy of these eleven style
 // calls would drift the first time one of them was touched.
-static void homeDashStyleCard(lv_obj_t *card) {
+static void homeDashStyleCard(lv_obj_t *card, bool themed) {
+    LV_UNUSED(themed);   // the e-paper branch below has no use for it
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 #if HAS_HOME_CAROUSEL_TAP
     lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);   // see buildHomeDashPage()
@@ -28885,10 +28934,10 @@ static void homeDashStyleCard(lv_obj_t *card) {
     lv_obj_set_style_border_width(card, 1, 0);
     lv_obj_set_style_border_color(card, sleepOverlayInk(), 0);
 #else
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_bg_color(card, glanceColor(themed, 0x0E285B), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_60, 0);
     lv_obj_set_style_border_width(card, 1, 0);
-    lv_obj_set_style_border_color(card, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_border_color(card, glanceColor(themed, 0x335D9D), 0);
 #endif
     lv_obj_set_style_radius(card, 4, 0);
     lv_obj_set_style_pad_all(card, 3, 0);
@@ -28935,7 +28984,7 @@ static lv_obj_t *buildGlanceChartCard(GlanceCarousel &c, lv_obj_t *row, const ch
     lv_obj_set_flex_grow(card, 1);
     if (homeDashSideBySide()) lv_obj_set_height(card, lv_pct(100));
     else                      lv_obj_set_width(card, lv_pct(100));
-    homeDashStyleCard(card);
+    homeDashStyleCard(card, c.themed);
 
     // Side by side, the card is tall and narrow: heading, chart, value, three
     // rows. Stacked, it is short and wide and has no third row to spare -- on a
@@ -28959,7 +29008,7 @@ static lv_obj_t *buildGlanceChartCard(GlanceCarousel &c, lv_obj_t *row, const ch
 
     lv_obj_t *heading = lv_label_create(labelRow);
     lv_obj_set_style_text_font(heading, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(heading, homeDashMutedInk(), 0);
+    lv_obj_set_style_text_color(heading, homeDashMutedInk(c.themed), 0);
     lv_label_set_text(heading, title);
 
     lv_obj_t *chart = lv_chart_create(card);
@@ -28979,11 +29028,11 @@ static lv_obj_t *buildGlanceChartCard(GlanceCarousel &c, lv_obj_t *row, const ch
     lv_chart_set_update_mode(chart, LV_CHART_UPDATE_MODE_SHIFT);
     lv_obj_set_style_size(chart, 0, 0, LV_PART_INDICATOR);
     lv_obj_set_style_pad_all(chart, 2, 0);
-    lv_obj_set_style_bg_color(chart, lv_color_hex(0x0F2A5C), 0);
+    lv_obj_set_style_bg_color(chart, glanceColor(c.themed, 0x0F2A5C), 0);
     lv_obj_set_style_bg_opa(chart, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(chart, lv_color_hex(0x335D9D), 0);
+    lv_obj_set_style_border_color(chart, glanceColor(c.themed, 0x335D9D), 0);
     lv_obj_set_style_border_width(chart, 1, 0);
-    lv_obj_set_style_line_color(chart, lv_color_hex(0x335D9D), LV_PART_MAIN);
+    lv_obj_set_style_line_color(chart, glanceColor(c.themed, 0x335D9D), LV_PART_MAIN);
     lv_obj_set_style_line_opa(chart, LV_OPA_40, LV_PART_MAIN);
 #if defined(DEVICE_TDECK_PRO)
     // Overrides the block above wholesale — white ground, black rules, and the
@@ -29164,12 +29213,12 @@ static void buildGlanceNodeCard(GlanceCarousel &c, lv_obj_t *page, int listIdx,
     lv_obj_set_flex_grow(card, 1);
     if (row) lv_obj_set_height(card, lv_pct(100));
     else     lv_obj_set_width(card, lv_pct(100));
-    homeDashStyleCard(card);
+    homeDashStyleCard(card, c.themed);
 
     lv_obj_t *heading = lv_label_create(card);
     lv_obj_set_width(heading, lv_pct(100));
     lv_obj_set_style_text_font(heading, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(heading, homeDashMutedInk(), 0);
+    lv_obj_set_style_text_color(heading, homeDashMutedInk(c.themed), 0);
     lv_label_set_text(heading, title);
 
     const int rows = glanceNodeRowCapacity(cardH);
@@ -29206,7 +29255,7 @@ static void buildGlanceNodeCard(GlanceCarousel &c, lv_obj_t *page, int listIdx,
         // Sized to its own text, so it is never the thing that gets squeezed.
         lv_obj_t *ageLbl = lv_label_create(rowObj);
         lv_obj_set_style_text_font(ageLbl, &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(ageLbl, homeDashMutedInk(), 0);
+        lv_obj_set_style_text_color(ageLbl, homeDashMutedInk(c.themed), 0);
         lv_label_set_long_mode(ageLbl, LV_LABEL_LONG_CLIP);
         lv_label_set_text(ageLbl, "");
 
@@ -29675,7 +29724,10 @@ static void openHomeDashboard() {
         for (int side = 0; side < 2; side++) {
             lv_obj_t *arrow = lv_label_create(s_homeDash);
             lv_obj_set_style_text_font(arrow, &lv_font_montserrat_12, 0);
-            lv_obj_set_style_text_color(arrow, homeDashMutedInk(), 0);
+            // The dashboard's own affordance, so always the themed ink: this
+            // block is openHomeDashboard()'s, and the lock screen draws no
+            // arrows (see buildLockCarousel).
+            lv_obj_set_style_text_color(arrow, homeDashMutedInk(true), 0);
 #if !defined(DEVICE_TDECK_PRO)
             // A step back from the headings, so they read as a hint rather than
             // competing with the cards. Not on the Pro: partial opacity there
