@@ -213,14 +213,14 @@
 #define KB_ADDR     KB_LEFT_I2C_ADDR
 #define KB_INT                    -1   // polled, not interrupt-driven
 
-// Touch — FT6636 shares the main I2C bus. LovyanGFX drives it with its
-// FT5x06-family driver (see lgfx_tdeck.h).
+// Touch — FT6636 shares the main I2C bus. Read directly over Wire rather than
+// through LovyanGFX's FT5x06-family driver, which lost the bus when the keyboard
+// re-initialised it; see the DEVICE_MESH_DECK touch reader in main_lvgl.cpp.
 //
-// pin_int is -1 on purpose: the interrupt is not a GPIO on this board, it is
-// expander 0x58 P04, which LovyanGFX cannot poll. Without it the driver falls
-// back to polling the controller over I2C, which costs a little bus traffic but
-// works. Reset is likewise expander 0x59 P13 and must be released by us before
-// the panel is initialised.
+// TOUCH_INT is -1 on purpose: the interrupt is not a GPIO on this board, it is
+// expander 0x58 P04. The controller is polled over I2C instead, which costs a
+// little bus traffic but works. Reset is likewise expander 0x59 P13 and must be
+// released by us before the panel is initialised.
 #define HAS_TOUCH                  1
 #define TOUCH_ADDR      TOUCH_I2C_ADDR
 #define TOUCH_SDA             I2C_SDA

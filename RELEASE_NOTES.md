@@ -1,5 +1,5 @@
+### Changed
+- Notification and alert tones now compute their volume once per tone instead of once per audio sample, leaving more headroom during playback on T-Deck, T-Lora Pager TFT and Wio Tracker L2.
+
 ### Fixed
-- Action buttons across the UI — Discovery's Sweep/Preset/Clear/Save row, chat's New Message and Actions, the Nodes filter and the DM composer — stayed dark navy on the light themes while their labels went near-black, leaving them unreadable; they now follow the theme like the rest of the UI.
-- The range labels under a settings slider (such as "30 sec ↔ 6 hours") came out near-white on a near-white panel on the light themes and were effectively invisible.
-- Opening Tools from the bottom nav bar while on Nodes, DMs or Config left that screen underneath the tool, so a tool like Discovery showed its W/P/C/S hints but every one of those keys went to the screen behind it; the nav bar now clears the screen first, as the keyboard shortcut already did. Affects the boards that always draw the bar (Heltec V4, Wio Tracker L2) and any board with it switched on.
-- Lock screen glance cards were drawn in the UI theme's colours instead of the lock screen's fixed palette, so on a light theme they appeared as pale slabs with grey headings against the black lock panel.
+- With GPS debug logging on, setting a GPS duty-cycle period below the supported minimum no longer floods the serial log with the "staying always-on" warning hundreds of times a second — it is printed once, when the setting changes.

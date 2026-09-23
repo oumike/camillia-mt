@@ -736,11 +736,15 @@ void gpsSetDutyCycle(bool enabled, uint32_t periodS) {
     // which costs more than it saves — treat that as "off" rather than
     // pretending to duty cycle.
     const bool viable = enabled && periodS >= GPS_DUTY_MIN_PERIOD_S;
+    // loop() mirrors config into here on every pass, so everything above this
+    // line runs ~200 times a second. The floor warning used to sit above it and
+    // printed on every one of those passes whenever GPS debug was on; below it,
+    // it prints once, when the setting that earns it arrives.
+    if (viable == _dutyEnabled && periodS == _dutyPeriodS) return;
     if (enabled && !viable) {
         debugLogGps("[gps] duty: period %lus below %lus floor - staying always-on\n",
                     (unsigned long)periodS, (unsigned long)GPS_DUTY_MIN_PERIOD_S);
     }
-    if (viable == _dutyEnabled && periodS == _dutyPeriodS) return;
 
     _dutyEnabled = viable;
     _dutyPeriodS = periodS;

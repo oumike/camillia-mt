@@ -1020,6 +1020,35 @@ static constexpr uint8_t TDECK_KB_MODE_RAW_CMD = 0x03;
 static constexpr uint8_t TDECK_KB_MODE_KEY_CMD = 0x04;
 static bool sTdeckKeyboardRawModeSupported = false;
 
+// The C3's raw matrix: five column bytes, one bit per row.
+static constexpr uint8_t kTdeckRawMatrixBytes = 5;
+
+// One raw-matrix sample. Switches the controller into raw mode, reads the five
+// column bytes, and puts it back in key mode -- left in raw mode it stops
+// reporting characters. True only when all five bytes arrived. If the raw-mode
+// command itself is refused there is nothing to switch back, so it returns
+// without the restore.
+//
+// Does not check sTdeckKeyboardRawModeSupported: the callers that need that
+// gate apply it themselves, and the `keys matrix` probe wants to say so aloud.
+static bool tdeckKeyboardReadRawMatrix(uint8_t matrix[kTdeckRawMatrixBytes]) {
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_RAW_CMD);
+    if (Wire.endTransmission() != 0) return false;
+
+    const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, kTdeckRawMatrixBytes);
+    uint8_t readCount = 0;
+    while (Wire.available() && readCount < kTdeckRawMatrixBytes) {
+        matrix[readCount++] = (uint8_t)Wire.read();
+    }
+
+    Wire.beginTransmission(KB_ADDR);
+    Wire.write(TDECK_KB_MODE_KEY_CMD);
+    (void)Wire.endTransmission();
+
+    return count == kTdeckRawMatrixBytes && readCount == kTdeckRawMatrixBytes;
+}
+
 void tdeckKeyboardSetBacklight(uint8_t duty) {
     // Exactly two bytes, one command per transmission. The stock C3 firmware's
     // onReceive() switch falls through from LILYGO_KB_BRIGHTNESS_CMD into the
@@ -1052,22 +1081,10 @@ void tdeckKeyboardProbeRawMatrix(uint32_t ms) {
     uint8_t seen[5] = {};
     const uint32_t until = millis() + ms;
     while ((int32_t)(millis() - until) < 0) {
-        Wire.beginTransmission(KB_ADDR);
-        Wire.write(TDECK_KB_MODE_RAW_CMD);
-        if (Wire.endTransmission() == 0) {
-            uint8_t matrix[5] = {};
-            const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
-            uint8_t readCount = 0;
-            while (Wire.available() && readCount < sizeof(matrix)) {
-                matrix[readCount++] = (uint8_t)Wire.read();
-            }
-            if (count == sizeof(matrix) && readCount == sizeof(matrix)) {
-                for (uint8_t i = 0; i < sizeof(matrix); i++) seen[i] |= matrix[i];
-            }
+        uint8_t matrix[kTdeckRawMatrixBytes] = {};
+        if (tdeckKeyboardReadRawMatrix(matrix)) {
+            for (uint8_t i = 0; i < kTdeckRawMatrixBytes; i++) seen[i] |= matrix[i];
         }
-        Wire.beginTransmission(KB_ADDR);
-        Wire.write(TDECK_KB_MODE_KEY_CMD);
-        (void)Wire.endTransmission();
         delay(20);
     }
 
@@ -1110,22 +1127,8 @@ static bool tdeckKeyboardMicPressedEdge() {
 #endif
     lastPollMs = now;
 
-    Wire.beginTransmission(KB_ADDR);
-    Wire.write(TDECK_KB_MODE_RAW_CMD);
-    if (Wire.endTransmission() != 0) return false;
-
-    uint8_t matrix[5] = {};
-    const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
-    uint8_t readCount = 0;
-    while (Wire.available() && readCount < sizeof(matrix)) {
-        matrix[readCount++] = (uint8_t)Wire.read();
-    }
-
-    Wire.beginTransmission(KB_ADDR);
-    Wire.write(TDECK_KB_MODE_KEY_CMD);
-    (void)Wire.endTransmission();
-
-    if (count != sizeof(matrix) || readCount != sizeof(matrix)) return false;
+    uint8_t matrix[kTdeckRawMatrixBytes] = {};
+    if (!tdeckKeyboardReadRawMatrix(matrix)) return false;
 
     const bool held = (matrix[0] & (1u << 6)) != 0;
     const bool edge = held && !wasHeld;   // the press, not the hold
@@ -1140,24 +1143,9 @@ bool keyboardMicPressed() {
 static bool tdeckKeyboardAltHeldRaw() {
     if (!sTdeckKeyboardRawModeSupported) return false;
 
-    Wire.beginTransmission(KB_ADDR);
-    Wire.write(TDECK_KB_MODE_RAW_CMD);
-    if (Wire.endTransmission() != 0) return false;
-
-    uint8_t matrix[5] = {};
-    const uint8_t count = Wire.requestFrom((uint8_t)KB_ADDR, (uint8_t)sizeof(matrix));
-    uint8_t readCount = 0;
-    while (Wire.available() && readCount < sizeof(matrix)) {
-        matrix[readCount++] = (uint8_t)Wire.read();
-    }
-
-    Wire.beginTransmission(KB_ADDR);
-    Wire.write(TDECK_KB_MODE_KEY_CMD);
-    (void)Wire.endTransmission();
-
+    uint8_t matrix[kTdeckRawMatrixBytes] = {};
     // LilyGo raw reports five column bytes with row bits. Alt is C0/R4.
-    return count == sizeof(matrix) && readCount == sizeof(matrix)
-           && (matrix[0] & (1u << 4)) != 0;
+    return tdeckKeyboardReadRawMatrix(matrix) && (matrix[0] & (1u << 4)) != 0;
 }
 #endif
 

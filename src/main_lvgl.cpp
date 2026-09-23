@@ -3511,6 +3511,10 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     if (attackFrames > maxRamp) attackFrames = maxRamp;
     if (releaseFrames > maxRamp) releaseFrames = maxRamp;
 
+    // Hoisted: the volume cannot change mid-tone, and inside the loop this was
+    // a config read, a clamp and a float divide on every one of 44,100 samples
+    // a second.
+    const float gain = kPagerToneAmplitude * notifyVolumeScale();
     const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
     float phase = 0.0f;
 
@@ -3533,7 +3537,7 @@ static void pagerAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
                 if (tail < env) env = tail;
             }
 
-            int16_t v = (int16_t)(s * kPagerToneAmplitude * notifyVolumeScale() * env);
+            int16_t v = (int16_t)(s * gain * env);
             pcm[(i * 2)] = v;
             pcm[(i * 2) + 1] = v;
             frameIndex++;
@@ -3694,6 +3698,10 @@ static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
     uint32_t rampFrames = kSampleRate / 400;
     if (rampFrames < 12) rampFrames = 12;
 
+    // Hoisted: the volume cannot change mid-tone, and inside the loop this was
+    // a config read, a clamp and a float divide on every one of 44,100 samples
+    // a second.
+    const float gain = 2800.0f * notifyVolumeScale();
     const float phaseStep = 2.0f * (float)M_PI * (float)freqHz / (float)kSampleRate;
     float phase = 0.0f;
 
@@ -3716,7 +3724,7 @@ static void tdeckAudioPlayTone(uint16_t freqHz, uint16_t durationMs) {
                 if (tail < env) env = tail;
             }
 
-            int16_t v = (int16_t)(s * 2800.0f * notifyVolumeScale() * env);
+            int16_t v = (int16_t)(s * gain * env);
             pcm[(i * 2)] = v;
             pcm[(i * 2) + 1] = v;
             frameIndex++;
@@ -14678,35 +14686,60 @@ static void closeChatStyleModal() {
     memset(s_chatStyleRows, 0, sizeof(s_chatStyleRows));
 }
 
+// ── Picker rows ──────────────────────────────────────────────────────────────
+// The highlight every single-choice list in Config draws: the selected row
+// filled and ringed, the rest a quiet slab. It was written out twelve times,
+// palette and all, once per picker -- identical but for which array each copy
+// walked -- so a change to the look was twelve edits and a missed one was a
+// picker that no longer matched its neighbours.
+//
+// The e-paper build draws a black ring on a transparent row instead: the
+// blues would threshold to a black slab under black text on a 1-bit panel.
+static void paintPickerRow(lv_obj_t *row, bool sel) {
+    if (!row) return;
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
+    lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
+#else
+    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
+    lv_obj_set_style_bg_color(row, sel ? (isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F))
+                                       : (isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266)), 0);
+    lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
+    lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
+    lv_obj_set_style_border_color(row, sel ? (isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF))
+                                           : (isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C)), 0);
+#endif
+}
+
+// How the selected row is brought into view. Recursive where the rows sit in a
+// grid and the object that actually scrolls is the modal a level or two up;
+// none where the list is short enough never to scroll.
+enum PickerScroll : uint8_t {
+    PICKER_SCROLL_NONE,
+    PICKER_SCROLL_VIEW,
+    PICKER_SCROLL_RECURSIVE,
+};
+
+static void paintPickerRows(lv_obj_t *const *rows, int count, int selection,
+                            PickerScroll scroll) {
+    for (int i = 0; i < count; i++) {
+        lv_obj_t *row = rows[i];
+        if (!row) continue;
+        const bool sel = (i == selection);
+        paintPickerRow(row, sel);
+        if (!sel) continue;
+        if (scroll == PICKER_SCROLL_VIEW) {
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        } else if (scroll == PICKER_SCROLL_RECURSIVE) {
+            lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+        }
+    }
+}
+
 static void refreshChatStyleSelection() {
     if (!s_chatStyleModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
-        lv_obj_t *row = s_chatStyleRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_chatStyleSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i <= CHAT_STYLE_MAX; i++) {
-        lv_obj_t *row = s_chatStyleRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_chatStyleSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_chatStyleRows, CHAT_STYLE_MAX + 1, s_chatStyleSelection, PICKER_SCROLL_VIEW);
 }
 
 static void applyChatStyleSelection(int style) {
@@ -14945,21 +14978,7 @@ static bool themeNameMatchesFilter(const char *name) {
 
 static void refreshThemeSelection() {
     if (!s_themeModal) return;
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < s_themeVisibleCount; i++) {
-        lv_obj_t *row = s_themeRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_themeSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_themeRows, s_themeVisibleCount, s_themeSelection, PICKER_SCROLL_VIEW);
 }
 
 static void onThemeRowPressed(lv_event_t *e);
@@ -15252,33 +15271,7 @@ static void closeChatNameModal() {
 
 static void refreshChatNameSelection() {
     if (!s_chatNameModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i <= CHAT_NAME_MAX; i++) {
-        lv_obj_t *row = s_chatNameRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_chatNameSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i <= CHAT_NAME_MAX; i++) {
-        lv_obj_t *row = s_chatNameRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_chatNameSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_chatNameRows, CHAT_NAME_MAX + 1, s_chatNameSelection, PICKER_SCROLL_VIEW);
 }
 
 static void applyChatNameSelection(int style) {
@@ -15433,33 +15426,7 @@ static void closeFontSizeModal() {
 
 static void refreshFontSizeSelection() {
     if (!s_fontSizeModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i <= FONT_SIZE_MAX; i++) {
-        lv_obj_t *row = s_fontSizeRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_fontSizeSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i <= FONT_SIZE_MAX; i++) {
-        lv_obj_t *row = s_fontSizeRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_fontSizeSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_fontSizeRows, FONT_SIZE_MAX + 1, s_fontSizeSelection, PICKER_SCROLL_VIEW);
 }
 
 static void applyFontSizeSelection(int size) {
@@ -16470,35 +16437,9 @@ static void refreshChanCfgLabels() {
 
 static void refreshChanCfgSelection() {
     if (!s_chanCfgModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        lv_obj_t *row = s_chanCfgRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_chanCfgSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        lv_obj_t *row = s_chanCfgRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_chanCfgSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        // Recursive: the scrollable object is the modal, two levels up from a row
-        // sitting inside the grid.
-        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
-    }
+    // Recursive: the scrollable object is the modal, two levels up from a row
+    // sitting inside the grid.
+    paintPickerRows(s_chanCfgRows, MESH_CHANNELS, s_chanCfgSelection, PICKER_SCROLL_RECURSIVE);
 }
 
 static void openChanCfgModal() {
@@ -16645,13 +16586,6 @@ static void closeChanEditModal() {
 
 static void refreshChanEditRows() {
     if (!s_chanEditModal) return;
-#if !defined(DEVICE_TDECK_PRO)
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-#endif
 
     char encText[24];
     chanEncLabel(s_chanEditKey, s_chanEditKeyLen, encText, sizeof(encText));
@@ -16660,16 +16594,7 @@ static void refreshChanEditRows() {
         lv_obj_t *row = s_chanEditRows[i];
         if (!row) continue;
         const bool sel = (i == s_chanEditSelection);
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-    #endif
+        paintPickerRow(row, sel);
         // Recursive: with the rows in a grid the scrollable object is the modal,
         // two levels up.
         if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
@@ -17338,13 +17263,6 @@ static void closeTimeCfgModal() {
 
 static void refreshTimeCfgRows() {
     if (!s_timeCfgModal) return;
-#if !defined(DEVICE_TDECK_PRO)
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-#endif
 
     // Automatic mode drops the whole date line, and the two time cells from the
     // line below — but not that line itself, which carries Save. Flex skips
@@ -17372,16 +17290,7 @@ static void refreshTimeCfgRows() {
         if (!timeCfgRowVisible(i)) continue;   // hidden, or inside a hidden line
 
         const bool sel = (i == s_timeCfgSelection);
-    #if defined(DEVICE_TDECK_PRO)
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-    #else
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-    #endif
+        paintPickerRow(row, sel);
         // Recursive: the date and time cells sit inside a grid, one level below
         // the modal that actually scrolls.
         if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
@@ -17623,21 +17532,7 @@ static void cancelAlertSoundModal() {
 
 static void refreshAlertSoundSelection() {
     if (!s_alertSoundModal) return;
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i <= MSG_ALERT_SOUND_MAX; i++) {
-        lv_obj_t *row = s_alertSoundRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_alertSoundSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_alertSoundRows, MSG_ALERT_SOUND_MAX + 1, s_alertSoundSelection, PICKER_SCROLL_VIEW);
 }
 
 // Move the highlight and play that mode so the user hears it before committing.
@@ -19078,33 +18973,7 @@ static void closeCfgPresetModal() {
 
 static void refreshCfgPresetSelection() {
     if (!s_cfgPresetModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < s_cfgPresetCount; i++) {
-        lv_obj_t *row = s_cfgPresetRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_cfgPresetSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < s_cfgPresetCount; i++) {
-        lv_obj_t *row = s_cfgPresetRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_cfgPresetSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_cfgPresetRows, s_cfgPresetCount, s_cfgPresetSelection, PICKER_SCROLL_VIEW);
 }
 
 // Applies the preset and restarts. Does not return.
@@ -19393,31 +19262,7 @@ static void closeCfgOrientModal() {
 
 static void refreshCfgOrientSelection() {
     if (!s_cfgOrientModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
-        lv_obj_t *row = s_cfgOrientRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_cfgOrientSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < (int)UI_ORIENT_COUNT; i++) {
-        lv_obj_t *row = s_cfgOrientRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_cfgOrientSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-    }
+    paintPickerRows(s_cfgOrientRows, (int)UI_ORIENT_COUNT, s_cfgOrientSelection, PICKER_SCROLL_NONE);
 }
 
 // Applies the orientation and restarts. Does not return unless it was already
@@ -27391,32 +27236,7 @@ static void openLiveModal() {
 
 // ── Live Tools modal ─────────────────────────────────────────────────────────
 static void refreshLiveToolsSelection() {
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-        lv_obj_t *row = s_liveToolsRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_liveToolsSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-
-    for (int i = 0; i < LIVE_TOOL_COUNT; i++) {
-        lv_obj_t *row = s_liveToolsRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_liveToolsSelection);
-        lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
-    }
+    paintPickerRows(s_liveToolsRows, LIVE_TOOL_COUNT, s_liveToolsSelection, PICKER_SCROLL_NONE);
 }
 
 // MQTT needs a broker and a broker needs WiFi, so with the master switch off
@@ -27716,36 +27536,9 @@ static void openLiveToolsModal() {
 
 // ── Live filter picker ───────────────────────────────────────────────────────
 static void refreshLiveFilterSelection() {
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < LIVE_FILTER_COUNT; i++) {
-        lv_obj_t *row = s_liveFilterRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_liveFilterSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selectedBg = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selectedBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder = isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-
-    for (int i = 0; i < LIVE_FILTER_COUNT; i++) {
-        lv_obj_t *row = s_liveFilterRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_liveFilterSelection);
-        lv_obj_set_style_bg_color(row, selected ? selectedBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, selected ? selectedBorder : idleBorder, 0);
-        // Ten rows do not fit the shortest panel, so the grid scrolls; keeping
-        // the selection in view is what makes arrowing past the fold work.
-        if (selected) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    // Ten rows do not fit the shortest panel, so the grid scrolls; keeping
+    // the selection in view is what makes arrowing past the fold work.
+    paintPickerRows(s_liveFilterRows, LIVE_FILTER_COUNT, s_liveFilterSelection, PICKER_SCROLL_VIEW);
 }
 
 // The chip in the Live header. Rewritten in place rather than rebuilt, so
@@ -31302,33 +31095,7 @@ static void onMqttSendBackdropPressed(lv_event_t *e) {
 }
 
 static void refreshMqttSendSelection() {
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        lv_obj_t *row = s_mqttSendRows[i];
-        if (!row) continue;
-        const bool selected = (i == s_mqttSendSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, selected ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (selected) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < MESH_CHANNELS; i++) {
-        lv_obj_t *row = s_mqttSendRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_mqttSendSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_mqttSendRows, MESH_CHANNELS, s_mqttSendSelection, PICKER_SCROLL_RECURSIVE);
 }
 
 static void openMqttSendModal() {
@@ -32580,33 +32347,7 @@ static void closeDiscoveryPresetModal() {
 
 static void refreshDiscoveryPresetSelection() {
     if (!s_presetPickModal) return;
-#if defined(DEVICE_TDECK_PRO)
-    for (int i = 0; i < s_presetPickCount; i++) {
-        lv_obj_t *row = s_presetPickRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_presetPickSelection);
-        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 0, 0);
-        lv_obj_set_style_border_color(row, lv_color_make(0, 0, 0), 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
-    return;
-#endif
-    const bool isLight = (s_cfg.uiMode == UI_MODE_LIGHT);
-    const lv_color_t selBg     = isLight ? lv_color_hex(0xDCE9FF) : lv_color_hex(0x2A4E8F);
-    const lv_color_t idleBg    = isLight ? lv_color_hex(0xEEF4FF) : lv_color_hex(0x123266);
-    const lv_color_t selBorder = isLight ? lv_color_hex(0x6B86B7) : lv_color_hex(0x90B4FF);
-    const lv_color_t idleBorder= isLight ? lv_color_hex(0xA9BEDF) : lv_color_hex(0x2B4D8C);
-    for (int i = 0; i < s_presetPickCount; i++) {
-        lv_obj_t *row = s_presetPickRows[i];
-        if (!row) continue;
-        const bool sel = (i == s_presetPickSelection);
-        lv_obj_set_style_bg_color(row, sel ? selBg : idleBg, 0);
-        lv_obj_set_style_bg_opa(row, sel ? LV_OPA_COVER : (isLight ? LV_OPA_90 : LV_OPA_40), 0);
-        lv_obj_set_style_border_width(row, sel ? 2 : 1, 0);
-        lv_obj_set_style_border_color(row, sel ? selBorder : idleBorder, 0);
-        if (sel) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
-    }
+    paintPickerRows(s_presetPickRows, s_presetPickCount, s_presetPickSelection, PICKER_SCROLL_VIEW);
 }
 
 // ── How long to listen ───────────────────────────────────────────────────────
@@ -39086,6 +38827,77 @@ static bool einkRefreshDueNow() {
 }
 #endif
 
+// The compose box's own keys: send, close, the two trays, delete, and plain
+// characters typed into it. Compose opens over the chat screen, DMs and the
+// Nodes list, and each of those used to carry its own copy of this switch --
+// three, identical but for their comments, so a key added to one was a key
+// missing from the other two.
+static void handleComposeKey(char k) {
+    switch (k) {
+        case KEY_ENTER:
+            sendComposeMessage();
+            break;
+        case KEY_ESCAPE:
+            closeComposePrompt();
+            break;
+        case KEY_SYMBOL:
+            // Mesh Deck's symbol key. Insert-mode tray, so the
+            // picked character lands in the box being typed.
+            openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
+            break;
+        // The Mesh Deck's dead bottom-left key. The T-Deck's mic
+        // key reaches the same place without a case here: its
+        // controller never reports it, so it is polled off the key
+        // matrix in loop() instead of arriving as a key at all.
+        case KEY_EMOJI_PICKER:
+            // Insert mode: the glyph lands in the message being
+            // typed rather than being sent on its own.
+            openEmojiPicker(/*sendMode=*/false);
+            break;
+        case KEY_BACKSPACE:
+        case KEY_BACKSPACE_HOLD:
+            if (s_composeInput) {
+                const char *cur = lv_textarea_get_text(s_composeInput);
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+                if (cur && cur[0] && k == KEY_BACKSPACE) {
+                    lv_textarea_delete_char(s_composeInput);
+                }
+#else
+                if (!cur || !cur[0]) {
+                    closeComposePrompt();
+                } else if (k == KEY_BACKSPACE) {
+                    lv_textarea_delete_char(s_composeInput);
+                }
+#endif
+            }
+            break;
+#if HAS_BACK_KEY
+        // The M9's dedicated Back button. It used to be indistinguishable from the
+        // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
+        // character at a time and there was no way for compose to tell them apart.
+        // The driver now gives it its own code, so Back can mean "abandon this
+        // draft": clear the box and close. Backspace keeps deleting a character.
+        //
+        // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
+        // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
+        // exactly as it always did. Alt+Backspace raises it on the keyboards
+        // that resolve an Alt of their own — see HAS_BACK_KEY in config.h.
+        case KEY_BACK_BTN:
+            if (s_composeInput) {
+                lv_textarea_set_text(s_composeInput, "");
+                closeComposePrompt();
+            }
+            break;
+#endif
+        default:
+            if (k >= 0x20 && k < 0x7F && s_composeInput) {
+                char one[2] = {k, '\0'};
+                lv_textarea_add_text(s_composeInput, one);
+            }
+            break;
+    }
+}
+
 static void pumpKeyboardInput() {
     for (int i = 0; i < 8; i++) {
         // Prioritize keyboard keys (especially Enter) before trackball deltas
@@ -40812,10 +40624,10 @@ static void pumpKeyboardInput() {
         // Steps the caret through the message being typed.
         //
         // It sits ahead of the per-screen handlers because compose is reachable
-        // from chat, DMs and the nodes list, and those three carry identical
-        // copies of the compose key switch — one branch here beats three. The
-        // emoji tray above already swallows every key while it is up, so it
-        // keeps the pad/wheel for its own grid without being named here.
+        // from chat, DMs and the nodes list, and each of those hands its keys to
+        // handleComposeKey() — one branch here covers all three. The emoji tray
+        // above already swallows every key while it is up, so it keeps the
+        // pad/wheel for its own grid without being named here.
         //
         // Every board's compose edit goes through lv_textarea_add_text() and
         // lv_textarea_delete_char(), both cursor-relative, so insert-in-the-
@@ -40930,69 +40742,7 @@ static void pumpKeyboardInput() {
 
         if (s_dmModal) {
             if (s_composeModal) {
-                switch (k) {
-                    case KEY_ENTER:
-                        sendComposeMessage();
-                        break;
-                    case KEY_ESCAPE:
-                        closeComposePrompt();
-                        break;
-                    case KEY_SYMBOL:
-                        // Mesh Deck's symbol key. Insert-mode tray, so the
-                        // picked character lands in the box being typed.
-                        openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
-                        break;
-                    // The Mesh Deck's dead bottom-left key. The T-Deck's mic
-                    // key reaches the same place without a case here: its
-                    // controller never reports it, so it is polled off the key
-                    // matrix in loop() instead of arriving as a key at all.
-                    case KEY_EMOJI_PICKER:
-                        // Insert mode: the glyph lands in the message being
-                        // typed rather than being sent on its own.
-                        openEmojiPicker(/*sendMode=*/false);
-                        break;
-                    case KEY_BACKSPACE:
-                    case KEY_BACKSPACE_HOLD:
-                        if (s_composeInput) {
-                            const char *cur = lv_textarea_get_text(s_composeInput);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-                            if (cur && cur[0] && k == KEY_BACKSPACE) {
-                                lv_textarea_delete_char(s_composeInput);
-                            }
-#else
-                            if (!cur || !cur[0]) {
-                                closeComposePrompt();
-                            } else if (k == KEY_BACKSPACE) {
-                                lv_textarea_delete_char(s_composeInput);
-                            }
-#endif
-                        }
-                        break;
-#if HAS_BACK_KEY
-                    // The M9's dedicated Back button. It used to be indistinguishable from the
-                    // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
-                    // character at a time and there was no way for compose to tell them apart.
-                    // The driver now gives it its own code, so Back can mean "abandon this
-                    // draft": clear the box and close. Backspace keeps deleting a character.
-                    //
-                    // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
-                    // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
-                    // exactly as it always did. Alt+Backspace raises it on the keyboards
-                    // that resolve an Alt of their own — see HAS_BACK_KEY in config.h.
-                    case KEY_BACK_BTN:
-                        if (s_composeInput) {
-                            lv_textarea_set_text(s_composeInput, "");
-                            closeComposePrompt();
-                        }
-                        break;
-#endif
-                    default:
-                        if (k >= 0x20 && k < 0x7F && s_composeInput) {
-                            char one[2] = {k, '\0'};
-                            lv_textarea_add_text(s_composeInput, one);
-                        }
-                        break;
-                }
+                handleComposeKey(k);
                 continue;
             }
 
@@ -41258,69 +41008,7 @@ static void pumpKeyboardInput() {
 
         if (s_nodesModal) {
             if (s_composeModal) {
-                switch (k) {
-                    case KEY_ENTER:
-                        sendComposeMessage();
-                        break;
-                    case KEY_ESCAPE:
-                        closeComposePrompt();
-                        break;
-                    case KEY_SYMBOL:
-                        // Mesh Deck's symbol key. Insert-mode tray, so the
-                        // picked character lands in the box being typed.
-                        openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
-                        break;
-                    // The Mesh Deck's dead bottom-left key. The T-Deck's mic
-                    // key reaches the same place without a case here: its
-                    // controller never reports it, so it is polled off the key
-                    // matrix in loop() instead of arriving as a key at all.
-                    case KEY_EMOJI_PICKER:
-                        // Insert mode: the glyph lands in the message being
-                        // typed rather than being sent on its own.
-                        openEmojiPicker(/*sendMode=*/false);
-                        break;
-                    case KEY_BACKSPACE:
-                    case KEY_BACKSPACE_HOLD:
-                        if (s_composeInput) {
-                            const char *cur = lv_textarea_get_text(s_composeInput);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-                            if (cur && cur[0] && k == KEY_BACKSPACE) {
-                                lv_textarea_delete_char(s_composeInput);
-                            }
-#else
-                            if (!cur || !cur[0]) {
-                                closeComposePrompt();
-                            } else if (k == KEY_BACKSPACE) {
-                                lv_textarea_delete_char(s_composeInput);
-                            }
-#endif
-                        }
-                        break;
-#if HAS_BACK_KEY
-                    // The M9's dedicated Back button. It used to be indistinguishable from the
-                    // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
-                    // character at a time and there was no way for compose to tell them apart.
-                    // The driver now gives it its own code, so Back can mean "abandon this
-                    // draft": clear the box and close. Backspace keeps deleting a character.
-                    //
-                    // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
-                    // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
-                    // exactly as it always did. Alt+Backspace raises it on the keyboards
-                    // that resolve an Alt of their own — see HAS_BACK_KEY in config.h.
-                    case KEY_BACK_BTN:
-                        if (s_composeInput) {
-                            lv_textarea_set_text(s_composeInput, "");
-                            closeComposePrompt();
-                        }
-                        break;
-#endif
-                    default:
-                        if (k >= 0x20 && k < 0x7F && s_composeInput) {
-                            char one[2] = {k, '\0'};
-                            lv_textarea_add_text(s_composeInput, one);
-                        }
-                        break;
-                }
+                handleComposeKey(k);
                 continue;
             }
 
@@ -42244,63 +41932,7 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        switch (k) {
-            case KEY_ENTER:
-                sendComposeMessage();
-                break;
-            case KEY_ESCAPE:
-                closeComposePrompt();
-                break;
-            case KEY_SYMBOL:
-                // Mesh Deck's symbol key, main-screen compose. This is the
-                // compose the space bar opens from the chat view — the DM and
-                // Nodes screens each have their own copy of this switch.
-                openEmojiPicker(/*sendMode=*/false, /*symbolTray=*/true);
-                break;
-            case KEY_EMOJI_PICKER:
-                openEmojiPicker(/*sendMode=*/false);
-                break;
-            case KEY_BACKSPACE:
-            case KEY_BACKSPACE_HOLD:
-                if (s_composeInput) {
-                    const char *cur = lv_textarea_get_text(s_composeInput);
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-                    if (cur && cur[0] && k == KEY_BACKSPACE) {
-                        lv_textarea_delete_char(s_composeInput);
-                    }
-#else
-                    if (!cur || !cur[0]) {
-                        closeComposePrompt();
-                    } else if (k == KEY_BACKSPACE) {
-                        lv_textarea_delete_char(s_composeInput);
-                    }
-#endif
-                }
-                break;
-#if HAS_BACK_KEY
-            // The M9's dedicated Back button. It used to be indistinguishable from the
-            // keyboard's Backspace — both arrived as KEY_BACKSPACE — so it deleted one
-            // character at a time and there was no way for compose to tell them apart.
-            // The driver now gives it its own code, so Back can mean "abandon this
-            // draft": clear the box and close. Backspace keeps deleting a character.
-            //
-            // isBackspaceKey() still counts KEY_BACK_BTN, so everywhere outside compose
-            // (filters, the channel and Wi-Fi text fields, modal close) Back behaves
-            // exactly as it always did.
-            case KEY_BACK_BTN:
-                if (s_composeInput) {
-                    lv_textarea_set_text(s_composeInput, "");
-                    closeComposePrompt();
-                }
-                break;
-#endif
-            default:
-                if (k >= 0x20 && k < 0x7F && s_composeInput) {
-                    char one[2] = {k, '\0'};
-                    lv_textarea_add_text(s_composeInput, one);
-                }
-                break;
-        }
+        handleComposeKey(k);
     }
 }
 
@@ -43385,19 +43017,6 @@ static void drawBootSplash() {
     const int screenW = displayDev().width();
     const int screenH = displayDev().height();
 
-    auto lerp565 = [](uint16_t c1, uint16_t c2, uint8_t t) -> uint16_t {
-        int r1 = (c1 >> 11) & 0x1F;
-        int g1 = (c1 >> 5) & 0x3F;
-        int b1 = c1 & 0x1F;
-        int r2 = (c2 >> 11) & 0x1F;
-        int g2 = (c2 >> 5) & 0x3F;
-        int b2 = c2 & 0x1F;
-        int r = r1 + ((r2 - r1) * t) / 255;
-        int g = g1 + ((g2 - g1) * t) / 255;
-        int b = b1 + ((b2 - b1) * t) / 255;
-        return (uint16_t)((r << 11) | (g << 5) | b);
-    };
-
     // Color displays use the fixed Camillia Dark splash. The e-paper build uses
     // its equally fixed inverse paper palette.
 #if HAS_UI_THEMES
@@ -43428,7 +43047,7 @@ static void drawBootSplash() {
 
     for (int y = 0; y < screenH; y++) {
         uint8_t t = (uint8_t)((255UL * y) / max(1, screenH - 1));
-        displayDev().drawFastHLine(0, y, screenW, lerp565(bgTop, bgBottom, t));
+        displayDev().drawFastHLine(0, y, screenW, blend565(bgTop, bgBottom, t));
     }
 
     const int cardMargin = 10;
