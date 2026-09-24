@@ -24,7 +24,8 @@ fi
 # 8) cardputer
 # 9) mesh-deck
 # 10) wio-tracker-l2
-# 11) tdisplay-p4
+# 11) p4-amoled-sx1262
+# 12) p4-amoled-lr2021
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"
@@ -36,7 +37,8 @@ TARGET_LABELS=(
   "cardputer"
   "mesh-deck"
   "wio-tracker-l2"
-  "tdisplay-p4"
+  "p4-amoled-sx1262"
+  "p4-amoled-lr2021"
 )
 
 TARGET_ENVS=(
@@ -50,7 +52,8 @@ TARGET_ENVS=(
   "cardputer-cap"
   "mesh-deck"
   "wio-tracker-l2"
-  "tdisplay-p4"
+  "p4-amoled-sx1262"
+  "p4-amoled-lr2021"
 )
 
 has_env() {
@@ -61,11 +64,10 @@ has_env() {
 run_pio_for_env() {
   local env_name="$1"
   shift
-  if [ "$env_name" = "tdisplay-p4" ]; then
-    PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@"
-  else
-    pio "$@"
-  fi
+  case "$env_name" in
+    p4-amoled-*) PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@" ;;
+    *)           pio "$@" ;;
+  esac
 }
 
 echo "[TEST] Checking required environments in platformio.ini..."

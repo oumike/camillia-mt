@@ -15,7 +15,8 @@ TLORA_ENV_NAME="tlora-pager-tft"
 ATTAKY_ENV_NAME="mesh-deck"
 M9_ENV_NAME="m9"
 WIO_TRACKER_L2_ENV_NAME="wio-tracker-l2"
-TDISPLAY_P4_ENV_NAME="tdisplay-p4"
+P4_AMOLED_SX1262_ENV_NAME="p4-amoled-sx1262"
+P4_AMOLED_LR2021_ENV_NAME="p4-amoled-lr2021"
 DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
 ENV_EXPLICIT=false
@@ -51,7 +52,8 @@ env_label() {
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;
-		"$TDISPLAY_P4_ENV_NAME")    echo "LilyGo T-Display P4 AMOLED" ;;
+		"$P4_AMOLED_SX1262_ENV_NAME") echo "LilyGo T-Display P4 AMOLED (SX1262)" ;;
+		"$P4_AMOLED_LR2021_ENV_NAME") echo "LilyGo T-Display P4 AMOLED (LR2021)" ;;
 		*)                         echo "$1" ;;
 	esac
 }
@@ -114,9 +116,13 @@ prompt_for_device() {
 		options+=("$WIO_TRACKER_L2_ENV_NAME")
 		labels+=("Seeed Wio Tracker L2")
 	fi
-	if has_env "$TDISPLAY_P4_ENV_NAME"; then
-		options+=("$TDISPLAY_P4_ENV_NAME")
-		labels+=("LilyGo T-Display P4 AMOLED")
+	if has_env "$P4_AMOLED_SX1262_ENV_NAME"; then
+		options+=("$P4_AMOLED_SX1262_ENV_NAME")
+		labels+=("LilyGo T-Display P4 AMOLED (SX1262)")
+	fi
+	if has_env "$P4_AMOLED_LR2021_ENV_NAME"; then
+		options+=("$P4_AMOLED_LR2021_ENV_NAME")
+		labels+=("LilyGo T-Display P4 AMOLED (LR2021)")
 	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
@@ -147,7 +153,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--tdisplay-p4] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--p4-amoled-sx1262|--p4-amoled-lr2021] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
@@ -158,7 +164,8 @@ show_usage() {
 	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
 	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
 	echo "  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment ($WIO_TRACKER_L2_ENV_NAME)"
-	echo "  --tdisplay-p4  Use LilyGo T-Display P4 AMOLED environment ($TDISPLAY_P4_ENV_NAME)"
+	echo "  --p4-amoled-sx1262  Use LilyGo T-Display P4 AMOLED SX1262 environment ($P4_AMOLED_SX1262_ENV_NAME)"
+	echo "  --p4-amoled-lr2021  Use LilyGo T-Display P4 AMOLED LR2021 environment ($P4_AMOLED_LR2021_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "                M9 uses the combined upload_erase target."
@@ -173,11 +180,10 @@ show_usage() {
 run_pio_for_env() {
 	local env_name="$1"
 	shift
-	if [ "$env_name" = "$TDISPLAY_P4_ENV_NAME" ]; then
-		PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@"
-	else
-		pio "$@"
-	fi
+	case "$env_name" in
+		p4-amoled-*) PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@" ;;
+		*)           pio "$@" ;;
+	esac
 }
 
 run_pio_target() {
@@ -246,8 +252,11 @@ for arg in "$@"; do
 		--wio-tracker-l2)
 			select_env_or_exit "$WIO_TRACKER_L2_ENV_NAME" "Environment '$WIO_TRACKER_L2_ENV_NAME' not found in platformio.ini"
 			;;
-		--tdisplay-p4)
-			select_env_or_exit "$TDISPLAY_P4_ENV_NAME" "Environment '$TDISPLAY_P4_ENV_NAME' not found in platformio.ini"
+		--p4-amoled-sx1262)
+			select_env_or_exit "$P4_AMOLED_SX1262_ENV_NAME" "Environment '$P4_AMOLED_SX1262_ENV_NAME' not found in platformio.ini"
+			;;
+		--p4-amoled-lr2021)
+			select_env_or_exit "$P4_AMOLED_LR2021_ENV_NAME" "Environment '$P4_AMOLED_LR2021_ENV_NAME' not found in platformio.ini"
 			;;
 		--help|-h)
 			show_usage

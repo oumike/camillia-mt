@@ -5707,16 +5707,56 @@ static OtaUiTextRow s_otaUiPctRow = {};
 static OtaUiTextRow s_otaUiBytesRow = {};
 static OtaUiTextRow s_otaUiDetailRow = {};
 
-// Geometry, shared so the chrome's bar outline and the incremental fill drawn
-// inside it cannot drift apart. Width comes from the panel rather than a
-// constant: heltec-v4-vertical is portrait 240x320, not 320x240.
+// Geometry is derived from the live panel height so the whole OTA block sits
+// vertically centred in either orientation. Typography grows from the old
+// DejaVu12 to 18 px on normal panels and 24 px on the high-DPI P4; the one
+// sub-180 px panel keeps 12 px so every row still fits.
 static constexpr int kOtaUiBarX = 8;
-static constexpr int kOtaUiBarY = 52;
-static constexpr int kOtaUiBarH = 18;
 static constexpr int kOtaUiTextX = 8;
-static constexpr int kOtaUiPctY = 78;
-static constexpr int kOtaUiBytesY = 102;
-static constexpr int kOtaUiDetailY = 126;
+static constexpr int kOtaRhinoW = 24;
+static constexpr int kOtaRhinoH = 13;
+static constexpr int kOtaRhinoStep = 6;
+
+static void otaWorkerUseLargeFont() {
+    displayDev().setTextSize(1);
+    if ((int)displayDev().height() < 180) {
+        displayDev().setFont(&fonts::DejaVu12);
+        return;
+    }
+#if defined(DEVICE_TDISPLAY_P4)
+    displayDev().setFont(&fonts::DejaVu24);
+#else
+    displayDev().setFont(&fonts::DejaVu18);
+#endif
+}
+
+struct OtaUiLayout {
+    int top;
+    int fontH;
+    int barY;
+    int barH;
+    int pctY;
+    int bytesY;
+    int detailY;
+    int rhinoY;
+};
+
+static OtaUiLayout otaWorkerLayout() {
+    otaWorkerUseLargeFont();
+    const int fontH = (int)displayDev().fontHeight();
+    const int barH = fontH + 6;
+    const int contentH = fontH + 12 + barH + 10
+                       + fontH * 3 + 8 * 3 + kOtaRhinoH;
+    const int top = max(4, ((int)displayDev().height() - contentH) / 2);
+    const int barY = top + fontH + 12;
+    const int pctY = barY + barH + 10;
+    const int bytesY = pctY + fontH + 8;
+    const int detailY = bytesY + fontH + 8;
+    return {
+        top, fontH, barY, barH, pctY, bytesY, detailY,
+        detailY + fontH + 8
+    };
+}
 
 static inline int otaWorkerBarW() {
     return max(120, (int)displayDev().width() - 16);
@@ -5739,10 +5779,6 @@ static inline int otaWorkerBarW() {
 // 1 bpp, MSB first, 24 px = exactly three bytes a row with no padding. The
 // source art is kept beside each row because that is the only form of it anyone
 // can edit.
-static constexpr int kOtaRhinoW    = 24;
-static constexpr int kOtaRhinoH    = 13;
-static constexpr int kOtaRhinoStep = 6;
-
 static const uint8_t kOtaRhinoRightA[] = {
     0x00, 0x00, 0x00,   // ........................
     0x00, 0x00, 0x02,   // ......................#.
@@ -5811,8 +5847,7 @@ static int     s_otaRhinoX = -1;     // left edge in panel coords; -1 = not plac
 static int     s_otaRhinoDir = 1;    // +1 running right, -1 running left
 static uint8_t s_otaRhinoFrame = 0;  // alternates the legs
 
-static void otaWorkerRunRhino() {
-    const int y = kOtaUiDetailY + (int)displayDev().fontHeight() + 6;
+static void otaWorkerRunRhino(int y) {
     const int minX = 8;
     const int maxX = (int)displayDev().width() - 8 - kOtaRhinoW;
     // A panel with no room for the track, or none below the detail row, simply
@@ -5909,13 +5944,14 @@ static void otaWorkerDrawTextRow(OtaUiTextRow &row, int y, const char *text, uin
 // phase change: the first progress draw of an install attempt, or a title change
 // — which is how the "OTA install failed" screen gets the whole panel it wants.
 static void otaWorkerDrawProgressChrome(const char *title) {
+    const OtaUiLayout layout = otaWorkerLayout();
     displayDev().startWrite();
     displayDev().fillScreen(TFT_BLACK);
-    displayDev().setTextSize(1);
-    displayDev().setFont(&fonts::DejaVu12);
+    otaWorkerUseLargeFont();
     displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
-    if (title && title[0]) displayDev().drawString(title, kOtaUiTextX, 14);
-    displayDev().drawRect(kOtaUiBarX, kOtaUiBarY, otaWorkerBarW(), kOtaUiBarH, TFT_WHITE);
+    if (title && title[0]) displayDev().drawString(title, kOtaUiTextX, layout.top);
+    displayDev().drawRect(kOtaUiBarX, layout.barY,
+                          otaWorkerBarW(), layout.barH, TFT_WHITE);
     displayDev().endWrite();
 
     otaWorkerInvalidateScreen();
@@ -5937,13 +5973,16 @@ static void otaWorkerDrawStatus(const char *line1, const char *line2 = nullptr) 
     displayDev().startWrite();
     displayDev().fillScreen(TFT_BLACK);
     displayDev().setTextColor(TFT_WHITE, TFT_BLACK);
-    displayDev().setTextSize(1);
-    displayDev().setFont(&fonts::DejaVu12);
+    otaWorkerUseLargeFont();
 
-    int y = 22;
+    const int fontH = (int)displayDev().fontHeight();
+    const int lineCount = ((line1 && line1[0]) ? 1 : 0)
+                        + ((line2 && line2[0]) ? 1 : 0);
+    const int blockH = lineCount > 0 ? lineCount * fontH + (lineCount - 1) * 10 : 0;
+    int y = max(4, ((int)displayDev().height() - blockH) / 2);
     if (line1 && line1[0]) {
         displayDev().drawString(line1, 8, y);
-        y += 22;
+        y += fontH + 10;
     }
     if (line2 && line2[0]) {
         displayDev().drawString(line2, 8, y);
@@ -5975,8 +6014,8 @@ static void otaWorkerDrawProgress(const char *title,
         otaWorkerDrawProgressChrome(title);
     }
 
-    displayDev().setTextSize(1);
-    displayDev().setFont(&fonts::DejaVu12);
+    const OtaUiLayout layout = otaWorkerLayout();
+    otaWorkerUseLargeFont();
 
     // The rhino runs on the install screen only; the failure screen keeps the
     // panel still. Ahead of the change test below on purpose -- the whole point
@@ -5985,7 +6024,7 @@ static void otaWorkerDrawProgress(const char *title,
     // it costs about a five-hundredth of what the old full repaint did.
     if (strncmp(s_otaUiTitle, kOtaInstallTitle, sizeof(kOtaInstallTitle) - 1) == 0) {
         displayDev().startWrite();
-        otaWorkerRunRhino();
+        otaWorkerRunRhino(layout.rhinoY);
         displayDev().endWrite();
     }
 
@@ -6040,28 +6079,29 @@ static void otaWorkerDrawProgress(const char *title,
         // The bar only ever runs backwards when the transfer restarted from
         // zero — the low-memory TLS retry. Without this the bar would keep the
         // failed attempt's fill and never move again.
-        displayDev().fillRect(kOtaUiBarX + 1, kOtaUiBarY + 1, barW - 2, kOtaUiBarH - 2, TFT_BLACK);
+        displayDev().fillRect(kOtaUiBarX + 1, layout.barY + 1,
+                      barW - 2, layout.barH - 2, TFT_BLACK);
         s_otaUiLastFillW = 0;
     }
     if (stalled != s_otaUiBarStalled) {
         // Colour flip only: repaint the span already filled, once. 18 px tall,
         // so ~11.5 KB even at full width.
         if (s_otaUiLastFillW > 0) {
-            displayDev().fillRect(kOtaUiBarX + 1, kOtaUiBarY + 1,
-                                  s_otaUiLastFillW, kOtaUiBarH - 2, barColor);
+            displayDev().fillRect(kOtaUiBarX + 1, layout.barY + 1,
+                                  s_otaUiLastFillW, layout.barH - 2, barColor);
         }
         s_otaUiBarStalled = stalled;
     }
     if (fillW > s_otaUiLastFillW) {
         // The common case, and the whole point: paint the new segment only.
-        displayDev().fillRect(kOtaUiBarX + 1 + s_otaUiLastFillW, kOtaUiBarY + 1,
-                              fillW - s_otaUiLastFillW, kOtaUiBarH - 2, barColor);
+        displayDev().fillRect(kOtaUiBarX + 1 + s_otaUiLastFillW, layout.barY + 1,
+                      fillW - s_otaUiLastFillW, layout.barH - 2, barColor);
         s_otaUiLastFillW = fillW;
     }
 
-    otaWorkerDrawTextRow(s_otaUiPctRow, kOtaUiPctY, pctBuf, pctColor);
-    otaWorkerDrawTextRow(s_otaUiBytesRow, kOtaUiBytesY, bytesBuf, TFT_WHITE);
-    otaWorkerDrawTextRow(s_otaUiDetailRow, kOtaUiDetailY, detailText, detailColor);
+    otaWorkerDrawTextRow(s_otaUiPctRow, layout.pctY, pctBuf, pctColor);
+    otaWorkerDrawTextRow(s_otaUiBytesRow, layout.bytesY, bytesBuf, TFT_WHITE);
+    otaWorkerDrawTextRow(s_otaUiDetailRow, layout.detailY, detailText, detailColor);
 
     displayDev().endWrite();
 #endif
@@ -8074,7 +8114,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     w.wxBelowText = nullptr;
     if (w.wxBelow) {
         // Weather under the clock rather than beside it: a rule across the
-        // column, and the fuller reading centred beneath. The side column is
+        // column, and the fuller reading left-aligned beneath. The side column is
         // not built, so the node name and clock stay centred (alignGlanceHero()
         // with nothing shown), and updateGlanceHeader() fills this instead.
         w.wxDesc = nullptr;
@@ -8097,7 +8137,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
         lv_obj_set_width(w.wxBelowText, lv_pct(92));
         lv_obj_set_style_text_font(w.wxBelowText, kSleepOverlayNodeFont, 0);
         lv_obj_set_style_text_color(w.wxBelowText, pal.ink, 0);
-        lv_obj_set_style_text_align(w.wxBelowText, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_align(w.wxBelowText, LV_TEXT_ALIGN_LEFT, 0);
         lv_obj_set_style_text_line_space(w.wxBelowText, 3, 0);
         lv_label_set_long_mode(w.wxBelowText, LV_LABEL_LONG_WRAP);
         lv_label_set_text(w.wxBelowText, "");
@@ -13933,8 +13973,8 @@ static void onCfgBrightLockSliderChanged(lv_event_t *e) {
 }
 #endif
 
-#if UI_TOUCH_ONLY_PROFILE
-// Cancel/commit row for the touch build's modals that stage a value.
+#if HAS_TOUCH
+// Cancel/commit row for touch-capable modals that stage a value.
 //
 // A modal on a touch-only board can stage a value but cannot commit one: there
 // is no Enter to press and no close key to back out with. Brightness and
@@ -13987,7 +14027,7 @@ static void appendHeltecCancelSaveRow(lv_obj_t *parent, lv_event_cb_t cancelCb,
     Local::make(row, "Cancel", cancelCb);
     Local::make(row, commitText, commitCb);
 }
-#endif  // UI_TOUCH_ONLY_PROFILE
+#endif  // HAS_TOUCH
 
 static void closeCfgBrightnessModal() {
     if (lvObjValid(s_cfgBrightBackdrop)) {
@@ -17693,7 +17733,6 @@ enum TimeCfgRow : uint8_t {
     TIME_CFG_DAY,
     TIME_CFG_HOUR,
     TIME_CFG_MINUTE,
-    TIME_CFG_SAVE,
     TIME_CFG_ROW_COUNT
 };
 
@@ -17734,7 +17773,7 @@ static int daysInMonth(int year, int month) {
 // Rows the user can reach right now. In Automatic mode the date and time rows
 // are hidden, so navigation has to skip them rather than stall on a blank line.
 static bool timeCfgRowVisible(int row) {
-    if (row == TIME_CFG_SOURCE || row == TIME_CFG_SAVE) return true;
+    if (row == TIME_CFG_SOURCE) return true;
     return timeCfgIsManual();
 }
 
@@ -17812,10 +17851,6 @@ static void onTimeCfgRowPressed(lv_event_t *e) {
     const int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx < 0 || idx >= TIME_CFG_ROW_COUNT) return;
     s_timeCfgSelection = idx;
-    if (idx == TIME_CFG_SAVE) {
-        timeCfgSave();
-        return;
-    }
     // Touch builds have no left/right: a tap steps the field, wrapping at the
     // end, which is the only way to drive this without a keyboard.
     timeCfgAdjust(idx, 1);
@@ -17844,24 +17879,17 @@ static void closeTimeCfgModal() {
 static void refreshTimeCfgRows() {
     if (!s_timeCfgModal) return;
 
-    // Automatic mode drops the whole date line, and the two time cells from the
-    // line below — but not that line itself, which carries Save. Flex skips
-    // hidden children, so the modal shrinks to what is left.
+    // Automatic mode drops both complete date/time lines. Flex skips hidden
+    // children, so the modal gives that space back instead of retaining an
+    // empty carrier row.
     const bool manual = timeCfgIsManual();
     if (s_timeCfgDateGrid) {
         if (manual) lv_obj_clear_flag(s_timeCfgDateGrid, LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_add_flag(s_timeCfgDateGrid, LV_OBJ_FLAG_HIDDEN);
     }
-    const int kTimeCells[2] = { TIME_CFG_HOUR, TIME_CFG_MINUTE };
-    for (int c = 0; c < 2; c++) {
-        lv_obj_t *cell = s_timeCfgRows[kTimeCells[c]];
-        if (!cell) continue;
-        if (manual) lv_obj_clear_flag(cell, LV_OBJ_FLAG_HIDDEN);
-        else        lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);
-    }
-    // A third of the line next to Hour and Minute, the whole line without them.
-    if (s_timeCfgRows[TIME_CFG_SAVE]) {
-        lv_obj_set_width(s_timeCfgRows[TIME_CFG_SAVE], lv_pct(manual ? 32 : 100));
+    if (s_timeCfgTimeGrid) {
+        if (manual) lv_obj_clear_flag(s_timeCfgTimeGrid, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_add_flag(s_timeCfgTimeGrid, LV_OBJ_FLAG_HIDDEN);
     }
 
     for (int i = 0; i < TIME_CFG_ROW_COUNT; i++) {
@@ -17897,14 +17925,8 @@ static void refreshTimeCfgRows() {
                               ? "Tap a field to step it"
                               : "Tap the source to change it");
 #else
-        // Context-sensitive: one short line that fits the Cardputer beats one
-        // long line listing every key, most of which don't apply to this row.
-        if (s_timeCfgSelection == TIME_CFG_SAVE) {
-            lv_label_set_text_fmt(s_timeCfgHint, "Enter=Save   %s=Back", modalCloseKeyLabel());
-        } else {
-            lv_label_set_text_fmt(s_timeCfgHint, "L/R or Enter=Change   %s=Back",
-                                  modalCloseKeyLabel());
-        }
+        lv_label_set_text_fmt(s_timeCfgHint, "L/R=Change   Enter=Save   %s=Back",
+                              modalCloseKeyLabel());
 #endif
     }
 }
@@ -17981,12 +18003,12 @@ static void openTimeCfgModal() {
     lv_label_set_text(s_timeCfgHint, "");
 
     static const char *kTimeRowLabel[TIME_CFG_ROW_COUNT] = {
-        "Source", "Year", "Month", "Day", "Hour", "Minute", "Save"
+        "Source", "Year", "Month", "Day", "Hour", "Minute"
     };
     const lv_color_t rowTextColor = (s_cfg.uiMode == UI_MODE_LIGHT)
                                         ? lv_color_hex(0x13233D) : lv_color_hex(0xD9E8FF);
 
-    // One cell of the modal: a full-width row (Source, Save) or one column of the
+    // One cell of the modal: the full-width Source row or one column of the
     // date/time grids. Values are short enough — four digits at most — that even
     // a third of the Cardputer's width fits "Month 07" on a single line.
     auto makeCell = [&](lv_obj_t *parent, int i, int widthPct) {
@@ -18016,10 +18038,6 @@ static void openTimeCfgModal() {
         lv_obj_set_style_text_color(label, rowTextColor, 0);
         lv_label_set_text(label, kTimeRowLabel[i]);
 
-        if (i == TIME_CFG_SAVE) {
-            s_timeCfgValues[i] = nullptr;
-            return;
-        }
         lv_obj_t *val = lv_label_create(cell);
         s_timeCfgValues[i] = val;
         lv_obj_set_flex_grow(val, 1);
@@ -18050,27 +18068,21 @@ static void openTimeCfgModal() {
 
     makeCell(s_timeCfgModal, TIME_CFG_SOURCE, 100);
 
-    // Date across three columns, then hour, minute and Save across three more.
+    // Date across three columns, then hour and minute across the full next row.
     // Percentages leave room for the gutter pad_column draws between cells.
     s_timeCfgDateGrid = makeGrid(kChanModalRowH);
     makeCell(s_timeCfgDateGrid, TIME_CFG_YEAR,  32);
     makeCell(s_timeCfgDateGrid, TIME_CFG_MONTH, 32);
     makeCell(s_timeCfgDateGrid, TIME_CFG_DAY,   32);
 
-    // Save shares the line with the time fields. It is the one cell here that
-    // has to survive Automatic mode, so this grid is never hidden — the Hour and
-    // Minute cells are hidden individually and Save widens to take the line.
     s_timeCfgTimeGrid = makeGrid(kChanModalRowH);
-    makeCell(s_timeCfgTimeGrid, TIME_CFG_HOUR,   32);
-    makeCell(s_timeCfgTimeGrid, TIME_CFG_MINUTE, 32);
-    makeCell(s_timeCfgTimeGrid, TIME_CFG_SAVE,   32);
+    makeCell(s_timeCfgTimeGrid, TIME_CFG_HOUR,   49);
+    makeCell(s_timeCfgTimeGrid, TIME_CFG_MINUTE, 49);
 
-#if UI_TOUCH_ONLY_PROFILE
-    // Below both grids, not beside Save: TIME_CFG_SAVE shares the time row with
-    // Hour and Minute at 32% each, so there is no room next to it. A footer row
-    // is also independent of refreshTimeCfgRows() rewriting the Save cell's
-    // width between Manual and Automatic — it lays out the same either way,
-    // which is what makes it work when the date/time grids are hidden.
+#if HAS_TOUCH
+    // The sole commit/discard controls. They stay visible when Automatic mode
+    // hides both date/time grids, so that compact modal still has an explicit
+    // way to apply or abandon the staged source change.
     appendHeltecCancelSaveRow(
         s_timeCfgModal,
         [](lv_event_t *e) { LV_UNUSED(e); closeTimeCfgModal(); },
@@ -40589,9 +40601,8 @@ static void pumpKeyboardInput() {
             continue;
         }
 
-        // Time and Date: up/down picks a field, left/right changes it, Enter
-        // saves from any row (there is one Save row, but reaching it from the
-        // minute field would otherwise be five keypresses).
+        // Time and Date: up/down picks a field, left/right changes it, and
+        // Enter saves from any row. Touch builds use the footer action row.
         if (s_timeCfgModal) {
             if (isModalCloseKey(k)) {
                 closeTimeCfgModal();   // discards staged edits
@@ -40599,10 +40610,7 @@ static void pumpKeyboardInput() {
                 continue;
             }
             if (k == KEY_ENTER || k == KEY_ROLLER) {
-                // Same shape as the channel editor: Enter activates the row, and
-                // Save is a row of its own.
-                if (s_timeCfgSelection == TIME_CFG_SAVE) timeCfgSave();
-                else                                     timeCfgAdjust(s_timeCfgSelection, 1);
+                timeCfgSave();
                 continue;
             }
             if (k == KEY_PREV_CHAN || k == KEY_PAGE_UP) {

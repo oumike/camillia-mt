@@ -93,6 +93,21 @@ No driver needed on any OS — they use native USB.
 
 ## 1. Flash a release (easiest)
 
+### Browser flasher
+
+Open <https://camillia.sumat.org/#flash> in desktop Chrome, Edge, Opera, or
+Brave, select the board and release, and connect it over USB when prompted. The
+flasher supports both the ESP32-S3 targets and both T-Display P4 AMOLED radio
+variants. Web Serial requires HTTPS, or `localhost` during local
+development.
+
+For the T-Display P4, this installs only the ESP32-P4 application. Its onboard
+ESP32-C6 runs separate ESP-Hosted firmware; provision that image with the
+[T-Display P4 C6 procedure](#t-display-p4-esp32-c6-companion-firmware) when
+needed.
+
+Use the manual release-image steps below when Web Serial is unavailable.
+
 ### Get the files
 
 From the [Releases page](https://github.com/oumike/camillia-mt/releases), download
@@ -108,7 +123,8 @@ the `.bin` for your device:
 | Attaky Mesh Deck | `camillia-mt-mesh-deck-vX.Y.Z.bin` |
 | Elecrow ThinkNode M9 | `camillia-mt-m9-vX.Y.Z.bin` |
 | Seeed Wio Tracker L2 | `camillia-mt-wio-tracker-l2-vX.Y.Z.bin` |
-| LilyGo T-Display P4 AMOLED | `camillia-mt-tdisplay-p4-vX.Y.Z.bin` |
+| LilyGo T-Display P4 AMOLED + SX1262 | `camillia-mt-p4-amoled-sx1262-vX.Y.Z.bin` |
+| LilyGo T-Display P4 AMOLED + LR2021 | `camillia-mt-p4-amoled-lr2021-vX.Y.Z.bin` |
 
 These are full images — bootloader, partition table and app in one file, written
 at address `0x0`.
@@ -299,7 +315,8 @@ Pick the environment for your board:
 | Attaky Mesh Deck | `mesh-deck` |
 | Elecrow ThinkNode M9 | `m9` |
 | Seeed Wio Tracker L2 | `wio-tracker-l2` |
-| LilyGo T-Display P4 AMOLED | `tdisplay-p4` |
+| LilyGo T-Display P4 AMOLED + SX1262 | `p4-amoled-sx1262` |
+| LilyGo T-Display P4 AMOLED + LR2021 | `p4-amoled-lr2021` |
 
 The command is identical on Windows, macOS and Linux:
 
@@ -360,7 +377,8 @@ Run it with no flags to get a device picker.
 | `--mesh-deck`, `--attaky`, `-M` | `mesh-deck` |
 | `--m9`, `-9` | `m9` |
 | `--wio-tracker-l2` | `wio-tracker-l2` |
-| `--tdisplay-p4` | `tdisplay-p4` |
+| `--p4-amoled-sx1262` | `p4-amoled-sx1262` |
+| `--p4-amoled-lr2021` | `p4-amoled-lr2021` |
 | `--erase`, `-E` | erase flash before a clean build/upload (M9 uses `upload_erase`) |
 
 Windows users: run the three `pio` commands above instead, or use WSL.
@@ -434,9 +452,9 @@ Both are idempotent. The LovyanGFX patch fails the build if an existing
 still emits a warning on version drift. If you see `NOT patched - run the build
 once more` on a fresh checkout, the library had not been fetched yet; build again.
 
-### LilyGo T-Display P4 (`tdisplay-p4`)
+### LilyGo T-Display P4 AMOLED
 
-- This is the only ESP32-P4 and Arduino 3.x target. Its platform and
+- These are the only ESP32-P4 and Arduino 3.x targets. Their platform and
   LovyanGFX 1.2.30 pins are environment-local; all S3 environments remain on
   `espressif32@7.0.1` and Arduino 2.0.17.
 - V1.0 boards report an ECO2 boot ROM and require the `esp32p4_es` SDK profile
@@ -452,9 +470,10 @@ once more` on a fresh checkout, the library had not been fetched yet; build agai
   framework's prebuilt ESP-Hosted configuration matches those pins. The C6
   enable/reset signal is on XL9535 rather than the framework's direct reset
   GPIO, so recovery from a wedged coprocessor requires a C6 or board reset.
-- SX1262 DIO1 and reset are also on XL9535. Camillia uses a P4-specific
-  RadioLib HAL to bridge those signals and selects the internal antenna through
-  the SKY13453 switch.
+- The SX1262 and LR2021 variants share SPI2, chip select, busy, reset and IRQ
+  wiring. Reset and IRQ are on XL9535, so Camillia uses a P4-specific RadioLib
+  HAL to bridge those signals. The LR2021 target also programs its internal
+  DIO6/7/8/10 RF paths. Both select the internal antenna through SKY13453.
 - The microSD slot runs four-bit SD_MMC. BQ27220 voltage and SOC are read
   directly. The optional TCA8418 keyboard is runtime-detected; the on-screen
   keyboard remains present when the accessory is detached.

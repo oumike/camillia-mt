@@ -17,6 +17,16 @@
 #define PAGER_LORA_USE_LR1121 0
 #endif
 
+#ifndef MESH_LORA_LR2021
+#define MESH_LORA_LR2021 0
+#endif
+
+#if defined(DEVICE_TDISPLAY_P4) && MESH_LORA_LR2021
+#  define MESH_RADIO_IS_LR2021 1
+#else
+#  define MESH_RADIO_IS_LR2021 0
+#endif
+
 // True on boards whose radio is an LR11x0 rather than an SX126x. The families
 // diverge enough in RadioLib's API — no DIO2-as-RF-switch, no current limit, no
 // RX-boost setter, setIrqAction() instead of setDio1Action() — that most call
@@ -156,7 +166,11 @@ private:
     TDisplayP4RadioHal _hal;
     Module _module{&_hal, LORA_CS, TDisplayP4RadioHal::kDio1,
                    TDisplayP4RadioHal::kReset, LORA_BUSY};
+#  if MESH_RADIO_IS_LR2021
+    LR2021 _radio{&_module};
+#  else
     SX1262 _radio{&_module};
+#  endif
 #elif defined(MESH_LORA_LR1110)
     MeshLR1110 _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #elif defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)

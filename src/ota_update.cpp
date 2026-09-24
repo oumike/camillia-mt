@@ -572,7 +572,11 @@ const char *otaCurrentDeviceAssetSlug() {
 #elif defined(DEVICE_WIO_TRACKER_L2)
     return "wio-tracker-l2";
 #elif defined(DEVICE_TDISPLAY_P4)
-    return "tdisplay-p4";
+#if defined(MESH_LORA_LR2021) && MESH_LORA_LR2021
+    return "p4-amoled-lr2021";
+#else
+    return "p4-amoled-sx1262";
+#endif
 // Ahead of the V4 branch below, and load-bearing: an R8 build defines
 // DEVICE_HELTEC_V4_EXPANSION too, so without its own case here it fell through
 // and reported "heltec" — an R8 checking for updates was being offered V4

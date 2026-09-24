@@ -54,7 +54,7 @@ jobs:
     name: Build, sign and publish
     runs-on: ubuntu-latest
     environment: release
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -100,9 +100,11 @@ jobs:
       - name: Install device frameworks
         # release.sh checks for boot_app0.bin during preflight, before it builds
         # anything, and that file only exists once the Arduino ESP32 framework
-        # package has been downloaded. All release environments share it, so
-        # resolving one is enough to satisfy the check.
-        run: pio pkg install -e tdeck
+        # package has been downloaded. The S3 environments share the default
+        # core; both P4 environments share their isolated Arduino 3.x core.
+        run: |
+          pio pkg install -e tdeck
+          PLATFORMIO_CORE_DIR="$HOME/.platformio-p4" pio pkg install -e p4-amoled-sx1262
 
       - name: Install OTA signing key
         env:

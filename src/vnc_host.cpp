@@ -108,11 +108,12 @@ static const char kViewerPage[] = R"HTML(<!doctype html>
 :root{color-scheme:light;--paper:#f3f1ea;--ink:#171816;--muted:#686b65;--line:#c9c8bf;--live:#087f72;--bad:#b33b31}
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--paper);color:var(--ink);font-family:"Avenir Next","Trebuchet MS",sans-serif;letter-spacing:0}
 body{display:grid;place-items:center;padding:6px;touch-action:none;user-select:none;-webkit-user-select:none}
-main{width:min(760px,100%);height:100%;display:grid;grid-template-rows:30px minmax(0,1fr);gap:5px;justify-items:center}
+main{width:min(760px,100%);height:100%;min-width:0;min-height:0;display:grid;grid-template-rows:30px minmax(0,1fr);gap:5px;justify-items:center}
 header{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:0 1px 4px}
 h1{font-size:15px;line-height:1;margin:0;font-weight:700;white-space:nowrap}.tools{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
 #status{font:600 11px "Avenir Next","Trebuchet MS",sans-serif;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#status.live{color:var(--live)}#status.bad{color:var(--bad)}
-#screen{display:block;align-self:center;background:#000;width:auto;height:auto;max-width:100%;max-height:100%;box-shadow:0 8px 22px #0003;image-rendering:auto;cursor:crosshair}
+.viewer{width:100%;height:100%;min-width:0;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+#screen{display:block;flex:none;background:#000;width:auto;height:auto;box-shadow:0 8px 22px #0003;image-rendering:auto;cursor:crosshair}
 #screen:focus{outline:2px solid var(--live);outline-offset:2px}
 button{height:25px;border:1px solid var(--ink);background:transparent;color:var(--ink);font:700 11px "Avenir Next","Trebuchet MS",sans-serif;padding:2px 8px;border-radius:3px;cursor:pointer;white-space:nowrap}button:active{background:var(--ink);color:var(--paper)}
 #keys{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;font-size:16px}
@@ -121,14 +122,20 @@ button{height:25px;border:1px solid var(--ink);background:transparent;color:var(
 <body>
 <main>
 <header><h1>Camillia VNC</h1><div class="tools"><span id="status">Connecting</span><button id="keyboard" type="button">Keyboard</button></div></header>
-<canvas id="screen" width="320" height="240" tabindex="0"></canvas>
+<div class="viewer" id="viewer"><canvas id="screen" width="320" height="240" tabindex="0"></canvas></div>
 </main>
 <textarea id="keys" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
 <script>
-const canvas=document.getElementById('screen'),ctx=canvas.getContext('2d');
+const canvas=document.getElementById('screen'),ctx=canvas.getContext('2d'),viewer=document.getElementById('viewer');
 const statusEl=document.getElementById('status'),keys=document.getElementById('keys');
 let width=320,height=240,socket=null,pointerDown=false,lastMove=0,retryTimer=0;
 const setStatus=(text,kind='')=>{statusEl.textContent=text;statusEl.className=kind};
+function fitScreen(){
+    const box=viewer.getBoundingClientRect();if(!box.width||!box.height||!width||!height)return;
+    const scale=Math.min(1,Math.max(1,box.width-4)/width,Math.max(1,box.height-4)/height);
+    canvas.style.width=`${Math.max(1,Math.floor(width*scale))}px`;
+    canvas.style.height=`${Math.max(1,Math.floor(height*scale))}px`;
+}
 function connect(){
   clearTimeout(retryTimer);
   socket=new WebSocket(`ws://${location.host}/mirror`);socket.binaryType='arraybuffer';
@@ -137,7 +144,7 @@ function connect(){
   socket.onclose=()=>{setStatus('Reconnecting','bad');retryTimer=setTimeout(connect,1500)};
   socket.onmessage=event=>{
     const bytes=new Uint8Array(event.data);if(!bytes.length)return;
-    if(bytes[0]===2){width=bytes[1]|(bytes[2]<<8);height=bytes[3]|(bytes[4]<<8);canvas.width=width;canvas.height=height;return}
+    if(bytes[0]===2){width=bytes[1]|(bytes[2]<<8);height=bytes[3]|(bytes[4]<<8);canvas.width=width;canvas.height=height;fitScreen();return}
     if(bytes[0]!==1||bytes.length<10)return;
     const flags=bytes[1],x=bytes[2]|(bytes[3]<<8),y=bytes[4]|(bytes[5]<<8),w=bytes[6]|(bytes[7]<<8),h=bytes[8]|(bytes[9]<<8);
     const image=ctx.createImageData(w,h),rgba=image.data;let src=10,dst=0;
@@ -157,6 +164,8 @@ function sendKey(codepoint){if(socket&&socket.readyState===1&&codepoint>=0&&code
 document.getElementById('keyboard').addEventListener('click',()=>{keys.value=' ';keys.focus();keys.setSelectionRange(1,1)});
 keys.addEventListener('beforeinput',event=>{if(event.inputType==='insertText'&&event.data){for(const char of event.data)sendKey(char.codePointAt(0));event.preventDefault()}else if(event.inputType==='deleteContentBackward'){sendKey(8);event.preventDefault()}else if(event.inputType==='insertLineBreak'||event.inputType==='insertParagraph'){sendKey(13);event.preventDefault()}keys.value=' ';try{keys.setSelectionRange(1,1)}catch(_){ }});
 window.addEventListener('keydown',event=>{if(document.activeElement===keys||event.ctrlKey||event.metaKey||event.altKey)return;let code=0;if(event.key==='Backspace')code=8;else if(event.key==='Enter')code=13;else if(event.key==='Escape')code=27;else if(event.key.length===1)code=event.key.codePointAt(0);if(code){sendKey(code);event.preventDefault()}});
+if('ResizeObserver' in window)new ResizeObserver(fitScreen).observe(viewer);
+window.addEventListener('resize',fitScreen);requestAnimationFrame(fitScreen);
 connect();
 </script>
 </body>

@@ -142,15 +142,15 @@ int MeshRadio::_armRx() {
     // packet does not leave RX). Re-entering RX is what startReceive() does next
     // anyway, so this costs a mode transition and nothing else.
     _radio.standby();
-    const int16_t state = _radio.restoreRxMaxPayload();
-    if (state != RADIOLIB_ERR_NONE) {
-        Serial.printf("[radio] restoreRxMaxPayload failed: %d\n", (int)state);
+    const int16_t restoreState = _radio.restoreRxMaxPayload();
+    if (restoreState != RADIOLIB_ERR_NONE) {
+        Serial.printf("[radio] restoreRxMaxPayload failed: %d\n", (int)restoreState);
     }
 #endif
     const int state = _radio.startReceive();
 #if defined(DEVICE_TDISPLAY_P4)
     // Reading the XL9535 input ports acknowledges the active-low expander IRQ
-    // after SX1262 DIO1 returns low, readying it for the next edge.
+    // after the radio IRQ returns low, readying it for the next edge.
     (void)tdisplayP4IoClearInterrupt();
 #endif
     return state;
@@ -236,7 +236,11 @@ void MeshRadio::logLr11xxHealth(const char *why) {
 void MeshRadio::setRxBoostedGain(bool enabled) {
     _rxBoostedGain = enabled;
     if (_ready) {
+#if MESH_RADIO_IS_LR2021
+        _radio.setRxBoostedGainMode(enabled ? 7 : 0);
+#else
         _radio.setRxBoostedGainMode(enabled);
+#endif
         _armRx();   // re-arm so the new gain setting takes effect
     }
 }
@@ -297,6 +301,11 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
 #endif
 
     _radio.reset();
+#if MESH_RADIO_IS_LR2021
+    // The V1 module routes internal DIO11 to the XL9535-backed host IRQ.
+    // RadioLib defaults to DIO5, so this must be selected before begin().
+    _radio.irqDioNum = 11;
+#endif
     int state = _radio.begin(MESH_FREQ, MESH_BW, MESH_SF, MESH_CR,
                              MESH_SYNC, txPower, MESH_PREAMBLE,
                              MESH_TCXO_V);
@@ -329,12 +338,46 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
 #elif defined(DEVICE_WIO_TRACKER_L2)
             Serial.printf("[radio] target=wio-tracker-l2 (expected pins: CS%d DIO1=%d RST%d BUSY%d)\n",
                           LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+#elif defined(DEVICE_TDISPLAY_P4)
+            Serial.printf("[radio] target=p4-amoled-%s (shared pins: CS%d IRQ=XL9535 RST=XL9535 BUSY%d)\n",
+                          MESH_RADIO_IS_LR2021 ? "lr2021" : "sx1262",
+                          LORA_CS, LORA_BUSY);
 #endif
         }
         return false;
     }
 
-#if !MESH_RADIO_IS_LR11XX
+#if MESH_RADIO_IS_LR2021
+    // LilyGo routes the LR2021's sub-GHz and 2.4 GHz front ends through four
+    // internal DIOs. Program them directly: RadioLib 7.7.1's convenience table
+    // indexes sparse DIOs incorrectly. The separate SKY13453 antenna selector
+    // is already set to the internal antenna through XL9535 above.
+    {
+        constexpr uint8_t kRxLf = 1U << (LR2021::MODE_RX - 1);
+        constexpr uint8_t kTxLf = 1U << (LR2021::MODE_TX - 1);
+        constexpr uint8_t kRxHf = 1U << (LR2021::MODE_RX_HF - 1);
+        constexpr uint8_t kTxHf = 1U << (LR2021::MODE_TX_HF - 1);
+        const auto configureRfDio = [this](uint8_t dio, uint8_t modes) {
+            int state = _radio.setDioFunction(
+                dio, RADIOLIB_LR2021_DIO_FUNCTION_RF_SWITCH,
+                RADIOLIB_LR2021_DIO_SLEEP_PULL_AUTO);
+            if (state == RADIOLIB_ERR_NONE) {
+                state = _radio.setDioRfSwitchConfig(dio, modes);
+            }
+            return state;
+        };
+
+        int state = configureRfDio(6, kRxHf);
+        if (state == RADIOLIB_ERR_NONE) state = configureRfDio(7, kTxHf);
+        if (state == RADIOLIB_ERR_NONE) state = configureRfDio(8, kRxLf | kTxLf);
+        if (state == RADIOLIB_ERR_NONE) state = configureRfDio(10, kRxHf | kTxHf);
+        if (state != RADIOLIB_ERR_NONE) {
+            Serial.printf("[radio] LR2021 RF switch setup failed: %d\n", state);
+            return false;
+        }
+        Serial.println("[radio] LR2021 RF switch: DIO6/DIO7/DIO8/DIO10 configured");
+    }
+#elif !MESH_RADIO_IS_LR11XX
     _radio.setDio2AsRfSwitch(true);
 #endif
 
@@ -368,12 +411,16 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
     // whenever setup()'s "did anything differ from the compile-time default?"
     // check decided not to call reconfigure().
     _radio.setOutputPower(txPower);
-#if !MESH_RADIO_IS_LR11XX
+#if !MESH_RADIO_IS_LR11XX && !MESH_RADIO_IS_LR2021
     _radio.setCurrentLimit(140.0);   // SX1262 HP PA max; default OCP may be too low
 #endif
     // Both families have this; only the SX126x branch above is chip-specific.
+#if MESH_RADIO_IS_LR2021
+    const int boostState = _radio.setRxBoostedGainMode(_rxBoostedGain ? 7 : 0);
+#else
     const int boostState = _radio.setRxBoostedGainMode(_rxBoostedGain);
-#if MESH_RADIO_IS_LR11XX
+#endif
+#if MESH_RADIO_IS_LR11XX || MESH_RADIO_IS_LR2021
     _radio.setIrqAction(_onDio1);
 #else
     _radio.setDio1Action(_onDio1);

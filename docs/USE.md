@@ -76,7 +76,7 @@ the pixel — and Config → **Nav Bar**, or **Bottom Nav Bar** in web config, t
 it on. It redraws immediately either way, with no reboot.
 
 On the touch-only boards (`heltec-v4*`, `heltec-r8*`, `wio-tracker-l2`, and
-`tdisplay-p4`) the bar is the only way off a screen, so there is no setting and
+`p4-amoled-*`) the bar is the only way off a screen, so there is no setting and
 no key-hint strip to go back to.
 
 A note for the three keyboard boards the bar is new to: it costs more than the strip it
@@ -1153,10 +1153,10 @@ The device info panel is scrollable with the keyboard on every keyboard build:
 
 ### Lock screen
 
-Ten of the twelve builds can show a lock screen before putting the panel fully
+Eleven of the thirteen builds can show a lock screen before putting the panel fully
 to sleep: `tdeck`, `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`,
 `mesh-deck`, `m9`, `wio-tracker-l2`, `heltec-r8`, `heltec-r8-vertical` and
-`tdisplay-p4`. The two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
+`p4-amoled-sx1262` and `p4-amoled-lr2021`. The two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
 under [Locking and unlocking, build by build](#locking-and-unlocking-build-by-build). It uses a black background with the time and channel in
 blue, node names in green, and message text in white. The current date, battery
 reading and newest unread message previews remain visible while it is active.

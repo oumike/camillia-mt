@@ -1,7 +1,8 @@
 # Hardware Targets
 
-Camillia has **ten distinct boards** across twelve build envs (the two Heltec
-families each also have a portrait-seeded environment). The comparison table
+Camillia has **ten distinct boards** across thirteen build envs (the two Heltec
+families each also have a portrait-seeded environment, and the P4 AMOLED has
+separate SX1262 and LR2021 environments). The comparison table
 below covers seven S3 boards. Nine boards use **ESP32-S3** with
 `espressif32@7.0.1` / Arduino 2.0.17. The T-Display P4 is the exception: ESP32-P4
 with a pinned pioarduino / Arduino 3.3.12 toolchain. All use dual-slot OTA;
@@ -37,13 +38,13 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 
 | Spec | T-Display P4 V1.0 |
 | --- | --- |
-| **Build env** | `tdisplay-p4` |
+| **Build env** | `p4-amoled-sx1262`, `p4-amoled-lr2021` |
 | **MCU** | ESP32-P4 V1.0 ECO2 (pre-rev.300), dual-core RISC-V at 360 MHz, 16 MB flash, 32 MB 200 MHz hex PSRAM |
 | **Toolchain** | pioarduino `55.03.312-1`, Arduino 3.3.12, ESP-IDF 5.5.5 |
 | **Display** | 4.1-inch RM69A10 AMOLED, 568x1232 RGB565, two-lane MIPI-DSI at 1000 Mbps/lane; DCS brightness; portrait default with runtime landscape/portrait selection |
 | **Touch** | GT9895 at `0x5D`; raw 1060x2400 coordinates scaled to panel space |
 | **Wireless** | ESP32-C6 over four-bit SDIO via ESP-Hosted 2.12.13; C6 firmware is a separate release asset and is not updated by P4 OTA |
-| **LoRa** | SX1262; CS/BUSY direct to P4, reset/DIO1 through XL9535; SKY13453 selects internal or MMCX1 antenna |
+| **LoRa** | SX1262 or LR2021; both use SPI2 with CS24/BUSY6 and reset/IRQ through XL9535. The LR2021 build configures its internal DIO6/7/8/10 RF paths; SKY13453 selects the internal antenna or MMCX1 for either radio |
 | **GNSS** | L76K on UART1; wake control through XL9535 |
 | **Input** | Touch-first UI and on-screen keyboard; optional 68-key TCA8418 expansion detected at runtime |
 | **Audio** | ES8311/NS4150B hardware present; Camillia notification audio is not enabled on this target yet |

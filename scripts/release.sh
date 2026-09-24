@@ -22,14 +22,22 @@ RELEASE_ENVS=(
     mesh-deck
     m9
     wio-tracker-l2
-    tdisplay-p4
+    p4-amoled-sx1262
+    p4-amoled-lr2021
 )
 
 DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
 
+is_p4_env() {
+    case "$1" in
+        p4-amoled-*) return 0 ;;
+        *)           return 1 ;;
+    esac
+}
+
 pio_core_dir_for_env() {
-    if [[ "$1" == "tdisplay-p4" ]]; then
+    if is_p4_env "$1"; then
         echo "$P4_PIO_CORE_DIR"
     else
         echo "$DEFAULT_PIO_CORE_DIR"
@@ -39,7 +47,7 @@ pio_core_dir_for_env() {
 run_pio_for_env() {
     local env_name="$1"
     shift
-    if [[ "$env_name" == "tdisplay-p4" ]]; then
+    if is_p4_env "$env_name"; then
         PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" "$PIO" "$@"
     else
         "$PIO" "$@"
@@ -57,21 +65,21 @@ env_flash_size() {
 
 env_chip() {
     case "$1" in
-        tdisplay-p4) echo "esp32p4" ;;
+        p4-amoled-*) echo "esp32p4" ;;
         *)           echo "esp32s3" ;;
     esac
 }
 
 env_bootloader_offset() {
     case "$1" in
-        tdisplay-p4) echo "0x2000" ;;
+        p4-amoled-*) echo "0x2000" ;;
         *)           echo "0x0" ;;
     esac
 }
 
 env_flash_mode() {
     case "$1" in
-        tdisplay-p4) echo "qio" ;;
+        p4-amoled-*) echo "qio" ;;
         *)           echo "dio" ;;
     esac
 }
@@ -92,11 +100,14 @@ has_env() {
 }
 
 validate_release_targets() {
-    local env_name out_name seen_out_names="|" failed=false tdeck_pro_found=false
+    local env_name out_name seen_out_names="|" failed=false
+    local tdeck_pro_found=false p4_sx1262_found=false p4_lr2021_found=false
 
     echo "Release target contract:"
     for env_name in "${RELEASE_ENVS[@]}"; do
         [[ "$env_name" == "tdeck-pro" ]] && tdeck_pro_found=true
+        [[ "$env_name" == "p4-amoled-sx1262" ]] && p4_sx1262_found=true
+        [[ "$env_name" == "p4-amoled-lr2021" ]] && p4_lr2021_found=true
         if ! has_env "$env_name"; then
             echo "  ERROR: release environment '$env_name' is missing from platformio.ini" >&2
             failed=true
@@ -123,6 +134,32 @@ validate_release_targets() {
         echo "  ERROR: T-Deck Pro release slugs no longer match the OTA firmware contract" >&2
         failed=true
     fi
+
+    if [[ "$p4_sx1262_found" != true \
+          || "$(env_out_name p4-amoled-sx1262)" != "p4-amoled-sx1262" ]]; then
+        echo "  ERROR: P4 AMOLED SX1262 release slug no longer matches its OTA contract" >&2
+        failed=true
+    fi
+    if [[ "$p4_lr2021_found" != true \
+          || "$(env_out_name p4-amoled-lr2021)" != "p4-amoled-lr2021" ]]; then
+        echo "  ERROR: P4 AMOLED LR2021 release slug no longer matches its OTA contract" >&2
+        failed=true
+    fi
+    for out_name in p4-amoled-sx1262 p4-amoled-lr2021; do
+        if ! grep -q "return \"${out_name}\";" src/ota_update.cpp; then
+            echo "  ERROR: OTA selector is missing the P4 asset slug '$out_name'" >&2
+            failed=true
+        fi
+    done
+    for env_name in p4-amoled-sx1262 p4-amoled-lr2021; do
+        if ! is_p4_env "$env_name" \
+            || [[ "$(env_chip "$env_name")" != "esp32p4" ]] \
+            || [[ "$(env_bootloader_offset "$env_name")" != "0x2000" ]] \
+            || [[ "$(env_flash_mode "$env_name")" != "qio" ]]; then
+            echo "  ERROR: $env_name no longer uses the P4 merge/toolchain contract" >&2
+            failed=true
+        fi
+    done
 
     [[ "$failed" == false ]]
 }
@@ -1045,11 +1082,14 @@ merge_sign_assets() {
     hosted_c6=$(find "$P4_PIO_CORE_DIR/packages/framework-arduinoespressif32-libs/hosted" \
         -name 'esp32c6-v2.12.13.bin' 2>/dev/null | head -1)
     if [[ -z "$hosted_c6" ]]; then
-        echo "Error: pinned ESP-Hosted C6 firmware not found after tdisplay-p4 build." >&2
+        echo "Error: pinned ESP-Hosted C6 firmware not found after P4 builds." >&2
         return 1
     fi
     cp "$hosted_c6" \
         "dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
+    install -m 0755 scripts/flash.sh dist/flash.sh
+    install -m 0755 scripts/flash-tdisplay-p4-c6.sh \
+        dist/flash-tdisplay-p4-c6.sh
 }
 
 verify_release_assets() {
@@ -1088,7 +1128,16 @@ verify_release_assets() {
         echo "Error: required ESP-Hosted C6 release asset is missing: $hosted_c6" >&2
         return 1
     fi
-    echo "  OK tdisplay-p4 C6: $(basename "$hosted_c6")"
+    echo "  OK T-Display P4 C6: $(basename "$hosted_c6")"
+
+    local helper
+    for helper in dist/flash.sh dist/flash-tdisplay-p4-c6.sh; do
+        if [[ ! -s "$helper" || ! -x "$helper" ]]; then
+            echo "Error: required release helper is missing or not executable: $helper" >&2
+            return 1
+        fi
+        echo "  OK helper: $(basename "$helper")"
+    done
 }
 
 echo ""
@@ -1121,7 +1170,8 @@ gh release create "$TAG" \
     "${RELEASE_FLAGS[@]}" \
     "${NOTES_ARGS[@]}" \
     dist/*.bin \
-    dist/*.sig
+    dist/*.sig \
+    dist/*.sh
 
 echo ""
 if [[ "$ALPHA" == true ]]; then

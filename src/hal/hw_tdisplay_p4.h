@@ -97,8 +97,12 @@
 #define LORA_FEM_POWER_PIN                   -1
 #define LORA_FEM_ENABLE_PIN                  -1
 #define LORA_FEM_TX_MODE_PIN                 -1
-// LilyGO's RadioLib reference uses SX1262::begin()'s 1.6 V default.
+// The fitted radios share pins but not their TCXO supply setting.
+#if defined(MESH_LORA_LR2021) && MESH_LORA_LR2021
+#define MESH_TCXO_V                        3.3f
+#else
 #define MESH_TCXO_V                        1.6f
+#endif
 
 // Dedicated four-bit SDMMC host. Power enable is active-low on XL9535 bit 13.
 #define SD_CS                                -1

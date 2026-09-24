@@ -1,7 +1,7 @@
 #!/bin/bash
 # Flash Camillia-MT to a connected supported ESP32 board.
 # Expects a merged factory image (bootloader + partitions + boot_app0 + app),
-# such as the camillia-mt-*-vX.Y.Z.bin produced by .github/workflows/build.yml.
+# such as the camillia-mt-*-vX.Y.Z.bin produced by the release workflow.
 # That layout is written at 0x0; an app-only firmware.bin from .pio/build/<env>
 # is NOT compatible with this script.
 #

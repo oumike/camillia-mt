@@ -81,13 +81,14 @@ Current PlatformIO environments include:
 - `mesh-deck`
 - `m9`
 - `wio-tracker-l2`
-- `tdisplay-p4`
+- `p4-amoled-sx1262`
+- `p4-amoled-lr2021`
 
 When a request says "mesh-deck", scope changes to `DEVICE_MESH_DECK` paths
 unless asked to propagate.
 
-When a request says "tdisplay-p4", scope changes to `DEVICE_TDISPLAY_P4`
-paths. It is the only ESP32-P4 / Arduino 3.x target; do not migrate the S3
+When a request says "p4-amoled", scope changes to `DEVICE_TDISPLAY_P4`
+paths. These are the only ESP32-P4 / Arduino 3.x targets; do not migrate the S3
 environments from `espressif32@7.0.1` unless explicitly requested.
 
 ## Config And Persistence

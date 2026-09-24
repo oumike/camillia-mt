@@ -28,7 +28,7 @@ fi
 
 if [[ -z "$FIRMWARE" || ! -f "$FIRMWARE" ]]; then
     echo "ESP-Hosted C6 firmware not found." >&2
-    echo "Run 'pio pkg install -e tdisplay-p4' or pass the release asset path." >&2
+    echo "Run 'pio pkg install -e p4-amoled-sx1262' or pass the release asset path." >&2
     exit 1
 fi
 
