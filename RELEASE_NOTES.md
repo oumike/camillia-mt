@@ -4,10 +4,12 @@
 - P4 Wi-Fi uses ESP-Hosted over the onboard ESP32-C6 and can reset the coprocessor when hosted networking stops responding. The matching C6 image is a separate release asset because P4 OTA cannot update the coprocessor.
 - Discovery Sweep/Scan Settings now offers 30-minute, 1-hour, 2-hour and 6-hour runs in addition to the existing shorter durations. A long preset scan keeps the radio away from the node's own mesh for the entire selected window.
 - Discovery can now **Save while discovering** on builds with file storage. The current run is rewritten at most every five seconds and once more when it finishes or is cancelled, preserving partial results through a power loss.
-- Message Actions now includes **Sender Info**, showing whether a message came through LoRa or MQTT, its last relayer or gateway when known, hops, SNR and RSSI. Delivery details are retained for the most recent 64 messages this boot.
+- Message Actions now includes **Message Info** (**I**), showing whether a message came through LoRa or MQTT, its last relayer or gateway when known, hops, SNR and RSSI. Delivery details are retained for the most recent 64 messages this boot.
+- MQTT Monitor can now run a timed **scan** (**W**, or the Scan button on touch builds), set up like a Discovery sweep: pick a window from 1 minute to 6 hours and, on builds with file storage, **Save while scanning**. The scan restarts the count, rewrites `/camillia/mqtt-<stamp>.json` at most every five seconds as messages arrive, and writes it once more when the window closes or the scan is stopped.
 - Node Actions now includes **Share**, which sends another known node's name, identity and public key as a zero-hop NodeInfo. Shares stay on LoRa, are limited to one every five seconds and are disabled for the local node or unnamed nodes.
 
 ### Changed
+- **Request Info** in Node Actions and Message Actions is now **Request Node**, on **Q** instead of **I**. **I** now opens Message Info in the message menu.
 - P4 factory and OTA assets are now radio-specific: `camillia-mt-p4-amoled-sx1262-*` and `camillia-mt-p4-amoled-lr2021-*`. Select the build matching the fitted radio; the former `tdisplay-p4` application target is no longer published.
 - LR2021 builds now use the module's required 3.3 V TCXO setting, DIO11 host interrupt and internal DIO6/7/8/10 RF paths. SX1262 behavior remains on the original shared P4 wiring.
 - The browser flasher exposes both P4 AMOLED radio variants with distinct downloads while sharing the same P4 product image and ESP32-C6 companion firmware.

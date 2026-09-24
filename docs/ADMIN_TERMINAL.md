@@ -165,7 +165,7 @@ The row is only there for nodes the peer list allows, exactly as on the web.
         │ │  (T)raceroute                        │ │
         │ │  Sen(d) DM                           │ │
         │ │  Un(f)avorite                        │ │
-        │ │  Request (I)nfo                      │ │
+        │ │  Re(q)uest Node                      │ │
         │ │  Request (P)osition                  │ │
         │ │  I(g)nore                            │ │
         │ │  (L)ocate                            │ │
