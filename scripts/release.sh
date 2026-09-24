@@ -991,8 +991,18 @@ else
     done
 fi
 
+# --disable-auto-clean: at the start of every `pio run`, PlatformIO compares a
+# checksum of the project (its config, its version, and the names of every
+# source file) with the one stored in .pio/build, and deletes the WHOLE build
+# directory when they differ -- every environment's output, not just this
+# one's. Anything that shifts that checksum between two environments here
+# (src/release_notes.h, for one, is generated during the first build on a
+# fresh checkout) then silently throws away every image already built, and the
+# merge below finds nothing to merge. That is how v5.4.0's first cut died, with
+# the tag already pushed. The clean this script wants is the explicit one
+# above; nothing should be deleted behind its back in the middle of the loop.
 for env_name in "${BUILD_ENVS[@]}"; do
-    run_pio_for_env "$env_name" run -e "$env_name"
+    run_pio_for_env "$env_name" run -e "$env_name" --disable-auto-clean
     # Official espressif32 and pioarduino use the same global framework package
     # name but carry different Arduino cores. Snapshot boot_app0 immediately
     # after each environment resolves so a later toolchain swap cannot make an
@@ -1015,7 +1025,12 @@ git add -A
 # been built right here, so build.yml compiling it again on the push tells us
 # nothing. It is a no-op on the workflow's own run — pushes made with the
 # default GITHUB_TOKEN never trigger workflows — and matters for --build-local.
-if [[ "$ALPHA" == true ]]; then
+if git diff --cached --quiet; then
+    # Re-cutting a tag whose release commit already landed (a run that got as
+    # far as pushing and then failed): VERSION already reads $TAG and there is
+    # nothing new to record. The tag goes on the current HEAD as before.
+    echo "Nothing to commit - VERSION already reads $TAG."
+elif [[ "$ALPHA" == true ]]; then
     git commit -m "Alpha release $TAG [skip ci]"
 else
     git commit -m "Release $TAG [skip ci]"
