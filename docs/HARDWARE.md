@@ -1,11 +1,13 @@
 # Hardware Targets
 
-Camillia has **nine distinct boards** across eleven build envs (the two Heltec
-envs select UI orientation). The comparison table below covers seven of them. All share an
-**ESP32-S3** SoC (dual-core Xtensa LX7 @ 240 MHz, 512 KB internal SRAM), the
-`espressif32@7.0.1` / Arduino toolchain, and a **dual-slot OTA** flash layout — two
-3.125 MB app partitions (`app0`/`app1`) + 64 KB NVS + 64 KB coredump
-([partitions.csv](../partitions.csv)). The table below captures what differs.
+Camillia has **ten distinct boards** across twelve build envs (the two Heltec
+families each also have a portrait-seeded environment). The comparison table
+below covers seven S3 boards. Nine boards use **ESP32-S3** with
+`espressif32@7.0.1` / Arduino 2.0.17. The T-Display P4 is the exception: ESP32-P4
+with a pinned pioarduino / Arduino 3.3.12 toolchain. All use dual-slot OTA;
+Wio Tracker L2 and T-Display P4 use the 6 MB-slot
+[`partitions_16mb_wio.csv`](../partitions_16mb_wio.csv), while the other layouts
+are described below.
 
 The Attaky Mesh Deck (`mesh-deck`) ships but is not yet in the comparison table; its
 pin map is in [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h).
@@ -30,6 +32,24 @@ and its [`src/hal/hw_*.h`](../src/hal/) pin map.
 | **microSD** | Yes (shared LoRa SPI) | Yes (shared e-paper/LoRa SPI) | Yes (shared SPI) | Yes (shared LoRa SPI) | No — a 9.5 MB LittleFS partition in flash holds the same files (`partitions_16mb_fs.csv`) | Yes (shared LoRa SPI) | Yes — 1-bit SD_MMC on CLK 2 / CMD 3 / D0 1, powered by PCA9555 bit 14 |
 | **Sensor / GPIO headroom** | Minimal — one SPI bus shared by LoRa/TFT/SD, I²C runs keyboard/touch/trackball, UART is GPS; `USER_BUTTON_PIN = -1` | Minimal — SPI is shared by e-paper/LoRa/SD and I²C by keyboard/touch/power sensors | Minimal — most rails are XL9555-managed | Grove port available (may be claimed by the LoRa/GPS cap) | **Most headers exposed** — best candidate for add-on sensors (e.g. the Detection Sensor module) | Minimal — one SPI bus shared by LoRa/TFT/SD, two I²C buses already claimed, UART is GPS | Switched Grove rail available; shared I²C bus is already heavily used |
 | **Vendor** | [LilyGo T-Deck](https://www.lilygo.cc/products/t-deck) | [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) | [LilyGo T-Lora Pager](https://lilygo.cc/products/t-lora-pager) | [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS | [Heltec WiFi LoRa 32 V4](https://heltec.org/project/wifi-lora-32-v4/) + TFT expansion kit | [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) | Seeed Studio Wio Tracker L2 |
+
+### LilyGo T-Display P4 AMOLED
+
+| Spec | T-Display P4 V1.0 |
+| --- | --- |
+| **Build env** | `tdisplay-p4` |
+| **MCU** | ESP32-P4 V1.0 ECO2 (pre-rev.300), dual-core RISC-V at 360 MHz, 16 MB flash, 32 MB 200 MHz hex PSRAM |
+| **Toolchain** | pioarduino `55.03.312-1`, Arduino 3.3.12, ESP-IDF 5.5.5 |
+| **Display** | 4.1-inch RM69A10 AMOLED, 568x1232 RGB565, two-lane MIPI-DSI at 1000 Mbps/lane; DCS brightness; portrait default with runtime landscape/portrait selection |
+| **Touch** | GT9895 at `0x5D`; raw 1060x2400 coordinates scaled to panel space |
+| **Wireless** | ESP32-C6 over four-bit SDIO via ESP-Hosted 2.12.13; C6 firmware is a separate release asset and is not updated by P4 OTA |
+| **LoRa** | SX1262; CS/BUSY direct to P4, reset/DIO1 through XL9535; SKY13453 selects internal or MMCX1 antenna |
+| **GNSS** | L76K on UART1; wake control through XL9535 |
+| **Input** | Touch-first UI and on-screen keyboard; optional 68-key TCA8418 expansion detected at runtime |
+| **Audio** | ES8311/NS4150B hardware present; Camillia notification audio is not enabled on this target yet |
+| **Battery** | BQ27220 voltage and state-of-charge over I2C; LGS4056H charger |
+| **microSD** | Four-bit SD_MMC on CLK43/CMD44/D0-D3 39-42; active-low power control through XL9535 |
+| **Status** | Implementation present; no subsystem is hardware-verified without serial logs or measurements |
 
 > **Notes.**
 > - **T-Deck Pro:** this initial port follows LilyGo and Meshtastic pin
@@ -117,6 +137,7 @@ Each board's full pin map and feature flags (`HAS_KEYBOARD`, `HAS_TOUCH`, `HAS_G
 | Attaky Mesh Deck | [`src/hal/hw_mesh_deck.h`](../src/hal/hw_mesh_deck.h) |
 | Elecrow ThinkNode M9 | [`src/hal/hw_m9.h`](../src/hal/hw_m9.h) |
 | Seeed Wio Tracker L2 | [`src/hal/hw_wio_tracker_l2.h`](../src/hal/hw_wio_tracker_l2.h) |
+| LilyGo T-Display P4 | [`src/hal/hw_tdisplay_p4.h`](../src/hal/hw_tdisplay_p4.h) |
 
 ## Sources
 
@@ -132,3 +153,7 @@ Manufacturer spec pages used to verify the table above:
 - Elecrow ThinkNode M9 — <https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html>. The pin map itself came from the M9 V1.0 schematic rather than this page.
 - Seeed Wio Tracker L2 — vendor reference firmware and device-ui configuration;
 	the public pin and peripheral map is recorded in [issue #56](https://github.com/oumike/camillia-mt/issues/56).
+- LilyGo T-Display P4 — <https://lilygo.cc/products/t-display-p4>,
+  <https://github.com/Xinyuan-LilyGO/T-Display-P4>, and the pinned
+  `lilygo_device_driver` configuration at commit
+  `a47cf73e2c9d442c0f00b618749150f4482dcd0a`.

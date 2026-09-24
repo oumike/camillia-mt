@@ -26,6 +26,10 @@ EmojiSlot s_slots[] = {
     { &lv_font_montserrat_14, 16, {}, nullptr, false },
     { &lv_font_montserrat_16, 18, {}, nullptr, false },
     { &lv_font_montserrat_18, 20, {}, nullptr, false },
+#if defined(DEVICE_TDISPLAY_P4)
+    // The P4's Extra Large chat size, which no other board draws at.
+    { &lv_font_montserrat_20, 22, {}, nullptr, false },
+#endif
 };
 constexpr int kSlotCount = (int)(sizeof(s_slots) / sizeof(s_slots[0]));
 

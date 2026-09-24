@@ -7,6 +7,9 @@
 #if defined(DEVICE_WIO_TRACKER_L2)
 #include "hal/wio_tracker_l2_io.h"
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
 
 namespace {
 bool sMounted = false;
@@ -74,6 +77,11 @@ const char *storageCardTypeName() {
 void storageUnmount() {
 #if defined(HAS_SD_MMC) && HAS_SD_MMC
     SD_MMC.end();
+#if defined(DEVICE_TDISPLAY_P4)
+    (void)tdisplayP4IoSetSdPower(false);
+#elif defined(DEVICE_WIO_TRACKER_L2)
+    (void)wioTrackerL2IoSetSdPower(false);
+#endif
 #elif HAS_SD_CARD
     SD.end();
 #else
@@ -91,8 +99,23 @@ bool storageBegin() {
         Serial.println("[sd] SD_MMC power enable failed");
         return false;
     }
+#elif defined(DEVICE_TDISPLAY_P4)
+    if (!tdisplayP4IoReady() || !tdisplayP4IoSetSdPower(true)) {
+        Serial.println("[sd] T-Display P4 SD power enable failed");
+        return false;
+    }
 #endif
     delay(10);
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0,
+                        SDMMC_D1, SDMMC_D2, SDMMC_D3)) {
+        Serial.printf("[sd] SD_MMC pin setup failed clk=%d cmd=%d d0=%d d1=%d d2=%d d3=%d\n",
+                      SDMMC_CLK, SDMMC_CMD, SDMMC_D0,
+                      SDMMC_D1, SDMMC_D2, SDMMC_D3);
+        (void)tdisplayP4IoSetSdPower(false);
+        return false;
+    }
+#else
     if (!SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_D0)) {
         Serial.printf("[sd] SD_MMC pin setup failed clk=%d cmd=%d d0=%d\n",
                       SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
@@ -101,7 +124,13 @@ bool storageBegin() {
 #endif
         return false;
     }
-    sMounted = SD_MMC.begin("/sdcard", /*mode1bit=*/true,
+#endif
+    sMounted = SD_MMC.begin("/sdcard",
+#if defined(DEVICE_TDISPLAY_P4)
+                            /*mode1bit=*/false,
+#else
+                            /*mode1bit=*/true,
+#endif
                             /*format_if_mount_failed=*/false);
     if (sMounted && SD_MMC.cardType() == CARD_NONE) {
         SD_MMC.end();
@@ -116,6 +145,8 @@ bool storageBegin() {
                       SDMMC_CLK, SDMMC_CMD, SDMMC_D0);
 #if defined(DEVICE_WIO_TRACKER_L2)
         (void)wioTrackerL2IoSetSdPower(false);
+#elif defined(DEVICE_TDISPLAY_P4)
+    (void)tdisplayP4IoSetSdPower(false);
 #endif
     }
 #elif HAS_SD_CARD

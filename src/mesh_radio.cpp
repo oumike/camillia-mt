@@ -88,6 +88,10 @@ static bool pagerPrimeLoRaRail(bool invertDirSense) {
 } // namespace
 #endif
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
+
 volatile bool MeshRadio::_rxFlag = false;
 MeshRadio Radio;
 static constexpr bool kVerboseRadioIo = false;
@@ -143,7 +147,13 @@ int MeshRadio::_armRx() {
         Serial.printf("[radio] restoreRxMaxPayload failed: %d\n", (int)state);
     }
 #endif
-    return _radio.startReceive();
+    const int state = _radio.startReceive();
+#if defined(DEVICE_TDISPLAY_P4)
+    // Reading the XL9535 input ports acknowledges the active-low expander IRQ
+    // after SX1262 DIO1 returns low, readying it for the next edge.
+    (void)tdisplayP4IoClearInterrupt();
+#endif
+    return state;
 }
 
 // ── RX health counters ───────────────────────────────────────────────────────
@@ -235,6 +245,20 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
     _rxBoostedGain = rxBoostedGain;
 #if defined(DEVICE_TLORA_PAGER_TFT)
     (void)pagerPrimeLoRaRail(false);
+#endif
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!tdisplayP4IoBegin()
+        || !tdisplayP4IoSelectInternalAntenna(true)) {
+        Serial.println("[radio] T-Display P4 XL9535 initialization failed");
+        return false;
+    }
+    // _radio.reset() below talks to the chip before begin() has configured
+    // chip select. On the 3.x core digitalWrite() refuses a pin pinMode() has
+    // not claimed ("IO 24 is not set as GPIO", four times a boot), so that
+    // first reset's standby commands never reached the radio. Claim it, idle
+    // high, first. The 2.x core the other boards use writes it regardless.
+    pinMode(LORA_CS, OUTPUT);
+    digitalWrite(LORA_CS, HIGH);
 #endif
 
 #if defined(LORA_POWER_ENABLE_PIN) && (LORA_POWER_ENABLE_PIN >= 0)
@@ -489,6 +513,17 @@ bool MeshRadio::pollRx(MeshPacket &pkt) {
     (void)pkt;
     return false;   // TEMP: LoRa RX disabled for MQTT-only testing
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+    // The expander IRQ gives prompt wake-up, while this level read also covers
+    // an edge that occurred while interrupts were masked or the CPU slept.
+    bool dio1High = false;
+    if (!tdisplayP4IoReadRadioDio1(dio1High) || !dio1High) {
+        _rxFlag = false;
+        (void)tdisplayP4IoClearInterrupt();
+        return false;
+    }
+    _rxFlag = true;
+#endif
     if (!_rxFlag) return false;
     _rxFlag = false;
     sRx.irqs++;
@@ -599,6 +634,15 @@ bool MeshRadio::transmit(const uint8_t *buf, size_t len) {
     // still run their MQTT uplink and local-display paths.
     (void)buf; (void)len;
     return true;
+#endif
+#if defined(DEVICE_TDISPLAY_P4)
+    // XL9535 INT is shared with touch and other inputs. Only retain a pending
+    // radio flag when the expander's SX1262 DIO1 bit is actually high.
+    bool dio1High = false;
+    if (!tdisplayP4IoReadRadioDio1(dio1High) || !dio1High) {
+        _rxFlag = false;
+        (void)tdisplayP4IoClearInterrupt();
+    }
 #endif
     if (kVerboseRadioIo) {
         // Dump header bytes for wire-format verification

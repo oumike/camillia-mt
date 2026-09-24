@@ -5,6 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
+P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
+
 if ! command -v pio >/dev/null 2>&1; then
   echo "PlatformIO CLI not found. Install it or run this from an environment with 'pio'."
   exit 1
@@ -21,6 +24,7 @@ fi
 # 8) cardputer
 # 9) mesh-deck
 # 10) wio-tracker-l2
+# 11) tdisplay-p4
 TARGET_LABELS=(
   "tdeck"
   "tdeck-pro"
@@ -32,6 +36,7 @@ TARGET_LABELS=(
   "cardputer"
   "mesh-deck"
   "wio-tracker-l2"
+  "tdisplay-p4"
 )
 
 TARGET_ENVS=(
@@ -45,11 +50,22 @@ TARGET_ENVS=(
   "cardputer-cap"
   "mesh-deck"
   "wio-tracker-l2"
+  "tdisplay-p4"
 )
 
 has_env() {
   local env_name="$1"
   grep -q "^\[env:${env_name}\]" platformio.ini
+}
+
+run_pio_for_env() {
+  local env_name="$1"
+  shift
+  if [ "$env_name" = "tdisplay-p4" ]; then
+    PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@"
+  else
+    pio "$@"
+  fi
 }
 
 echo "[TEST] Checking required environments in platformio.ini..."
@@ -66,7 +82,7 @@ for i in "${!TARGET_ENVS[@]}"; do
   env_name="${TARGET_ENVS[$i]}"
   echo ""
   echo "[BUILD] ${label} (${env_name})"
-  pio run -e "$env_name"
+  run_pio_for_env "$env_name" run -e "$env_name"
 done
 
 echo ""
@@ -85,8 +101,8 @@ for i in "${!TARGET_ENVS[@]}"; do
     case "$choice" in
       1)
         echo "[ERASE] Erasing flash on ${label} (${env_name})..."
-        pio run -e "$env_name" -t erase
-        pio run -e "$env_name" -t upload
+        run_pio_for_env "$env_name" run -e "$env_name" -t erase
+        run_pio_for_env "$env_name" run -e "$env_name" -t upload
         break
         ;;
       2)

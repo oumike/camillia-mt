@@ -16,6 +16,9 @@
 #if defined(DEVICE_WIO_TRACKER_L2)
 #include "hal/wio_tracker_l2_io.h"
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
 #include "live_util.h"
 #include "live_feed.h"
 #include "mesh_proto.h"
@@ -67,6 +70,10 @@ LV_FONT_DECLARE(lv_font_montserrat_bold_12);
 #include <esp_mac.h>
 #include <esp_random.h>
 #include <esp_heap_caps.h>
+#include <esp_idf_version.h>
+#if ESP_IDF_VERSION_MAJOR >= 5
+#include <esp_chip_info.h>
+#endif
 #include <nvs_flash.h>
 #include <nvs.h>
 #include <esp_partition.h>
@@ -75,10 +82,12 @@ LV_FONT_DECLARE(lv_font_montserrat_bold_12);
 #include "state_maps.h"
 #include "map_tiles.h"
 #include <Curve25519.h>
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
 #include <AudioBoard.h>
 #endif
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
 #include <driver/i2s.h>
 #endif
 #include <esp_sleep.h>
@@ -169,12 +178,40 @@ static auto &displayDev() {
 #endif
 }
 
+// Moves a top-edge header's contents in from a rounded panel's corners (see
+// UI_CORNER_SAFE_X in board.h). Call after the header's own padding is set:
+// this adds to it. Children placed with lv_obj_align() or flex are positioned
+// inside the padding, so they all move; a centred title stays centred.
+static inline void cornerSafeHeader(lv_obj_t *header) {
+#if UI_CORNER_SAFE_X > 0
+    if (!header) return;
+    lv_obj_set_style_pad_left(
+        header, lv_obj_get_style_pad_left(header, LV_PART_MAIN) + UI_CORNER_SAFE_X, 0);
+    lv_obj_set_style_pad_right(
+        header, lv_obj_get_style_pad_right(header, LV_PART_MAIN) + UI_CORNER_SAFE_X, 0);
+#else
+    (void)header;
+#endif
+}
+
+// The P4's portrait status strip under the nav bar; see statusStripInit(). Here
+// rather than with it because the nav bar and header, far above that, have to
+// know to leave its readings out.
+#if defined(DEVICE_TDISPLAY_P4) && (UI_BOTTOM_SAFE_H > 0) && (UI_PIXEL_SCALE > 1)
+#  define HAS_STATUS_STRIP 1
+#else
+#  define HAS_STATUS_STRIP 0
+#endif
+
 uint8_t myPubKey[32] = {0};
 uint8_t myPrivKey[32] = {0};
 uint8_t myDeviceRole = 0;
 
+// In LVGL pixels, which is what the draw buffer holds: panel pixels divided by
+// UI_PIXEL_SCALE (see board.h).
 static constexpr uint16_t kMaxHorRes =
-    (DEVICE_LCD_LANDSCAPE_W > DEVICE_LCD_PORTRAIT_W) ? DEVICE_LCD_LANDSCAPE_W : DEVICE_LCD_PORTRAIT_W;
+    ((DEVICE_LCD_LANDSCAPE_W > DEVICE_LCD_PORTRAIT_W) ? DEVICE_LCD_LANDSCAPE_W : DEVICE_LCD_PORTRAIT_W)
+    / UI_PIXEL_SCALE;
 #if defined(DEVICE_TLORA_PAGER_TFT)
 // Larger draw buffer -> fewer blocking SPI flushes per redraw (222px / 32 ~= 7
 // stripes instead of ~19), which removes the visible top-to-bottom "painting"
@@ -261,6 +298,12 @@ struct GlanceHeader {
     lv_obj_t *wxDesc;   // conditions, opposite the node name
     lv_obj_t *wxTemp;   // temperature, opposite the clock
     lv_obj_t *wxRule;   // the divider between the two columns, when there are two
+    // Set by the caller before building: weather goes under the clock, as a
+    // fuller block beneath a rule, instead of in a column beside it. Only the
+    // P4's landscape Home asks for it (openHomeDashboard()).
+    bool      wxBelow;
+    lv_obj_t *wxBelowRule;
+    lv_obj_t *wxBelowText;
 #endif
     // What the two icons above are currently showing, from glanceStatusIcons-
     // Key(). The clock and the battery are worth a repaint once a minute; GPS
@@ -621,6 +664,12 @@ struct CfgSliderPicker {
     void        (*apply)(int idx);
     const char *leftEnd;    // caption under the low end
     const char *rightEnd;   // caption under the high end
+    // Optional checkbox under the slider, for a yes/no that belongs to the
+    // same decision. Both null (the default for every spec that leaves them
+    // out) and there is no checkbox. Staged like the slider: *checkValue is
+    // written on Save, before apply() runs, and never on Cancel.
+    const char *checkLabel;
+    bool       *checkValue;
 };
 
 static lv_obj_t *s_cfgSliderBackdrop = nullptr;
@@ -633,6 +682,8 @@ static const CfgSliderPicker *s_cfgSliderSpec = nullptr;
 // must go out at the value the user actually chose, not at whatever the knob
 // happens to be resting on.
 static int       s_cfgSliderStaged = 0;
+static lv_obj_t *s_cfgSliderCheck = nullptr;
+static bool      s_cfgSliderCheckStaged = false;
 
 #if HAS_VOLUME_CONTROL
 static lv_obj_t *s_cfgVolBackdrop = nullptr;
@@ -850,6 +901,8 @@ static lv_obj_t *s_releaseNotesScroll = nullptr;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
 static lv_obj_t *s_nodeInfoModal = nullptr;
+// Sender Info, from the message actions menu; see openMsgSenderInfoModal().
+static lv_obj_t *s_msgInfoModal = nullptr;
 #endif
 static lv_obj_t *s_liveModal = nullptr;
 static lv_obj_t *s_liveList = nullptr;
@@ -1157,10 +1210,15 @@ static constexpr int kNodesActionBaseCount = 6;
 #if HAS_NODE_LOS
 // LOS sits after Locate where both exist, and takes Locate's index where it
 // does not — the Heltec has LOS but no Locate, so the two are independent.
+// Share sits just before Delete: after every action that exists on only some
+// boards, so none of their fixed indices move, and before Admin, which has to
+// stay last (see activeActionCount()).
 static constexpr int kNodesActionLos    = kNodesActionBaseCount;
-static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
+static constexpr int kNodesActionShare  = kNodesActionBaseCount + 1;
+static constexpr int kNodesActionDelete = kNodesActionBaseCount + 2;
 #else
-static constexpr int kNodesActionDelete = kNodesActionBaseCount;
+static constexpr int kNodesActionShare  = kNodesActionBaseCount;
+static constexpr int kNodesActionDelete = kNodesActionBaseCount + 1;
 #endif
 // Delete goes last on every board, after whichever of Locate and LOS this one
 // has. Appending rather than inserting is what keeps kMsgActionNodeMap — which
@@ -1196,6 +1254,8 @@ static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
     // that is not the word's first letter.
     'S',
 #endif
+    // 'H' for S(h)are: S is LOS's where LOS exists.
+    'H',
     // 'E' for Del(e)te: D is Send DM's and L is Locate's. It is one key on a
     // destructive action, which is why it opens a confirmation rather than
     // doing anything.
@@ -1219,6 +1279,9 @@ static bool s_nodesActionLosEnabled = false;
 // relayed — and a confirmation prompt that deletes nothing is worse than a row
 // that says up front it has nothing to act on.
 static bool s_nodesActionDeleteEnabled = false;
+// Share needs something to share: a node in the table with a real name, and
+// not this one (its own NodeInfo has its own send).
+static bool s_nodesActionShareEnabled = false;
 #if HAS_NODE_LOCATE
 // Locate needs a position to show. The row is built either way — a menu whose
 // contents move around depending on the node is harder to learn than one with a
@@ -1258,7 +1321,8 @@ static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTa
 //   0 .. 5  tapback reactions (kTapbackTray)
 //   6       "..."  -> full emoji picker in tapback mode
 //   7       Reply
-//   8 ..12  node actions, via kMsgActionNodeMap
+//   8       Sender Info (openMsgSenderInfoModal())
+//   9 ..13  node actions, via kMsgActionNodeMap
 //
 // Favorite is deliberately absent from message mode. It is a property of the
 // node rather than anything to do with the message, it is the one action here
@@ -1273,12 +1337,14 @@ static constexpr int kMsgActionNodeCount =
     (int)(sizeof(kMsgActionNodeMap) / sizeof(kMsgActionNodeMap[0]));
 static constexpr int kMsgActionMoreIdx  = kTapbackTrayCount;        // 6
 static constexpr int kMsgActionReplyIdx = kMsgActionMoreIdx + 1;    // 7
-static constexpr int kMsgActionNodeBase = kMsgActionReplyIdx + 1;   // 8
-static constexpr int kMsgActionCount    = kMsgActionNodeBase + kMsgActionNodeCount;  // 13
+static constexpr int kMsgActionInfoIdx  = kMsgActionReplyIdx + 1;   // 8
+static constexpr int kMsgActionNodeBase = kMsgActionInfoIdx + 1;    // 9
+static constexpr int kMsgActionCount    = kMsgActionNodeBase + kMsgActionNodeCount;  // 14
 static constexpr char kMsgActionShortcuts[kMsgActionCount] = {
     '1', '2', '3', '4', '5', '6',   // tapbacks
     'M',                            // more emoji
     'R',                            // reply
+    'S',                            // sender info
     'T', 'D', 'I', 'P', 'G'         // node actions, minus (F)avorite
 };
 
@@ -1318,6 +1384,7 @@ static inline bool nodesActionRowDisabled(int idx) {
     if (idx == kNodesActionLos && !s_nodesActionLosEnabled) return true;
 #endif
     if (idx == kNodesActionDelete && !s_nodesActionDeleteEnabled) return true;
+    if (idx == kNodesActionShare && !s_nodesActionShareEnabled) return true;
     return false;
 }
 
@@ -1476,7 +1543,17 @@ enum HeltecNavTarget : uint8_t {
 // for a while, on the reasoning that their bar is a second way in beside the
 // keys — but a tap target is a tap target whoever is aiming at it, and the four
 // pixels come out of a message list that can spare them.
+#if UI_LARGE_PANEL_PROFILE
+static constexpr int kBottomNavHeight = 56;
+#elif defined(DEVICE_TDISPLAY_P4)
+// Half as tall again. The pixel-doubled P4 is a 240x320-class screen with
+// nearly twice the height, so the message list can pay for bigger targets.
+// Every screen that carries the bar -- chat, its modal copies, the dashboard --
+// sizes from this, so the one number moves them all together.
+static constexpr int kBottomNavHeight = 42;
+#else
 static constexpr int kBottomNavHeight = 28;
+#endif
 #endif
 
 // Whether to draw the bottom nav bar at all. A touch-only board always does —
@@ -1774,6 +1851,19 @@ static constexpr bool kUseScrollKeysForMainNav = true;
 static constexpr bool kModalCloseUsesEscape = false;
 static const lv_font_t *kMainScreenFont = &lv_font_montserrat_10;
 static constexpr int kMainScreenChannelBtnHeight = 22;
+#elif defined(DEVICE_TDISPLAY_P4)
+static constexpr bool kPagerWheelChatNav = false;
+static constexpr bool kUseScrollKeysForMainNav = true;
+static constexpr bool kModalCloseUsesEscape = true;
+#if UI_LARGE_PANEL_PROFILE
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_24;
+static constexpr int kMainScreenChannelBtnHeight = 48;
+#else
+// Pixel-doubled to 284x616, where the T-Deck's sizes come out at about the
+// T-Deck's physical size: 12 px is ~1.9 mm here against its ~2.1 mm.
+static const lv_font_t *kMainScreenFont = &lv_font_montserrat_12;
+static constexpr int kMainScreenChannelBtnHeight = 24;
+#endif
 #else
 static constexpr bool kPagerWheelChatNav = false;
 static constexpr bool kUseScrollKeysForMainNav = false;
@@ -1783,7 +1873,10 @@ static constexpr int kMainScreenChannelBtnHeight = 22;
 #endif
 // The Mesh Deck's panel is 320x240, the same as the T-Deck's, so it takes the
 // T-Deck's roomier chat font rather than the small-screen default.
-#if defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
+#if UI_LARGE_PANEL_PROFILE
+static const lv_font_t *kChannelChatFont = &lv_font_montserrat_24;
+#elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9) \
+    || defined(DEVICE_TDISPLAY_P4)
 static const lv_font_t *kChannelChatFont = &lv_font_montserrat_12;
 #else
 static const lv_font_t *kChannelChatFont = kMainScreenFont;
@@ -1800,7 +1893,7 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // outright — see explicitChatFont() below for why a relative ladder could not
 // give them what they needed.
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
-    || defined(DEVICE_TDECK_PRO)
+    || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
 // These boards name their four sizes outright instead of deriving them.
 //
 // The shared ladder is relative: Medium is whatever base the caller passes and
@@ -1815,7 +1908,27 @@ static const lv_font_t *kChannelChatFont = kMainScreenFont;
 // same font (kMainScreenFont and kChannelChatFont are equal on both), so there
 // is no second anchor for it to be relative to.
 static const lv_font_t *explicitChatFont() {
-#if defined(DEVICE_TDECK_PRO)
+#if UI_LARGE_PANEL_PROFILE
+    switch (s_cfg.fontSize) {
+        case FONT_SIZE_SMALL:  return &lv_font_montserrat_18;
+        case FONT_SIZE_LARGE:  return &lv_font_montserrat_28;
+        case FONT_SIZE_XLARGE: return &lv_font_montserrat_32;
+        case FONT_SIZE_MEDIUM:
+        default:               return &lv_font_montserrat_24;
+    }
+#elif defined(DEVICE_TDISPLAY_P4)
+    // One step up from the T-Deck's relative ladder it used to share
+    // (10/12/14/16): Medium is what Extra Large was, and the rest follow in the
+    // same 2 px steps. 20 is compiled in, and given an emoji face, for this
+    // board alone (lv_conf.h, emoji_font.cpp).
+    switch (s_cfg.fontSize) {
+        case FONT_SIZE_SMALL:  return &lv_font_montserrat_14;
+        case FONT_SIZE_LARGE:  return &lv_font_montserrat_18;
+        case FONT_SIZE_XLARGE: return &lv_font_montserrat_20;
+        case FONT_SIZE_MEDIUM:
+        default:               return &lv_font_montserrat_16;
+    }
+#elif defined(DEVICE_TDECK_PRO)
     switch (s_cfg.fontSize) {
         case FONT_SIZE_SMALL:  return &lv_font_montserrat_12;
         case FONT_SIZE_LARGE:  return &lv_font_montserrat_16;
@@ -1837,7 +1950,7 @@ static const lv_font_t *explicitChatFont() {
 
 static const lv_font_t *scaledChatFontBase(const lv_font_t *base) {
 #if defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TLORA_PAGER_TFT) \
-    || defined(DEVICE_TDECK_PRO)
+    || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
     (void)base;
     return explicitChatFont();
 #else
@@ -2189,6 +2302,10 @@ static void onCfgHeaderInfoPressed(lv_event_t *e);
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 static void openNodeInfoModal();
 static void closeNodeInfoModal();
+#if HAS_MESSAGE_ACTIONS
+static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId);
+static void closeMsgSenderInfoModal();
+#endif
 #endif
 static void openLegendModal();
 static void closeLegendModal();
@@ -2661,6 +2778,12 @@ static void stateMapBootstrapRestoreWifi() {
 #ifndef LV_SYMBOL_GLOBE_TINY
 #define LV_SYMBOL_GLOBE_TINY LV_SYMBOL_WIFI
 #endif
+
+// The chat view's LoRa/MQTT mark, in front of every received message. One place
+// that picks it, so Sender Info (message actions) says it the same way.
+static inline const char *msgTransportIcon(bool viaMqtt) {
+    return viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
+}
 
 #if UI_TOUCH_ONLY_PROFILE
 // One X, in the top-right corner, for every screen and modal on the touch-only
@@ -3286,7 +3409,8 @@ static uint16_t notifyLedColorPreview565(uint8_t color) {
 }
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
 namespace {
 static bool sPagerAudioInitTried = false;
 static bool sPagerAudioReady = false;
@@ -3299,8 +3423,26 @@ static audio_driver::DriverPins sPagerAudioPins;
 static audio_driver::AudioBoard sPagerAudioBoard(audio_driver::AudioDriverES8311,
                                                  sPagerAudioPins);
 
+// The codec's I2C bus. On the T-Display P4 that is controller 1 re-pinned to
+// the codec's 20/21, which it shares with the keyboard accessory -- so every
+// codec access points it back here first (tdisplayP4I2c1()). Elsewhere the
+// codec has the main bus to itself.
+static inline TwoWire &pagerAudioCodecBus() {
+#if defined(DEVICE_TDISPLAY_P4)
+    return tdisplayP4I2c1(TDISPLAY_P4_I2C1_AUDIO);
+#else
+    return Wire;
+#endif
+}
+
+static inline void pagerAudioSetMute(bool mute) {
+    (void)pagerAudioCodecBus();
+    sPagerAudioBoard.setMute(mute);
+}
+
 static inline void pagerAudioApplyVolume(uint8_t volume) {
     if (sPagerAudioVolume == volume) return;
+    (void)pagerAudioCodecBus();
     sPagerAudioBoard.setVolume(volume);
     sPagerAudioVolume = volume;
 }
@@ -3314,6 +3456,11 @@ static void pagerAudioSetAmp(bool on) {
 #if defined(DEVICE_WIO_TRACKER_L2)
     if (!wioTrackerL2IoSetAudioPaPower(on)) {
         Serial.printf("[audio] Wio Tracker L2 PA %s failed\n", on ? "on" : "off");
+    }
+#elif defined(DEVICE_TDISPLAY_P4)
+    // XL9535 bit 6 (TDISPLAY_P4_EXP_AUDIO_POWER), LilyGO's amplifier enable.
+    if (!tdisplayP4IoSetAudioPower(on)) {
+        Serial.printf("[audio] T-Display P4 amp %s failed\n", on ? "on" : "off");
     }
 #else
     if (sPagerExpAddr == -2) sPagerExpAddr = xl9555FindAddr();
@@ -3396,7 +3543,7 @@ static bool pagerAudioEnsureReady() {
         Serial.println("[audio] ES8311 init retry");
     }
 
-    sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, Wire);
+    sPagerAudioPins.addI2C(audio_driver::PinFunction::CODEC, pagerAudioCodecBus());
     sPagerAudioPins.addI2S(audio_driver::PinFunction::CODEC,
                            AUDIO_DAC_I2S_MCLK,
                            AUDIO_DAC_I2S_BCK,
@@ -3451,7 +3598,7 @@ static inline void pagerAudioStartPlayback() {
     (void)i2s_write(kPagerI2SPort, preRoll, sizeof(preRoll),
                     &preRollWritten, 10 / portTICK_PERIOD_MS);
     // Unmute only once a clean stream of silence is already flowing → click-free.
-    sPagerAudioBoard.setMute(false);
+    pagerAudioSetMute(false);
 }
 
 static inline void pagerAudioStopPlayback() {
@@ -3461,7 +3608,7 @@ static inline void pagerAudioStopPlayback() {
     (void)i2s_write(kPagerI2SPort, tail, sizeof(tail), &tailWritten, 20 / portTICK_PERIOD_MS);
     // Mute while the output is silent, then drop the gain (now inaudible) and
     // leave the DAC muted for idle so it can't emit stray clicks between sounds.
-    sPagerAudioBoard.setMute(true);
+    pagerAudioSetMute(true);
     i2s_zero_dma_buffer(kPagerI2SPort);
     pagerAudioApplyVolume(kPagerAudioVolIdle);
     pagerAudioSetAmp(false);  // power down the amp for idle → no idle snaps
@@ -3969,7 +4116,8 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
     kbBlinkNotify(visualSource == MSG_ALERT_VISUAL_DM);
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
     if (s_cfg.msgAlertSound == MSG_ALERT_SOUND_OFF) return;
 
     switch (s_cfg.msgAlertSound) {
@@ -4047,7 +4195,8 @@ static void triggerMessageAlert(bool bypassRateLimit = false,
 // back up. Plays the default pattern whatever the alert style is set to — the
 // slider is about level, not about which sound.
 static void playVolumePreviewTone() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
     pagerAudioPlayAlertPattern();
 #elif defined(DEVICE_TDECK)
     tdeckPlayAlertPattern();
@@ -4069,7 +4218,8 @@ static void playSplashStartupRiff() {
     };
     static const size_t kCount = sizeof(kNotesHz) / sizeof(kNotesHz[0]);
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
     if (!pagerAudioEnsureReady()) return;
     pagerAudioStartPlayback();
     for (size_t i = 0; i < kCount; i++) {
@@ -6782,6 +6932,19 @@ static void loadBootOrientation() {
         return;
     }
     const uint8_t stored = p.getUChar("uiOrient", 0xFF);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Early P4 test builds seeded landscape before this target became
+    // portrait-first. If onboarding has not been completed, no user has had a
+    // chance to choose an orientation yet, so replace that stale seed once.
+    const bool onboardingIncomplete = !p.isKey("cfg") && !p.isKey("nodeLong");
+    if (onboardingIncomplete && stored == UI_ORIENT_LANDSCAPE) {
+        s_uiOrient = UI_ORIENT_PORTRAIT;
+        p.putUChar("uiOrient", s_uiOrient);
+        Serial.println("[orient] replaced pre-port stale landscape seed with Portrait");
+        p.end();
+        return;
+    }
+#endif
     if (stored == 0xFF) {
         p.putUChar("uiOrient", s_uiOrient);
         Serial.printf("[orient] no key yet - seeded %s from this build\n",
@@ -6801,6 +6964,24 @@ static void loadBootOrientation() {
 static constexpr bool uiPortrait() { return DEVICE_UI_VERTICAL != 0; }
 static inline void loadBootOrientation() {}
 #endif
+
+// Whether channels live in the overlay dropdown (true) or a list anchored
+// beside the chat, as on the Pager (false). A fixed property of every board
+// (UI_CHANNEL_LIST_DROPDOWN) except the T-Display P4, where it follows the
+// orientation chosen at boot: landscape has the Pager's width and takes its
+// list; portrait is 284 px wide and keeps the dropdown.
+//
+// The P4 compiles the dropdown code (UI_CHANNEL_LIST_DROPDOWN is 1 there), and
+// in landscape buildUi() turns that same list into the anchored column. So the
+// dropdown's open/close/measure paths are what have to stand down in
+// landscape, and they ask this.
+static inline bool channelListIsDropdown() {
+#if defined(DEVICE_TDISPLAY_P4)
+    return uiPortrait();
+#else
+    return UI_CHANNEL_LIST_DROPDOWN != 0;
+#endif
+}
 
 // ── Status icon ink ──────────────────────────────────────────────────────────
 // The GPS and Wi-Fi icons say four things by colour: located, searching,
@@ -7050,11 +7231,21 @@ static inline StatusIconInk glanceStatusInk() {
                           lv_color_make(255, 107, 107),
                           lv_color_make(244, 211, 94) };
 }
+#if defined(DEVICE_TDISPLAY_P4)
+// Not constants here: portrait on this panel has height to spare, and takes
+// larger faces for the title (orientationApplyOverlayGeometry()) and for the
+// clock and temperature (glanceFitHeroFonts()). Landscape keeps these.
+static const lv_font_t *kSleepOverlayTitleFont       = &lv_font_montserrat_18;
+static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
+static const lv_font_t *kSleepOverlayTimeFont        = &lv_font_montserrat_32;
+static const lv_font_t *kSleepOverlayWxFont          = &lv_font_montserrat_32;
+#else
 static const lv_font_t *const kSleepOverlayTitleFont = &lv_font_montserrat_18;
 static const lv_font_t *const kSleepOverlayNodeFont  = &lv_font_montserrat_14;
 static const lv_font_t *const kSleepOverlayTimeFont  = &lv_font_montserrat_32;
 // Same weight as the clock it sits beside: the two are the point of the row.
 static const lv_font_t *const kSleepOverlayWxFont    = &lv_font_montserrat_32;
+#endif
 #else
 static inline lv_color_t sleepOverlayInk() { return lv_color_make(0, 0, 0); }
 static inline lv_color_t sleepOverlayBg()  { return lv_color_make(255, 255, 255); }
@@ -7206,6 +7397,15 @@ static void orientationApplyOverlayGeometry() {
     kTdeckProTitleTop      = 30;
     kTdeckProNodeTop       = 58;
     kTdeckProTimeTop       = 82;
+#if defined(DEVICE_TDISPLAY_P4)
+    // A 32 px title rather than 18, so the rows under it move down: title line
+    // box 35 + 4, node line box 16 + 8. The clock's own size is settled when
+    // the header is built (glanceFitHeroFonts()); whatever it lands on, the
+    // widgets below start under it, so they give up the height, not the text.
+    kSleepOverlayTitleFont = &lv_font_montserrat_32;
+    kTdeckProNodeTop       = kTdeckProTitleTop + 35 + 4;
+    kTdeckProTimeTop       = kTdeckProNodeTop + 16 + 8;
+#endif
 }
 #elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int kTdeckProBandTop      = 3;
@@ -7451,11 +7651,48 @@ static void tdeckProRefreshSleepMsgRows() {
     }
 }
 
+// GPS as the status icons show it: enabled, fix, satellites. Read through here
+// by every status surface -- the chat header, the P4's strip (both from
+// refreshHeaderStatus()) and the glance band below -- so they agree.
+//
+// On the T-Display P4 the reading is held for a minute. A receiver working the
+// sky gains and drops satellites and the fix every few seconds, and redrawing
+// the icon for each one kept it constantly changing for no useful information.
+// Turning GPS on or off is the exception: that is the user's own action and
+// shows at once. Every other board reads it live, as before.
+#if defined(DEVICE_TDISPLAY_P4)
+static constexpr uint32_t kGpsUiHoldMs = 60000UL;
+#else
+static constexpr uint32_t kGpsUiHoldMs = 0;
+#endif
+static void gpsUiReading(bool &enabled, bool &fix, uint8_t &sats) {
+    static bool sHave = false;
+    static bool sEnabled = false;
+    static bool sFix = false;
+    static uint8_t sSats = 0;
+    static uint32_t sAtMs = 0;
+    const bool liveEnabled = gpsIsEnabled();
+    const uint32_t now = millis();
+    if (!sHave || kGpsUiHoldMs == 0 || liveEnabled != sEnabled
+        || (uint32_t)(now - sAtMs) >= kGpsUiHoldMs) {
+        sEnabled = liveEnabled;
+        sFix = liveEnabled && gpsHasFix();
+        sSats = liveEnabled ? gpsSats() : 0;
+        sAtMs = now;
+        sHave = true;
+    }
+    enabled = sEnabled;
+    fix = sFix;
+    sats = sSats;
+}
+
 // Everything the glance header's two status icons show, folded into one value
 // so a caller can ask "has any of this changed" without re-reading it twice.
 // Never zero: GlanceHeader::statusKey uses that for "not painted yet".
 static uint16_t glanceStatusIconsKey() {
-    const bool gpsEnabled = gpsIsEnabled();
+    bool gpsEnabled = false, gpsFix = false;
+    uint8_t gpsSatCount = 0;
+    gpsUiReading(gpsEnabled, gpsFix, gpsSatCount);
     wifi_mode_t wifiMode = WiFi.getMode();
     bool wifiApMode = (wifiMode == WIFI_AP);
 #ifdef WIFI_AP_STA
@@ -7463,13 +7700,13 @@ static uint16_t glanceStatusIconsKey() {
 #endif
     uint16_t key = 0x8000u;
     if (gpsEnabled)                                  key |= 0x0100u;
-    if (gpsEnabled && gpsHasFix())                   key |= 0x0200u;
+    if (gpsFix)                                      key |= 0x0200u;
     if (wifiApMode)                                  key |= 0x0400u;
     if (!wifiApMode && WiFi.status() == WL_CONNECTED) key |= 0x0800u;
     // Satellite count in the low byte: it is drawn, so a change in it is a
     // change on the panel. Clamped rather than masked — 255 and 0 must not
     // compare equal.
-    const unsigned sats = gpsEnabled ? gpsSats() : 0;
+    const unsigned sats = gpsSatCount;
     key |= (uint16_t)(sats > 99 ? 99 : sats);
     return key;
 }
@@ -7486,7 +7723,9 @@ static void paintGlanceStatusIcons(GlanceHeader &w) {
         return;
     }
 
-    const bool gpsEnabled = gpsIsEnabled();
+    bool gpsEnabled = false, gpsFix = false;
+    uint8_t gpsSatCount = 0;
+    gpsUiReading(gpsEnabled, gpsFix, gpsSatCount);
     wifi_mode_t wifiMode = WiFi.getMode();
     bool wifiApMode = (wifiMode == WIFI_AP);
 #ifdef WIFI_AP_STA
@@ -7494,8 +7733,8 @@ static void paintGlanceStatusIcons(GlanceHeader &w) {
 #endif
     const bool wifiConnected = (!wifiApMode && WiFi.status() == WL_CONNECTED);
 
-    paintStatusIcons(w.gps, w.wifi, gpsEnabled, gpsEnabled && gpsHasFix(),
-                     gpsEnabled ? gpsSats() : 0, wifiApMode, wifiConnected,
+    paintStatusIcons(w.gps, w.wifi, gpsEnabled, gpsFix,
+                     gpsSatCount, wifiApMode, wifiConnected,
                      glancePalette(w.themed).status);
 
     // Packed inward from the battery, the same order and direction the chat
@@ -7505,7 +7744,13 @@ static void paintGlanceStatusIcons(GlanceHeader &w) {
     if (lvObjValid(w.batt)) {
         lv_obj_t *band = lv_obj_get_parent(w.batt);
         if (band) lv_obj_update_layout(band);
-        lv_obj_align_to(w.wifi, w.batt, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        if (lv_obj_has_flag(w.batt, LV_OBJ_FLAG_HIDDEN)) {
+            // Battery hidden (the P4's status strip has it): Wi-Fi takes its
+            // place against the corner rather than leaving its width as a gap.
+            lv_obj_align_to(w.wifi, w.batt, LV_ALIGN_RIGHT_MID, 0, 0);
+        } else {
+            lv_obj_align_to(w.wifi, w.batt, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        }
         lv_obj_align_to(w.gps, w.wifi, LV_ALIGN_OUT_LEFT_MID, -7, 0);
     }
 
@@ -7620,6 +7865,40 @@ static void updateGlanceHeader(GlanceHeader &w) {
         // refresh to spend once a minute on a layout that has not moved.
         if (wxFresh != wasShown) alignGlanceHero(w, wxFresh);
     }
+    if (w.wxBelow && lvObjValid(w.wxBelowText)) {
+        if (wxFresh) {
+            // The fuller reading, one fact per line: conditions, how it feels,
+            // the wind, and where and how old. No degree sign -- it is not in
+            // the built-in faces -- so units read as the hero's do ("72F").
+            static const char *const kCompass[] = {
+                "N", "NE", "E", "SE", "S", "SW", "W", "NW"
+            };
+            const char *dir = kCompass[((wx.dirDeg % 360 + 360) % 360 + 22) / 45 % 8];
+            char gust[24] = "";
+            if (wx.gust > wx.wind) snprintf(gust, sizeof(gust), ", gusts %d", wx.gust);
+            char where[64] = "";
+            const uint32_t ageMin = weatherAgeMs() / 60000UL;
+            if (wx.place[0]) {
+                snprintf(where, sizeof(where), "\n%s, %lu min ago",
+                         wx.place, (unsigned long)ageMin);
+            } else {
+                snprintf(where, sizeof(where), "\n%lu min ago", (unsigned long)ageMin);
+            }
+            char text[224];
+            snprintf(text, sizeof(text),
+                     "%d%s  %s\nFeels %d%s, humidity %d%%\nWind %s %d %s%s%s",
+                     wx.temp, wx.tempUnit, wx.desc,
+                     wx.feels, wx.tempUnit, wx.humidityPct,
+                     dir, wx.wind, wx.windUnit, gust, where);
+            lv_label_set_text(w.wxBelowText, text);
+            lv_obj_clear_flag(w.wxBelowText, LV_OBJ_FLAG_HIDDEN);
+            if (lvObjValid(w.wxBelowRule)) lv_obj_clear_flag(w.wxBelowRule, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            // Nothing retrieved (or too old): no rule leading to nothing.
+            lv_obj_add_flag(w.wxBelowText, LV_OBJ_FLAG_HIDDEN);
+            if (lvObjValid(w.wxBelowRule)) lv_obj_add_flag(w.wxBelowRule, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 #endif
 
     // Read here rather than on its own timer, so the battery costs no extra
@@ -7686,9 +7965,44 @@ static void updateTdeckProSleepClock() {
 // would be on screen twice, a few centimetres apart. The lock screen always
 // passes true — it is an opaque, full-panel overlay, and nothing it covers is
 // showing anything.
+#if defined(DEVICE_TDISPLAY_P4)
+// Portrait on the P4: the clock and temperature at 40 px wherever they fit, 32
+// where they do not. Each sits in half the width beside the other (see
+// alignGlanceHero()), and a 12-hour "12:58 PM" at 40 px is wider than that half
+// of a 284 px panel, where the 24-hour form is not -- so it is measured, against
+// a worst-case reading in the clock format actually set, rather than assumed.
+static void glanceFitHeroFonts() {
+    if (!uiPortrait()) return;
+    const int colW = (int)lv_disp_get_hor_res(NULL) / 2 - kTdeckProBandInset - 6;
+    auto fits = [colW](const char *text, const lv_font_t *font) {
+        lv_point_t sz = {0, 0};
+        lv_text_get_size(&sz, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
+        return (int)sz.x <= colW;
+    };
+    struct tm worst = {};
+    worst.tm_hour = 12;   // "12", and PM wherever there is a suffix
+    worst.tm_min = 58;
+    char clockSample[LIVE_CLOCK_BUF];
+    liveFormatClock(worst, clockSample, sizeof(clockSample));
+    kSleepOverlayTimeFont = fits(clockSample, &lv_font_montserrat_40)
+                                ? &lv_font_montserrat_40 : &lv_font_montserrat_32;
+    // Three digits and a sign is as wide as a temperature gets.
+    kSleepOverlayWxFont = fits("-100\xC2\xB0" "F", &lv_font_montserrat_40)
+                              ? &lv_font_montserrat_40 : &lv_font_montserrat_32;
+}
+#endif
+
 static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
                               bool withStatusIcons, bool themed) {
     w.themed = themed;
+#if HAS_STATUS_STRIP
+    // Portrait: GPS, Wi-Fi and battery are in the status strip under the nav
+    // bar, which shows under this screen too -- not a second time up here.
+    if (uiPortrait()) withStatusIcons = false;
+#endif
+#if defined(DEVICE_TDISPLAY_P4)
+    glanceFitHeroFonts();   // before anything below reads those faces
+#endif
     const GlancePalette pal = glancePalette(themed);
 
     w.title = lv_label_create(parent);
@@ -7755,6 +8069,42 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_font(w.time, kSleepOverlayTimeFont, 0);
     lv_obj_set_style_text_color(w.time, pal.clockInk, 0);
 #if HAS_WEATHER
+    // Assigned on every path, for the reason given at w.wxRule below.
+    w.wxBelowRule = nullptr;
+    w.wxBelowText = nullptr;
+    if (w.wxBelow) {
+        // Weather under the clock rather than beside it: a rule across the
+        // column, and the fuller reading centred beneath. The side column is
+        // not built, so the node name and clock stay centred (alignGlanceHero()
+        // with nothing shown), and updateGlanceHeader() fills this instead.
+        w.wxDesc = nullptr;
+        w.wxTemp = nullptr;
+        w.wxRule = nullptr;
+        const int ruleY = kTdeckProTimeTop
+                        + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+        w.wxBelowRule = lv_obj_create(parent);
+        lv_obj_set_size(w.wxBelowRule, lv_pct(84), 1);
+        lv_obj_clear_flag(w.wxBelowRule, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_border_width(w.wxBelowRule, 0, 0);
+        lv_obj_set_style_radius(w.wxBelowRule, 0, 0);
+        lv_obj_set_style_pad_all(w.wxBelowRule, 0, 0);
+        lv_obj_set_style_bg_color(w.wxBelowRule, pal.ink, 0);
+        lv_obj_set_style_bg_opa(w.wxBelowRule, LV_OPA_40, 0);
+        lv_obj_align(w.wxBelowRule, LV_ALIGN_TOP_MID, 0, ruleY);
+        lv_obj_add_flag(w.wxBelowRule, LV_OBJ_FLAG_HIDDEN);
+
+        w.wxBelowText = lv_label_create(parent);
+        lv_obj_set_width(w.wxBelowText, lv_pct(92));
+        lv_obj_set_style_text_font(w.wxBelowText, kSleepOverlayNodeFont, 0);
+        lv_obj_set_style_text_color(w.wxBelowText, pal.ink, 0);
+        lv_obj_set_style_text_align(w.wxBelowText, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_line_space(w.wxBelowText, 3, 0);
+        lv_label_set_long_mode(w.wxBelowText, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(w.wxBelowText, "");
+        lv_obj_align(w.wxBelowText, LV_ALIGN_TOP_MID, 0, ruleY + 7);
+        lv_obj_add_flag(w.wxBelowText, LV_OBJ_FLAG_HIDDEN);
+        alignGlanceHero(w, /*wxShown=*/false);
+    } else {
     // The opposite column. Same two rows, mirrored: the sky on the node's row,
     // the temperature on the clock's.
     w.wxDesc = lv_label_create(parent);
@@ -7813,6 +8163,7 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     // first repaint that finds a fresh reading moves the pair left; until then
     // a header with no weather is drawn as one that never had any.
     alignGlanceHero(w, /*wxShown=*/false);
+    }   // !w.wxBelow
 #else
     lv_obj_align(w.time, LV_ALIGN_TOP_MID, 0, kTdeckProTimeTop);
 #endif
@@ -7824,8 +8175,10 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_font(w.date, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(w.date, pal.ink, 0);
     lv_obj_set_style_text_align(w.date, LV_TEXT_ALIGN_LEFT, 0);
+    // This band is the only row of the glance that reaches the top corners,
+    // so it alone takes the rounded-panel inset (board.h).
     lv_obj_align(w.date, LV_ALIGN_TOP_LEFT,
-                 kTdeckProBandInset, kTdeckProBandTop);
+                 kTdeckProBandInset + UI_CORNER_SAFE_X, kTdeckProBandTop);
 
     // Right half of the status band, opposite the date. Still the smallest text
     // on the screen -- it is a glance value, and on a panel with no colour the
@@ -7837,7 +8190,13 @@ static void buildGlanceHeader(lv_obj_t *parent, GlanceHeader &w,
     lv_obj_set_style_text_color(w.batt, pal.ink, 0);
     lv_obj_set_style_text_align(w.batt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(w.batt, LV_ALIGN_TOP_RIGHT,
-                 -kTdeckProBandInset, kTdeckProBandTop);
+                 -(kTdeckProBandInset + UI_CORNER_SAFE_X), kTdeckProBandTop);
+#if HAS_STATUS_STRIP
+    // In portrait the reading is in the status strip under the nav bar, which
+    // shows on this screen too. Kept and updated, only hidden: it is still the
+    // anchor the icons below are placed from (paintGlanceStatusIcons()).
+    if (uiPortrait()) lv_obj_add_flag(w.batt, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     // GPS and Wi-Fi, inside the same band, running inward from the battery.
     // "Is it on the network, does it know where it is" is half of what anyone
@@ -9136,13 +9495,13 @@ static bool chatScreenIsForeground() {
         && !s_composeModal && !s_emojiPickerModal && !s_legendModal
         && !s_channelActionsModal && !s_nodesActionModal && !s_tracerouteModal
         && !s_releaseNotesModal && !s_onboardingModal && !s_sysStatsModal
-        && !s_nodeInfoModal && !s_cfgActionMsgModal;
+        && !s_nodeInfoModal && !s_cfgActionMsgModal && !s_msgInfoModal;
 }
 #endif
 
 static bool pollUserButton(uint32_t nowMs) {
 #if defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0)
-#if !UI_TOUCH_ONLY_PROFILE
+#if !UI_TOUCH_ONLY_PROFILE || defined(DEVICE_TDISPLAY_P4)
     // Off the touch-only boards this button *is* the screen button, so it gets
     // the shared tap/hold rule rather than acting on a bare press edge. Its one
     // extra job -- standing in for Enter on the Config screen -- is checked
@@ -9157,6 +9516,7 @@ static bool pollUserButton(uint32_t nowMs) {
             && !s_lockScreenActive
 #endif
             ;
+#if !UI_TOUCH_ONLY_PROFILE
         if (uiIsUp && s_cfgModal) {
             // Edge-triggered, as it always was: Config's Enter is a press, not
             // a hold. Fed through the same debounce so the two cannot disagree
@@ -9169,6 +9529,12 @@ static bool pollUserButton(uint32_t nowMs) {
             }
             return screenBtn.stablePressed;
         }
+#else
+        // The T-Display P4 (HAS_WAKE_BUTTON, board.h): lock and unlock only,
+        // exactly as the Wio Tracker L2's Wake button. Config is tapped here,
+        // so it has no use for a hardware Enter.
+        (void)uiIsUp;
+#endif
         if (serviceWakeButton(screenBtn, pressed, nowMs, "BOOT button")) return true;
         // Held, or resting: nothing else on this board may act on it.
         if (screenBtn.stablePressed) return true;
@@ -9253,7 +9619,7 @@ static bool pollUserButton(uint32_t nowMs) {
         }
         return true;
     }
-#endif  // !UI_TOUCH_ONLY_PROFILE
+#endif  // !UI_TOUCH_ONLY_PROFILE || DEVICE_TDISPLAY_P4
 #endif  // USER_BUTTON_PIN
 
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
@@ -9414,6 +9780,25 @@ static bool camilliaKeyIsPreserved(const char *key) {
     return false;
 }
 
+static nvs_iterator_t nvsEntryFindCompat(const char *partition,
+                                         const char *namespaceName) {
+#if ESP_IDF_VERSION_MAJOR >= 5
+    nvs_iterator_t iterator = nullptr;
+    return nvs_entry_find(partition, namespaceName, NVS_TYPE_ANY, &iterator)
+               == ESP_OK ? iterator : nullptr;
+#else
+    return nvs_entry_find(partition, namespaceName, NVS_TYPE_ANY);
+#endif
+}
+
+static nvs_iterator_t nvsEntryNextCompat(nvs_iterator_t iterator) {
+#if ESP_IDF_VERSION_MAJOR >= 5
+    return nvs_entry_next(&iterator) == ESP_OK ? iterator : nullptr;
+#else
+    return nvs_entry_next(iterator);
+#endif
+}
+
 // Reclaims the per-key settings written by builds that predate the blob.
 // Enumerated rather than listed by name, so keys dropped from the writer along
 // the way are reclaimed too. Collects first and deletes after: removing entries
@@ -9427,7 +9812,7 @@ static int removeLegacyConfigKeys() {
     if (!doomed) return 0;
     int n = 0;
 
-    nvs_iterator_t it = nvs_entry_find("nvs", "camillia", NVS_TYPE_ANY);
+    nvs_iterator_t it = nvsEntryFindCompat("nvs", "camillia");
     while (it && n < cap) {
         nvs_entry_info_t info = {};
         nvs_entry_info(it, &info);
@@ -9436,7 +9821,7 @@ static int removeLegacyConfigKeys() {
             doomed[n][NVS_KEY_NAME_MAX_SIZE - 1] = '\0';
             n++;
         }
-        it = nvs_entry_next(it);
+        it = nvsEntryNextCompat(it);
     }
     if (it) nvs_release_iterator(it);   // loop stopped early; iterator still open
     if (n <= 0) { free(doomed); return 0; }
@@ -9640,7 +10025,7 @@ static int removeLegacyChannelKeys() {
     if (!doomed) return 0;
     int n = 0;
 
-    nvs_iterator_t it = nvs_entry_find("nvs", "mesh_ch", NVS_TYPE_ANY);
+    nvs_iterator_t it = nvsEntryFindCompat("nvs", "mesh_ch");
     while (it && n < cap) {
         nvs_entry_info_t info = {};
         nvs_entry_info(it, &info);
@@ -9649,7 +10034,7 @@ static int removeLegacyChannelKeys() {
             doomed[n][NVS_KEY_NAME_MAX_SIZE - 1] = '\0';
             n++;
         }
-        it = nvs_entry_next(it);
+        it = nvsEntryNextCompat(it);
     }
     if (it) nvs_release_iterator(it);
     if (n <= 0) { free(doomed); return 0; }
@@ -11245,8 +11630,60 @@ static void showTextareaCursor(lv_obj_t *ta) {
 static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     if (!keyboard) return;
     lv_obj_set_width(keyboard, lv_pct(100));
+#if UI_LARGE_PANEL_PROFILE
+    const int screenH = (int)lv_disp_get_ver_res(NULL);
+    const int keyboardH = min(360, max(240, screenH * 2 / 5));
+    lv_obj_set_flex_grow(keyboard, 0);
+    lv_obj_set_height(keyboard, keyboardH);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_24, LV_PART_ITEMS);
+    lv_obj_set_style_pad_all(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 4, LV_PART_ITEMS);
+#elif defined(DEVICE_TDISPLAY_P4)
+    // A fixed height pinned to the bottom, the way a phone keyboard sits and
+    // the way wadamesh's does -- not flex_grow. Growing into the rest of the
+    // modal is what the 240x320 boards want, where the rest is about half the
+    // screen; on this 596-tall portrait panel it was ~90% of it.
+    //
+    // 150 UI px is ~23 mm here (UI_PIXEL_SCALE, board.h): the physical size of
+    // wadamesh's 130 px keyboard on a T-Deck. Landscape is a 320x240-class
+    // shape, so it takes half the height, as wadamesh does there.
+    const int screenH = (int)lv_disp_get_ver_res(NULL);
+    lv_obj_set_flex_grow(keyboard, 0);
+    lv_obj_set_height(keyboard, uiPortrait() ? 150 : screenH / 2);
+
+    // What the keyboard gave up has to go somewhere. Where a sibling already
+    // grows (the admin transcript) it takes it and the keyboard, created last,
+    // is already at the bottom. Where nothing does -- the dialogs, whose rows
+    // are all fixed -- an invisible spacer above the keyboard takes it, rather
+    // than the keyboard floating mid-screen over blank space. A parent sized to
+    // its content (the composer) has no slack to take, so it gets none.
+    lv_obj_t *parent = lv_obj_get_parent(keyboard);
+    if (parent && lv_obj_get_style_layout(parent, LV_PART_MAIN) == LV_LAYOUT_FLEX
+        && lv_obj_get_style_height(parent, LV_PART_MAIN) != LV_SIZE_CONTENT) {
+        bool siblingGrows = false;
+        const uint32_t n = lv_obj_get_child_count(parent);
+        for (uint32_t i = 0; i < n; i++) {
+            lv_obj_t *child = lv_obj_get_child(parent, (int32_t)i);
+            if (child != keyboard
+                && lv_obj_get_style_flex_grow(child, LV_PART_MAIN) > 0) {
+                siblingGrows = true;
+                break;
+            }
+        }
+        if (!siblingGrows) {
+            lv_obj_t *spacer = lv_obj_create(parent);
+            lv_obj_remove_style_all(spacer);
+            lv_obj_clear_flag(spacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
+                                                      | LV_OBJ_FLAG_SCROLLABLE));
+            lv_obj_set_size(spacer, 1, 0);
+            lv_obj_set_flex_grow(spacer, 1);
+            lv_obj_move_to_index(spacer, lv_obj_get_index(keyboard));
+        }
+    }
+#elif defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_flex_grow(keyboard, 1);
-#if defined(DEVICE_WIO_TRACKER_L2)
     // Text entry owns the screen on the Wio Tracker L2. Remove keyboard chrome
     // and keep only a one-pixel key gap so the narrow QWERTY rows spend their
     // width on tap targets rather than nested modal/theme padding.
@@ -11255,6 +11692,8 @@ static void configureOnScreenKeyboard(lv_obj_t *keyboard) {
     lv_obj_set_style_pad_column(keyboard, 1, LV_PART_MAIN);
     lv_obj_set_style_pad_row(keyboard, 1, LV_PART_MAIN);
     lv_obj_set_style_pad_all(keyboard, 1, LV_PART_ITEMS);
+#else
+    lv_obj_set_flex_grow(keyboard, 1);
 #endif
 }
 #endif
@@ -11408,8 +11847,19 @@ static void openComposePrompt(uint32_t replyPacketId,
     if (modalH < 120) modalH = lv_disp_get_ver_res(NULL);
 
     s_composeModal = lv_obj_create(s_rootScreen);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Only as tall as what it holds, sitting on the bottom edge: the keyboard
+    // here is a fixed height (configureOnScreenKeyboard), so a full-screen
+    // modal left a band of nothing between it and the buttons. Content-sized,
+    // the buttons land on the keyboard, the input and title stack above them,
+    // and the conversation stays readable over the top.
+    (void)modalH;
+    lv_obj_set_size(s_composeModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_align(s_composeModal, LV_ALIGN_BOTTOM_MID, 0, -4);
+#else
     lv_obj_set_size(s_composeModal, modalW, modalH);
     lv_obj_align(s_composeModal, LV_ALIGN_CENTER, 0, 0);
+#endif
     lv_obj_clear_flag(s_composeModal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_composeModal, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_composeModal, lv_color_hex(0x0E285B), 0);
@@ -11456,14 +11906,45 @@ static void openComposePrompt(uint32_t replyPacketId,
         return;
     }
     lv_obj_set_width(s_composeInput, lv_pct(100));
-    lv_obj_set_height(s_composeInput, 44);
     lv_obj_set_style_text_font(s_composeInput, emojiFont(&lv_font_montserrat_14), 0);
     lv_obj_set_style_text_color(s_composeInput, lv_color_hex(0xE8F1FF), 0);
     lv_obj_set_style_bg_color(s_composeInput, lv_color_hex(0x102B61), 0);
     lv_obj_set_style_bg_opa(s_composeInput, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_composeInput, 1, 0);
     lv_obj_set_style_border_color(s_composeInput, lv_color_hex(0x4C76BA), 0);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Wrapping, several lines tall, so a message reads as you write it rather
+    // than scrolling sideways out of a single line. Four in portrait, where
+    // the panel has the room; two in landscape, where the half-height keyboard
+    // leaves about that much. Measured from the face, with explicit padding
+    // rather than the theme's, so the box is exactly that many lines.
+    {
+        const lv_coord_t composeLines = uiPortrait() ? 4 : 2;
+        const lv_coord_t composePad = 4;
+        lv_obj_set_style_pad_all(s_composeInput, composePad, 0);
+        lv_obj_set_height(s_composeInput,
+                          lv_font_get_line_height(emojiFont(&lv_font_montserrat_14))
+                              * composeLines
+                          + 2 * composePad + 2);   // + 1 px border each side
+    }
+    lv_textarea_set_one_line(s_composeInput, false);
+    // A wrapping box would take the keyboard's Enter as a line break. In the
+    // one-line box every other touch board uses, the textarea drops that
+    // character, and a mesh message is one line either way -- so drop it here
+    // too and keep Enter doing what it does there.
+    lv_obj_add_event_cb(s_composeInput,
+                        [](lv_event_t *e) {
+                            const char *ins = (const char *)lv_event_get_param(e);
+                            if (ins && strcmp(ins, "\n") == 0) {
+                                lv_textarea_set_insert_replace(
+                                    lv_event_get_target_obj(e), "");
+                            }
+                        },
+                        LV_EVENT_INSERT, nullptr);
+#else
+    lv_obj_set_height(s_composeInput, 44);
     lv_textarea_set_one_line(s_composeInput, true);
+#endif
     lv_textarea_set_max_length(s_composeInput, MESH_TEXT_MAX_LEN);
     lv_textarea_set_placeholder_text(s_composeInput, "Type message...");
     showTextareaCursor(s_composeInput);
@@ -12524,6 +13005,13 @@ static void refreshCfgModal() {
     const lv_font_t *cfgRowFont = &lv_font_montserrat_14;
     const int cfgPadTop = 6;
     const int cfgPadBottom = 6;
+#elif defined(DEVICE_TDISPLAY_P4)
+    // The touch rows below, grown into the room this panel has: a readable
+    // face and a taller target, ~47 px a row against the touch boards' ~34.
+    // The list scrolls, so the cost is only fewer rows on screen at once.
+    const lv_font_t *cfgRowFont = &lv_font_montserrat_16;
+    const int cfgPadTop = 14;
+    const int cfgPadBottom = 14;
 #elif UI_TOUCH_ONLY_PROFILE
     // Touch-only build: tall rows give a comfortable tap target. The action list
     // scrolls, so the extra height just means a bit more scrolling.
@@ -13678,9 +14166,24 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_bg_color(s_cfgBrightSlider, lvColorFrom565(s_ui.selectAccent), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_cfgBrightSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgBrightSlider, onCfgBrightSliderChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Room this panel has and the 6 px row gap does not give. A slider's knob
+    // and its 2 px focus outline both draw outside the slider's own box, so at
+    // 6 px they ran into the text either side -- which is what left the lock
+    // row looking wedged under the screen one. Space round each slider, a gap
+    // between the two groups, and one above the buttons below.
+    constexpr int kBrightSliderGap = 8;
+    constexpr int kBrightGroupGap  = 12;
+    constexpr int kBrightButtonGap = 16;
+    lv_obj_set_style_margin_top(s_cfgBrightSlider, kBrightSliderGap, 0);
+    lv_obj_set_style_margin_bottom(s_cfgBrightSlider, kBrightSliderGap, 0);
+#endif
 
 #if FEATURE_LOCK_SCREEN
     s_cfgBrightLockLabel = lv_label_create(s_cfgBrightModal);
+#if defined(DEVICE_TDISPLAY_P4)
+    lv_obj_set_style_margin_top(s_cfgBrightLockLabel, kBrightGroupGap, 0);
+#endif
     lv_obj_set_width(s_cfgBrightLockLabel, lv_pct(100));
     lv_obj_set_style_text_font(s_cfgBrightLockLabel, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(s_cfgBrightLockLabel, lv_color_hex(0xA7C7FF), 0);
@@ -13702,6 +14205,10 @@ static void openCfgBrightnessModal() {
     lv_obj_set_style_bg_color(s_cfgBrightLockSlider, lv_color_hex(0xE8F1FF), LV_PART_KNOB);
     lv_obj_add_event_cb(s_cfgBrightLockSlider, onCfgBrightLockSliderChanged,
                         LV_EVENT_VALUE_CHANGED, nullptr);
+#if defined(DEVICE_TDISPLAY_P4)
+    lv_obj_set_style_margin_top(s_cfgBrightLockSlider, kBrightSliderGap, 0);
+    lv_obj_set_style_margin_bottom(s_cfgBrightLockSlider, kBrightSliderGap, 0);
+#endif
 #endif
 
 #if UI_TOUCH_ONLY_PROFILE
@@ -13709,6 +14216,12 @@ static void openCfgBrightnessModal() {
         s_cfgBrightModal,
         [](lv_event_t *e) { LV_UNUSED(e); cancelCfgBrightness(); },
         [](lv_event_t *e) { LV_UNUSED(e); applyCfgBrightness(); });
+#if defined(DEVICE_TDISPLAY_P4)
+    // The row is the modal's last child; set the gap on it from here rather
+    // than teach the shared builder about one board.
+    lv_obj_set_style_margin_top(lv_obj_get_child(s_cfgBrightModal, -1),
+                                kBrightButtonGap, 0);
+#endif
 #else
     lv_obj_t *hint = lv_label_create(s_cfgBrightModal);
     lv_obj_set_width(hint, lv_pct(100));
@@ -13926,6 +14439,7 @@ static void closeCfgSliderModal() {
     s_cfgSliderCtl = nullptr;
     s_cfgSliderValue = nullptr;
     s_cfgSliderSpec = nullptr;
+    s_cfgSliderCheck = nullptr;
 }
 
 // Teardown-safe, like the brightness and volume equivalents: the settings
@@ -13946,9 +14460,13 @@ static void applyCfgSlider() {
     if (!spec) { closeCfgSliderModal(); return; }
     const int idx = (s_cfgSliderStaged >= 0 && s_cfgSliderStaged < spec->count)
                         ? s_cfgSliderStaged : 0;
+    const bool checked = s_cfgSliderCheckStaged;
     // Close first: apply() writes s_cfgStatus, and refreshCfgModal() below has
     // to see the modal already gone.
     closeCfgSliderModal();
+    // Before apply(), which may act on it straight away (Discovery starts its
+    // run from there).
+    if (spec->checkValue) *spec->checkValue = checked;
     if (spec->apply) spec->apply(idx);
     refreshCfgModal();
 }
@@ -13969,6 +14487,23 @@ static void onCfgSliderChanged(lv_event_t *e) {
     cfgSliderShow((int)lv_slider_get_value(slider));
 }
 
+// Keyboard builds reach the checkbox with Space; touch builds tap it. Both land
+// here so the staged value and the box on screen cannot disagree.
+static void toggleCfgSliderCheck() {
+    if (!s_cfgSliderSpec || !s_cfgSliderSpec->checkValue) return;
+    s_cfgSliderCheckStaged = !s_cfgSliderCheckStaged;
+    if (lvObjValid(s_cfgSliderCheck)) {
+        if (s_cfgSliderCheckStaged) lv_obj_add_state(s_cfgSliderCheck, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_cfgSliderCheck, LV_STATE_CHECKED);
+    }
+}
+
+static void onCfgSliderCheckChanged(lv_event_t *e) {
+    lv_obj_t *box = lv_event_get_target_obj(e);
+    if (!box) return;
+    s_cfgSliderCheckStaged = lv_obj_has_state(box, LV_STATE_CHECKED);
+}
+
 static void onCfgSliderBackdropPressed(lv_event_t *e) {
     if (lv_event_get_target_obj(e) != s_cfgSliderBackdrop) return;
     cancelCfgSliderAndRefresh();
@@ -13982,6 +14517,7 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (startIdx < 0) startIdx = 0;
     if (startIdx >= spec->count) startIdx = spec->count - 1;
     s_cfgSliderStaged = startIdx;
+    s_cfgSliderCheckStaged = spec->checkValue ? *spec->checkValue : false;
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -14069,6 +14605,19 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
         lv_label_set_text_fmt(ends, "%s  <->  %s", spec->leftEnd, spec->rightEnd);
     }
 
+    const bool hasCheck = (spec->checkLabel && spec->checkValue);
+    if (hasCheck) {
+        s_cfgSliderCheck = lv_checkbox_create(s_cfgSliderModal);
+        lv_checkbox_set_text(s_cfgSliderCheck, spec->checkLabel);
+        lv_obj_set_style_text_font(s_cfgSliderCheck, &lv_font_montserrat_12, 0);
+        // The same theme-mapped ink as the end captions above; see there.
+        lv_obj_set_style_text_color(s_cfgSliderCheck, lv_color_hex(0xD9E8FF), 0);
+        lv_obj_set_style_margin_top(s_cfgSliderCheck, 4, 0);
+        if (s_cfgSliderCheckStaged) lv_obj_add_state(s_cfgSliderCheck, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_cfgSliderCheck, onCfgSliderCheckChanged,
+                            LV_EVENT_VALUE_CHANGED, nullptr);
+    }
+
 #if UI_TOUCH_ONLY_PROFILE
     appendHeltecCancelSaveRow(
         s_cfgSliderModal,
@@ -14080,7 +14629,13 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text_fmt(hint, "Move=Adjust  Enter=Save  %s=Cancel", modalCloseKeyLabel());
+    if (hasCheck) {
+        lv_label_set_text_fmt(hint, "Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel",
+                              modalCloseKeyLabel());
+    } else {
+        lv_label_set_text_fmt(hint, "Move=Adjust  Enter=Save  %s=Cancel", modalCloseKeyLabel());
+    }
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 #endif
 
     cfgSliderShow(startIdx);
@@ -16046,6 +16601,11 @@ static uint32_t s_discoveryPresetScanWindowMs = kDiscoveryPresetScanWindowMs;
 static constexpr uint8_t kDiscoveryNoPresetPending = 0xFF;
 static uint8_t s_discoveryPendingPreset = kDiscoveryNoPresetPending;
 
+// "Save while discovering", from Sweep/Scan Settings. When set, the run writes
+// its results to storage as they arrive instead of waiting for the Save button.
+// Off at boot and remembered for the session, like the durations beside it.
+static bool s_discoverySaveWhileRunning = false;
+
 // Meshtastic's *polite* channel-utilization threshold (airtime.h:70-72); its
 // hard refusal is 40%. A sweep is discretionary and asks others to transmit, so
 // it is held to the polite one. Measured locally by Radio.channelUtilPercent()
@@ -16066,8 +16626,19 @@ static constexpr uint8_t kDiscoverySweepHopLimit = 3;
 //   Pager (480 wide): DIRECT | distance | HEARD ABOUT
 //   T-Deck, Mesh Deck, M9 (320): DIRECT + distance | HEARD ABOUT
 //   Cardputer, Heltec: one column, everything stacked
+//   T-Display P4: the Pager's three in landscape (616 wide), one in portrait
 static constexpr int kDiscoveryColDirect = 0;
-#if defined(DEVICE_TLORA_PAGER_TFT)
+#if defined(DEVICE_TDISPLAY_P4)
+// The one board whose shape is not known at compile time: the orientation is
+// chosen at boot (HAS_RUNTIME_ORIENTATION), so these are read when the screen
+// is built rather than fixed here. Landscape has the Pager's width and more;
+// portrait is 284 wide and stacks like the Heltec. uiPortrait() does not
+// change while the firmware runs, so every reader sees the same layout.
+#define kDiscoveryColDistance (uiPortrait() ? 0 : 1)
+#define kDiscoveryColHeard    (uiPortrait() ? 0 : 2)
+#define kDiscoveryCols        (kDiscoveryColHeard + 1)
+static constexpr int kDiscoveryColsMax = 3;
+#elif defined(DEVICE_TLORA_PAGER_TFT)
 static constexpr int kDiscoveryColDistance = 1;
 static constexpr int kDiscoveryColHeard    = 2;
 #elif defined(DEVICE_TDECK) || defined(DEVICE_MESH_DECK) || defined(DEVICE_M9)
@@ -16077,7 +16648,10 @@ static constexpr int kDiscoveryColHeard    = 1;
 static constexpr int kDiscoveryColDistance = 0;
 static constexpr int kDiscoveryColHeard    = 0;
 #endif
+#if !defined(DEVICE_TDISPLAY_P4)
 static constexpr int kDiscoveryCols = kDiscoveryColHeard + 1;
+static constexpr int kDiscoveryColsMax = kDiscoveryCols;
+#endif
 
 #if UI_TOUCH_ONLY_PROFILE
 // Touch build with no keyboard and one column of results: it has the width to
@@ -16098,7 +16672,13 @@ static constexpr uint32_t kDiscoveryBodyColor   = 0xD9E8FF;
 // Longest node name a row will print, including the terminator. Long names run
 // to 40 characters, which would wrap every row of a three-column Pager; one
 // column has the width to show far more of one.
+#if defined(DEVICE_TDISPLAY_P4)
+// Sized for one column; discoveryNodeLabel() cuts to the three-column length
+// when the orientation gives it three.
+static constexpr size_t kDiscoveryNameMax = 29;
+#else
 static constexpr size_t kDiscoveryNameMax = (kDiscoveryCols == 1) ? 29 : 19;
+#endif
 
 static lv_obj_t *s_discoveryModal = nullptr;
 static lv_obj_t *s_discoveryStatusLabel = nullptr;
@@ -16115,7 +16695,7 @@ static lv_obj_t *s_discoveryHintLabel = nullptr;
 // label text, so the two cannot disagree and neither is rewritten on a tick
 // where nothing changed -- lv_label_set_text() invalidates.
 static bool      s_discoveryActionsShowCancel = false;
-static lv_obj_t *s_discoveryColBoxes[kDiscoveryCols] = {};
+static lv_obj_t *s_discoveryColBoxes[kDiscoveryColsMax] = {};
 // 0 = no sweep in flight. Survives the modal closing so a sweep cannot be
 // restarted by closing and reopening, and so its result is there on return.
 static uint32_t s_discoverySweepStartedMs = 0;
@@ -20769,7 +21349,17 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
     // for a shortcut letter beside the glyph; with the letters gone (issue #78)
     // the glyph has the button to itself and this is simply the size that reads
     // at a glance without crowding a 320 px bar's ~35 px cells.
+#if UI_LARGE_PANEL_PROFILE
+    const lv_font_t *const navIconFont = &lv_font_montserrat_28;
+#elif defined(DEVICE_TDISPLAY_P4)
+    // Grown with the taller bar (kBottomNavHeight). 18 rather than a strict
+    // 1.5x: it is the largest face with an emoji fallback (emoji_font.cpp), and
+    // Chat, Nodes and Tools draw from that fallback -- a 24 would drop all three
+    // to their plain-symbol stand-ins.
+    const lv_font_t *const navIconFont = &lv_font_montserrat_18;
+#else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
+#endif
     const lv_font_t *const navEmojiFont = emojiFont(navIconFont);
     const bool navEmojiReady = (navEmojiFont != navIconFont);
     const char *const kContactIcon = "\U0001F464";  // bust in silhouette
@@ -20965,10 +21555,16 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     // fitting the first time a glyph or a font changes. "GPS 12" is the widest
     // ordinary reading -- "GPS SEARCH 12" exists but is allowed to sit under the
     // button edge, which is what the old width did too.
+#if defined(DEVICE_TDISPLAY_P4)
+    // Scaled with the P4's taller bar and larger icons (kBottomNavHeight).
+    const lv_font_t *const statusFont = &lv_font_montserrat_14;
+#else
+    const lv_font_t *const statusFont = &lv_font_montserrat_10;
+#endif
     lv_point_t szGps = {0, 0}, szWifi = {0, 0};
-    lv_text_get_size(&szGps, "GPS 12", &lv_font_montserrat_10, 0, 0,
+    lv_text_get_size(&szGps, "GPS 12", statusFont, 0, 0,
                      LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
-    lv_text_get_size(&szWifi, LV_SYMBOL_WIFI, &lv_font_montserrat_10, 0, 0,
+    lv_text_get_size(&szWifi, LV_SYMBOL_WIFI, statusFont, 0, 0,
                      LV_COORD_MAX, LV_TEXT_FLAG_EXPAND);
     // 2 right margin + gps + 7 gap + wifi + 2 left margin, matching the
     // alignments below.
@@ -20979,18 +21575,25 @@ static void buildNavStatusCluster(lv_obj_t *bar, lv_obj_t **boxOut, lv_obj_t **g
     // outliving the objects they name when a screen closes without clearing them.
     lv_obj_add_event_cb(box, onNavStatusClusterDeleted, LV_EVENT_DELETE, nullptr);
     lv_obj_set_size(box, statusBoxW, lv_pct(100));
+#if HAS_STATUS_STRIP
+    // In portrait these readings are in the status strip under the bar
+    // (statusStripInit()). Built and kept, only hidden: refreshHeaderStatus()
+    // still paints through these handles, and a hidden child takes no room in
+    // the bar's flex row, so the cells get the width back.
+    if (uiPortrait()) lv_obj_add_flag(box, LV_OBJ_FLAG_HIDDEN);
+#endif
     lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_pad_all(box, 0, 0);
 
     lv_obj_t *gps = lv_label_create(box);
-    lv_obj_set_style_text_font(gps, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(gps, statusFont, 0);
     lv_obj_set_style_text_color(gps, lv_color_hex(0xBFD6FF), 0);
     lv_obj_align(gps, LV_ALIGN_RIGHT_MID, -2, 0);
 
     lv_obj_t *wifi = lv_label_create(box);
-    lv_obj_set_style_text_font(wifi, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(wifi, statusFont, 0);
     lv_obj_set_style_text_color(wifi, lv_color_hex(0xBFD6FF), 0);
     lv_obj_align_to(wifi, gps, LV_ALIGN_OUT_LEFT_MID, -7, 0);
 
@@ -26099,6 +26702,13 @@ static void executeNodesActionSelection() {
             openEmojiPicker(/*sendMode=*/true);
             return;
         }
+        if (sel == kMsgActionInfoIdx) {
+            const uint32_t from = s_nodesActionNodeId;
+            const uint32_t pid = s_nodesActionPacketId;
+            closeNodesActionMenu();
+            openMsgSenderInfoModal(from, pid);
+            return;
+        }
         if (sel == kMsgActionReplyIdx) {
             const uint32_t replyId = s_selectedMsgReplyPacketId;
             char preview[kReplyPreviewTextMax + 1];
@@ -26138,6 +26748,19 @@ static void executeNodesActionSelection() {
         return;
     }
 #endif
+
+    if (s_nodesActionSelection == kNodesActionShare) {
+        if (!s_nodesActionShareEnabled) return;
+        const uint32_t shareId = s_nodesActionNodeId;
+        closeNodesActionMenu();
+        const NodeEntry *node = Nodes.find(shareId);
+        if (node && Radio.isReady() && s_myNodeId != 0) {
+            (void)Channels.sendSharedNodeInfo(s_myNodeId, shareId,
+                                              node->longName, node->shortName,
+                                              node->hasPubKey ? node->pubKey : nullptr);
+        }
+        return;
+    }
 
     if (s_nodesActionSelection == kNodesActionDelete) {
         // Greyed rows keep the highlight but do nothing when activated, same as
@@ -26318,7 +26941,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     s_nodesActionNodeId = nodeId;
     s_nodesActionSelection = 0;
 
-    const int modalW = min(230, lv_disp_get_hor_res(NULL) - 14);
+    const int modalW = min(230, (int)lv_disp_get_hor_res(NULL) - 14);
     const int modalMaxH = lv_disp_get_ver_res(NULL) - 10;
 
     lv_obj_t *actionParent = s_rootScreen ? s_rootScreen : s_nodesModal;
@@ -26388,6 +27011,8 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     // definition. Favorites are deletable: pinning a node says "keep this one
     // when the table evicts", not "protect it from me".
     s_nodesActionDeleteEnabled = (actionNode != nullptr);
+    s_nodesActionShareEnabled = actionNode && actionNode->hasName
+                                && nodeId != s_myNodeId;
 #if HAS_NODE_LOCATE
     // A node the table has never had a position for has nothing to point at, so
     // Locate is greyed rather than opening an empty map. (0, 0) is a real place
@@ -26424,6 +27049,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
     #if HAS_NODE_LOS
         "LOS",
     #endif
+        "Share",
         "Delete",
     #if HAS_ADMIN_TERMINAL
         "Admin",
@@ -26443,6 +27069,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #if HAS_NODE_LOS
         "LO(S)",
 #endif
+        "S(h)are",
         "Del(e)te",
 #if HAS_ADMIN_TERMINAL
         "(A)dmin",
@@ -26532,6 +27159,12 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
             labelText = "Reply";
 #else
             labelText = "(R)eply";
+#endif
+        } else if (s_nodesActionMsgMode && i == kMsgActionInfoIdx) {
+#if UI_TOUCH_ONLY_PROFILE
+            labelText = "Sender Info";
+#else
+            labelText = "(S)ender Info";
 #endif
         } else {
             // Message mode's node rows are not a straight offset — the map skips
@@ -26741,7 +27374,7 @@ static void openChannelActionsModal() {
     closeLegendModal();
     s_channelActionsChanIdx = s_activeChannel;
 
-    const int modalW = min(220, lv_disp_get_hor_res(NULL) - 14);
+    const int modalW = min(220, (int)lv_disp_get_hor_res(NULL) - 14);
     // Two 30px buttons plus the two-line title and the close hint overflow a
     // 135px-tall panel (Cardputer), and the modal is LV_SIZE_CONTENT — it would
     // simply run off the screen. Short panels get the compact button instead.
@@ -27104,6 +27737,7 @@ static void openLiveModal() {
     lv_obj_set_style_pad_top(header, 1, 0);
     lv_obj_set_style_pad_bottom(header, 1, 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
 #if defined(DEVICE_TDECK_PRO)
@@ -27403,7 +28037,7 @@ static void openLiveToolsModal() {
     // in, so it stays a centered block rather than spreading to fill a 480 px
     // Pager. kChanModalCellPct below is a percentage of this, not of the panel.
     const int toolsContentW =
-        min(kChanModalMaxW, lv_disp_get_hor_res(NULL) - 14) - 2 * kChanModalPad;
+        min(kChanModalMaxW, (int)lv_disp_get_hor_res(NULL) - 14) - 2 * kChanModalPad;
 
     lv_obj_t *title = lv_label_create(s_liveToolsModal);
     lv_obj_set_width(title, toolsContentW);
@@ -27519,8 +28153,15 @@ static void openLiveToolsModal() {
     // No close key on this build, so the way out has to be on screen — the same
     // corner X the tools it opens are closed with.
     reserveHeltecCloseXRow(title);
-    appendHeltecCloseX(s_liveToolsModal,
-                       [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); });
+    lv_obj_t *toolsCloseX = appendHeltecCloseX(
+        s_liveToolsModal, [](lv_event_t *e) { LV_UNUSED(e); closeLiveToolsModal(); });
+#if UI_CORNER_SAFE_X > 0
+    // Down out of the rounded top-right corner (board.h). Only the X moves:
+    // the grid is centred in the column and has no row shared with it.
+    if (toolsCloseX) lv_obj_align(toolsCloseX, LV_ALIGN_TOP_RIGHT, 0, UI_CORNER_SAFE_X);
+#else
+    (void)toolsCloseX;
+#endif
 #endif
 
     // Last, so the bar's layout spacer is the final child of the flex column and
@@ -27924,6 +28565,7 @@ static void openChUtilChartModal() {
     lv_obj_set_style_pad_top(header, 1, 0);
     lv_obj_set_style_pad_bottom(header, 1, 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
@@ -28121,6 +28763,7 @@ static void openSnrRssiChartModal() {
     lv_obj_set_style_pad_top(header, 1, 0);
     lv_obj_set_style_pad_bottom(header, 1, 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
@@ -29130,7 +29773,28 @@ static void glanceBuildChartPage(GlanceCarousel &c, lv_obj_t *host) {
 // pages of one list each where it is not. The same call homeDashSideBySide()
 // makes for the charts, and for the same reason.
 static void glanceBuildNodePages(GlanceCarousel &c, lv_obj_t *host, int cardH) {
-    if (homeDashSideBySide()) {
+#if defined(DEVICE_TDISPLAY_P4)
+    // The third shape: portrait on this panel is too narrow to halve across and
+    // tall enough to halve down, so both lists share one page as two rows. The
+    // page's 4 px row gap comes out of the two halves.
+    if (uiPortrait()) {
+        lv_obj_t *page = buildHomeDashPage(host, false);
+        const int halfH = (cardH - 4) / 2;
+        buildGlanceNodeCard(c, page, 0, "RECENTLY HEARD", false, halfH);
+        buildGlanceNodeCard(c, page, 1, "LONGEST SILENT", false, halfH);
+        glanceAddPage(c, page, GLANCE_PAGE_BOTH_LISTS);
+        return;
+    }
+#endif
+    bool bothOnOnePage = homeDashSideBySide();
+#if defined(DEVICE_TDISPLAY_P4)
+    // Landscape Home puts the widgets in the right-hand column only (see the
+    // dashboard builder), too narrow to halve again -- so there the two lists
+    // are two widgets of their own. The lock screen keeps the full width and
+    // keeps them side by side.
+    if (!uiPortrait() && &c == &s_homeCarousel) bothOnOnePage = false;
+#endif
+    if (bothOnOnePage) {
         lv_obj_t *page = buildHomeDashPage(host, true);
         buildGlanceNodeCard(c, page, 0, "RECENTLY HEARD", true, cardH);
         buildGlanceNodeCard(c, page, 1, "LONGEST SILENT", true, cardH);
@@ -29458,15 +30122,56 @@ static void openHomeDashboard() {
     lv_obj_clear_flag(s_homeDash, LV_OBJ_FLAG_GESTURE_BUBBLE);
     lv_obj_add_event_cb(s_homeDash, homeDashGestureCb, LV_EVENT_GESTURE, nullptr);
 
-    buildGlanceHeader(s_homeDash, s_homeGlance, !homeDashFooterShowsStatus(),
+    // Where the header goes and where the widgets go. Stacked everywhere --
+    // header across the top, widgets under it -- except P4 landscape, below.
+    lv_obj_t *headerParent = s_homeDash;
+    int widgetsX = 0;
+    int widgetsW = (int)lv_disp_get_hor_res(NULL);
+    bool twoColumns = false;
+#if defined(DEVICE_TDISPLAY_P4)
+    // Landscape on the P4 is 616 x ~256: stacked, the header spent the top of a
+    // very wide screen on a few words and left the widgets a letterbox. Side by
+    // side instead: the header block on the left, laid out as it is on a
+    // 240-wide portrait panel (this column is a little wider), and the widgets
+    // the full height of the right. Both start at one height, just under the
+    // rounded top corners (UI_CORNER_SAFE_X), so the two columns share a top
+    // edge; the header's band sits inside that already, clear of the curve.
+    if (!uiPortrait()) {
+        twoColumns = true;
+        const int leftW = widgetsW * 42 / 100;
+        const int blockH = kTdeckProTimeTop
+                         + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+        headerParent = lv_obj_create(s_homeDash);
+        lv_obj_remove_style_all(headerParent);
+        // Presses fall through to the dashboard, where the gesture handler is.
+        lv_obj_clear_flag(headerParent,
+                          (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+        const int columnsTop = max(4, UI_CORNER_SAFE_X);   // chartsTop below
+        // The full column, not just the header block: the weather goes under
+        // the clock here (GlanceHeader::wxBelow) and needs the room below it.
+        (void)blockH;
+        lv_obj_set_size(headerParent, leftW, contentH - columnsTop);
+#if HAS_WEATHER
+        s_homeGlance.wxBelow = true;
+#endif
+        lv_obj_align(headerParent, LV_ALIGN_TOP_LEFT, 0, columnsTop);
+        widgetsX = leftW;
+        widgetsW -= leftW;
+    }
+#endif
+    buildGlanceHeader(headerParent, s_homeGlance, !homeDashFooterShowsStatus(),
                       /*themed=*/true);
 
     // Under the header, where the lock screen puts its message previews. Its
     // widgets are positioned absolutely from the top, so the first free row is
     // the bottom of the clock — computed from the font rather than hardcoded,
     // because the six layouts do not share one.
-    const int chartsTop = kTdeckProTimeTop
-                        + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
+    //
+    // Side by side there is no header above them: they start at the top, below
+    // the rounded corner (UI_CORNER_SAFE_X, board.h).
+    const int chartsTop = twoColumns
+        ? max(4, UI_CORNER_SAFE_X)
+        : kTdeckProTimeTop + (int)lv_font_get_line_height(kSleepOverlayTimeFont) + 6;
 
     // Defensive floor. Every panel this builds on clears 90 px here, but the
     // header's height comes from a font and the dashboard's from a widget it
@@ -29495,8 +30200,8 @@ static void openHomeDashboard() {
     const int arrowGutter = 11;
     lv_obj_t *pageHost = lv_obj_create(s_homeDash);
     lv_obj_remove_style_all(pageHost);
-    lv_obj_set_size(pageHost, lv_disp_get_hor_res(NULL) - (2 * arrowGutter), chartsH);
-    lv_obj_align(pageHost, LV_ALIGN_TOP_LEFT, arrowGutter, chartsTop);
+    lv_obj_set_size(pageHost, widgetsW - (2 * arrowGutter), chartsH);
+    lv_obj_align(pageHost, LV_ALIGN_TOP_LEFT, widgetsX + arrowGutter, chartsTop);
     lv_obj_clear_flag(pageHost, LV_OBJ_FLAG_SCROLLABLE);
     s_homeCarousel.host = pageHost;
 #if HAS_HOME_CAROUSEL_TAP
@@ -29529,7 +30234,7 @@ static void openHomeDashboard() {
 #endif
             lv_label_set_text(arrow, side == 0 ? LV_SYMBOL_LEFT : LV_SYMBOL_RIGHT);
             lv_obj_align(arrow, side == 0 ? LV_ALIGN_TOP_LEFT : LV_ALIGN_TOP_RIGHT,
-                         side == 0 ? 1 : -1, arrowY);
+                         side == 0 ? widgetsX + 1 : -1, arrowY);
         }
     }
 
@@ -30156,6 +30861,12 @@ static void openWeatherModal() {
     // bar has to use the numbers the helper is written against or the bar sits
     // inset from the screen by the difference.
     lv_obj_set_style_pad_all(s_weatherModal, 4, 0);
+#if UI_CORNER_SAFE_X > 0
+    // Down out of the rounded top corners (board.h). The close X floats in the
+    // top-right corner and would sit under the curve; floating children still
+    // offset by the parent's padding, so the X and the title row move together.
+    lv_obj_set_style_pad_top(s_weatherModal, 4 + UI_CORNER_SAFE_X, 0);
+#endif
     lv_obj_set_style_pad_row(s_weatherModal, kWeatherRowPad, 0);
     lv_obj_set_flex_flow(s_weatherModal, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_weatherModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
@@ -30326,6 +31037,7 @@ static void openBeaconsModal() {
     lv_obj_set_style_pad_top(header, 1, 0);
     lv_obj_set_style_pad_bottom(header, 1, 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
@@ -30781,6 +31493,7 @@ static void openMqttMonitorModal() {
     // The root is the whole subject of the screen, so it is the title.
     char titleText[64];
     snprintf(titleText, sizeof(titleText), "%s/2/e/#", s_cfg.mqttRoot);
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xD9E8FF), 0);
@@ -31440,6 +32153,10 @@ static void discoverySectionFinish(DiscoverySection &s, const char *emptyText) {
 // Nodes.find() is a linear scan — looking it up again once per row would make
 // drawing the list quadratic in the size of the node table.
 static void discoveryNodeLabel(const NodeEntry &e, char *out, size_t outLen) {
+#if defined(DEVICE_TDISPLAY_P4)
+    // The multi-column length every other board sets through kDiscoveryNameMax.
+    if (kDiscoveryCols > 1 && outLen > 19) outLen = 19;
+#endif
     if (e.hasName && e.longName[0]) {
         utf8util::copyTruncate(out, outLen, e.longName);
         return;
@@ -31660,9 +32377,10 @@ static void discoveryJsonNode(File &f, bool &first, const NodeEntry *e,
              (unsigned long)nodeId, shortEsc, longEsc, extra ? extra : "");
 }
 
-// Writes the current picture to /camillia/discovery-<stamp>.json. Fills msg
-// with what to put on the status line either way.
-static bool discoverySaveJson(char *msg, size_t msgLen) {
+// Picks a fresh /camillia/discovery-<stamp>.json that does not exist yet. Split
+// from the write so a run that saves as it goes can pick its file once and keep
+// rewriting it. Fills msg on failure.
+static bool discoveryPickSavePath(char *path, size_t pathLen, char *msg, size_t msgLen) {
     if (!storageBegin()) {
         snprintf(msg, msgLen, "No %s - not saved", storageName());
         return false;
@@ -31682,15 +32400,25 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
         snprintf(stamp, sizeof(stamp), "boot-%lus", (unsigned long)(millis() / 1000UL));
     }
 
-    char path[64];
-    snprintf(path, sizeof(path), "/camillia/discovery-%s.json", stamp);
+    snprintf(path, pathLen, "/camillia/discovery-%s.json", stamp);
     for (int attempt = 2; attempt <= 9 && storageFs().exists(path); attempt++) {
-        snprintf(path, sizeof(path), "/camillia/discovery-%s-%d.json", stamp, attempt);
+        snprintf(path, pathLen, "/camillia/discovery-%s-%d.json", stamp, attempt);
     }
     if (storageFs().exists(path)) {
         snprintf(msg, msgLen, "Save failed - too many this second");
         return false;
     }
+    return true;
+}
+
+// Writes the current picture to `path`, replacing whatever is there. Fills msg
+// with what to put on the status line either way.
+static bool discoveryWriteJson(const char *path, char *msg, size_t msgLen) {
+    if (!storageBegin()) {
+        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        return false;
+    }
+    const time_t nowEpoch = time(nullptr);
 
     File f = storageFs().open(path, FILE_WRITE);
     if (!f) {
@@ -31811,6 +32539,13 @@ static bool discoverySaveJson(char *msg, size_t msgLen) {
     const char *name = strrchr(path, '/');
     snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
     return true;
+}
+
+// The Save button: a new file each press, so an earlier snapshot is never lost.
+static bool discoverySaveJson(char *msg, size_t msgLen) {
+    char path[64];
+    if (!discoveryPickSavePath(path, sizeof(path), msg, msgLen)) return false;
+    return discoveryWriteJson(path, msg, msgLen);
 }
 #endif  // HAS_FILE_STORAGE
 
@@ -32177,10 +32912,103 @@ static void discoveryStartPresetScan(uint8_t preset) {
                   (unsigned)kPresets[preset].sf, (unsigned)kPresets[preset].cr);
 }
 
+// A hash of what the screen would show: who has been heard, at what distance
+// and SNR, plus the neighbor reports. The screen rebuilds when it changes, and a
+// run saving as it goes rewrites its file when it changes.
+//
+// This has to hash the nodes themselves, not just count them. The obvious
+// cheap signature -- node count plus report count -- misses the case that
+// matters most: after a Clear, a node reappears by being *heard from* again,
+// which changes neither count. `meshDirty` does not save us either, because
+// processMeshPacket() returns false for NodeInfo, Position, Telemetry and
+// NeighborInfo -- precisely the packets that refill this screen.
+static uint32_t discoveryResultSig() {
+    uint32_t sig = (uint32_t)discoveryUsableReportCount() * 7919u
+                 + s_discoveryClearedMs;
+    const int total = Nodes.count();
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || !discoveryHeardFrom(*e)) continue;
+        // Whole-dB SNR: the reading jitters constantly, and rebuilding the tree
+        // (or rewriting the file) for a tenth of a dB is not worth it.
+        sig += e->nodeId
+             ^ ((uint32_t)e->hops << 24)
+             ^ (e->hasHops ? 0x5A5A5A5Au : 0u)
+             ^ ((uint32_t)(int32_t)e->snr << 8);
+    }
+    return sig;
+}
+
+// ── Save while discovering ───────────────────────────────────────────────────
+// One file per run, picked when it starts and rewritten as results change, so a
+// six-hour sweep leaves one current snapshot rather than dozens -- and whatever
+// was heard is on the card even if the run is cut short by a reboot or a flat
+// battery, which the Save button at the end cannot promise.
+//
+// Rate-limited: a busy mesh changes the result set many times a minute, and each
+// write is the whole file. One final write when the run ends, however it ends.
+#if HAS_FILE_STORAGE
+static constexpr uint32_t kDiscoveryLiveSaveMinGapMs = 5000;
+static bool     s_discoveryLiveSaveActive = false;
+static char     s_discoveryLiveSavePath[64] = {};
+static uint32_t s_discoveryLiveSaveSig = 0;
+static uint32_t s_discoveryLiveSaveMs = 0;
+
+static void discoveryLiveSaveBegin() {
+    s_discoveryLiveSaveActive = false;
+    char msg[72];
+    if (!discoveryPickSavePath(s_discoveryLiveSavePath, sizeof(s_discoveryLiveSavePath),
+                               msg, sizeof(msg))
+        || !discoveryWriteJson(s_discoveryLiveSavePath, msg, sizeof(msg))) {
+        // The run goes ahead regardless; it just says it is not being saved.
+        discoverySetStatus(msg);
+        Serial.printf("[discovery] save while discovering unavailable: %s\n", msg);
+        return;
+    }
+    s_discoveryLiveSaveActive = true;
+    s_discoveryLiveSaveSig = discoveryResultSig();
+    s_discoveryLiveSaveMs = millis();
+    Serial.printf("[discovery] saving as it runs to %s\n", s_discoveryLiveSavePath);
+}
+
+static void discoveryLiveSaveService() {
+    if (!s_discoveryLiveSaveActive) return;
+    char msg[72];
+    if (!discoveryRunInFlight()) {
+        // Ended -- completed, cancelled or aborted. The final picture, then done.
+        s_discoveryLiveSaveActive = false;
+        const bool ok = discoveryWriteJson(s_discoveryLiveSavePath, msg, sizeof(msg));
+        if (!ok) {
+            discoverySetStatus(msg);
+        } else if (s_discoveryStatus[0]) {
+            // Keep the run's own summary and say where it went.
+            char line[sizeof(s_discoveryStatus)];
+            snprintf(line, sizeof(line), "%s - saved", s_discoveryStatus);
+            discoverySetStatus(line);
+        }
+        refreshDiscoveryModal(true);
+        return;
+    }
+    const uint32_t now = millis();
+    if ((uint32_t)(now - s_discoveryLiveSaveMs) < kDiscoveryLiveSaveMinGapMs) return;
+    const uint32_t sig = discoveryResultSig();
+    if (sig == s_discoveryLiveSaveSig) return;
+    s_discoveryLiveSaveSig = sig;
+    s_discoveryLiveSaveMs = now;
+    if (!discoveryWriteJson(s_discoveryLiveSavePath, msg, sizeof(msg))) {
+        // Keep trying: a card that was briefly busy should not end the saving.
+        Serial.printf("[discovery] live save failed: %s\n", msg);
+    }
+}
+#else
+static inline void discoveryLiveSaveBegin() {}
+static inline void discoveryLiveSaveService() {}
+#endif
+
 // Closes out a sweep once its collection window has passed. Runs from the main
 // loop whether or not the modal is open, so a sweep started and then abandoned
 // still clears and still counts.
-static void serviceDiscoverySweep() {
+static void serviceDiscoverySweepWindow() {
     // A UI rebuild deletes the root screen — and the modal with it — without
     // going through closeDiscoveryModal(). For a plain sweep that costs nothing;
     // for a scan it would strand the radio on a foreign preset until the next
@@ -32236,6 +33064,13 @@ static void serviceDiscoverySweep() {
     refreshDiscoveryModal(true);
 }
 
+// The window check, then the live save -- in that order, so a run that has
+// just closed gets its final write on the same pass.
+static void serviceDiscoverySweep() {
+    serviceDiscoverySweepWindow();
+    discoveryLiveSaveService();
+}
+
 static void refreshDiscoveryModal(bool force) {
     if (!s_discoveryModal || !s_discoveryColBoxes[0] || !s_discoveryStatusLabel) return;
     if (!lvObjValid(s_discoveryModal)) {
@@ -32270,6 +33105,16 @@ static void refreshDiscoveryModal(bool force) {
                                     s_discoverySweepWindowMs / 1000UL);
             snprintf(msg, sizeof(msg), "Sweeping... %s/%s", sofar, total);
         }
+#if HAS_FILE_STORAGE
+        // Saving as it goes: name the file on the same line, so there is no
+        // question where the results are landing while it runs.
+        if (s_discoveryLiveSaveActive) {
+            const char *name = strrchr(s_discoveryLiveSavePath, '/');
+            name = name ? name + 1 : s_discoveryLiveSavePath;
+            const size_t used = strlen(msg);
+            snprintf(msg + used, sizeof(msg) - used, " - saving to %s", name);
+        }
+#endif
         discoverySetStatus(msg);
     } else if (!s_discoveryStatus[0]) {
         discoverySetStatus("Ready");
@@ -32297,29 +33142,10 @@ static void refreshDiscoveryModal(bool force) {
     }
 
     // Rebuilding tears down and recreates every label in the columns, so it is
-    // gated on the visible set actually having changed.
-    //
-    // This has to hash the nodes themselves, not just count them. The obvious
-    // cheap signature — node count plus report count — misses the case that
-    // matters most: after a Clear, a node reappears by being *heard from*
-    // again, which changes neither count. `meshDirty` does not save us either,
-    // because processMeshPacket() returns false for NodeInfo, Position,
-    // Telemetry and NeighborInfo — precisely the packets that refill this
-    // screen. So the scan is the price of the screen being live at all. It is
-    // one cheap pass over the node table, and only while the modal is open.
-    uint32_t sig = (uint32_t)discoveryUsableReportCount() * 7919u
-                 + s_discoveryClearedMs;
-    const int total = Nodes.count();
-    for (int i = 0; i < total; i++) {
-        const NodeEntry *e = Nodes.at(i);
-        if (!e || !discoveryHeardFrom(*e)) continue;
-        // Whole-dB SNR: the reading jitters constantly, and rebuilding the tree
-        // under the user for a tenth of a dB is not worth it.
-        sig += e->nodeId
-             ^ ((uint32_t)e->hops << 24)
-             ^ (e->hasHops ? 0x5A5A5A5Au : 0u)
-             ^ ((uint32_t)(int32_t)e->snr << 8);
-    }
+    // gated on the visible set actually having changed (discoveryResultSig()).
+    // That is one cheap pass over the node table, and only while the modal is
+    // open -- the price of the screen being live at all.
+    const uint32_t sig = discoveryResultSig();
     if (!force && sig == s_discoveryRenderedSig) return;
     s_discoveryRenderedSig = sig;
 
@@ -32372,6 +33198,9 @@ static void discoveryDurationApply(int idx) {
         s_discoveryPresetScanWindowMs = chosen;
         discoveryStartPresetScan(preset);
     }
+    // Only for a run that actually started: a refusal already said why, and
+    // there is nothing to save.
+    if (s_discoverySaveWhileRunning && discoveryRunInFlight()) discoveryLiveSaveBegin();
     refreshDiscoveryModal(true);
 }
 
@@ -32401,24 +33230,27 @@ static void openDiscoveryDurationModal(uint8_t preset) {
     for (int i = 0; i < kDiscoveryDurationCount; i++) {
         if (kDiscoveryDurations[i].ms == current) { startIdx = i; break; }
     }
-    static const CfgSliderPicker kSweepSpec = {
-        "Sweep For",
+    // One title for both: the modal is where a run is set up, and the duration
+    // is now one of two settings on it. The checkbox is offered only where there
+    // is storage to save to.
+#if HAS_FILE_STORAGE
+    static const char *const kSaveWhileLabel = "Save while discovering";
+    bool *const saveWhileValue = &s_discoverySaveWhileRunning;
+#else
+    static const char *const kSaveWhileLabel = nullptr;
+    bool *const saveWhileValue = nullptr;
+#endif
+    static const CfgSliderPicker kRunSpec = {
+        "Sweep/Scan Settings",
         kDiscoveryDurationCount,
         discoveryDurationLabelFor,
         discoveryDurationApply,
         "30 sec",
         "6 hours",
+        kSaveWhileLabel,
+        saveWhileValue,
     };
-    static const CfgSliderPicker kScanSpec = {
-        "Scan For",
-        kDiscoveryDurationCount,
-        discoveryDurationLabelFor,
-        discoveryDurationApply,
-        "30 sec",
-        "6 hours",
-    };
-    openCfgSliderModal((preset == kDiscoveryNoPresetPending) ? &kSweepSpec : &kScanSpec,
-                       startIdx);
+    openCfgSliderModal(&kRunSpec, startIdx);
 }
 
 static void discoveryPresetPickCommit() {
@@ -32702,6 +33534,7 @@ static void openDiscoveryModal() {
     lv_obj_set_style_pad_top(header, 1, 0);
     lv_obj_set_style_pad_bottom(header, 1, 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
 #if defined(DEVICE_TDECK_PRO)
@@ -34351,6 +35184,7 @@ static void openDmModal() {
     lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(
@@ -34647,6 +35481,7 @@ static void openNodesModal() {
     lv_obj_set_style_border_width(header, 1, 0);
     lv_obj_set_style_border_color(header, lv_color_hex(0x335D9D), 0);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
     s_nodesTitleLabel = title;
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
@@ -35162,6 +35997,11 @@ static void openLegendModal() {
     lv_obj_set_style_border_width(s_legendModal, 1, 0);
     lv_obj_set_style_border_color(s_legendModal, lv_color_hex(0x5C86C6), 0);
     lv_obj_set_style_pad_all(s_legendModal, 4, 0);
+#if UI_CORNER_SAFE_X > 0
+    // Down out of the rounded top corners (board.h), title and floating close X
+    // together -- the same move the Weather screen makes.
+    lv_obj_set_style_pad_top(s_legendModal, 4 + UI_CORNER_SAFE_X, 0);
+#endif
     lv_obj_set_style_pad_row(s_legendModal, 4, 0);
 #if UI_TOUCH_ONLY_PROFILE
     lv_obj_set_style_pad_row(s_legendModal, 5, 0);
@@ -35411,11 +36251,16 @@ static void openCfgModal() {
     lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
+    cornerSafeHeader(header);
     lv_obj_t *title = lv_label_create(header);
 #if defined(DEVICE_TLORA_PAGER_TFT)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
 #elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+#elif defined(DEVICE_TDISPLAY_P4)
+    // Up with the rows (refreshCfgModal()), but not to 16: the bar also carries
+    // the status and the Info button in ~248 px between the corner insets.
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
 #else
     lv_obj_set_style_text_font(title, &lv_font_montserrat_12, 0);
 #endif
@@ -35432,6 +36277,8 @@ static void openCfgModal() {
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
 #elif defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_MESH_DECK)
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_14, 0);
+#elif defined(DEVICE_TDISPLAY_P4)
+    lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_12, 0);
 #else
     lv_obj_set_style_text_font(s_cfgHeaderStatus, &lv_font_montserrat_10, 0);
 #endif
@@ -37784,6 +38631,17 @@ static void onboardingComputeModalSizeForStage(uint8_t stage, int screenW, int s
     modalW = screenW;
 #endif
 
+#if UI_LARGE_PANEL_PROFILE
+    const bool needsKeyboard = stage == ONBOARD_STAGE_ENTER_LONG
+                            || stage == ONBOARD_STAGE_ENTER_SHORT;
+    modalW = screenW - 32;
+    const int maxModalW = uiPortrait() ? 536 : 900;
+    if (modalW > maxModalW) modalW = maxModalW;
+    modalH = screenH - 32;
+    const int maxModalH = needsKeyboard ? 860 : 560;
+    if (modalH > maxModalH) modalH = maxModalH;
+#endif
+
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (stage == ONBOARD_STAGE_ASK_IMPORT) {
         // Cardputer import prompt is keyboard-only and titleless, so keep the
@@ -37830,15 +38688,23 @@ static void renderOnboardingStage() {
     const bool compactImportStage = false;
 #endif
 
+#if UI_LARGE_PANEL_PROFILE
+    const bool largeOnboarding = true;
+#else
+    const bool largeOnboarding = false;
+#endif
+
     lv_obj_set_style_pad_all(s_onboardingModal,
-                             compactImportStage ? 6 : (compactOnboarding ? 8 : 10),
+                             largeOnboarding ? 16
+                               : (compactImportStage ? 6 : (compactOnboarding ? 8 : 10)),
                              0);
 #if defined(DEVICE_WIO_TRACKER_L2)
     lv_obj_set_style_pad_left(s_onboardingModal, 2, 0);
     lv_obj_set_style_pad_right(s_onboardingModal, 2, 0);
 #endif
     lv_obj_set_style_pad_row(s_onboardingModal,
-                             compactImportStage ? 4 : (compactOnboarding ? 6 : 8),
+                                                         largeOnboarding ? 14
+                                                             : (compactImportStage ? 4 : (compactOnboarding ? 6 : 8)),
                              0);
 
     // Wipe children and rebuild for the current stage. Keep the modal
@@ -37850,24 +38716,31 @@ static void renderOnboardingStage() {
     s_onboardingPickLabel = nullptr;
 
     const lv_font_t *onboardingBodyFont =
-        compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12;
+                largeOnboarding ? &lv_font_montserrat_24
+                    : (compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12);
     const lv_font_t *onboardingPickerFont =
-        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16;
+                largeOnboarding ? &lv_font_montserrat_32
+                    : (compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
     const lv_font_t *onboardingInputFont =
-        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_14;
+                largeOnboarding ? &lv_font_montserrat_24
+                    : (compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_14);
+        const lv_font_t *onboardingStatusFont =
+                largeOnboarding ? &lv_font_montserrat_18 : &lv_font_montserrat_10;
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *onboardingButtonFont =
-        compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12;
-    const int onboardingButtonH = compactOnboarding ? 30 : 36;
-    const int onboardingButtonMinW = compactOnboarding ? 86 : 100;
-    const int onboardingStepBtnW = compactOnboarding ? 34 : 40;
-    const int onboardingStepBtnH = compactOnboarding ? 30 : 36;
+                largeOnboarding ? &lv_font_montserrat_18
+                    : (compactOnboarding ? &lv_font_montserrat_10 : &lv_font_montserrat_12);
+        const int onboardingButtonH = largeOnboarding ? 56 : (compactOnboarding ? 30 : 36);
+        const int onboardingButtonMinW = largeOnboarding ? 132 : (compactOnboarding ? 86 : 100);
+        const int onboardingStepBtnW = largeOnboarding ? 60 : (compactOnboarding ? 34 : 40);
+        const int onboardingStepBtnH = largeOnboarding ? 56 : (compactOnboarding ? 30 : 36);
 #endif
-    const int onboardingInputH = compactOnboarding ? 30 : 34;
+        const int onboardingInputH = largeOnboarding ? 60 : (compactOnboarding ? 30 : 34);
 
 #if !defined(DEVICE_CARDPUTER_LORA_HAT)
     const lv_font_t *onboardingTitleFont =
-        compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16;
+                largeOnboarding ? &lv_font_montserrat_28
+                    : (compactOnboarding ? &lv_font_montserrat_12 : &lv_font_montserrat_16);
     lv_obj_t *title = lv_label_create(s_onboardingModal);
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, onboardingTitleFont, 0);
@@ -37891,7 +38764,7 @@ static void renderOnboardingStage() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
-        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(s_onboardingStatus, "Y/Enter=Import   N/Bksp=Skip");
@@ -38008,7 +38881,7 @@ static void renderOnboardingStage() {
 
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
-        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
         #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -38069,7 +38942,7 @@ static void renderOnboardingStage() {
 
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
-        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -38171,7 +39044,7 @@ static void renderOnboardingStage() {
 
         s_onboardingStatus = lv_label_create(s_onboardingModal);
         lv_obj_set_width(s_onboardingStatus, lv_pct(100));
-        lv_obj_set_style_text_font(s_onboardingStatus, &lv_font_montserrat_10, 0);
+        lv_obj_set_style_text_font(s_onboardingStatus, onboardingStatusFont, 0);
         lv_obj_set_style_text_color(s_onboardingStatus, lv_color_hex(0xA7C7FF), 0);
         lv_obj_set_style_text_align(s_onboardingStatus, LV_TEXT_ALIGN_CENTER, 0);
     #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -38232,6 +39105,22 @@ static void renderOnboardingStage() {
 #if UI_TOUCH_ONLY_PROFILE
         s_onboardingKeyboard = lv_keyboard_create(s_onboardingModal);
         configureOnScreenKeyboard(s_onboardingKeyboard);
+#if defined(DEVICE_TDISPLAY_P4)
+        // configureOnScreenKeyboard() put a growing spacer above the keyboard
+        // to hold it on the bottom edge, and that spacer takes every free pixel
+        // -- so centring the column has nothing left to centre with. A second
+        // one at the top shares the space with it equally: the title, input and
+        // buttons land centred in what the keyboard leaves, and it stays put.
+        {
+            lv_obj_t *topSpacer = lv_obj_create(s_onboardingModal);
+            lv_obj_remove_style_all(topSpacer);
+            lv_obj_clear_flag(topSpacer, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE
+                                                         | LV_OBJ_FLAG_SCROLLABLE));
+            lv_obj_set_size(topSpacer, 1, 0);
+            lv_obj_set_flex_grow(topSpacer, 1);
+            lv_obj_move_to_index(topSpacer, 0);
+        }
+#endif
         lv_keyboard_set_mode(s_onboardingKeyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
         lv_keyboard_set_textarea(s_onboardingKeyboard, s_onboardingInput);
         lv_obj_add_event_cb(s_onboardingKeyboard,
@@ -38298,8 +39187,17 @@ static void openOnboardingModal() {
     lv_obj_set_style_pad_all(s_onboardingModal, 10, 0);
     lv_obj_set_style_pad_row(s_onboardingModal, 8, 0);
     lv_obj_set_flex_flow(s_onboardingModal, LV_FLEX_FLOW_COLUMN);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Centred top to bottom. The modal is nearly the full 596-px height, and
+    // packed from the top every stage left most of the screen empty below its
+    // buttons. The name stages centre over the keyboard instead; see the
+    // spacer added with it in renderOnboardingStage().
+    lv_obj_set_flex_align(s_onboardingModal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+#else
     lv_obj_set_flex_align(s_onboardingModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
+#endif
     lv_obj_move_foreground(s_onboardingBackdrop);
 
     renderOnboardingStage();
@@ -38509,6 +39407,9 @@ static bool prepareGlobalNavigation() {
     closeHomeDashboard();
 #endif
     closeEmojiPicker();
+#if HAS_MESSAGE_ACTIONS
+    closeMsgSenderInfoModal();
+#endif
     closeTracerouteProgressModal();
     closeChUtilChartModal();
     closeSnrRssiChartModal();
@@ -38618,6 +39519,8 @@ static void openNavHelpShortcut() {
 // Home closes it and stops there, so the gesture stays a way out of things
 // rather than a toggle that can leave you where you started.
 static bool homeShouldOpenChannelList() {
+    // Anchored beside the chat already: nothing to open.
+    if (!channelListIsDropdown()) return false;
     if (!chatScreenIsForeground()) return false;
     if (isChannelDropdownVisible()) return false;
     // The Tools surfaces sit above chat but outside that predicate's list — it
@@ -39536,6 +40439,10 @@ static void pumpKeyboardInput() {
                 applyCfgSlider();
                 continue;
             }
+            if (k == ' ') {
+                toggleCfgSliderCheck();   // no-op when the picker has no checkbox
+                continue;
+            }
             int steps = 0;
             if (k == 'j' || k == 'J')            steps = -1;
             else if (k == 'k' || k == 'K')       steps = 1;
@@ -40296,6 +41203,29 @@ static void pumpKeyboardInput() {
             }
             continue;
         }
+
+#if HAS_MESSAGE_ACTIONS
+        // Sender Info (message actions). Over whatever screen the message was
+        // on; scrolls with Up/Down and closes with the close key, and on a
+        // touch build any key dismisses it.
+        if (s_msgInfoModal) {
+#if !UI_TOUCH_ONLY_PROFILE
+            if (k == KEY_SCROLL_UP) {
+                scrollListClamped(s_msgInfoModal, 18);
+                continue;
+            }
+            if (k == KEY_SCROLL_DN) {
+                scrollListClamped(s_msgInfoModal, -18);
+                continue;
+            }
+            if (isModalCloseKey(k) || isBackspaceKey(k)) closeMsgSenderInfoModal();
+            continue;
+#else
+            closeMsgSenderInfoModal();
+            continue;
+#endif
+        }
+#endif
 
 #if !defined(DEVICE_TLORA_PAGER_TFT)
         // The (I)nformation popup layers over the CFG modal. Every keyboard
@@ -42702,6 +43632,38 @@ static void bootTimeNtpSync() {
     applyTimezoneFromConfig();
 }
 
+#if UI_PIXEL_SCALE > 1
+// Writes a block of UI pixels (board.h) to the panel, each one as a
+// UI_PIXEL_SCALE-square block. x, y, w and h are in UI pixels; stride is the
+// source's row pitch in pixels. One source row at a time, so the expansion
+// needs a few KB rather than a second copy of the block.
+//
+// Templated on the pixel type because LVGL hands over native-order RGB565 and
+// an LGFX sprite stores it byte-swapped; both pass through untouched.
+template <typename PixelT>
+static void pushPixelScaled(int32_t x, int32_t y, int32_t w, int32_t h,
+                            const PixelT *src, int32_t stride) {
+    static PixelT s_rows[(size_t)kMaxHorRes * UI_PIXEL_SCALE * UI_PIXEL_SCALE];
+    if (w <= 0 || h <= 0 || w > (int32_t)kMaxHorRes) return;
+    const int32_t scaledW = w * UI_PIXEL_SCALE;
+    displayDev().startWrite();
+    for (int32_t row = 0; row < h; row++) {
+        const PixelT *in = src + (size_t)row * (size_t)stride;
+        PixelT *out = s_rows;
+        for (int32_t i = 0; i < w; i++) {
+            for (int k = 0; k < UI_PIXEL_SCALE; k++) *out++ = in[i];
+        }
+        for (int r = 1; r < UI_PIXEL_SCALE; r++) {
+            memcpy(s_rows + (size_t)r * (size_t)scaledW, s_rows,
+                   (size_t)scaledW * sizeof(PixelT));
+        }
+        displayDev().pushImage(x * UI_PIXEL_SCALE, (y + row) * UI_PIXEL_SCALE,
+                               scaledW, UI_PIXEL_SCALE, s_rows);
+    }
+    displayDev().endWrite();
+}
+#endif
+
 static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
@@ -42733,7 +43695,13 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
 #else
     // v9 hands over a raw byte buffer in the display's colour format (RGB565).
     uint16_t *pixels = (uint16_t *)px_map;
+#if UI_PIXEL_SCALE > 1
+    // LVGL draws at 1/UI_PIXEL_SCALE of the panel (board.h). The mirror and
+    // screenshot hooks below still see LVGL's own pixels.
+    pushPixelScaled(area->x1, area->y1, w, h, (const lgfx::rgb565_t *)pixels, w);
+#else
     displayDev().pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)pixels);
+#endif
 #if HAS_VNC_HOST
     vncHostCaptureFlush(area->x1, area->y1, w, h, pixels);
 #endif
@@ -42765,6 +43733,147 @@ static void lvglFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
 #endif
     lv_display_flush_ready(disp);
 }
+
+// ── P4 portrait status strip ─────────────────────────────────────────────────
+// GPS, Wi-Fi and battery, in the blank strip under the nav bar that keeps the
+// UI clear of the panel's rounded bottom corners (UI_BOTTOM_SAFE_H, board.h).
+// Portrait only: that is the shape with height to spare, and the header gives
+// the room the battery leaves to the clock (layoutHeaderInlineItems()).
+//
+// The strip is outside the display LVGL lays the UI out on -- that is what
+// keeps every screen above the curve -- so it gets a small display of its own
+// rather than a row inside the main one. Every layout keeps the screen height it
+// already had, and the strip still draws with LVGL's fonts and symbols. Its
+// flush writes below the main display, scaled exactly like lvglFlush(). Nothing
+// on it is interactive, so no input device is attached.
+//
+// Centred, so its ends stay clear of the corners the strip exists to avoid.
+// Painted from refreshHeaderStatus() with the same readings as the header.
+#if HAS_STATUS_STRIP
+static lv_display_t *s_stripDisplay = nullptr;
+static uint8_t      *s_stripBuf = nullptr;
+static int32_t       s_stripTopY = 0;        // UI pixels: where the strip starts
+static lv_obj_t     *s_stripGps = nullptr;
+static lv_obj_t     *s_stripWifi = nullptr;
+static lv_obj_t     *s_stripBattIcon = nullptr;
+static lv_obj_t     *s_stripBatt = nullptr;
+
+static void lvglStripFlush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
+    const int32_t w = area->x2 - area->x1 + 1;
+    const int32_t h = area->y2 - area->y1 + 1;
+    pushPixelScaled(area->x1, s_stripTopY + area->y1, w, h,
+                    (const lgfx::rgb565_t *)px_map, w);
+    lv_display_flush_ready(disp);
+}
+
+// `uiW` and `topY` in UI pixels: the main display's width and height.
+static void statusStripInit(int32_t uiW, int32_t topY) {
+    if (s_stripDisplay || !uiPortrait()) return;
+    const size_t bufBytes = (size_t)uiW * UI_BOTTOM_SAFE_H * 2u;   // RGB565
+    s_stripBuf = (uint8_t *)heap_caps_malloc(bufBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_stripBuf) {
+        s_stripBuf = (uint8_t *)heap_caps_malloc(bufBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    if (!s_stripBuf) {
+        Serial.println("[strip] buffer allocation failed; no status strip");
+        return;
+    }
+    // lv_display_create() leaves the default display alone once there is one,
+    // so every lv_disp_get_*_res(NULL) in the UI still answers for the main one.
+    s_stripDisplay = lv_display_create(uiW, UI_BOTTOM_SAFE_H);
+    if (!s_stripDisplay) {
+        heap_caps_free(s_stripBuf);
+        s_stripBuf = nullptr;
+        Serial.println("[strip] display allocation failed; no status strip");
+        return;
+    }
+    s_stripTopY = topY;
+    lv_display_set_color_format(s_stripDisplay, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(s_stripDisplay, lvglStripFlush);
+    lv_display_set_buffers(s_stripDisplay, s_stripBuf, nullptr, (uint32_t)bufBytes,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+    lv_obj_t *scr = lv_display_get_screen_active(s_stripDisplay);
+    lv_obj_remove_style_all(scr);
+    // Black like the rest of the strip: on this AMOLED that is pixels off, so
+    // the corners the strip sits between stay invisible.
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *row = lv_obj_create(scr);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_center(row);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 12, 0);
+
+    // The nav bar's status size on this board (buildNavStatusCluster()).
+    const lv_font_t *font = &lv_font_montserrat_14;
+    s_stripGps = lv_label_create(row);
+    lv_obj_set_style_text_font(s_stripGps, font, 0);
+    s_stripWifi = lv_label_create(row);
+    lv_obj_set_style_text_font(s_stripWifi, font, 0);
+
+    // Icon and reading as one item, so the column gap does not open between them.
+    lv_obj_t *batt = lv_obj_create(row);
+    lv_obj_remove_style_all(batt);
+    lv_obj_set_size(batt, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(batt, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(batt, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(batt, 4, 0);
+    // Reading first, then the icon: "100%" to the left of the battery.
+    s_stripBatt = lv_label_create(batt);
+    lv_obj_set_style_text_font(s_stripBatt, font, 0);
+    // Coloured in statusStripPaint(), not here: see there.
+    lv_label_set_text(s_stripBatt, "");
+    s_stripBattIcon = lv_label_create(batt);
+    lv_obj_set_style_text_font(s_stripBattIcon, font, 0);
+    lv_label_set_text(s_stripBattIcon, LV_SYMBOL_BATTERY_EMPTY);
+
+    Serial.printf("[strip] status strip %ldx%d at UI y=%ld\n",
+                  (long)uiW, UI_BOTTOM_SAFE_H, (long)topY);
+}
+
+static void statusStripPaint(bool gpsEnabled, bool gpsFix, uint8_t gpsSats,
+                             bool wifiApMode, bool wifiConnected,
+                             uint8_t battPct, float battV, lv_color_t battInk) {
+    if (!s_stripDisplay) return;
+    // The lock screen's ink, not the header's: it is chosen for a black ground,
+    // which this always is, where the header's follows the UI theme.
+    paintStatusIcons(s_stripGps, s_stripWifi, gpsEnabled, gpsFix, gpsSats,
+                     wifiApMode, wifiConnected, glanceStatusInk());
+    // A battery rather than the header's dot: with room for a real icon it can
+    // show the level as well as the colour. Same five steps LVGL's symbol set
+    // has, and the header's charge colour on it.
+    const char *icon = (battPct >= 90) ? LV_SYMBOL_BATTERY_FULL
+                     : (battPct >= 65) ? LV_SYMBOL_BATTERY_3
+                     : (battPct >= 40) ? LV_SYMBOL_BATTERY_2
+                     : (battPct >= 15) ? LV_SYMBOL_BATTERY_1
+                                       : LV_SYMBOL_BATTERY_EMPTY;
+    lv_label_set_text(s_stripBattIcon, icon);
+    lv_obj_set_style_text_color(s_stripBattIcon, battInk, 0);
+    // Formatted here rather than copied from the header's label, so the strip
+    // does not depend on another widget's state to have a reading. The same
+    // choice of units the header makes (Config -> battery display).
+    char battText[12];
+    if (s_cfg.battDisplayMode == BATT_DISPLAY_VOLTAGE) {
+        snprintf(battText, sizeof(battText), "%.2fV", (double)battV);
+    } else {
+        snprintf(battText, sizeof(battText), "%u%%", (unsigned)battPct);
+    }
+    lv_label_set_text(s_stripBatt, battText);
+    // A fixed ink, set on every paint. lv_color_hex() is the theme remap in this
+    // file (themedColorHex()), and the strip is built with the display -- before
+    // the theme table is filled -- so 0xBFD6FF resolved to an all-zero
+    // statusText and the reading was drawn black on the strip's black. The
+    // strip is black on every theme, so it wants the plain colour anyway.
+    lv_obj_set_style_text_color(s_stripBatt, lv_color_make(0xBF, 0xD6, 0xFF), 0);
+}
+#endif
 
 #if HAS_VNC_HOST
 static void lvglVncPointerRead(lv_indev_t *indev, lv_indev_data_t *data) {
@@ -42834,6 +43943,19 @@ static void lvglTouchRead(lv_indev_t *indev, lv_indev_data_t *data) {
     const bool touched = meshDeckReadTouch(&tx, &ty);
 #else
     const bool touched = displayDev().getTouch(&tx, &ty);
+#endif
+#if UI_PIXEL_SCALE > 1
+    // Panel pixels back into LVGL's scaled-down space (board.h).
+    tx /= UI_PIXEL_SCALE;
+    ty /= UI_PIXEL_SCALE;
+#endif
+#if UI_BOTTOM_SAFE_H > 0
+    // A finger in the blank strip under the UI (board.h) meant the row just
+    // above it -- the nav bar, as often as not -- so give it that row.
+    {
+        const int32_t maxY = (int32_t)lv_disp_get_ver_res(NULL) - 1;
+        if (ty > maxY) ty = maxY;
+    }
 #endif
 
 #if defined(DEVICE_MESH_DECK) && defined(MESH_DECK_TOUCH_TRACE)
@@ -42959,6 +44081,72 @@ static uint32_t s_splashStatusDotMs = 0;
 
 static constexpr uint32_t kSplashDotIntervalMs = 350;
 
+// ── Splash canvas ───────────────────────────────────────────────────────────
+// The splash draws straight to the panel in fixed pixel sizes, so on a
+// pixel-scaled panel (UI_PIXEL_SCALE, board.h) it would come out at a fraction
+// of the size it was laid out for. There it draws into a UI-sized sprite
+// instead, and splashPresent() writes that out scaled exactly as the LVGL flush
+// does. The sprite is the UI area -- the bottom strip excluded -- so the card
+// stays clear of the rounded corners the same way the interface does.
+//
+// Everywhere else splashDev() is displayDev() and presenting is a no-op.
+#if UI_PIXEL_SCALE > 1
+static LGFX_Sprite s_splashCanvas(&lcd);
+static bool s_splashCanvasTried = false;
+static bool s_splashCanvasReady = false;
+
+static lgfx::LovyanGFX &splashDev() {
+    if (!s_splashCanvasTried) {
+        s_splashCanvasTried = true;
+        s_splashCanvas.setPsram(true);
+        s_splashCanvas.setColorDepth(16);
+        const int32_t w = displayDev().width() / UI_PIXEL_SCALE;
+        const int32_t h = displayDev().height() / UI_PIXEL_SCALE - UI_BOTTOM_SAFE_H;
+        s_splashCanvasReady = (s_splashCanvas.createSprite(w, h) != nullptr);
+        if (!s_splashCanvasReady) {
+            // Unscaled beats absent: the splash still says the device is booting.
+            Serial.println("[splash] canvas allocation failed; drawing unscaled");
+        }
+    }
+    if (s_splashCanvasReady) return s_splashCanvas;
+    return displayDev();
+}
+
+// Pushes one rectangle of the canvas (canvas pixels) to the panel.
+static void splashPresent(int32_t x, int32_t y, int32_t w, int32_t h) {
+    if (!s_splashCanvasReady) return;
+    const int32_t cw = s_splashCanvas.width();
+    const int32_t ch = s_splashCanvas.height();
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > cw) w = cw - x;
+    if (y + h > ch) h = ch - y;
+    if (w <= 0 || h <= 0) return;
+    // 16-bit sprites hold RGB565 byte-swapped.
+    const lgfx::swap565_t *buf = (const lgfx::swap565_t *)s_splashCanvas.getBuffer();
+    pushPixelScaled(x, y, w, h, buf + (size_t)y * (size_t)cw + (size_t)x, cw);
+}
+
+static void splashPresentAll() {
+    if (!s_splashCanvasReady) return;
+    const int32_t stripTop = s_splashCanvas.height() * UI_PIXEL_SCALE;
+    displayDev().fillRect(0, stripTop, displayDev().width(),
+                          displayDev().height() - stripTop, TFT_BLACK);
+    splashPresent(0, 0, s_splashCanvas.width(), s_splashCanvas.height());
+}
+
+// The canvas is only needed until the UI owns the panel.
+static void splashCanvasRelease() {
+    if (s_splashCanvasReady) s_splashCanvas.deleteSprite();
+    s_splashCanvasReady = false;
+}
+#else
+static auto &splashDev() { return displayDev(); }
+static inline void splashPresent(int32_t, int32_t, int32_t, int32_t) {}
+static inline void splashPresentAll() {}
+static inline void splashCanvasRelease() {}
+#endif
+
 // Repaint the band with the current message and dot count.
 static void bootSplashStatusPaint() {
     if (!s_splashStatusOn || !s_splashStatusMsg[0]) return;
@@ -42967,20 +44155,21 @@ static void bootSplashStatusPaint() {
                       : (s_splashStatusDots > 3) ? 3 : s_splashStatusDots;
     snprintf(line, sizeof(line), "%s%.*s", s_splashStatusMsg, (int)n, "...");
 
-    displayDev().setFont(&fonts::DejaVu12);
-    displayDev().setTextSize(1.0f);
-    const int h = displayDev().fontHeight();
+    splashDev().setFont(&fonts::DejaVu12);
+    splashDev().setTextSize(1.0f);
+    const int h = splashDev().fontHeight();
     // Clear the whole band first: messages vary in width, and the tail of a
     // longer previous one would otherwise stay on screen next to a shorter one.
     // This also covers the dots shrinking from three back to one.
-    displayDev().fillRect(s_splashStatusX, s_splashStatusY, s_splashStatusW, h,
+    splashDev().fillRect(s_splashStatusX, s_splashStatusY, s_splashStatusW, h,
                           s_splashStatusBg);
-    displayDev().setTextColor(s_splashStatusFg, s_splashStatusBg);
+    splashDev().setTextColor(s_splashStatusFg, s_splashStatusBg);
     // Centred on the message alone, not on message+dots, so the text does not
     // jitter left and right as the dots cycle.
-    const int msgW = displayDev().textWidth(s_splashStatusMsg);
-    displayDev().drawString(line, s_splashStatusX + max(0, (s_splashStatusW - msgW) / 2),
+    const int msgW = splashDev().textWidth(s_splashStatusMsg);
+    splashDev().drawString(line, s_splashStatusX + max(0, (s_splashStatusW - msgW) / 2),
                             s_splashStatusY);
+    splashPresent(s_splashStatusX, s_splashStatusY, s_splashStatusW, h);
 #if defined(DEVICE_TDECK_PRO)
     lcd.requestRefresh();
     lcd.serviceRefresh();
@@ -43011,11 +44200,14 @@ static void bootSplashTick() {
 
 // Stop accepting progress updates. Called once the UI owns the panel, so a late
 // call cannot paint a boot message over the running interface.
-static void bootSplashStatusEnd() { s_splashStatusOn = false; }
+static void bootSplashStatusEnd() {
+    s_splashStatusOn = false;
+    splashCanvasRelease();
+}
 
 static void drawBootSplash() {
-    const int screenW = displayDev().width();
-    const int screenH = displayDev().height();
+    const int screenW = splashDev().width();
+    const int screenH = splashDev().height();
 
     // Color displays use the fixed Camillia Dark splash. The e-paper build uses
     // its equally fixed inverse paper palette.
@@ -43047,18 +44239,53 @@ static void drawBootSplash() {
 
     for (int y = 0; y < screenH; y++) {
         uint8_t t = (uint8_t)((255UL * y) / max(1, screenH - 1));
-        displayDev().drawFastHLine(0, y, screenW, blend565(bgTop, bgBottom, t));
+        splashDev().drawFastHLine(0, y, screenW, blend565(bgTop, bgBottom, t));
     }
 
     const int cardMargin = 10;
     const int cardX = cardMargin;
-    const int cardY = 10;
-    const int cardW = screenW - cardMargin * 2;
-    const int cardH = screenH - 20;
+#if defined(DEVICE_TDISPLAY_P4)
+    // Sized to what it holds rather than to the canvas, and centred in it: on
+    // the 596-tall canvas any fixed card left dead space above and below the
+    // flower. Title block, a gap, the flower, a gap, the footer -- each measured
+    // the way the drawing below places it, so the flower lands in the middle of
+    // its band with kSplashFlowerGap clear either side. The gradient still fills
+    // the screen round it. Capped at the canvas, which only bites in landscape.
+    int cardH = 0;
+    {
+        // The title block exactly as drawn below: brand, subtitle, version.
+        splashDev().setFont(&Roboto_Bold26pt7b);
+        splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+        const int brandCapH = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
+        splashDev().setFont(&Roboto_Medium14pt7b);
+        splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+        const int subH = (int)splashDev().fontHeight();
+        splashDev().setFont(&fonts::DejaVu9);
+        splashDev().setTextSize(1.0f);
+        const int verH = (int)splashDev().fontHeight() + 2;
+        const int titleBlockH = 12 + MY_SPLASH_TITLE_Y_OFFSET + brandCapH + subH + verH;
 
-    displayDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
-    displayDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
-    displayDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
+        // drawCamelliaMark() at scale 1 reaches 30 px above its centre (outer
+        // petals) and 38 below (leaves). The band is centred on the mark, so
+        // it is sized to the larger half on both sides.
+        constexpr int kSplashFlowerBandH = 2 * 38;
+        constexpr int kSplashFlowerGap = 10;
+        // Node line at cardH-36 and status at cardH-20; the flower band ends
+        // at cardH-40.
+        constexpr int kSplashFooterH = 40;
+        cardH = min(screenH - 20, titleBlockH + kSplashFlowerGap * 2
+                                  + kSplashFlowerBandH + kSplashFooterH);
+    }
+    const int cardY = (screenH - cardH) / 2;
+#else
+    const int cardY = 10;
+    const int cardH = screenH - 20;
+#endif
+    const int cardW = screenW - cardMargin * 2;
+
+    splashDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
+    splashDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
+    splashDev().drawRoundRect(cardX + 1, cardY + 1, cardW - 2, cardH - 2, 12, cardEdgeHi);
 
     const char *version = APP_VERSION;
 
@@ -43070,26 +44297,26 @@ static void drawBootSplash() {
 #if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT)
     // Native-size Roboto GFX fonts (crisp at this size, no bitmap upscaling).
     int splashContentBottom = cardY + 40;
-    displayDev().setTextColor(titleCol, cardBg);
+    splashDev().setTextColor(titleCol, cardBg);
 
     auto drawCentered = [&](const char *text, int y) {
-        int w = displayDev().textWidth(text);
-        displayDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
+        int w = splashDev().textWidth(text);
+        splashDev().drawString(text, cardX + max(0, (cardW - w) / 2), y);
     };
 
     // Large brand name on top (Roboto Bold 26pt).
-    displayDev().setFont(&Roboto_Bold26pt7b);
-    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    splashDev().setFont(&Roboto_Bold26pt7b);
+    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
     const int brandY = cardY + 12 + MY_SPLASH_TITLE_Y_OFFSET;
     drawCentered("Camillia", brandY);
-    const int brandCap = max(8, displayDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
+    const int brandCap = max(8, (int)splashDev().fontHeight() - MY_SPLASH_SUBTITLE_GAP_TRIM);
 
     // "for Meshtastic" underneath (Roboto Medium 14pt).
-    displayDev().setFont(&Roboto_Medium14pt7b);
-    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    splashDev().setFont(&Roboto_Medium14pt7b);
+    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
     const int subY = brandY + brandCap;
     drawCentered("for Meshtastic", subY);
-    splashContentBottom = subY + displayDev().fontHeight();
+    splashContentBottom = subY + splashDev().fontHeight();
 
     // Version tucked under the subtitle in a small face. It moved here from the
     // footer so the footer line can carry the boot progress instead — the
@@ -43099,12 +44326,12 @@ static void drawBootSplash() {
     {
         char verSmall[32];
         snprintf(verSmall, sizeof(verSmall), "(%s)", version);
-        displayDev().setFont(&fonts::DejaVu9);
-        displayDev().setTextSize(1.0f);
-        displayDev().setTextColor(dimCol, cardBg);
+        splashDev().setFont(&fonts::DejaVu9);
+        splashDev().setTextSize(1.0f);
+        splashDev().setTextColor(dimCol, cardBg);
         drawCentered(verSmall, splashContentBottom + 2);
-        splashContentBottom += displayDev().fontHeight() + 2;
-        displayDev().setTextColor(titleCol, cardBg);
+        splashContentBottom += splashDev().fontHeight() + 2;
+        splashDev().setTextColor(titleCol, cardBg);
     }
 #endif
 
@@ -43163,24 +44390,24 @@ static void drawBootSplash() {
             float a = ((float)i * 2.0f * (float)M_PI / 10.0f) + 0.16f;
             int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
-            displayDev().drawCircle(px, py, (i & 1) ? petalOuterR1 : petalOuterR0, ink);
+            splashDev().drawCircle(px, py, (i & 1) ? petalOuterR1 : petalOuterR0, ink);
         }
         for (int i = 0; i < 8; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
             int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
-            displayDev().drawCircle(px, py, petalMidR, ink);
+            splashDev().drawCircle(px, py, petalMidR, ink);
         }
         for (int i = 0; i < 5; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
             int px = cx + (int)lroundf((float)petalInnerOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalInnerOrbitY * sinf(a));
-            displayDev().drawCircle(px, py, petalInnerR, ink);
+            splashDev().drawCircle(px, py, petalInnerR, ink);
         }
-        displayDev().drawCircle(cx, cy, centerR, ink);
-        displayDev().drawRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, ink);
-        displayDev().drawCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, ink);
-        displayDev().drawCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, ink);
+        splashDev().drawCircle(cx, cy, centerR, ink);
+        splashDev().drawRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, ink);
+        splashDev().drawCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, ink);
+        splashDev().drawCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, ink);
         return;
 #endif
 
@@ -43189,39 +44416,39 @@ static void drawBootSplash() {
             int px = cx + (int)lroundf((float)petalOuterOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalOuterOrbitY * sinf(a));
             int pr = (i & 1) ? petalOuterR1 : petalOuterR0;
-            displayDev().fillCircle(px, py, pr, PETAL_OUTER);
-            displayDev().drawCircle(px, py, pr, PETAL_EDGE);
+            splashDev().fillCircle(px, py, pr, PETAL_OUTER);
+            splashDev().drawCircle(px, py, pr, PETAL_EDGE);
         }
 
         for (int i = 0; i < 8; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 8.0f) + 0.42f;
             int px = cx + (int)lroundf((float)petalMidOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalMidOrbitY * sinf(a));
-            displayDev().fillCircle(px, py, petalMidR, PETAL_MID);
-            displayDev().drawCircle(px, py, petalMidR, PETAL_EDGE);
+            splashDev().fillCircle(px, py, petalMidR, PETAL_MID);
+            splashDev().drawCircle(px, py, petalMidR, PETAL_EDGE);
         }
 
         for (int i = 0; i < 5; i++) {
             float a = ((float)i * 2.0f * (float)M_PI / 5.0f) + 0.20f;
             int px = cx + (int)lroundf((float)petalInnerOrbitX * cosf(a));
             int py = cy + (int)lroundf((float)petalInnerOrbitY * sinf(a));
-            displayDev().fillCircle(px, py, petalInnerR, PETAL_INNER);
+            splashDev().fillCircle(px, py, petalInnerR, PETAL_INNER);
         }
 
-        displayDev().fillCircle(cx, cy, centerR, CENTER);
-        displayDev().drawCircle(cx, cy, centerR, 0xD4C0);
+        splashDev().fillCircle(cx, cy, centerR, CENTER);
+        splashDev().drawCircle(cx, cy, centerR, 0xD4C0);
         for (int i = 0; i < 10; i++) {
             float a = (float)i * 2.0f * (float)M_PI / 10.0f;
             int sx = cx + (int)lroundf((float)centerDotOrbit * cosf(a));
             int sy = cy + (int)lroundf((float)centerDotOrbit * sinf(a));
-            displayDev().fillCircle(sx, sy, centerDotR, CENTER_DOT);
+            splashDev().fillCircle(sx, sy, centerDotR, CENTER_DOT);
         }
 
-        displayDev().fillRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, STEM);
-        displayDev().fillCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, LEAF_DARK);
-        displayDev().fillCircle(cx - leafInnerX, cy + leafInnerYLeft, leafInnerR, LEAF_LIGHT);
-        displayDev().fillCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, LEAF_DARK);
-        displayDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, LEAF_LIGHT);
+        splashDev().fillRoundRect(cx - stemX, cy + stemY, stemW, stemH, stemRadius, STEM);
+        splashDev().fillCircle(cx - leafOuterX, cy + leafOuterYLeft, leafOuterR, LEAF_DARK);
+        splashDev().fillCircle(cx - leafInnerX, cy + leafInnerYLeft, leafInnerR, LEAF_LIGHT);
+        splashDev().fillCircle(cx + leafOuterX, cy + leafOuterYRight, leafOuterR, LEAF_DARK);
+        splashDev().fillCircle(cx + leafInnerX, cy + leafInnerYRight, leafInnerR, LEAF_LIGHT);
     };
 
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
@@ -43233,15 +44460,15 @@ static void drawBootSplash() {
 
     char verLine[72];
     snprintf(verLine, sizeof(verLine), "Version: %s", version);
-    displayDev().setFont(&fonts::DejaVu12);
-    displayDev().setTextSize(1.0f);
-    displayDev().setTextColor(dimCol, cardBg);
+    splashDev().setFont(&fonts::DejaVu12);
+    splashDev().setTextSize(1.0f);
+    splashDev().setTextColor(dimCol, cardBg);
     // Center version text between the flower and bottom of the display.
     const int flowerBottom = flowerCy + (int)lroundf(36.0f * cardputerFlowerScale);
     const int versionBandCenterY = (flowerBottom + screenH) / 2;
-    const int versionTopY = versionBandCenterY - (displayDev().fontHeight() / 2);
-    int verW = displayDev().textWidth(verLine);
-    displayDev().drawString(verLine,
+    const int versionTopY = versionBandCenterY - (splashDev().fontHeight() / 2);
+    int verW = splashDev().textWidth(verLine);
+    splashDev().drawString(verLine,
                             cardX + max(0, (cardW - verW) / 2),
                             versionTopY);
 #elif defined(DEVICE_TLORA_PAGER_TFT)
@@ -43257,10 +44484,10 @@ static void drawBootSplash() {
     auto trimTailToFit = [&](const char *src, int maxWidth) -> String {
         String out = src ? String(src) : String();
         if (maxWidth <= 0) return String();
-        while (out.length() > 3 && displayDev().textWidth(out.c_str()) > maxWidth) {
+        while (out.length() > 3 && splashDev().textWidth(out.c_str()) > maxWidth) {
             out.remove(out.length() - 1);
         }
-        if (displayDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
+        if (splashDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
             out.remove(out.length() - 3);
             out += "...";
         }
@@ -43270,10 +44497,10 @@ static void drawBootSplash() {
     auto trimHeadToFit = [&](const char *src, int maxWidth) -> String {
         String out = src ? String(src) : String();
         if (maxWidth <= 0) return String();
-        while (out.length() > 3 && displayDev().textWidth(out.c_str()) > maxWidth) {
+        while (out.length() > 3 && splashDev().textWidth(out.c_str()) > maxWidth) {
             out.remove(0, 1);
         }
-        if (displayDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
+        if (splashDev().textWidth(out.c_str()) > maxWidth && out.length() > 3) {
             out = String("...") + out.substring(3);
         }
         return out;
@@ -43284,29 +44511,29 @@ static void drawBootSplash() {
     const int titleY = cardY + 14;
     const int titleGap = 8;
 
-    displayDev().setFont(&Roboto_Bold26pt7b);
-    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-    const int camilliaW = displayDev().textWidth("Camillia");
-    const int camilliaH = displayDev().fontHeight();
+    splashDev().setFont(&Roboto_Bold26pt7b);
+    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    const int camilliaW = splashDev().textWidth("Camillia");
+    const int camilliaH = splashDev().fontHeight();
 
-    displayDev().setFont(&Roboto_Medium14pt7b);
-    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-    const int meshW = displayDev().textWidth("for Meshtastic");
-    const int meshH = displayDev().fontHeight();
+    splashDev().setFont(&Roboto_Medium14pt7b);
+    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    const int meshW = splashDev().textWidth("for Meshtastic");
+    const int meshH = splashDev().fontHeight();
 
     const int lineW = camilliaW + titleGap + meshW;
     const int lineX = leftX + max(0, (leftW - lineW) / 2);
     const int meshY = titleY + 3;
 
-    displayDev().setFont(&Roboto_Bold26pt7b);
-    displayDev().setTextSize(MY_SPLASH_TITLE_SCALE);
-    displayDev().setTextColor(titleCol, cardBg);
-    displayDev().drawString("Camillia", lineX, titleY);
+    splashDev().setFont(&Roboto_Bold26pt7b);
+    splashDev().setTextSize(MY_SPLASH_TITLE_SCALE);
+    splashDev().setTextColor(titleCol, cardBg);
+    splashDev().drawString("Camillia", lineX, titleY);
 
-    displayDev().setFont(&Roboto_Medium14pt7b);
-    displayDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
-    displayDev().setTextColor(subCol, cardBg);
-    displayDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
+    splashDev().setFont(&Roboto_Medium14pt7b);
+    splashDev().setTextSize(MY_SPLASH_SUBTITLE_SCALE);
+    splashDev().setTextColor(subCol, cardBg);
+    splashDev().drawString("for Meshtastic", lineX + camilliaW + titleGap, meshY);
 
     const int titleBlockBottom = max(titleY + camilliaH, meshY + meshH);
     const int flowerAreaTop = titleBlockBottom + 8;
@@ -43323,24 +44550,24 @@ static void drawBootSplash() {
     const int dividerTop = rightInfoTop;
     const int dividerBottom = cardY + cardH - 16;
     const int dividerH = max(8, dividerBottom - dividerTop);
-    displayDev().drawFastVLine(rightX - (paneGap / 2), dividerTop, dividerH, cardEdgeHi);
+    splashDev().drawFastVLine(rightX - (paneGap / 2), dividerTop, dividerH, cardEdgeHi);
 
-    displayDev().setFont(&fonts::DejaVu12);
-    displayDev().setTextSize(1.0f);
-    displayDev().setTextColor(subCol, cardBg);
+    splashDev().setFont(&fonts::DejaVu12);
+    splashDev().setTextSize(1.0f);
+    splashDev().setTextColor(subCol, cardBg);
     String longLine = trimTailToFit(nodeLong, rightW);
     String shortLine = trimTailToFit((String("(") + nodeShort + ")").c_str(), rightW);
     const int nodeLineY = dividerTop;
-    const int nodeLineStep = displayDev().fontHeight() + 4;
-    displayDev().drawString(longLine.c_str(), rightX, nodeLineY);
-    displayDev().drawString(shortLine.c_str(), rightX, nodeLineY + nodeLineStep);
+    const int nodeLineStep = splashDev().fontHeight() + 4;
+    splashDev().drawString(longLine.c_str(), rightX, nodeLineY);
+    splashDev().drawString(shortLine.c_str(), rightX, nodeLineY + nodeLineStep);
 
     char verLine[72];
     snprintf(verLine, sizeof(verLine), "Version: %s", version);
     String verText = trimHeadToFit(verLine, rightW);
-    displayDev().setTextColor(dimCol, cardBg);
-    const int versionY = dividerBottom - displayDev().fontHeight();
-    displayDev().drawString(verText.c_str(), rightX, versionY);
+    splashDev().setTextColor(dimCol, cardBg);
+    const int versionY = dividerBottom - splashDev().fontHeight();
+    splashDev().drawString(verText.c_str(), rightX, versionY);
 #else
     // Center the flower in the space between the title block and the footer text.
     const int flowerBandTop = splashContentBottom;
@@ -43349,11 +44576,11 @@ static void drawBootSplash() {
                      (flowerBandTop + flowerBandBottom) / 2,
                      flowerScale);
 
-    displayDev().setFont(&fonts::DejaVu12);
-    displayDev().setTextSize(1.0f);
-    displayDev().setTextColor(subCol, cardBg);
-    int nodeW = displayDev().textWidth(nodeLine);
-    displayDev().drawString(nodeLine, cardX + max(0, (cardW - nodeW) / 2), cardY + cardH - 36);
+    splashDev().setFont(&fonts::DejaVu12);
+    splashDev().setTextSize(1.0f);
+    splashDev().setTextColor(subCol, cardBg);
+    int nodeW = splashDev().textWidth(nodeLine);
+    splashDev().drawString(nodeLine, cardX + max(0, (cardW - nodeW) / 2), cardY + cardH - 36);
 
     // Where the version line used to sit. The version moved up under the
     // subtitle; this band now reports what boot is doing, updated by
@@ -43384,6 +44611,7 @@ static void drawBootSplash() {
     //
     // Ticked rather than a flat delay so the dots are already moving during the
     // hold, instead of the line sitting still until the first slow step.
+    splashPresentAll();
     bootSplashStatus("Starting up");
     const uint32_t holdUntil = millis() + 1200;
     while ((int32_t)(millis() - holdUntil) < 0) {
@@ -43843,6 +45071,8 @@ static bool useCompactVerticalHeltecSelector() {
 
 static bool isChannelDropdownVisible() {
 #if UI_CHANNEL_LIST_DROPDOWN
+    // Anchored, the list is always showing -- and is not a dropdown to close.
+    if (!channelListIsDropdown()) return false;
     return s_channelList && !lv_obj_has_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
 #else
     return false;
@@ -43853,6 +45083,7 @@ static void refreshChannelSelectorLabel() {
 #if !UI_CHANNEL_LIST_DROPDOWN
     return;
 #endif
+    if (!channelListIsDropdown()) return;   // no selector with an anchored list
     if (!s_channelSelectorLabel) return;
 
     const char *name = channelName(s_activeChannel);
@@ -43986,6 +45217,7 @@ static void setChannelDropdownVisible(bool visible) {
     LV_UNUSED(visible);
     return;
 #endif
+    if (!channelListIsDropdown()) return;   // anchored: never hidden or raised
     if (!s_channelList) return;
 
     if (visible) {
@@ -44018,6 +45250,7 @@ static void onChannelSelectorPressed(lv_event_t *e) {
     LV_UNUSED(e);
     return;
 #endif
+    if (!channelListIsDropdown()) return;
     LV_UNUSED(e);
     setChannelDropdownVisible(!isChannelDropdownVisible());
     refreshChannelGlow(true);
@@ -44073,6 +45306,7 @@ static void fitChannelDropdownToButtonContent() {
 #if UI_CHANNEL_LIST_DROPDOWN
     // This fitter applies only to the floating channel dropdown list.
     if (!s_channelList || s_channelStrip) return;
+    if (!channelListIsDropdown()) return;   // the anchored column keeps its width
 
     lv_coord_t maxLabelW = 0;
     for (int i = 0; i < MESH_CHANNELS; i++) {
@@ -44184,7 +45418,7 @@ static void logNvsNamespaceCensus() {
     int tracked = 0;
     int untracked = 0;
 
-    nvs_iterator_t it = nvs_entry_find("nvs", nullptr, NVS_TYPE_ANY);
+    nvs_iterator_t it = nvsEntryFindCompat("nvs", nullptr);
     while (it) {
         nvs_entry_info_t info = {};
         nvs_entry_info(it, &info);
@@ -44197,7 +45431,7 @@ static void logNvsNamespaceCensus() {
             strncpy(tally[slot].ns, info.namespace_name, sizeof(tally[0].ns) - 1);
         }
         if (slot >= 0) tally[slot].keys++; else untracked++;
-        it = nvs_entry_next(it);
+        it = nvsEntryNextCompat(it);
     }
 
     for (int i = 0; i < tracked; i++) {
@@ -44320,6 +45554,28 @@ static void layoutHeaderInlineItems() {
 
     const lv_coord_t headerTextYOffset = 1;
 
+#if HAS_STATUS_STRIP
+    if (uiPortrait()) {
+        // Battery, GPS and Wi-Fi are in the status strip under the nav bar
+        // (statusStripInit()), so the right end of the header is the clock's.
+        // RIGHT_MID is inside the header's padding, which already carries the
+        // rounded-corner inset (cornerSafeHeader()), so it stays off the curve.
+        lv_obj_add_flag(s_chatHeaderBattBar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_chatHeaderBattText, LV_OBJ_FLAG_HIDDEN);
+        // The touch-only chat screen keeps GPS and Wi-Fi in this bar too (only
+        // the keyboard boards move them onto the nav bar). They are in the
+        // strip as well, so here they go, and the clock has the end to itself.
+        if (s_chatHeaderGps && lv_obj_get_parent(s_chatHeaderGps) == s_chatHeaderBar) {
+            lv_obj_add_flag(s_chatHeaderGps, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (s_chatHeaderWifi && lv_obj_get_parent(s_chatHeaderWifi) == s_chatHeaderBar) {
+            lv_obj_add_flag(s_chatHeaderWifi, LV_OBJ_FLAG_HIDDEN);
+        }
+        lv_obj_align(s_chatHeaderTime, LV_ALIGN_RIGHT_MID, -4, headerTextYOffset);
+        return;
+    }
+#endif
+
     // Keep battery icon at the far right, with percent text close to it.
     lv_obj_align(s_chatHeaderBattBar, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_obj_align_to(s_chatHeaderBattText, s_chatHeaderBattBar, LV_ALIGN_OUT_LEFT_MID, -3, headerTextYOffset);
@@ -44347,6 +45603,14 @@ static void layoutHeaderInlineItems() {
                     LV_ALIGN_OUT_RIGHT_MID, 8, headerTextYOffset);
     return;
 #endif
+
+    // No selector with an anchored channel list (P4 landscape): the hidden
+    // button still has a position, and centring between it and the battery
+    // would push the clock off centre for nothing. Centre it on the bar.
+    if (!channelListIsDropdown()) {
+        lv_obj_align(s_chatHeaderTime, LV_ALIGN_CENTER, 0, headerTextYOffset);
+        return;
+    }
 
     // Keep time centered between selector button and battery info.
     lv_obj_update_layout(s_chatHeaderBar);
@@ -44377,7 +45641,11 @@ static void layoutHeaderInlineItems() {
         if (x < slotStart) x = slotStart;
         lv_coord_t maxX = slotEnd - timeW;
         if (x > maxX) x = maxX;
-        lv_obj_align(s_chatHeaderTime, LV_ALIGN_LEFT_MID, x, headerTextYOffset);
+        // x is a screen coordinate, but LEFT_MID offsets from inside the bar's
+        // padding. cornerSafeHeader() widened that padding; take it back out
+        // so the clock stays centred in its slot rather than pushed right.
+        lv_obj_align(s_chatHeaderTime, LV_ALIGN_LEFT_MID, x - UI_CORNER_SAFE_X,
+                     headerTextYOffset);
     }
 #endif
 }
@@ -44443,9 +45711,9 @@ static void refreshHeaderStatus(bool force) {
     // compares what the user can see rather than raw ADC jitter.
     const float battV = batteryReadVoltage();
     const uint16_t battCentiV = (uint16_t)(battV * 100.0f + 0.5f);
-    const bool gpsEnabled = gpsIsEnabled();
-    const bool gpsFix = gpsHasFix();
-    const uint8_t gpsSatCount = gpsEnabled ? gpsSats() : 0;
+    bool gpsEnabled = false, gpsFix = false;
+    uint8_t gpsSatCount = 0;
+    gpsUiReading(gpsEnabled, gpsFix, gpsSatCount);   // held a minute on the P4
     wifi_mode_t wifiMode = WiFi.getMode();
     bool wifiApMode = (wifiMode == WIFI_AP);
 #ifdef WIFI_AP_STA
@@ -44493,6 +45761,11 @@ static void refreshHeaderStatus(bool force) {
     paintStatusIcons(s_chatHeaderGps, s_chatHeaderWifi,
                      gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected,
                      headerStatusInk());
+#if HAS_STATUS_STRIP
+    statusStripPaint(gpsEnabled, gpsFix, gpsSatCount, wifiApMode, wifiConnected,
+                     battPct, battV,
+                     headerBatteryDotColor(battPct));
+#endif
 
     lv_obj_t *gpsParent = lv_obj_get_parent(s_chatHeaderGps);
     lv_obj_t *wifiParent = lv_obj_get_parent(s_chatHeaderWifi);
@@ -44701,6 +45974,247 @@ static bool channelSharesLocation(int chanIdx) {
     return nm && nm[0];
 }
 
+// ── How a message reached us ─────────────────────────────────────────────────
+// The chat and DM stores keep what was said and by whom. How it got here -- over
+// the air or through an MQTT broker, and which node handed it over on the last
+// leg -- is only in the packet header, gone once the text is filed. So each text
+// that arrives notes that here, keyed by sender and packet id, and Sender Info
+// (message actions) reads it back.
+//
+// A ring: the details are wanted for messages on screen, i.e. recent ones. A
+// message older than the ring, or from before this boot, says so rather than
+// guessing.
+struct MsgRxInfo {
+    uint32_t from;
+    uint32_t id;
+    float    snr;
+    float    rssi;
+    uint8_t  flags;      // MeshHdr.flags: hop_limit, via_mqtt, hop_start
+    uint8_t  relayNode;  // MeshHdr.relay_node: low byte of the last transmitter
+};
+static constexpr int kMsgRxInfoCount = 64;
+static MsgRxInfo s_msgRxInfo[kMsgRxInfoCount] = {};
+static int s_msgRxInfoNext = 0;
+
+static void noteMsgRxInfo(const MeshPacket &pkt) {
+    MsgRxInfo &r = s_msgRxInfo[s_msgRxInfoNext];
+    r.from = pkt.hdr.from;
+    r.id = pkt.hdr.id;
+    r.snr = pkt.snr;
+    r.rssi = pkt.rssi;
+    r.flags = pkt.hdr.flags;
+    r.relayNode = pkt.hdr.relay_node;
+    s_msgRxInfoNext = (s_msgRxInfoNext + 1) % kMsgRxInfoCount;
+}
+
+#if HAS_MESSAGE_ACTIONS
+static const MsgRxInfo *findMsgRxInfo(uint32_t from, uint32_t packetId) {
+    if (packetId == 0) return nullptr;
+    for (int i = 0; i < kMsgRxInfoCount; i++) {
+        const MsgRxInfo &r = s_msgRxInfo[i];
+        if (r.id == packetId && r.from == from) return &r;
+    }
+    return nullptr;
+}
+
+#endif  // HAS_MESSAGE_ACTIONS
+
+// Long name, else short name, else "!aabbccdd" -- the most human thing known.
+static void nodeFriendlyName(uint32_t nodeId, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    if (nodeId == s_myNodeId && s_cfg.nodeLong[0]) {
+        snprintf(out, outLen, "%s (this node)", s_cfg.nodeLong);
+        return;
+    }
+    const NodeEntry *e = Nodes.find(nodeId);
+    if (e && e->longName[0]) {
+        utf8util::copyTruncate(out, outLen, e->longName);
+    } else if (e && e->shortName[0]) {
+        utf8util::copyTruncate(out, outLen, e->shortName);
+    } else {
+        snprintf(out, outLen, "!%08lx", (unsigned long)nodeId);
+    }
+}
+
+#if HAS_MESSAGE_ACTIONS
+// The relayer, from the one byte the radio header carries: the low byte of the
+// node that transmitted the copy we heard. Any known node ending in that byte
+// could be it. One match is an answer; several are listed, directly heard ones
+// first since the relayer is by definition a direct neighbour; none means a
+// node this one has never heard from itself.
+static void describeRelayByte(uint8_t relay, char *out, size_t outLen) {
+    uint32_t direct[4] = {};
+    uint32_t other[4] = {};
+    int nDirect = 0, nOther = 0;
+    const int total = Nodes.count();
+    for (int i = 0; i < total; i++) {
+        const NodeEntry *e = Nodes.at(i);
+        if (!e || e->nodeId == 0 || e->nodeId == s_myNodeId) continue;
+        if ((uint8_t)(e->nodeId & 0xFF) != relay) continue;
+        const bool isDirect = e->hasHops && e->hops == 0;
+        if (isDirect && nDirect < 4) direct[nDirect++] = e->nodeId;
+        else if (!isDirect && nOther < 4) other[nOther++] = e->nodeId;
+    }
+    const int n = nDirect + nOther;
+    if (n == 0) {
+        snprintf(out, outLen, "unknown node (id ends ..%02x)", (unsigned)relay);
+        return;
+    }
+    size_t used = 0;
+    if (n > 1) used = (size_t)snprintf(out, outLen, "one of: ");
+    for (int i = 0; i < n && used < outLen; i++) {
+        const uint32_t id = (i < nDirect) ? direct[i] : other[i - nDirect];
+        char name[48];
+        nodeFriendlyName(id, name, sizeof(name));
+        used += (size_t)snprintf(out + used, outLen - used, "%s%s",
+                                 (i == 0) ? "" : ", ", name);
+    }
+}
+
+static void closeMsgSenderInfoModal() {
+    lvObjDeleteSafe(s_msgInfoModal);
+}
+
+// Who sent a message and how it got here: over LoRa or MQTT -- marked with the
+// same icon the chat view puts in front of it (msgTransportIcon()) -- and the
+// node that handed it to us on the last leg: the relayer over the air, the
+// uplinking gateway over MQTT.
+static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
+    if (!s_rootScreen) return;
+    closeMsgSenderInfoModal();
+
+    char lines[8][112] = {};
+    int n = 0;
+    char name[64];
+    nodeFriendlyName(from, name, sizeof(name));
+    snprintf(lines[n++], sizeof(lines[0]), "From: %s", name);
+    snprintf(lines[n++], sizeof(lines[0]), "Node id: !%08lx", (unsigned long)from);
+
+    const MsgRxInfo *rx = findMsgRxInfo(from, packetId);
+    if (from == s_myNodeId) {
+        snprintf(lines[n++], sizeof(lines[0]), "Sent by this node.");
+    } else if (!rx) {
+        snprintf(lines[n++], sizeof(lines[0]),
+                 "Delivery details not recorded: received before this boot, "
+                 "or too many messages ago.");
+    } else {
+        const bool viaMqtt = (rx->flags & 0x10) != 0;
+        const int hopLimit = rx->flags & 0x07;
+        const int hopStart = (rx->flags >> 5) & 0x07;
+        const int hopsTaken = (hopStart >= hopLimit) ? (hopStart - hopLimit) : -1;
+        char who[96];
+        snprintf(lines[n++], sizeof(lines[0]), "Received over: %s %s",
+                 msgTransportIcon(viaMqtt), viaMqtt ? "MQTT" : "LoRa");
+        if (viaMqtt) {
+            uint32_t gw = 0;
+            if (mqttBridgeGatewayFor(from, packetId, gw)) {
+                if (gw == from) {
+                    snprintf(lines[n++], sizeof(lines[0]),
+                             "Uplinked by: the sender itself");
+                } else {
+                    nodeFriendlyName(gw, who, sizeof(who));
+                    snprintf(lines[n++], sizeof(lines[0]), "Uplinked by: %s", who);
+                }
+            } else if (rx->relayNode != 0) {
+                // Arrived over the air with via_mqtt already set: a node on this
+                // mesh downlinked it from a broker and relayed it to us by radio.
+                describeRelayByte(rx->relayNode, who, sizeof(who));
+                snprintf(lines[n++], sizeof(lines[0]),
+                         "Relayed to us by: %s (from MQTT)", who);
+            } else {
+                snprintf(lines[n++], sizeof(lines[0]), "Gateway: not known");
+            }
+        } else {
+            if (hopStart > 0 && hopsTaken == 0) {
+                snprintf(lines[n++], sizeof(lines[0]),
+                         "Relayed to us by: nobody, heard directly");
+            } else if (rx->relayNode == 0) {
+                // Firmware before Meshtastic 2.6 leaves relay_node unset.
+                snprintf(lines[n++], sizeof(lines[0]),
+                         "Relayed to us by: not reported by the relaying node");
+            } else if (rx->relayNode == (uint8_t)(from & 0xFF)) {
+                snprintf(lines[n++], sizeof(lines[0]), "Relayed to us by: the sender itself");
+            } else {
+                describeRelayByte(rx->relayNode, who, sizeof(who));
+                snprintf(lines[n++], sizeof(lines[0]), "Relayed to us by: %s", who);
+            }
+            if (hopsTaken >= 0 && hopStart > 0) {
+                snprintf(lines[n++], sizeof(lines[0]), "Hops: %d of %d", hopsTaken, hopStart);
+            }
+            snprintf(lines[n++], sizeof(lines[0]), "Signal: SNR %.1f dB, RSSI %.0f dBm",
+                     (double)rx->snr, (double)rx->rssi);
+        }
+    }
+
+    int modalW = lv_disp_get_hor_res(NULL) - 24;
+    if (modalW < 180) modalW = lv_disp_get_hor_res(NULL) - 8;
+    if (modalW > 360) modalW = 360;
+#if defined(DEVICE_TDECK) || defined(DEVICE_TDISPLAY_P4)
+    const lv_font_t *bodyFont = &lv_font_montserrat_12;
+#else
+    const lv_font_t *bodyFont = &lv_font_montserrat_10;
+#endif
+
+    s_msgInfoModal = lv_obj_create(s_rootScreen);
+    lv_obj_set_size(s_msgInfoModal, modalW, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(s_msgInfoModal, lv_disp_get_ver_res(NULL) - 16, 0);
+    lv_obj_align(s_msgInfoModal, LV_ALIGN_CENTER, 0, 0);
+    setupVScroll(s_msgInfoModal);
+    lv_obj_set_scrollbar_mode(s_msgInfoModal, LV_SCROLLBAR_MODE_AUTO);
+#if defined(DEVICE_TDECK_PRO)
+    lv_obj_set_style_bg_color(s_msgInfoModal, lv_color_make(255, 255, 255), 0);
+    lv_obj_set_style_border_color(s_msgInfoModal, lv_color_make(0, 0, 0), 0);
+    const lv_color_t ink = lv_color_make(0, 0, 0);
+    const lv_color_t dim = ink;
+#else
+    lv_obj_set_style_bg_color(s_msgInfoModal, lv_color_hex(0x0E285B), 0);
+    lv_obj_set_style_border_color(s_msgInfoModal, lv_color_hex(0x5C86C6), 0);
+    const lv_color_t ink = lv_color_hex(0xD9E8FF);
+    const lv_color_t dim = lv_color_hex(0xA7C7FF);
+#endif
+    lv_obj_set_style_bg_opa(s_msgInfoModal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_msgInfoModal, 1, 0);
+    lv_obj_set_style_pad_all(s_msgInfoModal, 6, 0);
+    lv_obj_set_style_pad_row(s_msgInfoModal, 3, 0);
+    lv_obj_set_flex_flow(s_msgInfoModal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_msgInfoModal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    lv_obj_t *title = lv_label_create(s_msgInfoModal);
+    lv_obj_set_width(title, lv_pct(100));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, ink, 0);
+    lv_label_set_text(title, "Sender Info");
+#if UI_TOUCH_ONLY_PROFILE
+    reserveHeltecCloseXRow(title);
+    appendHeltecCloseX(s_msgInfoModal,
+                       [](lv_event_t *ev) { LV_UNUSED(ev); closeMsgSenderInfoModal(); });
+#endif
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *row = lv_label_create(s_msgInfoModal);
+        lv_obj_set_width(row, lv_pct(100));
+        lv_obj_set_style_text_font(row, emojiFont(bodyFont), 0);
+        lv_obj_set_style_text_color(row, ink, 0);
+        // Wrapped, not ellipsised: a list of relay candidates is the point.
+        lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+        setLabelTextEmojiSafe(row, lines[i]);
+    }
+
+#if !UI_TOUCH_ONLY_PROFILE
+    lv_obj_t *hint = lv_label_create(s_msgInfoModal);
+    lv_obj_set_width(hint, lv_pct(100));
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hint, dim, 0);
+    lv_obj_set_style_pad_top(hint, 3, 0);
+    lv_label_set_text_fmt(hint, "%s = Close", modalCloseKeyLabel());
+#else
+    LV_UNUSED(dim);
+#endif
+    lv_obj_move_foreground(s_msgInfoModal);
+}
+#endif  // HAS_MESSAGE_ACTIONS
+
 static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint32_t packetId, bool viaMqtt) {
     char timePrefix[12];
     char sender[48];
@@ -44713,7 +46227,7 @@ static void appendRxText(int chanIdx, uint32_t fromNode, const char *text, uint3
     snprintf(prefix, sizeof(prefix), "%s[%s] ", timePrefix, sender);
 #else
     chatSenderLabel(fromNode, sender, sizeof(sender));
-    const char *transportIcon = viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
+    const char *transportIcon = msgTransportIcon(viaMqtt);
     // Keep a small visual buffer between transport icon and timestamp.
     snprintf(prefix, sizeof(prefix), "%s  %s[%s] ", transportIcon, timePrefix, sender);
 #endif
@@ -46212,6 +47726,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
             if (textBuf[0]) {
                 const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+                noteMsgRxInfo(pkt);   // for Sender Info (message actions)
                 bool isDirectToMe = (pkt.hdr.to == s_myNodeId)
                                  || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
 
@@ -46484,6 +47999,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                            textBuf);
 
                     const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
+                    noteMsgRxInfo(pkt);   // for Sender Info (message actions)
                     // rr=8 (ROUTER_TEXT_DIRECT) is a replay of a message that was
                     // originally a DM; rr=9 (ROUTER_TEXT_BROADCAST) was a
                     // broadcast. Upstream picks between them on the stored
@@ -48768,8 +50284,18 @@ static void buildUi() {
     const int chatHeaderH = 25;
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
+#if defined(DEVICE_TDISPLAY_P4)
+    // Landscape: the Pager's anchored channel column down the left, and the
+    // chat and its header beside it. 120 px against the Pager's 89, for this
+    // panel's longer names and its 616 px. The column itself is the dropdown
+    // list, re-dressed once the buttons are in it (see the end of buildUi()).
+    const int p4ChannelColW = channelListIsDropdown() ? 0 : 120;
+    const int chatX = panelMargin + (p4ChannelColW > 0 ? p4ChannelColW + 4 : 0);
+    const int chatW = screenW - chatX - panelMargin;
+#else
     const int chatX = panelMargin;
     const int chatW = screenW - panelMargin * 2;
+#endif
     const int chatY = panelMargin + chatHeaderH + chatGap;
 #if UI_TOUCH_NAV_BAR
     // The bar runs the full width of the display and sits flush with the bottom
@@ -48924,6 +50450,7 @@ static void buildUi() {
     lv_obj_set_style_border_color(s_chatHeaderBar, lv_color_hex(0x335D9D), 0);
 #endif
     lv_obj_set_style_pad_all(s_chatHeaderBar, kChatHeaderPad, 0);
+    cornerSafeHeader(s_chatHeaderBar);
 
     const lv_font_t *headerTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_12 : &lv_font_montserrat_10;
     // Clock gets a larger font than the other header items so the time reads at a glance.
@@ -49259,7 +50786,13 @@ static void buildUi() {
     // read as cramped — and the six pixels go straight to the message list,
     // which is the flex_grow child of this panel and takes whatever the fixed
     // rows leave behind.
+#if UI_LARGE_PANEL_PROFILE
+    const int chatBtnRowH = 56;
+    const lv_font_t *chatActionFont = &lv_font_montserrat_18;
+#else
     const int chatBtnRowH = 22;
+    const lv_font_t *chatActionFont = &lv_font_montserrat_10;
+#endif
 
     lv_obj_t *chatBtnRow = lv_obj_create(s_chatPanel);
     lv_obj_set_width(chatBtnRow, lv_pct(100));
@@ -49292,7 +50825,7 @@ static void buildUi() {
                         (void *)(intptr_t)HELTEC_NAV_ACTIONS);
 
     lv_obj_t *chatActLabel = lv_label_create(s_chatActBtn);
-    lv_obj_set_style_text_font(chatActLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(chatActLabel, chatActionFont, 0);
     lv_obj_set_style_text_color(chatActLabel, lv_color_hex(0xE8F1FF), 0);
     // "Actions" does not fit the button at portrait width.
     lv_label_set_text(chatActLabel, uiPortrait() ? "Act" : "Actions");
@@ -49311,7 +50844,7 @@ static void buildUi() {
     lv_obj_add_event_cb(s_chatNewMsgBtn, onChatNewMessagePressed, LV_EVENT_CLICKED, nullptr);
 
     s_chatNewMsgLabel = lv_label_create(s_chatNewMsgBtn);
-    lv_obj_set_style_text_font(s_chatNewMsgLabel, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(s_chatNewMsgLabel, chatActionFont, 0);
     lv_obj_set_style_text_color(s_chatNewMsgLabel, lv_color_hex(0xE8F1FF), 0);
     lv_label_set_text(s_chatNewMsgLabel, "New Message");
     lv_obj_center(s_chatNewMsgLabel);
@@ -49592,6 +51125,32 @@ static void buildUi() {
         lv_obj_center(lbl);
 #endif
     }
+
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!channelListIsDropdown() && s_channelList) {
+        // Landscape: the dropdown list, built above with every channel button
+        // in it, becomes the anchored column the chat was offset for -- the
+        // Pager's layout, from the P4's own parts. Shown always, down the left
+        // from just under the rounded corner to the bottom of the chat, above
+        // the nav bar. Its dropdown paths all stand down (channelListIsDropdown()),
+        // so a tap on a channel only switches to it.
+        const int colTop = max(2, UI_CORNER_SAFE_X);
+        lv_obj_set_size(s_channelList, p4ChannelColW, (chatY + chatH) - colTop);
+        lv_obj_align(s_channelList, LV_ALIGN_TOP_LEFT, panelMargin, colTop);
+        lv_obj_clear_flag(s_channelList, LV_OBJ_FLAG_HIDDEN);
+        // The Pager panel's fill: a column of the screen, not a popup over it.
+        lv_obj_set_style_bg_color(s_channelList, lv_color_hex(0x0E285B), 0);
+        lv_obj_set_style_bg_opa(s_channelList, LV_OPA_70, 0);
+        for (int i = 0; i < MESH_CHANNELS; i++) {
+            // Full column width rather than sized to the name, which is what a
+            // dropdown wants and a list you read down does not.
+            if (s_channelBtns[i]) lv_obj_set_width(s_channelBtns[i], lv_pct(100));
+        }
+        // The header's selector opened the dropdown; with the list always in
+        // view it has nothing to do, and the active channel is the lit row.
+        if (s_channelSelectorBtn) lv_obj_add_flag(s_channelSelectorBtn, LV_OBJ_FLAG_HIDDEN);
+    }
+#endif
 
     refreshChatComposeButtonState();
 
@@ -50056,6 +51615,10 @@ static void serviceSerialCommands() {
 }
 
 void setup() {
+#if defined(DEVICE_TDISPLAY_P4)
+    // Before anything else registers a shutdown handler; see the function.
+    tdisplayP4InstallFullRestart();
+#endif
     Serial.begin(115200);
     delay(120);
     // First thing out of the door, before any peripheral is touched. If this
@@ -50121,6 +51684,14 @@ void setup() {
 #if defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)
     pinMode(DISPLAY_TOGGLE_BUTTON_PIN,
             (DISPLAY_TOGGLE_BUTTON_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
+#endif
+
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!tdisplayP4IoBegin()) {
+        Serial.println("[tdisplay-p4-io] initialization failed");
+    } else if (!tdisplayP4IoResetEsp32C6()) {
+        Serial.println("[wifi-p4] initial ESP32-C6 reset failed");
+    }
 #endif
 
     // Before the display, radio, Wi-Fi and GPS come up, because that current
@@ -50330,6 +51901,24 @@ void setup() {
         Serial.printf("[lvgl] WARNING: invalid lcd size, fallback to %ldx%ld\n",
                       (long)dispW, (long)dispH);
     }
+#if UI_PIXEL_SCALE > 1
+    // LVGL, the VNC mirror and every layout below work in scaled-down pixels;
+    // only lvglFlush() and lvglTouchRead() see the panel's own (board.h).
+    dispW /= UI_PIXEL_SCALE;
+    dispH /= UI_PIXEL_SCALE;
+#endif
+#if UI_BOTTOM_SAFE_H > 0
+    // Stop short of the rounded bottom corners (board.h). Nothing LVGL draws
+    // reaches the strip below, so it is blacked once here and stays that way.
+    dispH -= UI_BOTTOM_SAFE_H;
+    displayDev().fillRect(0, dispH * UI_PIXEL_SCALE, displayDev().width(),
+                          displayDev().height() - dispH * UI_PIXEL_SCALE, TFT_BLACK);
+#endif
+#if UI_PIXEL_SCALE > 1 || UI_BOTTOM_SAFE_H > 0
+    Serial.printf("[lvgl] panel %ldx%ld: UI %ldx%ld at %dx, %d px strip below\n",
+                  (long)displayDev().width(), (long)displayDev().height(),
+                  (long)dispW, (long)dispH, UI_PIXEL_SCALE, UI_BOTTOM_SAFE_H);
+#endif
     s_lvDisplay = lv_display_create(dispW, dispH);
     if (!s_lvDisplay) {
         Serial.println("[lvgl] FATAL: display allocation failed");
@@ -50343,6 +51932,18 @@ void setup() {
 #endif
         while (true) delay(1000);
     }
+#if UI_LARGE_PANEL_PROFILE
+    // 568x1232 across 4.1 inches is about 331 DPI. LVGL's default 130-DPI
+    // theme makes physically tiny padding and text on this panel, so give the
+    // theme the real density and a readable base face before any widgets exist.
+    lv_display_set_dpi(s_lvDisplay, 330);
+    (void)lv_theme_default_init(
+        s_lvDisplay,
+        lv_palette_main(LV_PALETTE_BLUE),
+        lv_palette_main(LV_PALETTE_RED),
+        LV_THEME_DEFAULT_DARK,
+        &lv_font_montserrat_24);
+#endif
 #if HAS_VNC_HOST
     vncHostInit((uint16_t)dispW, (uint16_t)dispH);
 #endif
@@ -50362,6 +51963,10 @@ void setup() {
     lv_display_set_buffers(s_lvDisplay, s_drawBufMem, nullptr,
                            (uint32_t)drawBufBytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
+#endif
+#if HAS_STATUS_STRIP
+    // After the main display, so that one stays LVGL's default.
+    statusStripInit(dispW, dispH);
 #endif
 
 #if HAS_TOUCH
@@ -50706,6 +52311,8 @@ static const NapWakeLine kNapWakeLines[] = {
 #endif
 #if defined(DEVICE_WIO_TRACKER_L2)
     { EXPANDER_INT, false }, // PCA9555 wake-button interrupt (active low)
+#elif defined(DEVICE_TDISPLAY_P4)
+    { TDISPLAY_P4_EXPANDER_INT, false }, // XL9535 radio/touch IRQ (active low)
 #endif
 };
 
@@ -50784,6 +52391,11 @@ static void powerHookShedLoads() {
 
 static void powerHookPrepareForOff() {
     displayDev().setBrightness(0);
+#if defined(DEVICE_TDISPLAY_P4)
+    displayDev().sleep();
+    storageUnmount();
+    (void)tdisplayP4IoPrepareForSleep();
+#endif
 }
 
 static void powerHookShowMessage(const char *msg) {

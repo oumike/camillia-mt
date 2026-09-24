@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include "keyboard.h"
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
 #include "battery_util.h"
 #if HAS_BLE_KEYBOARD
 #include "ble_keyboard.h"
@@ -62,7 +65,10 @@ static void m9ReleaseUsbPads() {
 #endif
 
 static TwoWire &keyboardBus() {
-#if defined(DEVICE_M9)
+#if defined(DEVICE_TDISPLAY_P4)
+    // Shared with the audio codec, on other pins; this points it back at ours.
+    return tdisplayP4I2c1(TDISPLAY_P4_I2C1_KEYBOARD);
+#elif defined(DEVICE_M9)
     return Wire1;
 #else
     return Wire;
@@ -95,6 +101,8 @@ void keyboardSetKeypadBacklight(uint8_t level) {
 #elif defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
     // The pin belongs to LEDC from begin(), so this is the only way to move it.
     ledcWrite(KB_BL_PWM_CH, level);
+#elif defined(DEVICE_TDISPLAY_P4) && defined(KB_BL) && (KB_BL >= 0)
+    ledcWrite(KB_BL, level);
 #else
     (void)level;
 #endif
@@ -236,7 +244,8 @@ static inline void expireHeldKeyBestEffort(uint32_t nowMs) {
 } // namespace
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
 namespace {
 constexpr uint8_t TLORA_KB_ADDR = 0x34;
 constexpr uint8_t TLORA_REG_INT_STAT = 0x02;
@@ -262,7 +271,10 @@ constexpr uint8_t TLORA_REG_DEBOUNCE_DIS_2 = 0x2A;
 constexpr uint8_t TLORA_REG_DEBOUNCE_DIS_3 = 0x2B;
 constexpr uint16_t TLORA_MOD_TIMEOUT_MS = 1500;
 constexpr uint16_t TLORA_BKSP_HOLD_MS = 3000;
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDISPLAY_P4)
+constexpr uint8_t TLORA_KEYNUM_BACKSPACE = 63;
+constexpr uint8_t TLORA_KEY_COUNT = 68;
+#elif defined(DEVICE_TDECK_PRO)
 constexpr uint8_t TLORA_KEYNUM_BACKSPACE = 11;
 constexpr uint8_t TLORA_KEY_COUNT = 35;
 #else
@@ -271,7 +283,7 @@ constexpr uint8_t TLORA_KEY_COUNT = 31;
 #endif
 constexpr uint8_t TLORA_MOD_SHIFT = 0x01;
 constexpr uint8_t TLORA_MOD_SYM = 0x02;
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
 constexpr uint8_t TDECK_PRO_MOD_ALT = 0x04;
 #endif
 constexpr int8_t kRotaryDelta[16] = {
@@ -297,13 +309,131 @@ char sTloraHeldKey = KEY_NONE;
 uint8_t sTloraHeldKeyNum = 0;
 uint32_t sTloraHeldSinceMs = 0;
 
+#if defined(DEVICE_TDISPLAY_P4)
+bool sP4KeyboardPresent = false;
+bool sP4CapsLock = false;
+
+bool p4KeyboardExpanderWrite(uint8_t reg, uint8_t value) {
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission(TDISPLAY_P4_KB_EXPANDER_ADDR);
+    bus.write(reg);
+    bus.write(value);
+    return bus.endTransmission() == 0;
+}
+
+bool p4KeyboardExpanderRead(uint8_t reg, uint8_t &value) {
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission(TDISPLAY_P4_KB_EXPANDER_ADDR);
+    bus.write(reg);
+    if (bus.endTransmission(false) != 0) return false;
+    if (bus.requestFrom((uint8_t)TDISPLAY_P4_KB_EXPANDER_ADDR,
+                        (size_t)1, true) != 1) return false;
+    value = (uint8_t)bus.read();
+    return true;
+}
+
+bool p4KeyboardDetectAndReset() {
+    uint8_t output = 0xFF;
+    uint8_t config = 0xFF;
+    if (!p4KeyboardExpanderRead(0x02, output)
+        || !p4KeyboardExpanderRead(0x06, config)) {
+        return false;
+    }
+
+    const uint8_t resetMask = (uint8_t)(1U << TDISPLAY_P4_KB_RESET_BIT);
+    config &= (uint8_t)~resetMask;
+    output &= (uint8_t)~resetMask;
+    if (!p4KeyboardExpanderWrite(0x02, output)
+        || !p4KeyboardExpanderWrite(0x06, config)) return false;
+    delay(10);
+    output |= resetMask;
+    if (!p4KeyboardExpanderWrite(0x02, output)) return false;
+    delay(10);
+
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission(KB_ADDR);
+    return bus.endTransmission() == 0;
+}
+#endif
+
 static inline uint8_t tloraReadRotaryAB() {
     uint8_t a = (TBALL_UP >= 0 && digitalRead(TBALL_UP) == LOW) ? 1 : 0;
     uint8_t b = (TBALL_DOWN >= 0 && digitalRead(TBALL_DOWN) == LOW) ? 1 : 0;
     return (uint8_t)((b << 1) | a);
 }
 
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDISPLAY_P4)
+const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
+    {KEY_OPEN_HOME, KEY_OPEN_HOME, KEY_OPEN_HOME},
+    {KEY_OPEN_CHAT, KEY_OPEN_CHAT, KEY_OPEN_CHAT},
+    {KEY_OPEN_CONFIG, KEY_OPEN_CONFIG, KEY_OPEN_CONFIG},
+    {KEY_OPEN_DMS, KEY_OPEN_DMS, KEY_OPEN_DMS},
+    {KEY_OPEN_NODES, KEY_OPEN_NODES, KEY_OPEN_NODES},
+    {KEY_OPEN_TOOLS, KEY_OPEN_TOOLS, KEY_OPEN_TOOLS},
+    {KEY_OPEN_HELP, KEY_OPEN_HELP, KEY_OPEN_HELP},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_ESCAPE, KEY_ESCAPE, KEY_ESCAPE},
+    {KEY_ESCAPE, KEY_ESCAPE, KEY_ESCAPE},
+    {'1', '!', '!'},
+    {'2', '@', '@'},
+    {'3', '#', '#'},
+    {'4', '$', '$'},
+    {'5', '%', '%'},
+    {'6', '^', '^'},
+    {'7', '&', '&'},
+    {'8', '*', '*'},
+    {'q', 'Q', '\''},
+    {'w', 'W', '_'},
+    {'e', 'E', '-'},
+    {'r', 'R', '+'},
+    {'t', 'T', '='},
+    {'y', 'Y', '\\'},
+    {'u', 'U', '|'},
+    {'i', 'I', ';'},
+    {'o', 'O', ':'},
+    {'p', 'P', '"'},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {'a', 'A', '~'},
+    {'s', 'S', '['},
+    {'d', 'D', ']'},
+    {'f', 'F', '{'},
+    {'g', 'G', '}'},
+    {'h', 'H', ','},
+    {'j', 'J', '`'},
+    {'k', 'K', '/'},
+    {'l', 'L', '?'},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {'z', 'Z', KEY_NONE},
+    {'x', 'X', KEY_NONE},
+    {'c', 'C', KEY_NONE},
+    {'v', 'V', KEY_NONE},
+    {'b', 'B', '.'},
+    {'n', 'N', '<'},
+    {'m', 'M', '>'},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_SCROLL_UP, KEY_SCROLL_UP, KEY_SCROLL_UP},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_TAB, KEY_TAB, KEY_TAB},
+    {' ', ' ', ' '},
+    {' ', ' ', ' '},
+    {' ', ' ', ' '},
+    {KEY_NONE, KEY_NONE, KEY_NONE},
+    {KEY_PREV_CHAN, KEY_PREV_CHAN, KEY_PREV_CHAN},
+    {KEY_SCROLL_DN, KEY_SCROLL_DN, KEY_SCROLL_DN},
+    {KEY_TOGGLE_KB_BACKLIGHT, KEY_TOGGLE_KB_BACKLIGHT, KEY_TOGGLE_KB_BACKLIGHT},
+    {'9', '(', '('},
+    {KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE_HOLD},
+    {KEY_ENTER, KEY_ENTER, KEY_ENTER},
+    {KEY_EMOJI_PICKER, KEY_EMOJI_PICKER, KEY_EMOJI_PICKER},
+    {KEY_ENTER, KEY_ENTER, KEY_ENTER},
+    {'0', ')', ')'},
+    {KEY_NEXT_CHAN, KEY_NEXT_CHAN, KEY_NEXT_CHAN},
+};
+#elif defined(DEVICE_TDECK_PRO)
 // The Pro has the same visible QWERTY layout as T-Deck, but its TCA8418 sends
 // matrix positions. Printable letters intentionally reach the shared shortcut
 // layer unchanged; Alt adds explicit directional navigation where available.
@@ -388,19 +518,21 @@ const char kTloraTapMap[TLORA_KEY_COUNT][3] = {
 #endif
 
 void tloraWriteReg(uint8_t reg, uint8_t value) {
-    Wire.beginTransmission(TLORA_KB_ADDR);
-    Wire.write(reg);
-    Wire.write(value);
-    Wire.endTransmission();
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission(TLORA_KB_ADDR);
+    bus.write(reg);
+    bus.write(value);
+    bus.endTransmission();
 }
 
 uint8_t tloraReadReg(uint8_t reg) {
-    Wire.beginTransmission(TLORA_KB_ADDR);
-    Wire.write(reg);
-    Wire.endTransmission();
-    Wire.requestFrom((uint8_t)TLORA_KB_ADDR, (uint8_t)1);
-    if (!Wire.available()) return 0;
-    return Wire.read();
+    TwoWire &bus = keyboardBus();
+    bus.beginTransmission(TLORA_KB_ADDR);
+    bus.write(reg);
+    bus.endTransmission();
+    bus.requestFrom((uint8_t)TLORA_KB_ADDR, (uint8_t)1);
+    if (!bus.available()) return 0;
+    return bus.read();
 }
 
 void tloraResetKeyboardController() {
@@ -421,8 +553,12 @@ void tloraResetKeyboardController() {
     tloraWriteReg(TLORA_REG_GPIO_INT_EN_2, 0xFF);
     tloraWriteReg(TLORA_REG_GPIO_INT_EN_3, 0xFF);
 
-    // 4 rows, 10 columns.
+    // Pager/Pro: 4 rows, 10 columns. P4 expansion: 7 rows, 10 columns.
+#if defined(DEVICE_TDISPLAY_P4)
+    tloraWriteReg(TLORA_REG_KP_GPIO_1, 0x7F);
+#else
     tloraWriteReg(TLORA_REG_KP_GPIO_1, 0x0F);
+#endif
     tloraWriteReg(TLORA_REG_KP_GPIO_2, 0xFF);
     tloraWriteReg(TLORA_REG_KP_GPIO_3, 0x03);
 
@@ -442,7 +578,27 @@ char tloraTranslateKey(uint8_t keyNum) {
     }
 
     // Key numbers are 1-based from the TCA8418 event FIFO.
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDISPLAY_P4)
+    if (keyNum == 53) {
+        sTloraModifier ^= TLORA_MOD_SHIFT;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+    if (keyNum == 31) {
+        sP4CapsLock = !sP4CapsLock;
+        return KEY_NONE;
+    }
+    if (keyNum == 51 || keyNum == 58) {
+        sTloraModifier ^= TLORA_MOD_SYM;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+    if (keyNum == 41) {
+        sTloraModifier ^= TDECK_PRO_MOD_ALT;
+        sTloraModifierSetMs = now;
+        return KEY_NONE;
+    }
+#elif defined(DEVICE_TDECK_PRO)
     if (keyNum == 31 || keyNum == 35) {
         sTloraModifier ^= TLORA_MOD_SHIFT;
         sTloraModifierSetMs = now;
@@ -474,7 +630,25 @@ char tloraTranslateKey(uint8_t keyNum) {
     if (keyNum < 1 || keyNum > TLORA_KEY_COUNT) return KEY_NONE;
     uint8_t idx = keyNum - 1;
 
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDISPLAY_P4)
+    if (sTloraModifier & TDECK_PRO_MOD_ALT) {
+    char nav = KEY_NONE;
+    if (keyNum == 63) nav = KEY_BACK_BTN;
+    else if (keyNum == 37) nav = KEY_OPEN_HOME;
+    else if (keyNum == 34) nav = KEY_OPEN_DMS;
+    else if (keyNum == 47) nav = KEY_OPEN_NODES;
+    else if (keyNum == 40) nav = KEY_OPEN_TOOLS;
+    else if (keyNum == 30) nav = KEY_OPEN_HELP;
+#if HAS_HOME_DASHBOARD
+    else if (keyNum == 44) nav = KEY_OPEN_CHAT;
+    else if (keyNum == 35) nav = KEY_OPEN_CONFIG;
+#else
+    else if (keyNum == 44) nav = KEY_OPEN_CONFIG;
+#endif
+    sTloraModifier = 0;
+    if (nav != KEY_NONE) return nav;
+    }
+#elif defined(DEVICE_TDECK_PRO)
     if (sTloraModifier & TDECK_PRO_MOD_ALT) {
         char nav = KEY_NONE;
         // By key number, not by letter: this keyboard reports position and the
@@ -520,6 +694,15 @@ char tloraTranslateKey(uint8_t keyNum) {
 
     char mapped = kTloraTapMap[idx][mode];
     if (mapped == KEY_NONE) mapped = kTloraTapMap[idx][0];
+
+#if defined(DEVICE_TDISPLAY_P4)
+    const char base = kTloraTapMap[idx][0];
+    if (sP4CapsLock && base >= 'a' && base <= 'z') {
+        mapped = (sTloraModifier & TLORA_MOD_SHIFT)
+                   ? base
+                   : (char)(base - 'a' + 'A');
+    }
+#endif
 
     // Consume one-shot modifier state after non-modifier keypress.
     sTloraModifier = 0;
@@ -692,6 +875,9 @@ void tloraDrainController() {
 // backstop for the one narrow window the interrupt cannot cover: an event that
 // lands between a drain's last read and its acknowledgement.
 void tloraPollController(uint32_t now) {
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!sP4KeyboardPresent) return;
+#endif
     static uint32_t lastPollMs = 0;
 #if (KB_INT >= 0)
     if (digitalRead(KB_INT) != KB_INT_ACTIVE_LEVEL
@@ -1214,14 +1400,35 @@ void TDeckKeyboard::begin() {
     return;
 #endif
 
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
-    Wire.begin(KB_SDA, KB_SCL, 100000UL);
-    Wire.setClock(400000UL);
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
+    TwoWire &tcaBus = keyboardBus();
+    tcaBus.begin(KB_SDA, KB_SCL, 100000UL);
+    tcaBus.setClock(400000UL);
     delay(30);
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!p4KeyboardDetectAndReset()) {
+        sP4KeyboardPresent = false;
+        Serial.println("[kb] T-Display P4 keyboard expansion not attached");
+        return;
+    }
+    sP4KeyboardPresent = true;
+    Serial.println("[kb] T-Display P4 keyboard expansion detected");
+#endif
 #if (KB_INT >= 0)
+#if defined(DEVICE_TDISPLAY_P4)
+    pinMode(KB_INT, INPUT_PULLDOWN);
+#else
     pinMode(KB_INT, (KB_INT_ACTIVE_LEVEL == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
 #endif
-#if defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
+#endif
+#if defined(DEVICE_TDISPLAY_P4) && defined(KB_BL) && (KB_BL >= 0)
+    if (ledcAttach(KB_BL, KB_BL_FREQ, 8)) {
+        ledcWrite(KB_BL, 255);
+    } else {
+        Serial.println("[kb-bl] T-Display P4 PWM attach failed");
+    }
+#elif defined(DEVICE_TDECK_PRO) && defined(KB_BL) && (KB_BL >= 0)
     // LEDC rather than a plain output, so this backlight has a brightness and
     // not just a state. Lit at full here, before any setting is loaded, exactly
     // as digitalWrite(HIGH) used to -- boot applies the stored level later.
@@ -1475,9 +1682,13 @@ char TDeckKeyboard::readKey() {
     pumpCardputerKeys();
     if (_cardputerCount == 0) return KEY_NONE;
     return dequeueCardputerKey();
-#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#elif defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     // The IRQ gate and the idle probe live in tloraPollController() now, so the
     // panel busy wait reaches them too and one poll cadence covers both callers.
+#if defined(DEVICE_TDISPLAY_P4)
+    if (!sP4KeyboardPresent) return KEY_NONE;
+#endif
     return tloraReadMappedKey();
 #elif !HAS_KEYBOARD
     return KEY_NONE;
@@ -1977,7 +2188,8 @@ void IRAM_ATTR TDeckKeyboard::_isrClick() { if (_instance) _instance->_click = t
 // own: on the passes where it does not poll it hands back the millisecond that
 // wait would otherwise have slept, so this costs no more CPU than the wait did.
 void keyboardServiceDuringBlockingWork() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     static uint32_t lastServiceMs = 0;
     const uint32_t now = millis();
     if ((uint32_t)(now - lastServiceMs) < 4) {
@@ -1996,7 +2208,8 @@ void keyboardServiceDuringBlockingWork() {
 // whether a typing burst is still in flight, which the e-paper build uses to
 // decide whether this is a good moment to spend ~700 ms repainting the panel.
 uint8_t keyboardPendingKeys() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     return sTloraQueueCount;
 #else
     return 0;
@@ -2004,7 +2217,8 @@ uint8_t keyboardPendingKeys() {
 }
 
 uint32_t keyboardLastKeyMs() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     return sTloraLastKeyMs;
 #else
     return 0;
@@ -2015,7 +2229,8 @@ uint32_t keyboardLastKeyMs() {
 // events, so it is the only build that can answer this; elsewhere callers get
 // a best-effort heuristic keyed from recent keyboard activity.
 char keyboardHeldKey() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     return sTloraHeldKey;
 #elif !HAS_KEYBOARD
 #  if HAS_BLE_KEYBOARD
@@ -2035,7 +2250,8 @@ char keyboardHeldKey() {
 }
 
 uint32_t keyboardHeldMs() {
-#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
+    || defined(DEVICE_TDISPLAY_P4)
     if (sTloraHeldKey == KEY_NONE || sTloraHeldSinceMs == 0) return 0;
     return millis() - sTloraHeldSinceMs;
 #elif !HAS_KEYBOARD

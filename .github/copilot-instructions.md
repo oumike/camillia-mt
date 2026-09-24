@@ -1,6 +1,6 @@
 # Camillia-MT Copilot Instructions
 
-This repository is ESP32-S3 firmware for Meshtastic-compatible handhelds.
+This repository is ESP32 firmware for Meshtastic-compatible handhelds.
 Treat this file as the default operating guide for AI-assisted work in this
 workspace.
 
@@ -16,10 +16,15 @@ Use these files as the source of truth before changing board-specific behavior:
 
 - `platformio.ini` for build environments and board flags.
 - `src/hal/hw_tdeck.h`
+- `src/hal/hw_tdeck_pro.h`
 - `src/hal/hw_tlora_pager.h`
 - `src/hal/hw_cardputer.h`
 - `src/hal/hw_heltec_v4.h`
+- `src/hal/hw_heltec_r8.h`
 - `src/hal/hw_mesh_deck.h`
+- `src/hal/hw_m9.h`
+- `src/hal/hw_wio_tracker_l2.h`
+- `src/hal/hw_tdisplay_p4.h`
 - `docs/HARDWARE.md`
 
 Do not invent pin maps, bus addresses, or peripheral wiring.
@@ -66,15 +71,24 @@ Use this staged flow for feature and bug work:
 Current PlatformIO environments include:
 
 - `tdeck`
+- `tdeck-pro`
 - `tlora-pager-tft`
 - `cardputer-cap`
 - `heltec-v4`
 - `heltec-v4-vertical`
+- `heltec-r8`
+- `heltec-r8-vertical`
 - `mesh-deck`
 - `m9`
+- `wio-tracker-l2`
+- `tdisplay-p4`
 
 When a request says "mesh-deck", scope changes to `DEVICE_MESH_DECK` paths
 unless asked to propagate.
+
+When a request says "tdisplay-p4", scope changes to `DEVICE_TDISPLAY_P4`
+paths. It is the only ESP32-P4 / Arduino 3.x target; do not migrate the S3
+environments from `espressif32@7.0.1` unless explicitly requested.
 
 ## Config And Persistence
 

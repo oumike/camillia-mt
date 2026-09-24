@@ -11,6 +11,7 @@
 #include <freertos/task.h>
 #include <lwip/sockets.h>
 #include <mbedtls/sha1.h>
+#include <mbedtls/version.h>
 #include <string.h>
 
 namespace {
@@ -379,8 +380,13 @@ static bool completeWebSocketHandshake() {
     memcpy(source, key, keyLength);
     memcpy(source + keyLength, kMagic, sizeof(kMagic) - 1);
     uint8_t digest[20];
+#if MBEDTLS_VERSION_MAJOR >= 3
+    if (mbedtls_sha1((const unsigned char *)source,
+                     keyLength + sizeof(kMagic) - 1, digest) != 0) {
+#else
     if (mbedtls_sha1_ret((const unsigned char *)source,
                          keyLength + sizeof(kMagic) - 1, digest) != 0) {
+#endif
         return false;
     }
     char accept[29];

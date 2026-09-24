@@ -75,17 +75,20 @@ is **off** out of the box — a fresh install there is the key-hint strip, down 
 the pixel — and Config → **Nav Bar**, or **Bottom Nav Bar** in web config, turns
 it on. It redraws immediately either way, with no reboot.
 
-On the touch-only boards (`heltec-v4*`, `heltec-r8*`, `wio-tracker-l2`) the bar
-is the only way off a screen, so there is no setting and no key-hint strip to go
-back to.
+On the touch-only boards (`heltec-v4*`, `heltec-r8*`, `wio-tracker-l2`, and
+`tdisplay-p4`) the bar is the only way off a screen, so there is no setting and
+no key-hint strip to go back to.
 
-A note for the three boards the bar is new to: it costs more than the strip it
+A note for the three keyboard boards the bar is new to: it costs more than the strip it
 replaces. The bar is 28 px against the strip's 14 — 12 on the Cardputer — and
 the strip is where the M9's and the Cardputer's shortcuts are written down, so
 turning the bar on trades that text for icons. The **Help** screen still lists
 every key, which is the answer to "what was the key for Nodes again" once the
 hints are gone. The Cardputer feels the height most: 28 px is a fifth of its
 135 px panel.
+
+The T-Display P4 uses the same navigation model at a 56 px height with 28 px
+icons, scaled for its 568x1232 panel.
 
 If your board has the browser **Remote** (M9 and T-Lora Pager do), the bar's
 cells are clickable there even though the device itself has no touch panel — the
@@ -566,7 +569,8 @@ neighbor report.
   to your own preset on the way out. With nothing running, C clears the list as
   before. Cancelling does not hand back a fresh sweep straight away: the
   broadcast has already gone out, so the usual cooldown still applies
-- **Both Sweep and a preset scan ask how long to listen first** — 30 sec, 1, 2,
+- **Both Sweep and a preset scan open Sweep/Scan Settings first**, which asks
+  how long to listen — 30 sec, 1, 2,
   5, 10, 15 or 30 min, or 1, 2 or 6 hours. **A long preset scan is not the same
   as a long sweep:** a scan parks the radio on the foreign preset for the whole
   window, so the node is deaf to its own mesh until it ends. Six hours of that
@@ -609,6 +613,15 @@ neighbor report.
   (`discovery-boot-123s.json`) and the file's `generated` field is `null`
   rather than a made-up date. The JSON carries every group the screen draws
   plus the raw neighbor reports, so the graph can be rebuilt from the file.
+- **Save while discovering** (Sweep/Scan Settings, under the duration; off by
+  default, and Space toggles it on keyboard boards) saves the run as it goes
+  instead of waiting for S. The run gets one file of its own, named the same
+  way, rewritten as results change (at most every 5 seconds) and once more when
+  the run ends — finished, cancelled or cut short — so what was heard is on the
+  card even if the device loses power mid-run. While it runs the status line
+  names the file ("Sweeping... 1m/5m - saving to discovery-….json"), and it
+  ends in "- saved" when it closes. The choice lasts until reboot. Only offered on
+  builds with storage.
 - Close with the device close key (see device sections below)
 
 ### Beacons
@@ -1140,10 +1153,10 @@ The device info panel is scrollable with the keyboard on every keyboard build:
 
 ### Lock screen
 
-Nine of the eleven builds can show a lock screen before putting the panel fully
+Ten of the twelve builds can show a lock screen before putting the panel fully
 to sleep: `tdeck`, `tlora-pager-tft`, `heltec-v4`, `heltec-v4-vertical`,
-`mesh-deck`, `m9`, `wio-tracker-l2`, `heltec-r8` and `heltec-r8-vertical`. The
-two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
+`mesh-deck`, `m9`, `wio-tracker-l2`, `heltec-r8`, `heltec-r8-vertical` and
+`tdisplay-p4`. The two that cannot are `cardputer-cap` and `tdeck-pro`, for different reasons given
 under [Locking and unlocking, build by build](#locking-and-unlocking-build-by-build). It uses a black background with the time and channel in
 blue, node names in green, and message text in white. The current date, battery
 reading and newest unread message previews remain visible while it is active.
@@ -2045,9 +2058,18 @@ The menu is titled `Message Actions: <sender>` and holds:
   fire the reactions, **M** opens the full tray.
 - **Reply** (**R**) — opens compose quoting that message, the same thing Space
   does on a highlighted message.
-- The six node actions for the **sender**: Traceroute (**T**), Send DM (**D**),
-  Favorite (**F**), Request Info (**I**), Request Position (**P**) and Ignore
-  (**G**).
+- **Sender Info** (**S**) — who sent it and how it reached you: over **LoRa**
+  or **MQTT** (the same radio/globe mark the chat shows in front of it), and the
+  node that handed it to you on the last leg. Over LoRa that is the relaying
+  node, or "heard directly"; the radio header only carries the last byte of the
+  relayer's id, so when several known nodes end in that byte they are all
+  listed, direct neighbours first. Over MQTT it is the gateway that uplinked it.
+  Names are the long name, else the short name, else the node id. Hops, SNR and
+  RSSI are shown too. Details are kept for the last 64 received messages since
+  boot; older ones say so.
+- The node actions for the **sender**: Traceroute (**T**), Send DM (**D**),
+  Request Info (**I**), Request Position (**P**) and Ignore (**G**). Favorite is
+  left to the Nodes screen.
 
 Up/down walks the whole list including the reaction row; Esc closes and leaves
 the chat cursor where it was.
@@ -2062,6 +2084,17 @@ one-glyph messages rather than being folded into the message they target.
 
 The Nodes screen's Enter menu is unchanged and still titled **Node Actions** —
 there is no message in that context to react to or reply to.
+
+Node Actions also has **Share** (**H**): it transmits that node's NodeInfo — its
+id, long and short names, and public key when known — once, zero-hop, so every
+node within radio range of you learns it without having heard it themselves.
+It goes out under the shared node's own id, the way a NodeInfo has to, with
+your node as the one that transmitted it. Two things follow from that: nodes
+that receive it treat the shared node as a direct neighbour at your signal until
+its own traffic says otherwise, and the hardware model and role it carries are
+blank, because this node does not keep them. It never goes to MQTT, is limited
+to one share every 5 seconds, and is greyed for nodes with no name yet and for
+your own node.
 
 ### Chat names
 
@@ -2679,6 +2712,9 @@ Primary usage is touch.
   both shapes lay out identically; only the rotation values differ, because the
   Wio's panel carries its own rotation offset. There is no seeded
   `wio-tracker-l2-vertical` target — the setting is the only route
+- The **T-Display P4** uses the same Config and Web Config selectors. Its native
+  568x1232 portrait orientation is the first-boot default; choosing Landscape
+  rotates the panel and GT9895 touch together after the required reboot
 - Bottom touch nav provides Home, DM, Nodes, Live, Config, and Help, in that
   order left to right
 - **An unread DM lights the nav bar's DM icon**, which blinks amber until you

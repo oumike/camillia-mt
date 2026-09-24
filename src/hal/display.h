@@ -27,7 +27,9 @@
 #endif
 #include "config.h"
 
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDISPLAY_P4)
+#include "tdisplay_p4_display.h"
+#elif defined(DEVICE_TDECK_PRO)
 #include "tdeck_pro_display.h"
 #else
 
@@ -321,4 +323,4 @@ public:
     }
 };
 
-#endif  // DEVICE_TDECK_PRO
+#endif  // dedicated display paths

@@ -22,7 +22,29 @@ RELEASE_ENVS=(
     mesh-deck
     m9
     wio-tracker-l2
+    tdisplay-p4
 )
+
+DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
+P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
+
+pio_core_dir_for_env() {
+    if [[ "$1" == "tdisplay-p4" ]]; then
+        echo "$P4_PIO_CORE_DIR"
+    else
+        echo "$DEFAULT_PIO_CORE_DIR"
+    fi
+}
+
+run_pio_for_env() {
+    local env_name="$1"
+    shift
+    if [[ "$env_name" == "tdisplay-p4" ]]; then
+        PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" "$PIO" "$@"
+    else
+        "$PIO" "$@"
+    fi
+}
 
 # Lookups are functions rather than associative arrays so the script runs on
 # macOS's stock bash 3.2 (which lacks `declare -A`).
@@ -30,6 +52,27 @@ env_flash_size() {
     case "$1" in
         cardputer-cap) echo "8MB" ;;
         *)             echo "16MB" ;;
+    esac
+}
+
+env_chip() {
+    case "$1" in
+        tdisplay-p4) echo "esp32p4" ;;
+        *)           echo "esp32s3" ;;
+    esac
+}
+
+env_bootloader_offset() {
+    case "$1" in
+        tdisplay-p4) echo "0x2000" ;;
+        *)           echo "0x0" ;;
+    esac
+}
+
+env_flash_mode() {
+    case "$1" in
+        tdisplay-p4) echo "qio" ;;
+        *)           echo "dio" ;;
     esac
 }
 
@@ -594,8 +637,9 @@ generate_ai_summary() {
     [[ -n "$log" || -n "$diff" ]] || return 1
 
     prompt="You are writing release notes for Camillia-MT, Meshtastic-compatible
-    firmware for ESP32-S3 handheld LoRa devices (T-Deck, T-Deck Pro, T-Lora Pager TFT, M5Stack
-Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Seeed Wio Tracker L2).
+    firmware for ESP32 handheld LoRa devices (T-Deck, T-Deck Pro, T-Lora Pager TFT, M5Stack
+Cardputer, Heltec V4, Attaky Mesh Deck, Elecrow ThinkNode M9, Seeed Wio Tracker L2,
+and LilyGo T-Display P4).
 
 Summarize what changed in release ${TAG} for the people who flash and use it.
 
@@ -849,14 +893,14 @@ fi
 # ── Build firmware ────────────────────────────────────────────────────────────
 echo ""
 echo "Building firmware..."
-BUILD_ARGS=()
+BUILD_ENVS=()
 for env_name in "${RELEASE_ENVS[@]}"; do
     if has_env "$env_name"; then
-        BUILD_ARGS+=( -e "$env_name" )
+        BUILD_ENVS+=( "$env_name" )
     fi
 done
 
-if [[ ${#BUILD_ARGS[@]} -eq 0 ]]; then
+if [[ ${#BUILD_ENVS[@]} -eq 0 ]]; then
     echo "No release environments found in platformio.ini"
     exit 1
 fi
@@ -905,10 +949,26 @@ if [[ "$NO_CLEAN" == true ]]; then
     echo "Skipping full clean (--no-clean); building on existing .pio output."
 else
     echo "Running full clean for release environments..."
-    "$PIO" run "${BUILD_ARGS[@]}" -t fullclean
+    for env_name in "${BUILD_ENVS[@]}"; do
+        run_pio_for_env "$env_name" run -e "$env_name" -t fullclean
+    done
 fi
 
-"$PIO" run "${BUILD_ARGS[@]}"
+for env_name in "${BUILD_ENVS[@]}"; do
+    run_pio_for_env "$env_name" run -e "$env_name"
+    # Official espressif32 and pioarduino use the same global framework package
+    # name but carry different Arduino cores. Snapshot boot_app0 immediately
+    # after each environment resolves so a later toolchain swap cannot make an
+    # S3 factory image contain the P4 boot app (or vice versa).
+    env_core_dir="$(pio_core_dir_for_env "$env_name")"
+    BOOT_APP0=$(find "$env_core_dir/packages/framework-arduinoespressif32/tools/partitions" \
+        -name boot_app0.bin 2>/dev/null | head -1)
+    if [[ -z "$BOOT_APP0" ]]; then
+        echo "Error: boot_app0.bin missing after building ${env_name}." >&2
+        exit 1
+    fi
+    cp "$BOOT_APP0" ".pio/build/${env_name}/boot_app0.bin"
+done
 echo "Build successful."
 
 # ── Commit, push, and tag ─────────────────────────────────────────────────────
@@ -951,23 +1011,26 @@ echo "Tag $TAG pushed."
 # Turns the current .pio build output into distributable, tag-named factory and
 # OTA images plus detached signatures, written to dist/ for the given tag ($1).
 merge_sign_assets() {
-    local tag="$1" env_name out_name flash_size d out ota_out
+    local tag="$1" env_name out_name flash_size chip boot_offset flash_mode d out ota_out
     for env_name in "${RELEASE_ENVS[@]}"; do
         if ! has_env "$env_name"; then continue; fi
         out_name="$(env_out_name "$env_name")"
         flash_size="$(env_flash_size "$env_name")"
+        chip="$(env_chip "$env_name")"
+        boot_offset="$(env_bootloader_offset "$env_name")"
+        flash_mode="$(env_flash_mode "$env_name")"
         d=".pio/build/${env_name}"
         out="dist/camillia-mt-${out_name}-${tag}.bin"
         ota_out="dist/camillia-mt-${out_name}-${tag}-ota.bin"
         echo "  ${env_name} (${flash_size}) -> ${out}"
-        $ESPTOOL --chip esp32s3 merge_bin \
+        $ESPTOOL --chip "$chip" merge_bin \
             -o "${out}" \
-            -fm dio \
+            -fm "$flash_mode" \
             -ff 80m \
             -fs "${flash_size}" \
-            0x0     "${d}/bootloader.bin" \
+            "$boot_offset" "${d}/bootloader.bin" \
             0x8000  "${d}/partitions.bin" \
-            0xe000  "${BOOT_APP0}" \
+            0xe000  "${d}/boot_app0.bin" \
             0x10000 "${d}/firmware.bin"
         cp "${d}/firmware.bin" "${ota_out}"
         cp "${d}/firmware.elf" "dist/camillia-mt-${out_name}-${tag}.elf"
@@ -977,6 +1040,16 @@ merge_sign_assets() {
         openssl dgst -sha256 -sign "$SIGNING_KEY" -out "${ota_out}.sig" "${ota_out}"
         echo "    signed -> ${ota_out}.sig"
     done
+
+    local hosted_c6
+    hosted_c6=$(find "$P4_PIO_CORE_DIR/packages/framework-arduinoespressif32-libs/hosted" \
+        -name 'esp32c6-v2.12.13.bin' 2>/dev/null | head -1)
+    if [[ -z "$hosted_c6" ]]; then
+        echo "Error: pinned ESP-Hosted C6 firmware not found after tdisplay-p4 build." >&2
+        return 1
+    fi
+    cp "$hosted_c6" \
+        "dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
 }
 
 verify_release_assets() {
@@ -1009,6 +1082,13 @@ verify_release_assets() {
         fi
         echo "  OK ${env_name}: $(basename "$factory"), $(basename "$ota"), $(basename "$sig")"
     done
+
+    local hosted_c6="dist/camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin"
+    if [[ ! -s "$hosted_c6" ]]; then
+        echo "Error: required ESP-Hosted C6 release asset is missing: $hosted_c6" >&2
+        return 1
+    fi
+    echo "  OK tdisplay-p4 C6: $(basename "$hosted_c6")"
 }
 
 echo ""

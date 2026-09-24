@@ -126,6 +126,11 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_18 1
+#if defined(DEVICE_TDISPLAY_P4)
+// The top of the P4's chat size ladder (explicitChatFont() in main_lvgl.cpp).
+// Only that board draws at 20, so only it pays the flash for it.
+#define LV_FONT_MONTSERRAT_20 1
+#endif
 #define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_32 1

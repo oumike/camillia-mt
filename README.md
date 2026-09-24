@@ -1,6 +1,6 @@
 # Camillia for Meshtastic
 
-Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
+Meshtastic-compatible mesh radio firmware for ESP32 handheld LoRa devices.
 
 **Website:** <https://camillia.sumat.org/>
 
@@ -28,13 +28,16 @@ Meshtastic-compatible mesh radio firmware for ESP32-S3 handheld LoRa devices.
 - [LilyGo T-Deck](https://lilygo.cc/products/t-deck) — ESP32-S3, SX1262 LoRa, 320x240 display, physical keyboard, trackball, L76K GPS
 - [LilyGo T-Deck Pro](https://lilygo.cc/products/t-deck-pro) — ESP32-S3, SX1262 LoRa, 240x320 e-paper touchscreen, physical keyboard, MIA-M10Q GPS
 - [LilyGo T-Lora Pager TFT](https://lilygo.cc/products/t-lora-pager) — ESP32-S3, SX1262 LoRa, 480x222 TFT, physical keyboard, roller wheel + click, GPS
+- [LilyGo T-Display P4](https://lilygo.cc/products/t-display-p4) — ESP32-P4, SX1262 LoRa, 568x1232 RM69A10 AMOLED, GT9895 touch, ESP32-C6 wireless coprocessor, optional keyboard expansion
 - [M5Stack Cardputer](https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3) + Cap LoRa/GPS module
 - [Heltec](https://heltec.org/) WiFi LoRa 32 V4 + TFT expansion kit (Heltec V4 expansion profile)
 - [Attaky Mesh Deck](https://shop.attaky.com/) — ESP32-S3, SX1262 LoRa, 320x240 touch display, 48-key QWERTY, D-pad, GPS
 - [Elecrow ThinkNode M9](https://www.elecrow.com/thinknode-m9-meshcore-communication-terminal-with-full-keyboard-2-4inch-lcd-esp32-s3-lr1110-gps-2300mah.html) — ESP32-S3, **LR1110** LoRa, 2.4" 320x240 display, 37-key QWERTY + d-pad, GPS, 2300 mAh
 - Seeed Wio Tracker L2 — ESP32-S3, SX1262 LoRa, 320x240 touch UI, GNSS, 16 MB flash and 8 MB PSRAM
 
-No additional hardware required.
+The T-Display P4's ESP32-C6 companion firmware is flashed through its dedicated
+3.3 V UART connector and may require a USB-to-UART adapter; see
+[docs/BUILD.md](docs/BUILD.md#lilygo-t-display-p4-tdisplay-p4).
 
 ## Supported Devices
 
@@ -48,9 +51,10 @@ No additional hardware required.
 - Attaky Mesh Deck (`mesh-deck`): keyboard + D-pad + touch input, GPS, and full mesh UI support; no microSD — config, DM history and the node archive live in internal flash.
 - Elecrow ThinkNode M9 (`m9`): keyboard + d-pad input (no touch), microSD config import/export, GPS, and full mesh UI support (channels, ANN, DMs, MAP, CFG, web config). The only LR1110 board in the lineup.
 - Seeed Wio Tracker L2 (`wio-tracker-l2`): bring-up target with a touch-first 320x240 UI, optional external BLE keyboard, ES8311 sound notifications, GNSS, browser VNC Host/Remote control, and 1-bit SD_MMC storage, including firmware config import/export at `/camillia/config.yaml`. LP5814 brightness, ADS1115 battery, audio, SD, BLE, and Remote support still need hardware verification.
+- LilyGo T-Display P4 AMOLED (`tdisplay-p4`): ESP32-P4 bring-up target with a portrait large-panel UI, RM69A10 MIPI-DSI display, GT9895 touch, SX1262, L76K GNSS, BQ27220 gauge, 4-bit SD_MMC, browser VNC Host/Remote control, and runtime detection of the detachable TCA8418 keyboard. WiFi uses ESP-Hosted over the onboard ESP32-C6; the C6 image is released separately because P4 OTA cannot update it. All hardware behavior remains unverified until supported by serial logs or measurements.
 
 Notes:
-- All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tdeck-pro`, `tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`).
+- All keyboard-specific shortcuts apply to keyboard builds (`tdeck`, `tdeck-pro`, `tlora-pager-tft`, `cardputer-cap`, `mesh-deck`, and `m9`) and to `tdisplay-p4` while its detachable keyboard is present.
 - Environmental telemetry via BME280/BMP280/AHT20 is available on Heltec V4 expansion builds when a compatible sensor is present.
 
 ## Features
@@ -112,8 +116,9 @@ and needs an `ANTHROPIC_API_KEY` secret.
 Signing uses the `OTA_SIGNING_KEY` secret on the `release` environment. The
 workflow refuses to publish if that key does not match the public key baked into
 `src/ota_signing_pubkey.h`, since a mismatch would lock out every device in the
-field. T-Deck Pro publishes the `tdeck-pro` factory and OTA images; the release
-script verifies the target list and every OTA signature before publication.
+field. T-Deck Pro publishes the `tdeck-pro` factory and OTA images; T-Display P4
+also publishes its matching ESP-Hosted C6 image. The release script verifies the
+target list and every OTA signature before publication.
 Debug symbols (`.elf`) are uploaded as a `debug-symbols-<tag>` workflow artifact
 rather than bloating the release by ~35MB per profile.
 

@@ -20,7 +20,7 @@
 // still gets DEVICE_TDECK forced on underneath it, and because board.h tests
 // DEVICE_TDECK first, the build then silently compiles against the T-Deck pin
 // map — the real target's header is never included at all.
-#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2)
+#if !defined(DEVICE_TDECK) && !defined(DEVICE_TDECK_PRO) && !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_CARDPUTER_LORA_HAT) && !defined(DEVICE_HELTEC_V4_EXPANSION) && !defined(DEVICE_MESH_DECK) && !defined(DEVICE_M9) && !defined(DEVICE_WIO_TRACKER_L2) && !defined(DEVICE_TDISPLAY_P4)
 #  define DEVICE_TDECK 1
 #endif
 
@@ -29,7 +29,8 @@
 #endif
 
 // What a device with no orientation key yet takes as its own, once, on the boot
-// that finds the key missing (issue #77). Fresh installs are landscape.
+// that finds the key missing (issue #77). Fresh installs are landscape unless
+// their environment explicitly seeds portrait, as T-Display P4 does.
 //
 // The heltec-v4-vertical / heltec-r8-vertical envs build byte-identical
 // firmware with this set to 1, so a device flashed from one comes up portrait
@@ -174,6 +175,9 @@
 #define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_WIO_TRACKER_L2)
 #define MY_HW_MODEL MESH_HW_MODEL_SEEED_WIO_TRACKER_L2
+#elif defined(DEVICE_TDISPLAY_P4)
+// No Meshtastic HardwareModel has been allocated for the T-Display P4.
+#define MY_HW_MODEL MESH_HW_MODEL_PRIVATE_HW
 #elif defined(DEVICE_M9)
 // Meshtastic's HardwareModel enum has no ThinkNode M9 — the M1/M2 are in it,
 // the M9 is a MeshCore device. Advertising one of those, or the T-Deck the
@@ -538,7 +542,7 @@
 // every tone call there compiles to nothing, and the alert-sound, splash-melody
 // and volume settings were UI for hardware that does not exist.
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT) || (BOARD_BUZZER >= 0)
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4) || (BOARD_BUZZER >= 0)
 #define HAS_AUDIO_ALERTS 1
 #else
 #define HAS_AUDIO_ALERTS 0
@@ -981,7 +985,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 // the code says "unknown" rather than guessing — see powerMgrChargerPresent().
 #ifndef POWER_HAS_CHARGER_SENSE
 #if defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
-    || defined(DEVICE_CARDPUTER_LORA_HAT)
+    || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_TDISPLAY_P4)
 #define POWER_HAS_CHARGER_SENSE 1
 #else
 #define POWER_HAS_CHARGER_SENSE 0
@@ -994,7 +998,7 @@ extern int VISIBLE_LINES;   // visible rows at LINE_H spacing
 #ifndef HAS_BATTERY_SENSE
 #if (BATT_ADC_PIN >= 0) || defined(DEVICE_TLORA_PAGER_TFT) || defined(DEVICE_TDECK_PRO) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_WIO_TRACKER_L2)
+    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4)
 #define HAS_BATTERY_SENSE 1
 #else
 #define HAS_BATTERY_SENSE 0

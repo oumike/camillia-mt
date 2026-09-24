@@ -316,6 +316,15 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
                       uint8_t *buf, size_t bufLen,
                       bool wantResponse = true, uint32_t bitfield = 0);
 
+// A NODEINFO_APP Data message describing *another* node, for the node actions'
+// Share: its id, names and, when known, public key (pubKey32 may be null). What
+// this node does not store about it -- hardware model, role, MAC -- is left out
+// rather than filled with our own, which encodeNodeInfo() would do. Never asks
+// for a response and never carries OK_TO_MQTT.
+size_t encodeSharedNodeInfo(uint32_t nodeId, const char *longName,
+                            const char *shortName, const uint8_t *pubKey32,
+                            uint8_t *buf, size_t bufLen);
+
 // Coarsen a coordinate pair to `precisionBits` of latitude/longitude, in place.
 // No-op at 32 or above. This is Meshtastic's imprecise-location transform: mask
 // off the low bits, then add half a cell so the transmitted point sits in the

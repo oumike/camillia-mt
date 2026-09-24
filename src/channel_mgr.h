@@ -86,6 +86,20 @@ public:
                       uint32_t toNodeId = 0xFFFFFFFF, bool wantResponse = false,
                       bool okToMqtt = false);
 
+    // Node actions' Share: puts another node's NODEINFO on the air once, zero-
+    // hop, so every node in radio range learns it -- the Meshtastic take on
+    // wadamesh's contact share. It goes out *as* that node (from = its id),
+    // because that is who a NodeInfo describes and whose id receivers decrypt
+    // under; relay_node carries ours, since we are the one transmitting.
+    //
+    // The known cost, chosen knowingly: receivers see it as heard directly
+    // (zero hops) at our signal, so for them that node looks like a neighbour
+    // until its own traffic says otherwise. Zero-hop keeps that to the nodes
+    // within range, and it is never sent to MQTT. Rate-limited to one per 5 s.
+    bool sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
+                            const char *longName, const char *shortName,
+                            const uint8_t *pubKey32);
+
     // Discovery sweep: one NODEINFO_APP broadcast with want_response, so every
     // node that hears it answers with its own. This is the deliberate exception
     // to the no-want_response-on-broadcast rule above, and hopLimit (capped at

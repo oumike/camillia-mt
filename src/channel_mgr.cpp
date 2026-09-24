@@ -1227,6 +1227,56 @@ bool ChannelMgr::sendNodeInfo(uint32_t myNodeId,
                              isUnicast && wantResponse, meshHopLimit(), okToMqtt);
 }
 
+bool ChannelMgr::sendSharedNodeInfo(uint32_t myNodeId, uint32_t sharedNodeId,
+                                    const char *longName, const char *shortName,
+                                    const uint8_t *pubKey32) {
+    static uint32_t sLastShareMs = 0;
+    static constexpr uint32_t kShareGapMs = 5000UL;
+    if (!Radio.isReady() || sharedNodeId == 0 || sharedNodeId == myNodeId) return false;
+    if (sLastShareMs != 0 && (uint32_t)(millis() - sLastShareMs) < kShareGapMs) {
+        debugLogMessages("[share] held: %lums left in the 5s window\n",
+                         (unsigned long)(kShareGapMs - (millis() - sLastShareMs)));
+        return false;
+    }
+
+    uint8_t proto[256], cipher[256];
+    const size_t protoLen = encodeSharedNodeInfo(sharedNodeId, longName, shortName,
+                                                 pubKey32, proto, sizeof(proto));
+    if (protoLen == 0) return false;
+
+    // The primary channel, like every NODEINFO this firmware sends.
+    const ChannelKey &ck = CHANNEL_KEYS[0];
+    const uint32_t packetId = nextMeshPacketId();
+    // The nonce is built from the sender, so it has to be the node the packet
+    // claims to come from, or no receiver could decrypt it.
+    if (!encryptPayload(packetId, sharedNodeId, ck.key, ck.keyLen,
+                        proto, cipher, protoLen)) return false;
+
+    uint8_t frame[sizeof(MeshHdr) + 256];
+    MeshHdr hdr = {};
+    hdr.to         = 0xFFFFFFFF;
+    hdr.from       = sharedNodeId;
+    hdr.id         = packetId;
+    hdr.channel    = ck.hash;
+    hdr.flags      = 0;   // hop_limit 0, hop_start 0: zero-hop, nothing relays it
+    hdr.relay_node = (uint8_t)(myNodeId & 0xFF);
+    memcpy(frame, &hdr, sizeof(hdr));
+    memcpy(frame + sizeof(hdr), cipher, protoLen);
+
+    const bool ok = Radio.transmit(frame, sizeof(hdr) + protoLen);
+    if (ok) sLastShareMs = millis();
+    debugLogMessages("[share] !%08X nodeinfo zero-hop %s\n",
+                     (unsigned)sharedNodeId, ok ? "OK" : "FAILED");
+    {
+        char who[16];
+        liveNodeLabel(sharedNodeId, who, sizeof(who), true);
+        char live[64];
+        snprintf(live, sizeof(live), "T SHR B %s %s", who, ok ? "OK" : "ER");
+        liveFeedAddLine(live, ok ? TFT_DARKGREY : TFT_RED);
+    }
+    return ok;
+}
+
 uint32_t ChannelMgr::nodeInfoBroadcastCooldownMs() const {
     if (sLastNodeInfoBroadcastMs == 0) return 0;
     const uint32_t since = millis() - sLastNodeInfoBroadcastMs;

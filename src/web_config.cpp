@@ -35,6 +35,10 @@
 #include "ota_update.h"   // otaLayoutSupportsUpdate()
 #include "battery_util.h"
 #include "utf8_utils.h"
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#include <esp32-hal-hosted.h>
+#endif
 
 static const uint32_t kConnectTimeout  = 10000;  // ms
 static const uint32_t kReleaseCheckTimeoutMs = 7000;
@@ -207,9 +211,73 @@ static void logWifiHeapDiag(const char *tag) {
                   (unsigned)largestDma);
 }
 
+#if defined(DEVICE_TDISPLAY_P4)
+static void logP4HostedInfoOnce() {
+    static bool logged = false;
+    if (logged || !hostedIsInitialized()) return;
+
+    uint32_t hostMajor = 0;
+    uint32_t hostMinor = 0;
+    uint32_t hostPatch = 0;
+    uint32_t slaveMajor = 0;
+    uint32_t slaveMinor = 0;
+    uint32_t slavePatch = 0;
+    hostedGetHostVersion(&hostMajor, &hostMinor, &hostPatch);
+    const char *target = hostedGetSlaveTargetName();
+    hostedGetSlaveVersion(&slaveMajor, &slaveMinor, &slavePatch);
+    Serial.printf("[wifi-p4] ESP-Hosted host=%lu.%lu.%lu slave=%lu.%lu.%lu target=%s\n",
+                  (unsigned long)hostMajor,
+                  (unsigned long)hostMinor,
+                  (unsigned long)hostPatch,
+                  (unsigned long)slaveMajor,
+                  (unsigned long)slaveMinor,
+                  (unsigned long)slavePatch,
+                  target ? target : "unknown");
+    if (hostMajor != slaveMajor || hostMinor != slaveMinor || hostPatch != slavePatch) {
+        Serial.println("[wifi-p4] ESP-Hosted firmware mismatch; flash the matching C6 image");
+    }
+    logged = true;
+}
+
+static bool recoverP4Hosted(wifi_mode_t mode, const char *stageTag) {
+    if (hostedIsBLEActive()) {
+        Serial.println("[wifi-p4] C6 reset skipped because ESP-Hosted BLE is active");
+        return false;
+    }
+    Serial.printf("[wifi-p4] Hosted unavailable at %s; resetting ESP32-C6\n",
+                  stageTag ? stageTag : "startup");
+    WiFi.disconnect(true);
+    (void)WiFi.mode(WIFI_OFF);
+    if (!tdisplayP4IoResetEsp32C6()) {
+        Serial.println("[wifi-p4] ESP32-C6 reset failed");
+        return false;
+    }
+    if (!WiFi.mode(mode)) {
+        Serial.println("[wifi-p4] ESP-Hosted reinitialization failed");
+        return false;
+    }
+    logP4HostedInfoOnce();
+    Serial.println("[wifi-p4] ESP-Hosted recovered after C6 reset");
+    return true;
+}
+#endif
+
 static bool ensureWifiMode(wifi_mode_t mode, const char *stageTag) {
-    if (WiFi.getMode() == mode) return true;
-    if (WiFi.mode(mode)) return true;
+    if (WiFi.getMode() == mode) {
+#if defined(DEVICE_TDISPLAY_P4)
+        logP4HostedInfoOnce();
+#endif
+        return true;
+    }
+    if (WiFi.mode(mode)) {
+#if defined(DEVICE_TDISPLAY_P4)
+        logP4HostedInfoOnce();
+#endif
+        return true;
+    }
+#if defined(DEVICE_TDISPLAY_P4)
+    if (recoverP4Hosted(mode, stageTag)) return true;
+#endif
     Serial.printf("[web] WiFi.mode(%d) failed at %s\n",
                   (int)mode,
                   stageTag ? stageTag : "startup");
@@ -9390,7 +9458,14 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         WiFi.disconnect(false);
         if (!ensureWifiMode(WIFI_AP, modeTag)) return false;
         delay(120);
-        if (!WiFi.softAP("camillia-mt")) {
+        bool apStarted = WiFi.softAP("camillia-mt");
+#if defined(DEVICE_TDISPLAY_P4)
+        if (!apStarted && recoverP4Hosted(WIFI_AP, "SoftAP start")) {
+            delay(120);
+            apStarted = WiFi.softAP("camillia-mt");
+        }
+#endif
+        if (!apStarted) {
             Serial.printf("[web] %s start failed\n", onboarding ? "onboarding AP" : "AP fallback");
             logWifiHeapDiag(onboarding ? "onboarding AP start failed" : "AP fallback start failed");
             return false;
@@ -9457,7 +9532,16 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
         if (!ok) restoreUiBuffersIfNeeded();
         return ok;
     }
+#if defined(DEVICE_TDISPLAY_P4)
+    bool hostedRecoveryAttempted = false;
+#endif
     wl_status_t beginStatus = WiFi.begin(staConnectSsid(), staConnectPass());
+#if defined(DEVICE_TDISPLAY_P4)
+    if (beginStatus == WL_NO_SHIELD && recoverP4Hosted(WIFI_STA, "STA begin")) {
+        hostedRecoveryAttempted = true;
+        beginStatus = WiFi.begin(staConnectSsid(), staConnectPass());
+    }
+#endif
     if (beginStatus == WL_CONNECT_FAILED || beginStatus == WL_NO_SHIELD) {
         Serial.printf("[web] STA begin failed (%d)\n", (int)beginStatus);
         logWifiHeapDiag("STA begin failed");
@@ -9472,6 +9556,14 @@ bool webCfgBegin(RhinoConfig *cfg, WebCfgSaveCb onSave,
     while (WiFi.status() != WL_CONNECTED) {
         wl_status_t st = WiFi.status();
         if (st == WL_NO_SHIELD) {
+#if defined(DEVICE_TDISPLAY_P4)
+            if (!hostedRecoveryAttempted && recoverP4Hosted(WIFI_STA, "STA connect")) {
+                hostedRecoveryAttempted = true;
+                (void)WiFi.begin(staConnectSsid(), staConnectPass());
+                start = millis();
+                continue;
+            }
+#endif
             Serial.println("[web] WiFi stack unavailable during STA connect");
             logWifiHeapDiag("STA connect unavailable");
             bool ok = startApMode("AP fallback", false);

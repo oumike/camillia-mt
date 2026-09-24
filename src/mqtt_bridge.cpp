@@ -105,6 +105,29 @@ void monRecord(const char *topic) {
     s_monTopicSeq++;
 }
 
+// Recent downlinks and the gateway each came through; see mqttBridgeGatewayFor().
+// Sixteen covers the gap between delivery and the UI asking about a message
+// many times over: the question is asked of messages already on screen.
+struct GatewaySeen {
+    uint32_t from;
+    uint32_t id;
+    uint32_t gateway;
+};
+constexpr int kGatewaySeenCount = 16;
+GatewaySeen s_gatewaySeen[kGatewaySeenCount] = {};
+int s_gatewaySeenNext = 0;
+
+// "!aabbccdd" as the topic's last segment, or 0.
+uint32_t topicGatewayNode(const char *topic) {
+    if (!topic) return 0;
+    const char *last = strrchr(topic, '/');
+    last = last ? last + 1 : topic;
+    if (last[0] != '!' || strlen(last) != 9) return 0;
+    char *end = nullptr;
+    const unsigned long v = strtoul(last + 1, &end, 16);
+    return (end && *end == '\0') ? (uint32_t)v : 0;
+}
+
 // Downlink: decode a received ServiceEnvelope and hand it to the app sink.
 void onMessage(char *topic, uint8_t *payload, unsigned int len) {
     // Counted before the inject gate: the monitor is interested in every message
@@ -121,7 +144,14 @@ void onMessage(char *topic, uint8_t *payload, unsigned int len) {
     // Serial.printf("[mqtt] downlink rx topic=%s len=%u decoded=%d chan=%s from=%08lx\n",
     //               topic ? topic : "(null)", len, decoded ? 1 : 0,
     //               decoded ? chan : "?", decoded ? (unsigned long)hdr.from : 0UL);
-    if (decoded) s_inject(hdr, cipher, cipherLen, chan);
+    if (!decoded) return;
+    // Before the inject, so the gateway is known by the time anything asks.
+    const uint32_t gw = topicGatewayNode(topic);
+    if (gw != 0) {
+        s_gatewaySeen[s_gatewaySeenNext] = { hdr.from, hdr.id, gw };
+        s_gatewaySeenNext = (s_gatewaySeenNext + 1) % kGatewaySeenCount;
+    }
+    s_inject(hdr, cipher, cipherLen, chan);
 }
 
 void applyTransport() {
@@ -191,6 +221,17 @@ void mqttBridgeBegin(const RhinoConfig *cfg, uint32_t myNodeId) {
 }
 
 void mqttBridgeSetInject(MqttInjectFn fn) { s_inject = fn; }
+
+bool mqttBridgeGatewayFor(uint32_t from, uint32_t packetId, uint32_t &gatewayNode) {
+    for (int i = 0; i < kGatewaySeenCount; i++) {
+        const GatewaySeen &g = s_gatewaySeen[i];
+        if (g.gateway != 0 && g.from == from && g.id == packetId) {
+            gatewayNode = g.gateway;
+            return true;
+        }
+    }
+    return false;
+}
 
 void mqttBridgeConfigChanged() {
     if (s_mqtt.connected()) s_mqtt.disconnect();

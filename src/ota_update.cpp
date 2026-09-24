@@ -571,6 +571,8 @@ const char *otaCurrentDeviceAssetSlug() {
     return "m9";
 #elif defined(DEVICE_WIO_TRACKER_L2)
     return "wio-tracker-l2";
+#elif defined(DEVICE_TDISPLAY_P4)
+    return "tdisplay-p4";
 // Ahead of the V4 branch below, and load-bearing: an R8 build defines
 // DEVICE_HELTEC_V4_EXPANSION too, so without its own case here it fell through
 // and reported "heltec" — an R8 checking for updates was being offered V4

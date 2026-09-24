@@ -15,6 +15,9 @@ TLORA_ENV_NAME="tlora-pager-tft"
 ATTAKY_ENV_NAME="mesh-deck"
 M9_ENV_NAME="m9"
 WIO_TRACKER_L2_ENV_NAME="wio-tracker-l2"
+TDISPLAY_P4_ENV_NAME="tdisplay-p4"
+DEFAULT_PIO_CORE_DIR="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
+P4_PIO_CORE_DIR="${CAMILLIA_P4_PIO_CORE_DIR:-${DEFAULT_PIO_CORE_DIR}-p4}"
 ENV_EXPLICIT=false
 ERASE_FIRST=false
 FULLCLEAN=false
@@ -48,6 +51,7 @@ env_label() {
 		"$ATTAKY_ENV_NAME")        echo "Attaky Mesh Deck" ;;
 		"$M9_ENV_NAME")            echo "Elecrow ThinkNode M9" ;;
 		"$WIO_TRACKER_L2_ENV_NAME") echo "Seeed Wio Tracker L2" ;;
+		"$TDISPLAY_P4_ENV_NAME")    echo "LilyGo T-Display P4 AMOLED" ;;
 		*)                         echo "$1" ;;
 	esac
 }
@@ -110,6 +114,10 @@ prompt_for_device() {
 		options+=("$WIO_TRACKER_L2_ENV_NAME")
 		labels+=("Seeed Wio Tracker L2")
 	fi
+	if has_env "$TDISPLAY_P4_ENV_NAME"; then
+		options+=("$TDISPLAY_P4_ENV_NAME")
+		labels+=("LilyGo T-Display P4 AMOLED")
+	fi
 
 	if [ "${#options[@]}" -eq 0 ]; then
 		echo "No supported device environments found in platformio.ini"
@@ -139,7 +147,7 @@ prompt_for_device() {
 }
 
 show_usage() {
-	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
+	echo "Usage: $0 [--tdeck|-t] [--tdeck-pro|-p] [--debug|-d] [--cardputer|-C] [--pager|-P] [--heltec|-H] [--heltec-r8|-R] [--mesh-deck|-M] [--m9|-9] [--wio-tracker-l2] [--tdisplay-p4] [--erase|-E] [--fullclean|-F] [--just-build|-B]"
 	echo "  --tdeck, -t  Use T-Deck environment (tdeck)"
 	echo "  --tdeck-pro, -p  Use T-Deck Pro environment ($TDECK_PRO_ENV_NAME)"
 	echo "  --debug, -d   Use debug PlatformIO environment ($DEBUG_ENV_NAME)"
@@ -150,6 +158,7 @@ show_usage() {
 	echo "  --mesh-deck, --attaky, -M  Use Attaky Mesh Deck environment ($ATTAKY_ENV_NAME)"
 	echo "  --m9, -9      Use Elecrow ThinkNode M9 environment ($M9_ENV_NAME)"
 	echo "  --wio-tracker-l2  Use Seeed Wio Tracker L2 environment ($WIO_TRACKER_L2_ENV_NAME)"
+	echo "  --tdisplay-p4  Use LilyGo T-Display P4 AMOLED environment ($TDISPLAY_P4_ENV_NAME)"
 	echo "                If neither is provided, you'll be prompted to choose a device."
 	echo "  --erase, -E   Erase flash before clean build/upload"
 	echo "                M9 uses the combined upload_erase target."
@@ -161,11 +170,21 @@ show_usage() {
 	echo "                environment failed to build."
 }
 
+run_pio_for_env() {
+	local env_name="$1"
+	shift
+	if [ "$env_name" = "$TDISPLAY_P4_ENV_NAME" ]; then
+		PLATFORMIO_CORE_DIR="$P4_PIO_CORE_DIR" pio "$@"
+	else
+		pio "$@"
+	fi
+}
+
 run_pio_target() {
 	local target="$1"
 	local label="$2"
 	echo "[PIO] $label ($ENV_NAME)..."
-	pio run -e "$ENV_NAME" -t "$target"
+	run_pio_for_env "$ENV_NAME" run -e "$ENV_NAME" -t "$target"
 }
 
 format_duration() {
@@ -227,6 +246,9 @@ for arg in "$@"; do
 		--wio-tracker-l2)
 			select_env_or_exit "$WIO_TRACKER_L2_ENV_NAME" "Environment '$WIO_TRACKER_L2_ENV_NAME' not found in platformio.ini"
 			;;
+		--tdisplay-p4)
+			select_env_or_exit "$TDISPLAY_P4_ENV_NAME" "Environment '$TDISPLAY_P4_ENV_NAME' not found in platformio.ini"
+			;;
 		--help|-h)
 			show_usage
 			exit 0
@@ -278,7 +300,7 @@ if [ "$JUST_BUILD" = true ]; then
 			echo "[PIO] Full clean ($env)..."
 			# A clean failure is the env's failure: building on top of a
 			# half-cleaned tree would report a result about the wrong sources.
-			if ! pio run -e "$env" -t fullclean; then
+			if ! run_pio_for_env "$env" run -e "$env" -t fullclean; then
 				ENV_END_TS="$(date +%s)"
 				RESULTS+=("FAIL  $env  (fullclean)  $(format_duration $((ENV_END_TS - ENV_START_TS)))")
 				FAILED=$((FAILED + 1))
@@ -289,7 +311,7 @@ if [ "$JUST_BUILD" = true ]; then
 		# No -t: the default target is a plain build. Failures are collected
 		# rather than aborting the sweep — the point of building everything is
 		# to find out which ones are broken, not just the first.
-		if pio run -e "$env"; then
+		if run_pio_for_env "$env" run -e "$env"; then
 			ENV_END_TS="$(date +%s)"
 			SIZE_NOTE=""
 			ENV_BIN=".pio/build/${env}/firmware.bin"

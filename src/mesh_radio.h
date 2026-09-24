@@ -9,6 +9,10 @@
 #include <RadioLib.h>
 #include "mesh_proto.h"
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_radio_hal.h"
+#endif
+
 #ifndef PAGER_LORA_USE_LR1121
 #define PAGER_LORA_USE_LR1121 0
 #endif
@@ -148,7 +152,12 @@ private:
 
     bool    _ready = false;
     bool    _rxBoostedGain = (bool)MY_LORA_RX_BOOST;
-#if defined(MESH_LORA_LR1110)
+#if defined(DEVICE_TDISPLAY_P4)
+    TDisplayP4RadioHal _hal;
+    Module _module{&_hal, LORA_CS, TDisplayP4RadioHal::kDio1,
+                   TDisplayP4RadioHal::kReset, LORA_BUSY};
+    SX1262 _radio{&_module};
+#elif defined(MESH_LORA_LR1110)
     MeshLR1110 _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};
 #elif defined(DEVICE_TLORA_PAGER_TFT) && (PAGER_LORA_USE_LR1121)
     MeshLR1121 _radio{new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY)};

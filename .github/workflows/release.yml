@@ -84,7 +84,9 @@ jobs:
         # be able to pick up an object file from an earlier run.
         uses: actions/cache@v4
         with:
-          path: ~/.platformio
+          path: |
+            ~/.platformio
+            ~/.platformio-p4
           key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 

@@ -534,8 +534,9 @@ struct RhinoConfig {
     // so a zero read out of an old blob resolves to 10%, which is exactly the
     // wanted default. Always read this through cfgCoerceBrightness().
     uint8_t  lockScreenBrightness;
-    // Panel orientation: 0 = landscape, 1 = portrait. Heltec V4 only; every
-    // other board ignores it and reads its shape off the build (issue #77).
+    // Panel orientation: 0 = landscape, 1 = portrait, 2 = portrait rotated
+    // 180 degrees. Used by the Heltec, Wio Tracker L2 and T-Display P4 runtime
+    // orientation builds; other boards read their shape from the build.
     //
     // Spends the reserved byte the note above describes, and is the rare field
     // that wants exactly what that note warns about: an upgrading device reads

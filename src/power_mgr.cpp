@@ -5,6 +5,10 @@
 #include <esp_system.h>
 #include <driver/rtc_io.h>
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
+
 // ── State that has to outlive a reset ────────────────────────────────────────
 // RTC slow memory survives a brownout reset and does not survive a real power
 // cycle, which is exactly the lifetime these want: a brownout loop must be
@@ -107,6 +111,10 @@ static void pmBoardOff() {
         delay(300);
     }
 
+#if defined(DEVICE_TDISPLAY_P4)
+    (void)tdisplayP4IoPrepareForSleep();
+#endif
+
     // Last resort. Microamps rather than zero, but it stops the boot loop and
     // stops the meaningful drain, and it is the only option on the boards with
     // neither a latch nor a charger FET.
@@ -115,10 +123,19 @@ static void pmBoardOff() {
     // Arm the button so the device can be brought back deliberately. Only RTC
     // GPIOs can wake from deep sleep; on a pin that cannot, this is skipped and
     // recovery is via USB or a battery pull.
+#if defined(DEVICE_TDISPLAY_P4)
+    if (esp_sleep_is_valid_wakeup_gpio((gpio_num_t)USER_BUTTON_PIN)) {
+        esp_deep_sleep_enable_gpio_wakeup(
+            1ULL << USER_BUTTON_PIN,
+            (USER_BUTTON_ACTIVE_LEVEL == LOW)
+                ? ESP_GPIO_WAKEUP_GPIO_LOW : ESP_GPIO_WAKEUP_GPIO_HIGH);
+    }
+#else
     if (rtc_gpio_is_valid_gpio((gpio_num_t)USER_BUTTON_PIN)) {
         esp_sleep_enable_ext0_wakeup((gpio_num_t)USER_BUTTON_PIN,
                                      (USER_BUTTON_ACTIVE_LEVEL == LOW) ? 0 : 1);
     }
+#endif
 #endif
     esp_deep_sleep_start();
 }
@@ -154,7 +171,12 @@ void powerMgrShutdown(const char *reason) {
 void powerMgrBootGate() {
     pmRtcInit();
 
-    const esp_reset_reason_t why = esp_reset_reason();
+    esp_reset_reason_t why = esp_reset_reason();
+#if defined(DEVICE_TDISPLAY_P4)
+    // Software restarts arrive as watchdog resets on this board (see
+    // tdisplayP4InstallFullRestart()); count them as what they were.
+    if (why == ESP_RST_WDT && tdisplayP4ConsumeFullRestartMarker()) why = ESP_RST_SW;
+#endif
     if (why == ESP_RST_BROWNOUT) {
         s_pmBrownouts++;
         Serial.printf("[power] brownout reset (%lu in a row)\n",

@@ -291,6 +291,75 @@ static float batteryReadCardputerVolts() {
 } // namespace
 #endif
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include <Wire.h>
+namespace {
+constexpr uint8_t kBq27220RegControl = 0x00;
+constexpr uint8_t kBq27220RegVoltage = 0x08;
+constexpr uint8_t kBq27220RegBatteryStatus = 0x0A;
+constexpr uint8_t kBq27220RegStateOfCharge = 0x2C;
+constexpr uint8_t kBq27220RegMacData = 0x40;
+constexpr uint16_t kBq27220DeviceNumber = 0x0001;
+constexpr uint16_t kBq27220ExpectedDevice = 0x0220;
+bool sP4GaugePresent = false;
+
+bool bq27220ReadU16(uint8_t reg, uint16_t &value) {
+    Wire.beginTransmission(BATT_FUEL_GAUGE_ADDR);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((uint8_t)BATT_FUEL_GAUGE_ADDR, (size_t)2, true) != 2) {
+        return false;
+    }
+    const uint8_t low = (uint8_t)Wire.read();
+    const uint8_t high = (uint8_t)Wire.read();
+    value = (uint16_t)low | ((uint16_t)high << 8);
+    return true;
+}
+
+bool bq27220WriteU16(uint8_t reg, uint16_t value) {
+    Wire.beginTransmission(BATT_FUEL_GAUGE_ADDR);
+    Wire.write(reg);
+    Wire.write((uint8_t)value);
+    Wire.write((uint8_t)(value >> 8));
+    return Wire.endTransmission() == 0;
+}
+
+bool bq27220Probe() {
+    if (!bq27220WriteU16(kBq27220RegControl, kBq27220DeviceNumber)) return false;
+    delay(15);
+    uint16_t device = 0;
+    return bq27220ReadU16(kBq27220RegMacData, device)
+        && device == kBq27220ExpectedDevice;
+}
+
+float batteryReadP4GaugeVolts() {
+    uint16_t millivolts = 0;
+    if (!sP4GaugePresent || !bq27220ReadU16(kBq27220RegVoltage, millivolts)) {
+        return 0.0f;
+    }
+    return (float)millivolts / 1000.0f;
+}
+
+int batteryReadP4GaugePct() {
+    uint16_t percent = 0;
+    if (!sP4GaugePresent
+        || !bq27220ReadU16(kBq27220RegStateOfCharge, percent)) {
+        return -1;
+    }
+    return percent > 100 ? 100 : (int)percent;
+}
+
+bool batteryP4ExternalPowerPresent(bool &known) {
+    uint16_t status = 0;
+    known = sP4GaugePresent
+         && bq27220ReadU16(kBq27220RegBatteryStatus, status);
+    // BatteryStatus bit 0 is DSG. While the running device is externally
+    // powered, the gauge is charging or idle rather than discharging.
+    return known && (status & 0x0001U) == 0;
+}
+} // namespace
+#endif
+
 #if defined(DEVICE_MESH_DECK)
 #include <Wire.h>
 namespace {
@@ -505,6 +574,12 @@ void batteryInitAdc() {
 #if defined(DEVICE_WIO_TRACKER_L2)
     (void)wioTrackerL2AdsEnsureReady();
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+    sP4GaugePresent = bq27220Probe();
+    Serial.printf("[batt] BQ27220 %s at 0x%02X\n",
+                  sP4GaugePresent ? "ready" : "not found",
+                  BATT_FUEL_GAUGE_ADDR);
+#endif
 
     batteryResetFilter();
     batteryRefreshFilter(true);
@@ -520,6 +595,8 @@ static float batteryReadVoltageHw() {
     return batteryReadPagerBqVolts();
 #elif defined(DEVICE_MESH_DECK)
     return batteryReadMeshDeckVolts();
+#elif defined(DEVICE_TDISPLAY_P4)
+    return batteryReadP4GaugeVolts();
 #else
     return 0.0f;
 #endif
@@ -630,6 +707,8 @@ bool batteryExternalPowerPresent(bool *known) {
         haveAnswer = true;
         present = (st == m5::Power_Class::is_charging_t::is_charging);
     }
+#elif defined(DEVICE_TDISPLAY_P4)
+    present = batteryP4ExternalPowerPresent(haveAnswer);
 #endif
     if (known) *known = haveAnswer;
     return present;
@@ -675,6 +754,9 @@ uint8_t batteryReadPercent() {
     const int gaugePct = batteryReadMeshDeckPct();
     if (gaugePct >= 0) return (uint8_t)gaugePct;
     // Gauge silent: fall through to the shared voltage-curve estimate.
+#elif defined(DEVICE_TDISPLAY_P4)
+    const int gaugePct = batteryReadP4GaugePct();
+    if (gaugePct >= 0) return (uint8_t)gaugePct;
 #endif
     batteryRefreshFilter(false);
     return sBatteryFilter.initialized ? sBatteryFilter.displayPct : 0;
@@ -703,6 +785,15 @@ void batteryDebugSnapshot(char *out, size_t outLen) {
              (double)filtered,
              shown,
              batteryVoltageToPct(filtered));
+#elif defined(DEVICE_TDISPLAY_P4)
+    const int gaugePct = batteryReadP4GaugePct();
+    snprintf(out, outLen,
+             "[batt] BQ27220 present=%d soc=%d%% | trim=x%.3f filtered=%.3fV shown=%d%%",
+             sP4GaugePresent ? 1 : 0,
+             gaugePct,
+             (double)sBatteryCalTrimScale,
+             (double)filtered,
+             shown);
 #else
     const float hwV = batteryReadVoltageHw();
     snprintf(out, outLen,

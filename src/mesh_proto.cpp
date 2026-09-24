@@ -945,6 +945,48 @@ size_t encodeNodeInfo(uint32_t nodeId, const char *longName,
     return n;
 }
 
+size_t encodeSharedNodeInfo(uint32_t nodeId, const char *longName,
+                            const char *shortName, const uint8_t *pubKey32,
+                            uint8_t *buf, size_t bufLen) {
+    if (!longName) longName = "";
+    if (!shortName) shortName = "";
+    uint8_t user[164]; size_t u = 0;
+
+    // User: id (1), long_name (2), short_name (3), public_key (8). The same
+    // fields and order encodeNodeInfo() writes, less the ones that describe
+    // the device sending it.
+    char idStr[12]; snprintf(idStr, sizeof(idStr), "!%08x", nodeId);
+    const size_t idLen = strlen(idStr);
+    size_t lnLen = strlen(longName);
+    if (lnLen > 39) lnLen = 39;
+    size_t snLen = strlen(shortName);
+    if (snLen > 4) snLen = 4;
+
+    u += pbWriteVarint(user + u, (1 << 3) | 2);
+    u += pbWriteVarint(user + u, idLen);
+    memcpy(user + u, idStr, idLen); u += idLen;
+    u += pbWriteVarint(user + u, (2 << 3) | 2);
+    u += pbWriteVarint(user + u, lnLen);
+    memcpy(user + u, longName, lnLen); u += lnLen;
+    u += pbWriteVarint(user + u, (3 << 3) | 2);
+    u += pbWriteVarint(user + u, snLen);
+    memcpy(user + u, shortName, snLen); u += snLen;
+    if (pubKey32 && u + 35 <= sizeof(user)) {
+        u += pbWriteVarint(user + u, (8 << 3) | 2);
+        u += pbWriteVarint(user + u, 32);
+        memcpy(user + u, pubKey32, 32); u += 32;
+    }
+
+    size_t n = 0;
+    n += pbWriteVarint(buf + n, (1 << 3) | 0);
+    n += pbWriteVarint(buf + n, NODEINFO_APP);
+    n += pbWriteVarint(buf + n, (2 << 3) | 2);
+    n += pbWriteVarint(buf + n, u);
+    if (n + u > bufLen) return 0;
+    memcpy(buf + n, user, u); n += u;
+    return n;
+}
+
 void applyPositionPrecision(int32_t &latI, int32_t &lonI, uint8_t precisionBits) {
     if (precisionBits >= 32) return;
     if (precisionBits == 0) {

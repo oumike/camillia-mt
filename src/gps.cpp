@@ -42,6 +42,10 @@ static bool wioTrackerL2SetGpsRail(bool on) {
 } // namespace
 #endif
 
+#if defined(DEVICE_TDISPLAY_P4)
+#include "hal/tdisplay_p4_io.h"
+#endif
+
 #if defined(DEVICE_TLORA_PAGER_TFT)
 #include "hal/xl9555.h"
 namespace {
@@ -252,6 +256,71 @@ static bool           _nmeaSeen      = false;
 static bool           _streamConfigLocked = false;
 static bool           _everValidStreamSeen = false;
 
+#if defined(DEVICE_TDISPLAY_P4)
+struct P4GpsNmeaDebug {
+    char current[96] = {};
+    char latest[96] = {};
+    uint8_t currentLength = 0;
+    uint32_t latestMs = 0;
+    uint32_t gga = 0;
+    uint32_t gsa = 0;
+    uint32_t gsv = 0;
+    uint32_t gns = 0;
+    uint32_t rmc = 0;
+    uint32_t other = 0;
+};
+
+static P4GpsNmeaDebug _p4NmeaDebug;
+
+static bool p4NmeaTypeIs(const char *line, uint8_t length, const char *type) {
+    return length >= 6 && line[0] == '$' && line[3] == type[0]
+        && line[4] == type[1] && line[5] == type[2];
+}
+
+static void p4TrackNmeaByte(char c) {
+    if (c == '$') {
+        _p4NmeaDebug.currentLength = 0;
+        _p4NmeaDebug.current[_p4NmeaDebug.currentLength++] = c;
+        return;
+    }
+    if (_p4NmeaDebug.currentLength == 0 || c == '\r') return;
+    if (c != '\n') {
+        if (_p4NmeaDebug.currentLength < sizeof(_p4NmeaDebug.current) - 1) {
+            _p4NmeaDebug.current[_p4NmeaDebug.currentLength++] = c;
+        }
+        return;
+    }
+
+    _p4NmeaDebug.current[_p4NmeaDebug.currentLength] = '\0';
+    strlcpy(_p4NmeaDebug.latest, _p4NmeaDebug.current,
+            sizeof(_p4NmeaDebug.latest));
+    _p4NmeaDebug.latestMs = millis();
+    if (p4NmeaTypeIs(_p4NmeaDebug.current, _p4NmeaDebug.currentLength, "GGA")) _p4NmeaDebug.gga++;
+    else if (p4NmeaTypeIs(_p4NmeaDebug.current, _p4NmeaDebug.currentLength, "GSA")) _p4NmeaDebug.gsa++;
+    else if (p4NmeaTypeIs(_p4NmeaDebug.current, _p4NmeaDebug.currentLength, "GSV")) _p4NmeaDebug.gsv++;
+    else if (p4NmeaTypeIs(_p4NmeaDebug.current, _p4NmeaDebug.currentLength, "GNS")) _p4NmeaDebug.gns++;
+    else if (p4NmeaTypeIs(_p4NmeaDebug.current, _p4NmeaDebug.currentLength, "RMC")) _p4NmeaDebug.rmc++;
+    else _p4NmeaDebug.other++;
+    _p4NmeaDebug.currentLength = 0;
+}
+
+static void p4LogGpsWakeState(const char *action, bool writeAttempted,
+                              bool writeOk) {
+    bool latchedHigh = false;
+    bool sampledHigh = false;
+    bool configuredOutput = false;
+    const bool readOk = tdisplayP4IoReadGpsWake(
+        latchedHigh, sampledHigh, configuredOutput);
+    Serial.printf("[gps-p4] %s write=%s readback=%s latch=%s pin=%s direction=%s\n",
+                  action,
+                  writeAttempted ? (writeOk ? "ok" : "FAILED") : "n/a",
+                  readOk ? "ok" : "FAILED",
+                  readOk ? (latchedHigh ? "HIGH" : "LOW") : "unknown",
+                  readOk ? (sampledHigh ? "HIGH" : "LOW") : "unknown",
+                  readOk ? (configuredOutput ? "output" : "INPUT") : "unknown");
+}
+#endif
+
 // Some firmwares update GSA regularly while GGA satellite fields can remain stale.
 // Track both GN and GP talkers and prefer fresh GSA "satellites used" counts.
 static TinyGPSCustom  _gngsaSat01(_gps, "GNGSA", 3);
@@ -332,6 +401,72 @@ static uint8_t parseCustomU8(TinyGPSCustom &term, bool &fresh) {
     if (v > 99) v = 99;
     return (uint8_t)v;
 }
+
+#if defined(DEVICE_TDISPLAY_P4)
+static void p4PrintGpsDebugDetails() {
+    bool gngsaFresh = false;
+    bool gpgsaFresh = false;
+    const uint8_t gngsa = gsaSatsUsed(_gngsaSats, gngsaFresh);
+    const uint8_t gpgsa = gsaSatsUsed(_gpgsaSats, gpgsaFresh);
+
+    bool gnggaFresh = false;
+    bool gpggaFresh = false;
+    bool gngnsFresh = false;
+    bool gpgnsFresh = false;
+    const uint8_t gngga = parseCustomU8(_gnggaSatsUsed, gnggaFresh);
+    const uint8_t gpgga = parseCustomU8(_gpggaSatsUsed, gpggaFresh);
+    const uint8_t gngns = parseCustomU8(_gngnsSatsUsed, gngnsFresh);
+    const uint8_t gpgns = parseCustomU8(_gpgnsSatsUsed, gpgnsFresh);
+
+    bool gngsvFresh = false;
+    bool gpgsvFresh = false;
+    bool glgsvFresh = false;
+    bool gagsvFresh = false;
+    bool bdgsvFresh = false;
+    bool gbgsvFresh = false;
+    bool gqgsvFresh = false;
+    bool qzgsvFresh = false;
+    const uint8_t gngsv = parseCustomU8(_gngsvSatsView, gngsvFresh);
+    const uint8_t gpgsv = parseCustomU8(_gpgsvSatsView, gpgsvFresh);
+    const uint8_t glgsv = parseCustomU8(_glgsvSatsView, glgsvFresh);
+    const uint8_t gagsv = parseCustomU8(_gagsvSatsView, gagsvFresh);
+    const uint8_t bdgsv = parseCustomU8(_bdgsvSatsView, bdgsvFresh);
+    const uint8_t gbgsv = parseCustomU8(_gbgsvSatsView, gbgsvFresh);
+    const uint8_t gqgsv = parseCustomU8(_gqgsvSatsView, gqgsvFresh);
+    const uint8_t qzgsv = parseCustomU8(_qzgsvSatsView, qzgsvFresh);
+
+    Serial.printf("[gps-p4] NMEA counts GGA=%lu GSA=%lu GSV=%lu GNS=%lu RMC=%lu other=%lu\n",
+                  (unsigned long)_p4NmeaDebug.gga,
+                  (unsigned long)_p4NmeaDebug.gsa,
+                  (unsigned long)_p4NmeaDebug.gsv,
+                  (unsigned long)_p4NmeaDebug.gns,
+                  (unsigned long)_p4NmeaDebug.rmc,
+                  (unsigned long)_p4NmeaDebug.other);
+    if (_p4NmeaDebug.latestMs != 0) {
+        Serial.printf("[gps-p4] latest NMEA age=%lums %s\n",
+                      (unsigned long)(millis() - _p4NmeaDebug.latestMs),
+                      _p4NmeaDebug.latest);
+    } else {
+        Serial.println("[gps-p4] latest NMEA: none");
+    }
+    Serial.printf("[gps-p4] sats used GSA GN=%u/%d GP=%u/%d GGA GN=%u/%d GP=%u/%d GNS GN=%u/%d GP=%u/%d\n",
+                  (unsigned)gngsa, (int)gngsaFresh,
+                  (unsigned)gpgsa, (int)gpgsaFresh,
+                  (unsigned)gngga, (int)gnggaFresh,
+                  (unsigned)gpgga, (int)gpggaFresh,
+                  (unsigned)gngns, (int)gngnsFresh,
+                  (unsigned)gpgns, (int)gpgnsFresh);
+    Serial.printf("[gps-p4] sats view GN=%u/%d GP=%u/%d GL=%u/%d GA=%u/%d BD=%u/%d GB=%u/%d GQ=%u/%d QZ=%u/%d (value/fresh)\n",
+                  (unsigned)gngsv, (int)gngsvFresh,
+                  (unsigned)gpgsv, (int)gpgsvFresh,
+                  (unsigned)glgsv, (int)glgsvFresh,
+                  (unsigned)gagsv, (int)gagsvFresh,
+                  (unsigned)bdgsv, (int)bdgsvFresh,
+                  (unsigned)gbgsv, (int)gbgsvFresh,
+                  (unsigned)gqgsv, (int)gqgsvFresh,
+                  (unsigned)qzgsv, (int)qzgsvFresh);
+}
+#endif
 
 // ── Generic GPS enable / reset lines ─────────────────────────────────────────
 // A board that wires the module's enable (and optionally reset) straight to a
@@ -432,6 +567,10 @@ void gpsBegin() {
     (void)pagerPrimeGpsRails(_pagerRailInverted);
 #elif defined(DEVICE_WIO_TRACKER_L2)
     (void)wioTrackerL2PrimeGpsRails();
+#elif defined(DEVICE_TDISPLAY_P4)
+    const bool wakeOk = tdisplayP4IoSetGpsAwake(true);
+    p4LogGpsWakeState("wake", true, wakeOk);
+    delay(20);
 #endif
     // Power and release the module before the first probe, so the prober is
     // listening to a receiver that is actually running.
@@ -469,6 +608,9 @@ void gpsBegin() {
     _nmeaSeen      = false;
     _streamConfigLocked = false;
     _everValidStreamSeen = false;
+#if defined(DEVICE_TDISPLAY_P4)
+    _p4NmeaDebug = {};
+#endif
     // Duty-cycle timers are relative to this start, not to a previous session:
     // a stale _dutyWokeAtMs would make the first pass look like a wake that had
     // already been awake for hours, and park (or fault) the receiver instantly.
@@ -486,7 +628,8 @@ void gpsBegin() {
 
 static void gpsSendNmea(const char *body);   // defined with the duty-cycle code
 
-#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_WIO_TRACKER_L2)
+#if !defined(DEVICE_TLORA_PAGER_TFT) && !defined(DEVICE_WIO_TRACKER_L2) \
+    && !defined(DEVICE_TDISPLAY_P4)
 // Indefinite standby, for boards with no GPS enable pin. PMTK161,0 is genuinely
 // open-ended. PCAS12 takes a duration and has no documented "forever", so it
 // gets a day — if a CASIC part self-wakes after that with GPS switched off it
@@ -512,6 +655,10 @@ static void gpsPowerDown() {
     }
 #elif defined(DEVICE_WIO_TRACKER_L2)
     if (!wioTrackerL2SetGpsRail(false)) return;
+#elif defined(DEVICE_TDISPLAY_P4)
+    const bool wakeOk = tdisplayP4IoSetGpsAwake(false);
+    p4LogGpsWakeState("sleep", true, wakeOk);
+    if (!wakeOk) return;
 #else
     // Standby first, and it has to be sent before the UART closes. On a board
     // with no enable line that is the only lever there is; on one that has a
@@ -555,6 +702,11 @@ static void gpsPowerUp() {
 #elif defined(DEVICE_WIO_TRACKER_L2)
     if (!wioTrackerL2SetGpsRail(true)) return;
     delay(20);
+#elif defined(DEVICE_TDISPLAY_P4)
+    const bool wakeOk = tdisplayP4IoSetGpsAwake(true);
+    p4LogGpsWakeState("wake", true, wakeOk);
+    if (!wakeOk) return;
+    delay(20);
 #else
     // Restore the enable line and release reset. A board with neither still
     // needs no action: the module keeps power and gpsBegin() nudges it out of
@@ -593,6 +745,8 @@ void gpsDebugReport() {
 #if defined(DEVICE_WIO_TRACKER_L2)
     Serial.printf("[gps] EN  expander=0x%02X bit=%d requested=%s\n",
                   EXPANDER_ADDR, EXP_BIT_GNSS_POWER, _powered ? "on" : "off");
+#elif defined(DEVICE_TDISPLAY_P4)
+    p4LogGpsWakeState(_powered ? "status awake" : "status sleep", false, false);
 #elif GPS_HAS_ENABLE_PIN
     Serial.printf("[gps] EN  pin=%d enableLevel=%s driving=%s\n",
                   (int)GPS_ENABLE_PIN,
@@ -611,6 +765,10 @@ void gpsDebugReport() {
                   digitalRead(GPS_RESET_PIN) ? "HIGH" : "LOW");
 #else
     Serial.println("[gps] RST pin: none declared for this board");
+#endif
+
+#if defined(DEVICE_TDISPLAY_P4)
+    p4PrintGpsDebugDetails();
 #endif
 
     // State the conclusion rather than leaving it to be inferred from counters.
@@ -774,6 +932,9 @@ void gpsLoop() {
     bool sawBytes = false;
     while (_serial.available()) {
         char c = (char)_serial.read();
+#if defined(DEVICE_TDISPLAY_P4)
+        p4TrackNmeaByte(c);
+#endif
         _gps.encode(c);
         _totalBytes++;
         sawBytes = true;
@@ -898,8 +1059,14 @@ void gpsLoop() {
     if (debugGpsEnabled() && (now - _lastDbg >= 5000)) {
         _lastDbg = now;
         uint32_t sf = _gps.sentencesWithFix();
+    #if defined(DEVICE_TDISPLAY_P4)
+        const int debugSats = (int)gpsSats();
+    #else
+        const int debugSats = _gps.satellites.isValid()
+                    ? (int)_gps.satellites.value() : -1;
+    #endif
         debugLogGps("[gps] sats=%d fix=%d q=%c sf=%lu(+%lu) age=%lums hdop=%.1f pos=%.6f,%.6f bytes=%lu\n",
-                    _gps.satellites.isValid() ? (int)_gps.satellites.value() : -1,
+                debugSats,
                     (int)_gps.location.isValid(),
                     _gps.location.isValid() ? (char)_gps.location.FixQuality() : '?',
                     (unsigned long)sf,
@@ -908,6 +1075,9 @@ void gpsLoop() {
                     _gps.hdop.isValid() ? _gps.hdop.hdop() : 99.9,
                     _gps.location.lat(), _gps.location.lng(),
                     (unsigned long)_totalBytes);
+            #if defined(DEVICE_TDISPLAY_P4)
+                p4PrintGpsDebugDetails();
+            #endif
         _prevSentences = sf;
     }
 

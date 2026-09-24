@@ -36,6 +36,7 @@
 //   DEVICE_MESH_DECK            Attaky Mesh Deck 1.0 (modular frame)
 //   DEVICE_M9                   Elecrow ThinkNode M9 (LR1110, no touch)
 //   DEVICE_WIO_TRACKER_L2       Seeed Wio Tracker L2 (NV3031B, gated rails)
+//   DEVICE_TDISPLAY_P4          LilyGO T-Display P4 (RM69A10 MIPI-DSI)
 // ════════════════════════════════════════════════════════════════════════════
 
 #if defined(DEVICE_TDECK)
@@ -63,10 +64,13 @@
 #  include "hw_m9.h"
 #elif defined(DEVICE_WIO_TRACKER_L2)
 #  include "hw_wio_tracker_l2.h"
+#elif defined(DEVICE_TDISPLAY_P4)
+#  include "hw_tdisplay_p4.h"
 #else
 #  error "No DEVICE_* build flag set. Define one of: DEVICE_TDECK, DEVICE_TDECK_PRO, \
 DEVICE_TLORA_PAGER_TFT, DEVICE_CARDPUTER_LORA_HAT, DEVICE_HELTEC_V4_EXPANSION, \
-DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
+DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2, \
+DEVICE_TDISPLAY_P4"
 #endif
 
 #ifndef KB_INT_ACTIVE_LEVEL
@@ -75,7 +79,7 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 
 // ── TFT default rotation ──────────────────────────────────────────────────────
 // Most boards use landscape (rotation=1).  Override per-device where needed.
-#if defined(DEVICE_TDECK_PRO)
+#if defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
 #  define TFT_ROTATION_DEFAULT 0
 #elif defined(DEVICE_HELTEC_V4_EXPANSION) && !DEVICE_UI_VERTICAL
 #  define TFT_ROTATION_DEFAULT 3
@@ -104,11 +108,11 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #endif
 
 // ── Runtime panel orientation ────────────────────────────────────────────────
-// The Heltec V4 runs either way up and which one is a setting rather than a
-// build, so both rotations are named here and setup() picks one from NVS before
-// the panel comes up (issue #77). Every other board keeps the single
-// TFT_ROTATION_DEFAULT above, and uiPortrait() folds to a compile-time constant
-// there, so nothing downstream pays for a choice it does not have.
+// Boards that run in either orientation name both rotations here, and setup()
+// picks one from NVS before the panel comes up (issue #77). Every other board
+// keeps the single TFT_ROTATION_DEFAULT above, and uiPortrait() folds to a
+// compile-time constant there, so nothing downstream pays for a choice it does
+// not have.
 //
 // Both Heltec families: the V4 on its expansion kit and the V4-R8 on the
 // Expansion Kit V2. They share this header's rotation values because they share
@@ -136,6 +140,14 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #  define HAS_RUNTIME_ORIENTATION 1
 #  define TFT_ROTATION_LANDSCAPE  0
 #  define TFT_ROTATION_PORTRAIT   1
+#elif defined(DEVICE_TDISPLAY_P4)
+// RM69A10 is native portrait at logical rotation 0. Rotation 3 turns it into
+// 1232x568 landscape; LovyanGFX applies the same transform to GT9895 touch.
+// 3 rather than 1 so landscape reads the right way up with the TCA8418
+// keyboard accessory attached, which is the reason to hold it sideways.
+#  define HAS_RUNTIME_ORIENTATION 1
+#  define TFT_ROTATION_LANDSCAPE  3
+#  define TFT_ROTATION_PORTRAIT   0
 #else
 #  define HAS_RUNTIME_ORIENTATION 0
 #endif
@@ -165,7 +177,8 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 // dozen call sites, which made adding a board a dozen chances to miss one.
 #if defined(DEVICE_TDECK) || defined(DEVICE_TDECK_PRO) || defined(DEVICE_HELTEC_V4_EXPANSION) \
     || defined(DEVICE_CARDPUTER_LORA_HAT) || defined(DEVICE_MESH_DECK) \
-    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2)
+    || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
 #  define UI_CHANNEL_LIST_DROPDOWN 1
 #else
 #  define UI_CHANNEL_LIST_DROPDOWN 0
@@ -175,10 +188,70 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 // Boards with touch input but no built-in keyboard use tap-first controls,
 // an on-screen keyboard and the roomier 320x240 touch layout. Keep this
 // separate from hardware-specific Heltec paths such as CHSC6X and VEXT.
-#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2)
+#if defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_WIO_TRACKER_L2) \
+    || defined(DEVICE_TDISPLAY_P4)
 #  define UI_TOUCH_ONLY_PROFILE 1
 #else
 #  define UI_TOUCH_ONLY_PROFILE 0
+#endif
+
+// ── UI pixel scale ──────────────────────────────────────────────────────────
+// How many panel pixels make one LVGL pixel, in each direction. Every other
+// board is 1. The T-Display P4 packs 568x1232 into 4.1" -- about 330 DPI
+// against the ~143 of the 240x320 boards -- so the whole UI drawn 1:1 comes out
+// at less than half the physical size it was designed for.
+//
+// At 2 LVGL sees a 284x616 portrait panel (616x284 in landscape), the flush
+// path writes each pixel as a 2x2 block and the touch path halves coordinates
+// back into LVGL's space. That lands text at roughly the T-Deck's physical size
+// with the existing touch layout unchanged: the panel is a tall 240x320-class
+// screen as far as the UI can tell. The cost is sharpness, not size.
+//
+// Build with -DTDISPLAY_P4_UI_SCALE=1 to drive the panel natively instead, which
+// swaps in UI_LARGE_PANEL_PROFILE below: hand-upsized fonts and targets.
+#if defined(DEVICE_TDISPLAY_P4)
+#  ifndef TDISPLAY_P4_UI_SCALE
+#    define TDISPLAY_P4_UI_SCALE 2
+#  endif
+#  define UI_PIXEL_SCALE TDISPLAY_P4_UI_SCALE
+#else
+#  define UI_PIXEL_SCALE 1
+#endif
+#if UI_PIXEL_SCALE < 1
+#  error "UI_PIXEL_SCALE must be at least 1"
+#endif
+
+// ── Rounded panel corners ───────────────────────────────────────────────────
+// Both in LVGL pixels (panel pixels / UI_PIXEL_SCALE), 0 on square panels.
+//
+// UI_CORNER_SAFE_X: extra side padding on every header, so the text and icons
+// at either end of a bar along the top edge clear the curve. The bar's own
+// background still runs corner to corner; only what is drawn on it moves in.
+//
+// UI_BOTTOM_SAFE_H: a strip along the bottom edge that LVGL never draws in.
+// The display LVGL is given stops this far short of the panel, so everything
+// anchored to the bottom -- the nav bar first -- rises clear of the curve, and
+// the strip underneath stays black.
+//
+// Neither is from a drawing: no corner radius for this panel has been found in
+// LilyGO's material. Both are starting estimates (a ~3.5 mm radius at ~330 DPI)
+// to be adjusted against the 4.1" AMOLED itself.
+#if defined(DEVICE_TDISPLAY_P4)
+#  define UI_CORNER_SAFE_X  10
+// Raised from 20 after the first look on hardware: the nav bar's end cells
+// were still clipped by the bottom corners at that height.
+#  define UI_BOTTOM_SAFE_H  28
+#else
+#  define UI_CORNER_SAFE_X  0
+#  define UI_BOTTOM_SAFE_H  0
+#endif
+
+// Native-resolution layout for a panel with no pixel scaling in front of it.
+// Only the T-Display P4 can be in that position, and only when built at scale 1.
+#if defined(DEVICE_TDISPLAY_P4) && UI_PIXEL_SCALE == 1
+#  define UI_LARGE_PANEL_PROFILE 1
+#else
+#  define UI_LARGE_PANEL_PROFILE 0
 #endif
 
 // ── Dedicated screen / wake button ───────────────────────────────────────────
@@ -192,9 +265,14 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 // key, so it does not count; those boards wake from the panel instead. The
 // Heltec R8 has neither and comes out false, which is correct: touch is its
 // only wake gesture.
+//
+// The T-Display P4 is the touch-only exception. Its one button, the ESP32-P4
+// BOOT key on GPIO35 (LilyGO t_display_p4_config.h, button::kEsp32p4Boot),
+// is its screen button, with the Wio Tracker L2's rule: a touch UI has no need
+// of a hardware Enter, and a phone-shaped device wants a lock key.
 #if (defined(USER_BUTTON_PIN) && (USER_BUTTON_PIN >= 0) && !UI_TOUCH_ONLY_PROFILE) \
     || (defined(DISPLAY_TOGGLE_BUTTON_PIN) && (DISPLAY_TOGGLE_BUTTON_PIN >= 0)) \
-    || defined(DEVICE_WIO_TRACKER_L2)
+    || defined(DEVICE_WIO_TRACKER_L2) || defined(DEVICE_TDISPLAY_P4)
 #  define HAS_WAKE_BUTTON 1
 #else
 #  define HAS_WAKE_BUTTON 0
@@ -255,7 +333,7 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 #if defined(DEVICE_TDECK) || defined(DEVICE_TLORA_PAGER_TFT) \
     || defined(DEVICE_HELTEC_V4_EXPANSION) || defined(DEVICE_MESH_DECK) \
     || defined(DEVICE_M9) || defined(DEVICE_WIO_TRACKER_L2) \
-    || defined(DEVICE_TDECK_PRO)
+    || defined(DEVICE_TDECK_PRO) || defined(DEVICE_TDISPLAY_P4)
 #  define HAS_VNC_HOST 1
 #else
 #  define HAS_VNC_HOST 0
@@ -265,11 +343,9 @@ DEVICE_HELTEC_R8, DEVICE_MESH_DECK, DEVICE_M9, DEVICE_WIO_TRACKER_L2"
 // Boards that can pair an external Bluetooth keyboard and merge its keypresses
 // into the same pipeline as the built-in one. See src/ble_keyboard.cpp.
 //
-// One hardware fact governs the whole feature and is worth stating here rather
-// than only in the docs: every board this project supports is an ESP32-S3,
-// which has no Bluetooth Classic (BR/EDR) radio at all. Only a BLE / "Bluetooth
-// Low Energy" keyboard can ever pair; a Classic-only one cannot, on any board,
-// with any firmware. docs/BLUETOOTH_KEYBOARDS.md has the buying guidance.
+// The S3 targets have no Bluetooth Classic (BR/EDR), and the P4 target reaches
+// Bluetooth through its C6 coprocessor. BLE remains the only keyboard transport
+// supported here. docs/BLUETOOTH_KEYBOARDS.md has the buying guidance.
 //
 // Keyboard-less touch boards gain the most. Nothing in the implementation is
 // board-specific — this macro plus a build_src_filter entry is the entire gate

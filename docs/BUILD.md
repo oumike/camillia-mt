@@ -108,6 +108,7 @@ the `.bin` for your device:
 | Attaky Mesh Deck | `camillia-mt-mesh-deck-vX.Y.Z.bin` |
 | Elecrow ThinkNode M9 | `camillia-mt-m9-vX.Y.Z.bin` |
 | Seeed Wio Tracker L2 | `camillia-mt-wio-tracker-l2-vX.Y.Z.bin` |
+| LilyGo T-Display P4 AMOLED | `camillia-mt-tdisplay-p4-vX.Y.Z.bin` |
 
 These are full images — bootloader, partition table and app in one file, written
 at address `0x0`.
@@ -154,7 +155,7 @@ almost always want to pass it.
 this is exactly what the script does:
 
 ```powershell
-esptool.py --chip esp32s3 --port COM3 --baud 921600 `
+esptool.py --chip auto --port COM3 --baud 921600 `
     --before default_reset --after hard_reset `
     write_flash -z 0x0 camillia-mt-<device>-vX.Y.Z.bin
 ```
@@ -163,6 +164,33 @@ The backtick `` ` `` is PowerShell's line-continuation character. To keep it on 
 line, drop the backticks and the line breaks.
 
 Replace `COM3` with your port.
+
+### T-Display P4 ESP32-C6 companion firmware
+
+The main factory image above updates only the ESP32-P4. WiFi and Bluetooth run
+on the onboard ESP32-C6 through ESP-Hosted, and the C6 has its own 4 MB flash.
+Each release therefore also includes
+`camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin`.
+
+The C6 is not updated by Camillia OTA. Provision it separately through the
+board's dedicated **3.3 V UART** connector:
+
+1. Power the T-Display P4 normally and connect a 3.3 V USB-to-UART adapter:
+   adapter TX to board RX, adapter RX to board TX, and GND to GND. Never use
+   5 V UART logic.
+2. Hold the coprocessor BOOT button, tap its RESET button, then release BOOT.
+3. Run:
+
+```bash
+./scripts/flash-tdisplay-p4-c6.sh <c6-uart-port> \
+  camillia-mt-tdisplay-p4-c6-esp-hosted-v2.12.13.bin
+```
+
+4. Tap the coprocessor RESET button and reboot the ESP32-P4.
+
+The C6 image version must match the ESP-Hosted host libraries in the P4
+toolchain. Do not substitute LilyGO's ESP-AT image; Camillia uses Arduino's
+transparent `WiFi` API over ESP-Hosted.
 
 ### Erasing first (optional, destructive)
 
@@ -180,7 +208,7 @@ macOS / Linux:
 Windows (PowerShell):
 
 ```powershell
-esptool.py --chip esp32s3 --port COM3 --baud 921600 `
+esptool.py --chip auto --port COM3 --baud 921600 `
     --before default_reset --after no_reset erase_flash
 ```
 
@@ -271,6 +299,7 @@ Pick the environment for your board:
 | Attaky Mesh Deck | `mesh-deck` |
 | Elecrow ThinkNode M9 | `m9` |
 | Seeed Wio Tracker L2 | `wio-tracker-l2` |
+| LilyGo T-Display P4 AMOLED | `tdisplay-p4` |
 
 The command is identical on Windows, macOS and Linux:
 
@@ -331,6 +360,7 @@ Run it with no flags to get a device picker.
 | `--mesh-deck`, `--attaky`, `-M` | `mesh-deck` |
 | `--m9`, `-9` | `m9` |
 | `--wio-tracker-l2` | `wio-tracker-l2` |
+| `--tdisplay-p4` | `tdisplay-p4` |
 | `--erase`, `-E` | erase flash before a clean build/upload (M9 uses `upload_erase`) |
 
 Windows users: run the three `pio` commands above instead, or use WSL.
@@ -341,10 +371,10 @@ Windows users: run the three `pio` commands above instead, or use WSL.
 
 | Setting | Value |
 |---|---|
-| Platform | espressif32 7.0.1 |
+| Platform | Existing targets: `espressif32@7.0.1` / Arduino 2.0.17. T-Display P4 only: pioarduino `55.03.312-1` / Arduino 3.3.12 / ESP-IDF 5.5.5 |
 | Framework | Arduino |
-| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`, which adds a 9.5 MB LittleFS partition after the app slots. The Wio Tracker L2 has its own, `partitions_16mb_wio.csv`, with **6 MB app slots** — it stores files on SD_MMC and never mounts LittleFS, so that space goes to the app instead (see below) |
-| PSRAM | enabled (OPI; none on Cardputer) |
+| Flash | 16 MB, dual-slot OTA partitions (8 MB on Cardputer). Mesh Deck and Heltec use `partitions_16mb_fs.csv`. Wio Tracker L2 and T-Display P4 use `partitions_16mb_wio.csv` with **6 MB app slots** because files live on SD_MMC |
+| PSRAM | Enabled where fitted; T-Display P4 uses 32 MB 200 MHz hex PSRAM, Cardputer has none |
 | Upload speed | 115200 |
 
 ---
@@ -374,8 +404,8 @@ see [Linux drivers](#thinknode-m9-on-linux).
 fresh checkout: the patch ran before PlatformIO had downloaded RadioLib. Build
 again and it lands.
 
-After flashing, the device boots straight into the firmware — there is nothing
-else to install.
+After flashing, the device boots straight into the firmware. The T-Display P4
+is the exception: provision its C6 companion image as described above.
 
 ---
 
@@ -387,7 +417,8 @@ Two `pre:` scripts rewrite third-party sources in `.pio/libdeps` before a build.
 PlatformIO gives every environment its own copy, so a patch only reaches the env
 that lists the script.
 
-- `tools/patch_lgfx_dmadesc.py` — every display env. LovyanGFX and M5GFX (which
+- `tools/patch_lgfx_dmadesc.py` — SPI display envs. The P4 DSI target does not
+  use this patch. LovyanGFX and M5GFX (which
   vendors the same file) free the SPI DMA descriptor array before allocating its
   replacement, record the new size whether or not the allocation succeeded, and
   then dereference the result without a null check. Under memory pressure that
@@ -402,6 +433,38 @@ Both are idempotent. The LovyanGFX patch fails the build if an existing
 `Bus_SPI.cpp` no longer matches or is only partially patched; the RadioLib patch
 still emits a warning on version drift. If you see `NOT patched - run the build
 once more` on a fresh checkout, the library had not been fetched yet; build again.
+
+### LilyGo T-Display P4 (`tdisplay-p4`)
+
+- This is the only ESP32-P4 and Arduino 3.x target. Its platform and
+  LovyanGFX 1.2.30 pins are environment-local; all S3 environments remain on
+  `espressif32@7.0.1` and Arduino 2.0.17.
+- V1.0 boards report an ECO2 boot ROM and require the `esp32p4_es` SDK profile
+  at 360 MHz. The build scripts isolate its PlatformIO packages under
+  `~/.platformio-p4` so the S3 environments cannot replace its Arduino 3.x
+  framework or RISC-V compiler.
+- The 4.1-inch AMOLED uses RM69A10 over two-lane MIPI-DSI at 568x1232 with
+  RGB565 framebuffers. GT9895 touch is scaled from its 1060x2400 raw range.
+- Fresh installs start in the panel's native portrait orientation. Config →
+  **Orientation** and Web Config → **Orientation** can switch between landscape
+  and either portrait direction; the saved choice takes effect after reboot.
+- WiFi uses the ESP32-C6 over four-bit SDIO on GPIO18/19/14-17. The Arduino P4
+  framework's prebuilt ESP-Hosted configuration matches those pins. The C6
+  enable/reset signal is on XL9535 rather than the framework's direct reset
+  GPIO, so recovery from a wedged coprocessor requires a C6 or board reset.
+- SX1262 DIO1 and reset are also on XL9535. Camillia uses a P4-specific
+  RadioLib HAL to bridge those signals and selects the internal antenna through
+  the SKY13453 switch.
+- The microSD slot runs four-bit SD_MMC. BQ27220 voltage and SOC are read
+  directly. The optional TCA8418 keyboard is runtime-detected; the on-screen
+  keyboard remains present when the accessory is detached.
+- The ESP32-P4 factory image and ESP32-C6 companion image are separate release
+  assets. P4 OTA cannot update the C6.
+
+> **Hardware verification pending.** A successful compile is not evidence that
+> AMOLED timing, touch orientation, hosted WiFi, LoRa TX/RX, SD, battery, or the
+> optional keyboard works on a physical unit. Record serial logs or measured
+> behavior before marking any of those complete.
 
 ### Seeed Wio Tracker L2 (wio-tracker-l2)
 

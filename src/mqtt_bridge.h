@@ -51,6 +51,13 @@ typedef void (*MqttInjectFn)(const MeshHdr &hdr, const uint8_t *cipher,
                              size_t cipherLen, const char *chanName);
 void mqttBridgeSetInject(MqttInjectFn fn);
 
+// The gateway that uplinked a packet this bridge delivered: the node whose id
+// ends its topic, "<root>/2/e/<channel>/!aabbccdd" -- the MQTT counterpart of the
+// radio header's relay_node. Remembered for the last few packets only, keyed by
+// sender and packet id. False when the packet is not among them or its topic
+// named no gateway.
+bool mqttBridgeGatewayFor(uint32_t from, uint32_t packetId, uint32_t &gatewayNode);
+
 // ── Topic monitor ─────────────────────────────────────────────
 // A live census of what is arriving under <root>/2/e/#: one row per channel and
 // how many messages landed on it. Deliberately not a message log — payloads are
