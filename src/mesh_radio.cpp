@@ -357,12 +357,18 @@ bool MeshRadio::init(uint8_t txPower, bool rxBoostedGain) {
         constexpr uint8_t kTxLf = 1U << (LR2021::MODE_TX - 1);
         constexpr uint8_t kRxHf = 1U << (LR2021::MODE_RX_HF - 1);
         constexpr uint8_t kTxHf = 1U << (LR2021::MODE_TX_HF - 1);
+        // LR2021::setDioFunction()/setDioRfSwitchConfig() are private, so send
+        // the same two commands through the Module: each is one 16-bit opcode
+        // plus two bytes, written exactly as LRxxxx::SPIcommand() writes them.
         const auto configureRfDio = [this](uint8_t dio, uint8_t modes) {
-            int state = _radio.setDioFunction(
-                dio, RADIOLIB_LR2021_DIO_FUNCTION_RF_SWITCH,
-                RADIOLIB_LR2021_DIO_SLEEP_PULL_AUTO);
+            uint8_t func[] = {dio, (uint8_t)(RADIOLIB_LR2021_DIO_FUNCTION_RF_SWITCH
+                                             | RADIOLIB_LR2021_DIO_SLEEP_PULL_AUTO)};
+            int state = _module.SPIwriteStream(RADIOLIB_LR2021_CMD_SET_DIO_FUNCTION,
+                                               func, sizeof(func), true, true);
             if (state == RADIOLIB_ERR_NONE) {
-                state = _radio.setDioRfSwitchConfig(dio, modes);
+                uint8_t sw[] = {dio, modes};
+                state = _module.SPIwriteStream(RADIOLIB_LR2021_CMD_SET_DIO_RF_SWITCH_CONFIG,
+                                               sw, sizeof(sw), true, true);
             }
             return state;
         };
