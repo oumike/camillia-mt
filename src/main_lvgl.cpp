@@ -898,6 +898,19 @@ static lv_obj_t *s_releaseNotesModal = nullptr;
 // sit outside it so they stay put while the notes move.
 static lv_obj_t *s_releaseNotesScroll = nullptr;
 
+// ── Message Actions ──────────────────────────────────────────────────────────
+// Off on the Cardputer. The modal would add seven emoji cells to a board with
+// no PSRAM and a 96 KB LVGL pool — the same headroom that caps its emoji tray at
+// 40 glyphs and compiles Discovery out entirely. Chat there keeps the plain node
+// menu; the quick-emoji tray on E is still the way to send a reaction.
+// Defined up here, ahead of the first #if that tests it: an undefined macro
+// reads as 0, which would silently compile the feature out everywhere.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_MESSAGE_ACTIONS 0
+#else
+#define HAS_MESSAGE_ACTIONS 1
+#endif
+
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
 static lv_obj_t *s_nodeInfoModal = nullptr;
@@ -1300,17 +1313,6 @@ static const char *const kTapbackTray[] = {
     "\U0001F44D", "\U0001F44E", "\U0000203C", "\U00002753", "\U0001F602", "\U0001F622",
 };
 static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTapbackTray[0]));
-
-// ── Message Actions ──────────────────────────────────────────────────────────
-// Off on the Cardputer. The modal would add seven emoji cells to a board with
-// no PSRAM and a 96 KB LVGL pool — the same headroom that caps its emoji tray at
-// 40 glyphs and compiles Discovery out entirely. Chat there keeps the plain node
-// menu; the quick-emoji tray on E is still the way to send a reaction.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define HAS_MESSAGE_ACTIONS 0
-#else
-#define HAS_MESSAGE_ACTIONS 1
-#endif
 
 // The same modal opened from a chat message rather than a node row. It keeps
 // the six node actions and prepends the things that only make sense about a
@@ -9537,7 +9539,11 @@ static bool chatScreenIsForeground() {
         && !s_composeModal && !s_emojiPickerModal && !s_legendModal
         && !s_channelActionsModal && !s_nodesActionModal && !s_tracerouteModal
         && !s_releaseNotesModal && !s_onboardingModal && !s_sysStatsModal
-        && !s_nodeInfoModal && !s_cfgActionMsgModal && !s_msgInfoModal;
+        && !s_nodeInfoModal && !s_cfgActionMsgModal
+#if HAS_MESSAGE_ACTIONS
+        && !s_msgInfoModal
+#endif
+        ;
 }
 #endif
 
