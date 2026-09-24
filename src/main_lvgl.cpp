@@ -901,6 +901,8 @@ static lv_obj_t *s_releaseNotesScroll = nullptr;
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
 static lv_obj_t *s_nodeInfoModal = nullptr;
+#endif
+#if HAS_MESSAGE_ACTIONS
 // Sender Info, from the message actions menu; see openMsgSenderInfoModal().
 static lv_obj_t *s_msgInfoModal = nullptr;
 #endif
@@ -2302,10 +2304,10 @@ static void onCfgHeaderInfoPressed(lv_event_t *e);
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 static void openNodeInfoModal();
 static void closeNodeInfoModal();
+#endif
 #if HAS_MESSAGE_ACTIONS
 static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId);
 static void closeMsgSenderInfoModal();
-#endif
 #endif
 static void openLegendModal();
 static void closeLegendModal();
