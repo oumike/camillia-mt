@@ -7076,6 +7076,41 @@ static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
                              bool wifiApMode, bool wifiConnected,
                              const StatusIconInk &ink);
 
+// GPS as the status icons show it: enabled, fix, satellites. Read through here
+// by every status surface -- the chat header, the P4's strip (both from
+// refreshHeaderStatus()) and the glance band below -- so they agree.
+//
+// On the T-Display P4 the reading is held for a minute. A receiver working the
+// sky gains and drops satellites and the fix every few seconds, and redrawing
+// the icon for each one kept it constantly changing for no useful information.
+// Turning GPS on or off is the exception: that is the user's own action and
+// shows at once. Every other board reads it live, as before.
+#if defined(DEVICE_TDISPLAY_P4)
+static constexpr uint32_t kGpsUiHoldMs = 60000UL;
+#else
+static constexpr uint32_t kGpsUiHoldMs = 0;
+#endif
+static void gpsUiReading(bool &enabled, bool &fix, uint8_t &sats) {
+    static bool sHave = false;
+    static bool sEnabled = false;
+    static bool sFix = false;
+    static uint8_t sSats = 0;
+    static uint32_t sAtMs = 0;
+    const bool liveEnabled = gpsIsEnabled();
+    const uint32_t now = millis();
+    if (!sHave || kGpsUiHoldMs == 0 || liveEnabled != sEnabled
+        || (uint32_t)(now - sAtMs) >= kGpsUiHoldMs) {
+        sEnabled = liveEnabled;
+        sFix = liveEnabled && gpsHasFix();
+        sSats = liveEnabled ? gpsSats() : 0;
+        sAtMs = now;
+        sHave = true;
+    }
+    enabled = sEnabled;
+    fix = sFix;
+    sats = sSats;
+}
+
 #if HAS_SLEEP_OVERLAY
 static uint32_t tdeckProSleepClockMinuteKey() {
     const time_t now = time(nullptr);
@@ -7693,41 +7728,6 @@ static void tdeckProRefreshSleepMsgRows() {
             }
         }
     }
-}
-
-// GPS as the status icons show it: enabled, fix, satellites. Read through here
-// by every status surface -- the chat header, the P4's strip (both from
-// refreshHeaderStatus()) and the glance band below -- so they agree.
-//
-// On the T-Display P4 the reading is held for a minute. A receiver working the
-// sky gains and drops satellites and the fix every few seconds, and redrawing
-// the icon for each one kept it constantly changing for no useful information.
-// Turning GPS on or off is the exception: that is the user's own action and
-// shows at once. Every other board reads it live, as before.
-#if defined(DEVICE_TDISPLAY_P4)
-static constexpr uint32_t kGpsUiHoldMs = 60000UL;
-#else
-static constexpr uint32_t kGpsUiHoldMs = 0;
-#endif
-static void gpsUiReading(bool &enabled, bool &fix, uint8_t &sats) {
-    static bool sHave = false;
-    static bool sEnabled = false;
-    static bool sFix = false;
-    static uint8_t sSats = 0;
-    static uint32_t sAtMs = 0;
-    const bool liveEnabled = gpsIsEnabled();
-    const uint32_t now = millis();
-    if (!sHave || kGpsUiHoldMs == 0 || liveEnabled != sEnabled
-        || (uint32_t)(now - sAtMs) >= kGpsUiHoldMs) {
-        sEnabled = liveEnabled;
-        sFix = liveEnabled && gpsHasFix();
-        sSats = liveEnabled ? gpsSats() : 0;
-        sAtMs = now;
-        sHave = true;
-    }
-    enabled = sEnabled;
-    fix = sFix;
-    sats = sSats;
 }
 
 // Everything the glance header's two status icons show, folded into one value
@@ -26722,6 +26722,7 @@ static void executeNodesActionSelection() {
             openEmojiPicker(/*sendMode=*/true);
             return;
         }
+#if HAS_MESSAGE_ACTIONS
         if (sel == kMsgActionInfoIdx) {
             const uint32_t from = s_nodesActionNodeId;
             const uint32_t pid = s_nodesActionPacketId;
@@ -26729,6 +26730,7 @@ static void executeNodesActionSelection() {
             openMsgSenderInfoModal(from, pid);
             return;
         }
+#endif
         if (sel == kMsgActionReplyIdx) {
             const uint32_t replyId = s_selectedMsgReplyPacketId;
             char preview[kReplyPreviewTextMax + 1];
