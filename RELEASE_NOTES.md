@@ -21,6 +21,7 @@
 - Notification and alert tones now compute volume once per tone instead of once per audio sample, leaving more playback headroom on T-Deck, T-Lora Pager TFT and Wio Tracker L2.
 
 ### Fixed
+- The P4 AMOLED no longer blinks when the device writes to flash. The display's frame refresh now keeps running during flash writes, so saving settings or node data no longer blinks the screen every half minute or so, and an OTA no longer blinks the panel on every progress-bar step.
 - On ThinkNode M9, Sweep/Scan Settings and MQTT Scan Settings now let the d-pad reach the save checkbox: Up/Down move between the duration slider and the checkbox, Left/Right change whichever is focused, and Enter starts the run. Previously every direction moved the slider.
 - On ThinkNode M9, the d-pad now moves across Node Actions and Message Actions as they are laid out: Up/Down between rows, Left/Right between the two columns, and in Message Actions between the reaction strip and the buttons below it. Previously Down stepped sideways and Left/Right repeated Up/Down.
 - Web Config VNC now fits the remote canvas against both viewport width and height, so the P4's tall 568x1232 portrait display stays fully visible and pointer coordinates remain accurate after scaling or browser resizing.
