@@ -142,7 +142,8 @@ These apply to all keyboard builds, including `tdeck`, `tdeck-pro`,
 - Inside Discovery: W sweeps and P picks a preset to scan — both ask how long to
   listen first. C cancels a sweep or scan while one is running and clears the
   list when none is, and S saves a snapshot to SD. Inside Beacons: C clears.
-  Inside MQTT Monitor: C restarts the count and S sends the top 5 to a channel
+  Inside MQTT Monitor: W starts a timed scan (asking how long, and whether to
+  save while it runs), C restarts the count and S sends the top 5 to a channel
 
 ### LilyGo T-Deck (tdeck)
 
@@ -733,9 +734,11 @@ or displayed.
   counting*, so a message count has a denominator
 - Cells fill left to right, top to bottom, in first-seen order, and stay put;
   only the numbers move. Nothing is sorted or reshuffled under you while you read
-- Nothing persists. Counting starts when the screen opens, the table is freed
-  when it closes, and reopening starts from zero. Press C (Heltec: the Reset
-  button) to start over without leaving the screen
+- Nothing persists unless you ask it to. Counting starts when the screen opens,
+  the table is freed when it closes, and reopening starts from zero. Press C
+  (Heltec: the Reset button) to start over without leaving the screen
+- **Press W (Heltec: the Scan button) for a timed scan that can save as it
+  runs.** See [Scanning and saving](#scanning-and-saving) below
 - **Press S (Heltec: the Send button) to put the top 5 channels on the mesh.**
   See [Sending a summary](#sending-a-summary) below
 - Bounded on purpose, so leaving it up all day costs what one minute costs: 32
@@ -746,6 +749,32 @@ or displayed.
   second connection, so it neither adds broker load nor changes what the bridge
   does with downlink traffic
 - Close with the device close key (see device sections below)
+
+#### Scanning and saving
+
+A scan is a count over a window you choose, set up the same way as a Discovery
+sweep.
+
+- Press **W** (on Heltec, the **Scan** button in the header). **MQTT Scan
+  Settings** asks how long to listen — 1 minute to 6 hours, opening on whatever
+  you used last — and, on boards with an SD card or internal file storage, offers
+  **Save while scanning**. Space toggles the box on keyboard builds; Enter starts
+- Starting a scan restarts the count, so the result covers exactly that window.
+  The status line counts towards it, such as `12 chans  400 msgs  5m/1h`, with
+  `saving` added while a file is being written
+- With Save while scanning ticked, the scan writes
+  `/camillia/mqtt-<date>-<time>.json` when it starts and rewrites it at most every
+  five seconds while messages keep arriving, so a scan cut short by a reboot or a
+  flat battery still leaves what it had. The file holds the root and filter, the
+  window and how much of it had run, the totals (including off-list messages) and
+  every channel with its count, in the order the screen shows them
+- When the window closes the scan ends with one last write and says so on the
+  status line — `Scan done - saved mqtt-20260924-221500.json`. Counting carries on
+  afterwards as normal
+- Closing the screen, pressing C, or starting another scan ends the current one
+  early, with the same final write first. The file's `"done"` field is true only
+  for a scan that was ended this way, never for one interrupted by power loss
+- Save while scanning is off at boot and remembered until the next reboot
 
 #### Sending a summary
 
@@ -2058,7 +2087,7 @@ The menu is titled `Message Actions: <sender>` and holds:
   fire the reactions, **M** opens the full tray.
 - **Reply** (**R**) — opens compose quoting that message, the same thing Space
   does on a highlighted message.
-- **Sender Info** (**S**) — who sent it and how it reached you: over **LoRa**
+- **Message Info** (**I**) — who sent it and how it reached you: over **LoRa**
   or **MQTT** (the same radio/globe mark the chat shows in front of it), and the
   node that handed it to you on the last leg. Over LoRa that is the relaying
   node, or "heard directly"; the radio header only carries the last byte of the
@@ -2068,7 +2097,7 @@ The menu is titled `Message Actions: <sender>` and holds:
   RSSI are shown too. Details are kept for the last 64 received messages since
   boot; older ones say so.
 - The node actions for the **sender**: Traceroute (**T**), Send DM (**D**),
-  Request Info (**I**), Request Position (**P**) and Ignore (**G**). Favorite is
+  Request Node (**Q**), Request Position (**P**) and Ignore (**G**). Favorite is
   left to the Nodes screen.
 
 Up/down walks the whole list including the reaction row; Esc closes and leaves

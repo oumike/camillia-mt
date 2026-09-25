@@ -898,12 +898,25 @@ static lv_obj_t *s_releaseNotesModal = nullptr;
 // sit outside it so they stay put while the notes move.
 static lv_obj_t *s_releaseNotesScroll = nullptr;
 
+// ── Message Actions ──────────────────────────────────────────────────────────
+// Off on the Cardputer. The modal would add seven emoji cells to a board with
+// no PSRAM and a 96 KB LVGL pool — the same headroom that caps its emoji tray at
+// 40 glyphs and compiles Discovery out entirely. Chat there keeps the plain node
+// menu; the quick-emoji tray on E is still the way to send a reaction.
+// Defined up here, ahead of the first #if that tests it: an undefined macro
+// reads as 0, which would silently compile the feature out everywhere.
+#if defined(DEVICE_CARDPUTER_LORA_HAT)
+#define HAS_MESSAGE_ACTIONS 0
+#else
+#define HAS_MESSAGE_ACTIONS 1
+#endif
+
 #if !defined(DEVICE_TLORA_PAGER_TFT)
 // (I)nformation popup over the CFG modal — pager shows this in a side panel.
 static lv_obj_t *s_nodeInfoModal = nullptr;
 #endif
 #if HAS_MESSAGE_ACTIONS
-// Sender Info, from the message actions menu; see openMsgSenderInfoModal().
+// Message Info, from the message actions menu; see openMsgSenderInfoModal().
 static lv_obj_t *s_msgInfoModal = nullptr;
 #endif
 static lv_obj_t *s_liveModal = nullptr;
@@ -1243,10 +1256,12 @@ static lv_obj_t *s_nodesActionModal = nullptr;
 static int s_nodesActionSelection = 0;
 static uint32_t s_nodesActionNodeId = 0;
 // Action ordering (also referenced by executeNodesActionSelection):
-//   0=Traceroute, 1=Send DM, 2=Favorite toggle, 3=Request Info,
+//   0=Traceroute, 1=Send DM, 2=Favorite toggle, 3=Request Node,
 //   4=Request Position, 5=Ignore toggle, 6=Locate, then LOS, then Delete.
 static constexpr char kNodesActionShortcuts[kNodesActionCount] = {
-    'T', 'D', 'F', 'I', 'P', 'G',
+    // 'Q' for Re(q)uest Node: I is Message Info's in the message menu, which
+    // shares these rows, and one key per action across both menus is the rule.
+    'T', 'D', 'F', 'Q', 'P', 'G',
 #if HAS_NODE_LOCATE
     'L',
 #endif
@@ -1301,17 +1316,6 @@ static const char *const kTapbackTray[] = {
 };
 static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTapbackTray[0]));
 
-// ── Message Actions ──────────────────────────────────────────────────────────
-// Off on the Cardputer. The modal would add seven emoji cells to a board with
-// no PSRAM and a 96 KB LVGL pool — the same headroom that caps its emoji tray at
-// 40 glyphs and compiles Discovery out entirely. Chat there keeps the plain node
-// menu; the quick-emoji tray on E is still the way to send a reaction.
-#if defined(DEVICE_CARDPUTER_LORA_HAT)
-#define HAS_MESSAGE_ACTIONS 0
-#else
-#define HAS_MESSAGE_ACTIONS 1
-#endif
-
 // The same modal opened from a chat message rather than a node row. It keeps
 // the six node actions and prepends the things that only make sense about a
 // message: the tapback reactions, an escape to the full emoji tray, and Reply.
@@ -1323,7 +1327,7 @@ static constexpr int kTapbackTrayCount = (int)(sizeof(kTapbackTray) / sizeof(kTa
 //   0 .. 5  tapback reactions (kTapbackTray)
 //   6       "..."  -> full emoji picker in tapback mode
 //   7       Reply
-//   8       Sender Info (openMsgSenderInfoModal())
+//   8       Message Info (openMsgSenderInfoModal())
 //   9 ..13  node actions, via kMsgActionNodeMap
 //
 // Favorite is deliberately absent from message mode. It is a property of the
@@ -1346,8 +1350,8 @@ static constexpr char kMsgActionShortcuts[kMsgActionCount] = {
     '1', '2', '3', '4', '5', '6',   // tapbacks
     'M',                            // more emoji
     'R',                            // reply
-    'S',                            // sender info
-    'T', 'D', 'I', 'P', 'G'         // node actions, minus (F)avorite
+    'I',                            // message info
+    'T', 'D', 'Q', 'P', 'G'         // node actions, minus (F)avorite
 };
 
 // Sized for the larger of the two modes.
@@ -2782,7 +2786,7 @@ static void stateMapBootstrapRestoreWifi() {
 #endif
 
 // The chat view's LoRa/MQTT mark, in front of every received message. One place
-// that picks it, so Sender Info (message actions) says it the same way.
+// that picks it, so Message Info (message actions) says it the same way.
 static inline const char *msgTransportIcon(bool viaMqtt) {
     return viaMqtt ? LV_SYMBOL_GLOBE_TINY : LV_SYMBOL_RADIO_TINY;
 }
@@ -7074,6 +7078,41 @@ static void paintStatusIcons(lv_obj_t *gpsLabel, lv_obj_t *wifiLabel,
                              bool wifiApMode, bool wifiConnected,
                              const StatusIconInk &ink);
 
+// GPS as the status icons show it: enabled, fix, satellites. Read through here
+// by every status surface -- the chat header, the P4's strip (both from
+// refreshHeaderStatus()) and the glance band below -- so they agree.
+//
+// On the T-Display P4 the reading is held for a minute. A receiver working the
+// sky gains and drops satellites and the fix every few seconds, and redrawing
+// the icon for each one kept it constantly changing for no useful information.
+// Turning GPS on or off is the exception: that is the user's own action and
+// shows at once. Every other board reads it live, as before.
+#if defined(DEVICE_TDISPLAY_P4)
+static constexpr uint32_t kGpsUiHoldMs = 60000UL;
+#else
+static constexpr uint32_t kGpsUiHoldMs = 0;
+#endif
+static void gpsUiReading(bool &enabled, bool &fix, uint8_t &sats) {
+    static bool sHave = false;
+    static bool sEnabled = false;
+    static bool sFix = false;
+    static uint8_t sSats = 0;
+    static uint32_t sAtMs = 0;
+    const bool liveEnabled = gpsIsEnabled();
+    const uint32_t now = millis();
+    if (!sHave || kGpsUiHoldMs == 0 || liveEnabled != sEnabled
+        || (uint32_t)(now - sAtMs) >= kGpsUiHoldMs) {
+        sEnabled = liveEnabled;
+        sFix = liveEnabled && gpsHasFix();
+        sSats = liveEnabled ? gpsSats() : 0;
+        sAtMs = now;
+        sHave = true;
+    }
+    enabled = sEnabled;
+    fix = sFix;
+    sats = sSats;
+}
+
 #if HAS_SLEEP_OVERLAY
 static uint32_t tdeckProSleepClockMinuteKey() {
     const time_t now = time(nullptr);
@@ -7691,41 +7730,6 @@ static void tdeckProRefreshSleepMsgRows() {
             }
         }
     }
-}
-
-// GPS as the status icons show it: enabled, fix, satellites. Read through here
-// by every status surface -- the chat header, the P4's strip (both from
-// refreshHeaderStatus()) and the glance band below -- so they agree.
-//
-// On the T-Display P4 the reading is held for a minute. A receiver working the
-// sky gains and drops satellites and the fix every few seconds, and redrawing
-// the icon for each one kept it constantly changing for no useful information.
-// Turning GPS on or off is the exception: that is the user's own action and
-// shows at once. Every other board reads it live, as before.
-#if defined(DEVICE_TDISPLAY_P4)
-static constexpr uint32_t kGpsUiHoldMs = 60000UL;
-#else
-static constexpr uint32_t kGpsUiHoldMs = 0;
-#endif
-static void gpsUiReading(bool &enabled, bool &fix, uint8_t &sats) {
-    static bool sHave = false;
-    static bool sEnabled = false;
-    static bool sFix = false;
-    static uint8_t sSats = 0;
-    static uint32_t sAtMs = 0;
-    const bool liveEnabled = gpsIsEnabled();
-    const uint32_t now = millis();
-    if (!sHave || kGpsUiHoldMs == 0 || liveEnabled != sEnabled
-        || (uint32_t)(now - sAtMs) >= kGpsUiHoldMs) {
-        sEnabled = liveEnabled;
-        sFix = liveEnabled && gpsHasFix();
-        sSats = liveEnabled ? gpsSats() : 0;
-        sAtMs = now;
-        sHave = true;
-    }
-    enabled = sEnabled;
-    fix = sFix;
-    sats = sSats;
 }
 
 // Everything the glance header's two status icons show, folded into one value
@@ -9537,7 +9541,11 @@ static bool chatScreenIsForeground() {
         && !s_composeModal && !s_emojiPickerModal && !s_legendModal
         && !s_channelActionsModal && !s_nodesActionModal && !s_tracerouteModal
         && !s_releaseNotesModal && !s_onboardingModal && !s_sysStatsModal
-        && !s_nodeInfoModal && !s_cfgActionMsgModal && !s_msgInfoModal;
+        && !s_nodeInfoModal && !s_cfgActionMsgModal
+#if HAS_MESSAGE_ACTIONS
+        && !s_msgInfoModal
+#endif
+        ;
 }
 #endif
 
@@ -26716,6 +26724,7 @@ static void executeNodesActionSelection() {
             openEmojiPicker(/*sendMode=*/true);
             return;
         }
+#if HAS_MESSAGE_ACTIONS
         if (sel == kMsgActionInfoIdx) {
             const uint32_t from = s_nodesActionNodeId;
             const uint32_t pid = s_nodesActionPacketId;
@@ -26723,6 +26732,7 @@ static void executeNodesActionSelection() {
             openMsgSenderInfoModal(from, pid);
             return;
         }
+#endif
         if (sel == kMsgActionReplyIdx) {
             const uint32_t replyId = s_selectedMsgReplyPacketId;
             char preview[kReplyPreviewTextMax + 1];
@@ -26734,7 +26744,7 @@ static void executeNodesActionSelection() {
         // Anything past Reply is one of the node actions; fall through with the
         // index mapped back so the arms below keep their original 0..5 numbering.
         // Through the map, not a subtraction: message mode omits Favorite, so
-        // the offsets diverge past it — a plain shift would fire Request Info
+        // the offsets diverge past it — a plain shift would fire Request Node
         // where the user pressed Request Position.
         const int nodeSel = sel - kMsgActionNodeBase;
         if (nodeSel < 0 || nodeSel >= kMsgActionNodeCount) {
@@ -27054,7 +27064,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "Traceroute",
         "Send DM",
         selectedIsFavorite ? "Unfavorite" : "Favorite",
-        "Request Info",
+        "Request Node",
         "Request Position",
         selectedIsIgnored ? "Unignore" : "Ignore",
     #if HAS_NODE_LOCATE
@@ -27074,7 +27084,7 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
         "(T)raceroute",
         "Sen(d) DM",
         selectedIsFavorite ? "Un(f)avorite" : "(F)avorite",
-        "Request (I)nfo",
+        "Re(q)uest Node",
         "Request (P)osition",
         selectedIsIgnored ? "Uni(g)nore" : "I(g)nore",
 #if HAS_NODE_LOCATE
@@ -27176,9 +27186,9 @@ static void openNodesActionMenuFor(uint32_t nodeId, bool msgMode, uint32_t packe
 #endif
         } else if (s_nodesActionMsgMode && i == kMsgActionInfoIdx) {
 #if UI_TOUCH_ONLY_PROFILE
-            labelText = "Sender Info";
+            labelText = "Message Info";
 #else
-            labelText = "(S)ender Info";
+            labelText = "Message (I)nfo";
 #endif
         } else {
             // Message mode's node rows are not a straight offset — the map skips
@@ -31242,9 +31252,284 @@ static int mqttMonTopIndices(int *out, int maxOut) {
     return n;
 }
 
+// ── Scan ─────────────────────────────────────────────────────────────────────
+// A timed count, set up the way Discovery sets up a sweep: W (Heltec: the Scan
+// button) asks how long to listen and whether to save while it runs, then the
+// count starts over so the result describes exactly that window. When the
+// window closes the counting carries on as before -- the scan only decides what
+// the saved file covers and when it is called final.
+//
+// Everything still lives and dies with the screen. Closing it ends a scan early,
+// with one last write first, since the table is freed straight after.
+struct MqttScanDurationOption {
+    uint32_t    ms;
+    const char *label;
+};
+static const MqttScanDurationOption kMqttScanDurations[] = {
+    {    60000UL, "1 min"   },
+    {   300000UL, "5 min"   },
+    {   600000UL, "10 min"  },
+    {   900000UL, "15 min"  },
+    {  1800000UL, "30 min"  },
+    {  3600000UL, "1 hour"  },
+    {  7200000UL, "2 hours" },
+    { 21600000UL, "6 hours" },
+};
+static constexpr int kMqttScanDurationCount =
+    (int)(sizeof(kMqttScanDurations) / sizeof(kMqttScanDurations[0]));
+
+static uint32_t s_mqttScanWindowMs = 300000UL;   // last chosen; 5 min until then
+static uint32_t s_mqttScanStartedMs = 0;         // 0 = no scan running
+// "Save while scanning", from MQTT Scan Settings. Off at boot and remembered
+// for the session, like Discovery's.
+static bool     s_mqttScanSaveWhileRunning = false;
+
+static bool mqttScanRunning() { return s_mqttScanStartedMs != 0; }
+
+#if HAS_FILE_STORAGE
+// One file per scan, picked when it starts and rewritten as the counts move, so
+// a long scan leaves one current snapshot on the card even if it is cut short.
+// Rate-limited like Discovery's, since each write is the whole file.
+static constexpr uint32_t kMqttScanSaveMinGapMs = 5000;
+static bool     s_mqttScanSaveActive = false;
+static char     s_mqttScanSavePath[64] = {};
+static uint32_t s_mqttScanSaveTotal = 0;
+static uint32_t s_mqttScanSaveMs = 0;
+
+// Same rules as discoveryJsonEscape(), which lives behind FEATURE_DISCOVERY.
+static void mqttScanJsonEscape(const char *in, char *out, size_t outLen) {
+    if (!out || outLen == 0) return;
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 2 < outLen; i++) {
+        const unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20) {
+            out[o++] = ' ';
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+// A fresh /camillia/mqtt-<stamp>.json that does not exist yet.
+static bool mqttScanPickSavePath(char *path, size_t pathLen, char *msg, size_t msgLen) {
+    if (!storageBegin()) {
+        snprintf(msg, msgLen, "No %s - not saving", storageName());
+        return false;
+    }
+    storageFs().mkdir("/camillia");
+
+    char stamp[32];
+    const time_t nowEpoch = time(nullptr);
+    if (nowEpoch >= 1700000000) {
+        struct tm lt;
+        localtime_r(&nowEpoch, &lt);
+        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &lt);
+    } else {
+        snprintf(stamp, sizeof(stamp), "boot-%lus", (unsigned long)(millis() / 1000UL));
+    }
+
+    snprintf(path, pathLen, "/camillia/mqtt-%s.json", stamp);
+    for (int attempt = 2; attempt <= 9 && storageFs().exists(path); attempt++) {
+        snprintf(path, pathLen, "/camillia/mqtt-%s-%d.json", stamp, attempt);
+    }
+    if (storageFs().exists(path)) {
+        snprintf(msg, msgLen, "Save failed - too many this second");
+        return false;
+    }
+    return true;
+}
+
+// Writes the current table to `path`, replacing whatever is there. `done` marks
+// the final write, so a file cut off by a reboot reads as unfinished.
+static bool mqttScanWriteJson(const char *path, bool done, char *msg, size_t msgLen) {
+    if (!storageBegin()) {
+        snprintf(msg, msgLen, "No %s - not saved", storageName());
+        return false;
+    }
+    File f = storageFs().open(path, FILE_WRITE);
+    if (!f) {
+        snprintf(msg, msgLen, "Save failed - cannot write %s", storageName());
+        return false;
+    }
+
+    const uint32_t now = millis();
+    const time_t nowEpoch = time(nullptr);
+    char rootEsc[2 * sizeof(s_cfg.mqttRoot)];
+    mqttScanJsonEscape(s_cfg.mqttRoot, rootEsc, sizeof(rootEsc));
+
+    f.print("{\n");
+    f.printf("  \"node\": \"!%08lX\",\n", (unsigned long)s_myNodeId);
+    f.printf("  \"root\": \"%s\",\n", rootEsc);
+    f.printf("  \"filter\": \"%s/2/e/#\",\n", rootEsc);
+    if (nowEpoch >= 1700000000) {
+        char iso[32];
+        struct tm lt;
+        localtime_r(&nowEpoch, &lt);
+        strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%S", &lt);
+        f.printf("  \"generated\": \"%s\",\n", iso);
+    } else {
+        f.print("  \"generated\": null,\n");   // clock not set; do not invent one
+    }
+    f.printf("  \"uptimeMs\": %lu,\n", (unsigned long)now);
+    f.printf("  \"scan\": {\"windowMs\": %lu, \"elapsedMs\": %lu, \"done\": %s},\n",
+             (unsigned long)s_mqttScanWindowMs,
+             (unsigned long)(now - s_mqttMonStartMs),
+             done ? "true" : "false");
+    f.printf("  \"counts\": {\"channels\": %d, \"messages\": %lu, \"offList\": %lu},\n",
+             mqttMonitorTopicCount(),
+             (unsigned long)mqttMonitorTotalMsgs(),
+             (unsigned long)mqttMonitorOtherMsgs());
+
+    // First-seen order, the order the screen shows.
+    f.print("  \"channels\": [");
+    const int rows = mqttMonitorTopicCount();
+    bool first = true;
+    for (int i = 0; i < rows; i++) {
+        const MqttTopicStat *st = mqttMonitorTopicAt(i);
+        if (!st) break;
+        char chanEsc[2 * MQTT_MONITOR_TOPIC_MAX];
+        mqttScanJsonEscape(st->channel, chanEsc, sizeof(chanEsc));
+        f.printf("%s\n    {\"channel\": \"%s\", \"count\": %lu}",
+                 first ? "" : ",", chanEsc, (unsigned long)st->count);
+        first = false;
+    }
+    f.print(first ? "]\n}\n" : "\n  ]\n}\n");
+
+    const size_t bytes = (size_t)f.position();
+    f.close();
+
+    Serial.printf("[mqtt-mon] saved %s (%u bytes)\n", path, (unsigned)bytes);
+    const char *name = strrchr(path, '/');
+    snprintf(msg, msgLen, "Saved %s", name ? name + 1 : path);
+    return true;
+}
+
+static void mqttScanSaveBegin() {
+    s_mqttScanSaveActive = false;
+    char msg[72];
+    if (!mqttScanPickSavePath(s_mqttScanSavePath, sizeof(s_mqttScanSavePath),
+                              msg, sizeof(msg))
+        || !mqttScanWriteJson(s_mqttScanSavePath, false, msg, sizeof(msg))) {
+        // The scan goes ahead regardless; it just says it is not being saved.
+        mqttMonNotice(msg, 5000);
+        Serial.printf("[mqtt-mon] save while scanning unavailable: %s\n", msg);
+        return;
+    }
+    s_mqttScanSaveActive = true;
+    s_mqttScanSaveTotal = mqttMonitorTotalMsgs();
+    s_mqttScanSaveMs = millis();
+    Serial.printf("[mqtt-mon] saving as it scans to %s\n", s_mqttScanSavePath);
+}
+
+// Periodic rewrite while the scan runs: at most every few seconds, and only when
+// something new has arrived (the total covers every count, off-list included).
+static void mqttScanSaveService() {
+    if (!s_mqttScanSaveActive) return;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - s_mqttScanSaveMs) < kMqttScanSaveMinGapMs) return;
+    const uint32_t total = mqttMonitorTotalMsgs();
+    if (total == s_mqttScanSaveTotal) return;
+    s_mqttScanSaveTotal = total;
+    s_mqttScanSaveMs = now;
+    char msg[72];
+    if (!mqttScanWriteJson(s_mqttScanSavePath, false, msg, sizeof(msg))) {
+        // Keep trying: a card that was briefly busy should not end the saving.
+        Serial.printf("[mqtt-mon] live save failed: %s\n", msg);
+    }
+}
+#else
+static inline void mqttScanSaveBegin() {}
+static inline void mqttScanSaveService() {}
+#endif  // HAS_FILE_STORAGE
+
+// Ends the scan in flight, if there is one: the final write, then a notice
+// saying how it went. Must run before mqttMonitorStop() frees the table.
+static void mqttScanFinish(const char *why) {
+    if (!mqttScanRunning()) return;
+    s_mqttScanStartedMs = 0;
+    char msg[72];
+    snprintf(msg, sizeof(msg), "Scan %s", why);
+#if HAS_FILE_STORAGE
+    if (s_mqttScanSaveActive) {
+        s_mqttScanSaveActive = false;
+        char saveMsg[72];
+        if (mqttScanWriteJson(s_mqttScanSavePath, true, saveMsg, sizeof(saveMsg))) {
+            const char *name = strrchr(s_mqttScanSavePath, '/');
+            snprintf(msg, sizeof(msg), "Scan %s - saved %s", why,
+                     name ? name + 1 : s_mqttScanSavePath);
+        } else {
+            snprintf(msg, sizeof(msg), "%s", saveMsg);
+        }
+    }
+#endif
+    mqttMonNotice(msg, 8000);
+    Serial.printf("[mqtt-mon] %s\n", msg);
+}
+
+// From the UI tick while the screen is up: closes the window when it is over,
+// and keeps the file current until then.
+static void mqttScanService() {
+    if (!mqttScanRunning()) return;
+    if ((uint32_t)(millis() - s_mqttScanStartedMs) >= s_mqttScanWindowMs) {
+        mqttScanFinish("done");
+        return;
+    }
+    mqttScanSaveService();
+}
+
+static void mqttMonitorReset();   // below; a scan starts from a clean count
+
+static const char *mqttScanDurationLabelFor(int idx) {
+    if (idx < 0 || idx >= kMqttScanDurationCount) idx = 0;
+    return kMqttScanDurations[idx].label;
+}
+
+static void mqttScanDurationApply(int idx) {
+    if (!s_mqttMonModal) return;
+    if (idx < 0 || idx >= kMqttScanDurationCount) idx = 0;
+    s_mqttScanWindowMs = kMqttScanDurations[idx].ms;
+    mqttMonitorReset();              // also ends a scan already in flight
+    s_mqttScanStartedMs = millis();
+    if (s_mqttScanStartedMs == 0) s_mqttScanStartedMs = 1;   // 0 means "none"
+    if (s_mqttScanSaveWhileRunning) mqttScanSaveBegin();
+    Serial.printf("[mqtt-mon] scan started (%s)\n", mqttScanDurationLabelFor(idx));
+}
+
+// The Scan button and W. Opens on whatever length was used last.
+static void openMqttScanModal() {
+    if (!s_mqttMonModal) return;
+    int startIdx = 0;
+    for (int i = 0; i < kMqttScanDurationCount; i++) {
+        if (kMqttScanDurations[i].ms == s_mqttScanWindowMs) { startIdx = i; break; }
+    }
+#if HAS_FILE_STORAGE
+    static const char *const kSaveWhileLabel = "Save while scanning";
+    bool *const saveWhileValue = &s_mqttScanSaveWhileRunning;
+#else
+    static const char *const kSaveWhileLabel = nullptr;
+    bool *const saveWhileValue = nullptr;
+#endif
+    static const CfgSliderPicker kScanSpec = {
+        "MQTT Scan Settings",
+        kMqttScanDurationCount,
+        mqttScanDurationLabelFor,
+        mqttScanDurationApply,
+        "1 min",
+        "6 hours",
+        kSaveWhileLabel,
+        saveWhileValue,
+    };
+    openCfgSliderModal(&kScanSpec, startIdx);
+}
+
 
 static void closeMqttMonitorModal() {
     if (!s_mqttMonModal) return;
+    mqttScanFinish("stopped");
     // Both are parented to the root screen, so neither goes down with the modal
     // that opened them.
     closeMqttConfirmModal();
@@ -31373,9 +31658,14 @@ static void refreshMqttMonitorModal(bool force) {
         s_mqttMonList = nullptr;
         s_mqttMonStatusLabel = nullptr;
         memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+        mqttScanFinish("stopped");
         mqttMonitorStop();
         return;
     }
+
+    // Before the throttle below: the window has to close on time, and the
+    // notice it leaves has to be up before the status line is written.
+    mqttScanService();
 
     // The list only changes shape when a topic is seen for the first time, and
     // that is exactly what the topic sequence counts. Everything else that moves
@@ -31412,17 +31702,32 @@ static void refreshMqttMonitorModal(bool force) {
             // a denominator — 400 messages means nothing without it.
             char span[16];
             beaconsFormatSpan((uint32_t)(now - s_mqttMonStartMs), span, sizeof(span));
+            if (mqttScanRunning()) {
+                // "5m/1h": counting towards the chosen window, so a long scan
+                // does not read like a short one that has overrun.
+                char window[16];
+                beaconsFormatSpan(s_mqttScanWindowMs, window, sizeof(window));
+                const size_t used = strlen(span);
+                snprintf(span + used, sizeof(span) - used, "/%s", window);
+            }
+            // The file name is on the notice the scan leaves when it ends; while
+            // it runs a word is all the line has room for.
+#if HAS_FILE_STORAGE
+            const char *saving = s_mqttScanSaveActive ? "  saving" : "";
+#else
+            const char *saving = "";
+#endif
             const uint32_t other = mqttMonitorOtherMsgs();
             if (other) {
                 char otherText[16];
                 mqttMonitorFormatCount(other, otherText, sizeof(otherText));
                 // The table is full, so say so rather than letting the list read
                 // as the whole picture.
-                snprintf(status, sizeof(status), "%d chans  %s msgs  %s  (+%s off-list)",
-                         mqttMonitorTopicCount(), total, span, otherText);
+                snprintf(status, sizeof(status), "%d chans  %s msgs  %s%s  (+%s off-list)",
+                         mqttMonitorTopicCount(), total, span, saving, otherText);
             } else {
-                snprintf(status, sizeof(status), "%d chans  %s msgs  %s",
-                         mqttMonitorTopicCount(), total, span);
+                snprintf(status, sizeof(status), "%d chans  %s msgs  %s%s",
+                         mqttMonitorTopicCount(), total, span, saving);
             }
         }
         const char *shown = lv_label_get_text(s_mqttMonStatusLabel);
@@ -31447,6 +31752,7 @@ static void refreshMqttMonitorModal(bool force) {
 // Start over without leaving the screen: same thing closing and reopening does,
 // minus the teardown.
 static void mqttMonitorReset() {
+    mqttScanFinish("stopped");   // what it had is saved before the count goes
     mqttMonitorStop();
     mqttMonitorStart();
     s_mqttMonStartMs = millis();
@@ -31463,6 +31769,7 @@ static void openMqttMonitorModal() {
         s_mqttMonList = nullptr;
         s_mqttMonStatusLabel = nullptr;
         memset(s_mqttMonCountLabels, 0, sizeof(s_mqttMonCountLabels));
+        mqttScanFinish("stopped");
         mqttMonitorStop();
     }
     if (!s_rootScreen || s_mqttMonModal) return;
@@ -31514,8 +31821,8 @@ static void openMqttMonitorModal() {
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
     lv_label_set_text(title, titleText);
 #if UI_TOUCH_ONLY_PROFILE
-    // Two buttons and the corner X sit on the right of this header.
-    lv_obj_set_width(title, modalW - 136);
+    // Three buttons and the corner X sit on the right of this header.
+    lv_obj_set_width(title, modalW - 184);
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 2, 0);
 
     auto makeMqttMonBtn = [](lv_obj_t *parent, const char *text, int xOffset,
@@ -31546,6 +31853,8 @@ static void openMqttMonitorModal() {
                    [](lv_event_t *e) { LV_UNUSED(e); mqttMonitorReset(); });
     makeMqttMonBtn(header, "Send", -72,
                    [](lv_event_t *e) { LV_UNUSED(e); openMqttSendModal(); });
+    makeMqttMonBtn(header, "Scan", -120,
+                   [](lv_event_t *e) { LV_UNUSED(e); openMqttScanModal(); });
 #else
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
@@ -31592,7 +31901,8 @@ static void openMqttMonitorModal() {
     lv_obj_set_width(hint, lv_pct(100));
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
-    lv_label_set_text_fmt(hint, "S = Send   C = Reset   %s = Back", modalCloseKeyLabel());
+    lv_label_set_text_fmt(hint, "W = Scan   S = Send   C = Reset   %s = Back",
+                          modalCloseKeyLabel());
 #endif
 
     refreshMqttMonitorModal(true);
@@ -41215,7 +41525,7 @@ static void pumpKeyboardInput() {
         }
 
 #if HAS_MESSAGE_ACTIONS
-        // Sender Info (message actions). Over whatever screen the message was
+        // Message Info (message actions). Over whatever screen the message was
         // on; scrolls with Up/Down and closes with the close key, and on a
         // touch build any key dismisses it.
         if (s_msgInfoModal) {
@@ -41926,10 +42236,11 @@ static void pumpKeyboardInput() {
 
             // Single-key shortcuts select and execute the corresponding action,
             // mirroring the (X) hints in the labels. Message mode adds 1-6 for
-            // the tapbacks, M for the full tray and R for Reply; T/D/F/I/P/G
-            // keep their meanings in both modes. L is node mode's alone, and on
-            // a node with no position it moves the highlight and stops there —
-            // executeNodesActionSelection() declines it exactly as Enter does.
+            // the tapbacks, M for the full tray, R for Reply and I for Message
+            // Info; T/D/Q/P/G keep their meanings in both modes. L is node
+            // mode's alone, and on a node with no position it moves the
+            // highlight and stops there — executeNodesActionSelection()
+            // declines it exactly as Enter does.
             if (k >= 0x20 && k < 0x7F) {
                 char up = (k >= 'a' && k <= 'z') ? (char)(k - 32) : k;
                 const char *shortcuts = activeActionShortcuts();
@@ -42233,6 +42544,11 @@ static void pumpKeyboardInput() {
             }
             if (k == 's' || k == 'S') {
                 openMqttSendModal();
+                continue;
+            }
+            // W, as in Discovery: asks how long, and whether to save, first.
+            if (k == 'w' || k == 'W') {
+                openMqttScanModal();
                 continue;
             }
             if (k == 'c' || k == 'C') {
@@ -45988,7 +46304,7 @@ static bool channelSharesLocation(int chanIdx) {
 // The chat and DM stores keep what was said and by whom. How it got here -- over
 // the air or through an MQTT broker, and which node handed it over on the last
 // leg -- is only in the packet header, gone once the text is filed. So each text
-// that arrives notes that here, keyed by sender and packet id, and Sender Info
+// that arrives notes that here, keyed by sender and packet id, and Message Info
 // (message actions) reads it back.
 //
 // A ring: the details are wanted for messages on screen, i.e. recent ones. A
@@ -46194,7 +46510,7 @@ static void openMsgSenderInfoModal(uint32_t from, uint32_t packetId) {
     lv_obj_set_width(title, lv_pct(100));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(title, ink, 0);
-    lv_label_set_text(title, "Sender Info");
+    lv_label_set_text(title, "Message Info");
 #if UI_TOUCH_ONLY_PROFILE
     reserveHeltecCloseXRow(title);
     appendHeltecCloseX(s_msgInfoModal,
@@ -47736,7 +48052,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
 
             if (textBuf[0]) {
                 const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
-                noteMsgRxInfo(pkt);   // for Sender Info (message actions)
+                noteMsgRxInfo(pkt);   // for Message Info (message actions)
                 bool isDirectToMe = (pkt.hdr.to == s_myNodeId)
                                  || (pkt.hasDataDest && pkt.dataDest == s_myNodeId);
 
@@ -48009,7 +48325,7 @@ static bool processMeshPacket(const MeshPacket &rxPkt) {
                                            textBuf);
 
                     const bool viaMqtt = (pkt.hdr.flags & 0x10) != 0;
-                    noteMsgRxInfo(pkt);   // for Sender Info (message actions)
+                    noteMsgRxInfo(pkt);   // for Message Info (message actions)
                     // rr=8 (ROUTER_TEXT_DIRECT) is a replay of a message that was
                     // originally a DM; rr=9 (ROUTER_TEXT_BROADCAST) was a
                     // broadcast. Upstream picks between them on the stored
