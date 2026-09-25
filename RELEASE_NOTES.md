@@ -21,6 +21,7 @@
 - Notification and alert tones now compute volume once per tone instead of once per audio sample, leaving more playback headroom on T-Deck, T-Lora Pager TFT and Wio Tracker L2.
 
 ### Fixed
+- A message that arrives on the open channel while Home, the lock screen or a dark panel is covering the chat no longer stays unread after you return to that chat. Previously the unread alert stayed lit until you switched to another channel and back.
 - The P4 AMOLED no longer blinks when the device writes to flash. The display's frame refresh now keeps running during flash writes, so saving settings or node data no longer blinks the screen every half minute or so, and an OTA no longer blinks the panel on every progress-bar step.
 - On ThinkNode M9, Sweep/Scan Settings and MQTT Scan Settings now let the d-pad reach the save checkbox: Up/Down move between the duration slider and the checkbox, Left/Right change whichever is focused, and Enter starts the run. Previously every direction moved the slider.
 - On ThinkNode M9, the d-pad now moves across Node Actions and Message Actions as they are laid out: Up/Down between rows, Left/Right between the two columns, and in Message Actions between the reaction strip and the buttons below it. Previously Down stepped sideways and Left/Right repeated Up/Down.

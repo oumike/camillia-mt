@@ -53609,6 +53609,16 @@ void loop() {
         // contains preprocessor directives, and those cannot legally appear
         // inside a macro argument.
         const uint32_t uiPhaseStartMs = millis();
+        // The open channel is read once nothing covers it any more. The RX
+        // path flags it when a message lands behind the dashboard, the lock
+        // screen or a dark panel, and only the wake and unlock paths used to
+        // clear it -- going back to chat from the dashboard left it unread
+        // until the user switched away and back. Asked here, with the same
+        // test the RX gate uses, so every route back to chat clears it.
+        if (s_activeChannel >= 0 && s_activeChannel < MESH_CHANNELS
+            && s_channelNeedsAttention[s_activeChannel] && !glanceOverlayHidesUi()) {
+            s_channelNeedsAttention[s_activeChannel] = false;
+        }
         refreshChannelGlow(false);
         refreshHeaderTime(false);
         refreshHeaderStatus(false);
