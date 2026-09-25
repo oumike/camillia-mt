@@ -110,57 +110,6 @@ static bool extractJsonStringField(const String &json, const char *field, String
     return false;
 }
 
-static bool httpGetString(const char *url,
-                          String &bodyOut,
-                          String &errOut,
-                          bool followRedirects,
-                          int *statusOut = nullptr,
-                          String *locationOut = nullptr,
-                          const char *acceptHeader = nullptr) {
-    preferExternalHeapForOta();
-
-    bodyOut = "";
-    errOut = "";
-    if (statusOut) *statusOut = 0;
-    if (locationOut) *locationOut = "";
-
-    // Plain HTTP only — this firmware has no TLS client.
-    WiFiClient plainClient;
-    HTTPClient http;
-    if (!http.begin(plainClient, url)) {
-        errOut = "Failed to start request";
-        return false;
-    }
-
-    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
-    http.addHeader("User-Agent", "camillia-mt-ota");
-    if (acceptHeader && acceptHeader[0]) {
-        http.addHeader("Accept", acceptHeader);
-    }
-    http.setFollowRedirects(followRedirects ? HTTPC_STRICT_FOLLOW_REDIRECTS
-                                            : HTTPC_DISABLE_FOLLOW_REDIRECTS);
-
-    int code = http.GET();
-    if (statusOut) *statusOut = code;
-    if (locationOut) *locationOut = http.getLocation();
-
-    if (code <= 0) {
-        errOut = String("Network error (") + String(code) + ")";
-        http.end();
-        return false;
-    }
-
-    if (code != HTTP_CODE_OK) {
-        errOut = String("HTTP ") + String(code);
-        http.end();
-        return false;
-    }
-
-    bodyOut = http.getString();
-    http.end();
-    return true;
-}
-
 static int parseNextVersionNumber(const char *s, int &idx) {
     if (!s) return -1;
     while (s[idx] && !isdigit((unsigned char)s[idx])) idx++;
@@ -271,14 +220,76 @@ static bool fetchLatestReleaseTag(String &tagOut, String &errOut) {
     snprintf(url, sizeof(url), "%s/firmware/%s", s_otaBaseUrl,
              (otaResolveChannel(g_otaChannel) == OTA_CHANNEL_ALPHA) ? "latest-alpha"
                                                                     : "latest");
-    String body, err;
-    if (httpGetString(url, body, err, true, nullptr, nullptr,
-                      "application/vnd.github+json")
-        && extractJsonStringField(body, "tag_name", tagOut)
-        && tagOut.length() > 0) {
-        return true;
+
+    // Read only as far as tag_name, never the whole body. The release JSON is
+    // well over 70 KB (36 assets and the release notes) and grows with every
+    // board and every note; buffering it with getString() needs one allocation
+    // that large, and when that fails the body comes back empty or cut short
+    // and the check reported "Release tag not found" instead of an answer.
+    // tag_name is the first field GitHub emits, so the first read has it.
+    preferExternalHeapForOta();
+    WiFiClient plainClient;
+    HTTPClient http;
+    if (!http.begin(plainClient, url)) {
+        errOut = "Failed to start request";
+        return false;
     }
-    errOut = err.length() ? err : String("Release tag not found (proxy)");
+    http.setTimeout((uint16_t)kReleaseCheckTimeoutMs);
+    http.addHeader("User-Agent", "camillia-mt-ota");
+    http.addHeader("Accept", "application/vnd.github+json");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    const int code = http.GET();
+    if (code <= 0) {
+        errOut = String("Network error (") + String(code) + ")";
+        http.end();
+        return false;
+    }
+    if (code != HTTP_CODE_OK) {
+        errOut = String("HTTP ") + String(code);
+        http.end();
+        return false;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    if (!stream) {
+        errOut = "Release stream unavailable";
+        http.end();
+        return false;
+    }
+
+    // Generous against where tag_name actually sits (byte 2), and a hard stop
+    // so a reply without one cannot be read to the end.
+    constexpr size_t kMaxHeadBytes = 8UL * 1024UL;
+    String head;
+    uint32_t lastDataMs = millis();
+    bool found = false;
+    while (head.length() < kMaxHeadBytes) {
+        const size_t avail = stream->available();
+        if (avail == 0) {
+            if (!http.connected()) break;
+            if (millis() - lastDataMs > kReleaseCheckTimeoutMs) break;
+            delay(5);
+            continue;
+        }
+        char buf[256];
+        const size_t want = (avail > sizeof(buf)) ? sizeof(buf) : avail;
+        const int n = stream->readBytes((uint8_t *)buf, want);
+        if (n <= 0) continue;
+        lastDataMs = millis();
+        head.concat(buf, (size_t)n);
+        // False until the closing quote of the value has arrived, so a tag
+        // split across two reads is simply finished by the next one.
+        if (extractJsonStringField(head, "tag_name", tagOut) && tagOut.length() > 0) {
+            found = true;
+            break;
+        }
+    }
+    http.end();
+
+    if (found) return true;
+    tagOut = "";
+    errOut = "Release tag not found (proxy)";
     return false;
 }
 
