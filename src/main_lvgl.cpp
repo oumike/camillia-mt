@@ -1376,6 +1376,64 @@ static inline const char *activeActionShortcuts() {
     return s_nodesActionMsgMode ? kMsgActionShortcuts : kNodesActionShortcuts;
 }
 
+#if defined(DEVICE_M9)
+// Where the M9's d-pad goes from `sel`, moving (dx, dy) across the menu as it is
+// drawn: the action buttons are a two-column grid (every row is lv_pct(49)), and
+// in message mode the tapback strip is one row of cells above it. Returns `sel`
+// unchanged at an edge -- nothing wraps.
+//
+// Every other keyboard board keeps stepping through the flat index one action
+// at a time: the Pager's wheel has no left or right, and moving a whole row at a
+// time would leave it unable to reach the second column.
+static int nodesActionGridStep(int sel, int dx, int dy) {
+    constexpr int kCols = 2;
+    const int count = activeActionCount();
+    const int gridFirst = s_nodesActionMsgMode ? kMsgActionReplyIdx : 0;
+
+    if (sel < gridFirst) {
+        // On the tapback strip: left/right walk it, down drops into whichever
+        // column this cell sits over, up has nowhere to go.
+        if (dx) {
+            const int n = sel + dx;
+            return (n >= 0 && n < gridFirst) ? n : sel;
+        }
+        if (dy > 0) {
+            const int col = sel * kCols / gridFirst;
+            const int n = gridFirst + col;
+            return (n < count) ? n : count - 1;
+        }
+        return sel;
+    }
+
+    const int pos = sel - gridFirst;
+    const int row = pos / kCols;
+    const int col = pos % kCols;
+    if (dx) {
+        const int nc = col + dx;
+        if (nc < 0 || nc >= kCols) return sel;
+        const int n = sel + dx;
+        return (n < count) ? n : sel;
+    }
+    if (dy < 0) {
+        if (row > 0) return sel - kCols;
+        // Top row: up onto the strip, to the cell over the middle of this
+        // column -- the inverse of the column pick above, so up then down
+        // lands back where it started.
+        if (gridFirst > 0) return (2 * col + 1) * gridFirst / (2 * kCols);
+        return sel;
+    }
+    if (dy > 0) {
+        const int n = sel + kCols;
+        if (n < count) return n;
+        // The right column over a short last row: the one below is the last
+        // action, even though it sits in the other column.
+        const int lastRow = (count - 1 - gridFirst) / kCols;
+        return (row < lastRow) ? count - 1 : sel;
+    }
+    return sel;
+}
+#endif
+
 // Rows that can be unavailable — Locate, LOS and Delete — and only in node
 // mode. Message mode lays a different set of rows over the same index space
 // (see kMsgActionNodeMap), carries none of these three, and greys nothing; the
@@ -40425,6 +40483,9 @@ static void pumpKeyboardInput() {
                          || (s_chanEditModal && !s_chanTextModal)
                          || s_timeCfgModal
                          || s_liveToolsModal
+                         // Node / Message Actions: a two-column grid, plus
+                         // the tapback strip above it in message mode.
+                         || s_nodesActionModal
                          // Not multi-column, but it has two rows and the pad's
                          // Up/Down is what moves between them — so the value
                          // needs Left/Right, which the fold would eat.
@@ -42211,6 +42272,25 @@ static void pumpKeyboardInput() {
                 closeNodesActionMenu();
                 continue;
             }
+
+#if defined(DEVICE_M9)
+            // The d-pad moves across the grid as drawn rather than through the
+            // flat index, which on two columns made Down step sideways and left
+            // Left/Right as a second pair of Up/Down (see nodesActionGridStep()).
+            // Left/Right arrive unfolded because this modal is on the
+            // m9FourWaySelection list above.
+            if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN
+                || k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN) {
+                const int dx = (k == KEY_PREV_CHAN) ? -1 : (k == KEY_NEXT_CHAN) ? 1 : 0;
+                const int dy = (k == KEY_SCROLL_UP) ? -1 : (k == KEY_SCROLL_DN) ? 1 : 0;
+                const int next = nodesActionGridStep(s_nodesActionSelection, dx, dy);
+                if (next != s_nodesActionSelection) {
+                    s_nodesActionSelection = next;
+                    refreshNodesActionMenuSelection();
+                }
+                continue;
+            }
+#endif
 
             if (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN) {
                 int next = s_nodesActionSelection;

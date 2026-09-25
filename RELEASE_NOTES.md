@@ -21,6 +21,7 @@
 - Notification and alert tones now compute volume once per tone instead of once per audio sample, leaving more playback headroom on T-Deck, T-Lora Pager TFT and Wio Tracker L2.
 
 ### Fixed
+- On ThinkNode M9, the d-pad now moves across Node Actions and Message Actions as they are laid out: Up/Down between rows, Left/Right between the two columns, and in Message Actions between the reaction strip and the buttons below it. Previously Down stepped sideways and Left/Right repeated Up/Down.
 - Web Config VNC now fits the remote canvas against both viewport width and height, so the P4's tall 568x1232 portrait display stays fully visible and pointer coordinates remain accurate after scaling or browser resizing.
 - P4 GPS now uses the correct host-side UART direction, radio chip select is claimed before reset, and software restart performs a full system reset so the configured DSI host does not leave the AMOLED blank.
 - Pressing Enter or the d-pad centre on Home no longer opens a message composer or Message Actions over the dashboard on ThinkNode M9. Wheel click and Tab no longer open those stray overlays on T-Lora Pager TFT.
