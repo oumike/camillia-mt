@@ -1620,7 +1620,11 @@ static constexpr int kBottomNavHeight = 56;
 // nearly twice the height, so the message list can pay for bigger targets.
 // Every screen that carries the bar -- chat, its modal copies, the dashboard --
 // sizes from this, so the one number moves them all together.
-static constexpr int kBottomNavHeight = 42;
+//
+// Not a constant here: portrait has the height for half as tall again once
+// more, and takes 63 when the orientation is read at boot (loadBootOrientation()).
+// Landscape keeps 42. Nothing reads it before then.
+static int kBottomNavHeight = 42;
 #else
 static constexpr int kBottomNavHeight = 28;
 #endif
@@ -6357,6 +6361,40 @@ static void serviceWifiStation(uint32_t now) {
     wifiBeginActiveKnown();
 }
 
+#if defined(DEVICE_TDISPLAY_P4)
+// The P4's panel is refreshed continuously from a framebuffer in PSRAM (MIPI-DSI
+// video mode). An install is a Wi-Fi download written straight to flash, and
+// that starves the framebuffer read: the DSI bridge underruns and fills the
+// panel with bright blue, over and over for the whole install -- ESP-IDF's DPI
+// driver says as much in its underrun handler ("the LCD display may already
+// becomes blue"). A lower pixel clock does not reliably cure it, because flash
+// writes can stall PSRAM outright; the configuration that would needs a rebuilt
+// IDF, which the prebuilt Arduino libraries do not allow.
+//
+// So the panel is simply off while flash is being written: brightness 0 and
+// sleep, which on an AMOLED is black, not blue. The screen says so before it
+// goes. Success reboots into the new firmware and brings the panel up fresh;
+// a failure turns it back on to show why.
+static bool s_otaP4PanelOff = false;
+
+static void otaWorkerP4PanelOff() {
+    displayDev().setBrightness(0);
+    displayDev().sleep();
+    s_otaP4PanelOff = true;
+}
+
+static void otaWorkerP4PanelOn() {
+    if (!s_otaP4PanelOff) return;
+    displayDev().wakeup();
+    delay(120);   // sleep-out settle before the panel takes commands again
+    displayDev().setBrightness(TFT_BRIGHTNESS_DEFAULT);
+    s_otaP4PanelOff = false;
+    // Whatever was drawn while it slept is in the framebuffer, but the next
+    // draw should not trust a delta against it.
+    otaWorkerInvalidateScreen();
+}
+#endif
+
 static bool runOtaWorkerModeIfRequested() {
 #if defined(DEVICE_CARDPUTER_LORA_HAT)
     if (isOtaWorkerModeRequestedRtc() || isOtaWorkerModeRequestedOnce()) {
@@ -6452,6 +6490,14 @@ static bool runOtaWorkerModeIfRequested() {
     // off the only screen that board shows for the whole update.
     otaWorkerDrawStatus(otaComposeInstallTitle(check.latestTag),
                         check.latestTag[0] ? check.latestTag : "latest");
+#if defined(DEVICE_TDISPLAY_P4)
+    // See otaWorkerP4PanelOff(): the install would otherwise flash the panel
+    // blue throughout. Said on screen first, and held long enough to read.
+    otaWorkerDrawStatus(otaComposeInstallTitle(check.latestTag),
+                        "Screen off until it restarts");
+    delay(2500);
+    otaWorkerP4PanelOff();
+#endif
     static volatile size_t s_otaWorkerBytesWritten = 0;
     static volatile size_t s_otaWorkerBytesTotal = 0;
     static volatile uint32_t s_otaWorkerLastProgressMs = 0;
@@ -6548,6 +6594,9 @@ static bool runOtaWorkerModeIfRequested() {
     }
 
     // Final refresh with last known transfer counters for context on failure.
+#if defined(DEVICE_TDISPLAY_P4)
+    otaWorkerP4PanelOn();   // the failure has to be seen; flash writing is over
+#endif
     {
         size_t curW = (size_t)s_otaWorkerBytesWritten;
         size_t curT = (size_t)s_otaWorkerBytesTotal;
@@ -21470,11 +21519,13 @@ static void populateHeltecBottomNav(lv_obj_t *bar, int activeTarget) {
 #if UI_LARGE_PANEL_PROFILE
     const lv_font_t *const navIconFont = &lv_font_montserrat_28;
 #elif defined(DEVICE_TDISPLAY_P4)
-    // Grown with the taller bar (kBottomNavHeight). 18 rather than a strict
-    // 1.5x: it is the largest face with an emoji fallback (emoji_font.cpp), and
-    // Chat, Nodes and Tools draw from that fallback -- a 24 would drop all three
-    // to their plain-symbol stand-ins.
-    const lv_font_t *const navIconFont = &lv_font_montserrat_18;
+    // Grown with the taller bar (kBottomNavHeight). Capped by the emoji fallback
+    // (emoji_font.cpp): Chat, Nodes and Tools draw from it, and a face without
+    // one would drop all three to their plain-symbol stand-ins. Portrait's
+    // taller bar takes 20, which this board alone gives an emoji face; 18
+    // otherwise.
+    const lv_font_t *const navIconFont = uiPortrait() ? &lv_font_montserrat_20
+                                                      : &lv_font_montserrat_18;
 #else
     const lv_font_t *const navIconFont = &lv_font_montserrat_14;
 #endif
@@ -44712,7 +44763,17 @@ static void drawBootSplash() {
     }
 
     const int cardMargin = 10;
+#if defined(DEVICE_TDISPLAY_P4)
+    // The portrait card's width in both orientations, centred. Landscape used
+    // to run the card end to end across 616 px with the same narrow stack of
+    // title, flower and footer in the middle of it; now it is the same card,
+    // on a wider background. Everything below is placed from cardX/cardW.
+    const int cardW = min(screenW - cardMargin * 2,
+                          DEVICE_LCD_PORTRAIT_W / UI_PIXEL_SCALE - cardMargin * 2);
+    const int cardX = (screenW - cardW) / 2;
+#else
     const int cardX = cardMargin;
+#endif
 #if defined(DEVICE_TDISPLAY_P4)
     // Sized to what it holds rather than to the canvas, and centred in it: on
     // the 596-tall canvas any fixed card left dead space above and below the
@@ -44750,7 +44811,9 @@ static void drawBootSplash() {
     const int cardY = 10;
     const int cardH = screenH - 20;
 #endif
+#if !defined(DEVICE_TDISPLAY_P4)
     const int cardW = screenW - cardMargin * 2;
+#endif
 
     splashDev().fillRoundRect(cardX, cardY, cardW, cardH, 12, cardBg);
     splashDev().drawRoundRect(cardX, cardY, cardW, cardH, 12, cardEdge);
@@ -45634,6 +45697,10 @@ static void refreshChannelSelectorLabel() {
             if (desiredW < 56) desiredW = 56;
 #elif defined(DEVICE_CARDPUTER_LORA_HAT)
             if (desiredW < 60) desiredW = 60;
+#elif defined(DEVICE_TDISPLAY_P4)
+            // Wider in portrait, where the header grew: a short name like "Main"
+            // should not leave a small button in a big bar.
+            if (desiredW < (uiPortrait() ? 120 : 72)) desiredW = uiPortrait() ? 120 : 72;
 #else
             if (desiredW < 72) desiredW = 72;
 #endif
@@ -50750,7 +50817,14 @@ static void buildUi() {
     const int chatGap = 3;
     const int chatLegendH = 28;
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+    // Portrait has height to spare: half as tall again, for a bigger channel
+    // name and clock (see selectorTextFont / clockTextFont below). The chat
+    // list is what gives it up -- it is sized from what is left over.
+    const int chatHeaderH = uiPortrait() ? 38 : 25;
+#else
     const int chatHeaderH = 25;
+#endif
     const int screenW = lv_disp_get_hor_res(NULL);
     const int screenH = lv_disp_get_ver_res(NULL);
 #if defined(DEVICE_TDISPLAY_P4)
@@ -50931,6 +51005,9 @@ static void buildUi() {
 #else
     const lv_font_t *clockTextFont = (chatHeaderH >= 25) ? &lv_font_montserrat_16 : &lv_font_montserrat_14;
 #endif
+#if defined(DEVICE_TDISPLAY_P4)
+    if (uiPortrait()) clockTextFont = &lv_font_montserrat_24;   // the taller header
+#endif
 #if UI_TOUCH_ONLY_PROFILE
     const lv_font_t *headerIconFont = (chatHeaderH >= 25) ? &lv_font_montserrat_14 : &lv_font_montserrat_12;
 #endif
@@ -50979,6 +51056,12 @@ static void buildUi() {
     selectorTextFont = &lv_font_montserrat_14; // nearest built-in to requested size 13
 #elif UI_TOUCH_ONLY_PROFILE
     if (!compactHeltecSelector) selectorTextFont = &lv_font_montserrat_14; // keep vertical Heltec unchanged
+#endif
+#if defined(DEVICE_TDISPLAY_P4)
+    // The taller portrait header's channel name. The button follows it: its
+    // width is measured from the widest name in this face (refreshChannel-
+    // SelectorLabel()).
+    if (uiPortrait()) selectorTextFont = &lv_font_montserrat_20;
 #endif
 
     s_channelSelectorBtn = lv_btn_create(s_chatHeaderBar);
@@ -52234,6 +52317,12 @@ void setup() {
     loadBootOrientation();
 #if HAS_SLEEP_OVERLAY
     orientationApplyOverlayGeometry();
+#endif
+#if defined(DEVICE_TDISPLAY_P4)
+    // Portrait's taller nav bar (see kBottomNavHeight): set once the boot's
+    // orientation is known and before any UI is built. Here rather than inside
+    // loadBootOrientation(), which has early returns that would skip it.
+    kBottomNavHeight = uiPortrait() ? 63 : 42;
 #endif
 
 #if (BOARD_VEXT_ENABLE >= 0) && defined(BOARD_VEXT_RAIL_ON_AT_DISPLAY) && BOARD_VEXT_RAIL_ON_AT_DISPLAY

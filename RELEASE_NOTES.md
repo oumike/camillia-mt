@@ -35,3 +35,12 @@
 > build alone does not confirm AMOLED timing, touch orientation, hosted Wi-Fi,
 > LoRa TX/RX, SD, battery sensing or the optional keyboard; use serial logs or
 > measured behavior before marking those subsystems verified.
+
+
+### Update (v5.4.3)
+### Changed
+- T-Display P4: in portrait, the bottom navigation bar is taller with larger icons, and the chat header is taller with a bigger channel name and clock — the channel button also widens so short names like "Main" don't sit in a tiny button.
+- T-Display P4: the boot splash now draws the same centered card in landscape as in portrait, instead of stretching it across the full width.
+
+### Fixed
+- T-Display P4: installing a firmware update no longer fills the screen with flashing blue. The display shows "Screen off until it restarts", then goes black for the install and comes back on the new firmware — or turns back on to show the error if the install fails.
