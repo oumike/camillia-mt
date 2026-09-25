@@ -2800,6 +2800,10 @@ Primary usage is keyboard plus the d-pad and the dedicated function row.
   except in the New Message box, where the d-pad moves the text cursor
   (Left/Right by a character, Up/Down by a line), and on the Brightness screen,
   where Up/Down moves between the two sliders and Left/Right sets the level
+- In Node Actions and Message Actions the d-pad moves across the buttons as
+  they are laid out: Up/Down between rows, Left/Right between the two columns.
+  In Message Actions, Up from the top row reaches the reaction strip, where
+  Left/Right walks the reactions and Down drops back into the column below
 - H opens the home dashboard, C the chat screen (again for the channel
   selector), F the configuration screen. D, N and L are unchanged — Direct
   Messages, Nodes and Tools
