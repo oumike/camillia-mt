@@ -684,6 +684,12 @@ static const CfgSliderPicker *s_cfgSliderSpec = nullptr;
 static int       s_cfgSliderStaged = 0;
 static lv_obj_t *s_cfgSliderCheck = nullptr;
 static bool      s_cfgSliderCheckStaged = false;
+#if defined(DEVICE_M9)
+// Which control the d-pad is on when the picker has a checkbox: 0 the slider,
+// 1 the checkbox. Up/Down move between them and Left/Right change the focused
+// one, the way the Brightness screen's two rows work on this board.
+static int       s_cfgSliderFocus = 0;
+#endif
 
 #if HAS_VOLUME_CONTROL
 static lv_obj_t *s_cfgVolBackdrop = nullptr;
@@ -14606,6 +14612,27 @@ static void toggleCfgSliderCheck() {
     }
 }
 
+#if defined(DEVICE_M9)
+// Outlines whichever control has focus. Same halo the Brightness rows use
+// (paintCfgBrightnessRow()), so "which one am I on" reads the same way.
+static void refreshCfgSliderFocus() {
+    const lv_color_t accent = lvColorFrom565(s_ui.selectAccent);
+    lv_obj_t *const ctls[2] = { s_cfgSliderCtl, s_cfgSliderCheck };
+    for (int i = 0; i < 2; i++) {
+        if (!lvObjValid(ctls[i])) continue;
+        const bool focused = (s_cfgSliderFocus == i);
+        lv_obj_set_style_outline_width(ctls[i], focused ? 2 : 0, LV_PART_MAIN);
+        lv_obj_set_style_outline_pad(ctls[i], 2, LV_PART_MAIN);
+        lv_obj_set_style_outline_color(ctls[i], accent, LV_PART_MAIN);
+        lv_obj_set_style_outline_opa(ctls[i], focused ? LV_OPA_COVER : LV_OPA_TRANSP,
+                                     LV_PART_MAIN);
+    }
+    // The modal is height-capped and scrolls on the shorter panels.
+    lv_obj_t *focused = ctls[s_cfgSliderFocus ? 1 : 0];
+    if (lvObjValid(focused)) lv_obj_scroll_to_view(focused, LV_ANIM_OFF);
+}
+#endif
+
 static void onCfgSliderCheckChanged(lv_event_t *e) {
     lv_obj_t *box = lv_event_get_target_obj(e);
     if (!box) return;
@@ -14626,6 +14653,9 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     if (startIdx >= spec->count) startIdx = spec->count - 1;
     s_cfgSliderStaged = startIdx;
     s_cfgSliderCheckStaged = spec->checkValue ? *spec->checkValue : false;
+#if defined(DEVICE_M9)
+    s_cfgSliderFocus = 0;   // always opens on the slider
+#endif
 
     const int w = lv_disp_get_hor_res(NULL);
     const int h = lv_disp_get_ver_res(NULL);
@@ -14738,8 +14768,13 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
     lv_obj_set_style_text_color(hint, lv_color_hex(0xA7C7FF), 0);
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     if (hasCheck) {
+#if defined(DEVICE_M9)
+        lv_label_set_text_fmt(hint, "Up/Down=Select  Left/Right=Change  Enter=Save  %s=Cancel",
+                              modalCloseKeyLabel());
+#else
         lv_label_set_text_fmt(hint, "Move=Adjust  Space=Toggle  Enter=Save  %s=Cancel",
                               modalCloseKeyLabel());
+#endif
     } else {
         lv_label_set_text_fmt(hint, "Move=Adjust  Enter=Save  %s=Cancel", modalCloseKeyLabel());
     }
@@ -14747,6 +14782,9 @@ static void openCfgSliderModal(const CfgSliderPicker *spec, int startIdx) {
 #endif
 
     cfgSliderShow(startIdx);
+#if defined(DEVICE_M9)
+    if (hasCheck) refreshCfgSliderFocus();
+#endif
 }
 
 // ── Location precision ───────────────────────────────────────────────────────
@@ -40486,6 +40524,11 @@ static void pumpKeyboardInput() {
                          // Node / Message Actions: a two-column grid, plus
                          // the tapback strip above it in message mode.
                          || s_nodesActionModal
+                         // A slider picker with a checkbox under it (Sweep/Scan
+                         // and MQTT Scan Settings): two rows, the same shape as
+                         // Brightness just below.
+                         || (s_cfgSliderModal && s_cfgSliderSpec
+                             && s_cfgSliderSpec->checkValue)
                          // Not multi-column, but it has two rows and the pad's
                          // Up/Down is what moves between them — so the value
                          // needs Left/Right, which the fold would eat.
@@ -40828,6 +40871,26 @@ static void pumpKeyboardInput() {
                 toggleCfgSliderCheck();   // no-op when the picker has no checkbox
                 continue;
             }
+#if defined(DEVICE_M9)
+            // With a checkbox the pad's Up/Down pick between it and the slider,
+            // and Left/Right change whichever is picked -- the Brightness
+            // screen's grammar. j/k fold onto the same codes and keep adjusting
+            // the slider; jkDirectionInvert is what tells them apart.
+            if (s_cfgSliderSpec && s_cfgSliderSpec->checkValue) {
+                if (!jkDirectionInvert && (k == KEY_SCROLL_UP || k == KEY_SCROLL_DN)) {
+                    const int next = (k == KEY_SCROLL_DN) ? 1 : 0;
+                    if (next != s_cfgSliderFocus) {
+                        s_cfgSliderFocus = next;
+                        refreshCfgSliderFocus();
+                    }
+                    continue;
+                }
+                if (s_cfgSliderFocus == 1 && (k == KEY_PREV_CHAN || k == KEY_NEXT_CHAN)) {
+                    toggleCfgSliderCheck();
+                    continue;
+                }
+            }
+#endif
             int steps = 0;
             if (k == 'j' || k == 'J')            steps = -1;
             else if (k == 'k' || k == 'K')       steps = 1;
