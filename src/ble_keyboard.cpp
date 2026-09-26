@@ -75,18 +75,28 @@ constexpr uint16_t kUuidReportRef    = 0x2908;   // descriptor: [id, type]
 constexpr uint16_t kUuidBatterySvc   = 0x180F;
 constexpr uint16_t kUuidBatteryLevel = 0x2A19;
 
-// Advertised appearance values that mean "keyboard". Checked because plenty of
-// keyboards keep the HID service UUID out of the advertisement and only expose
-// it after connecting, so filtering on 0x1812 alone hides them from the picker.
-constexpr uint16_t kAppearanceHid      = 0x03C0;
-constexpr uint16_t kAppearanceKeyboard = 0x03C1;
+// Advertised appearance category for HID devices (0x03C0 generic HID, 0x03C1
+// keyboard, the rest of 0x03C0-0x03FF mice, joysticks and the like). Checked
+// because plenty of keyboards keep the HID service UUID out of the
+// advertisement and only expose it after connecting, so filtering on 0x1812
+// alone hides them from the picker.
+constexpr uint16_t kAppearanceHidFirst = 0x03C0;
+constexpr uint16_t kAppearanceHidLast  = 0x03FF;
+
+// How sure a scan result is to be a keyboard. Some keyboards advertise neither
+// the HID service nor an HID appearance -- only a name -- and the HID service
+// turns up only after connecting (the Clicks Power Keyboard was reported as
+// never appearing in the picker). So any named device is listed, ranked below
+// the ones that say what they are. Connecting to one that is not a keyboard
+// fails harmlessly as "not a keyboard".
+enum : uint8_t { RANK_NAMED = 0, RANK_APPEARANCE = 1, RANK_HID_SERVICE = 2 };
 
 struct ScanEntry {
     char name[32];
     char addr[20];
     uint8_t addrType;
     int  rssi;
-    bool hidService;   // advertised 0x1812 outright, vs. matched on appearance
+    uint8_t rank;      // RANK_*; the UI marks anything below RANK_HID_SERVICE
 };
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -375,37 +385,54 @@ class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice *dev) override {
         const bool hasHid = dev->isAdvertisingService(NimBLEUUID(kUuidHidService));
         const uint16_t appearance = dev->haveAppearance() ? dev->getAppearance() : 0;
-        const bool looksLikeKeyboard =
-            (appearance == kAppearanceKeyboard || appearance == kAppearanceHid);
+        const bool hidAppearance =
+            appearance >= kAppearanceHidFirst && appearance <= kAppearanceHidLast;
+        const bool named = dev->haveName() && dev->getName().length() > 0;
 
-        // Logged for every candidate, not only the one connected to: name,
+        uint8_t rank;
+        if (hasHid)             rank = RANK_HID_SERVICE;
+        else if (hidAppearance) rank = RANK_APPEARANCE;
+        else if (named)         rank = RANK_NAMED;
+        else                    return;   // nothing to pick it by in a list
+
+        // Logged for every listed device, not only the one connected to: name,
         // address and appearance from real hardware is what turns the
         // compatibility guidance in docs/BLUETOOTH_KEYBOARDS.md from inference
         // into something tested.
-        if (hasHid || looksLikeKeyboard) {
-            Serial.printf("[blekbd] candidate %s \"%s\" rssi=%d appearance=0x%04X hid=%d\n",
-                          dev->getAddress().toString().c_str(),
-                          dev->haveName() ? dev->getName().c_str() : "",
-                          dev->getRSSI(), (unsigned)appearance, (int)hasHid);
-        } else {
-            return;
-        }
+        Serial.printf("[blekbd] candidate %s \"%s\" rssi=%d appearance=0x%04X hid=%d rank=%u\n",
+                      dev->getAddress().toString().c_str(),
+                      named ? dev->getName().c_str() : "",
+                      dev->getRSSI(), (unsigned)appearance, (int)hasHid, (unsigned)rank);
 
         Lock lock;
-        if (s_scanCount >= kMaxScanResults) return;
         const std::string addr = dev->getAddress().toString();
         for (int i = 0; i < s_scanCount; i++) {
             if (!strcmp(s_scan[i].addr, addr.c_str())) return;
         }
-        ScanEntry &entry = s_scan[s_scanCount++];
+        int slot = -1;
+        if (s_scanCount < kMaxScanResults) {
+            slot = s_scanCount++;
+        } else {
+            // Full, which in a busy room is mostly phones and watches. A device
+            // that looks more like a keyboard takes the place of the weakest
+            // one that looks least like one; otherwise it is dropped.
+            for (int i = 0; i < s_scanCount; i++) {
+                if (s_scan[i].rank >= rank) continue;
+                if (slot < 0 || s_scan[i].rank < s_scan[slot].rank
+                    || (s_scan[i].rank == s_scan[slot].rank && s_scan[i].rssi < s_scan[slot].rssi)) {
+                    slot = i;
+                }
+            }
+            if (slot < 0) return;
+        }
+        ScanEntry &entry = s_scan[slot];
         memset(&entry, 0, sizeof(entry));
         snprintf(entry.addr, sizeof(entry.addr), "%s", addr.c_str());
         snprintf(entry.name, sizeof(entry.name), "%s",
-                 dev->haveName() && dev->getName().length() ? dev->getName().c_str()
-                                                            : "(unnamed)");
-        entry.addrType   = dev->getAddress().getType();
-        entry.rssi       = dev->getRSSI();
-        entry.hidService = hasHid;
+                 named ? dev->getName().c_str() : "(unnamed)");
+        entry.addrType = dev->getAddress().getType();
+        entry.rssi     = dev->getRSSI();
+        entry.rank     = rank;
     }
 };
 
@@ -944,7 +971,7 @@ bool bleKeyboardScanEntry(int idx, char *name, size_t nameLen,
     if (name && nameLen) snprintf(name, nameLen, "%s", entry.name);
     if (addr && addrLen) snprintf(addr, addrLen, "%s", entry.addr);
     if (rssi) *rssi = entry.rssi;
-    if (hid)  *hid  = entry.hidService;
+    if (hid)  *hid  = entry.rank == RANK_HID_SERVICE;
     return true;
 }
 

@@ -86,7 +86,8 @@ bool bleKeyboardStartScan();
 bool bleKeyboardScanning();
 int  bleKeyboardScanCount();
 // Copies one scan result out. `hid` reports whether the device advertised the
-// HID service outright or only looked like a keyboard by appearance.
+// HID service outright, as opposed to looking like a keyboard by appearance or
+// only having a name (some keyboards reveal HID only once connected).
 bool bleKeyboardScanEntry(int idx, char *name, size_t nameLen,
                           char *addr, size_t addrLen, int *rssi, bool *hid);
 // Connects to a scan result and remembers it.

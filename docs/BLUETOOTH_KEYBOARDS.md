@@ -123,7 +123,7 @@ a BLE scanner before relying on any of these.**
   published sources whether it presents as BLE HID to a non-Apple host, and Apple
   peripherals carry extra pairing behavior. Scan it yourself before assuming.
 
-## Pairing one (Heltec and Wio Tracker L2 builds)
+## Pairing one (Heltec V4, Heltec R8 and Wio Tracker L2 builds)
 
 Two rows in **Config**, in the same shape as the Wi-Fi pair above them:
 
@@ -138,9 +138,13 @@ The dialog is driven by its on-screen buttons because these boards have no
 physical keyboard to drive it with until one is paired. Once one is, it also takes
 arrow keys, Enter to pair, `N` to rescan and `F` to forget.
 
-A row with a `?` after the signal strength advertised no HID service and was
-listed only because its appearance code says "keyboard" — it may well work,
-but it is a guess rather than a declaration.
+A row with a `?` after the signal strength advertised no HID service. It was
+listed either because its appearance code says it is an input device, or only
+because it has a name: some keyboards (the Clicks Power Keyboard among them)
+say nothing about being a keyboard until something connects to them. So the
+list also carries nearby phones, watches and the like. Rows without a `?` are
+the ones that declared themselves keyboards. Pick yours by name; tapping a
+device that turns out not to be a keyboard just fails with `not a keyboard`.
 
 The bond is stored by the Bluetooth stack itself and survives reboots and
 turning the feature off and on, so pairing is a once-per-keyboard job.
